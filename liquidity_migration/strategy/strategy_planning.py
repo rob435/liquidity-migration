@@ -28,10 +28,9 @@ from liquidity_migration.account.account_intent_client import (
     unresolved_target_snapshot,
 )
 from liquidity_migration.account.account_owner_health import (
-    AccountOwnerHealthHeadPending,
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-    require_recent_account_owner_health,
 )
+from liquidity_migration.account.engine_account_health import require_recent_engine_account
 from liquidity_migration.account.entry_attempts import signal_scoped_entry_attempt_key
 from liquidity_migration.account.account_kernel import AccountJournalCursor, AccountJournalDigest
 from liquidity_migration.account.account_route import AccountRoute
@@ -104,9 +103,6 @@ def account_owner_health_reading(
     *,
     environment: str,
     max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-    head_retry_attempts: int = 4,
-    head_retry_seconds: float = 1.0,
-    sleep: Callable[[float], None] | None = None,
     stored_reading: OwnerHealthReading | None = None,
     now_ns: int | None = None,
     stored_max_age_ns: int | None = None,
@@ -120,17 +116,19 @@ def account_owner_health_reading(
     still accept that receipt under ``max_age_ns``. Serving returns the same
     object, original stamp and all, so age can never launder itself.
 
-    A stale or absent reading falls through to the live read, whose
-    head-retry ladder may sleep; the returned reading is stamped at
-    ``now_ns`` (or the wall clock) and carries the receipt stamp on success.
-    A failed live read returns an error reading with no receipt stamp --
-    serving a failure only blocks entries, the fail-closed direction.
+    A stale or absent reading falls through to a live read of the engine
+    heartbeat; the returned reading is stamped at ``now_ns`` (or the wall
+    clock) and carries the venue's own reading time on success. A failed live
+    read returns an error reading with no receipt stamp -- serving a failure
+    only blocks entries, the fail-closed direction.
+
+    There is no head-retry ladder any more. It existed because the old owner
+    receipt was bound to a journal head that could legitimately be a moment
+    behind, and sleeping was cheaper than blocking a cycle over it. The engine
+    heartbeat is one file replaced by rename, so there is no pending state to
+    wait out: it reads or it does not.
     """
 
-    if head_retry_attempts <= 0:
-        raise ValueError("owner-health head retry attempts must be positive")
-    if head_retry_seconds < 0.0:
-        raise ValueError("owner-health head retry delay cannot be negative")
     if (
         stored_reading is not None
         and now_ns is not None
@@ -141,42 +139,32 @@ def account_owner_health_reading(
         )
     ):
         return stored_reading
-    if sleep is None:
-        # Bound at call time, not definition time, so a test can observe the
-        # ladder's sleeps through the module's ``time``.
-        sleep = time.sleep
     stamp_ns = time.time_ns() if now_ns is None else int(now_ns)
-    last_pending: AccountOwnerHealthHeadPending | None = None
-    for attempt in range(head_retry_attempts):
-        try:
-            owner_health = require_recent_account_owner_health(
-                route.account_path,
-                environment=environment,
-                max_age_ns=max_age_ns,
-                expected_account_id=route.account_id,
-            )
-        except AccountOwnerHealthHeadPending as exc:
-            last_pending = exc
-            if attempt + 1 < head_retry_attempts:
-                sleep(head_retry_seconds)
-                continue
-            break
-        except (OSError, RuntimeError, ValueError) as exc:
-            return OwnerHealthReading(
-                equity_usdt=0.0,
-                error=f"{type(exc).__name__}: {exc}"[:500],
-                read_wall_ts_ns=stamp_ns,
-            )
+    try:
+        account = require_recent_engine_account(
+            environment,
+            max_age_ns=max_age_ns,
+            expected_account_id=route.account_id,
+            # Deliberately not `now_ns`. How old the venue reading is, is a
+            # question about the wall clock, and the old owner-health check
+            # asked it that way too. A caller's `now_ns` is its cycle stamp --
+            # a replay or a back-dated test drives it -- and comparing a real
+            # timestamp against a simulated one makes a healthy engine look
+            # like one reading the venue from the future.
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
         return OwnerHealthReading(
-            equity_usdt=float(owner_health.equity_usdt),
-            error="",
+            equity_usdt=0.0,
+            error=f"{type(exc).__name__}: {exc}"[:500],
             read_wall_ts_ns=stamp_ns,
-            receipt_wall_ts_ns=int(owner_health.observed_ts_ns),
         )
     return OwnerHealthReading(
-        equity_usdt=0.0,
-        error=f"{type(last_pending).__name__}: {last_pending}"[:500],
+        equity_usdt=float(account.equity_usdt),
+        error="",
         read_wall_ts_ns=stamp_ns,
+        # The venue's own reading time, not the heartbeat's write time, so an
+        # engine that keeps beating while its venue reads fail ages out here.
+        receipt_wall_ts_ns=int(account.observed_ts_ns),
     )
 
 
@@ -185,28 +173,22 @@ def account_owner_equity_or_error(
     *,
     environment: str,
     max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-    head_retry_attempts: int = 4,
-    head_retry_seconds: float = 1.0,
-    sleep: Callable[[float], None] | None = None,
     stored_reading: OwnerHealthReading | None = None,
     now_ns: int | None = None,
     stored_max_age_ns: int | None = None,
 ) -> tuple[float, str]:
-    """Return (equity_usdt, "") from fresh owner health, or (0.0, error).
+    """Return (equity_usdt, "") from a fresh account reading, or (0.0, error).
 
-    A missing or stale owner-health receipt never fails the cycle; the caller
-    records the error and plans entries as blocked. The serving and live-read
-    contract lives in :func:`account_owner_health_reading`; this wrapper just
-    unpacks the reading for callers that keep their own.
+    A missing or stale reading never fails the cycle; the caller records the
+    error and plans entries as blocked. The serving and live-read contract
+    lives in :func:`account_owner_health_reading`; this wrapper just unpacks
+    the reading for callers that keep their own.
     """
 
     reading = account_owner_health_reading(
         route,
         environment=environment,
         max_age_ns=max_age_ns,
-        head_retry_attempts=head_retry_attempts,
-        head_retry_seconds=head_retry_seconds,
-        sleep=sleep,
         stored_reading=stored_reading,
         now_ns=now_ns,
         stored_max_age_ns=stored_max_age_ns,

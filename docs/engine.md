@@ -165,11 +165,14 @@ parallel and integrate by type-check.
 - **Shadow mode is the default.** The engine computes intents and logs them;
   it only sends orders when started with an explicit live flag, and the risk
   kernel still gates every send.
-- **The four capital controls are ported, not bypassed.** The Python originals
-  (`account_loss_guard.py`, `equity_anchored_envelope.py`,
-  `venue_protection.py`, the partition in `account_kernel.py`) stay untouched
-  and remain the reference; the Rust kernel carries table-driven parity tests
-  against their decision semantics. Unknown state refuses the order.
+- **The four capital controls are ported, not bypassed.** They were ported
+  from `account_loss_guard.py`, `equity_anchored_envelope.py`,
+  `venue_protection.py` and the partition in `account_kernel.py`, with
+  table-driven parity tests written against those files' decision semantics.
+  Those Python originals were deleted on 2026-08-14 once the port was proved,
+  so the parity tests are now the reference rather than a comparison — read
+  them and `engine-risk/PORT_NOTES.md` together. Unknown state refuses the
+  order.
 - **One writer per account — measured, then enforced.** On 2026-08-14 the
   engine held a 0.001 BTCUSDT position on the demo account for about a
   hundred seconds. The Python owner refused new intents for the whole of it:
@@ -328,66 +331,48 @@ because the deletion order depends on it:
 
 ### What that leaves
 
-Not a capability, as of 2026-08-14. Every row above is Done.
+Not a capability, as of 2026-08-14. Every row above is Done, and on the same
+day the Python order path was deleted, so there is no second implementation to
+compare against any more.
 
 What is left is **evidence**. Nothing above has ever run against real money.
 The mainnet path exists, is fenced, and is tested; it has never carried an
 order. A capability that has not been exercised is a claim, and the only thing
-that turns it into a fact is running it — in shadow first, against the
-account, for long enough to compare its decisions with the Python owner's.
+that turns it into a fact is running it — in shadow first, against the account,
+for long enough to watch it.
 
-The Python execution path stays, and not out of caution.
+**The engine is the account owner in the repository, and not yet on the host.**
+The host runs its own installed checkout and keeps trading the old way until
+somebody deploys. That deploy is the moment this becomes real, and it has one
+precondition that is easy to miss:
 
-**How much of it is actually the order path — measured, and smaller than the
-number this document used to quote.** An earlier pass reported "93 of 135
-modules reachable from a live unit", which is true and misleading: it is the
-whole fleet's closure, not the order path's. Re-measured 2026-08-14 seeding
-from every script as well as every unit, so operator tooling counts as a
-consumer:
+- **The producers size from the engine.** They read `account_equity_usdt` and
+  `account_observed_ns` out of the heartbeat and plan every entry as blocked
+  when that reading is missing or stale. A host that takes this code with no
+  engine running has a fleet that publishes exits and never opens a position.
+  It fails closed and says so per cycle, but it says so in a cycle field, not
+  in a page. Install, enable and watch the engine beat first.
 
-- The account owner's own closure is **79 modules**.
-- **Ten of them are reachable only from the owner.** The other 69 are shared
-  with `ops.sh status`, the CLI, research tooling and the deploy readiness
-  check — `venue/bybit.py` among them, which four operator scripts import
-  directly. Deleting on the larger figure would have taken those with it.
+**Two capabilities did not survive the deletion**, and the engine does not have
+them:
 
-So "the Python order path" as a deletable thing is ten modules, two systemd
-units, their dispatcher arms, and the tests that cover them. Roughly 8,000
-lines. Not 93 modules.
+1. **Flatten.** The operator's "close everything now" — `ops.sh flatten` and
+   the Telegram close button — worked by publishing zero targets into the
+   account owner's intent inbox. The engine reads target *book files* and has
+   no inbox, so nothing drains those requests. Both routes now refuse with that
+   explanation rather than appearing to work. Closing a book is a manual job at
+   the venue, or a matter of stopping the sleeve and letting exits run.
+2. **The hourly digest.** Rendered by the owner from the canonical journal.
+   `docs/notifications.md` keeps its description as the specification for
+   whatever replaces it.
 
-Two things about those ten are worth knowing before anyone acts on the number:
-
-1. **Three of them are `policy/account_loss_guard.py`,
-   `policy/equity_anchored_envelope.py` and `venue/venue_protection.py`** —
-   which `AGENTS.md` names and says are not to be removed. They are the order
-   path's risk layer and nothing else reaches them, so they cannot stay behind
-   without becoming unreachable files. Their function is ported to
-   `engine-risk`, with parity tests written against these very modules. That
-   is a conflict between two standing instructions and it needs the owner to
-   resolve it, not a programmer.
-2. **`check_fleet_liveness.py` imports the owner's readiness module.** The
-   watchdog is meant to survive, and the function it uses reads a sidecar the
-   owner *writes* — so this is not a dependency that can be tidied away first.
-   When the owner goes, that check has nothing to read and has to go with it.
-
-Demo and mainnet still run byte-identical command lines — the realm is a
-parameter branched *inside* shared modules — so there is no demo half to
-retire first.
-
-And deleting it from the repository does not stop the funded fleet. The host
-runs its own installed checkout; it keeps trading until somebody deploys. What
-the deletion does is make the next deploy the thing that stops it, and block
-shipping any fix without also shipping the removal.
-
-There is a further trap worth knowing before anyone tries the obvious first
-step: `verify_topology()` in `scripts/deploy_vps_live.sh` unconditionally
-requires the demo owner to be active, and `staged` reaches it through
-`activate_mode` — so **every mainnet deploy verifies the demo fleet.**
-Removing the demo units breaks the path that ships mainnet changes.
+Neither is hard to build on top of what exists — a flatten is a target book of
+zeros, which the engine already follows — but neither has been built, and
+saying so is the point of this section.
 
 And the producers are not the order path. A carry decision is a batch over
 ninety days of funding and bars; it stays in research and arrives as a target
-book. "Delete the Python one" was never going to mean deleting that.
+book. "Delete the Python one" never meant deleting that, and it did not.
 
 ### The handover, concretely
 

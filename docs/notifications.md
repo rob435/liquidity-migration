@@ -60,10 +60,20 @@ numeric user ids) in the host env file — with no allow-list, every press in a 
 queued while the daemon was down are dropped at startup, so a stale button can never fire late; if the
 bot did not react, press again.
 
-## The owner's digest
+## The owner's digest — retired
 
-[`account_notifications.py`](../liquidity_migration/ops/account_notifications.py), rendered from the
-canonical account journal — never from a projection or a venue read.
+There is no hourly digest any more. It was rendered by the Python account
+owner from the canonical account journal, and that owner was deleted with the
+rest of the Python order path. Nothing writes
+`<ACCOUNT_EXECUTION_ROOT>/account_notifications.json`, and the watchdog no
+longer reads it.
+
+What replaced it, for liveness rather than for accounting, is the engine's
+heartbeat: see the watchdog below. A periodic position-and-P&L summary is not
+something the engine does yet, and this section will say so until it does.
+
+The rest of this section describes the retired digest, kept because the shape
+of what is missing is the specification for whatever replaces it.
 
 - **Hourly summary** on the UTC hour boundary: open positions with side, quantity, price, open P&L and
   stop; realized P&L (with a short `(pending: …)` note when funding/fees are not final); account health;

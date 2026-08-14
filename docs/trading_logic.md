@@ -213,11 +213,11 @@ The negative results, and what the retired sleeves did and did not establish, ar
 
 [`configs/operational.demo.json`](../configs/operational.demo.json) is the one editable
 sizing surface. Caps are a fraction of observed wallet equity
-([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py):
+([`envelope.rs`](../engine/engine-risk/src/envelope.rs):
 contraction immediate, expansion behind a dead band, unknown equity moves nothing);
 [`account_kernel.py`](../liquidity_migration/account/account_kernel.py) holds each sleeve to
 its own partition of it;
-[`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py) halts the day
+[`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs) halts the day
 at a loss ceiling.
 
 **The venue stop comes from the outermost declared stop.**

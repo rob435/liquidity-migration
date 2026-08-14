@@ -201,7 +201,7 @@ def _patch_planning(
             raise RuntimeError("owner health receipt is stale")
         return SimpleNamespace(equity_usdt=EQUITY, observed_ts_ns=0)
 
-    monkeypatch.setattr(planning_module, "require_recent_account_owner_health", owner_health)
+    monkeypatch.setattr(planning_module, "require_recent_engine_account", owner_health)
     monkeypatch.setattr(
         planning_module, "canonical_strategy_trade_rows", lambda *_a, **_k: frame
     )
@@ -1900,7 +1900,7 @@ class TestFreezeTimeEquityAnchorAndBoundaryHealth:
     def _patch_health(
         self, monkeypatch: pytest.MonkeyPatch, health: Any
     ) -> None:
-        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", health)
+        monkeypatch.setattr(planning_module, "require_recent_engine_account", health)
         monkeypatch.setattr(
             planning_module, "canonical_strategy_trade_rows", lambda *_a, **_k: pl.DataFrame()
         )
@@ -1931,9 +1931,6 @@ class TestFreezeTimeEquityAnchorAndBoundaryHealth:
     def test_boundary_with_fresh_freeze_reading_does_zero_health_reads_or_sleeps(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from liquidity_migration.account.account_owner_health import (
-            AccountOwnerHealthHeadPending,
-        )
 
         _route(tmp_path / "route")
         _patch_demo_market_data_ws_served(monkeypatch)
@@ -1950,28 +1947,29 @@ class TestFreezeTimeEquityAnchorAndBoundaryHealth:
         assert reading.read_wall_ts_ns == REFRESH_NOW * 1_000_000
         assert reading.equity_usdt == pytest.approx(EQUITY)
 
-        # From here the owner-health head is pending: a LIVE read would walk
-        # the retry ladder and sleep. The boundary must never reach it.
+        # From here a live read fails. There is no retry ladder any more --
+        # the engine heartbeat is one file replaced by rename, so a read lands
+        # or it does not -- but a live read is still a read, and the boundary
+        # must never reach it.
         live_reads: list[str] = []
 
-        def head_pending(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        def unreadable(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
             live_reads.append("read")
-            raise AccountOwnerHealthHeadPending("synthetic head pending")
+            raise OSError("synthetic unreadable heartbeat")
 
-        self._patch_health(monkeypatch, head_pending)
+        self._patch_health(monkeypatch, unreadable)
         counting_time = _CountingTimeModule()
         monkeypatch.setattr(planning_module, "time", counting_time)
 
-        # CONTROL — the pre-change boundary path: no stored reading forces the
-        # live read, which retries the pending head and sleeps.
+        # CONTROL — no stored reading forces the live read.
         control_state = CarryCycleState()
         control_state.frozen_decisions = dict(state.frozen_decisions)
         control = self._run(
             tmp_path, control_state, now_ms=BOUNDARY_NOW, cycle_kind="market_boundary"
         )
         assert control["data_build_skipped"] is True
-        assert len(live_reads) == 4  # 4 head attempts
-        assert len(counting_time.sleeps) == 3  # a sleep between each attempt
+        assert len(live_reads) == 1
+        assert counting_time.sleeps == []
         assert control["equity_usdt"] is None
         assert control["entry_blocked_reason"] == "account_owner_health_unavailable"
 

@@ -144,7 +144,7 @@ unchanged, so flatten. While `REAL_MONEY` stays armed, `verify` fails and the ne
 No money amount binds anything. `capital_reference_usdt` in
 [`configs/operational.mainnet.json`](../configs/operational.mainnet.json) is only a scale: the runtime
 reference tracks observed wallet equity, and every cap in the profile is a ratio of it
-([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py)). Equity
+([`envelope.rs`](../engine/engine-risk/src/envelope.rs)). Equity
 down rescales the caps immediately; equity up waits for a move larger than the dead band; missing or
 stale equity holds the current reference, and below the floor it clamps rather than collapsing.
 `account_risk.sleeve_limits` partitions the account gross and margin caps into per-sleeve shares; the
@@ -218,11 +218,11 @@ the envelope and the watchdog thresholds are unexercised on a funded account unt
 Absolute pre-trade caps (component gross, account gross, initial margin, available margin, leverage)
 rejected atomically inside the journal transaction, and the per-sleeve partition:
 [`account_kernel.py`](../liquidity_migration/account/account_kernel.py). Caps rescale with observed
-equity: [`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py).
+equity: [`envelope.rs`](../engine/engine-risk/src/envelope.rs).
 Daily loss halt → `run_safety_flat_once`:
-[`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py). Venue-native stop armed
+[`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs). Venue-native stop armed
 in the same `place_order` call and read back after create:
-[`venue_protection.py`](../liquidity_migration/venue/venue_protection.py). One owner process per
+[`working.rs`](../engine/engine-core/src/working.rs). One owner process per
 account and journal ↔ venue reconciliation:
 [`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py),
 [`account_reconcile.py`](../liquidity_migration/venue/account_reconcile.py). An independent watchdog

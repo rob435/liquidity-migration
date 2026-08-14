@@ -4,9 +4,20 @@ Do not add safety features, guards, gates, receipts, or proofs on your own
 initiative. Propose them; the owner decides. Fix a fault instead of proving it
 absent.
 
-Existing capital-preservation controls stay and are not yours to remove either:
-`account_loss_guard.py`, `equity_anchored_envelope.py`, `venue_protection.py`,
-the per-sleeve capital partition in `account_kernel.py`.
+Existing capital-preservation controls stay and are not yours to remove either.
+They live in the engine now: the daily loss halt
+([`loss_guard.rs`](engine/engine-risk/src/loss_guard.rs)), the equity-anchored
+envelope ([`envelope.rs`](engine/engine-risk/src/envelope.rs)), the venue-native
+stop discipline ([`working.rs`](engine/engine-core/src/working.rs) and
+[`reconcile.rs`](engine/engine-core/src/reconcile.rs)), and the per-sleeve
+capital partition ([`kernel.rs`](engine/engine-risk/src/kernel.rs)).
+
+Until 2026-08-14 this rule named the Python originals — `account_loss_guard.py`,
+`equity_anchored_envelope.py`, `venue_protection.py`, and the partition in
+`account_kernel.py`. Those files were deleted with the rest of the Python order
+path, on the owner's explicit instruction, after the engine carried all four
+with parity tests written against them. The rule did not change; only where the
+controls live did.
 
 ## Runtime Safety
 

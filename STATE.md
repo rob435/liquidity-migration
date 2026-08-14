@@ -13,6 +13,27 @@ match; never append history to this file.
 
 ### The fleet
 
+- **The repository no longer contains a Python order path; the host still runs
+  one.** Deleted 2026-08-14 on the owner's instruction (CHANGELOG 2026-08-14):
+  the account owner, its two units, its launcher scripts and its risk layer,
+  about 25,000 lines. The engine is the account owner in the repository now.
+  **Nothing is deployed** — the host runs its own installed checkout at
+  `2bd3a00` and keeps trading exactly as before until somebody deploys. The
+  next deploy is what makes this real, and it is the one that stops the Python
+  owner.
+
+  Before that deploy, know what changed underneath the producers. They size
+  from account equity, and they used to read it from the owner's health file;
+  they now read it from the engine's heartbeat
+  ([`engine_account_health.py`](liquidity_migration/account/engine_account_health.py)).
+  **A host that deploys this without a running engine has producers that
+  publish exits and never open a position** — fail-closed, logged per cycle,
+  and silent unless somebody reads the cycle error. The demo engine must be
+  installed, enabled and beating before or with that deploy.
+
+  Two things went and did not come back: `ops.sh flatten` and the Telegram
+  close button (both worked through the deleted owner's intent inbox), and the
+  hourly Telegram digest. Closing a book is a manual job at the venue.
 - **The host runs `2bd3a00`**, deployed 2026-08-13 23:46 UTC by `staged
   --stop-first` from main (`staged-ok
   commit=2bd3a0090deb2dbf34f04e34df14f320f190744f profile=operational`,

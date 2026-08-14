@@ -1,119 +1,155 @@
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from liquidity_migration.strategy import strategy_planning as planning
-from liquidity_migration.account.account_owner_health import AccountOwnerHealthHeadPending
+
+
+# The venue-reading age is measured against the wall clock, not against the
+# caller's cycle stamp, so these fixtures anchor to real now -- taken when the
+# test runs, never at import. Anchoring at import made the whole file pass
+# alone and fail inside the suite, because by then import was a minute ago and
+# every fixture was older than the 30s bound.
+BOUND_NS = 30_000_000_000
 
 
 def _route(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(account_path=tmp_path, account_id="demo-account")
+    return SimpleNamespace(account_path=tmp_path, account_id="6039967")
 
 
-def test_owner_equity_retries_only_the_exact_head_publication_race(
+def _heartbeat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    **overrides: object,
+) -> int:
+    """Write one engine heartbeat and point the producers at it.
+
+    The keys are the ones `engine-core/src/heartbeat.rs` renders; the Rust side
+    has its own test that the file carries exactly this key set.
+    """
+
+    now_ns = time.time_ns()
+    payload: dict[str, object] = {
+        "account_available_usdt": 4_100.25,
+        "account_equity_usdt": 9_876.5,
+        "account_observed_ns": now_ns - 1_000_000_000,
+        "account_user_id": "6039967",
+        "mode": "live",
+        "may_open": True,
+    }
+    payload.update(overrides)
+    path = tmp_path / "heartbeat.json"
+    path.write_text(json.dumps(payload))
+    monkeypatch.setenv("ENGINE_ACCOUNT_HEARTBEAT_FILE", str(path))
+    return now_ns
+
+
+def test_equity_comes_from_the_engine_heartbeat(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = 0
-    sleeps: list[float] = []
-
-    def owner_health(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        nonlocal calls
-        calls += 1
-        if calls < 3:
-            raise AccountOwnerHealthHeadPending(
-                "account-owner health journal sequence mismatch: health=10, journal=11"
-            )
-        return SimpleNamespace(equity_usdt=9_876.5, observed_ts_ns=0)
-
-    monkeypatch.setattr(planning, "require_recent_account_owner_health", owner_health)
+    _heartbeat(tmp_path, monkeypatch)
 
     equity, error = planning.account_owner_equity_or_error(
         _route(tmp_path),
         environment="demo",
-        head_retry_attempts=4,
-        head_retry_seconds=0.25,
-        sleep=sleeps.append,
     )
 
     assert (equity, error) == (9_876.5, "")
-    assert calls == 3
-    assert sleeps == [0.25, 0.25]
 
 
-def test_owner_equity_does_not_retry_a_terminal_health_failure(
+def test_an_engine_that_stopped_reading_the_venue_blocks_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = 0
-    sleeps: list[float] = []
+    """The heartbeat is current; the venue reading inside it is not.
 
-    def owner_health(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        nonlocal calls
-        calls += 1
-        raise RuntimeError("account owner is blocked: native protection missing")
+    This is the case the whole check exists for. An engine whose loop keeps
+    running while its venue reads fail rewrites this file on time forever, so
+    ageing the file would say healthy. Ageing `account_observed_ns` says what
+    is true: nobody knows what this account holds.
+    """
 
-    monkeypatch.setattr(planning, "require_recent_account_owner_health", owner_health)
+    _heartbeat(tmp_path, monkeypatch, account_observed_ns=time.time_ns() - BOUND_NS - 1)
 
     equity, error = planning.account_owner_equity_or_error(
         _route(tmp_path),
         environment="demo",
-        sleep=sleeps.append,
     )
 
     assert equity == 0.0
-    assert error == "RuntimeError: account owner is blocked: native protection missing"
-    assert calls == 1
-    assert sleeps == []
+    assert "not reading the venue" in error
 
 
-def test_owner_equity_reports_a_head_race_after_the_bounded_retry(
+def test_a_heartbeat_for_another_account_blocks_and_names_both(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = 0
-    sleeps: list[float] = []
-
-    def owner_health(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        nonlocal calls
-        calls += 1
-        raise AccountOwnerHealthHeadPending(
-            "account-owner health journal sequence mismatch: health=20, journal=21"
-        )
-
-    monkeypatch.setattr(planning, "require_recent_account_owner_health", owner_health)
+    _heartbeat(tmp_path, monkeypatch, account_user_id="579580669")
 
     equity, error = planning.account_owner_equity_or_error(
         _route(tmp_path),
         environment="demo",
-        head_retry_attempts=3,
-        head_retry_seconds=0.1,
-        sleep=sleeps.append,
     )
 
     assert equity == 0.0
-    assert error.startswith("AccountOwnerHealthHeadPending: account-owner health journal sequence mismatch")
-    assert calls == 3
-    assert sleeps == [0.1, 0.1]
+    assert "6039967" in error and "579580669" in error
 
 
-@pytest.mark.parametrize(
-    ("attempts", "seconds", "message"),
-    ((0, 1.0, "attempts"), (1, -0.1, "delay")),
-)
-def test_owner_equity_rejects_invalid_retry_bounds(
+def test_an_engine_with_no_account_reading_yet_blocks_entries(
     tmp_path: Path,
-    attempts: int,
-    seconds: float,
-    message: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with pytest.raises(ValueError, match=message):
-        planning.account_owner_equity_or_error(
-            _route(tmp_path),
-            environment="demo",
-            head_retry_attempts=attempts,
-            head_retry_seconds=seconds,
-        )
+    """Booted, beating, has not read the venue yet: null, not zero."""
+
+    _heartbeat(tmp_path, monkeypatch, account_equity_usdt=None, account_observed_ns=None)
+
+    equity, error = planning.account_owner_equity_or_error(
+        _route(tmp_path),
+        environment="demo",
+    )
+
+    assert equity == 0.0
+    assert "no account reading yet" in error
+
+
+def test_a_missing_heartbeat_blocks_entries_rather_than_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ENGINE_ACCOUNT_HEARTBEAT_FILE", str(tmp_path / "absent.json"))
+
+    equity, error = planning.account_owner_equity_or_error(
+        _route(tmp_path),
+        environment="demo",
+    )
+
+    assert equity == 0.0
+    assert error
+
+
+def test_a_stored_reading_cannot_outlive_the_venue_reading_behind_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serving a stored reading must not let ages stack.
+
+    The reading is young, but the venue observation it carries is already at
+    the bound, so serving it for another reading-lifetime would plan against
+    equity twice as old as a live read allows.
+    """
+
+    now_ns = _heartbeat(tmp_path, monkeypatch)
+    stored = planning.OwnerHealthReading(
+        equity_usdt=9_876.5,
+        error="",
+        read_wall_ts_ns=now_ns,
+        receipt_wall_ts_ns=now_ns - BOUND_NS - 1,
+    )
+
+    assert not stored.is_serveable(now_ns=now_ns, max_age_ns=BOUND_NS)

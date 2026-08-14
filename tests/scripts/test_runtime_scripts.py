@@ -66,7 +66,6 @@ def test_deployed_shell_scripts_parse_and_are_executable() -> None:
     scripts = [
         DEPLOY,
         WRAPPER,
-        ROOT / "scripts" / "runtime" / "run_account_execution_service.sh",
         ROOT / "scripts" / "runtime" / "run_bybit_long_demo_event_engine.sh",
         ROOT / "scripts" / "runtime" / "run_bybit_carry_demo_event_engine.sh",
         ROOT / "scripts" / "maintain" / "reset_demo_ledgers.sh",
@@ -84,18 +83,10 @@ def test_authorized_wrapper_owns_every_runtime_argv() -> None:
         assert f"{unit}:main" in wrapper
         fragment = _unit(unit)
         assert f"run_authorized_runtime.sh {unit} main" in fragment
-    # The readiness entrypoint stays registered for manual and verify use even
-    # where it no longer gates startup.
-    for owner in (
-        "liquidity-migration-account-execution.service",
-        "liquidity-migration-account-execution-mainnet.service",
-    ):
-        assert f"{owner}:readiness" in wrapper
-    # Only this owner still runs it as an ExecStartPost startup gate.
-    for gated in (
-        "liquidity-migration-account-execution-mainnet.service",
-    ):
-        assert f"run_authorized_runtime.sh {gated} readiness" in _unit(gated)
+    # No readiness entrypoint is registered any more. It belonged to the two
+    # Python account owner units, and both are gone, so a wrapper arm for one
+    # would be an argv nothing can reach.
+    assert ":readiness" not in wrapper
 
 
 ENGINE_UNIT = "liquidity-migration-engine.service"
@@ -222,31 +213,6 @@ def test_the_engine_stays_in_shadow_unless_the_host_file_plainly_says_otherwise(
     assert "ENGINE_CONFIG_FILE is required" in missing.stderr
 
 
-def test_only_demo_owner_inherits_demo_credentials() -> None:
-    demo_owner = _unit("liquidity-migration-account-execution.service")
-    assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" in demo_owner
-    assert "BYBIT_DEMO_API_KEY" not in next(
-        line for line in demo_owner.splitlines() if line.startswith("UnsetEnvironment=")
-    )
-    for unit in AUTHORIZED_UNITS:
-        if unit == "liquidity-migration-account-execution.service":
-            continue
-        fragment = _unit(unit)
-        unset = " ".join(line for line in fragment.splitlines() if line.startswith("UnsetEnvironment="))
-        assert "BYBIT_DEMO_API_KEY" in unset
-        assert "BYBIT_DEMO_API_SECRET" in unset
-    # The mainnet owner is the one deliberate carrier of the real pair; every
-    # other guarded unit strips it, in the directive rather than a comment.
-    for unit in AUTHORIZED_UNITS:
-        if unit == "liquidity-migration-account-execution-mainnet.service":
-            continue
-        unset = " ".join(
-            line for line in _unit(unit).splitlines() if line.startswith("UnsetEnvironment=")
-        )
-        assert "BYBIT_REAL_API_KEY" in unset, unit
-        assert "BYBIT_REAL_API_SECRET" in unset, unit
-
-
 def test_persistent_demo_workers_have_small_box_memory_limits() -> None:
     """carry/long are MemoryMax-only since the 2026-08-03 retune: both ran
     pinned at their MemoryHigh watermark for weeks (reclaim throttling, slow
@@ -261,17 +227,6 @@ def test_persistent_demo_workers_have_small_box_memory_limits() -> None:
         assert "MemoryHigh=" not in fragment, unit
         assert f"MemoryMax={maximum}" in fragment
         assert f"MemorySwapMax={swap}" in fragment
-
-
-def test_demo_owner_is_bounded_but_never_reclaim_throttled() -> None:
-    """MemoryHigh throttles rather than kills, and throttling the one latency-critical
-    unit is what stretched venue round-trips into the 2026-08-01..03 stale-exposure
-    wedge. MemoryMax already bounds the cgroup, so the high watermark is gone.
-    """
-    fragment = _unit("liquidity-migration-account-execution.service")
-    assert "MemoryHigh=" not in fragment
-    assert "MemoryMax=1024M" in fragment
-    assert "MemorySwapMax=384M" in fragment
 
 
 def test_liveness_timer_has_one_bounded_activation_grace() -> None:
@@ -289,111 +244,6 @@ def test_liveness_timer_has_one_bounded_activation_grace() -> None:
         assert "OnBootSec=" not in timer
 
 
-def test_producers_require_owner_readiness_and_never_hold_private_order_authority() -> None:
-    mainnet_owner = "liquidity-migration-account-execution-mainnet.service"
-    demo_owner = "liquidity-migration-account-execution.service"
-    # A demo producer only ORDERS after its owner; it is not bound to the
-    # owner's fate. See test_demo_producers_are_ordered_after_the_owner_but_
-    # never_taken_down_with_it for why.
-    ordered_only = {
-        "liquidity-migration-bybit-long-demo.service": demo_owner,
-        "liquidity-migration-bybit-carry-demo.service": demo_owner,
-    }
-    pairs = {
-        "liquidity-migration-bybit-long-mainnet.service": mainnet_owner,
-        "liquidity-migration-bybit-carry-mainnet.service": mainnet_owner,
-    }
-    for producer, owner in {**ordered_only, **pairs}.items():
-        fragment = _unit(producer)
-        if producer in pairs:
-            assert f"Requires={owner}" in fragment
-        assert owner in next(line for line in fragment.splitlines() if line.startswith("After="))
-        # Every producer, in every realm, has both credential pairs and the
-        # arming switch stripped from its inherited environment.
-        unset = next(line for line in fragment.splitlines() if line.startswith("UnsetEnvironment="))
-        for stripped in (
-            "BYBIT_DEMO_API_KEY",
-            "BYBIT_DEMO_API_SECRET",
-            "BYBIT_REAL_API_KEY",
-            "BYBIT_REAL_API_SECRET",
-            "REAL_MONEY",
-        ):
-            assert stripped in unset, (producer, stripped)
-    for runner in (
-        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
-        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
-    ):
-        text = _read(runner)
-        assert "place_order" not in text
-        # A credential name may appear only inside a refusal. Reading one to
-        # reject it is the opposite of holding order authority; assigning one
-        # or handing it to the workload is what this forbids.
-        for variable in ("BYBIT_DEMO_API_SECRET", "BYBIT_REAL_API_SECRET"):
-            for line in text.splitlines():
-                if variable not in line:
-                    continue
-                assert f"{variable}=" not in line.replace(f"{variable}:-", ""), (runner, line)
-                assert "--api-secret" not in line, (runner, line)
-                assert "export" not in line, (runner, line)
-
-
-def test_demo_producers_are_ordered_after_the_owner_but_never_taken_down_with_it() -> None:
-    """``Requires=`` propagates a stop: when the demo owner failed on 2026-08-01 it took
-    every producer down with it and kept them down for two days. Every invariant the
-    hard dependency was standing in for is enforced at point of use — producers
-    re-check owner health per cycle and plan entries as blocked while still publishing
-    exits, queued entries self-expire, exits never expire, and order submission is
-    gated inside the owner — so ordering is all the unit file needs to say.
-    """
-    owner = "liquidity-migration-account-execution.service"
-    for producer in (
-        "liquidity-migration-bybit-long-demo.service",
-        "liquidity-migration-bybit-carry-demo.service",
-    ):
-        directives = [line for line in _unit(producer).splitlines() if not line.startswith("#")]
-        assert f"Requires={owner}" not in directives, producer
-        assert f"Wants={owner}" in directives, producer
-        assert owner in next(line for line in directives if line.startswith("After="))
-        # A producer draining a cycle must not hold a restart for three minutes.
-        assert "TimeoutStopSec=90" in directives, producer
-        assert "TimeoutStopSec=180" not in directives, producer
-
-
-def test_demo_owner_startup_is_not_gated_and_its_restart_is_not_a_tight_loop() -> None:
-    """The ExecStartPost readiness gate failed while the book was wedged and systemd
-    killed a live owner that was still draining exits; RestartSec=2 plus the 180s gate
-    made a ~182s cycle that never trips the default rate limiter. Removing the gate
-    removes the kill; the slower RestartSec keeps a genuine crash loop visible in the
-    journal rather than pegged.
-    """
-    fragment = _unit("liquidity-migration-account-execution.service")
-    assert "ExecStartPost=" not in fragment
-    # TimeoutStartSec existed only to bound that gate.
-    assert "TimeoutStartSec=" not in fragment
-    assert "Restart=always" in fragment
-    assert "RestartSec=5" in fragment
-    # No limiter directive, and none is needed: the default 5-starts-in-10s
-    # window still applies here, but RestartSec=5 spaces five restarts over
-    # ~20 s, so it cannot trip.
-    assert "StartLimit" not in fragment
-    # The mainnet owner is deliberately untouched: it gates, and it may.
-    mainnet = _unit("liquidity-migration-account-execution-mainnet.service")
-    assert (
-        "ExecStartPost=/opt/liquidity-migration/scripts/run_authorized_runtime.sh "
-        "liquidity-migration-account-execution-mainnet.service readiness"
-    ) in mainnet
-    assert "TimeoutStartSec=240" in mainnet
-    assert "RestartSec=2" in mainnet
-    # RestartSec=2 puts five restarts inside the 10 s window, so the mainnet
-    # owner really can latch failed and leave real exposure unsupervised. The
-    # directive that disables the limiter is only read in [Unit]: it sat in
-    # [Service] until 2026-08-09, where systemd ignored it and said so in the
-    # journal. Assert the section, not the substring -- the substring was
-    # present for weeks while the limiter was live.
-    assert _section(mainnet, "Unit").count("StartLimitIntervalSec=0") == 1
-    assert "StartLimit" not in _section(mainnet, "Service")
-
-
 def test_demo_watchdog_repages_within_the_hour_like_the_mainnet_one() -> None:
     """A six-hour cooldown meant one page, then silence across the whole outage."""
     wrapper = _read(WRAPPER)
@@ -405,70 +255,6 @@ def test_demo_watchdog_repages_within_the_hour_like_the_mainnet_one() -> None:
         case = wrapper[start : wrapper.index("\n        ;;", start)]
         assert "--cooldown-min 60" in case, unit
         assert "--cooldown-min 360" not in case, unit
-
-
-def test_owner_runner_degrades_rather_than_refusing_to_start() -> None:
-    """A notification channel, and an unset diagnostic toggle, must never be able to
-    keep the account owner down. Only the mainnet realm still re-checks the latch
-    variables its own unit sets.
-    """
-    script = _read("scripts/runtime/run_account_execution_service.sh")
-
-    # Misconfigured Telegram drops the flag and warns; it does not exit.
-    telegram = script[script.index("telegram_args=()") : script.index('exec "$PYTHON_BIN"')]
-    assert "running without Telegram" in telegram
-    assert "exit 2" not in telegram
-    assert "--telegram" in telegram
-
-    # Bulk raw-market persistence is a diagnostic; unset means off.
-    assert 'ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-0}"' in script
-    assert "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly set" not in script
-    raw_market = script[script.index("case \"$ACCOUNT_RAW_MARKET_PERSISTENCE\"") :]
-    raw_market = raw_market[: raw_market.index("esac")]
-    assert "--no-persist-raw-market" in raw_market
-    assert "exit 2" not in raw_market
-
-    # The unit sets these two lines above the check; only mainnet re-reads them.
-    realm_case = script[script.index('case "$ACCOUNT_VENUE_REALM" in\n    mainnet)') :]
-    mainnet_arm = realm_case[: realm_case.index("    demo)")]
-    demo_arm = realm_case[realm_case.index("    demo)") : realm_case.index("\nesac")]
-    for variable in ("ACCOUNT_EXECUTION_KERNEL_REQUIRED", "CONFIRM_DEMO_ORDERS"):
-        assert variable in mainnet_arm, variable
-        assert variable not in demo_arm, variable
-    # The mainnet credential/REAL_MONEY strip verification is unchanged.
-    assert "ACCOUNT_VENUE_REALM=mainnet requires BYBIT_REAL_API_KEY and BYBIT_REAL_API_SECRET." in mainnet_arm
-    assert "requires REAL_MONEY to be explicitly armed by the owner." in mainnet_arm
-    assert "The demo owner must not receive mainnet credentials." in demo_arm
-
-    # The Python runner accepts --confirm-demo-orders as a deprecated no-op, so
-    # the wrapper stops passing a flag that decides nothing.
-    assert "--confirm-demo-orders" not in script
-
-
-def test_hand_traded_mainnet_owner_gives_up_the_cached_leverage_fast_path() -> None:
-    """The owner trades the funded account by hand and sets leverage on it, so
-    that owner is not the sole writer of leverage: a flat symbol must forget its
-    cached value and re-assert it on the next entry. The demo account has no
-    second hand on it and keeps the fast path.
-    """
-
-    script = _read("scripts/runtime/run_account_execution_service.sh")
-
-    # Unset means off, and the toggle never keeps the owner down.
-    assert 'ACCOUNT_SHARED_LEVERAGE_AUTHORITY="${ACCOUNT_SHARED_LEVERAGE_AUTHORITY:-0}"' in script
-    leverage = script[script.index('case "$ACCOUNT_SHARED_LEVERAGE_AUTHORITY"') :]
-    leverage = leverage[: leverage.index("esac")]
-    assert "--shared-leverage-authority" in leverage
-    assert "exit 2" not in leverage
-
-    # Reading the variable is worthless if the flag never reaches the runner.
-    assert '"${leverage_authority_args[@]}"' in script[script.index("\nexec ") :]
-
-    mainnet = _environment("liquidity-migration-account-execution-mainnet.service")
-    assert mainnet["ACCOUNT_SHARED_LEVERAGE_AUTHORITY"] == "1"
-    assert "ACCOUNT_SHARED_LEVERAGE_AUTHORITY" not in _environment(
-        "liquidity-migration-account-execution.service"
-    )
 
 
 def test_producer_runners_carry_no_kernel_latch_cross_product() -> None:
@@ -501,21 +287,6 @@ def test_producer_runners_carry_no_kernel_latch_cross_product() -> None:
         mainnet_arm = text[text.index("    mainnet)") : text.index("\n    *)\n        echo \"EXECUTION_ENVIRONMENT")]
         assert "A target producer must not receive venue credentials." in mainnet_arm, runner
         assert "A target producer must not receive REAL_MONEY; it submits no orders." in mainnet_arm, runner
-
-
-def test_only_the_mainnet_owner_surface_check_asserts_an_exec_start_post() -> None:
-    """``lm_verify_guarded_unit_surfaces`` would fail every verify against the demo
-    owner now that it has no ExecStartPost. The ExecStart argv check still covers
-    every guarded unit.
-    """
-    text = _read("deploy/lib_sleeves.sh")
-    function = text[text.index("lm_verify_guarded_unit_surfaces() {") :]
-    function = function[: function.index("\nlm_install_current_systemd_units")]
-    post_case = function[function.index("--property=ExecStartPost") - 400 :]
-    assert "liquidity-migration-account-execution-mainnet.service)" in post_case
-    assert "liquidity-migration-account-execution.service |" not in post_case
-    # Argv verification is unscoped and stays that way.
-    assert 'run_authorized_runtime.sh $_lvgus_unit main ;"*) ;;' in function
 
 
 def test_retired_auth_shutdown_toggle_has_no_remaining_reference() -> None:
@@ -611,15 +382,6 @@ def test_demo_strategy_units_use_one_validated_operational_profile() -> None:
     assert carry_demo["EXECUTION_ENVIRONMENT"] == "demo"
 
 
-def test_demo_account_notification_reads_no_retired_continuous_status_root() -> None:
-    # CONTINUOUS is retired. The status root is deliberately unset, which is what
-    # removes the sleeve's line from the hourly digest; re-promotion must set it
-    # explicitly again.
-    demo_owner = _environment("liquidity-migration-account-execution.service")
-    assert "CONTINUOUS_CYCLE_ROOT" not in demo_owner
-    assert "CONTINUOUS_CYCLE_MAX_AGE_MINUTES" not in demo_owner
-
-
 def test_install_is_stopped_exact_commit_preparation_only() -> None:
     text = _read(DEPLOY)
     install = text[text.index("install_mode()") : text.index("load_authorization()")]
@@ -677,7 +439,9 @@ def test_activation_verifies_bound_state_before_start_and_cannot_reconfigure_it(
     text = _read(DEPLOY)
     activate = text[text.index("activate_mode()") : text.index('case "$MODE" in', text.index("activate_mode()"))]
     assert activate.index("load_authorization") < activate.index("systemctl start")
-    assert activate.index("account-execution.service") < activate.index("bybit-long-demo.service")
+    # The account owner is no longer started here by name: the engine block
+    # below starts it, and only where the engine is installed.
+    assert "account-execution.service" not in activate.split("start_if")[0]
     for forbidden in ("git fetch", "git checkout", "pip install", "lm_write_resolved", "sed -i"):
         assert forbidden not in activate
 
@@ -1097,20 +861,6 @@ def test_deploy_workflow_keeps_the_ssh_session_alive_and_is_time_bounded() -> No
     assert "timeout-minutes:" in workflow
 
 
-def test_account_owner_units_configure_no_retired_sleeve_cycle_root() -> None:
-    """A retired sleeve must leave no cycle root behind, or the owners keep reading a
-    dead sleeve's completion receipt and every hourly digest carries a permanently
-    growing staleness line.
-    """
-
-    for unit in (
-        "liquidity-migration-account-execution.service",
-        "liquidity-migration-account-execution-mainnet.service",
-    ):
-        text = (ROOT / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
-        assert "Environment=CONTINUOUS_CYCLE_ROOT=" not in text, unit
-
-
 def _mainnet_harness(
     armed: str,
     preflight_status: int,
@@ -1461,7 +1211,9 @@ def test_verify_asserts_the_mainnet_fleet_only_when_armed() -> None:
     text = _read(DEPLOY)
     verify = text[text.index("verify_topology()") : text.index("start_if()")]
     assert "if mainnet_armed; then" in verify
-    assert "mainnet owner is not active and enabled" in verify
+    # No mainnet account-owner row: the Python owner is deleted and the
+    # mainnet engine is not installed anywhere yet.
+    assert "account-execution-mainnet.service" not in verify
     assert "verify_unit on liquidity-migration-mainnet-liveness.timer" in verify
     assert "is active under demo authorization" in verify
     assert "mainnet=%s" in verify
@@ -1682,8 +1434,7 @@ def _verify_harness(
 
 
 _VERIFY_GREEN = (
-    "liquidity-migration-account-execution.service "
-    "liquidity-migration-demo-liveness.timer "
+        "liquidity-migration-demo-liveness.timer "
     "liquidity-migration-telegram-controls.service"
 )
 
@@ -1703,7 +1454,6 @@ def test_verify_reports_every_mismatch_with_a_unit_table_not_just_the_first() ->
     assert "verify-ok commit=abc123" in combined
     assert "verify-units unit|expected|active|enabled" in combined
     # Units that pass are in the table too, or the table is only a failure list.
-    assert "liquidity-migration-account-execution.service|on|active|enabled" in combined
     assert (
         "liquidity-migration-bybit-carry-demo.service|off|inactive|disabled" in combined
     )
@@ -1731,14 +1481,13 @@ def test_verify_reports_every_mismatch_with_a_unit_table_not_just_the_first() ->
     combined = broken.stdout + broken.stderr
     assert broken.returncode != 0
     for finding in (
-        "verify-mismatch demo owner is not active and enabled",
         "verify-mismatch liveness timer is not active",
         "verify-mismatch telegram controls daemon is not active",
         "verify-mismatch liquidity-migration-demo-liveness.service is failed",
         "verify-mismatch demo order permission verification failed",
     ):
         assert finding in combined, finding
-    assert "found 5 mismatch(es)" in combined
+    assert "found 4 mismatch(es)" in combined
     assert "verify-ok" not in combined
     # The table is printed before the verdict, so it survives the failure.
     assert combined.index("verify-units") < combined.index("fail:topology verification")

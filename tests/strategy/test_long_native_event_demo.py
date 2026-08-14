@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -25,6 +26,8 @@ import pytest
 
 import liquidity_migration.strategy.long_native_event_demo as lnd
 import liquidity_migration.strategy.strategy_planning as planning_module
+
+
 from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
 from liquidity_migration.account.account_route import (
     AccountRoute,
@@ -51,6 +54,16 @@ from liquidity_migration.strategy.long_native_event_demo import (
     target_long_order_notional_pct_equity,
 )
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_heartbeat_path() -> Any:
+    """`_write_owner_health` points the producer at a tmp heartbeat; a path
+    left in the environment would follow the next test into a deleted tmp dir
+    and read as "the engine is down" rather than as this test's own mess."""
+
+    yield
+    os.environ.pop("ENGINE_ACCOUNT_HEARTBEAT_FILE", None)
 
 
 def test_v11a_config_matches_research_run() -> None:
@@ -1099,39 +1112,35 @@ def _write_owner_health(
     equity_usdt: float = 10_000.0,
     now_ms: int | None = None,
 ) -> None:
-    from liquidity_migration.account.account_kernel import read_account_journal
-    from liquidity_migration.account.account_owner_health import (
-        TEST_ACCOUNT_OWNER_INVOCATION_ID,
-        AccountOwnerHealth,
-        write_account_owner_health,
-    )
+    """Write the account reading a producer sizes from.
+
+    This used to write the Python owner's ``account_owner_health.json``. The
+    engine owns the account now and says the same thing in its heartbeat, so
+    this writes one of those and points the producer at it. The keys are the
+    ones ``engine-core/src/heartbeat.rs`` renders.
+    """
 
     route = _ensure_owner_route(
         account_root,
         inbox_root,
         environment=environment,
     )
-    journal = read_account_journal(account_root, verify=True)
     observed_ts_ns = time.time_ns() if now_ms is None else now_ms * 1_000_000
-    write_account_owner_health(
-        account_root,
-        AccountOwnerHealth(
-            owner="account_execution",
-            environment=environment,
-            account_id=route.account_id,
-            status="healthy",
-            observed_ts_ns=observed_ts_ns,
-            loop_sequence=1,
-            journal_sequence=journal[-1].sequence if journal else 0,
-            journal_state_hash=journal[-1].state_hash if journal else "0" * 64,
-            equity_usdt=equity_usdt,
-            available_margin_usdt=equity_usdt,
-            requested_symbols_ready=True,
-            venue_facts_at_ns=observed_ts_ns,
-            venue_facts_healthy=True,
-            invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
-        ),
+    heartbeat = account_root / "engine-heartbeat.json"
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "account_available_usdt": equity_usdt,
+                "account_equity_usdt": equity_usdt,
+                "account_observed_ns": observed_ts_ns,
+                "account_user_id": route.account_id,
+                "may_open": True,
+                "mode": "live",
+            }
+        )
     )
+    os.environ["ENGINE_ACCOUNT_HEARTBEAT_FILE"] = str(heartbeat)
 
 
 def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
@@ -1153,14 +1162,14 @@ def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
         environment="demo",
         equity_usdt=12_345.0,
     )
-    real_health_check = planning_module.require_recent_account_owner_health
+    real_health_check = planning_module.require_recent_engine_account
     owner_health_call: dict[str, Any] = {}
 
     def owner_health(*args: Any, **kwargs: Any) -> Any:
         owner_health_call.update(kwargs)
         return real_health_check(*args, **kwargs)
 
-    monkeypatch.setattr(planning_module, "require_recent_account_owner_health", owner_health)
+    monkeypatch.setattr(planning_module, "require_recent_engine_account", owner_health)
 
     payload = _run_cycle(tmp_path / "long", demo)
 
@@ -1243,16 +1252,12 @@ class TestFastWakeSpendsTheStoredHealthReading:
     def test_a_price_touch_wake_does_zero_health_reads_or_sleeps(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from liquidity_migration.account.account_owner_health import (
-            AccountOwnerHealthHeadPending,
-        )
-
         _stub_cycle_dependencies(monkeypatch, candidates=[])
         demo = self._demo(tmp_path)
         now = 1_700_000_300_000
         monkeypatch.setattr(
             planning_module,
-            "require_recent_account_owner_health",
+            "require_recent_engine_account",
             lambda *_a, **_k: SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000),
         )
 
@@ -1263,20 +1268,21 @@ class TestFastWakeSpendsTheStoredHealthReading:
         assert state.owner_health_reading.read_wall_ts_ns == now * 1_000_000
         assert state.owner_health_reading.equity_usdt == pytest.approx(10_000.0)
 
-        # From here the owner-health head is pending: a live read walks the
-        # retry ladder and sleeps between attempts.
+        # From here a live read fails. There is no retry ladder to walk any
+        # more -- the engine heartbeat is one file replaced by rename, so a
+        # read either lands or it does not -- but a failed read still costs the
+        # wake a read, which is the thing this test is about.
         live_reads: list[str] = []
 
-        def head_pending(*_args: Any, **_kwargs: Any) -> Any:
+        def unreadable(*_args: Any, **_kwargs: Any) -> Any:
             live_reads.append("read")
-            raise AccountOwnerHealthHeadPending("synthetic head pending")
+            raise OSError("synthetic unreadable heartbeat")
 
-        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", head_pending)
+        monkeypatch.setattr(planning_module, "require_recent_engine_account", unreadable)
         counting_time = _CountingTimeModule()
         monkeypatch.setattr(planning_module, "time", counting_time)
 
-        # CONTROL — the pre-change path: no stored reading, so the wake pays
-        # the live read, retries the pending head, and sleeps.
+        # CONTROL — no stored reading, so the wake pays the live read.
         control = self._cycle(
             tmp_path,
             demo,
@@ -1284,8 +1290,8 @@ class TestFastWakeSpendsTheStoredHealthReading:
             state=lnd.LongCycleState(),
             cycle_kind="price_touch",
         )
-        assert len(live_reads) == 4  # 4 head attempts
-        assert len(counting_time.sleeps) == 3  # a sleep between each attempt
+        assert len(live_reads) == 1
+        assert counting_time.sleeps == []
         assert control["cycle"]["equity_usdt"] is None
 
         # TREATED — the reading is 10s old, inside the same 30s freshness
@@ -1315,7 +1321,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
             live_reads.append("read")
             return SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000)
 
-        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", live_health)
+        monkeypatch.setattr(planning_module, "require_recent_engine_account", live_health)
         state = lnd.LongCycleState()
         self._cycle(tmp_path, demo, now_ms=now, state=state)
 
@@ -1350,7 +1356,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
                 observed_ts_ns=(now - 25_000) * 1_000_000,
             )
 
-        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", aged_receipt)
+        monkeypatch.setattr(planning_module, "require_recent_engine_account", aged_receipt)
         state = lnd.LongCycleState()
         self._cycle(tmp_path, demo, now_ms=now, state=state)
         assert live_reads == ["read"]
@@ -1384,7 +1390,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
             live_reads.append("read")
             return SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000)
 
-        monkeypatch.setattr(planning_module, "require_recent_account_owner_health", live_health)
+        monkeypatch.setattr(planning_module, "require_recent_engine_account", live_health)
         state = lnd.LongCycleState()
         self._cycle(tmp_path, demo, now_ms=now, state=state)
         assert state.owner_health_reading is not None

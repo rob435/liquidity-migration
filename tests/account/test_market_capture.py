@@ -384,69 +384,6 @@ def test_current_book_observation_orders_wall_time_after_locked_snapshot(
     recorder.close()
 
 
-def test_owner_market_readiness_covers_every_required_symbol_and_invalidates_changes(
-    tmp_path: Path,
-) -> None:
-    from liquidity_migration.runtime.account_owner_readiness import (
-        latest_market_readiness,
-        latest_market_receive_ts_ns,
-    )
-
-    invocation_id = "a1" * 16
-    first_receive_ns = 1_800_000_000_010_000_000
-    clock = VirtualClock(
-        current_wall_ns=first_receive_ns,
-        current_monotonic_ns=0,
-    )
-    recorder = SequenceAwareMarketRecorder(
-        tmp_path,
-        config=_config(persist_raw_market=False),
-        clock=clock,
-        owner_invocation_id=invocation_id,
-    )
-    recorder.set_required_symbols({"BUSDT", "ETHUSDT"})
-    recorder.on_message(
-        _snapshot(symbol="BUSDT"),
-        local_receive_ts_ns=first_receive_ns,
-    )
-
-    with pytest.raises(RuntimeError, match="healthy=1/2"):
-        latest_market_readiness(
-            tmp_path,
-            expected_invocation_id=invocation_id,
-        )
-
-    clock.advance_ns(1_000_000_000)
-    recorder.on_message(
-        _snapshot(symbol="ETHUSDT"),
-        local_receive_ts_ns=clock.wall_time_ns(),
-    )
-    sidecar = latest_market_readiness(
-        tmp_path,
-        expected_invocation_id=invocation_id,
-    )
-    assert sidecar.required_symbol_count == 2
-    assert sidecar.healthy_symbol_count == 2
-    assert sidecar.all_required_books_healthy is True
-    assert sidecar.oldest_required_receive_ts_ns == first_receive_ns
-    assert (
-        latest_market_receive_ts_ns(
-            tmp_path,
-            expected_invocation_id=invocation_id,
-        )
-        == first_receive_ns
-    )
-
-    recorder.set_required_symbols({"BUSDT", "ETHUSDT", "SOLUSDT"})
-    assert not (tmp_path / OWNER_MARKET_READINESS_FILENAME).exists()
-    with pytest.raises(ValueError, match="unavailable"):
-        latest_market_readiness(
-            tmp_path,
-            expected_invocation_id=invocation_id,
-        )
-    recorder.close()
-
-
 def test_market_readiness_fsyncs_land_outside_the_recorder_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

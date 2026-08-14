@@ -68,6 +68,16 @@ pub struct Facts<'a> {
     /// wire. A part nothing has been recorded into is written as null.
     pub decide: Quantiles,
     pub wire: Quantiles,
+    /// The account as the venue last described it, and when that reading was
+    /// taken. This is not telemetry like the rest of this struct: the target
+    /// producers size their entries from the equity here, having read it from
+    /// the Python owner's health file until that owner was deleted. A reading
+    /// the engine has not taken yet has `observed_ns == 0`, and all three are
+    /// written as null rather than as a confident zero — a producer must be
+    /// able to tell "no reading" from "no money".
+    pub equity_usdt: f64,
+    pub available_usdt: f64,
+    pub account_observed_ns: u64,
 }
 
 /// The heartbeat writer: where the file goes, how often, and the facts about
@@ -150,7 +160,20 @@ impl Heartbeat {
     /// the lease note uses, so anything in the fleet that reads one reads the
     /// other.
     pub fn render(&self, facts: &Facts, wall_ts_ms: i64) -> String {
+        let taken = facts.account_observed_ns != 0;
         let mut fields: Vec<(&str, String)> = vec![
+            (
+                "account_available_usdt",
+                or_null(taken.then(|| amount(facts.available_usdt))),
+            ),
+            (
+                "account_equity_usdt",
+                or_null(taken.then(|| amount(facts.equity_usdt))),
+            ),
+            (
+                "account_observed_ns",
+                or_null(taken.then(|| facts.account_observed_ns.to_string())),
+            ),
             (
                 "account_user_id",
                 or_null(self.account.as_ref().map(|a| quoted(&a.user_id))),
@@ -227,6 +250,18 @@ fn quoted(text: &str) -> String {
     serde_json::to_string(text).expect("a string is always encodable as JSON")
 }
 
+/// One JSON number from a venue amount. A reading that is not finite is
+/// written as null, because a producer sizes from this: NaN dressed as a
+/// number would be multiplied by a weight and become a position, whereas null
+/// is the same "no reading" every other absent field here says.
+fn amount(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value}")
+    } else {
+        "null".to_string()
+    }
+}
+
 fn or_null(value: Option<String>) -> String {
     value.unwrap_or_else(|| "null".to_string())
 }
@@ -252,7 +287,10 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 15] = [
+    const KEYS: [&str; 18] = [
+        "account_available_usdt",
+        "account_equity_usdt",
+        "account_observed_ns",
         "account_user_id",
         "decide_p50_ns",
         "decide_p99_ns",
@@ -283,6 +321,9 @@ mod tests {
             strategies,
             decide: measured(7, 83, 400),
             wire: measured(7, 2_600_000, 4_100_000),
+            equity_usdt: 10_250.5,
+            available_usdt: 4_100.25,
+            account_observed_ns: 1_786_000_000_000_000_000,
         }
     }
 
