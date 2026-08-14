@@ -25,6 +25,13 @@ OPERATIONAL_PROFILE_KIND = "liquidity_migration_operational_profile"
 #: nothing spends while the real sleeve stays unlisted and refused.
 PARTITIONABLE_SLEEVES: tuple[str, ...] = ("carry", "continuous", "hedge", "long")
 
+#: The retired CONTINUOUS sleeve's resolved sizing shape, frozen here now that
+#: its code is deleted. Its token envelope is still proved against the account
+#: caps, so these must keep the values ``continuous_ensemble_v2`` produced: a
+#: single ensemble component at weight 1.0, inverse-vol sizing clamped at 2.0.
+_CONTINUOUS_COMPONENT_WEIGHT = 1.0
+_CONTINUOUS_VOL_WEIGHT_CLAMP = 2.0
+
 
 def _object(
     value: object,
@@ -469,10 +476,6 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
 
     # Imported lazily to keep the shared account-policy loader out of strategy
     # import cycles; these are the real sizing constants, not copies of them.
-    from liquidity_migration.strategy.continuous_demo import (  # noqa: PLC0415
-        ContinuousDemoCycleConfig,
-        apply_continuous_demo_profile,
-    )
     from liquidity_migration.research.backtest.long_native import long_v11a_profile  # noqa: PLC0415
     from liquidity_migration.strategy.long_native_event_demo import (  # noqa: PLC0415
         LongNativeDemoCycleConfig,
@@ -504,24 +507,13 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
             "long full-book margin projection exceeds its configured equity cap"
         )
 
-    continuous_config = apply_continuous_demo_profile(
-        ContinuousDemoCycleConfig(
-            max_active=profile.continuous.max_active,
-            max_new_entries_per_cycle=profile.continuous.max_new_entries_per_cycle,
-            btc_trend_gate=profile.continuous.btc_trend_gate,
-            entry_leverage=profile.continuous.entry_leverage,
-            notional_multiplier=profile.continuous.notional_multiplier,
-            per_position_notional_pct_equity=(
-                profile.continuous.per_position_notional_pct_equity
-            ),
-        )
-    )
-    component_weights = [float(row[4]) for row in continuous_config.ensemble_components]
-    vol_clamp = (
-        float(continuous_config.vol_weight_clamp)
-        if continuous_config.sizing_mode == "inverse_vol"
-        else 1.0
-    )
+    # CONTINUOUS is retired and its sizing code is gone, but the profiles still
+    # carry a token continuous envelope and it still has to fit inside the
+    # account caps checked below. These are the shapes the deleted
+    # ``continuous_ensemble_v2`` profile resolved to: one component at weight
+    # 1.0, and inverse-vol sizing clamped at 2.0.
+    component_weights = [_CONTINUOUS_COMPONENT_WEIGHT]
+    vol_clamp = _CONTINUOUS_VOL_WEIGHT_CLAMP
     base_fraction = (
         profile.continuous.per_position_notional_pct_equity
         * profile.continuous.notional_multiplier

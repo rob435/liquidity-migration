@@ -291,7 +291,7 @@ def test_owner_runner_degrades_rather_than_refusing_to_start() -> None:
     script = _read("scripts/runtime/run_account_execution_service.sh")
 
     # Misconfigured Telegram drops the flag and warns; it does not exit.
-    telegram = script[script.index("telegram_args=()") : script.index("continuous_cycle_args=()")]
+    telegram = script[script.index("telegram_args=()") : script.index('exec "$PYTHON_BIN"')]
     assert "running without Telegram" in telegram
     assert "exit 2" not in telegram
     assert "--telegram" in telegram
@@ -978,13 +978,6 @@ def test_account_owner_units_configure_no_retired_sleeve_cycle_root() -> None:
     ):
         text = (ROOT / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
         assert "Environment=CONTINUOUS_CYCLE_ROOT=" not in text, unit
-
-
-def test_demo_owner_runner_passes_no_cycle_root_when_unset() -> None:
-    runner = (ROOT / "scripts" / "runtime" / "run_account_execution_service.sh").read_text(encoding="utf-8")
-    assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"' in runner
-    assert "data/bybit-continuous-demo-event" not in runner
-    assert 'if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then' in runner
 
 
 def _mainnet_harness(

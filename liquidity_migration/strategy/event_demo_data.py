@@ -1,7 +1,7 @@
 """Public market-data plane for the demo target producers.
 
-LONG and CONTINUOUS use these helpers in both environments; the selected
-account owner is a separate route.
+The demo target producers use these helpers in both environments; the
+selected account owner is a separate route.
 """
 
 from __future__ import annotations
@@ -20,21 +20,11 @@ from typing import Any, Mapping, Protocol, Sequence
 
 import polars as pl
 
-from liquidity_migration.strategy.account_candidate_universe import (
-    CandidatePopulationReconciliation,
-    FrozenCandidateUniverse,
-    continuous_profile_universe_inputs,
-    enforce_frozen_candidate_frames,
-    load_candidate_universe,
-    require_profile_binding,
-)
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData, BybitRestRateLimiter
 from liquidity_migration.core.artifact_snapshot import read_stable_file
-from liquidity_migration.core.config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
-from liquidity_migration.data.downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
-from liquidity_migration.account.execution_environment import candidate_universe_realm
+from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.data.downloaders import _normalize_instruments, _normalize_klines
 from liquidity_migration.data.storage import dataset_path, read_dataset, write_dataset
-from liquidity_migration.data.universe import build_current_universe_table
 from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR, coerce_int, exact_duration_ms, finite_float
 
 _logger = logging.getLogger(__name__)
@@ -195,11 +185,6 @@ def _resolve_ticker_snapshot(
     return public.get_tickers(), "rest"
 
 
-def _universe_shrink_floor(config: MarketUniverseConfig) -> int:
-    requested = config.universe_max_symbols or config.universe_rank_end
-    return int(requested * 0.75) if requested > 0 else _MATCH_BACKTEST_UNIVERSE_FLOOR
-
-
 def _prune_cycle_reports(
     report_dir: Path,
     *,
@@ -276,12 +261,6 @@ def _read_demo_instruments_cache(cache_root: Path) -> tuple[pl.DataFrame | None,
         return None, 0
     return frame, fetched_ts_ms
 
-def _bust_demo_instruments_cache(cache_root: Path) -> None:
-    """Delete the instruments cache so the next _demo_instruments call refetches."""
-    parquet_path, metadata_path = _demo_instruments_cache_paths(cache_root)
-    parquet_path.unlink(missing_ok=True)
-    metadata_path.unlink(missing_ok=True)
-
 def _write_demo_instruments_cache(cache_root: Path, instruments: pl.DataFrame, fetched_ts_ms: int) -> None:
     if instruments.is_empty():
         return
@@ -333,127 +312,6 @@ def _demo_instruments(public: Any, *, cache_root: Path, now_ms: int) -> pl.DataF
         raise
     _write_demo_instruments_cache(cache_root, fresh, now_ms)
     return fresh
-
-def _build_demo_universe(
-    instruments: pl.DataFrame,
-    tickers: pl.DataFrame,
-    *,
-    config: MarketUniverseConfig,
-    snapshot_ts_ms: int,
-) -> pl.DataFrame:
-    # Listing age belongs to the active component gate downstream. Applying a
-    # second implicit 30-day floor here would silently change that profile.
-    universe_config = UniverseConfig(
-        min_turnover_24h=config.universe_min_turnover_24h,
-        min_age_days=0,
-        rank_start=1,
-        rank_end=config.universe_rank_end,
-        max_symbols=config.universe_max_symbols,
-        exclude_symbols=DEFAULT_EXCLUDED_SYMBOLS,
-    )
-    return build_current_universe_table(
-        instruments,
-        tickers,
-        universe_config=universe_config,
-        snapshot_ts_ms=snapshot_ts_ms,
-    )
-
-
-def _resolve_cycle_universe(
-    *,
-    public: Any,
-    demo: MarketUniverseConfig,
-    config: ResearchConfig,
-    root: Path,
-    cycle_now_ms: int,
-    ticker_cache: Any | None,
-    state_cache_stale_seconds: float,
-    frozen_candidate_universe: FrozenCandidateUniverse | None = None,
-) -> tuple[
-    pl.DataFrame,
-    list[str],
-    pl.DataFrame,
-    str,
-    CandidatePopulationReconciliation | None,
-]:
-    """Resolve one fresh, public-only strategy universe."""
-
-    _ = config  # venue normalization is owned by the supplied public adapter
-    instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
-    raw_tickers, ticker_source = _resolve_ticker_snapshot(
-        public,
-        ticker_cache=ticker_cache,
-        state_cache_stale_seconds=state_cache_stale_seconds,
-    )
-    tickers = _normalize_tickers(raw_tickers)
-    universe = _build_demo_universe(
-        instruments,
-        tickers,
-        config=demo,
-        snapshot_ts_ms=cycle_now_ms,
-    )
-    shrink_floor = _universe_shrink_floor(demo)
-    if universe.height < shrink_floor:
-        _logger.warning(
-            "universe shrink detected: got %d symbols (floor %d); "
-            "busting instruments cache and retrying",
-            universe.height,
-            shrink_floor,
-        )
-        _bust_demo_instruments_cache(root)
-        instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
-        tickers = _normalize_tickers(public.get_tickers())
-        universe = _build_demo_universe(
-            instruments,
-            tickers,
-            config=demo,
-            snapshot_ts_ms=cycle_now_ms,
-        )
-        if universe.height < shrink_floor:
-            _logger.error(
-                "universe shrink persists after cache bust: %d symbols "
-                "(floor %d, instruments=%d, tickers=%d)",
-                universe.height,
-                shrink_floor,
-                instruments.height,
-                tickers.height,
-            )
-    candidate_path = str(getattr(demo, "candidate_universe_file", "") or "").strip()
-    candidate_reconciliation = None
-    if candidate_path:
-        frozen = frozen_candidate_universe or load_candidate_universe(
-            candidate_path,
-            realm=candidate_universe_realm(demo.execution_environment),
-        )
-        if frozen.path != Path(candidate_path).expanduser().absolute():
-            raise ValueError("CONT candidate-universe snapshot belongs to another path")
-        require_profile_binding(
-            frozen,
-            profile="continuous",
-            current_inputs=continuous_profile_universe_inputs(demo),
-        )
-        candidate_reconciliation = enforce_frozen_candidate_frames(
-            instruments,
-            tickers,
-            frozen,
-            profile="continuous",
-            snapshot_ts_ms=cycle_now_ms,
-            context="CONT cycle",
-            retirement_registry_path=(
-                root / "candidate_retirements" / f"{frozen.artifact_sha256}.json"
-            ),
-        )
-        # Newly listed symbols may appear in the current public snapshot but
-        # cannot enter this bounded evidence epoch.
-        universe = universe.filter(
-            pl.col("symbol").is_in(list(candidate_reconciliation.active_symbols))
-        )
-    elif frozen_candidate_universe is not None:
-        raise ValueError("CONT received a frozen candidate universe without a configured path")
-    symbols = universe["symbol"].to_list() if not universe.is_empty() else []
-    if not symbols:
-        raise RuntimeError("public market-data cycle found no tradable symbols")
-    return universe, symbols, tickers, ticker_source, candidate_reconciliation
 
 def _download_recent_1h_klines(
     symbols: list[str],

@@ -8,6 +8,10 @@ from typing import Any, Mapping
 ENTRY_ATTEMPT_METADATA_KEY = "entry_attempt_key"
 SIGNAL_TS_METADATA_KEY = "signal_ts_ms"
 SIGNAL_VALID_UNTIL_METADATA_KEY = "signal_valid_until_ms"
+#: Written by the retired CONTINUOUS sleeve, and still read back: journal rows
+#: carrying it predate the sleeve's removal, and the entry-to-close projection
+#: must keep copying it forward or those trades lose their entry evidence.
+BTC_RISK_EVIDENCE_METADATA_KEY = "btc_risk_decision_evidence"
 
 
 def entry_attempt_key(target_key: str) -> str:

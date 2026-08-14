@@ -33,7 +33,6 @@ from liquidity_migration.cli.parsers import (  # argparse subcommand builders (e
     _add_archive_download_klines_1h_api_parser,
     _add_archive_manifest_parser,
     _add_carry_demo_cycle_parser,
-    _add_continuous_event_demo_cycle_parser,
     _add_coverage_parser,
     _add_download_binance_proxy_parser,
     _add_download_data_parser,
@@ -85,7 +84,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_manifest_parser(subparsers)
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
-    _add_continuous_event_demo_cycle_parser(subparsers)
     _add_carry_demo_cycle_parser(subparsers)
 
     return parser
@@ -103,7 +101,6 @@ _COMMANDS_WITHOUT_DATA_ROOT = frozenset(
 _COMMANDS_THAT_OWN_DATA_ROOT = frozenset(
     {
         "long-native-event-demo-cycle",
-        "continuous-event-demo-cycle",
         "carry-demo-cycle",
     }
 )
@@ -361,84 +358,6 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
     return 0
 
 
-def _cmd_continuous_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
-    from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig, run_continuous_demo_cycle
-
-    candidate_universe_file = getattr(args, "candidate_universe_file", "")
-    strategy_target_capture_path = getattr(args, "strategy_target_capture_path", None)
-    operational_profile = None
-    if args.operational_profile_file:
-        from liquidity_migration.policy.operational_profile import load_operational_profile
-
-        operational_profile = load_operational_profile(args.operational_profile_file)
-    continuous_settings = operational_profile.continuous if operational_profile else None
-
-    cont_demo_config = ContinuousDemoCycleConfig(
-        lookback_days=args.lookback_days,
-        workers=args.workers,
-        max_active=(continuous_settings.max_active if continuous_settings else args.max_active),
-        max_new_entries_per_cycle=(
-            continuous_settings.max_new_entries_per_cycle
-            if continuous_settings
-            else args.max_new_entries_per_cycle
-        ),
-        btc_trend_gate=(
-            continuous_settings.btc_trend_gate
-            if continuous_settings
-            else args.btc_trend_gate
-        ),
-        entry_leverage=(
-            continuous_settings.entry_leverage
-            if continuous_settings
-            else args.entry_leverage
-        ),
-        notional_multiplier=(
-            continuous_settings.notional_multiplier
-            if continuous_settings
-            else args.notional_multiplier
-        ),
-        per_position_notional_pct_equity=(
-            continuous_settings.per_position_notional_pct_equity
-            if continuous_settings
-            else args.per_position_notional_pct_equity
-        ),
-        operational_profile_sha256=(
-            operational_profile.source_sha256 if operational_profile else ""
-        ),
-        execution_environment=args.execution_environment,
-        account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
-        account_execution_root=getattr(args, "account_execution_root", None),
-        candidate_universe_file=candidate_universe_file,
-    )
-    if getattr(args, "daemon", False):
-        from liquidity_migration.strategy.continuous_demo_daemon import ContinuousDemoDaemon
-
-        cont_daemon = ContinuousDemoDaemon(
-            data_root,
-            config=config,
-            demo_config=cont_demo_config,
-            interval_seconds=args.interval_seconds,
-            strategy_target_capture_path=strategy_target_capture_path,
-        )
-        cont_daemon.install_signal_handlers()
-        stats = cont_daemon.run()
-        print(
-            "continuous target producer daemon stopped "
-            f"cycles_run={stats.get('cycles_run')} cycle_errors={stats.get('cycle_errors')}",
-            flush=True,
-        )
-        return 0
-    payload = run_continuous_demo_cycle(data_root, config=config, demo_config=cont_demo_config)
-    print(
-        f"continuous target cycle [{payload['mode']}] profile={payload.get('strategy_profile')} "
-        f"universe={payload.get('universe_symbols')} "
-        f"rmom={payload.get('rmom_present')} d9={payload.get('live_d9_symbols')} "
-        f"open={payload.get('open_positions')} entries={payload.get('entries')} exits={payload.get('exits')}",
-        flush=True,
-    )
-    return 0
-
-
 def producer_capital_reference_usdt(operational_profile: OperationalProfile) -> float:
     """The fixed clamp the carry producer should carry, or 0.0 to disable it.
 
@@ -515,7 +434,6 @@ _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Pat
     "archive-manifest": _cmd_archive_manifest,
     "archive-download-klines-1h-api": _cmd_archive_download_klines_1h_api,
     "long-native-event-demo-cycle": _cmd_long_native_event_demo_cycle,
-    "continuous-event-demo-cycle": _cmd_continuous_event_demo_cycle,
     "carry-demo-cycle": _cmd_carry_demo_cycle,
 }
 

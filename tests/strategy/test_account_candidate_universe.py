@@ -23,7 +23,6 @@ from liquidity_migration.account.account_intent_client import (
 )
 from liquidity_migration.account.account_route import ensure_account_route
 from liquidity_migration.account.account_service import SleeveAdapterKind
-from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.data.downloaders import _normalize_instruments, _normalize_tickers
 from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
@@ -99,7 +98,6 @@ def _payload() -> dict[str, object]:
         tickers,
         snapshot_ts_ns=SNAPSHOT_NS,
         long_config=LongNativeDemoCycleConfig(),
-        continuous_config=ContinuousDemoCycleConfig(),
     )
 
 
@@ -155,7 +153,6 @@ def test_builder_excludes_non_crypto_products_before_liquidity_ranking(
             LongNativeDemoCycleConfig(),
             universe_superset_size=1,
         ),
-        continuous_config=ContinuousDemoCycleConfig(),
     )
 
     assert payload["schema_version"] == 4
@@ -214,7 +211,6 @@ def test_builder_rejects_non_string_symbol_type() -> None:
             [_ticker("AAAUSDT", "3000000")],
             snapshot_ts_ns=SNAPSHOT_NS,
             long_config=LongNativeDemoCycleConfig(),
-            continuous_config=ContinuousDemoCycleConfig(),
         )
 
 
@@ -552,7 +548,6 @@ def test_builder_rejects_duplicate_raw_symbol() -> None:
             [_ticker("AAAUSDT", "3000000")],
             snapshot_ts_ns=SNAPSHOT_NS,
             long_config=LongNativeDemoCycleConfig(),
-            continuous_config=ContinuousDemoCycleConfig(),
         )
 
 
@@ -570,7 +565,6 @@ def test_builder_records_noncanonical_ticker_only_source_rejection(
         [_ticker("AAAUSDT", "3000000"), synthetic],
         snapshot_ts_ns=SNAPSHOT_NS,
         long_config=LongNativeDemoCycleConfig(),
-        continuous_config=ContinuousDemoCycleConfig(),
     )
 
     assert payload["schema_version"] == 4
@@ -593,7 +587,6 @@ def test_builder_records_noncanonical_ticker_only_source_rejection(
             [synthetic],
             snapshot_ts_ns=SNAPSHOT_NS,
             long_config=LongNativeDemoCycleConfig(),
-            continuous_config=ContinuousDemoCycleConfig(),
         )
 
     with pytest.raises(ValueError, match="duplicate symbol"):
@@ -602,7 +595,6 @@ def test_builder_records_noncanonical_ticker_only_source_rejection(
             [synthetic, dict(synthetic)],
             snapshot_ts_ns=SNAPSHOT_NS,
             long_config=LongNativeDemoCycleConfig(),
-            continuous_config=ContinuousDemoCycleConfig(),
         )
 
     with pytest.raises(ValueError, match="invalid candidate-universe symbol"):
@@ -611,7 +603,6 @@ def test_builder_records_noncanonical_ticker_only_source_rejection(
             [{"turnover24h": "3000000"}],
             snapshot_ts_ns=SNAPSHOT_NS,
             long_config=LongNativeDemoCycleConfig(),
-            continuous_config=ContinuousDemoCycleConfig(),
         )
 
 
@@ -624,7 +615,6 @@ def test_loader_recomputes_noncanonical_ticker_source_rejections(
         [_ticker("AAAUSDT", "3000000"), synthetic],
         snapshot_ts_ns=SNAPSHOT_NS,
         long_config=LongNativeDemoCycleConfig(),
-        continuous_config=ContinuousDemoCycleConfig(),
     )
     payload["rejected_ticker_rows"][0]["reason"] = "silently_ignored"
     payload["artifact_sha256"] = ""
@@ -641,7 +631,6 @@ def test_loader_recomputes_non_crypto_instrument_exclusions(tmp_path: Path) -> N
         [_ticker("AAAUSDT", "3000000"), _ticker("AAOIUSDT", "9000000")],
         snapshot_ts_ns=SNAPSHOT_NS,
         long_config=LongNativeDemoCycleConfig(),
-        continuous_config=ContinuousDemoCycleConfig(),
     )
     payload["excluded_instrument_rows"][0]["reason"] = "silently_admitted"
     payload["artifact_sha256"] = ""

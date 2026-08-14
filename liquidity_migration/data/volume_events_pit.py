@@ -1,7 +1,7 @@
 """Point-in-time (PIT) membership + full-PIT universe validation.
 
 This is the methodology-critical no-look-ahead / no-survivorship gate consumed
-by the long/continuous engines, with shared frame helpers imported from
+by the backtest engines, with shared frame helpers imported from
 _common / trade_lifecycle.
 """
 from __future__ import annotations

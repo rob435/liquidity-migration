@@ -27,8 +27,11 @@ from liquidity_migration.account.account_intent_client import (
     completed_expired_entry_attempt_keys,
 )
 from liquidity_migration.account.account_service import AccountIntentInbox
-from liquidity_migration.research.backtest.continuous_btc_risk import BTC_RISK_EVIDENCE_METADATA_KEY
-from liquidity_migration.account.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY, entry_attempt_key
+from liquidity_migration.account.entry_attempts import (
+    BTC_RISK_EVIDENCE_METADATA_KEY,
+    ENTRY_ATTEMPT_METADATA_KEY,
+    entry_attempt_key,
+)
 
 # Bound once. Every scan below walks the whole journal, and ``Enum.value`` is a
 # descriptor call, not an attribute read — it was 37% of one anchor build.

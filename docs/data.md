@@ -107,7 +107,7 @@ splat under "Never let target metadata overwrite fill-derived lifecycle fields."
 beside a populated `entry_target_ts_ms` is not licence to use the target time.
 
 Passing `max_hold_deadline_ts_ms` makes the sleeve publish a replacement zero target
-(`continuous_demo.py:811-818`, `long_native_event_demo.py:1086-1128`); it asserts nothing about when the
+(`long_native_event_demo.py:1086-1128`); it asserts nothing about when the
 account owner fills the resulting aggregate order. The actual close is a later journal fill event,
 surfaced as `exit_ts_ms` / `closed_at_ms` (`account_strategy_state.py:1725-1726`).
 
@@ -208,8 +208,8 @@ PIT codes are `PIT_MANIFEST_EMPTY` and `PIT_SURVIVORSHIP`, both `tainted`), a da
 and a `methodology_run_label` (`exploratory` | `biased_benchmark` | `invalid`). Any `tainted` warning
 means the result is survivorship- or look-ahead-biased and must not be cited as clean. Both labels are
 printed at the top of the long-native report; the label vocabulary is in
-[`trading_logic.md`](trading_logic.md). The CONTINUOUS equity runner reads the kline root, which
-establishes nothing about historical membership. Changing the population treatment after seeing a result
+[`trading_logic.md`](trading_logic.md). An equity runner that reads the kline root establishes
+nothing about historical membership. Changing the population treatment after seeing a result
 does not rescue the original claim.
 
 ## Refresh

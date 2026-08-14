@@ -15,8 +15,6 @@ PRIVATE_MODULE = REPO / "liquidity_migration" / "venue" / "bybit.py"
 OWNER_ADAPTER_MODULE = REPO / "liquidity_migration" / "venue" / "bybit_execution_adapter.py"
 OWNER_RUNNER_MODULE = REPO / "liquidity_migration" / "runtime" / "account_service_runner.py"
 ACTIVE_MARKET_DATA_PRODUCERS = (
-    "strategy/continuous_demo.py",
-    "strategy/continuous_demo_daemon.py",
     "data/downloaders.py",
     "strategy/event_demo_data.py",
     "marketdata/kline_stream_manager.py",
@@ -26,10 +24,7 @@ ACTIVE_MARKET_DATA_PRODUCERS = (
 PUBLIC_PROCESS_MODULES = (
     "liquidity_migration.marketdata.bybit_market_data",
     "liquidity_migration.account.execution_adapters",
-    "liquidity_migration.research.backtest.continuous_events",
     "liquidity_migration.research.backtest.long_native",
-    "liquidity_migration.strategy.continuous_demo",
-    "liquidity_migration.strategy.continuous_demo_daemon",
     "liquidity_migration.strategy.long_native_event_demo",
     "liquidity_migration.strategy.long_native_event_demo_daemon",
 )

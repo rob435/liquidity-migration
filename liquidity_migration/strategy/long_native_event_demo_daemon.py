@@ -6,10 +6,6 @@ adds the LONG cycle runner, its config validation, the v11a/v12 profile
 identity, and the LONG kline universe. Publishes desired targets to the
 account owner, which owns execution and account state. SIGTERM drains the
 current cycle and exits cleanly.
-
-Also the base for :class:`ContinuousDemoDaemon`, which inherits the LONG
-defaults (kline universe factory, journal-cursor cycle kwarg) and swaps in
-its own cycle runner.
 """
 
 from __future__ import annotations

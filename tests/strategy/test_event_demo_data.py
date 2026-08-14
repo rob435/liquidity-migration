@@ -13,7 +13,6 @@ import polars as pl
 from liquidity_migration.strategy import event_demo_data
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.strategy.event_demo_data import (
-    _build_demo_universe,
     _demo_instruments,
     _demo_kline_fetch_ranges,
     _window_incomplete_symbols,
@@ -28,8 +27,6 @@ from _event_demo_fixtures import (
     FailingKlineMarket,
     FakeKlineMarket,
     _RecordingInstrumentsMarket,
-    _make_instruments_frame,
-    _make_tickers_frame,
 )
 
 
@@ -588,32 +585,6 @@ def test_demo_instruments_falls_back_to_stale_cache_on_fetch_error(tmp_path: Pat
     assert served.equals(cached)
 
 
-def test_build_demo_universe_match_backtest_mode_includes_all_trading_perps() -> None:
-    """With universe_rank_end == universe_max_symbols == 0 the universe is every Trading
-    USDT-perp except the hard exclusion list: no turnover floor, rank cap, or 30-day
-    age filter. Symbols are filtered downstream by the strategy's own gates, matching
-    the backtest's path.
-    """
-    snapshot_ts_ms = 1_779_440_000_000  # 2026-05-22-ish, past NEWUSDT's launch
-    demo_config = _public_config(
-        universe_rank_end=0,
-        universe_max_symbols=0,
-        universe_min_turnover_24h=0.0,
-    )
-    universe = _build_demo_universe(
-        _make_instruments_frame(),
-        _make_tickers_frame(),
-        config=demo_config,
-        snapshot_ts_ms=snapshot_ts_ms,
-    )
-    symbols = set(universe["symbol"].to_list())
-    # BTC, BAN, NEW all included. BUSDUSDT is on the hard-exclude list.
-    assert "BTCUSDT" in symbols
-    assert "BANUSDT" in symbols
-    assert "NEWUSDT" in symbols, "NEWUSDT (5 days old) must be included in match-the-backtest mode"
-    assert "BUSDUSDT" not in symbols
-
-
 # ---------------------------------------------------------------------------
 # event_demo_klines_1h REST-cache prune (date= partitions accumulated forever:
 # live box hit 49 partitions vs a 45-day lookback, ~6.8MB/day/root).
@@ -765,26 +736,6 @@ def test_download_recent_1h_klines_prunes_stale_partitions_after_rest_write(tmp_
 
 def _hour_floor_now_ms() -> int:
     return (int(time.time() * 1000) // MS_PER_HOUR) * MS_PER_HOUR
-
-
-def test_build_demo_universe_leaves_age_filter_to_component_profile(monkeypatch) -> None:
-    captured: list[int] = []
-
-    def spy_build(instruments, tickers, *, universe_config, snapshot_ts_ms):
-        del instruments, tickers, snapshot_ts_ms
-        captured.append(universe_config.min_age_days)
-        return pl.DataFrame()
-
-    monkeypatch.setattr(event_demo_data, "build_current_universe_table", spy_build)
-    empty = pl.DataFrame()
-
-    unlimited = _public_config(
-        universe_rank_end=0, universe_max_symbols=0,
-    )
-    event_demo_data._build_demo_universe(
-        empty, empty, config=unlimited, snapshot_ts_ms=_hour_floor_now_ms(),
-    )
-    assert captured == [0]
 
 
 def test_demo_kline_fetch_ranges_backfills_a_missing_window_head() -> None:

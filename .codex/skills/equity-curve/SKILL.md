@@ -1,6 +1,6 @@
 ---
 name: equity-curve
-description: Produce and interpret the repository-standard equity curves for the LONG and CONTINUOUS profiles, and for a registered Lane-2 carry config through the same chart. Use scripts/research/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
+description: Produce and interpret the repository-standard equity curves for the LONG profile, and for a registered Lane-2 carry config through the same chart. Use scripts/research/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
 ---
 
 # Produce equity curves
@@ -16,11 +16,9 @@ Use the standard wrapper for outputs intended to be compared or cited:
 
 ```bash
 bash scripts/research/equity_curves.sh --sleeves long
-bash scripts/research/equity_curves.sh --sleeves continuous
 bash scripts/research/equity_curves.sh --sleeves carry
-bash scripts/research/equity_curves.sh --sleeves long,continuous,carry
-bash scripts/research/equity_curves.sh --root ~/SHARED_DATA/bybit_full_pit --venue bybit
-bash scripts/research/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
+bash scripts/research/equity_curves.sh --sleeves long,carry
+bash scripts/research/equity_curves.sh --root ~/SHARED_DATA/bybit_full_pit
 ```
 
 Derive the time boundary and venues from the user's question or experiment
@@ -30,10 +28,6 @@ contract. Do not assume a default window is OOS or that both venues are required
 
 - `long` loads the active LONG profile and runs the long-native research
   engine.
-- `continuous` reconstructs the continuous component book and hedge through
-  `scripts/research/continuous_deployed_equity_refresh.py`. The sleeve was retired from
-  the forward routes on 2026-07-29, so that curve is a research reconstruction of a
-  dormant profile, never a live record.
 - `carry` renders the registered research config
   `configs/lane2_carry_hold_v3.json` from the cross-venue panel, through the
   same `--research-config` path (below). It is the registered research shape,
@@ -48,12 +42,6 @@ contract. Do not assume a default window is OOS or that both venues are required
 
 - Use `--long-notional-multiplier` only to scale the same LONG signal when that
   is the intended comparison.
-- Use `--continuous-backtest-leverage` to change modeled component exposure so
-  fees, impact, funding, and hedge constraints are recomputed.
-- Use `--continuous-chart-leverage` or `--chart-leverage` only for presentation.
-  It does not model margin or liquidation and must be labelled as such.
-- Use `--continuous-render-only` only when the expected existing CSV is present
-  and its identity is known.
 
 Do not describe a partial flag combination as “the live config.” Verify every
 material runtime setting and lifecycle behavior.

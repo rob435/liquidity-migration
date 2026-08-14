@@ -181,12 +181,24 @@ benchmark; the superseded 2.57 / t 4.87 figures are wrong. Detail:
 
 CONTINUOUS (`continuous_ensemble_v2`) was retired 2026-07-29; its systemd units and runtime
 launchers left the deploy set on 2026-08-03, after the host's hedge book was verified flat.
-A token CONTINUOUS envelope survives in the operational profiles by design, and tests guard
-it.
+Its own code — the producer, its daemon, the cycle-status projection, and the backtest
+modules behind it — was deleted from the tree in the 2026-08-14 cleanup, together with the
+`continuous-event-demo-cycle` CLI subcommand. Git history holds all of it.
+
+Three things the sleeve left behind are data, not code, and they stay:
+
+- A token CONTINUOUS envelope in both operational profiles, still proved against the account
+  caps. Its sizing shape is now frozen as constants in `policy/operational_profile.py`.
+- A `continuous` profile in the frozen candidate universe. The tradable population every
+  producer reads is the union of the three profiles, and the continuous one is the unbounded
+  member — dropping it would narrow what CARRY may trade, and the running fleet would reject
+  its own installed artifact, whose loader rebuilds and re-hashes all three profiles.
+- `btc_risk_decision_evidence` on journal rows written before the removal, now defined in
+  `account/entry_attempts.py` beside the other metadata keys, so an entry's evidence still
+  copies forward onto its close.
 
 The hedge that sat against the CONTINUOUS short book — its model code and its committed
-warmstart prior — was removed from the tree in the 2026-08-14 cleanup. Git history holds
-both.
+warmstart prior — was removed from the tree in the same cleanup.
 
 The negative results, and what the retired sleeves did and did not establish, are in
 [`research_findings.md`](research/research_findings.md) and the

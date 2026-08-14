@@ -24,7 +24,7 @@ def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Pat
     """
     missing = tmp_path / "new_sleeve_root"
     assert not missing.exists()
-    out = _resolve_data_root("continuous-event-demo-cycle", missing)
+    out = _resolve_data_root("long-native-event-demo-cycle", missing)
     assert out == missing and missing.is_dir()  # daemon command -> self-provisioned
     with pytest.raises(FileNotFoundError):  # research command -> strict guard
         _resolve_data_root("archive-manifest", tmp_path / "absent_research_root")
@@ -32,105 +32,8 @@ def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Pat
     assert _resolve_data_root("download-data", noop) == noop and not noop.exists()
 
 
-@pytest.mark.parametrize(
-    "fixed_flag",
-    (
-        "--strategy-profile",
-        "--feature-set",
-        "--entry-event-trigger",
-        "--sizing-mode",
-        "--target-vol-per-name",
-        "--vol-weight-clamp",
-        "--max-hold-hours",
-        "--decile",
-        "--rmom-quantile",
-        "--liq-turnover-min",
-        "--btc-trend-lookback-days",
-        "--btc-trend-mode",
-        "--btc-trend-month-days",
-        "--btc-trend-smart-tolerance",
-        "--allow-same-signal-reentry",
-        "--data-name",
-        "--no-event-driven-cycle",
-    ),
-)
-def test_cli_continuous_demo_rejects_fixed_profile_flags(
-    tmp_path: Path,
-    fixed_flag: str,
-) -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(
-            [
-                "--data-root",
-                str(tmp_path),
-                "continuous-event-demo-cycle",
-                "--execution-environment",
-                "demo",
-                fixed_flag,
-                "ignored",
-            ]
-        )
-
-
-def test_cli_continuous_demo_target_only_parser(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "continuous-event-demo-cycle",
-            "--execution-environment",
-            "demo",
-        ]
-    )
-
-    assert args.execution_environment == "demo"
-    assert not hasattr(args, "strategy_profile")
-    assert not hasattr(args, "sizing_mode")
-
-
-def test_cli_continuous_demo_default_gate_matches_live_target(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "continuous-event-demo-cycle",
-            "--execution-environment",
-            "demo",
-        ]
-    )
-
-    assert args.btc_trend_gate == "uptrend"
-    assert args.notional_multiplier == 1.0
-    assert args.workers == 4
-
-
-def test_cli_continuous_demo_accepts_explicit_notional_multiplier(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "continuous-event-demo-cycle",
-            "--execution-environment",
-            "demo",
-            "--notional-multiplier",
-            "10",
-        ]
-    )
-
-    assert args.notional_multiplier == 10.0
-
-
 def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:
     parser = build_parser()
-    continuous = parser.parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "continuous-event-demo-cycle",
-            "--execution-environment",
-            "demo",
-        ]
-    )
     long = parser.parse_args(
         [
             "--data-root",
@@ -141,7 +44,6 @@ def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:
         ]
     )
 
-    assert continuous.workers == 4
     assert long.workers == 4
 
 
@@ -346,7 +248,7 @@ def test_binance_proxy_end_help_documents_exclusive_boundary() -> None:
 # The target route is explicit; there are no alternate order-submission flags.
 @pytest.mark.parametrize(
     "subcommand",
-    ["long-native-event-demo-cycle", "continuous-event-demo-cycle"],
+    ["long-native-event-demo-cycle"],
 )
 def test_target_environment_replaces_order_submission_flags(subcommand: str) -> None:
     parser = build_parser()

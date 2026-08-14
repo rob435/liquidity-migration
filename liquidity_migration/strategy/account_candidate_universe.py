@@ -206,14 +206,13 @@ def _partition_ticker_rows(
 def profile_universe_inputs(
     *,
     long_config: object,
-    continuous_config: object,
 ) -> dict[str, dict[str, Any]]:
     """Extract the complete pre-signal universe knobs from effective configs."""
 
     return {
         "long": long_profile_universe_inputs(long_config),
-        "continuous": continuous_profile_universe_inputs(continuous_config),
-        "carry": carry_profile_universe_inputs(continuous_config),
+        "continuous": continuous_profile_universe_inputs(),
+        "carry": carry_profile_universe_inputs(),
     }
 
 
@@ -235,38 +234,34 @@ def long_profile_universe_inputs(long_config: object) -> dict[str, Any]:
     }
 
 
-def continuous_profile_universe_inputs(continuous_config: object) -> dict[str, Any]:
-    continuous_rank_end = int(getattr(continuous_config, "universe_rank_end"))
-    continuous_max = int(getattr(continuous_config, "universe_max_symbols"))
-    if continuous_rank_end < 0 or continuous_max < 0:
-        raise ValueError("CONT universe bounds must be non-negative")
-    continuous_unlimited = continuous_rank_end == 0 and continuous_max == 0
-    continuous_exclude = tuple(
-        sorted(
-            {
-                _symbol(value)
-                for value in getattr(
-                    continuous_config,
-                    "exclude_symbols",
-                    DEFAULT_EXCLUDED_SYMBOLS,
-                )
-            }
-        )
-    )
+def continuous_profile_universe_inputs() -> dict[str, Any]:
+    """The retired CONTINUOUS sleeve's frozen pre-signal population.
+
+    The sleeve's code is gone, but this profile is not decoration: the union
+    below is what every producer reads as the tradable population, and these
+    unlimited bounds are what make that union the whole strategy instrument
+    set rather than LONG's top-120 plus CARRY's top-150. The installed
+    artifacts also carry a ``continuous`` entry, and the loader rebuilds and
+    re-hashes all three profiles, so changing or dropping these values would
+    make the running fleet reject its own frozen universe.
+
+    Values are the ones the deleted ``ContinuousDemoCycleConfig`` defaults
+    produced: unlimited rank and symbol bounds, no turnover or age floor, and
+    the shared stablecoin exclusions.
+    """
+
     return {
-        "min_turnover_24h": float(
-            getattr(continuous_config, "universe_min_turnover_24h")
-        ),
-        "min_age_days": 0 if continuous_unlimited else 30,
+        "min_turnover_24h": 0.0,
+        "min_age_days": 0,
         "max_age_days": 0,
         "rank_start": 1,
-        "rank_end": continuous_rank_end,
-        "max_symbols": continuous_max,
-        "exclude_symbols": list(continuous_exclude),
+        "rank_end": 0,
+        "max_symbols": 0,
+        "exclude_symbols": sorted({_symbol(value) for value in DEFAULT_EXCLUDED_SYMBOLS}),
     }
 
 
-def carry_profile_universe_inputs(continuous_config: object) -> dict[str, Any]:
+def carry_profile_universe_inputs() -> dict[str, Any]:
     """Pre-signal population for the CARRY sleeve (lane2_carry_hold_v4).
 
     Runtime universe is the top 100 by trailing 24h turnover; enforcement uses a
@@ -276,9 +271,7 @@ def carry_profile_universe_inputs(continuous_config: object) -> dict[str, Any]:
     """
 
     return {
-        "min_turnover_24h": float(
-            getattr(continuous_config, "universe_min_turnover_24h")
-        ),
+        "min_turnover_24h": 0.0,
         "min_age_days": 7,
         "max_age_days": 0,
         "rank_start": 1,
@@ -471,7 +464,6 @@ def build_candidate_universe_artifact(
     *,
     snapshot_ts_ns: int,
     long_config: object,
-    continuous_config: object,
     realm: VenueRealm | str = VenueRealm.DEMO,
 ) -> dict[str, Any]:
     """Build the self-hashed population artifact from one venue snapshot.
@@ -495,10 +487,7 @@ def build_candidate_universe_artifact(
         instrument_symbols=set(instruments),
         label="ticker_rows",
     )
-    inputs = profile_universe_inputs(
-        long_config=long_config,
-        continuous_config=continuous_config,
-    )
+    inputs = profile_universe_inputs(long_config=long_config)
     tables = build_profile_universe_tables(
         instrument_rows,
         ticker_rows,

@@ -64,7 +64,6 @@ from liquidity_migration.ops.account_flatten import (
 )
 from liquidity_migration.ops.account_notifications import AccountNotificationEngine, deliver_notification_batch
 from liquidity_migration.core.logging_setup import ensure_default_log_handler
-from liquidity_migration.strategy.continuous_cycle_status import ContinuousCycleStatusReader
 from liquidity_migration.account.account_owner_health import (
     AccountOwnerHealth,
     AccountOwnerHealthStatus,
@@ -1057,17 +1056,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--telegram", action="store_true")
     parser.add_argument("--notification-state", default="")
     parser.add_argument("--notification-poll-seconds", type=float, default=1.0)
-    parser.add_argument(
-        "--continuous-cycle-root",
-        default="",
-        help="Read-only CONTINUOUS cycle status root shown in account notifications.",
-    )
-    parser.add_argument(
-        "--continuous-cycle-max-age-minutes",
-        type=float,
-        default=15.0,
-        help="Mark CONTINUOUS notification telemetry stale beyond this age.",
-    )
     parser.add_argument("--health-interval-seconds", type=float, default=5.0)
     parser.add_argument(
         "--private-ws-reconnect-seconds",
@@ -1091,8 +1079,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--entry-clip-touch-fraction must be zero or a positive finite number")
     if not math.isfinite(args.entry_clip_min_notional_usdt) or args.entry_clip_min_notional_usdt < 0.0:
         parser.error("--entry-clip-min-notional-usdt must be zero or a positive finite number")
-    if not math.isfinite(args.continuous_cycle_max_age_minutes) or args.continuous_cycle_max_age_minutes <= 0.0:
-        parser.error("--continuous-cycle-max-age-minutes must be positive and finite")
     if not math.isfinite(args.private_ws_reconnect_seconds) or args.private_ws_reconnect_seconds <= 0.0:
         parser.error("--private-ws-reconnect-seconds must be positive and finite")
     try:
@@ -1552,15 +1538,6 @@ def main(argv: list[str] | None = None) -> int:
             heading=f"Bybit {realm.value}",
         )
         if args.telegram
-        else None
-    )
-    continuous_status_reader = (
-        ContinuousCycleStatusReader(
-            args.continuous_cycle_root,
-            environment=realm.value,
-            max_age_minutes=args.continuous_cycle_max_age_minutes,
-        )
-        if notifier is not None and str(args.continuous_cycle_root).strip()
         else None
     )
     recovered = inbox.recover_processing()
@@ -2219,14 +2196,6 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     position_truth_healthy=position_truth_healthy,
                     position_truth_status=position_truth_status,
-                    continuous_status=(
-                        continuous_status_reader.render(now_ns=notification_now_ns)
-                        if continuous_status_reader is not None
-                        # No configured cycle root means the sleeve is not
-                        # running, so render no line rather than a permanent
-                        # "unavailable" or ever-growing "STALE" fault.
-                        else ""
-                    ),
                     now_ns=notification_now_ns,
                 )
                 deliver_notification_batch(

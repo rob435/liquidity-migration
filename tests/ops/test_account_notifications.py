@@ -899,43 +899,6 @@ def test_native_protection_failure_does_not_claim_position_truth_mismatch(
     assert "Health: BLOCKED · native protection missing" in report.message
 
 
-@pytest.mark.parametrize(
-    ("position_truth_healthy", "position_truth_status"),
-    [(True, "healthy"), (False, "mismatch")],
-)
-def test_hourly_summary_explicitly_separates_continuous_gate_from_account_health(
-    tmp_path: Path,
-    position_truth_healthy: bool,
-    position_truth_status: str,
-) -> None:
-    kernel, clock, *_ = _setup_open(tmp_path / "account")
-    notifier = AccountNotificationEngine(
-        kernel=kernel,
-        state_path=tmp_path / "notify-state.json",
-        clock=clock,
-    )
-    continuous_status = (
-        "CONTINUOUS BTC gate: BLOCKED · uptrend · 30d -0.44%\n"
-        "CONTINUOUS funnel (component opportunities): "
-        "D9 3 → liquidity 2 → event 2 → age 1 → capacity 1\n"
-        "CONTINUOUS qualified but blocked: AAAUSDT · "
-        "first rejection btc trend gate"
-    )
-
-    report = notifier.prepare(
-        midpoint_by_symbol={"BUSDT": 10.0},
-        health=("healthy" if position_truth_healthy else "BLOCKED · account reconciliation mismatch"),
-        venue_positions={"BUSDT": 2.0},
-        position_truth_healthy=position_truth_healthy,
-        position_truth_status=position_truth_status,
-        continuous_status=continuous_status,
-    )
-
-    assert continuous_status in report.message
-    assert "Health:" in report.message
-    assert "\nExecution health:" not in report.message
-
-
 def test_entry_risk_first_rejection_sends_one_actionable_alert(tmp_path: Path) -> None:
     kernel, _, notifier, snapshot, policy = _setup_risk_notifications(tmp_path / "account")
     result = _submit_entry_risk_decision(
@@ -1383,7 +1346,6 @@ def test_retired_sleeve_contributes_no_digest_line(tmp_path: Path) -> None:
         midpoint_by_symbol={"BUSDT": 10.0},
         health="healthy",
         venue_positions={"BUSDT": 2.0},
-        continuous_status="",
     )
 
     assert report.hourly_included

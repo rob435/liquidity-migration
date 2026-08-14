@@ -690,11 +690,16 @@ evidence trail.
       withdrawal), and financed-longs negative-ledger rows 1/2/13–17/20
       (2026-07-28 double-count correction).
 - [ ] Score the venue-scoped CONTINUOUS admission variant beside the shipped
-      shape on post-2026-07-27 days
-      (`scripts/research/render_continuous_admission_variants.py admission --end-date …`;
-      registered 2026-07-27, evidence
+      shape on post-2026-07-27 days (registered 2026-07-27, evidence
       `docs/research/archive/2026-07-27-continuous-ladder-mechanism.md` §5 — the 2025-carried
       era profile is the thing the forward record must test).
+      **Blocked by deletion, not by evidence (2026-08-14):** the sleeve this
+      scores was retired 2026-07-29 and its code, including
+      `scripts/research/render_continuous_admission_variants.py` and the
+      backtest modules it drove, was deleted from the tree in the 2026-08-14
+      cleanup. Git history holds all of it. Running this item now means
+      restoring that tooling first — or retiring the item, which is an owner
+      decision and not one a cleanup gets to make.
 - [ ] Measure realised maker-fill probability in flow (target was 100 fills
       per arm; the retired paper-owner A/B froze at 2 of 8). This is the last
       unmeasured cost input. **Blocked, not pending:** it now needs a

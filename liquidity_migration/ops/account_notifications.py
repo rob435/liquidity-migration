@@ -116,7 +116,6 @@ class AccountNotificationEngine:
         venue_positions: Mapping[str, float] | None = None,
         position_truth_healthy: bool = True,
         position_truth_status: str | None = None,
-        continuous_status: str = "",
         now_ns: int | None = None,
     ) -> AccountNotificationBatch:
         now = int(now_ns or self.clock.wall_time_ns())
@@ -221,7 +220,6 @@ class AccountNotificationEngine:
                     venue_positions=venue_positions,
                     position_truth_healthy=position_truth_healthy,
                     position_truth_status=truth_status,
-                    continuous_status=continuous_status,
                     now_ns=now,
                     notification_state=next_state,
                     heading=self.heading,
@@ -491,7 +489,6 @@ def _hourly_summary(
     venue_positions: Mapping[str, float] | None,
     position_truth_healthy: bool,
     position_truth_status: str,
-    continuous_status: str,
     now_ns: int,
     notification_state: AccountNotificationState,
     heading: str = "Bybit demo",
@@ -520,8 +517,6 @@ def _hourly_summary(
         rejection_summary = _entry_rejection_summary(notification_state)
         if rejection_summary:
             lines.append(rejection_summary)
-        if continuous_status.strip():
-            lines.extend(continuous_status.strip().splitlines())
         lines.append(f"Health: {health or 'unknown'}")
         return "\n".join(lines)
 
@@ -572,8 +567,6 @@ def _hourly_summary(
     rejection_summary = _entry_rejection_summary(notification_state)
     if rejection_summary:
         lines.append(rejection_summary)
-    if continuous_status.strip():
-        lines.extend(continuous_status.strip().splitlines())
     effective_health = health or "unknown"
     if unpriced_symbols and effective_health.lower().startswith("healthy"):
         effective_health = "blocked · live prices unavailable"

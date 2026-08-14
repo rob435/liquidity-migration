@@ -22,7 +22,6 @@ from liquidity_migration.ops.candidate_rule_coverage import (
     project_demo_rules_to_candidate_subset,
 )
 from liquidity_migration.core.artifact_snapshot import read_stable_file
-from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.venue.demo_rule_probe import (
     DEMO_RULE_PROBE_EVIDENCE_KIND,
@@ -99,7 +98,6 @@ def _candidate_symbols(
         tickers,
         snapshot_ts_ns=NOW_NS,
         long_config=LongNativeDemoCycleConfig(),
-        continuous_config=ContinuousDemoCycleConfig(),
     )
     return write_candidate_universe(tmp_path / filename, payload)
 

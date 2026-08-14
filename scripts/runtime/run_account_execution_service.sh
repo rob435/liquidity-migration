@@ -21,8 +21,6 @@ ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-18
 ACCOUNT_RAW_MARKET_PERSISTENCE="${ACCOUNT_RAW_MARKET_PERSISTENCE:-0}"
 ACCOUNT_SHARED_LEVERAGE_AUTHORITY="${ACCOUNT_SHARED_LEVERAGE_AUTHORITY:-0}"
 ACCOUNT_PRE_BOUNDARY_QUIESCE="${ACCOUNT_PRE_BOUNDARY_QUIESCE:-}"
-CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"
-CONTINUOUS_CYCLE_MAX_AGE_MINUTES="${CONTINUOUS_CYCLE_MAX_AGE_MINUTES:-15}"
 
 ACCOUNT_VENUE_REALM="${ACCOUNT_VENUE_REALM:-demo}"
 case "$ACCOUNT_VENUE_REALM" in
@@ -134,16 +132,6 @@ if [[ "${TELEGRAM_ENABLED:-0}" == "1" ]]; then
     fi
 fi
 
-# A sleeve with no configured cycle root is not running. Pass nothing rather
-# than a stale root, so the Telegram digest carries no permanent STALE line.
-continuous_cycle_args=()
-if [[ -n "$CONTINUOUS_CYCLE_ROOT" ]]; then
-    continuous_cycle_args+=(
-        --continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT"
-        --continuous-cycle-max-age-minutes "$CONTINUOUS_CYCLE_MAX_AGE_MINUTES"
-    )
-fi
-
 exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_service_runner \
     --realm "$ACCOUNT_VENUE_REALM" \
     --account-id "$ACCOUNT_ID" \
@@ -156,7 +144,6 @@ exec "$PYTHON_BIN" -m liquidity_migration.runtime.account_service_runner \
     --max-demo-rule-age-hours "$MAX_DEMO_RULE_AGE_HOURS" \
     --request-market-warmup-timeout-seconds "$ACCOUNT_REQUEST_MARKET_WARMUP_TIMEOUT_SECONDS" \
     --private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS" \
-    "${continuous_cycle_args[@]}" \
     "${raw_market_args[@]}" \
     "${leverage_authority_args[@]}" \
     "${quiesce_args[@]}" \

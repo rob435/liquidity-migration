@@ -1068,11 +1068,10 @@ def test_demo_owner_supervises_private_execution_stream_before_admission() -> No
     wrapper = (repo / "scripts" / "runtime" / "run_account_execution_service.sh").read_text(encoding="utf-8")
     assert 'ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS="${ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS:-180}"' in wrapper
     assert '--private-ws-reconnect-seconds "$ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS"' in wrapper
-    # CONTINUOUS is retired: the cycle root is unset by default and the flag is
-    # only passed when an operator configures a running sleeve again.
-    assert 'CONTINUOUS_CYCLE_ROOT="${CONTINUOUS_CYCLE_ROOT:-}"' in wrapper
-    assert '--continuous-cycle-root "$CONTINUOUS_CYCLE_ROOT"' in wrapper
-    assert '"${continuous_cycle_args[@]}"' in wrapper
+    # CONTINUOUS is retired and its code is deleted: the wrapper must not name
+    # it at all, or it would pass a flag the owner no longer accepts.
+    assert "CONTINUOUS" not in wrapper
+    assert "continuous" not in wrapper
 
 
 def test_the_order_path_runs_before_the_venue_reads_it_used_to_queue_behind() -> None:

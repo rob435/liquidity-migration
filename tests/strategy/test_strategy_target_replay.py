@@ -17,8 +17,6 @@ from liquidity_migration.account.account_intent_client import (
 from liquidity_migration.account.account_route import AccountRoute, ensure_account_route
 from liquidity_migration.account.account_service import AccountIntentInbox, SleeveAdapterKind
 from liquidity_migration.core.config import ResearchConfig
-from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
-from liquidity_migration.strategy.continuous_demo_daemon import ContinuousDemoDaemon
 from liquidity_migration.core.deterministic_runtime import VirtualClock
 from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 from liquidity_migration.strategy.long_native_event_demo_daemon import (
@@ -30,7 +28,6 @@ from liquidity_migration.strategy.strategy_event_outcome import (
     load_strategy_event_decision_tape,
 )
 from liquidity_migration.strategy.strategy_cycle_health import (
-    read_strategy_cycle_health,
     strategy_cycle_health_path,
 )
 from liquidity_migration.strategy.strategy_target_replay import (
@@ -105,7 +102,7 @@ def _event(sequence: int, *, sleeve: str = "long", timestamp: int | None = None)
             "strategy_profile": {
                 "long": "LongV11aDivWeekendVol",
                 "carry": "lane2_carry_hold_v3",
-            }.get(sleeve, "continuous_ensemble_v2"),
+            }.get(sleeve, "unknown_profile"),
         },
     )
 
@@ -308,104 +305,6 @@ def test_daemon_callback_or_publication_failure_leaves_outcome_missing(
     assert load_strategy_event_decision_tape(publication_root / "strategy_event_decision_tape.jsonl")[0] == ()
     assert load_target_scheduling_capture(publication_root / "strategy_target_scheduling_capture.jsonl")[0] == ()
     assert publication_daemon._strategy_evidence_errors == 1
-
-
-def test_continuous_daemon_records_successful_no_target_cycle(
-    tmp_path: Path,
-) -> None:
-    route = _route(tmp_path / "route")
-    result = PublishedTargetCyclePayload(
-        {
-            "cycle_id": "empty",
-            "mode": "demo_target",
-            "universe_symbols": 0,
-            "rmom_present": False,
-            "live_d9_symbols": 0,
-            "candidates": 0,
-            "entries": 0,
-            "exits": 0,
-            "open_positions": 0,
-            "equity_usdt": 0.0,
-        },
-        publication=ExitFirstPublication((), (), ()),
-        route=route,
-    )
-    root = tmp_path / "continuous"
-    daemon = ContinuousDemoDaemon(
-        root,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=ContinuousDemoCycleConfig(
-            execution_environment="demo",
-            account_intent_inbox_root=route.inbox_root,
-            account_execution_root=route.account_root,
-            ws_klines_enabled=False,
-        ),
-        cycle_runner=lambda *_args, **_kwargs: result,
-        clock=VirtualClock(current_wall_ns=1_000_000_000),
-    )
-
-    daemon._run_one_cycle()
-
-    outcomes, _ = load_strategy_event_decision_tape(root / "strategy_event_decision_tape.jsonl")
-    captures, _ = load_target_scheduling_capture(root / "strategy_target_scheduling_capture.jsonl")
-    assert outcomes[0].decision_keys == ()
-    assert captures[0].sleeve == "continuous"
-    assert captures[0].requests == ()
-
-
-def test_continuous_daemon_publishes_post_evidence_completion_health(
-    tmp_path: Path,
-) -> None:
-    invocation_id = "34" * 16
-    route = _route(tmp_path / "route")
-    result = PublishedTargetCyclePayload(
-        {
-            "cycle_id": "continuous-target-health-1000",
-            "ts_ms": 1_000,
-            "mode": "demo_target",
-            "universe_symbols": 10,
-        },
-        publication=ExitFirstPublication((), (), ()),
-        route=route,
-    )
-
-    class _KlineManager:
-        def store(self) -> None:
-            return None
-
-        def stats(self) -> dict[str, object]:
-            return {"store": {"rows": 383_711}}
-
-    root = tmp_path / "continuous-demo"
-    daemon = ContinuousDemoDaemon(
-        root,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=ContinuousDemoCycleConfig(
-            execution_environment="demo",
-            account_intent_inbox_root=route.inbox_root,
-            account_execution_root=route.account_root,
-            ws_klines_enabled=False,
-        ),
-        cycle_runner=lambda *_args, **_kwargs: result,
-        kline_stream_manager=_KlineManager(),
-        clock=VirtualClock(current_wall_ns=1_000_000_000),
-        strategy_invocation_id=invocation_id,
-        completion_clock_ns=lambda: 2_000_000_000,
-    )
-
-    daemon._run_one_cycle()
-
-    health = read_strategy_cycle_health(root)
-    assert health.cycle_id == "continuous-target-health-1000"
-    assert health.cycle_ts_ms == 1_000
-    assert health.completed_ts_ns == 2_000_000_000
-    assert health.invocation_id == invocation_id
-    assert health.environment == "demo"
-    assert health.ws_kline_store_rows == 383_711
-    assert (
-        load_strategy_event_decision_tape(root / "strategy_event_decision_tape.jsonl")[0][0].event_id
-        == JsonlStrategyEventTape(root / "strategy_event_tape.jsonl").prior_events[0].event_id
-    )
 
 
 def test_completion_health_never_precedes_evidence_and_cannot_invalidate_it(

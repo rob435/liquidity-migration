@@ -292,11 +292,10 @@ def test_every_cycle_runner_receives_a_resumable_cursor() -> None:
     import inspect
 
     from liquidity_migration.strategy.carry_demo import CarryCycleState, run_carry_demo_cycle
-    from liquidity_migration.strategy.continuous_demo import run_continuous_demo_cycle
     from liquidity_migration.strategy.long_native_event_demo import run_long_native_demo_cycle
     from liquidity_migration.strategy.strategy_planning import new_planning_journal_cursor
 
-    for runner in (run_long_native_demo_cycle, run_continuous_demo_cycle):
+    for runner in (run_long_native_demo_cycle,):
         assert "journal_cursor" in inspect.signature(runner).parameters, runner.__name__
 
     # CARRY carries its own inside the cycle state.
@@ -308,18 +307,22 @@ def test_every_cycle_runner_receives_a_resumable_cursor() -> None:
 
 
 def test_subclass_cycle_kwargs_keep_the_base_cursor() -> None:
-    from liquidity_migration.strategy.continuous_demo_daemon import ContinuousDemoDaemon
+    from liquidity_migration.strategy.long_native_event_demo_daemon import LongNativeDemoDaemon
 
     # Bypass __init__: this pins the kwargs contract, not daemon construction.
-    daemon = object.__new__(ContinuousDemoDaemon)
+    daemon = object.__new__(LongNativeDemoDaemon)
     sentinel = AccountJournalCursor()
     daemon._journal_cursor = sentinel  # type: ignore[attr-defined]
-    daemon._panel_cache = object()  # type: ignore[attr-defined]
+    daemon._long_target_producer = True  # type: ignore[attr-defined]
+    daemon._strategy_config = None  # type: ignore[attr-defined]
+    daemon._long_cycle_state = None  # type: ignore[attr-defined]
+    daemon._pending_cycle_kind = "scheduled"  # type: ignore[attr-defined]
 
     merged = daemon._extra_cycle_kwargs()
 
+    # The subclass adds its own kwarg without dropping the host's cursor.
     assert merged["journal_cursor"] is sentinel
-    assert merged["panel_cache"] is daemon._panel_cache  # type: ignore[attr-defined]
+    assert merged["cycle_kind"] == "scheduled"
 
 
 def test_planning_cursor_memoizes_projection_and_trades_until_a_new_event(tmp_path: Path) -> None:

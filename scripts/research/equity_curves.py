@@ -2,17 +2,13 @@
 """One command for standard equity curves.
 
 LONG runs from ``long_native.long_v11a_profile``.
-CONTINUOUS is reconstructed from the continuous entry book
-(`continuous_ensemble_v2`, code-defined TP12 components, 2f hedge, BTC-vol
-regime) via the continuous refresh runner.
 CARRY renders the registered research config ``configs/lane2_carry_hold_v4.json``
 through the same --research-config path (cross-venue panel, settlement-exact
 scorer). That is the registered research shape, not a demo daemon replay.
 
     bash scripts/research/equity_curves.sh                      # LONG sleeve, last 3 years, bybit_full_pit
-    bash scripts/research/equity_curves.sh --sleeves continuous # retired-from-publication profile
-    bash scripts/research/equity_curves.sh --sleeves long,continuous,carry
-    bash scripts/research/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit --venue binance
+    bash scripts/research/equity_curves.sh --sleeves long,carry
+    bash scripts/research/equity_curves.sh --root ~/SHARED_DATA/binance_full_pit
 
 The strategy modules own their active configurations.
 """
@@ -30,7 +26,6 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from liquidity_migration.core.config import load_config  # noqa: E402
-from liquidity_migration.research.backtest.continuous_profile import CONTINUOUS_HISTORICAL_RUN_LABEL  # noqa: E402
 from liquidity_migration.core.symbol_codec import (  # noqa: E402
     SymbolIdentityError,
     decode_symbol_partition,
@@ -39,7 +34,6 @@ from liquidity_migration.core.symbol_codec import (  # noqa: E402
 DEFAULT_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_CONFIG = "configs/volume_alpha.default.yaml"
 DEFAULT_PANEL_ROOT = "~/SHARED_DATA/cross_venue_panel_v1"
-VALID_CONTINUOUS_VENUES = {"bybit", "binance"}
 
 #: Columns a registered financed-longs config needs from the cross-venue panel.
 RESEARCH_PANEL_COLUMNS = (
@@ -86,76 +80,6 @@ def _run_long(
     return run_long_native_research(root, config=cfg, cost_config=costs, report_dir=out)
 
 
-def _infer_venue_from_root(root: str | Path, explicit: str | None = None) -> str:
-    if explicit:
-        venue = explicit.lower()
-        if venue not in VALID_CONTINUOUS_VENUES:
-            raise ValueError(f"unknown continuous venue {explicit!r}; valid: {', '.join(sorted(VALID_CONTINUOUS_VENUES))}")
-        return venue
-    raw = str(Path(root).expanduser()).lower().replace("\\", "/")
-    if "binance" in raw:
-        return "binance"
-    if "bybit" in raw:
-        return "bybit"
-    raise ValueError("could not infer continuous venue from --root; pass --venue bybit or --venue binance")
-
-
-def _continuous_payload_from_summary(summary: dict[str, Any], *, report_dir: Path) -> dict[str, Any]:
-    one_x = summary.get("1x") or {}
-    normalized: dict[str, float] = {}
-    if isinstance(one_x.get("total_return_pct"), (int, float)):
-        normalized["total_return"] = float(one_x["total_return_pct"]) / 100.0
-    if isinstance(one_x.get("max_drawdown_pct"), (int, float)):
-        normalized["max_drawdown"] = float(one_x["max_drawdown_pct"]) / 100.0
-    if isinstance(one_x.get("mar"), (int, float)):
-        normalized["mar"] = float(one_x["mar"])
-    if isinstance(one_x.get("sharpe_daily_ann"), (int, float)):
-        normalized["sharpe_like"] = float(one_x["sharpe_daily_ann"])
-    return {
-        "run_label": CONTINUOUS_HISTORICAL_RUN_LABEL,
-        "summary": normalized,
-        "continuous_summary": summary,
-        "report_dir": str(report_dir),
-    }
-
-
-def _run_continuous(
-    root: str,
-    costs: Any,
-    start: str | None,  # None preserves the active profile's full history
-    end: str,
-    out: Path,
-    pit_tol: float,
-    *,
-    venue: str | None = None,
-    render_only: bool = False,
-    chart_leverage: float | None = 4.0,
-    backtest_leverage: float = 1.0,
-    research_disable_btc_gate: bool = False,
-) -> dict[str, Any]:
-    del costs, pit_tol
-    scripts_dir = Path(__file__).resolve().parent
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-
-    import continuous_deployed_equity_refresh as continuous_refresh
-
-    data_root = Path(root).expanduser()
-    venue_name = _infer_venue_from_root(data_root, venue)
-    summary = continuous_refresh.run_venue(
-        venue_name,
-        output_root=out,
-        start_date=start,
-        end_date=end,
-        render_only=render_only,
-        data_root=data_root,
-        chart_leverage=chart_leverage,
-        backtest_leverage=backtest_leverage,
-        research_disable_btc_gate=research_disable_btc_gate,
-    )
-    return _continuous_payload_from_summary(summary, report_dir=out / venue_name)
-
-
 def _load_research_panel(panel_root: str | Path) -> Any:
     """Load the cross-venue panel columns every research-config render needs."""
     import polars as pl
@@ -191,7 +115,7 @@ def _run_carry(
     return research_equity_chart(panel, CARRY_CONFIG_PATH, out, start=start, end=end)
 
 
-RUNNERS = {"long": _run_long, "continuous": _run_continuous, "carry": _run_carry}
+RUNNERS = {"long": _run_long, "carry": _run_carry}
 
 
 def _find_png(out: Path) -> Path | None:
@@ -203,7 +127,7 @@ def _find_png(out: Path) -> Path | None:
         rel_parts = tuple(part.lower() for part in path.relative_to(out).parts)
         is_component = "components" in rel_parts
         is_levered = "_4x" in path.stem.lower()
-        is_official_name = path.name in {"long_native_equity_btc.png", "continuous_equity_btc.png"}
+        is_official_name = path.name == "long_native_equity_btc.png"
         return (
             1 if is_component else 0,
             1 if is_levered else 0,
@@ -320,14 +244,14 @@ def _headline(payload: dict[str, Any]) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Standard equity curves for the active LONG and CONTINUOUS profiles.",
+        description="Standard equity curves for the active LONG profile and the registered CARRY config.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
         "--sleeves",
         default="long",
         help=(
-            "Comma list: long, continuous, carry. 'carry' renders the registered "
+            "Comma list: long, carry. 'carry' renders the registered "
             "research config (lane2_carry_hold_v4) from the cross-venue panel — "
             "a research-shape simulation, not a daemon replay."
         ),
@@ -349,35 +273,6 @@ def main() -> int:
             "Which LONG profile to render. v11a is the deployed one; v12 is the "
             "same signal with the stop widened to 3x ATR for two days and then "
             "tightened to 1.5x."
-        ),
-    )
-    p.add_argument("--venue", choices=sorted(VALID_CONTINUOUS_VENUES), default=None, help="Continuous venue override.")
-    p.add_argument(
-        "--continuous-render-only",
-        action="store_true",
-        help="Re-render continuous PNGs/stats from an existing continuous_equity.csv; no component rerun.",
-    )
-    p.add_argument(
-        "--continuous-chart-leverage",
-        "--chart-leverage",
-        dest="continuous_chart_leverage",
-        type=float,
-        default=4.0,
-        help="Extra pure-leverage continuous chart to render alongside 1x. Use 1 to suppress the extra chart.",
-    )
-    p.add_argument(
-        "--continuous-backtest-leverage",
-        type=float,
-        default=1.0,
-        help="Modeled continuous leverage: scales component gross exposure before costs/funding and scales hedge cap.",
-    )
-    p.add_argument(
-        "--research-disable-btc-gate",
-        action="store_true",
-        help=(
-            "RESEARCH RENDER ONLY (T-A ablation): render the continuous sleeve with the "
-            "BTC uptrend entry gate off. Requires an explicit --out; never touches the "
-            "runtime demo producers or the hedge service."
         ),
     )
     # Default --years to a sentinel so an unset window preserves the active
@@ -424,13 +319,9 @@ def main() -> int:
     bad = [s for s in sleeves if s not in RUNNERS]
     if bad:
         raise SystemExit(f"unknown sleeve(s) {bad}; valid: {', '.join(RUNNERS)}")
-    if args.research_disable_btc_gate and not args.out:
-        raise SystemExit("--research-disable-btc-gate requires an isolated --out directory")
 
     today = _today()
     end = args.end or (today + dt.timedelta(days=1)).isoformat()
-    # Without an explicit window the continuous path uses its full active history.
-    explicit_window = args.start is not None or args.years is not None
     years = 3 if args.years is None else args.years
     start = args.start or _shift_years(today, years).isoformat()
     root = str(Path(args.root).expanduser())
@@ -445,7 +336,7 @@ def main() -> int:
         heading = {
             "long": "active LONG profile",
             "carry": "registered CARRY research config, simulation on seen data",
-        }.get(s, "active CONTINUOUS profile")
+        }[s]
         print(f"=== {s.upper()} ({heading}) ===", flush=True)
         try:
             if s == "long":
@@ -459,23 +350,8 @@ def main() -> int:
                     long_notional=args.long_notional_multiplier,
                     long_profile=args.long_profile,
                 )
-            elif s == "carry":
-                payload = _run_carry(args.panel_root, start, end, out)
             else:
-                # Pass a start only when the user explicitly requests a window.
-                payload = _run_continuous(
-                    root,
-                    costs,
-                    start if explicit_window else None,
-                    end,
-                    out,
-                    0.0,
-                    venue=args.venue,
-                    render_only=args.continuous_render_only,
-                    chart_leverage=args.continuous_chart_leverage,
-                    backtest_leverage=args.continuous_backtest_leverage,
-                    research_disable_btc_gate=args.research_disable_btc_gate,
-                )
+                payload = _run_carry(args.panel_root, start, end, out)
         except Exception as exc:  # noqa: BLE001 - report per-sleeve, keep going
             print(f"  [X] {s} failed: {type(exc).__name__}: {exc}\n", flush=True)
             results[s] = {"error": str(exc)}

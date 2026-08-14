@@ -1,4 +1,4 @@
-"""Shared chart writers consumed by the long/continuous report paths."""
+"""Shared chart writers consumed by the research report paths."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _write_equity_benchmark_chart(
     metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write the strategy-vs-BTC equity PNG. ``png_name`` lets active sleeves
-    (e.g. ``long_native``, ``continuous``) reuse this without inheriting the
+    (e.g. ``long_native``) reuse this without inheriting the
     default filename — each sleeve drops its own ``*_equity_btc.png``
     alongside its research report. ``title``/``subtitle`` override the chart
     header (e.g. an EXPLORATORY-grade sleeve marks its curve as such).

@@ -51,15 +51,7 @@ def _install_import_only_windows_fcntl_guard() -> None:
 
 _install_import_only_windows_fcntl_guard()
 
-from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms  # noqa: E402
-from liquidity_migration.core.config import DEFAULT_EXCLUDED_SYMBOLS  # noqa: E402
-from liquidity_migration.research.backtest.continuous_events import (  # noqa: E402
-    ContinuousEventConfig,
-    _btc_trend_returns,
-    continuous_source_decile_panel,
-    per_symbol_timeseries_features,
-)
-from liquidity_migration.research.backtest.continuous_profile import ACTIVE_CONTINUOUS_COMPONENTS  # noqa: E402
+from liquidity_migration.core._common import MS_PER_HOUR, exact_duration_ms  # noqa: E402
 from liquidity_migration.research.backtest.long_native import (  # noqa: E402
     _classify_entry,
     build_long_features,
@@ -85,16 +77,8 @@ LONG_REQUIRED_GATES = (
     "entry_anchor",
     "signal_freshness",
 )
-CONTINUOUS_REQUIRED_GATES = (
-    "pit_tradable",
-    "history_floor",
-    "source_decile_9",
-    "liquidity_floor",
-    "one_hour_confirmation",
-)
 REQUIRED_GATE_ORDERS = {
     "long": LONG_REQUIRED_GATES,
-    "continuous": CONTINUOUS_REQUIRED_GATES,
 }
 HORIZON_HOURS = (1, 6, 24, 72)
 LONG_WARMUP_DAYS = 120
@@ -407,156 +391,6 @@ def _build_long_funnel(
     return pl.from_dicts(rows, infer_schema_length=None) if rows else _empty_funnel(), expected_keys
 
 
-def _continuous_event_states(row: dict[str, Any]) -> dict[str, bool | None]:
-    turnover_spike = _finite(row.get("turnover_spike_168h"))
-    ret1 = _finite(row.get("ret1"))
-    return {
-        "turn3_pop3": None if turnover_spike is None or ret1 is None else turnover_spike >= 3.0 and ret1 >= 0.03,
-        "turn4_pop3": None if turnover_spike is None or ret1 is None else turnover_spike >= 4.0 and ret1 >= 0.03,
-        "turn4_pop5": None if turnover_spike is None or ret1 is None else turnover_spike >= 4.0 and ret1 >= 0.05,
-    }
-
-
-def _build_continuous_funnel(
-    klines: pl.DataFrame,
-    manifest: pl.DataFrame,
-    *,
-    venue: str,
-    start_ms: int,
-    end_ms: int,
-    bars_by_symbol: dict[str, dict[str, list[Any]]],
-) -> tuple[pl.DataFrame, set[str]]:
-    filtered = klines.filter(~pl.col("symbol").is_in(list(DEFAULT_EXCLUDED_SYMBOLS)))
-    featured = per_symbol_timeseries_features(
-        filtered.select("ts_ms", "symbol", "close", "turnover_quote")
-    )
-    target = featured.filter((pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
-    manifest_keys, manifest_detail = _manifest_maps(manifest)
-    target = target.with_columns(
-        pl.from_epoch("ts_ms", time_unit="ms").dt.strftime("%Y-%m-%d").alias("membership_date")
-    ).filter(
-        pl.struct("membership_date", "symbol").map_elements(
-            lambda item: (str(item["membership_date"]), str(item["symbol"]).upper()) in manifest_keys,
-            return_dtype=pl.Boolean,
-        )
-    )
-    empty_rmom = pl.DataFrame(
-        schema={"symbol": pl.String, "day_ts": pl.Int64, "residual_momentum": pl.Float64}
-    )
-    source_panel = continuous_source_decile_panel(
-        target.drop("membership_date"),
-        empty_rmom,
-        feature_set=("max_ret168",),
-    ).filter(pl.col("source_decile") == 9)
-    btc_trend = _btc_trend_returns(filtered, lookback_days=30)
-    rows: list[dict[str, Any]] = []
-    expected_keys: set[str] = set()
-    for source in source_panel.to_dicts():
-        symbol = str(source["symbol"]).upper()
-        signal_ts_ms = int(source["ts_ms"])
-        membership_date = dt.datetime.fromtimestamp(
-            signal_ts_ms / 1000,
-            tz=dt.timezone.utc,
-        ).date().isoformat()
-        membership = manifest_detail.get((membership_date, symbol), {})
-        decision_ts_ms = signal_ts_ms + exact_duration_ms(hours=2)
-        entry_price = _exact_close(bars_by_symbol.get(symbol), decision_ts_ms)
-        first_archive_date = membership.get("first_archive_observed_date")
-        archive_age_lower_bound_days = None
-        if first_archive_date:
-            archive_age_lower_bound_days = (
-                dt.date.fromisoformat(membership_date)
-                - dt.date.fromisoformat(str(first_archive_date))
-            ).days + 1
-        event_states = _continuous_event_states(source)
-        signal_day_ms = (signal_ts_ms // MS_PER_DAY) * MS_PER_DAY
-        btc_trend_value = btc_trend.get(signal_day_ms)
-        row = finalize_funnel_row(
-            {
-                "sleeve": "continuous",
-                "venue": venue,
-                "symbol": symbol,
-                "signal_ts_ms": signal_ts_ms,
-                "feature_ts_ms": signal_ts_ms + MS_PER_HOUR,
-                "data_available_ts_ms": signal_ts_ms + MS_PER_HOUR,
-                "decision_ts_ms": decision_ts_ms,
-                "entry_ts_ms": decision_ts_ms if entry_price is not None else None,
-                "evaluation_ts_ms": decision_ts_ms,
-                "entry_price": entry_price,
-                "entry_missing_reason": None if entry_price is not None else "missing_confirmation_bar",
-                "component_scope": "shared_pre_component",
-                "source_strength": _finite(source.get("source_composite")),
-                "source_decile": int(source["source_decile"]),
-                "source_composite": _finite(source.get("source_composite")),
-                "membership_date": membership_date,
-                "membership_source": membership.get("membership_source"),
-                "membership_inferred": membership.get("membership_inferred"),
-                "membership_provenance_limitation": membership.get(
-                    "membership_provenance_limitation"
-                ),
-                "max_ret168": _finite(source.get("max_ret168")),
-                "ret1": _finite(source.get("ret1")),
-                "rv_168h": _finite(source.get("rv_168h")),
-                "vov": _finite(source.get("vov")),
-                "dist_low": _finite(source.get("dist_low")),
-                "turnover_quote": _finite(source.get("turnover_quote")),
-                "turnover_24h": _finite(source.get("turnover_24h")),
-                "turnover_spike_168h": _finite(source.get("turnover_spike_168h")),
-                "turnover_zscore_168h": _finite(source.get("turnover_zscore_168h")),
-                "liquidity_rank": _finite(source.get("liquidity_rank")),
-                "first_archive_observed_date": first_archive_date,
-                "archive_age_lower_bound_days": archive_age_lower_bound_days,
-                "residual_momentum": None,
-                "residual_momentum_rank": None,
-                "residual_momentum_missing_reason": "unproven_is_provisional_provenance",
-                "btc_trend_30d": btc_trend_value,
-                "active_turn3_pop3": event_states["turn3_pop3"],
-                "active_turn4_pop3": event_states["turn4_pop3"],
-                "active_turn4_pop5": event_states["turn4_pop5"],
-                "active_reference_accepted": None,
-                "gate_pit_tradable": "pass",
-                "gate_history_floor": (
-                    "pass"
-                    if archive_age_lower_bound_days is not None
-                    and archive_age_lower_bound_days >= 30
-                    else "missing"
-                ),
-                "gate_source_decile_9": "pass",
-                "gate_liquidity_floor": gate_state(
-                    None
-                    if _finite(source.get("turnover_quote")) is None
-                    else float(source["turnover_quote"]) >= 500_000.0
-                ),
-                "gate_one_hour_confirmation": gate_state(entry_price is not None),
-                "gate_active_rmom_quartile": "missing",
-                "gate_active_btc_trend": gate_state(btc_trend_value is not None and btc_trend_value > 0.0),
-                "gate_active_age_240d": gate_state(
-                    True
-                    if archive_age_lower_bound_days is not None
-                    and archive_age_lower_bound_days >= 240
-                    else None
-                ),
-                "gate_active_turn3_pop3": gate_state(event_states["turn3_pop3"]),
-                "gate_active_turn4_pop3": gate_state(event_states["turn4_pop3"]),
-                "gate_active_turn4_pop5": gate_state(event_states["turn4_pop5"]),
-                "gate_crowding": "not_applicable",
-                "gate_cooldown_reentry": "not_applicable",
-                "gate_existing_exposure": "not_applicable",
-                "gate_capacity": "not_applicable",
-                "gate_owner_health": "not_applicable",
-                "gate_adverse_pause": "not_applicable",
-                "gate_unresolved_target": "not_applicable",
-                "gate_terminal_attempt": "not_applicable",
-                "gate_account_risk": "not_applicable",
-                "gate_publication": "not_applicable",
-            },
-            required_gate_order=CONTINUOUS_REQUIRED_GATES,
-        )
-        expected_keys.add(row["source_key"])
-        rows.append(row)
-    return pl.from_dicts(rows, infer_schema_length=None) if rows else _empty_funnel(), expected_keys
-
-
 def _empty_funnel() -> pl.DataFrame:
     return pl.DataFrame(
         schema={
@@ -576,7 +410,7 @@ def _empty_funnel() -> pl.DataFrame:
 
 
 def _ensure_funnel_gate_columns(frame: pl.DataFrame) -> pl.DataFrame:
-    all_gates = sorted({*LONG_REQUIRED_GATES, *CONTINUOUS_REQUIRED_GATES})
+    all_gates = sorted(LONG_REQUIRED_GATES)
     missing = [f"gate_{gate}" for gate in all_gates if f"gate_{gate}" not in frame.columns]
     return frame.with_columns([pl.lit(None, dtype=pl.String).alias(column) for column in missing])
 
@@ -710,25 +544,8 @@ def _config_identities(start: dt.date, end: dt.date) -> dict[str, Any]:
         start_date=start.isoformat(),
         end_date=end.isoformat(),
     )
-    components: dict[str, Any] = {}
-    for component in ACTIVE_CONTINUOUS_COMPONENTS:
-        config = ContinuousEventConfig(
-            component_key=component.key,
-            start_date=start.isoformat(),
-            end_date=end.isoformat(),
-            entry_event_trigger=component.entry_event_trigger,
-            age_days_min=component.age_days_min,
-            take_profit_pct=component.take_profit_pct,
-            stop_loss_pct=component.stop_loss_pct,
-            funding_min_at_entry=component.funding_min_at_entry,
-        )
-        components[component.key] = {
-            "config_hash": config.config_hash(),
-            "full_config_sha256": payload_sha256(asdict(config)),
-        }
     return {
         "long_full_config_sha256": payload_sha256(asdict(long_config)),
-        "continuous_components": components,
     }
 
 
@@ -872,27 +689,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         long_funnel = pl.read_parquet(long_funnel_path)
 
-    continuous_funnel_path = work / "continuous_funnel.parquet"
-    if "continuous" not in checkpoint["completed"]:
-        continuous_funnel, continuous_expected = _build_continuous_funnel(
-            klines,
-            manifest,
-            venue=args.venue,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            bars_by_symbol=bars_by_symbol,
-        )
-        if set(continuous_funnel["source_key"].to_list()) != continuous_expected:
-            raise RuntimeError("CONTINUOUS source-key completeness failed")
-        continuous_funnel.write_parquet(continuous_funnel_path, compression="zstd", statistics=True)
-        checkpoint["completed"].append("continuous")
-        _atomic_checkpoint(checkpoint_path, checkpoint)
-    else:
-        continuous_funnel = pl.read_parquet(continuous_funnel_path)
-
-    funnel = _ensure_funnel_gate_columns(
-        pl.concat([long_funnel, continuous_funnel], how="diagonal_relaxed")
-    ).sort(["sleeve", "signal_ts_ms", "symbol"])
+    funnel = _ensure_funnel_gate_columns(long_funnel).sort(
+        ["sleeve", "signal_ts_ms", "symbol"]
+    )
     structural_funnel = validate_decision_funnel(
         funnel,
         required_gate_orders=REQUIRED_GATE_ORDERS,
@@ -941,7 +740,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
             "counts": {
                 "long_source_rows": long_funnel.height,
-                "continuous_source_rows": continuous_funnel.height,
                 "funnel_rows": funnel.height,
                 "path_label_rows": labels.height,
             },

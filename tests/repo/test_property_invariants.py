@@ -7,11 +7,6 @@ import random
 import polars as pl
 
 from liquidity_migration.core._common import MS_PER_DAY
-from liquidity_migration.research.backtest.continuous_rebalance import (
-    ContinuousHedgeRule,
-    ContinuousHedgeState,
-    compute_continuous_hedge_ratio,
-)
 from liquidity_migration.core.config import TradeLifecycleConfig
 from liquidity_migration.data.ingestion import normalize_funding_history
 from liquidity_migration.data.trade_lifecycle import (
@@ -140,22 +135,3 @@ def test_normalize_funding_8h_equiv_finite_and_correct() -> None:
         assert math.isclose(r["funding_rate_8h_equiv"], expected[r["symbol"]], rel_tol=1e-9, abs_tol=1e-15), r
 
 
-def test_hedge_ratio_bounded_by_cap_times_scale() -> None:
-    """compute_continuous_hedge_ratio == clip(-beta,0,cap)*max(scale,0): always finite,
-    in [0, cap*max(scale,0)], and exactly 0 for a non-positive target scale."""
-    rng = random.Random(5)
-    for _ in range(400):
-        n = rng.randint(0, 120)
-        raw = [rng.uniform(-0.1, 0.1) for _ in range(n)]
-        hs = [rng.uniform(-0.1, 0.1) for _ in range(n)]
-        cap = rng.uniform(0.5, 4.0)
-        rule = ContinuousHedgeRule(
-            beta_window_days=90, beta_min_obs=rng.randint(5, 60), hedge_cap=cap, cost_bps=5.0
-        )
-        scale = rng.uniform(-1.0, 4.0)
-        state = ContinuousHedgeState(prior_raw_returns=tuple(raw), prior_hedge_returns=tuple(hs))
-        r = compute_continuous_hedge_ratio(state, rule, scale)
-        assert math.isfinite(r), (n, cap, scale)
-        assert 0.0 <= r <= cap * max(scale, 0.0) + 1e-12, (r, cap, scale)
-        if scale <= 0.0:
-            assert r == 0.0

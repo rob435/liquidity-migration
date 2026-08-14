@@ -101,26 +101,6 @@ def test_unicode_symbol_partition_is_canonical_and_round_trips(tmp_path: Path) -
     assert read_dataset(tmp_path, "funding")["symbol"].to_list() == [symbol]
 
 
-def test_continuous_cycle_datasets_registered_and_roundtrip(tmp_path: Path) -> None:
-    from liquidity_migration.strategy.continuous_demo import (
-        ContinuousDemoCycleConfig,
-        continuous_cycles_dataset,
-    )
-    from liquidity_migration.data.storage import DATASET_KEYS, DATASETS
-
-    datasets = {
-        continuous_cycles_dataset(ContinuousDemoCycleConfig(execution_environment="demo")),
-    }
-    for dataset in datasets:
-        assert dataset in DATASETS
-        assert DATASET_KEYS[dataset] == ("cycle_id",)
-        row = pl.DataFrame([{"cycle_id": "k1", "ts_ms": 1_700_000_000_000, "v": 1}])
-        write_dataset(row, tmp_path, dataset, partition_by=())
-        write_dataset(row.with_columns(pl.lit(2).alias("v")), tmp_path, dataset, partition_by=())
-        stored = read_dataset(tmp_path, dataset)
-        assert stored.height == 1 and stored["v"][0] == 2
-
-
 def test_read_dataset_handles_schema_evolution_across_partitions(tmp_path: Path) -> None:
     first = pl.DataFrame(
         [

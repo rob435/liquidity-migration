@@ -71,8 +71,9 @@ kill band); best-tuned cell t 2.78 against t ≥ 3.25. Still the momentum leg of
 no kill criterion tripped, so the frozen journal is a retirement artifact, not
 a dead run. Citable baseline for the shipped shape: **+11.06% / max DD −1.84% / Sharpe 1.45 / MAR 1.80**, 655
 trades, 2023-03-13 → 2026-07-16. Five load-bearing parameters, all in
-[continuous_profile.py](../../liquidity_migration/research/backtest/continuous_profile.py) and
-[continuous_events.py](../../liquidity_migration/research/backtest/continuous_events.py): trigger `turn3_pop3`, age 240d,
+`continuous_profile.py` and
+`continuous_events.py` (both deleted from the tree in the 2026-08-14 cleanup; git history holds
+them): trigger `turn3_pop3`, age 240d,
 settled-funding floor 0.0, crowd-2, hold 24h, plus the BTC uptrend gate and BTC+ETH hedge.
 
 - **The gate is half the strategy and the funding floor is an economic boundary, not a searched threshold.**

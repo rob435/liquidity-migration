@@ -9,12 +9,6 @@ import polars as pl
 import pytest
 
 from liquidity_migration.core._common import MS_PER_HOUR
-from liquidity_migration.research.backtest.continuous_events import (
-    ContinuousEventConfig,
-    _fresh_entries,
-    _run_trades,
-    cross_sectional_decile,
-)
 from liquidity_migration.research.backtest.long_native import long_v11a_profile
 from liquidity_migration.strategy.long_native_event_demo import (
     LongNativeDemoCycleConfig,
@@ -25,7 +19,6 @@ from liquidity_migration.account.strategy_funnel import (
     FunnelJsonlWriter,
     finalize_funnel_row,
 )
-from liquidity_migration.data.trade_lifecycle import _indexed_price_bars_by_symbol
 
 
 class _Collector:
@@ -166,87 +159,6 @@ def _continuous_frame(symbols: int = 40) -> tuple[pl.DataFrame, pl.DataFrame]:
     return pl.DataFrame(rows), pl.DataFrame(rmom)
 
 
-def test_continuous_writer_on_off_preserves_active_panel_byte_values() -> None:
-    frame, rmom = _continuous_frame()
-    expected = cross_sectional_decile(
-        frame,
-        rmom,
-        rmom_quantile=0.25,
-        feature_set=("max_ret168",),
-    )
-    collector = _Collector()
-    actual = cross_sectional_decile(
-        frame,
-        rmom,
-        rmom_quantile=0.25,
-        feature_set=("max_ret168",),
-        funnel_observer=collector,
-        funnel_venue="bybit",
-    )
-
-    assert actual.equals(expected)
-    assert actual.schema == expected.schema
-    assert collector.rows
-    assert all(row["sleeve"] == "continuous" for row in collector.rows)
-    assert all(row["source_decile"] == 9 for row in collector.rows)
-
-    config = ContinuousEventConfig(
-        start_date="2023-01-01",
-        end_date="2023-01-10",
-        feature_set=("max_ret168",),
-        rmom_quantile=0.25,
-        entry_event_trigger="none",
-        entry_crowding_max_fresh=0,
-        age_days_min=0,
-        btc_trend_gate="off",
-        hold_hours=6,
-        max_active=25,
-        use_funding=False,
-    )
-    entries_off = _fresh_entries(expected, config)
-    entries_on = _fresh_entries(actual, config)
-    assert entries_on.equals(entries_off)
-    symbols = entries_off["symbol"].to_list()
-    bar_rows = []
-    for symbol_index, symbol in enumerate(symbols):
-        for hour in range(10, 24):
-            price = 100.0 + symbol_index + hour / 100.0
-            bar_rows.append(
-                {
-                    "symbol": symbol,
-                    "ts_ms": hour * MS_PER_HOUR,
-                    "open": price,
-                    "high": price * 1.001,
-                    "low": price * 0.999,
-                    "close": price,
-                }
-            )
-    bars = _indexed_price_bars_by_symbol(pl.DataFrame(bar_rows))
-    trades_off, lifecycle_off = _run_trades(entries_off, bars, None, config)
-    trades_on, lifecycle_on = _run_trades(entries_on, bars, None, config)
-    assert trades_on.equals(trades_off)
-    assert lifecycle_on == lifecycle_off
-
-
-def test_continuous_writer_failure_cannot_change_active_panel() -> None:
-    frame, rmom = _continuous_frame()
-    expected = cross_sectional_decile(
-        frame,
-        rmom,
-        rmom_quantile=0.25,
-        feature_set=("max_ret168",),
-    )
-    actual = cross_sectional_decile(
-        frame,
-        rmom,
-        rmom_quantile=0.25,
-        feature_set=("max_ret168",),
-        funnel_observer=_RaisingObserver(),
-    )
-
-    assert actual.equals(expected)
-
-
 def _writer_row(*, liquidity: str, evaluation_ts_ms: int) -> dict[str, Any]:
     return finalize_funnel_row(
         {
@@ -288,7 +200,7 @@ def test_jsonl_writer_suppresses_unchanged_evaluations_and_resumes(tmp_path: Pat
 def test_required_not_applicable_gate_is_not_accepted() -> None:
     row = finalize_funnel_row(
         {
-            "sleeve": "continuous",
+            "sleeve": "long",
             "venue": "bybit",
             "symbol": "ABCUSDT",
             "signal_ts_ms": 1_700_000_000_000,

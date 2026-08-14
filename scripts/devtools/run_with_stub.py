@@ -78,13 +78,6 @@ def ensure_posix_stubs() -> None:
     account_kernel_module._atomic_replace = _research_atomic_replace
     account_kernel_module._append_jsonl_projection = lambda *_args, **_kwargs: None
 
-    # continuous_btc_risk fsyncs through O_RDONLY descriptors; Windows rejects
-    # that with Errno 9.
-    from liquidity_migration.research.backtest import continuous_btc_risk as continuous_btc_risk_module
-
-    continuous_btc_risk_module._fsync_file = lambda path: None
-    continuous_btc_risk_module._fsync_directory = lambda path: None
-
     # artifact_snapshot.rename_noreplace fails closed off Linux/Darwin
     # (renameat2/renamex_np). Windows os.rename is natively no-replace, so the
     # substitute keeps the no-clobber semantics and drops only POSIX atomicity.

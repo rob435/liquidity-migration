@@ -14,7 +14,6 @@ from liquidity_migration.strategy.account_candidate_universe import (
     write_candidate_universe,
 )
 from liquidity_migration.strategy.carry_demo import _candidate_filtered_universe
-from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
 from liquidity_migration.account.execution_environment import candidate_universe_realm
 from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 from liquidity_migration.core.venue_realm import VenueRealm
@@ -25,7 +24,6 @@ SNAPSHOT_NS = 1_800_000_000_000_000_000
 PRODUCER_MODULES = (
     "liquidity_migration/ops/candidate_rule_coverage.py",
     "liquidity_migration/strategy/carry_demo.py",
-    "liquidity_migration/strategy/continuous_demo.py",
     "liquidity_migration/strategy/event_demo_data.py",
     "liquidity_migration/strategy/long_native_event_demo.py",
     "scripts/maintain/freeze_venue_instrument_rules.py",
@@ -112,7 +110,6 @@ def _artifact(realm: VenueRealm) -> dict[str, Any]:
         _TICKERS,
         snapshot_ts_ns=SNAPSHOT_NS,
         long_config=LongNativeDemoCycleConfig(),
-        continuous_config=ContinuousDemoCycleConfig(),
         realm=realm,
     )
 

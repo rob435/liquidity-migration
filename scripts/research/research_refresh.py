@@ -59,7 +59,7 @@ BINANCE_ANCILLARY = (
     "binance_usdm_taker_flow_1h",
 )
 VALID_VENUES = tuple(DEFAULT_ROOTS)
-VALID_SLEEVES = ("long", "continuous", "carry")
+VALID_SLEEVES = ("long", "carry")
 
 
 def _utc_now() -> dt.datetime:
@@ -794,18 +794,12 @@ def _backtest_step(
         str(REPO / "scripts" / "research" / "equity_curves.sh"),
         "--sleeves",
         sleeve,
-        "--venue",
-        venue,
         "--root",
         str(root),
         "--start",
         start.isoformat(),
         "--end",
         end.isoformat(),
-        "--continuous-chart-leverage",
-        "1",
-        "--continuous-backtest-leverage",
-        "1",
         "--out",
         str(report_root),
         "--fresh-output",
@@ -815,7 +809,7 @@ def _backtest_step(
     elif sleeve == "carry":
         expected = report_root / "carry" / CARRY_SUMMARY_NAME
     else:
-        expected = report_root / "continuous" / venue / "continuous_equity_summary.json"
+        raise ValueError(f"unknown backtest sleeve: {sleeve}")
     return CommandStep(
         step_id=f"backtest.{venue}.{sleeve}",
         command=command,
@@ -831,7 +825,6 @@ def _backtest_step(
 
 def _validate_backtest_report(
     *,
-    venue: str,
     sleeve: str,
     report_root: Path,
     start: dt.date,
@@ -854,27 +847,17 @@ def _validate_backtest_report(
         if "research_seen_data" not in str(payload.get("run_label") or ""):
             raise RuntimeError(f"CARRY report is missing its research label under {path}")
         return
-    summary_path = report_root / "continuous" / venue / "continuous_equity_summary.json"
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    if summary.get("start_date") != start.isoformat() or summary.get("end_date") != end.isoformat():
-        raise RuntimeError(f"CONTINUOUS report window mismatch under {summary_path}")
-    if summary.get("chart_leverage") != 1.0 or summary.get("backtest_leverage") != 1.0:
-        raise RuntimeError(f"CONTINUOUS leverage mismatch under {summary_path}")
+    raise ValueError(f"unknown backtest sleeve: {sleeve}")
 
 
-def _artifact_files(report_root: Path, *, venue: str) -> list[Path]:
+def _artifact_files(report_root: Path) -> list[Path]:
     files: list[Path] = []
     patterns = (
         "long/long_native_*.csv",
         "long/long_native_*.json",
         "long/long_native_*.md",
-        "continuous/*/*.csv",
-        "continuous/*/*.json",
-        "continuous/*/*.md",
         "carry/*.csv",
         "carry/*.json",
-        f"continuous/components/{venue}/*/continuous_*.csv",
-        f"continuous/components/{venue}/*/continuous_*.json",
     )
     for pattern in patterns:
         files.extend(path for path in report_root.glob(pattern) if path.is_file())
@@ -926,18 +909,8 @@ def _run_summary(
                     "report": str(path),
                 }
             else:
-                path = report_root / "continuous" / venue / "continuous_equity_summary.json"
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                cells[key] = {
-                    "run_label": payload.get("run_label"),
-                    "strategy_run_label": payload.get("strategy_run_label"),
-                    "stats": payload.get("stats"),
-                    "funding_modes": payload.get("funding_modes"),
-                    "window": payload.get("window"),
-                    "components": payload.get("components"),
-                    "report": str(path),
-                }
-        for path in _artifact_files(report_root, venue=venue):
+                raise ValueError(f"unknown backtest sleeve: {sleeve}")
+        for path in _artifact_files(report_root):
             artifacts.append(
                 {
                     "venue": venue,
@@ -1067,7 +1040,7 @@ def _plan(args: argparse.Namespace) -> int:
         print(json.dumps(coverage_snapshot(root, venue=str(venue)), indent=2))
         if not args.skip_data:
             _refresh_data(venue=str(venue), root=root, end=end, args=args, ledger=None)
-        if not args.skip_features and "continuous" in configuration["sleeves"]:
+        if not args.skip_features:
             rewrite_reason = _rmom_rewrite_reason(args)
             _print_step(
                 _rmom_step(
@@ -1128,7 +1101,7 @@ def _execute(args: argparse.Namespace) -> int:
         root.mkdir(parents=True, exist_ok=True)
         if not args.skip_data:
             _refresh_data(venue=venue, root=root, end=end, args=args, ledger=ledger)
-        if not args.skip_features and "continuous" in sleeves:
+        if not args.skip_features:
             rewrite_reason = _rmom_rewrite_reason(args)
             ledger.run(
                 _rmom_step(
@@ -1154,7 +1127,6 @@ def _execute(args: argparse.Namespace) -> int:
                     )
                 )
                 _validate_backtest_report(
-                    venue=venue,
                     sleeve=sleeve,
                     report_root=report_root,
                     start=start,
@@ -1194,7 +1166,7 @@ def _add_refresh_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--start", type=_date, default=None, help="benchmark start; default end minus --years")
     parser.add_argument("--years", type=int, default=3, help="benchmark window when --start is absent")
     parser.add_argument("--venues", default="bybit,binance", help="comma list: bybit,binance")
-    parser.add_argument("--sleeves", default="long,continuous", help="comma list: long,continuous,carry")
+    parser.add_argument("--sleeves", default="long", help="comma list: long,carry")
     parser.add_argument("--bybit-root", default=str(DEFAULT_ROOTS["bybit"]))
     parser.add_argument("--binance-root", default=str(DEFAULT_ROOTS["binance"]))
     parser.add_argument(

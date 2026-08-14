@@ -1,6 +1,6 @@
 # liquidity_migration/
 
-125 modules in eleven subpackages. The path tells you what a module is for; the
+135 modules in eleven subpackages. The path tells you what a module is for; the
 import order tells you what it is allowed to know.
 
 ## Where things are
@@ -48,8 +48,8 @@ the code belongs somewhere else.
   file, and grep finds every caller.
 - A module's package is chosen by what it *is*, not by who calls it. `market_capture`
   is in `account/` because only account owners use it, not in `marketdata/`.
-- `strategy/` is flat at 18 modules; filename prefixes (`carry_*`, `continuous_*`,
-  `long_*`) already group them. The next sleeve pushes it past 20 — split
+- `strategy/` is flat at 13 modules; filename prefixes (`carry_*`, `long_*`)
+  already group them. The next sleeve pushes it toward 20 — split
   per-sleeve then, not on a new axis.
 - A sleeve daemon is a plug on `strategy/strategy_host.py`: the host owns the
   market planes, wake machinery (bar, account-journal commit, time deadline,

@@ -50,7 +50,6 @@ no_implicit_optional = true
 module = [
     "liquidity_migration.data.trade_lifecycle",
     "liquidity_migration.marketdata.kline_store",
-    "liquidity_migration.research.backtest.continuous_events",
 ]
 disable_error_code = ["arg-type"]
 

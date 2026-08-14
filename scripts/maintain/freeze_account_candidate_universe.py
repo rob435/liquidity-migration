@@ -30,10 +30,6 @@ from liquidity_migration.marketdata.bybit_market_data import (  # noqa: E402
     BybitMarketData,
     BybitRestRateLimiter,
 )
-from liquidity_migration.strategy.continuous_demo import (  # noqa: E402
-    ContinuousDemoCycleConfig,
-    apply_continuous_demo_profile,
-)
 from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
 from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig  # noqa: E402
 from liquidity_migration.core.venue_realm import VenueRealm, venue_realm  # noqa: E402
@@ -66,7 +62,6 @@ def main(argv: list[str] | None = None) -> int:
         LongNativeDemoCycleConfig(),
         universe_superset_size=args.long_universe_superset_size,
     )
-    continuous_config = apply_continuous_demo_profile(ContinuousDemoCycleConfig())
     limiter = BybitRestRateLimiter(
         max_requests=args.max_public_requests_per_second,
         per_seconds=1.0,
@@ -82,7 +77,6 @@ def main(argv: list[str] | None = None) -> int:
         ticker_rows,
         snapshot_ts_ns=completed_ts_ns,
         long_config=long_config,
-        continuous_config=continuous_config,
         realm=realm,
     )
     # The two endpoint calls cannot be literally simultaneous. Bind their

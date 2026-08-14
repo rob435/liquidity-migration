@@ -79,7 +79,7 @@ def build_equity_curve(baskets: pl.DataFrame) -> pl.DataFrame:
 
 def annualized_sharpe(daily_returns: "np.ndarray | list[float]", *, ann_days: float = 365.25) -> float:
     """Canonical annualised Sharpe = mean / std(ddof=1) * sqrt(ann_days) over a daily
-    return series — the convention shared by trade_lifecycle and continuous_events.
+    return series — the convention shared across the backtest engines.
     Returns 0.0 for fewer than 2 finite points or zero variance. Callers
     pass the daily series (the equity-based sites forward-fill the calendar grid first)."""
     arr = np.asarray(

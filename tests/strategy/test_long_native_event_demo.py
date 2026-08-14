@@ -2260,7 +2260,6 @@ def test_retiring_symbol_with_exposure_does_not_wedge_the_cycle(
         build_candidate_universe_artifact,
         write_candidate_universe,
     )
-    from liquidity_migration.strategy.continuous_demo import ContinuousDemoCycleConfig
     from tests.strategy.test_account_candidate_universe import (
         SNAPSHOT_NS,
         _instrument,
@@ -2278,7 +2277,6 @@ def test_retiring_symbol_with_exposure_does_not_wedge_the_cycle(
             [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "4000000")],
             snapshot_ts_ns=SNAPSHOT_NS,
             long_config=LongNativeDemoCycleConfig(),
-            continuous_config=ContinuousDemoCycleConfig(),
         ),
     )
 

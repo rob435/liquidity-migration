@@ -27,7 +27,7 @@ from liquidity_migration.strategy.account_strategy_state import (
     target_reservation_rows,
     terminal_entry_attempt_keys,
 )
-from liquidity_migration.research.backtest.continuous_btc_risk import BTC_RISK_EVIDENCE_METADATA_KEY
+from liquidity_migration.account.entry_attempts import BTC_RISK_EVIDENCE_METADATA_KEY
 from liquidity_migration.core.deterministic_runtime import VirtualClock
 from liquidity_migration.account.entry_attempts import ENTRY_ATTEMPT_METADATA_KEY, entry_attempt_key
 
@@ -865,7 +865,6 @@ def test_filled_component_remains_exit_visible_while_same_symbol_peer_is_pending
     tmp_path: Path,
     second_order_status: str,
 ) -> None:
-    from liquidity_migration.strategy.continuous_demo import _open_continuous_trades
     from liquidity_migration.strategy.long_native_event_demo import _open_long_trades
 
     kernel = AccountExecutionKernel(tmp_path / second_order_status, account_id="a")
@@ -950,12 +949,9 @@ def test_filled_component_remains_exit_visible_while_same_symbol_peer_is_pending
         "trade-a",
         "trade-b",
     }
-    # Both strategy exit paths deliberately consume only filled/open rows.  A
-    # symbol-wide pending label must not hide component A from either planner.
+    # The strategy exit path deliberately consumes only filled/open rows.  A
+    # symbol-wide pending label must not hide component A from the planner.
     assert _open_long_trades(projected)["trade_id"].to_list() == ["trade-a"]
-    assert _open_continuous_trades(projected, "strategy")["trade_id"].to_list() == [
-        "trade-a"
-    ]
 
 
 def test_entry_fill_anchor_and_resize_preserve_original_lifecycle_clock(

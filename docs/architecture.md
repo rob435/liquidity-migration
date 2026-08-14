@@ -346,11 +346,11 @@ advances only after all lossless Telegram-sized pages are delivered. The hourly 
 owner/reconciliation state `Health:`; realized P&L carries a short `(pending: …)` note whenever funding
 fees, trade fees or the exchange cross-check are not final — the digest number is reconstructed from
 fills, never venue-final. Component bookkeeping detail goes to the service journal, not the chat. The
-CONTINUOUS BTC gate and entry-funnel line comes from a separate receipt-bound projection shown only when
-`CONTINUOUS_CYCLE_ROOT` is configured; it is deliberately unset on the owner unit
-(`deploy/systemd/liquidity-migration-account-execution.service`, pinned by
-`tests/scripts/test_runtime_scripts.py`) so a retired sleeve leaves no permanently `STALE` line.
-Re-promotion must set the root explicitly.
+digest once carried a CONTINUOUS BTC gate and entry-funnel line, read from a separate receipt-bound
+projection. That projection, the `CONTINUOUS_CYCLE_ROOT` switch that enabled it, and the owner flags
+behind it were deleted with the sleeve on 2026-08-14. The root was already unset on the owner unit, so
+the digest is unchanged; `tests/runtime/test_account_service_runner_readiness.py` now pins that the
+launcher names no cycle root at all.
 
 ## Epoch reset
 
@@ -456,7 +456,7 @@ is explicitly `0` or `1` — "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly 
 `"0"`.
 
 Deployment derives one authorization-bound scheduling-capture tape:
-`<ACCOUNT_CAPTURE_ROOT>/strategy-targets.jsonl`. LONG and CONTINUOUS share it through a locked,
+`<ACCOUNT_CAPTURE_ROOT>/strategy-targets.jsonl`. Every producer shares it through a locked,
 hash-chained writer — not one tape per producer. Older per-producer fallback tapes remain preserved as
 pre-boundary history and are not silently merged into a prospective epoch.
 
@@ -475,7 +475,7 @@ process environment, runs `scripts/maintain/check_bybit_order_permissions.py` an
 
 Subpackage ownership, what may import what, and the import order:
 [`liquidity_migration/README.md`](../liquidity_migration/README.md). Producer-side strategy modules
-(`long_native*`, `continuous_*`, `carry_demo*`, `financed_longs.py`, `lane2_blend.py`) are documented
+(`long_native*`, `carry_demo*`, `financed_longs.py`, `lane2_blend.py`) are documented
 with the research they implement: [`trading_logic.md`](trading_logic.md),
 [`strategy_program.md`](research/strategy_program.md). Data roots, PIT rules and clock domains:
 [`data.md`](data.md).
@@ -493,7 +493,10 @@ Removed from the tree, and not to be recreated from an old document: `research_d
 `unit_numeric_comparison`, the `active_runtime_comparator`, the `forward_epoch_start` collector,
 `venue_lifecycle`, the Strategy Overhaul V2 aggregate analyser and full-ledger replay runner, the
 `bybit_render_1m` / `binance_vision_alt` acquisition plans and their fetchers, and
-the continuous hedge manager with its warm-start regeneration. (The quote-lab package stays:
+the continuous hedge manager with its warm-start regeneration, and — on 2026-08-14 — the whole
+CONTINUOUS sleeve: `continuous_demo*`, `continuous_cycle_status`, `continuous_identity`,
+`continuous_component_sources`, the five `research/backtest/continuous_*` modules, the two
+continuous research runners, and the `continuous-event-demo-cycle` subcommand. (The quote-lab package stays:
 it is the machinery behind the registered entry recipes — CHANGELOG 2026-08-08.)
 
 ## Trade diagnostics
@@ -577,10 +580,8 @@ Freeze source-population and transition semantics before enabling the writer, wh
 
 LONG sources are closed feature rows keyed by symbol and daily `ts_ms`, captured before
 `_classify_entry`, with dynamic retrace, cooldown, capacity, health, unresolved-target, terminal-attempt
-and publication gates as transitions. CONTINUOUS rows are `entry_state` symbol/hour rows before the
-decile and liquidity filters, carrying component scope for trigger/age differences, with shared health,
-adverse-pause, BTC-trend/risk, capacity, reentry, cooldown, crowding, unresolved-target and publication
-gates separately named.
+and publication gates as transitions. (The tape once carried CONTINUOUS `entry_state` symbol/hour rows
+alongside them; that half went with the sleeve on 2026-08-14, and the tape is now the LONG funnel alone.)
 
 **Artifact budget.** At most four claim-bearing payloads per run: `manifest.json` (identities, schema,
 counts, nulls, hashes, deviations), `execution_tca.parquet` (one row per canonical command),
