@@ -144,7 +144,6 @@ def account_owner_health_reading(
         account = require_recent_engine_account(
             environment,
             max_age_ns=max_age_ns,
-            expected_account_id=route.account_id,
             # Deliberately not `now_ns`. How old the venue reading is, is a
             # question about the wall clock, and the old owner-health check
             # asked it that way too. A caller's `now_ns` is its cycle stamp --

@@ -1135,6 +1135,7 @@ def _write_owner_health(
                 "account_equity_usdt": equity_usdt,
                 "account_observed_ns": observed_ts_ns,
                 "account_user_id": route.account_id,
+                "realm": environment,
                 "may_open": True,
                 "mode": "live",
             }

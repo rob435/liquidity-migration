@@ -39,6 +39,7 @@ def _heartbeat(
         "account_equity_usdt": 9_876.5,
         "account_observed_ns": now_ns - 1_000_000_000,
         "account_user_id": "6039967",
+        "realm": "demo",
         "mode": "live",
         "may_open": True,
     }
@@ -86,11 +87,20 @@ def test_an_engine_that_stopped_reading_the_venue_blocks_entries(
     assert "not reading the venue" in error
 
 
-def test_a_heartbeat_for_another_account_blocks_and_names_both(
+def test_a_mainnet_heartbeat_can_never_size_a_demo_producer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _heartbeat(tmp_path, monkeypatch, account_user_id="579580669")
+    """Realm, not account id.
+
+    The two halves name an account differently on the live host -- the route
+    calls it `bybit-mainnet-unified`, the engine reports the venue's user
+    number -- so comparing ids blocked every entry. Realm is the value they
+    genuinely share, and it catches the failure that actually matters: one
+    realm's equity sizing the other realm's producer.
+    """
+
+    _heartbeat(tmp_path, monkeypatch, realm="mainnet", account_user_id="552445993")
 
     equity, error = planning.account_owner_equity_or_error(
         _route(tmp_path),
@@ -98,7 +108,8 @@ def test_a_heartbeat_for_another_account_blocks_and_names_both(
     )
 
     assert equity == 0.0
-    assert "6039967" in error and "579580669" in error
+    assert "'mainnet' realm, not 'demo'" in error
+    assert "552445993" in error
 
 
 def test_an_engine_with_no_account_reading_yet_blocks_entries(

@@ -19,12 +19,20 @@ no such loop to describe, and the engine does not read the Python journal, so
 inventing those fields would have meant writing down numbers that referred to
 nothing. They are gone rather than faked.
 
-One thing here is deliberately fail-closed and worth knowing about: the
-account id. The producers pass the id from their account route, the heartbeat
-carries the id the engine authenticated as, and a disagreement blocks entries
-with both values in the message. If those two ever name the same account
-differently, this is where it shows up, in one line, rather than as a fleet
-that quietly stops trading.
+**What is checked is the realm, not the account id, and that was a correction
+made against the live host.** The first draft compared the producer's
+``route.account_id`` with the id the engine authenticated as. Those are two
+different id spaces: the route names an account logically
+(``bybit-mainnet-unified``) and the engine reports the venue's own user number
+(``552445993``, the same one its lease file is named after). They never match,
+so that check would have blocked every entry on every cycle -- fail-closed,
+silent, and exactly the outcome this module exists to prevent.
+
+The realm is the comparison that carries the real risk anyway. What must never
+happen is a demo heartbeat sizing a mainnet producer, and realm catches that
+while being a value both halves genuinely share. The venue user id is still
+read and still reported in errors, because when something is wrong it is the
+number that identifies which account you are actually looking at.
 """
 
 from __future__ import annotations
@@ -66,7 +74,10 @@ class EngineAccountReading:
     equity_usdt: float
     available_usdt: float
     observed_ts_ns: int
-    account_id: str
+    #: The venue's own user number, for saying which account this was.
+    account_user_id: str
+    #: "demo" or "mainnet", as the engine resolved it.
+    realm: str
 
 
 def engine_heartbeat_path(environment: str) -> Path:
@@ -108,7 +119,8 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     equity = payload.get("account_equity_usdt")
     available = payload.get("account_available_usdt")
     observed = payload.get("account_observed_ns")
-    account_id = payload.get("account_user_id")
+    account_user_id = payload.get("account_user_id")
+    realm = payload.get("realm")
     if equity is None or observed is None:
         raise ValueError(
             "engine heartbeat carries no account reading yet "
@@ -126,13 +138,16 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         raise ValueError("engine heartbeat available margin must be finite")
     if observed_ts_ns <= 0:
         raise ValueError("engine heartbeat account_observed_ns must be positive")
-    if not isinstance(account_id, str) or not account_id:
+    if not isinstance(account_user_id, str) or not account_user_id:
         raise ValueError("engine heartbeat carries no account_user_id")
+    if not isinstance(realm, str) or not realm:
+        raise ValueError("engine heartbeat carries no realm")
     return EngineAccountReading(
         equity_usdt=equity_usdt,
         available_usdt=available_usdt,
         observed_ts_ns=observed_ts_ns,
-        account_id=account_id,
+        account_user_id=account_user_id,
+        realm=realm,
     )
 
 
@@ -140,18 +155,17 @@ def require_recent_engine_account(
     environment: str,
     *,
     max_age_ns: int,
-    expected_account_id: str | None = None,
     now_ns: int | None = None,
     path: str | Path | None = None,
 ) -> EngineAccountReading:
-    """The reading, if it is recent and about the account the caller means."""
+    """The reading, if it is recent and about the realm the caller means."""
 
     resolved = Path(path) if path is not None else engine_heartbeat_path(environment)
     reading = read_engine_account(resolved)
-    if expected_account_id is not None and reading.account_id != expected_account_id:
+    if reading.realm != environment:
         raise ValueError(
-            "engine heartbeat is for a different account: "
-            f"route says {expected_account_id!r}, engine authenticated as {reading.account_id!r}"
+            f"engine heartbeat is for the {reading.realm!r} realm, not {environment!r} "
+            f"(that engine is on venue account {reading.account_user_id})"
         )
     stamp_ns = time.time_ns() if now_ns is None else int(now_ns)
     age_ns = stamp_ns - reading.observed_ts_ns
