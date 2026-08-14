@@ -125,30 +125,74 @@ struct EnvelopeSection {
     max_initial_margin_usdt: f64,
 }
 
+/// The other way to say what the caps are: name the fleet's own profile.
+///
+/// `deny_unknown_fields` is doing real work here. It means an `[risk.envelope]`
+/// block or a stray `leverage` left beside the profile path is refused rather
+/// than silently ignored — one document decides the caps, not two.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileRiskSection {
+    /// The operational profile to read, e.g. `configs/operational.mainnet.json`.
+    operational_profile_path: PathBuf,
+    max_account_view_age_s: u64,
+    min_order_notional_usdt: f64,
+    /// How far a position may move against it before its stop ends it. Not in
+    /// the profile — it is `DISASTER_STOP_FRACTION` on the host — so it is
+    /// named here rather than guessed.
+    disaster_stop_fraction: f64,
+}
+
 fn default_qty_tolerance() -> f64 {
     1e-12
 }
 
-/// The four capital controls. Each strategy's `capital_usdt` is its margin
-/// share of the partition; its gross share is that times the account
-/// leverage. `Kernel::new` still proves the shares fit inside the account
-/// caps and refuses a config that does not.
+/// The four capital controls, from one of two places.
+///
+/// Either the caps are written out in `[risk]`, and each strategy's
+/// `capital_usdt` is its margin share of the partition; or `[risk]` names the
+/// fleet's operational profile and the caps and the sleeve shares come from
+/// that document. Naming a profile is what the funded account does, so the
+/// engine and the Python fleet are held to one file rather than to two copies
+/// of it.
+///
+/// Either way `Kernel::new` proves the shares fit inside the account caps and
+/// refuses a config that does not.
 pub fn risk(
     section: &toml::Table,
     strategies: &[StrategyConfig],
 ) -> Result<Kernel, Box<dyn Error>> {
+    if section.contains_key("operational_profile_path") {
+        return risk_from_profile(section, strategies);
+    }
     let parsed: RiskSection = toml::Value::Table(section.clone())
         .try_into()
         .map_err(|e| format!("the [risk] block is wrong: {e}"))?;
-    let allocations = strategies
-        .iter()
-        .enumerate()
-        .map(|(index, s)| StrategyAllocation {
+    let mut allocations = Vec::with_capacity(strategies.len());
+    for (index, s) in strategies.iter().enumerate() {
+        let Some(capital_usdt) = s.capital_usdt else {
+            return Err(format!(
+                "strategy \"{}\" has no capital_usdt, and [risk] names no \
+                 operational_profile_path — one of the two has to say how much of the \
+                 account this strategy may use",
+                s.name
+            )
+            .into());
+        };
+        if s.sleeve.is_some() {
+            return Err(format!(
+                "strategy \"{}\" names a sleeve, but [risk] names no \
+                 operational_profile_path — there is no profile for that sleeve to be in",
+                s.name
+            )
+            .into());
+        }
+        allocations.push(StrategyAllocation {
             strategy: StrategyId(index as u16),
-            max_gross_notional_usdt: s.capital_usdt * parsed.leverage,
-            max_initial_margin_usdt: s.capital_usdt,
-        })
-        .collect();
+            max_gross_notional_usdt: capital_usdt * parsed.leverage,
+            max_initial_margin_usdt: capital_usdt,
+        });
+    }
     let cfg = KernelConfig {
         max_account_view_age_ns: parsed.max_account_view_age_s.saturating_mul(1_000_000_000),
         loss_guard: LossGuardConfig {
@@ -173,6 +217,102 @@ pub fn risk(
         },
         qty_tolerance: parsed.qty_tolerance,
     };
+    Ok(Kernel::new(cfg).map_err(|e| format!("the risk kernel refuses this config: {e}"))?)
+}
+
+/// The caps, read from the fleet's own operational profile.
+///
+/// Every strategy must appear in the profile's `sleeve_limits`, and every
+/// sleeve in the profile must be a strategy the engine runs. Both directions
+/// matter and they fail differently:
+///
+/// - A sleeve with no strategy is caught by the profile loader. Its share
+///   would be counted in the sums that prove the partition fits, so the other
+///   sleeves would look smaller than they are.
+/// - A strategy with no sleeve is caught here. The kernel refuses every order
+///   from a strategy the partition does not name, so it would start, subscribe,
+///   decide, and have every order denied — a sleeve that is running and cannot
+///   trade, which reads from the outside like a quiet market.
+fn risk_from_profile(
+    section: &toml::Table,
+    strategies: &[StrategyConfig],
+) -> Result<Kernel, Box<dyn Error>> {
+    let parsed: ProfileRiskSection = toml::Value::Table(section.clone())
+        .try_into()
+        .map_err(|e| format!("the [risk] block is wrong: {e}"))?;
+
+    for s in strategies {
+        if s.capital_usdt.is_some() {
+            return Err(format!(
+                "strategy \"{}\" sets capital_usdt, but [risk] takes the sleeve shares from \
+                 {}. Two answers to one question: take the capital_usdt line out.",
+                s.name,
+                parsed.operational_profile_path.display()
+            )
+            .into());
+        }
+    }
+
+    let mut sleeves: Vec<(&str, StrategyId)> = Vec::with_capacity(strategies.len());
+    for (index, s) in strategies.iter().enumerate() {
+        let name = s.sleeve_name();
+        if let Some((_, first)) = sleeves.iter().find(|(seen, _)| *seen == name) {
+            return Err(format!(
+                "two strategy blocks both claim the sleeve \"{name}\" (the first is #{}); \
+                 one sleeve is one share of the account, so give one of them its own \
+                 `sleeve = ...`",
+                first.0
+            )
+            .into());
+        }
+        sleeves.push((name, StrategyId(index as u16)));
+    }
+
+    let text = std::fs::read_to_string(&parsed.operational_profile_path).map_err(|e| {
+        format!(
+            "cannot read the operational profile {}: {e}",
+            parsed.operational_profile_path.display()
+        )
+    })?;
+    let cfg = engine_risk::kernel_config_from_profile(
+        &text,
+        &engine_risk::ProfileInputs {
+            disaster_stop_fraction: parsed.disaster_stop_fraction,
+            min_order_notional_usdt: parsed.min_order_notional_usdt,
+            max_account_view_age_ns: parsed.max_account_view_age_s.saturating_mul(1_000_000_000),
+            sleeves: &sleeves,
+        },
+    )
+    .map_err(|e| {
+        format!(
+            "{} is not a profile this engine can run: {e}",
+            parsed.operational_profile_path.display()
+        )
+    })?;
+
+    // The other direction. An empty partition means the profile named no
+    // sleeves at all, which is a legitimate unpartitioned profile — there the
+    // account caps bind and no strategy is left unable to trade.
+    if !cfg.partition.allocations.is_empty() {
+        for (name, id) in &sleeves {
+            if cfg.partition.share(*id).is_none() {
+                return Err(format!(
+                    "the engine runs the sleeve \"{name}\", but {} gives it no share of the \
+                     account. It would start and then have every order refused.",
+                    parsed.operational_profile_path.display()
+                )
+                .into());
+            }
+        }
+    }
+
+    tracing::info!(
+        profile = %parsed.operational_profile_path.display(),
+        reference_usdt = cfg.envelope.reference_usdt,
+        account_gross_cap_usdt = cfg.envelope.account_gross_cap_usdt(),
+        sleeves = cfg.partition.allocations.len(),
+        "capital limits read from the fleet's operational profile"
+    );
     Ok(Kernel::new(cfg).map_err(|e| format!("the risk kernel refuses this config: {e}"))?)
 }
 
@@ -241,7 +381,7 @@ mod tests {
         "#
         ))
         .expect("test config parses");
-        StrategyConfig { name: "touch_sniper".into(), capital_usdt: 50.0, params }
+        StrategyConfig { name: "touch_sniper".into(), capital_usdt: Some(50.0), sleeve: None, params }
     }
 
     fn quoter(symbol: &str) -> StrategyConfig {
@@ -256,7 +396,7 @@ mod tests {
         "#
         ))
         .expect("test config parses");
-        StrategyConfig { name: "quoter".into(), capital_usdt: 50.0, params }
+        StrategyConfig { name: "quoter".into(), capital_usdt: Some(50.0), sleeve: None, params }
     }
 
     /// The shipped engine.toml `[risk]` block.
@@ -339,5 +479,141 @@ max_initial_margin_usdt = 100.0
     #[test]
     fn the_same_strategy_twice_on_one_symbol_is_refused() {
         assert!(strategies(&[sniper("BTCUSDT"), sniper("BTCUSDT")]).is_err());
+    }
+
+    // ----------------------------------------------------------------------
+    // Taking the caps from the fleet's operational profile instead
+    // ----------------------------------------------------------------------
+
+    /// The `[risk]` block a funded engine would ship: no caps of its own, a
+    /// path to the document the Python fleet already reads.
+    fn profile_risk(profile: &str) -> toml::Table {
+        risk_block(&format!(
+            r#"
+operational_profile_path = "../../configs/{profile}"
+max_account_view_age_s = 120
+min_order_notional_usdt = 1.0
+disaster_stop_fraction = 0.35
+"#
+        ))
+    }
+
+    /// `Kernel` has no Debug, so `expect_err` cannot be used on these.
+    fn refusal(result: Result<Kernel, Box<dyn Error>>, what: &str) -> String {
+        match result {
+            Ok(_) => panic!("{what}"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    /// A strategy block in profile mode: no capital of its own, a sleeve name.
+    fn sleeve_strategy(sleeve: &str, symbol: &str) -> StrategyConfig {
+        let mut cfg = sniper(symbol);
+        cfg.capital_usdt = None;
+        cfg.sleeve = Some(sleeve.to_string());
+        cfg
+    }
+
+    #[test]
+    fn the_shipped_mainnet_profile_builds_a_kernel() {
+        let sleeves = [
+            sleeve_strategy("carry", "BTCUSDT"),
+            sleeve_strategy("long", "ETHUSDT"),
+        ];
+        risk(&profile_risk("operational.mainnet.json"), &sleeves)
+            .expect("the funded account's own profile must build a kernel");
+    }
+
+    #[test]
+    fn a_strategy_that_also_states_its_capital_is_refused() {
+        // Two answers to one question. Which one binds would depend on which
+        // line someone read.
+        let mut sleeves = vec![
+            sleeve_strategy("carry", "BTCUSDT"),
+            sleeve_strategy("long", "ETHUSDT"),
+        ];
+        sleeves[0].capital_usdt = Some(40.0);
+        let err = refusal(risk(&profile_risk("operational.mainnet.json"), &sleeves), "capital_usdt beside a profile was accepted");
+        assert!(err.to_string().contains("capital_usdt"), "{err}");
+    }
+
+    #[test]
+    fn caps_written_beside_a_named_profile_are_refused() {
+        // The same worry from the other side: an [envelope] block left in the
+        // file when the profile took over would be a set of limits nobody is
+        // enforcing, sitting somewhere an operator would read them.
+        let mut block = profile_risk("operational.mainnet.json");
+        block.insert("leverage".into(), toml::Value::Float(2.0));
+        let err = refusal(risk(&block, &[sleeve_strategy("carry", "BTCUSDT")]), "a stray cap beside a profile was accepted");
+        assert!(err.to_string().contains("leverage"), "{err}");
+    }
+
+    #[test]
+    fn a_sleeve_the_profile_does_not_fund_is_refused() {
+        // It would boot, subscribe, decide, and have every order denied by the
+        // partition -- which from outside looks like a quiet market.
+        let sleeves = [
+            sleeve_strategy("carry", "BTCUSDT"),
+            sleeve_strategy("long", "ETHUSDT"),
+            sleeve_strategy("hedge", "SOLUSDT"),
+        ];
+        let err = refusal(risk(&profile_risk("operational.mainnet.json"), &sleeves), "an unfunded sleeve was accepted");
+        assert!(err.to_string().contains("hedge"), "{err}");
+    }
+
+    #[test]
+    fn a_profile_sleeve_with_no_strategy_is_refused() {
+        // The other direction. Its share is counted in the sums that prove the
+        // partition fits inside the account, so leaving it out would make the
+        // sleeves that are running look smaller than they are.
+        let err = refusal(risk(
+            &profile_risk("operational.mainnet.json"),
+            &[sleeve_strategy("carry", "BTCUSDT")],
+        ), "a profile naming a sleeve nobody runs was accepted");
+        assert!(err.to_string().contains("long"), "{err}");
+    }
+
+    #[test]
+    fn two_strategies_cannot_claim_one_sleeve() {
+        let sleeves = [
+            sleeve_strategy("carry", "BTCUSDT"),
+            sleeve_strategy("carry", "ETHUSDT"),
+        ];
+        let err = refusal(risk(&profile_risk("operational.mainnet.json"), &sleeves), "one share of the account was handed to two strategies");
+        assert!(err.to_string().contains("carry"), "{err}");
+    }
+
+    #[test]
+    fn the_sleeve_name_falls_back_to_the_strategy_name() {
+        let mut cfg = sniper("BTCUSDT");
+        cfg.capital_usdt = None;
+        assert_eq!(cfg.sleeve_name(), "touch_sniper");
+        cfg.sleeve = Some("carry".into());
+        assert_eq!(cfg.sleeve_name(), "carry");
+    }
+
+    #[test]
+    fn a_missing_profile_file_says_which_file() {
+        let err = refusal(risk(
+            &profile_risk("operational.does-not-exist.json"),
+            &[sleeve_strategy("carry", "BTCUSDT")],
+        ), "a missing profile was accepted");
+        assert!(err.to_string().contains("does-not-exist"), "{err}");
+    }
+
+    #[test]
+    fn without_a_profile_a_strategy_must_still_state_its_capital() {
+        let mut cfg = sniper("BTCUSDT");
+        cfg.capital_usdt = None;
+        let err = refusal(risk(&risk_block(RISK), &[cfg]), "a strategy with no capital booted");
+        assert!(err.to_string().contains("capital_usdt"), "{err}");
+    }
+
+    #[test]
+    fn without_a_profile_a_sleeve_name_means_nothing_and_is_refused() {
+        let mut cfg = sniper("BTCUSDT");
+        cfg.sleeve = Some("carry".into());
+        let err = refusal(risk(&risk_block(RISK), &[cfg]), "a sleeve with no profile booted");
+        assert!(err.to_string().contains("sleeve"), "{err}");
     }
 }

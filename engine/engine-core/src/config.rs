@@ -1,9 +1,14 @@
 //! `engine.toml`: what the engine reads at boot.
 //!
 //! The file never contains a venue address. `venue` names one of the adapters
-//! compiled into the venue crate, and every host that crate knows is a demo
-//! host; config chooses strategies, sizes, timings, and which adapter runs,
-//! but nothing about the destination.
+//! compiled into the venue crate; config chooses strategies, sizes, timings,
+//! and which adapter runs, but never an endpoint.
+//!
+//! One of the names it can pick is `bybit_mainnet`, the funded account. That
+//! is not a hole in the above — naming it is not permission to trade it. The
+//! gateway refuses to build unless `REAL_MONEY` is armed in the host's
+//! credential file by the account owner, so the worst a wrong name in this
+//! file can do is stop the engine starting.
 
 use std::path::{Path, PathBuf};
 
@@ -71,10 +76,29 @@ pub struct EngineSection {
 #[derive(Clone, Debug, Deserialize)]
 pub struct StrategyConfig {
     pub name: String,
-    pub capital_usdt: f64,
+    /// This strategy's margin share of the partition, written here.
+    ///
+    /// Absent when `[risk]` names an operational profile — there the sleeve
+    /// shares come from the profile, and a second number here would be a
+    /// second answer to the same question. `assembly::risk` requires exactly
+    /// one of the two and says which is missing.
+    #[serde(default)]
+    pub capital_usdt: Option<f64>,
+    /// Which sleeve in the operational profile this block is. Defaults to
+    /// `name`, which is right whenever the strategy is named after its sleeve.
+    /// Only read in profile mode.
+    #[serde(default)]
+    pub sleeve: Option<String>,
     /// Everything else in the block, handed to the strategy as written.
     #[serde(flatten)]
     pub params: toml::Table,
+}
+
+impl StrategyConfig {
+    /// The sleeve name this block answers to in an operational profile.
+    pub fn sleeve_name(&self) -> &str {
+        self.sleeve.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// Spelled out rather than imported so this layer stays ignorant of the venue
@@ -170,7 +194,7 @@ symbols = ["BTCUSDT"]
         assert_eq!(cfg.risk.get("max_symbols").unwrap().as_integer(), Some(4));
         let s = &cfg.strategies[0];
         assert_eq!(s.name, "quote_taker");
-        assert_eq!(s.capital_usdt, 250.0);
+        assert_eq!(s.capital_usdt, Some(250.0));
         assert_eq!(s.params.get("every_nth_quote").unwrap().as_integer(), Some(20));
         assert!(s.params.get("name").is_none(), "name is not a param");
     }

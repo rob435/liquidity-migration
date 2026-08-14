@@ -1,14 +1,20 @@
 # The engine's config. There is still no venue address in here on purpose:
 # `venue` below is a name, not an address. It picks one of the adapters
-# compiled into the venue crate, and every host that crate knows is a demo
-# host — its own test reads the crate source back and fails the build if
-# another appears. So no edit to this file can point the engine somewhere
-# else; the most a wrong name can do is refuse to start.
+# compiled into the venue crate, and every host that crate knows is written in
+# one file — its own test reads the crate source back and fails the build if a
+# host appears anywhere else. So no edit to this file can point the engine at
+# an endpoint nobody compiled in.
+#
+# One of the names is `bybit_mainnet`, the funded account. Typing it here is
+# not permission to trade it: that gateway refuses to build unless REAL_MONEY
+# is armed in the host's credential file, by the owner. The most a wrong name
+# in this file can do is stop the engine starting.
 
 [engine]
 wal_path = "engine.wal"
-# Which venue adapter to run. Leave the line out and it means this same one,
-# so a config written before the key existed still says what it said.
+# Which venue adapter to run: `bybit_demo` or `bybit_mainnet`. Leave the line
+# out and it means the demo account, so a config written before the key
+# existed still says what it said.
 venue = "bybit_demo"
 # How often buffered log bytes are pushed to the OS. Order records do not
 # wait for this — they are forced to disk before the order goes out.
@@ -37,6 +43,26 @@ shadow = true
 # The four capital controls. Nothing here has a default: every number is
 # written down, and the Python fleet's values are recorded in
 # engine-risk/PORT_NOTES.md.
+#
+# THE OTHER WAY. Instead of writing the caps out, point at the profile
+# document the Python fleet already reads, and the caps and the per-sleeve
+# shares both come from it:
+#
+#   [risk]
+#   operational_profile_path = "configs/operational.mainnet.json"
+#   max_account_view_age_s = 120
+#   min_order_notional_usdt = 1.0
+#   disaster_stop_fraction = 0.35
+#
+# Those last three are the only numbers the profile does not carry. Nothing
+# else may be written beside them — an [risk.envelope] block or a stray
+# `leverage` is refused, because one document decides the caps or two of them
+# disagree in a way nobody notices until it matters. Each [[strategy]] then
+# drops its `capital_usdt` and takes its share from the profile's sleeve of the
+# same name (or `sleeve = "..."` to say which one).
+#
+# This is what a funded engine uses, so that tightening a cap tightens it for
+# the fleet and the engine at once.
 [risk]
 max_account_view_age_s = 120
 # Daily loss ceiling against the UTC day's opening equity. Remove the line
