@@ -46,6 +46,14 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
     // Building a strategy is reading its config block: no clock, no socket,
     // no decision. Nothing below has happened yet when the lease is taken.
     let strategies: Vec<Box<dyn Strategy>> = assembly::strategies(&loaded.config.strategies)?;
+    // Each block's own name, so the log and the heartbeat can tell two sleeves
+    // running the same plug apart. Both of this fleet's are `target_book`.
+    let sleeves: Vec<String> = loaded
+        .config
+        .strategies
+        .iter()
+        .map(|s| s.sleeve_name().to_string())
+        .collect();
     let wanted: Vec<_> = strategies
         .iter()
         .flat_map(|s| s.subscriptions())
@@ -71,13 +79,14 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
 
     let (wal, replayed) = assembly::wal(&settings.wal_path)?;
 
-    let mut engine = Engine::boot(
+    let mut engine = Engine::boot_as(
         &settings,
         &loaded.sha256,
         wal,
         risk,
         venue,
         strategies,
+        &sleeves,
         &replayed,
     )
     .await?;

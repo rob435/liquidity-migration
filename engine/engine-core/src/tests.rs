@@ -3547,3 +3547,56 @@ async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
 
     assert_eq!(engine.fills().total().fills, 0, "not our trade to score");
 }
+
+#[tokio::test]
+async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
+    // This fleet runs `target_book` twice. Named by the plug, the log and the
+    // heartbeat said "target_book" twice and nobody could tell carry's
+    // trading from long's.
+    let (one, _a) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (two, _b) = Buyer::new("ETHUSDT", 100, 0.01);
+    let tape = tape();
+    let (wal, records) = MockWal::new(tape.clone());
+    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT", "ETHUSDT"]);
+    let (risk, _saw) = MockRisk::with(allow_all());
+    let engine = Engine::boot_as(
+        &settings(true),
+        "0",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(one), Box::new(two)],
+        &["carry".to_string(), "long".to_string()],
+        &[],
+    )
+    .await
+    .expect("boot");
+
+    assert_eq!(engine.strategy_names(), &["carry".to_string(), "long".to_string()]);
+    let said = records
+        .borrow()
+        .iter()
+        .find_map(|r| match r {
+            WalRecord::Names { strategies, .. } => Some(strategies.clone()),
+            _ => None,
+        })
+        .expect("the log says what its ids mean");
+    assert_eq!(said, vec!["carry".to_string(), "long".to_string()]);
+}
+
+#[tokio::test]
+async fn a_sleeve_with_no_name_of_its_own_keeps_the_plugs() {
+    // The fallback, and the reason `boot` can stay a one-liner over `boot_as`.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (_engine, h) = build(true, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let said = h
+        .records
+        .borrow()
+        .iter()
+        .find_map(|r| match r {
+            WalRecord::Names { strategies, .. } => Some(strategies.clone()),
+            _ => None,
+        })
+        .expect("the log says what its ids mean");
+    assert_eq!(said, vec!["buyer".to_string()], "the plug's own name");
+}

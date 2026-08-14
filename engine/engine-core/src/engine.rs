@@ -176,13 +176,39 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Come up: read the log back, say who we are in it, learn what the
     /// strategies want, then ask the venue for the instrument rules and the
     /// account before the first message is allowed in.
+    ///
+    /// The strategies are named by their plug, which is right for a fleet
+    /// where each plug runs once and wrong for this one: both sleeves here are
+    /// `target_book`, so a log and a heartbeat that named the plug said
+    /// "target_book" twice and left nobody able to tell carry from long. Use
+    /// [`Engine::boot_as`] to give them the names their config chose.
     pub async fn boot(
+        settings: &EngineSection,
+        config_sha256: &str,
+        wal: W,
+        risk: R,
+        venue: V,
+        strategies: Vec<Box<dyn Strategy>>,
+        replayed: &[WalRecord],
+    ) -> Result<Self, EngineError> {
+        Engine::boot_as(settings, config_sha256, wal, risk, venue, strategies, &[], replayed).await
+    }
+
+    /// The same, with each sleeve's own name from its config block.
+    ///
+    /// `sleeves[i]` names the strategy in position `i`; a short list, or an
+    /// entry that is empty, falls back to that strategy's plug name. This is
+    /// what goes in the log's id table and in the heartbeat, so `engine fills`
+    /// can say which sleeve's trading cost what.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn boot_as(
         settings: &EngineSection,
         config_sha256: &str,
         mut wal: W,
         mut risk: R,
         mut venue: V,
         strategies: Vec<Box<dyn Strategy>>,
+        sleeves: &[String],
         replayed: &[WalRecord],
     ) -> Result<Self, EngineError> {
         let orders = LedgerOfOrders::from_records(replayed);
@@ -216,7 +242,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let sid = StrategyId(u16::try_from(index).map_err(|_| {
                 EngineError::Boot("more than 65535 strategies".to_string())
             })?);
-            names.push(strategy.name().to_string());
+            names.push(match sleeves.get(index) {
+                Some(sleeve) if !sleeve.is_empty() => sleeve.clone(),
+                _ => strategy.name().to_string(),
+            });
             for sub in strategy.subscriptions() {
                 let symbol = market.add_symbol(&sub.symbol);
                 routing.add(symbol, sub.feed, sid);
