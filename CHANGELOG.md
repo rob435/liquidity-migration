@@ -16,6 +16,79 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 — The engine holds an account, works an entry, and checks
+  itself against the venue; and a dead sleeve stops deciding what the live
+  ones may trade.** Two commits, `4a8f8301` and `a8388b27`.
+
+  *The dead sleeve's grip.* The frozen candidate universe kept the venue's
+  whole tradable instrument set under the retired CONTINUOUS sleeve's name,
+  and every producer read the union of the three profiles — so the funded
+  account's tradable population was a deleted sleeve's config. Measured on
+  both live artifacts, not inferred: `continuous` is 510 symbols on demo and
+  512 on mainnet, and in each case that **is** the entire symbol list; the
+  union added nothing. Schema 5 renames it `strategy_instruments` — a venue
+  fact no sleeve owns — and keeps profiles for live sleeves only. CARRY now
+  binds to its own profile and reads the instrument set, so its population
+  does not move. Narrowing CARRY to its own 150 names would cut 362 symbols
+  and is a strategy change; it has **not** been made, and is an open question
+  for the owner. `scripts/maintain/migrate_candidate_universe_schema.py`
+  converts an old artifact offline at the same snapshot, refuses if one symbol
+  would change, and re-keys LONG's retirement registry so the three recorded
+  delistings keep their first-observed anchors. Run against the real funded
+  artifact: 512 in, the same 512 out, frozen epoch preserved, CARRY's binding
+  passes.
+
+  *And its claim on capital.* The retired sleeve still held a share of the
+  funded envelope. Removed: the account gross cap moves 176.77 → 175.0 (−1%)
+  and the margin shares it was holding go back to the two live sleeves in
+  proportion (carry 56.57 → 57.14, long 42.43 → 42.86). The shares that
+  actually bind — carry 100.0 and long 75.0 gross — are unchanged, and the
+  margin total still sums to the 100.0 account ceiling. The combined dial
+  ceiling widens 9.9 → 10.0. **Deploy note: the new schema refuses a profile
+  that still carries a `continuous` block.** The deploy re-renders the
+  installed profile from the dials, so code and profile move together, but a
+  code-only push leaves the funded host holding a profile the new code will
+  not load.
+
+  *A live fault found on the way.* When the venue **moved** a delisting date,
+  the reconciler wrote `evidence_source="live_instrument_delivery_time_updated"`
+  and the reader accepted only `"live_instrument_delivery_time"` — so the cycle
+  after a move raised `candidate-retirement registry record is invalid`, for
+  good, on a path LONG runs every cycle with three real retirements standing on
+  the funded box. Fixed; the test now runs the third cycle, which is where it
+  bit.
+
+  *The engine's three gaps, closed and proved live.* The single-writer lease
+  is not a new invention: the fleet already had one, and the engine joins it —
+  same `flock`, same path named by the venue's own account number, same
+  re-proof after the lock that the file locked is still the file at the path.
+  Entries can now rest at the touch and be worked in rather than crossing, the
+  whole recipe ported from the fleet's quote manager. Boot compares the log
+  against the venue's working orders and the account, repairs a missing stop
+  from the level the log says it was opened behind, and latches out of opening
+  on exposure it cannot account for — durably, in the log.
+
+  Proved against demo account **579580669**, which the fleet does not own and
+  whose lease nothing held (funded from Bybit's demo faucet for the test):
+  a live engine took the lease and a second engine was refused, naming the
+  holder by pid; a market entry was rewritten into a resting limit and filled
+  299 BEATUSDT at 0.666 with its stop attached at 0.434; a restart on the same
+  log found nothing wrong; the same position under a fresh log reported `the
+  venue holds 299 and this log accounts for 0` and refused to open; an empty
+  book flattened it. The fleet's own two leases were held throughout and
+  nothing it does was touched.
+
+  *Modularity.* A config where two strategies claim one symbol is now refused
+  at boot — the venue holds one position per symbol and cannot say whose it is,
+  so each would read the other's fills as its own. And there is a strategy
+  template: a working, tested plug whose module doc is the authoring guide,
+  compiled with the crate so it cannot rot and left out of the registry so no
+  config can run it by accident.
+
+  *What is still true.* The engine reaches demo hosts only, by construction and
+  by a test that reads the crate back. It cannot trade the funded account, so
+  the Python order path cannot be deleted while it is the only thing that can.
+
 - **2026-08-14 — The retired CONTINUOUS sleeve's code leaves the tree
   (~14,600 lines), and nothing the live fleet does changes.** This supersedes
   the "kept deliberately" note in the 2026-08-14 ~00:40 entry below: the three

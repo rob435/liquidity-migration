@@ -170,6 +170,33 @@ parallel and integrate by type-check.
   that cannot be wrong. The log file is claimed the same way, so two engines
   cannot share one log either.
 
+## Worked entries
+
+An entry can afford to wait for a price; an exit cannot. So exits cross and
+entries may rest, and the engine — not the strategy — does the working. A
+strategy attaches a `work` policy to its intent and the engine rewrites the
+order into a resting limit at the touch, then walks it: it reads which way the
+displayed size leans and rests inside the spread or behind the touch
+accordingly, moves the order as the market moves, **never chases a touch that
+fell away** (an order left alone at the front of the book is where you want to
+be), escalates as the window runs out, and finally crosses at a bounded price
+rather than sending an unbounded market order. Every number is the recipe the
+Python fleet measured; the decision is a pure function and the engine's
+group-flush tick drives it.
+
+Two gates decide whether resting is worth it at all: the spread must be at
+least two ticks **and** at least one basis point of the price. The second is
+the one that bites on high-priced instruments — BTC's spread is routinely
+under a basis point, so an entry there crosses whatever the config says.
+
+Off unless asked. `rest_entries = true` on the target-book follower turns it
+on; a trim or an exit is never worked, whatever the config says.
+
+One thing worth knowing: a strategy that decides before the market feed has
+delivered a quote has no touch to rest at, and its order goes as written. A
+target book already on disk at boot is read within a second, before the feed
+connects, so the first entry after a restart crosses.
+
 ## Crash safety
 
 One append-only log (`engine.wal`) is the engine's memory. Every record is a
@@ -179,6 +206,35 @@ order lifecycle is written as it happens: intent → risk verdict → order sent
 in-flight order) → venue ack or reject → fills. On boot the engine replays
 the log, truncates a torn tail at the crash point, and reconstructs what was
 in flight before touching the venue.
+
+Then it asks the venue. The log is a perfect record of what this engine did;
+it is not a record of what happened to the account, because the venue keeps
+trading while the engine is stopped and other hands reach the same account.
+Boot is the one moment the two pictures can be compared:
+
+- An order both agree is working is adopted and keeps being charged to the
+  strategy that placed it.
+- An order the log says is working and the venue has never heard of ended
+  while the engine was down. Noted, not re-sent.
+- An order the log never placed is reported. If it is in a symbol a strategy
+  here trades, the engine stops opening; if it is in a symbol no strategy can
+  even address, it is news — the owner hand-trades this account, and stopping
+  for that would mean stopping most days. An order with no client id is the
+  exchange's own stop, not a second writer.
+- A position the log's own fills cannot account for stops the engine opening.
+  Reducing stays allowed: taking exposure off is safe whoever put it on.
+- A position with no stop gets back the stop **the log says it was opened
+  behind**. If the log cannot say, the engine refuses rather than inventing a
+  level.
+
+The latch is written into the log and read on the next boot, because a restart
+that cleared it would turn "stop and tell somebody" into "stop until the next
+crash", and something restarts this process automatically.
+
+Proved against a real account on 2026-08-14: an engine restarted on its own log
+while holding a live position found nothing wrong; the same position under a
+fresh log reported `the venue holds 299 and this log accounts for 0` and
+refused to open anything.
 
 ## Adding a venue
 
@@ -235,9 +291,9 @@ because the deletion order depends on it:
 | The four capital controls | Ported, minus four account caps named in `engine-risk/PORT_NOTES.md` |
 | Quantizing to tick and step, venue minimums | Done |
 | Following a research target book | Built, tested, and run against the demo account. The plug remembers what it sent until the account reading shows it, so the window between a fill and the next reading cannot become a second entry |
-| Resting entry quoting (place at touch, reprice, escalate, cross) | **Absent.** The engine sends market orders. This is the largest execution-quality gap |
-| Venue reconciliation and restart recovery | **Absent.** The engine replays its own log but never asks the venue what happened to an order it lost |
-| Stop verify, repair, and a durable breach latch | **Attach only.** `set_stop` exists and is not yet called after a fill |
+| Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
+| Venue reconciliation and restart recovery | Done. Boot reads the venue's working orders and compares them, and the account, against the log |
+| Stop verify, repair, and a durable breach latch | Done. A position missing its stop gets back the one the log says it was opened behind; exposure the log cannot account for latches the engine out of opening |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | **Absent.** Nothing outside the process can tell whether the engine is healthy |
 

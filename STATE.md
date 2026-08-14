@@ -25,23 +25,37 @@ match; never append history to this file.
   grouped, `err=none`) — receipts in CHANGELOG 2026-08-14. The one-line
   rollback floor `31ee68d` remains: rolling back past it requires archiving
   each producer's event tape.
-- **The Rust execution engine builds and runs on the host, and trades
-  nothing.** `engine/` ([docs/engine.md](docs/engine.md)) is built in an
+- **The Rust execution engine trades a demo account of its own, and nothing
+  the fleet owns.** `engine/` ([docs/engine.md](docs/engine.md)) is built in an
   isolated clone at `/opt/engine-build` — never the deployed checkout the
   fleet runs from — with its own toolchain under `/opt/rust`. Measured there
   2026-08-14: whole chain **2.60 ms median**, against the Python order path's
-  25.7 ms on the same box. It has run in **shadow** against the demo account, and once **live**: on
-  2026-08-14 01:56 UTC it entered and exited 0.001 BTCUSDT from a target book,
-  both orders accepted by Bybit, account flat afterwards. **That live run
-  blocked the demo owner for ~100 s** — its native-protection reconciliation
-  cannot accept a venue position it did not place — so the engine runs
-  against a fleet-owned account in **shadow only** until it holds a
-  single-writer lease or has an account of its own (CHANGELOG 2026-08-14
-  01:56). No
-  systemd unit, no deploy, and **no `REAL_MONEY` equivalent at all** — demo
-  hostnames by construction, shadow by default. The Python fleet owns
-  everything live and stays until the engine can quote entries, reconcile with
-  the venue after a restart, hold a single-writer lease, and page an operator
+  25.7 ms on the same box.
+
+  It has a **single-writer lease**, and it is the fleet's own: one kernel
+  `flock` per venue account at
+  `/run/lock/liquidity-migration/bybit-{realm}-user-{userID}.lock`, named by
+  the account number the venue itself reports. A live engine takes it before
+  it boots and refuses to start if anything holds it; a shadow engine only
+  looks. That closes the wedge of 2026-08-14 01:56, when a live engine run
+  blocked the demo owner for ~100 s.
+
+  There are **two demo accounts on the box**. The fleet owns 555899665; the
+  engine runs against **579580669**, whose lease nothing else holds
+  (credentials in `bybit-quote-lab.env`, so the quote lab and the engine
+  cannot run at once — which the lease now enforces rather than leaving to
+  memory). On 2026-08-14 the engine took that account live end to end: lease
+  held and a second engine refused, a market entry rewritten into a resting
+  limit and filled 299 BEATUSDT at 0.666 with its stop at 0.434, a restart on
+  its own log finding nothing wrong, a fresh log correctly refusing to open
+  against a position it could not account for, and an empty book flattening
+  it. The fleet's two leases were held throughout.
+
+  Still: **no systemd unit, no deploy, and no `REAL_MONEY` equivalent at
+  all** — demo hostnames by construction, proved by a test that reads the
+  venue crate back, and shadow by default. The Python fleet owns everything
+  live and stays: the engine cannot reach the funded account, so the Python
+  order path cannot be deleted while it is the only thing that can
   ([docs/engine.md](docs/engine.md) §What the engine cannot do yet).
 
 ### The funded account
