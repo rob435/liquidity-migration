@@ -938,7 +938,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 wire: ledger.quantiles(Segment::Wire),
                 equity_usdt: account.equity_usdt,
                 available_usdt: account.available_usdt,
-                account_observed_ns: account.observed_ns,
+                // The age, not the stamp: this engine's clock is monotonic
+                // and means nothing outside this process.
+                account_age_ns: (account.observed_ns != 0)
+                    .then(|| now_ns.saturating_sub(account.observed_ns)),
             },
         );
     }

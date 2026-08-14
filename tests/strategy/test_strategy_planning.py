@@ -37,7 +37,7 @@ def _heartbeat(
     payload: dict[str, object] = {
         "account_available_usdt": 4_100.25,
         "account_equity_usdt": 9_876.5,
-        "account_observed_ns": now_ns - 1_000_000_000,
+        "account_observed_wall_ts_ms": now_ns // 1_000_000 - 1_000,
         "account_user_id": "6039967",
         "realm": "demo",
         "mode": "live",
@@ -72,11 +72,15 @@ def test_an_engine_that_stopped_reading_the_venue_blocks_entries(
 
     This is the case the whole check exists for. An engine whose loop keeps
     running while its venue reads fail rewrites this file on time forever, so
-    ageing the file would say healthy. Ageing `account_observed_ns` says what
+    ageing the file would say healthy. Ageing the reading stamp says what
     is true: nobody knows what this account holds.
     """
 
-    _heartbeat(tmp_path, monkeypatch, account_observed_ns=time.time_ns() - BOUND_NS - 1)
+    _heartbeat(
+        tmp_path,
+        monkeypatch,
+        account_observed_wall_ts_ms=(time.time_ns() - BOUND_NS) // 1_000_000 - 1,
+    )
 
     equity, error = planning.account_owner_equity_or_error(
         _route(tmp_path),
@@ -118,7 +122,12 @@ def test_an_engine_with_no_account_reading_yet_blocks_entries(
 ) -> None:
     """Booted, beating, has not read the venue yet: null, not zero."""
 
-    _heartbeat(tmp_path, monkeypatch, account_equity_usdt=None, account_observed_ns=None)
+    _heartbeat(
+        tmp_path,
+        monkeypatch,
+        account_equity_usdt=None,
+        account_observed_wall_ts_ms=None,
+    )
 
     equity, error = planning.account_owner_equity_or_error(
         _route(tmp_path),
@@ -164,3 +173,26 @@ def test_a_stored_reading_cannot_outlive_the_venue_reading_behind_it(
     )
 
     assert not stored.is_serveable(now_ns=now_ns, max_age_ns=BOUND_NS)
+
+
+def test_a_reading_stamped_on_the_engines_own_clock_is_not_mistaken_for_fresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fault a live deploy found, from the reading side.
+
+    The engine's clock is monotonic and counts from an instant near its own
+    boot, so a healthy engine six seconds old would stamp `6_000`. Read as a
+    unix stamp that is 1970, and it must block rather than look fresh -- and
+    the engine now converts the age to a wall stamp so this cannot arrive.
+    """
+
+    _heartbeat(tmp_path, monkeypatch, account_observed_wall_ts_ms=6_000)
+
+    equity, error = planning.account_owner_equity_or_error(
+        _route(tmp_path),
+        environment="demo",
+    )
+
+    assert equity == 0.0
+    assert "not reading the venue" in error

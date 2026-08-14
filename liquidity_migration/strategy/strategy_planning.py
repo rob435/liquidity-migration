@@ -163,7 +163,7 @@ def account_owner_health_reading(
         read_wall_ts_ns=stamp_ns,
         # The venue's own reading time, not the heartbeat's write time, so an
         # engine that keeps beating while its venue reads fail ages out here.
-        receipt_wall_ts_ns=int(account.observed_ts_ns),
+        receipt_wall_ts_ns=int(account.observed_wall_ts_ms) * 1_000_000,
     )
 
 

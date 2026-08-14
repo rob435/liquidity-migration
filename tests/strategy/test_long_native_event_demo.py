@@ -1125,7 +1125,7 @@ def _write_owner_health(
         inbox_root,
         environment=environment,
     )
-    observed_ts_ns = time.time_ns() if now_ms is None else now_ms * 1_000_000
+    observed_wall_ts_ms = time.time_ns() // 1_000_000 if now_ms is None else int(now_ms)
     heartbeat = account_root / "engine-heartbeat.json"
     heartbeat.parent.mkdir(parents=True, exist_ok=True)
     heartbeat.write_text(
@@ -1133,7 +1133,7 @@ def _write_owner_health(
             {
                 "account_available_usdt": equity_usdt,
                 "account_equity_usdt": equity_usdt,
-                "account_observed_ns": observed_ts_ns,
+                "account_observed_wall_ts_ms": observed_wall_ts_ms,
                 "account_user_id": route.account_id,
                 "realm": environment,
                 "may_open": True,
@@ -1259,7 +1259,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
         monkeypatch.setattr(
             planning_module,
             "require_recent_engine_account",
-            lambda *_a, **_k: SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000),
+            lambda *_a, **_k: SimpleNamespace(equity_usdt=10_000.0, observed_wall_ts_ms=1_700_000_300_000),
         )
 
         # An ordinary cycle takes the reading the fast wake will spend.
@@ -1320,7 +1320,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
 
         def live_health(*_args: Any, **_kwargs: Any) -> Any:
             live_reads.append("read")
-            return SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000)
+            return SimpleNamespace(equity_usdt=10_000.0, observed_wall_ts_ms=1_700_000_300_000)
 
         monkeypatch.setattr(planning_module, "require_recent_engine_account", live_health)
         state = lnd.LongCycleState()
@@ -1354,7 +1354,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
             live_reads.append("read")
             return SimpleNamespace(
                 equity_usdt=10_000.0,
-                observed_ts_ns=(now - 25_000) * 1_000_000,
+                observed_wall_ts_ms=now - 25_000,
             )
 
         monkeypatch.setattr(planning_module, "require_recent_engine_account", aged_receipt)
@@ -1389,7 +1389,7 @@ class TestFastWakeSpendsTheStoredHealthReading:
 
         def live_health(*_args: Any, **_kwargs: Any) -> Any:
             live_reads.append("read")
-            return SimpleNamespace(equity_usdt=10_000.0, observed_ts_ns=1_700_000_300_000 * 1_000_000)
+            return SimpleNamespace(equity_usdt=10_000.0, observed_wall_ts_ms=1_700_000_300_000)
 
         monkeypatch.setattr(planning_module, "require_recent_engine_account", live_health)
         state = lnd.LongCycleState()

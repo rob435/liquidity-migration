@@ -68,16 +68,26 @@ pub struct Facts<'a> {
     /// wire. A part nothing has been recorded into is written as null.
     pub decide: Quantiles,
     pub wire: Quantiles,
-    /// The account as the venue last described it, and when that reading was
-    /// taken. This is not telemetry like the rest of this struct: the target
+    /// The account as the venue last described it, and how old that reading
+    /// is. This is not telemetry like the rest of this struct: the target
     /// producers size their entries from the equity here, having read it from
-    /// the Python owner's health file until that owner was deleted. A reading
-    /// the engine has not taken yet has `observed_ns == 0`, and all three are
-    /// written as null rather than as a confident zero — a producer must be
-    /// able to tell "no reading" from "no money".
+    /// the Python owner's health file until that owner was deleted. All three
+    /// are written as null when no reading has been taken yet, rather than as
+    /// a confident zero — a producer must be able to tell "no reading" from
+    /// "no money".
+    ///
+    /// The **age** crosses, not the stamp, and the reason is a fault this cost
+    /// a live deploy to find. The engine's clock is monotonic: it counts from
+    /// an arbitrary instant near boot, so `observed_ns` was a few seconds
+    /// after the engine started. A producer comparing that against the wall
+    /// clock read a healthy engine as fifty-six thousand years stale and
+    /// blocked every entry. An age is the same number in both clocks, so the
+    /// renderer turns it into a wall stamp beside its own, and nothing has to
+    /// know which clock the other half keeps.
     pub equity_usdt: f64,
     pub available_usdt: f64,
-    pub account_observed_ns: u64,
+    /// `None` when the engine has not read the venue yet.
+    pub account_age_ns: Option<u64>,
 }
 
 /// The heartbeat writer: where the file goes, how often, and the facts about
@@ -160,7 +170,7 @@ impl Heartbeat {
     /// the lease note uses, so anything in the fleet that reads one reads the
     /// other.
     pub fn render(&self, facts: &Facts, wall_ts_ms: i64) -> String {
-        let taken = facts.account_observed_ns != 0;
+        let taken = facts.account_age_ns.is_some();
         let mut fields: Vec<(&str, String)> = vec![
             (
                 "account_available_usdt",
@@ -171,8 +181,13 @@ impl Heartbeat {
                 or_null(taken.then(|| amount(facts.equity_usdt))),
             ),
             (
-                "account_observed_ns",
-                or_null(taken.then(|| facts.account_observed_ns.to_string())),
+                // When the venue reading was taken, on the same clock as
+                // `wall_ts_ms` beside it. Deliberately not the engine's own
+                // monotonic stamp: see `Facts::account_age_ns`.
+                "account_observed_wall_ts_ms",
+                or_null(facts.account_age_ns.map(|age_ns| {
+                    (wall_ts_ms - (age_ns / 1_000_000) as i64).to_string()
+                })),
             ),
             (
                 "account_user_id",
@@ -290,7 +305,7 @@ mod tests {
     const KEYS: [&str; 18] = [
         "account_available_usdt",
         "account_equity_usdt",
-        "account_observed_ns",
+        "account_observed_wall_ts_ms",
         "account_user_id",
         "decide_p50_ns",
         "decide_p99_ns",
@@ -323,8 +338,32 @@ mod tests {
             wire: measured(7, 2_600_000, 4_100_000),
             equity_usdt: 10_250.5,
             available_usdt: 4_100.25,
-            account_observed_ns: 1_786_000_000_000_000_000,
+            // Two seconds old, on the engine's own monotonic clock.
+            account_age_ns: Some(2_000_000_000),
         }
+    }
+
+    #[test]
+    fn the_account_reading_is_stamped_on_the_wall_clock_beside_its_own() {
+        // The fault this exists for, found on a live deploy: the engine's
+        // clock is monotonic and starts near boot, so the raw `observed_ns`
+        // was a few seconds. A producer comparing it against the wall clock
+        // read a healthy engine as fifty-six thousand years stale and blocked
+        // every entry, quietly, per cycle.
+        let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
+        let names = vec!["target_book".to_string()];
+        let wall_ts_ms = 1_786_737_867_645_i64;
+
+        let fields = parsed(&beat.render(&facts(&names), wall_ts_ms));
+
+        let observed = fields["account_observed_wall_ts_ms"]
+            .as_i64()
+            .expect("a whole number of milliseconds");
+        assert_eq!(observed, wall_ts_ms - 2_000, "two seconds before this beat");
+        assert!(
+            observed > 1_700_000_000_000,
+            "a unix millisecond stamp, not a count since boot: {observed}"
+        );
     }
 
     fn on_the_demo_account(path: PathBuf) -> Heartbeat {

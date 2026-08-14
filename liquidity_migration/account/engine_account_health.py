@@ -9,9 +9,18 @@ The engine owns the account now, and says the same thing in its heartbeat:
 what the venue last reported as equity and spare margin, and **when that
 reading was taken at the venue** -- not when the file was written. The
 distinction is the whole check. An engine whose loop keeps running while its
-venue reads fail rewrites its heartbeat on time with `account_observed_ns`
+venue reads fail rewrites its heartbeat on time with the reading stamp
 standing still, so the number goes stale exactly when the account knowledge
 does, which is the case a producer must not size against.
+
+**The stamp is on the wall clock, and that cost a live deploy to learn.** The
+first version read `account_observed_ns` straight out of the file and compared
+it against `time.time_ns()`. The engine's clock is monotonic -- it counts from
+an arbitrary instant near its own boot -- so a healthy engine six seconds old
+published a stamp of six seconds, and this read it as fifty-six thousand years
+stale and blocked every entry on both sleeves. The engine now converts the
+reading's *age* into a stamp on the same clock it writes `wall_ts_ms` with, and
+both halves have a test that says which clock it is.
 
 What the old receipt carried beyond equity -- a journal sequence, a state
 hash, a systemd generation binding -- described the owner's own loop. There is
@@ -73,7 +82,8 @@ class EngineAccountReading:
 
     equity_usdt: float
     available_usdt: float
-    observed_ts_ns: int
+    #: When the venue reading was taken, in unix milliseconds.
+    observed_wall_ts_ms: int
     #: The venue's own user number, for saying which account this was.
     account_user_id: str
     #: "demo" or "mainnet", as the engine resolved it.
@@ -118,17 +128,17 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
 
     equity = payload.get("account_equity_usdt")
     available = payload.get("account_available_usdt")
-    observed = payload.get("account_observed_ns")
+    observed = payload.get("account_observed_wall_ts_ms")
     account_user_id = payload.get("account_user_id")
     realm = payload.get("realm")
     if equity is None or observed is None:
         raise ValueError(
             "engine heartbeat carries no account reading yet "
-            "(account_equity_usdt/account_observed_ns are null)"
+            "(account_equity_usdt/account_observed_wall_ts_ms are null)"
         )
     equity_usdt = float(equity)
     available_usdt = float(available) if available is not None else 0.0
-    observed_ts_ns = int(observed)
+    observed_wall_ts_ms = int(observed)
     if not math.isfinite(equity_usdt) or equity_usdt <= 0.0:
         raise ValueError("engine heartbeat equity must be finite and positive")
     # Negative spare margin is an ordinary reading on a fully deployed account,
@@ -136,8 +146,8 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     # kernel is what refuses new risk on it.
     if not math.isfinite(available_usdt):
         raise ValueError("engine heartbeat available margin must be finite")
-    if observed_ts_ns <= 0:
-        raise ValueError("engine heartbeat account_observed_ns must be positive")
+    if observed_wall_ts_ms <= 0:
+        raise ValueError("engine heartbeat account_observed_wall_ts_ms must be positive")
     if not isinstance(account_user_id, str) or not account_user_id:
         raise ValueError("engine heartbeat carries no account_user_id")
     if not isinstance(realm, str) or not realm:
@@ -145,7 +155,7 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     return EngineAccountReading(
         equity_usdt=equity_usdt,
         available_usdt=available_usdt,
-        observed_ts_ns=observed_ts_ns,
+        observed_wall_ts_ms=observed_wall_ts_ms,
         account_user_id=account_user_id,
         realm=realm,
     )
@@ -168,7 +178,7 @@ def require_recent_engine_account(
             f"(that engine is on venue account {reading.account_user_id})"
         )
     stamp_ns = time.time_ns() if now_ns is None else int(now_ns)
-    age_ns = stamp_ns - reading.observed_ts_ns
+    age_ns = stamp_ns - reading.observed_wall_ts_ms * 1_000_000
     if age_ns < 0:
         raise ValueError(
             f"engine heartbeat account reading is {-age_ns}ns in the future; clocks disagree"
