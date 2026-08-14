@@ -16,6 +16,30 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 ~02:20 UTC — The engine becomes plug-and-play on both axes:
+  a venue chosen by name, and a market maker beside the book follower.** Not
+  deployed; the fleet is untouched. **Venues**: `Venue` is a closed enum in
+  the venue crate with `KNOWN_VENUES` and a by-name constructor, so adding
+  Hyperliquid or MEXC is a module, a variant and a name — the engine's wiring
+  does not move. Dispatch is an enum rather than a trait object because
+  `VenueGateway` uses `async fn` in trait and cannot be made into one at all,
+  and because a closed set keeps every venue visible in one place. **That
+  last property is the safety fence**, which venue selection is exactly the
+  mechanism to undermine: a name selects an adapter already compiled in and
+  can never introduce an endpoint, the source scanner covers every module the
+  crate declares (a new test fails if one escapes it), and a check walks
+  `KNOWN_VENUES` for anything that smells of real money. Verified by planting
+  `api.bybit.com` in the new registry: two fence tests failed by name.
+  **Strategies**: a `quoter` plug — the in-the-loop kind — quoting both sides
+  around mid, post-only, each quote carrying a stop because the kernel
+  refuses an opening order without one. It moves a quote rather than
+  replacing it (a replacement gives up the queue position it earned), leaves
+  a nearly-right quote alone, stops quoting the side that would push
+  inventory past its ceiling, and pulls both sides when the book is empty or
+  crossed. No adverse-selection model, no queue estimate, and nothing has
+  graded whether it makes money — it is a working maker on the engine's
+  contracts, not a strategy. 372 Rust tests, full Python gate green.
+
 - **2026-08-14 01:56 UTC — The engine placed its first live orders, a full
   round trip through the carry plug on the DEMO account — and blocked the
   Python owner for about a hundred seconds doing it.** The round trip: a book
