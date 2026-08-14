@@ -30,9 +30,14 @@ match; never append history to this file.
   isolated clone at `/opt/engine-build` — never the deployed checkout the
   fleet runs from — with its own toolchain under `/opt/rust`. Measured there
   2026-08-14: whole chain **2.60 ms median**, against the Python order path's
-  25.7 ms on the same box. It has run in **shadow** against the demo account
-  (real feed, venue-authenticated private stream, real equity read, risk gate,
-  durable log, send declined), so **nothing it does reaches the venue**. No
+  25.7 ms on the same box. It has run in **shadow** against the demo account, and once **live**: on
+  2026-08-14 01:56 UTC it entered and exited 0.001 BTCUSDT from a target book,
+  both orders accepted by Bybit, account flat afterwards. **That live run
+  blocked the demo owner for ~100 s** — its native-protection reconciliation
+  cannot accept a venue position it did not place — so the engine runs
+  against a fleet-owned account in **shadow only** until it holds a
+  single-writer lease or has an account of its own (CHANGELOG 2026-08-14
+  01:56). No
   systemd unit, no deploy, and **no `REAL_MONEY` equivalent at all** — demo
   hostnames by construction, shadow by default. The Python fleet owns
   everything live and stays until the engine can quote entries, reconcile with

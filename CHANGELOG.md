@@ -16,6 +16,33 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 01:56 UTC — The engine placed its first live orders, a full
+  round trip through the carry plug on the DEMO account — and blocked the
+  Python owner for about a hundred seconds doing it.** The round trip: a book
+  saying hold 70 USDT of BTCUSDT went in, the follower entered **Buy 0.001 at
+  market**, and Bybit accepted it (`4a9dcdc5-03b7-4861-9ab4-adae7eedc11c`,
+  835 ms from process start). An empty book then went in, the follower exited
+  **Sell 0.001 reduce-only**, accepted as
+  `8c18803e-6f6c-46fb-8d0c-b7a5cdb49b24` (173 ms from start), and a read-only
+  probe afterwards found nothing left to close. Research decided, the engine
+  traded, the account came back flat.
+  **The cost, and it is the finding that matters.** While that 0.001 position
+  was open the demo account owner logged, every pass:
+  `account reconcile blocked new intents: native protection reconciliation
+  failed: BTCUSDT reconstructed flat contradicts authenticated venue size
+  0.001`. The fleet's separate-books policy tolerates a foreign *position* for
+  trading, but native-protection reconciliation is stricter — it requires the
+  venue's size and the owner's own reconstruction to agree per symbol, and a
+  position the owner did not place can never agree. The owner refused new
+  intents until the engine closed it, then recovered on its own with no
+  intervention; the fleet took no trades in that window and nothing was lost.
+  **This is the wedge, demonstrated cheaply.** It is why the single-writer
+  lease is a hard blocker rather than tidiness, and it settles a question that
+  was open: the engine and the Python fleet **cannot share an account**, even
+  for a minute, even on demo. Either the engine gets a lease that stops both
+  running, or it gets an account of its own. Until one of those exists, the
+  engine runs against this account in shadow only.
+
 - **2026-08-14 01:42 UTC — The target-book seam runs end to end on the
   production box.** A book rendered by the Python side
   (`carry_hold_v4_live_v1`, one 120 USDT BTCUSDT target, 0.35 stop) was

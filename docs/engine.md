@@ -122,10 +122,16 @@ parallel and integrate by type-check.
   `venue_protection.py`, the partition in `account_kernel.py`) stay untouched
   and remain the reference; the Rust kernel carries table-driven parity tests
   against their decision semantics. Unknown state refuses the order.
-- **One writer per account.** The engine must never trade the same account as
-  the Python fleet at the same time — that is the wedge we already lived
-  through once. Deployment posture is an owner decision recorded in
-  CHANGELOG when it happens.
+- **One writer per account — measured, not assumed.** On 2026-08-14 the
+  engine held a 0.001 BTCUSDT position on the demo account for about a
+  hundred seconds. The Python owner refused new intents for the whole of it:
+  its native-protection reconciliation requires the venue's size and its own
+  reconstruction to agree per symbol, and a position it did not place never
+  can. It recovered by itself once the engine closed out. The separate-books
+  policy covers a foreign position for trading; it does not cover this. So
+  the two **cannot share an account**, even briefly, and the engine has no
+  lease yet: it runs against a fleet-owned account in shadow only, until it
+  either holds a lease or has an account of its own.
 
 ## Crash safety
 
