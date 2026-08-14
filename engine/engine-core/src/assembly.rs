@@ -485,7 +485,7 @@ mod tests {
     fn quoter(symbol: &str) -> StrategyConfig {
         let params: toml::Table = toml::from_str(&format!(
             r#"
-            symbol = "{symbol}"
+            symbols = ["{symbol}"]
             half_spread_bps = 10.0
             requote_bps = 2.0
             qty = 0.1

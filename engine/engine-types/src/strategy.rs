@@ -52,6 +52,23 @@ pub trait StrategyCtx {
     /// a hand trade reads as `false`. Boot's reconciliation is what notices
     /// that and stops the engine opening on top of it.
     fn foreign_position(&self, symbol: SymbolId) -> bool;
+    /// This strategy's own signed position in a symbol, summed from the fills
+    /// of the orders it placed. Positive is long.
+    ///
+    /// [`StrategyCtx::position`] above is the venue's account reading, and it
+    /// is the wrong number for a strategy to hold inventory against, twice
+    /// over. It is refreshed on the engine's own schedule — seconds — so a
+    /// strategy that has just filled goes on acting as though it had not,
+    /// which for a maker means quoting the same side again and again. And on
+    /// an account running two sleeves it is the sum of both, so one sleeve
+    /// would count the other's position as its own.
+    ///
+    /// This is the strategy's own trading and nobody else's. It moves the
+    /// instant a fill arrives, before the strategy is woken. What it is *not*
+    /// is a second opinion about what the account holds: hand-placed exposure
+    /// belongs to nobody here and reads as zero, and where this and the
+    /// account reading disagree the account reading is the fact.
+    fn my_position(&self, symbol: SymbolId) -> f64;
     /// Tick, step and minimums, as the venue stated them at boot. `None`
     /// means nothing can be quantized for that symbol, so nothing can be
     /// sent for it either.

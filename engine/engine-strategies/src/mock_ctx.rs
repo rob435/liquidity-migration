@@ -61,6 +61,11 @@ pub struct MockCtx {
     /// the account reading cannot tell you this, so a mock that derived one
     /// from the other could not show the difference.
     foreign: HashSet<SymbolId>,
+    /// What this strategy's own fills add up to, signed, positive long. The
+    /// engine keeps this from the log; the bench keeps it from the fills a
+    /// test delivers, so a plug that reads its own inventory reads the same
+    /// number here that it would live.
+    mine: HashMap<SymbolId, f64>,
     /// What the venue said about tick and step. Empty unless a test seeds it,
     /// and an unseeded symbol reads the way an unknown one does: nothing can
     /// be quantized for it.
@@ -89,6 +94,7 @@ impl MockCtx {
             tickers: Vec::new(),
             positions: HashMap::new(),
             foreign: HashSet::new(),
+            mine: HashMap::new(),
             rules: HashMap::new(),
             now_ns: 1_000,
             // An ordinary unix millisecond stamp, so anything that reads like
@@ -157,6 +163,23 @@ impl MockCtx {
         self.foreign.insert(id);
     }
 
+    /// Charge a fill to this strategy's own running position, the way the
+    /// engine's attribution does before it wakes anybody.
+    pub fn charge_fill(&mut self, symbol: SymbolId, side: Side, qty: f64) {
+        let signed = match side {
+            Side::Buy => qty,
+            Side::Sell => -qty,
+        };
+        *self.mine.entry(symbol).or_insert(0.0) += signed;
+    }
+
+    /// Start a test with this strategy already holding something of its own,
+    /// without walking it through the fills that got there.
+    pub fn set_my_position(&mut self, symbol: &str, signed_qty: f64) {
+        let id = self.add_symbol(symbol);
+        self.mine.insert(id, signed_qty);
+    }
+
     /// Seed the venue's tick, step and minimums for a symbol.
     pub fn set_rule(&mut self, symbol: &str, rule: InstrumentRule) {
         let id = self.add_symbol(symbol);
@@ -188,6 +211,10 @@ impl StrategyCtx for MockCtx {
 
     fn foreign_position(&self, symbol: SymbolId) -> bool {
         self.foreign.contains(&symbol)
+    }
+
+    fn my_position(&self, symbol: SymbolId) -> f64 {
+        self.mine.get(&symbol).copied().unwrap_or(0.0)
     }
 
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
@@ -314,6 +341,10 @@ impl Harness {
         is_maker: bool,
     ) {
         let id = self.ctx.id_of(symbol);
+        // Before the strategy hears about it, exactly as the engine charges
+        // attribution before it wakes anybody: a plug that reads its own
+        // position inside the fill callback must already see the fill.
+        self.ctx.charge_fill(id, side, qty);
         self.deliver(EngineEvent::Order(OrderUpdate::Fill {
             client_order_id: client_order_id.to_string(),
             symbol: id,

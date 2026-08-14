@@ -1,11 +1,11 @@
-//! The engine binary: `run`, `bench`, `replay`.
+//! The engine binary: `run`, `bench`, `replay`, `fills`.
 //!
 //! One thread. The runtime is tokio's current-thread build on purpose — the
 //! whole point of the design is that a market message is turned into an order
 //! without ever leaving the thread it arrived on.
 
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use engine_core::bench::{self, BenchOptions};
@@ -107,7 +107,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
         "fills" => {
             let path = value(args, "--wal").ok_or("fills needs --wal PATH")?;
-            let (replayed, torn) = engine_wal::replay_scan(&PathBuf::from(path))?;
+            let (replayed, torn) = engine_wal::replay_scan(Path::new(&path))?;
             let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
             print!("{}", execution::report::of_log(&records));
             if torn {

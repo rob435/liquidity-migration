@@ -1,25 +1,39 @@
-//! `quoter`: hold a two-sided quote around mid, and keep it there.
+//! `quoter`: hold a two-sided quote around the market, and keep it there.
 //!
 //! The other kind of strategy. It decides in the loop rather than following a
 //! book, and it needs the whole order vocabulary: quotes have to be pulled
 //! when the book breaks or inventory fills, and moved when the market walks
 //! away. Placing alone is not market making.
 //!
-//! The arithmetic — where a quote belongs, when it is worth moving, which
-//! side stops being quoted — is [`super::plan::plan_quotes`], and it is pure.
-//! This plug only turns its answers into actions and remembers which order is
-//! which.
+//! The arithmetic — where a quote belongs, when it is worth moving, which side
+//! stops being quoted — is [`super::plan`], and it is pure. This plug only
+//! turns its answers into actions and remembers which order is which.
 //!
-//! ## What this is not
+//! ## Three things it reads that a naive maker gets wrong
 //!
-//! There is no adverse-selection model, no queue-position estimate, no
-//! skewing of the quote by inventory beyond stopping a side outright, and no
-//! measurement of whether any of it makes money. It is a working maker on the
-//! engine's contracts, not a strategy anybody has graded.
+//! - **Its own position, not the account's.** [`StrategyCtx::my_position`] is
+//!   this strategy's own fills; `position` is the venue's account reading,
+//!   which lags by seconds and, on an account running two sleeves, is the sum
+//!   of both. A maker quoting off the account reading goes on offering the
+//!   same side it has just been filled on until the reading catches up, which
+//!   is the exact behaviour that turns a maker into a position.
+//! - **A fill is a wake.** After one, inventory has changed and a quote has
+//!   left the book, so the quotes are rebuilt then and there rather than on
+//!   the next price.
+//! - **A name another sleeve is holding is left alone.** There is one venue
+//!   stop per position, so two sleeves in one symbol would have one stop
+//!   between them, set by whoever placed the last opening order.
+//!
+//! ## What this is still not
+//!
+//! There is no adverse-selection model and no queue-position estimate, and it
+//! has never been graded. What it now has is the engine's own measurement:
+//! every fill it takes is priced and marked out, so `engine fills` can say
+//! whether the quoting pays.
 
 use engine_types::{
-    EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy,
-    StrategyCtx, StrategyId, Subscription, SymbolId, TimeInForce,
+    EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, OrderUpdate, Side, StopSpec,
+    Strategy, StrategyCtx, StrategyId, Subscription, SymbolId, TimeInForce,
 };
 
 use super::plan::{plan_quotes, QuoteRules, QuoteStep, Resting};
@@ -32,39 +46,62 @@ const QUOTE_TAG: &str = "quote";
 
 pub struct Quoter {
     id: StrategyId,
-    symbol_name: String,
-    symbol: Option<SymbolId>,
+    /// The venue's spellings, and the ids once the engine has interned them.
+    /// Kept in step by position, so `ids[i]` is `symbol_names[i]`.
+    symbol_names: Vec<String>,
+    ids: Vec<Option<SymbolId>>,
     rules: QuoteRules,
     /// Scratch, kept between wakes so reading our own book allocates nothing
     /// on the hot path.
-    working: Vec<(String, Side, f64)>,
+    working: Vec<Resting>,
 }
 
 impl Quoter {
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
         let p = Params::new(NAME, params)?;
         p.reject_unknown(&[
-            "symbol",
+            "symbols",
             "half_spread_bps",
             "requote_bps",
+            "skew_bps",
             "qty",
             "max_position",
             "stop_loss_fraction",
         ])?;
 
-        let symbol_name = p.string("symbol")?;
-        if symbol_name.is_empty() {
-            return Err(p.invalid("symbol", "expected a venue symbol, got an empty string"));
+        let symbol_names = p.strings("symbols")?;
+        if symbol_names.is_empty() {
+            return Err(p.invalid("symbols", "expected at least one venue symbol, got none"));
+        }
+        if let Some(blank) = symbol_names.iter().position(|s| s.is_empty()) {
+            return Err(p.invalid(
+                "symbols",
+                format!("entry {blank} is an empty string, which is not a venue symbol"),
+            ));
         }
         let half_spread = p.positive("half_spread_bps")? / 10_000.0;
         let requote = p.positive("requote_bps")? / 10_000.0;
-        // A quote that has to move further than it sits from mid would never
-        // be moved at all, which is a maker standing still in a moving market.
+        // A quote that has to move further than it sits from the centre would
+        // never be moved at all, which is a maker standing still in a moving
+        // market.
         if requote >= half_spread {
             return Err(p.invalid(
                 "requote_bps",
                 "expected less than half_spread_bps; a tolerance wider than the quote's own \
-                 distance from mid means a quote is never moved",
+                 distance from the centre means a quote is never moved",
+            ));
+        }
+        // Absent means no lean: quote symmetrically whatever is held, which
+        // is the strategy exactly as it was before the lean existed. Present
+        // and it must be a real number, the same way every other optional dial
+        // in this crate reads.
+        let skew = p.opt_positive("skew_bps")?.unwrap_or(0.0) / 10_000.0;
+        if skew > half_spread {
+            return Err(p.invalid(
+                "skew_bps",
+                "expected no more than half_spread_bps; a lean wider than the quote's own \
+                 half-spread would put the far side of the quote through the market at full \
+                 inventory, which is a taker",
             ));
         }
         let stop_loss_fraction = p.positive("stop_loss_fraction")?;
@@ -75,14 +112,20 @@ impl Quoter {
             ));
         }
 
+        let ids = vec![None; symbol_names.len()];
         Ok(Self {
             id,
-            symbol_name,
-            symbol: None,
+            symbol_names,
+            ids,
             rules: QuoteRules {
                 half_spread,
                 requote_tolerance: requote,
+                skew,
                 qty: p.positive("qty")?,
+                // In base units, so it is a per-symbol ceiling and the same
+                // number means different money on different coins. That is the
+                // contract this plug was written to; a notional ceiling would
+                // be a different strategy.
                 max_position: p.positive("max_position")?,
                 stop_loss_fraction,
             },
@@ -90,57 +133,72 @@ impl Quoter {
         })
     }
 
-    fn resolve(&mut self, ctx: &dyn StrategyCtx) -> Option<SymbolId> {
-        if self.symbol.is_none() {
-            self.symbol = ctx.symbol_id(&self.symbol_name);
+    /// Fill in the ids the engine handed out. Symbols are interned at boot
+    /// from the union of every strategy's subscriptions, so this resolves on
+    /// the first event and is kept from then on.
+    fn resolve(&mut self, ctx: &dyn StrategyCtx) {
+        for (index, name) in self.symbol_names.iter().enumerate() {
+            if self.ids[index].is_none() {
+                self.ids[index] = ctx.symbol_id(name);
+            }
         }
-        self.symbol
+    }
+
+    fn mine(&self, symbol: SymbolId) -> bool {
+        self.ids.contains(&Some(symbol))
     }
 
     fn requote(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) {
-        let quote = *ctx.quote(symbol);
-        let position = match ctx.position(symbol) {
-            Some(p) if p.side == Side::Buy => p.qty,
-            Some(p) => -p.qty,
-            None => 0.0,
-        };
-
         // Our own working orders on this symbol, as the planner wants them.
+        // The buffer is reused between wakes, so this allocates only when a
+        // quote's id is longer than the last one that lived in the slot.
         self.working.clear();
         let mut out = Vec::new();
         ctx.resting(&mut out);
         for order in out.iter().filter(|o| o.symbol == symbol) {
             if let Some(px) = order.px() {
-                self.working.push((order.client_order_id.to_string(), order.side, px));
+                self.working.push(Resting {
+                    client_order_id: order.client_order_id.to_string(),
+                    side: order.side,
+                    px,
+                });
             }
         }
         drop(out);
-        let resting: Vec<Resting> = self
-            .working
-            .iter()
-            .map(|(id, side, px)| Resting { client_order_id: id.clone(), side: *side, px: *px })
-            .collect();
+
+        // Somebody else's name. Pull anything of ours that is resting in it
+        // and leave it: there is one venue stop per position, so two sleeves
+        // here would have one stop between them.
+        if ctx.foreign_position(symbol) {
+            for order in &self.working {
+                ctx.cancel(symbol, &order.client_order_id);
+            }
+            return;
+        }
 
         let Some(rule) = ctx.instrument(symbol) else {
             return;
         };
-        for step in plan_quotes(quote.bid_px, quote.ask_px, position, &resting, self.rules) {
+        let quote = *ctx.quote(symbol);
+        // This strategy's own fills, not the account's reading. See the header.
+        let position = ctx.my_position(symbol);
+        let steps = plan_quotes(quote.bid_px, quote.ask_px, position, &self.working, self.rules);
+        for step in steps {
             match step {
                 QuoteStep::Place { side, px, qty, stop_px } => {
                     self.place(symbol, side, px, qty, stop_px, &rule, ctx)
                 }
-                QuoteStep::Move { client_order_id, px } => {
-                    ctx.amend(
-                        symbol,
-                        &client_order_id,
-                        engine_types::AmendSpec { px: Some(px), qty: None },
-                    );
-                }
+                QuoteStep::Move { client_order_id, px } => ctx.amend(
+                    symbol,
+                    &client_order_id,
+                    engine_types::AmendSpec { px: Some(px), qty: None },
+                ),
                 QuoteStep::Pull { client_order_id } => ctx.cancel(symbol, &client_order_id),
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn place(
         &self,
         symbol: SymbolId,
@@ -186,18 +244,25 @@ impl Strategy for Quoter {
     }
 
     fn subscriptions(&self) -> Vec<Subscription> {
-        vec![Subscription { symbol: self.symbol_name.clone(), feed: Feed::Quote }]
+        self.symbol_names
+            .iter()
+            .map(|symbol| Subscription { symbol: symbol.clone(), feed: Feed::Quote })
+            .collect()
     }
 
     fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
-        let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event else {
-            return;
+        self.resolve(&*ctx);
+        let symbol = match event {
+            EngineEvent::Market(MarketEvent::Quote { symbol, .. }) => *symbol,
+            // A fill changed the inventory and took a quote out of the book.
+            // Waiting for the next price to notice would leave the maker
+            // one-sided for as long as the market is quiet — which is exactly
+            // when it is least able to afford it.
+            EngineEvent::Order(OrderUpdate::Fill { symbol, .. }) => *symbol,
+            _ => return,
         };
-        let Some(mine) = self.resolve(&*ctx) else {
-            return;
-        };
-        if *symbol == mine {
-            self.requote(mine, ctx);
+        if self.mine(symbol) {
+            self.requote(symbol, ctx);
         }
     }
 }

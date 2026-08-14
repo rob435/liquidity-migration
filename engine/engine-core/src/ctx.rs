@@ -130,6 +130,10 @@ impl StrategyCtx for Ctx<'_> {
         self.attribution.held_by_another(self.strategy, symbol)
     }
 
+    fn my_position(&self, symbol: SymbolId) -> f64 {
+        self.attribution.signed(self.strategy, symbol)
+    }
+
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
         self.rules.get(symbol.0 as usize).copied().flatten()
     }

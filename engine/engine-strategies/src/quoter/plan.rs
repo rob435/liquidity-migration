@@ -25,6 +25,19 @@ pub struct QuoteRules {
     /// Inventory ceiling in base units. A side that would push the position
     /// past this stops being quoted.
     pub max_position: f64,
+    /// How far the quote's centre moves away from the inventory when the
+    /// position is at its ceiling, as a fraction of mid. Zero quotes
+    /// symmetrically around the market whatever is held.
+    ///
+    /// This is the difference between a maker and a thing that accumulates.
+    /// Without it the only answer to inventory is the ceiling, which is a
+    /// wall: quote both sides at full size until the position hits the limit,
+    /// then stop one side outright and wait for the market to come back. With
+    /// it, every fill on one side moves both quotes away from that side, so
+    /// the book pays a little more to be taken out of its position and a
+    /// little less to be put further into it. It works out of inventory
+    /// continuously instead of parking at the wall.
+    pub skew: f64,
     /// How far below (bid) or above (ask) the fill a stop sits. The risk
     /// kernel refuses a position-opening order without one, and a quote is
     /// position-opening.
@@ -51,6 +64,21 @@ pub enum QuoteStep {
     Pull { client_order_id: String },
 }
 
+/// Where the quotes are centred, given what is already held.
+///
+/// Long pushes the centre down, short pushes it up — so the side that would
+/// add to the position quotes further away and the side that would reduce it
+/// quotes closer. `position` is signed, positive long, and the lean is capped
+/// at the ceiling so a position somehow past it cannot send the centre through
+/// the floor.
+pub fn centre(mid: f64, position: f64, rules: QuoteRules) -> f64 {
+    if rules.skew <= 0.0 || rules.max_position <= 0.0 || !position.is_finite() {
+        return mid;
+    }
+    let lean = (position / rules.max_position).clamp(-1.0, 1.0);
+    mid * (1.0 - lean * rules.skew)
+}
+
 /// Work out what each side needs. `position` is signed: positive is long.
 ///
 /// A crossed or empty book yields no quotes and pulls what is resting — a
@@ -66,6 +94,7 @@ pub fn plan_quotes(
     let mut steps = Vec::new();
     let usable = bid_px > 0.0 && ask_px > 0.0 && ask_px >= bid_px;
     let mid = (bid_px + ask_px) / 2.0;
+    let centre = centre(mid, position, rules);
 
     for side in [Side::Buy, Side::Sell] {
         let working = resting.iter().find(|r| r.side == side);
@@ -86,8 +115,8 @@ pub fn plan_quotes(
         }
 
         let want_px = match side {
-            Side::Buy => mid * (1.0 - rules.half_spread),
-            Side::Sell => mid * (1.0 + rules.half_spread),
+            Side::Buy => centre * (1.0 - rules.half_spread),
+            Side::Sell => centre * (1.0 + rules.half_spread),
         };
         match working {
             None => steps.push(QuoteStep::Place {
@@ -119,15 +148,22 @@ fn stop_for(px: f64, side: Side, fraction: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    pub(super) use super::*;
 
-    const RULES: QuoteRules = QuoteRules {
+    /// No skew, so the existing rules read exactly as they always did: the
+    /// quotes sit symmetrically around mid whatever is held.
+    pub(super) const RULES: QuoteRules = QuoteRules {
         half_spread: 0.001,
         requote_tolerance: 0.0005,
         qty: 1.0,
         max_position: 3.0,
         stop_loss_fraction: 0.35,
+        skew: 0.0,
     };
+
+    /// The same book, leaning against inventory: at the ceiling the centre
+    /// moves a full half-spread, so one side of the quote lands on mid.
+    pub(super) const LEANING: QuoteRules = QuoteRules { skew: 0.001, ..RULES };
 
     fn resting(id: &str, side: Side, px: f64) -> Resting {
         Resting { client_order_id: id.into(), side, px }
@@ -223,5 +259,82 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod skew_tests {
+    use super::tests::{LEANING, RULES};
+    use super::*;
+
+    fn px_of(steps: &[QuoteStep], want: Side) -> f64 {
+        steps
+            .iter()
+            .find_map(|s| match s {
+                QuoteStep::Place { side, px, .. } if *side == want => Some(*px),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {want:?} quote in {steps:?}"))
+    }
+
+    #[test]
+    fn a_flat_book_quotes_evenly_around_the_market() {
+        assert_eq!(centre(100.0, 0.0, LEANING), 100.0);
+    }
+
+    #[test]
+    fn being_long_moves_both_quotes_down() {
+        // The whole idea: the side that would sell us out of the position gets
+        // cheaper to hit, and the side that would add to it gets dearer. Both
+        // move, which is what makes it a lean rather than a one-sided pull.
+        let flat = plan_quotes(99.0, 101.0, 0.0, &[], LEANING);
+        let long = plan_quotes(99.0, 101.0, 1.5, &[], LEANING);
+        assert!(px_of(&long, Side::Buy) < px_of(&flat, Side::Buy), "bid backs off");
+        assert!(px_of(&long, Side::Sell) < px_of(&flat, Side::Sell), "ask comes in");
+    }
+
+    #[test]
+    fn being_short_moves_both_quotes_up() {
+        let flat = plan_quotes(99.0, 101.0, 0.0, &[], LEANING);
+        let short = plan_quotes(99.0, 101.0, -1.5, &[], LEANING);
+        assert!(px_of(&short, Side::Buy) > px_of(&flat, Side::Buy));
+        assert!(px_of(&short, Side::Sell) > px_of(&flat, Side::Sell));
+    }
+
+    #[test]
+    fn the_lean_is_proportional_and_stops_at_the_ceiling() {
+        // Half-full leans half as far as full, and a position somehow past the
+        // ceiling cannot lean further than full — otherwise a stale reading
+        // could send the centre through the floor.
+        let mid = 100.0;
+        let half = mid - centre(mid, 1.5, LEANING);
+        let full = mid - centre(mid, 3.0, LEANING);
+        let over = mid - centre(mid, 30.0, LEANING);
+        assert!((full - 2.0 * half).abs() < 1e-12, "{full} vs {half}");
+        assert_eq!(over, full, "capped at the ceiling");
+    }
+
+    #[test]
+    fn no_skew_is_the_old_behaviour_exactly() {
+        // The dial off must be the strategy that existed before it, or every
+        // number measured against the old one is invalidated by a default.
+        for position in [-3.0, -1.0, 0.0, 1.0, 3.0] {
+            assert_eq!(centre(100.0, position, RULES), 100.0);
+        }
+    }
+
+    #[test]
+    fn a_ceiling_still_stops_a_side_outright() {
+        // The lean is continuous pressure, not a limit. At the ceiling the
+        // side that would add to the position stops being quoted at all.
+        let steps = plan_quotes(99.0, 101.0, 3.0, &[], LEANING);
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(steps[0], QuoteStep::Place { side: Side::Sell, .. }));
+    }
+
+    #[test]
+    fn a_nonsense_position_leaves_the_centre_alone() {
+        assert_eq!(centre(100.0, f64::NAN, LEANING), 100.0);
+        assert_eq!(centre(100.0, 1.0, QuoteRules { max_position: 0.0, ..LEANING }), 100.0);
     }
 }
