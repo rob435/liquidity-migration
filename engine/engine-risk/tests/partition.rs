@@ -125,12 +125,17 @@ fn an_unpartitioned_config_keeps_the_historical_behaviour() {
 fn the_margin_share_binds_independently_of_the_gross_share() {
     let mut cfg = partition_config();
     cfg.envelope.reference_usdt = 5_000.0;
+    // The partition below runs at leverage 1, so the most book this account
+    // could ever carry is the reference itself. The gross multiple has to say
+    // so: at the fixture's 2.0 the account cap would be 10,000 of book that no
+    // amount of margin could fund, which the load-time proof now refuses.
+    cfg.envelope.gross_notional_multiple = 1.0;
     // The reference moves tenfold, so the account caps move with it. Left at
     // the 500 USDT shape's numbers the account margin cap would refuse this
     // order before the margin share got to clamp it, and the test would be
     // watching the wrong control.
-    cfg.envelope.max_symbol_notional_usdt = 10_000.0;
-    cfg.envelope.max_component_gross_notional_usdt = 10_000.0;
+    cfg.envelope.max_symbol_notional_usdt = 5_000.0;
+    cfg.envelope.max_component_gross_notional_usdt = 5_000.0;
     cfg.envelope.max_initial_margin_usdt = 5_000.0;
     cfg.partition = PartitionConfig {
         allocations: vec![StrategyAllocation {

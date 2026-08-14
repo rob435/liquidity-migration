@@ -211,3 +211,66 @@ fn the_two_profiles_are_not_accidentally_the_same_shape() {
         "the funded account should be the smaller book of the two"
     );
 }
+
+#[test]
+fn a_gross_cap_no_amount_of_margin_could_fund_is_refused() {
+    // operational_profile.py:409, the last load-time proof the Rust side did
+    // not run. Gross above the whole capital reference times leverage is book
+    // nobody can reach, so a cap set up there is scenery -- an operator
+    // tightening it would watch nothing change.
+    let sleeves = both_sleeves();
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    // 100 of reference at leverage 2 funds 200 of book. Ask for 201.
+    doc["account_risk"]["max_account_gross_notional_usdt"] = serde_json::json!(201.0);
+    doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(201.0);
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
+    assert!(err.to_string().contains("cannot be reached"), "{err}");
+}
+
+#[test]
+fn the_shipped_mainnet_profile_sits_inside_what_its_capital_can_fund() {
+    // 175 of book against 100 of reference at leverage 2, which funds 200.
+    // Stated because it is the margin the check above leaves, and a change to
+    // the dials that ate it would otherwise show up only as a refusal to boot.
+    let sleeves = both_sleeves();
+    let cfg = kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs(&sleeves))
+        .unwrap();
+    let reachable = cfg.envelope.reference_usdt * cfg.partition.leverage;
+    assert_eq!(reachable, 200.0);
+    assert_eq!(cfg.envelope.account_gross_cap_usdt(), 175.0);
+}
+
+#[test]
+fn a_profile_whose_numbers_do_not_survive_a_round_trip_still_loads() {
+    // The engine holds the account gross cap as a multiple of the reference,
+    // because its reference follows the wallet. The profile states it as
+    // money. Rebuilding one from the other lands a fraction of a cent off for
+    // most numbers -- 100 * (177/100) is not 177 -- and both shipped profiles
+    // set the component cap equal to the account cap. Without a tolerance on
+    // that comparison, a profile would be refused for agreeing with itself.
+    //
+    // 113 is deliberate. 1.75 and 2.0 are exact in binary, which is why the
+    // two files in the repository never showed this; 100 * (113/100) comes
+    // back as 112.99999999999999, just *under* the number the profile stated,
+    // which is the direction that gets a profile refused.
+    let sleeves = both_sleeves();
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    doc["account_risk"]["max_account_gross_notional_usdt"] = serde_json::json!(113.0);
+    doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(113.0);
+    // The sleeve shares have to fit inside the smaller account too.
+    doc["account_risk"]["sleeve_limits"]["carry"]["max_gross_notional_usdt"] =
+        serde_json::json!(60.0);
+    doc["account_risk"]["sleeve_limits"]["long"]["max_gross_notional_usdt"] =
+        serde_json::json!(49.0);
+    let cfg = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves))
+        .expect("a profile that states one cap twice must load");
+    assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 113.0);
+    // And the rebuild really is lossy, which is what makes the tolerance real
+    // rather than defensive.
+    assert!(
+        cfg.envelope.account_gross_cap_usdt() < 113.0,
+        "the rebuild has to land under the stated cap, or this test proves nothing"
+    );
+}

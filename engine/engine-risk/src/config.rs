@@ -113,7 +113,14 @@ impl EnvelopeConfig {
                 "max_symbol_notional_usdt cannot exceed max_component_gross_notional_usdt",
             ));
         }
-        if self.max_component_gross_notional_usdt > self.account_gross_cap_usdt() {
+        // The tolerance is not slack, it is arithmetic. The account cap is
+        // held as a multiple and rebuilt as `reference * multiple`, while this
+        // number was read straight from the profile — and both shipped
+        // profiles set the two equal. Rebuilding 201 as 100 * 2.01 gives
+        // 200.99999999999997, so an exact comparison would refuse a profile
+        // for saying the same thing twice. The two shipped files happen to use
+        // ratios that survive a round trip (1.75, 2.0); most numbers do not.
+        if self.max_component_gross_notional_usdt > self.account_gross_cap_usdt() * (1.0 + 1e-12) {
             return Err(bad(
                 "max_component_gross_notional_usdt cannot exceed reference_usdt * \
                  gross_notional_multiple",
@@ -230,6 +237,28 @@ impl KernelConfig {
         self.partition.validate(&self.envelope)?;
         if !self.qty_tolerance.is_finite() || self.qty_tolerance < 0.0 {
             return Err(bad("qty_tolerance must not be negative"));
+        }
+        // operational_profile.py:409, the one load-time proof PORT_NOTES had
+        // recorded as not ported. It needs both blocks, which is why it lives
+        // here rather than in either one.
+        //
+        // Gross above the whole capital reference times leverage is gross
+        // nobody can reach — that is the most book the account could carry if
+        // every last unit of capital were posted as margin. A cap set above it
+        // looks like a limit and is scenery: an operator tightening it would
+        // watch nothing change.
+        //
+        // It says nothing about `max_initial_margin_usdt`, which may sit well
+        // below the reference on purpose. A profile that wants margin to be
+        // the binding cap is a profile, not a mistake.
+        let reachable = self.envelope.reference_usdt * self.partition.leverage;
+        if self.envelope.account_gross_cap_usdt() > reachable * (1.0 + 1e-12) {
+            return Err(bad(format!(
+                "the account gross cap ({:.6}) is above what the capital reference could \
+                 fund at leverage {:.6} ({reachable:.6}); that much book cannot be reached",
+                self.envelope.account_gross_cap_usdt(),
+                self.partition.leverage,
+            )));
         }
         Ok(())
     }
