@@ -324,38 +324,17 @@ because the deletion order depends on it:
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | Done, by feeding the fleet's own watchdog rather than growing a second one. The engine writes a heartbeat file; `check_fleet_liveness.py` reads it and pages on stale, unreadable, or latched. Off unless a path is configured |
 | Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file. **Never exercised** — see below |
-| **The universe is fixed at boot** | **Not done.** A follower's symbols are collected once, when it starts, so it cannot trade a name a later book first mentions. Widening it means editing the config and restarting. Smaller than it first looks — see below |
+| Following a symbol a book names late | Done. A name the engine has never followed is taken on when a book asks for it: interned, subscribed, added to the gateway, taught to the private stream, and given an instrument rule. The four tables that map names to ids are checked against each other and a symbol they disagree about is dropped rather than traded |
 
 ### What that leaves
 
-Two different kinds of thing, and it is worth not confusing them.
+Not a capability, as of 2026-08-14. Every row above is Done.
 
-**A capability gap, and it is smaller than it first looks.** The universe is
-fixed at boot, so a follower cannot trade a name that a later book first
-mentions: there is no price for it, no instrument rule, and no `SymbolId` to
-place an order against, and it is skipped rather than refused.
-
-The reason that is not urgent is worth stating, because the obvious reading is
-worse than the truth. On the funded account the candidate universe is *already*
-frozen and re-frozen by hand — `docs/operations.md` records that the automatic
-refreeze is demo-only and a new listing is admitted by re-freezing. So
-admitting a listing is an owner action there either way. What the engine adds
-to that action is a restart. That is a real difference from the Python owner,
-which picks the new universe up without one, and it is a worse story on demo,
-where the refreeze is automatic and nobody is expecting to restart anything.
-
-So: build it, but it is not what stands between here and the funded account.
-Doing it properly means the symbol table, the venue gateway, the private
-stream, and the market feed all growing in the same order — `SymbolId` is a
-shared index assigned by position, and four components that disagree about it
-would put orders on the wrong symbol. That is a design job, not a patch.
-
-**No evidence, which is not the same as no capability.** Nothing above has
-ever run against real money. The mainnet path exists, is fenced, and is
-tested; it has never carried an order. A capability that has not been
-exercised is a claim, and the only thing that turns it into a fact is running
-it — in shadow first, against the account, for long enough to compare its
-decisions with the Python owner's.
+What is left is **evidence**. Nothing above has ever run against real money.
+The mainnet path exists, is fenced, and is tested; it has never carried an
+order. A capability that has not been exercised is a claim, and the only thing
+that turns it into a fact is running it — in shadow first, against the
+account, for long enough to compare its decisions with the Python owner's.
 
 The Python execution path stays, and not out of caution. Measured 2026-08-14
 by walking the import graph from all nine systemd units: **93 of 135 modules
@@ -364,7 +343,8 @@ mainnet run byte-identical command lines — the realm is a parameter branched
 *inside* shared modules — so there is no demo half to retire first. A
 symbol-level scan of all 45 order-path modules found zero unreferenced
 functions or classes. Deleting any of it today would not be a risk taken; it
-would simply stop the funded fleet trading.
+would simply stop the funded fleet trading, because nothing is deployed to
+take over.
 
 There is a further trap worth knowing before anyone tries the obvious first
 step: `verify_topology()` in `scripts/deploy_vps_live.sh` unconditionally
@@ -386,10 +366,9 @@ one is what the step after it needs in order not to be reckless.
    stand down while nothing can tell you the replacement is sick.
 2. **The engine enforces what the fleet enforces.** Done — and now from the
    same document rather than a copy of its numbers.
-3. **The engine can widen its universe without a restart.** Not done. Less
-   pressing than it sounds, because a new mainnet listing is already admitted
-   by hand — but it is the one thing on this list the engine does worse than
-   the owner it would replace, rather than merely not yet having proved.
+3. **The engine can widen its universe without a restart.** Done — a name a
+   book mentions for the first time is taken on while the engine runs. This
+   was the last thing it did worse than the owner it would replace.
 4. **The engine runs as a service, on its own demo account, in shadow.** This
    is the first step that produces evidence continuously rather than once, and
    it is where the comparison against the Python owner's decisions starts.
@@ -407,10 +386,9 @@ one is what the step after it needs in order not to be reckless.
    `ops/reset_path_safety.py`) must survive or be rebuilt. Those are not the
    trading path; they are what ships it.
 
-What changed on 2026-08-14 is that the distance stopped being mostly capability
-and started being mostly evidence. One capability gap remains, and it is a
-restart rather than an inability. The question after it is not what the engine
-can do but whether anyone has watched it do it.
+What changed on 2026-08-14 is that the distance stopped being capability at
+all. The question now is not what the engine can do but whether anyone has
+watched it do it — and the answer, on the funded account, is nobody, ever.
 
 ## What v1 does not do
 

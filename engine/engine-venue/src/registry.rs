@@ -143,6 +143,12 @@ impl VenueGateway for Venue {
         }
     }
 
+    fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
+        match self {
+            Venue::Bybit(gw) => VenueGateway::add_symbol(gw, symbol),
+        }
+    }
+
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
         match self {
             Venue::Bybit(gw) => gw.account_identity().await,

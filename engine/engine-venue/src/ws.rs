@@ -16,6 +16,7 @@
 //! the one engine thread; it just is not part of the `select!`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use engine_types::ids::{Symbol, SymbolId};
@@ -59,7 +60,15 @@ type Handover = Result<OrderUpdate, FeedError>;
 pub struct BybitOrderFeed {
     url: String,
     creds: Credentials,
-    symbols: Vec<Symbol>,
+    /// Name to id, shared with the socket task's decoder.
+    ///
+    /// The private stream is subscribed per account, not per symbol, so
+    /// updates for a symbol the engine started following after boot already
+    /// arrive — what is missing is a way to read them. The engine writes here;
+    /// the decoder reads. A lock rather than a channel because a fill must be
+    /// decodable the instant the engine says it is following the name, not one
+    /// message later.
+    ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>,
     updates: Option<mpsc::Receiver<Handover>>,
 }
 
@@ -78,12 +87,25 @@ impl BybitOrderFeed {
     }
 
     fn build(url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
+        let ids = symbols
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
+            .collect();
         Self {
             url: url.to_string(),
             creds,
-            symbols,
+            ids: Arc::new(RwLock::new(ids)),
             updates: None,
         }
+    }
+
+    /// Teach the decoder what id a symbol has. Idempotent, and a name already
+    /// known keeps the id it had — an id that moved would make every record
+    /// already in the log mean something else.
+    pub fn learn(&mut self, symbol: &str, id: SymbolId) {
+        let mut ids = self.ids.write().expect("the symbol map lock is poisoned");
+        ids.entry(symbol.to_string()).or_insert(id);
     }
 
     /// Start the socket task. The first `next_update` does this, because that
@@ -93,7 +115,7 @@ impl BybitOrderFeed {
         let worker = Worker {
             url: self.url.clone(),
             creds: self.creds.clone(),
-            decoder: Decoder::new(&self.symbols),
+            decoder: Decoder::new(self.ids.clone()),
             backoff: Duration::ZERO,
             connected_before: false,
         };
@@ -103,6 +125,10 @@ impl BybitOrderFeed {
 }
 
 impl OrderFeed for BybitOrderFeed {
+    fn learn(&mut self, symbol: &str, id: SymbolId) {
+        BybitOrderFeed::learn(self, symbol, id);
+    }
+
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
         if self.updates.is_none() {
             self.start();
@@ -286,20 +312,16 @@ async fn hand_over(tx: &mpsc::Sender<Handover>, item: Handover) -> Result<(), Go
 /// Frames in, updates out, plus the memory of which orders have already
 /// acked. No socket and no clock but the receive stamp.
 struct Decoder {
-    ids: HashMap<Symbol, SymbolId>,
+    ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>,
     pending: VecDeque<OrderUpdate>,
     acked: HashSet<String>,
     acked_order: VecDeque<String>,
 }
 
 impl Decoder {
-    fn new(symbols: &[Symbol]) -> Self {
+    fn new(ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>) -> Self {
         Self {
-            ids: symbols
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-                .collect(),
+            ids,
             pending: VecDeque::new(),
             acked: HashSet::new(),
             acked_order: VecDeque::new(),
@@ -326,7 +348,7 @@ impl Decoder {
             let update = if topic.starts_with("order") {
                 map_order_row(row, recv_ns)?
             } else if topic.starts_with("execution") {
-                let ids = &self.ids;
+                let ids = self.ids.read().expect("the symbol map lock is poisoned");
                 map_execution_row(row, &|name: &str| ids.get(name).copied(), recv_ns)?
             } else {
                 None
@@ -503,6 +525,18 @@ fn first_chars(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A decoder that knows these symbols, ids by position — the same mapping
+    /// the live feed starts with.
+    fn decoder_for(symbols: &[&str]) -> super::Decoder {
+        use super::*;
+        let ids: HashMap<Symbol, SymbolId> = symbols
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.to_string(), SymbolId(i as u16)))
+            .collect();
+        Decoder::new(Arc::new(RwLock::new(ids)))
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -679,7 +713,7 @@ mod tests {
 
     #[test]
     fn a_whole_frame_queues_every_row_once() {
-        let mut feed = Decoder::new(&["BTCUSDT".to_string()]);
+        let mut feed = decoder_for(&["BTCUSDT"]);
         let frame = json!({
             "topic": "order",
             "id": "test",
@@ -702,7 +736,7 @@ mod tests {
 
     #[test]
     fn control_frames_are_ignored_and_failures_surface() {
-        let mut feed = Decoder::new(&["BTCUSDT".to_string()]);
+        let mut feed = decoder_for(&["BTCUSDT"]);
         feed.ingest(r#"{"op":"pong","success":true,"ret_msg":"pong"}"#).unwrap();
         feed.ingest(r#"{"op":"subscribe","success":true}"#).unwrap();
         assert!(feed.pending.is_empty());
@@ -714,7 +748,7 @@ mod tests {
 
     #[test]
     fn ack_memory_stays_bounded() {
-        let mut feed = Decoder::new(&["BTCUSDT".to_string()]);
+        let mut feed = decoder_for(&["BTCUSDT"]);
         for i in 0..(ACK_MEMORY + 100) {
             assert!(feed.remember_ack(&format!("eng-{i}")));
         }

@@ -17,7 +17,7 @@
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
-use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolTable};
+use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId, SymbolTable};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -73,6 +73,9 @@ pub struct BybitPublicFeed {
     url: String,
     topics: Vec<String>,
     subs: Vec<Subscription>,
+    /// Where late subscriptions go once the worker is running. `None` before
+    /// the first `next_event`, when appending to `subs` is enough on its own.
+    admissions: Option<mpsc::UnboundedSender<Vec<Subscription>>>,
     /// The same interning the worker builds, so a `SymbolId` handed out here
     /// means what the worker's events mean.
     table: SymbolTable,
@@ -117,6 +120,7 @@ impl BybitPublicFeed {
             topics,
             table: FeedState::new(&subs).into_table(),
             subs,
+            admissions: None,
             clock: MonoClock::new(),
             inbox: None,
         }
@@ -138,10 +142,41 @@ impl BybitPublicFeed {
         &self.topics
     }
 
+    /// Start following a symbol the feed was not built with.
+    ///
+    /// Returns the `SymbolId` this feed will use for it. That id is the same
+    /// one the worker's state will assign, because both intern in the same
+    /// order — the boot subscriptions, then admissions as they arrive. Nothing
+    /// else in the engine may intern out of band, or a `SymbolId` would mean
+    /// two different symbols in two places, and orders would go to the wrong
+    /// one.
+    ///
+    /// Idempotent: a symbol already known keeps its id and no frame is sent.
+    /// Before the worker is running this only records the subscription; the
+    /// first dial carries it like any other.
+    pub fn admit(&mut self, symbol: &str, feed: Feed) -> SymbolId {
+        let symbol = symbol.to_uppercase();
+        let sub = Subscription { symbol: symbol.clone(), feed };
+        let topic = topic_for(&sub);
+        let known = self.topics.contains(&topic);
+        if !known {
+            self.topics.push(topic);
+            self.subs.push(sub.clone());
+            if let Some(tx) = &self.admissions {
+                // Unbounded, and the worker drains it before servicing a
+                // timer, so this cannot block the loop that called it.
+                let _ = tx.send(vec![sub]);
+            }
+        }
+        self.table.intern(&symbol)
+    }
+
     /// Start the socket worker. Called on the first `next_event`, so nothing
     /// is dialled until somebody asks for a price.
     fn start(&mut self) {
         let (events, inbox) = mpsc::channel(QUEUE_DEPTH);
+        let (admit_tx, admit_rx) = mpsc::unbounded_channel();
+        self.admissions = Some(admit_tx);
         let worker = FeedWorker {
             url: self.url.clone(),
             topics: self.topics.clone(),
@@ -152,6 +187,7 @@ impl BybitPublicFeed {
             epochs: 0,
             next_ping_at: Instant::now() + PING_INTERVAL,
             pong_deadline: None,
+            admissions: admit_rx,
         };
         // The engine runs one thread, so this stays on it.
         let worker = tokio::spawn(worker.run());
@@ -186,6 +222,8 @@ struct FeedWorker {
     epochs: u64,
     next_ping_at: Instant,
     pong_deadline: Option<Instant>,
+    /// Symbols admitted after the socket was already up.
+    admissions: mpsc::UnboundedReceiver<Vec<Subscription>>,
 }
 
 impl FeedWorker {
@@ -274,6 +312,40 @@ impl FeedWorker {
         Ok(socket)
     }
 
+    /// Take on symbols the engine has just started following.
+    ///
+    /// Their topics join `self.topics`, so a reconnect resubscribes them along
+    /// with everything else, and the state grows to hold them. Interning here
+    /// gives the same ids the feed handed out, because both intern in the same
+    /// order: the boot subscriptions, then each admission as it arrives.
+    async fn admit(
+        &mut self,
+        subs: Vec<Subscription>,
+        socket: &mut Socket,
+    ) -> Result<(), FeedError> {
+        let mut fresh: Vec<String> = Vec::new();
+        for sub in &subs {
+            self.state.intern(&sub.symbol);
+            let topic = topic_for(sub);
+            if !self.topics.contains(&topic) {
+                self.topics.push(topic.clone());
+                fresh.push(topic);
+            }
+        }
+        if fresh.is_empty() {
+            return Ok(());
+        }
+        info!(topics = fresh.len(), "subscribing to symbols taken on since boot");
+        for chunk in fresh.chunks(TOPICS_PER_MESSAGE) {
+            let payload = subscribe_payload(chunk);
+            socket
+                .send(Message::text(payload))
+                .await
+                .map_err(|e| FeedError::Transport(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn bump_backoff(&mut self) {
         self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
     }
@@ -288,6 +360,14 @@ impl FeedWorker {
             // Draining the socket beats servicing a timer.
             biased;
             msg = socket.next() => Some((clock.now_ns(), msg)),
+            // A symbol the engine has just taken on. Handled before the timer
+            // so a book naming a new name is not waiting out a ping interval.
+            admitted = self.admissions.recv() => {
+                if let Some(subs) = admitted {
+                    self.admit(subs, socket).await?;
+                }
+                return Ok(Step::Idle);
+            }
             _ = tokio::time::sleep_until(deadline.into()) => None,
         };
         match incoming {
@@ -388,6 +468,10 @@ impl MarketFeed for BybitPublicFeed {
         // No sender left means the worker is gone for good.
         inbox.events.recv().await.unwrap_or(Err(FeedError::Closed))
     }
+    fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
+        Some(BybitPublicFeed::admit(self, symbol, feed))
+    }
+
 }
 
 const PING_PAYLOAD: &str = r#"{"op":"ping"}"#;

@@ -122,6 +122,13 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// The resting entries this engine is advancing. Empty unless a strategy
     /// asked for one to be worked.
     working: WorkingOrders,
+    /// Symbols a book has named that the engine does not follow yet.
+    ///
+    /// Filled while a book is being handled and drained by the run loop, which
+    /// is the only place that holds the feeds. Admitting from inside
+    /// `on_targets` would mean borrowing them out of the `select!` they are
+    /// waiting in.
+    wanted_symbols: Vec<String>,
     /// What leverage each symbol was last set to by this engine.
     ///
     /// A symbol keeps its leverage at the venue until somebody changes it, so
@@ -310,6 +317,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // for — so a recovered order is left alone rather than worked
             // from a made-up deadline.
             working: WorkingOrders::default(),
+            wanted_symbols: Vec::new(),
             leverage_at: std::collections::HashMap::new(),
             may_open,
             ledger: LatencyLedger::new(now),
@@ -544,6 +552,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
                 _ = flush_tick.tick() => self.on_tick().await?,
             }
+
+            // Outside the select!, where the feeds are borrowable again.
+            if !self.wanted_symbols.is_empty() {
+                self.admit_wanted(market_feed, order_feed).await?;
+            }
         }
 
         self.targets = targets;
@@ -667,6 +680,73 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// the venue holds one position per symbol — so a book delivered to the
     /// wrong follower is that follower trying to hold another sleeve's
     /// positions.
+    /// Start following symbols a book named that the engine did not know.
+    ///
+    /// Every table that maps a name to a `SymbolId` has to gain the symbol in
+    /// the same order, because the id is an index assigned by position. Four
+    /// of them exist — the engine's own, the public feed's, the venue
+    /// gateway's, and the private stream's — and if any two disagreed, an
+    /// order meant for one symbol would be sent for another. So this is the
+    /// only place that admits, it admits one name at a time, and it checks
+    /// that all four agree before the symbol is usable. A disagreement drops
+    /// the symbol rather than trading it: the engine carries on with the names
+    /// it already had, and says loudly which one it refused.
+    async fn admit_wanted<M, O>(
+        &mut self,
+        market_feed: &mut M,
+        order_feed: &mut O,
+    ) -> Result<(), EngineError>
+    where
+        M: engine_types::MarketFeed,
+        O: engine_types::OrderFeed,
+    {
+        let wanted = std::mem::take(&mut self.wanted_symbols);
+        let mut admitted = 0usize;
+        for name in wanted {
+            let core_id = self.market.add_symbol(&name);
+            let feed_id = market_feed.admit(&name, engine_types::Feed::Quote);
+            let venue_id = self.venue.add_symbol(&name);
+            if feed_id != Some(core_id) || venue_id != Some(core_id) {
+                tracing::error!(
+                    symbol = %name,
+                    ?core_id,
+                    ?feed_id,
+                    ?venue_id,
+                    "the parts of the engine disagree about this symbol's id; it will not be \
+                     traded. Nothing else is affected — the ids already handed out do not move."
+                );
+                continue;
+            }
+            order_feed.learn(&name, core_id);
+            self.routing.size_to(self.market.table.len());
+            admitted += 1;
+            tracing::info!(symbol = %name, id = core_id.0, "following a symbol a book named");
+        }
+        if admitted == 0 {
+            return Ok(());
+        }
+        // One venue read covers everything admitted this pass. Without a rule
+        // there is no way to quantize, so the symbol is followed but nothing
+        // can be sent for it — which is the same state as a symbol whose rule
+        // was missing at boot.
+        self.rules.resize(self.market.table.len(), None);
+        match self.venue.instrument_rules().await {
+            Ok(fetched) => {
+                for (name, rule) in fetched {
+                    if let Some(id) = self.market.table.get(&name) {
+                        self.rules[id.0 as usize] = Some(rule);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "no instrument rules for the symbols just taken on; they cannot trade until \
+                 the next attempt"
+            ),
+        }
+        Ok(())
+    }
+
     /// Take a fresh account reading.
     ///
     /// The one place a reading is adopted, so what has to happen with it
@@ -723,6 +803,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             valid_until_ms = book.valid_until_ms,
             "a target book reached its strategy"
         );
+        // A book may name something this engine has never followed. Note it
+        // for the run loop, which can reach the feeds; the strategy is still
+        // woken now, and will act on the name once it has a price.
+        for target in &book.targets {
+            if self.market.table.get(&target.symbol).is_none()
+                && !self.wanted_symbols.contains(&target.symbol)
+            {
+                self.wanted_symbols.push(target.symbol.clone());
+            }
+        }
+
         let event = EngineEvent::Targets(book);
         {
             let Engine {

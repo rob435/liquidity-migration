@@ -262,6 +262,10 @@ impl VenueGateway for BybitGateway {
         Ok(())
     }
 
+    fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
+        Some(BybitGateway::add_symbol(self, symbol))
+    }
+
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
         let text = venue_num(leverage)?;
         let mut body = Map::new();

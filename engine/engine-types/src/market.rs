@@ -73,12 +73,38 @@ pub enum FeedError {
 #[allow(async_fn_in_trait)]
 pub trait MarketFeed {
     async fn next_event(&mut self) -> Result<MarketEvent, FeedError>;
+
+    /// Start following a symbol this feed was not built with, and return the
+    /// id it will use for it.
+    ///
+    /// Every component that holds a symbol table has to grow in the same
+    /// order, because a `SymbolId` is an index assigned by position — two
+    /// components disagreeing about one would put orders on the wrong symbol.
+    /// The engine is the only caller and admits in one place, which is what
+    /// keeps that order the same everywhere.
+    ///
+    /// The default refuses, so a feed that cannot grow says so rather than
+    /// handing back an id it will never deliver prices for.
+    fn admit(&mut self, symbol: &str, feed: crate::market::Feed) -> Option<SymbolId> {
+        let _ = (symbol, feed);
+        None
+    }
 }
 
 /// A live order/fill update source (the venue's private stream).
 #[allow(async_fn_in_trait)]
 pub trait OrderFeed {
     async fn next_update(&mut self) -> Result<crate::orders::OrderUpdate, FeedError>;
+
+    /// Teach this feed what id a symbol has, so a fill on it can be decoded.
+    ///
+    /// Bybit's private stream is subscribed per account, not per symbol, so
+    /// updates for a newly followed name already arrive — what is missing is
+    /// the name-to-id mapping to read them with. A fill that cannot be
+    /// resolved is a fill the engine does not see.
+    fn learn(&mut self, symbol: &str, id: SymbolId) {
+        let _ = (symbol, id);
+    }
 }
 
 /// The single in-memory market picture. The market data crate is the only

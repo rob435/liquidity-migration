@@ -64,7 +64,7 @@ impl FeedState {
         out
     }
 
-    fn intern(&mut self, name: &str) -> SymbolId {
+    pub(crate) fn intern(&mut self, name: &str) -> SymbolId {
         let id = self.table.intern(name);
         let need = self.table.len();
         if self.books.len() < need {

@@ -304,6 +304,20 @@ impl VenueGateway for MockVenue {
         Ok(())
     }
 
+    fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
+        let id = SymbolId(self.rules.len() as u16);
+        self.rules.push((
+            symbol.to_string(),
+            InstrumentRule {
+                tick_size: 0.5,
+                qty_step: 0.001,
+                min_qty: 0.001,
+                min_notional: 5.0,
+            },
+        ));
+        Some(id)
+    }
+
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
         self.leverages.borrow_mut().push((symbol, leverage));
         if self.leverage_refuses {
@@ -394,6 +408,13 @@ impl RiskKernel for MockRisk {
 struct ScriptFeed {
     events: VecDeque<MarketEvent>,
     close_at_end: bool,
+    /// Symbols admitted after boot, in order, with the ids handed back.
+    admitted: Rc<RefCell<Vec<(String, SymbolId)>>>,
+    /// How many symbols this feed already knows, so an admission gets the
+    /// next id — the same rule the real feed's table follows.
+    known: u16,
+    /// Hand back the wrong id, to prove the engine notices.
+    admits_wrongly: bool,
 }
 
 impl ScriptFeed {
@@ -415,6 +436,9 @@ impl ScriptFeed {
         ScriptFeed {
             events,
             close_at_end,
+            admitted: Rc::new(RefCell::new(Vec::new())),
+            known: 1,
+            admits_wrongly: false,
         }
     }
 
@@ -440,11 +464,25 @@ impl ScriptFeed {
         ScriptFeed {
             events,
             close_at_end,
+            admitted: Rc::new(RefCell::new(Vec::new())),
+            known: 1,
+            admits_wrongly: false,
         }
     }
 }
 
 impl MarketFeed for ScriptFeed {
+    fn admit(&mut self, symbol: &str, _feed: engine_types::Feed) -> Option<SymbolId> {
+        let id = if self.admits_wrongly {
+            SymbolId(self.known + 7)
+        } else {
+            SymbolId(self.known)
+        };
+        self.known += 1;
+        self.admitted.borrow_mut().push((symbol.to_string(), id));
+        Some(id)
+    }
+
     async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
         match self.events.pop_front() {
             Some(event) => Ok(event),
@@ -456,17 +494,23 @@ impl MarketFeed for ScriptFeed {
 
 struct ScriptOrderFeed {
     updates: VecDeque<OrderUpdate>,
+    learned: Rc<RefCell<Vec<(String, SymbolId)>>>,
 }
 
 impl ScriptOrderFeed {
     fn empty() -> Self {
         ScriptOrderFeed {
             updates: VecDeque::new(),
+            learned: Rc::new(RefCell::new(Vec::new())),
         }
     }
 }
 
 impl OrderFeed for ScriptOrderFeed {
+    fn learn(&mut self, symbol: &str, id: SymbolId) {
+        self.learned.borrow_mut().push((symbol.to_string(), id));
+    }
+
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
         match self.updates.pop_front() {
             Some(update) => Ok(update),
@@ -1405,6 +1449,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
 
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let mut orders = ScriptOrderFeed {
+        learned: Rc::new(RefCell::new(Vec::new())),
         updates: VecDeque::from(vec![OrderUpdate::Fill {
             client_order_id: stale.client_order_id.clone(),
             symbol,
@@ -1473,6 +1518,9 @@ async fn timers_fire_for_the_strategy_that_armed_them() {
             },
         ]),
         close_at_end: false,
+        admitted: Rc::new(RefCell::new(Vec::new())),
+        known: 1,
+        admits_wrongly: false,
     };
     engine
         .run(
@@ -2600,6 +2648,83 @@ async fn each_sleeve_hears_only_its_own_book() {
         ["long x2"],
         "the long sleeve heard something other than its own book"
     );
+}
+
+#[tokio::test]
+async fn a_symbol_a_book_names_late_is_taken_on() {
+    // The universe used to be fixed when the engine booted: a name that first
+    // appeared in a later book had no price, no instrument rule and no
+    // SymbolId, so it was skipped rather than traded. The fleet's universe
+    // moves with listings, so that was the engine quietly holding a smaller
+    // book than it was told to.
+    let path = temp_path("book-late-symbol");
+    std::fs::write(&path, LONG_BOOK_JSON).expect("writes a book naming ETHUSDT");
+    let (listener, heard) = BookListener::new("BTCUSDT");
+    // Boots knowing BTCUSDT only.
+    let (mut engine, h) =
+        build(true, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    assert!(engine.market().table.get("ETHUSDT").is_none(), "it starts unknown");
+
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![(
+        StrategyId(0),
+        book_watcher(&path),
+    )]));
+
+    let mut feed = ScriptFeed::quotes(SymbolId(0), 0, false);
+    let admitted = feed.admitted.clone();
+    let mut orders = ScriptOrderFeed::empty();
+    let learned = orders.learned.clone();
+    engine
+        .run(&mut feed, &mut orders, until_heard(heard.clone()))
+        .await
+        .unwrap();
+
+    let id = engine
+        .market()
+        .table
+        .get("ETHUSDT")
+        .expect("the engine now follows the symbol the book named");
+    // All three of the other tables that map names to ids agree, which is the
+    // only thing that makes the id safe to place an order against.
+    assert_eq!(admitted.borrow().as_slice(), [("ETHUSDT".to_string(), id)]);
+    assert_eq!(learned.borrow().as_slice(), [("ETHUSDT".to_string(), id)]);
+    assert!(
+        h.sends.borrow().is_empty(),
+        "taking on a symbol is not a reason to trade it"
+    );
+}
+
+#[tokio::test]
+async fn a_symbol_the_parts_disagree_about_is_not_traded() {
+    // A SymbolId is an index assigned by position, so two tables that
+    // disagreed about one would send an order meant for one symbol on
+    // another. The engine checks rather than trusts, and drops the symbol.
+    let path = temp_path("book-late-symbol-clash");
+    std::fs::write(&path, LONG_BOOK_JSON).expect("writes a book naming ETHUSDT");
+    let (listener, heard) = BookListener::new("BTCUSDT");
+    let (mut engine, _h) =
+        build(true, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![(
+        StrategyId(0),
+        book_watcher(&path),
+    )]));
+
+    let mut feed = ScriptFeed::quotes(SymbolId(0), 0, false);
+    feed.admits_wrongly = true;
+    let mut orders = ScriptOrderFeed::empty();
+    let learned = orders.learned.clone();
+    engine
+        .run(&mut feed, &mut orders, until_heard(heard.clone()))
+        .await
+        .unwrap();
+
+    assert!(
+        learned.borrow().is_empty(),
+        "a symbol the parts disagree about was passed on as usable"
+    );
+    // BTCUSDT, which was there before, is untouched: one bad symbol does not
+    // take the engine down or move anybody else's id.
+    assert_eq!(engine.market().table.get("BTCUSDT"), Some(SymbolId(0)));
 }
 
 #[tokio::test]

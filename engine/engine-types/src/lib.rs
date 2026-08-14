@@ -111,6 +111,16 @@ pub trait VenueGateway {
     /// Attach or move a position stop (stop-loss trigger price). Only called
     /// when [`VenueCaps::native_position_stop`] is true.
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError>;
+    /// Start trading a symbol this gateway was not built with, and return the
+    /// id it will use. `None` if it cannot grow.
+    ///
+    /// Part of the same lockstep the feeds are in: every table that maps names
+    /// to ids has to gain a symbol in the same order, because a `SymbolId` is
+    /// an index assigned by position.
+    fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
+        let _ = symbol;
+        None
+    }
     /// Set the venue's margin leverage for a symbol, both sides. Only called
     /// when [`VenueCaps::set_leverage`] is true, and only before an order that
     /// would increase exposure.

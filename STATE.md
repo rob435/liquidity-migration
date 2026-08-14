@@ -60,13 +60,14 @@ match; never append history to this file.
   the venue before the order goes. **Nothing has been sent to the funded
   account, and no unit is deployed.**
 
-  The Python fleet owns everything live and stays. One capability gap remains —
-  a follower's symbol universe is fixed when it boots, so widening it costs a
-  restart the Python owner does not pay; on mainnet a new listing is already
-  admitted by hand, so it is smaller than it sounds. Beyond that what is
-  missing is evidence rather than capability: no shadow run against the funded
-  account has happened
-  ([docs/engine.md](docs/engine.md) §What the engine cannot do yet).
+  It also takes on a symbol a book names for the first time while it is
+  running — interned, subscribed, added to the gateway and the private stream,
+  and given an instrument rule, with the four name-to-id tables checked against
+  each other. That was the last capability it lacked.
+
+  The Python fleet owns everything live and stays. What is missing is now
+  evidence rather than capability: nothing has ever run against the funded
+  account ([docs/engine.md](docs/engine.md) §What the engine cannot do yet).
 
 ### The funded account
 
