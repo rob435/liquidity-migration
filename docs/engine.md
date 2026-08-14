@@ -77,13 +77,14 @@ every non-colocated participant pays.
 ### On the production box
 
 Measured 2026-08-14 by the same command on the VPS the fleet runs on (2
-cores, Linux, `fdatasync`; 4,000 quotes in, 200 orders out):
+cores, Linux, `fdatasync`; 20,000 quotes in, 1,000 orders out, alongside the
+running fleet):
 
 | Segment | median | p99 | worst |
 | --- | --- | --- | --- |
-| market message in → decision made | 448 ns | 852 ns | 948 ns |
-| decision → order durable in the log | 2.14 ms | 4.83 ms | 8.45 ms |
-| **in → durable → out the socket** | **2.60 ms** | **5.65 ms** | **10.12 ms** |
+| market message in → decision made | 721 ns | 1.6 µs | 12.5 µs |
+| decision → order durable in the log | 1.91 ms | 4.71 ms | 8.82 ms |
+| **in → durable → out the socket** | **2.28 ms** | **5.18 ms** | **9.47 ms** |
 
 The box's CPU is slower than the laptop's, so thinking costs more; its disk
 is faster to make durable, so the chain is shorter overall. The comparison
