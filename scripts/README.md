@@ -16,7 +16,7 @@ a group below, so moving a grouped script never edits a unit file.
 | `deploy_vps_live.sh` | you (via `ops.sh deploy`) / GitHub Actions | the deploy engine; modes are tabulated in [`docs/operations.md`](../docs/operations.md) |
 | `runtime/` | systemd, via the wrapper | four files: the LONG and CARRY event engines, the account-execution owner (demo and mainnet both enter here), and the fleet liveness check the two liveness timers run |
 | `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, rollout readiness, flatten |
-| `maintain/` | you, one-shot | ledger reset, universe and instrument-rule freezes, demo-rule probe and its projection, order-permission check, venue-accounting reconcile |
+| `maintain/` | you, one-shot | ledger reset, universe and instrument-rule freezes, the candidate-universe schema-4 to schema-5 converter, demo-rule probe and its projection, order-permission check, venue-accounting reconcile |
 | `data/` | you or the refresh timer | point-in-time data-root and panel builders, residual-momentum precompute |
 | `research/` | you, offline | screens, scorers, equity curves, cost and diagnostic reports, the research-refresh workflow |
 | `devtools/` | `dev.sh` | `repo_doctor.py`, `run_with_stub.py` |

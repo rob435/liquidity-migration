@@ -40,18 +40,12 @@ __all__ = [
 #: Every dial is one environment variable named ``RM_<FIELD>`` in upper case.
 REAL_MONEY_DIAL_PREFIX = "RM_"
 
-#: The retired CONTINUOUS sleeve has no mainnet unit, but the profile schema
-#: requires its block and the block cannot be sized to exactly zero.
-_CONTINUOUS_NOTIONAL_MULTIPLIER = 0.001
-_CONTINUOUS_GROSS_SHARE = 0.01
-
 #: Ceiling on total account gross, as a multiple of the wallet: the two
-#: sleeve dials may sum to at most ``10.0 * (1 - _CONTINUOUS_GROSS_SHARE)``
-#: = 9.9. Owner's dial, owner's risk — but be clear what protects the book
-#: up there: the loss halt fires on realised loss and the envelope on
-#: observed equity, while an open position's drawdown meets the venue's
-#: liquidation engine first. At 10x gross a ~10% adverse move on the book
-#: is the wallet.
+#: sleeve dials may sum to at most 10.0. Owner's dial, owner's risk — but be
+#: clear what protects the book up there: the loss halt fires on realised loss
+#: and the envelope on observed equity, while an open position's drawdown meets
+#: the venue's liquidation engine first. At 10x gross a ~10% adverse move on
+#: the book is the wallet.
 MAX_REAL_MONEY_LEVERAGE = 10.0
 
 # Derived constants the old dial surface used to expose. Fixed on purpose:
@@ -71,7 +65,7 @@ class RealMoneyDials:
     Each leverage dial is the most that sleeve's book can reach, as a multiple
     of account equity, with the strategy's own worst-case upscaling
     (volatility and weekend size multipliers) already inside the number.
-    Together they may total at most 9.9; past a total of ~2 the venue margin
+    Together they may total at most 10.0; past a total of ~2 the venue margin
     leverage the producers request rises with the dials, and the venue's
     liquidation engine becomes the binding backstop on an open book.
     """
@@ -158,12 +152,11 @@ def _validate_dials(dials: RealMoneyDials) -> None:
                 "mute a sleeve with its sleeves.env toggle, not a zero dial"
             )
     total = dials.carry_leverage + dials.long_leverage
-    ceiling = MAX_REAL_MONEY_LEVERAGE * (1.0 - _CONTINUOUS_GROSS_SHARE)
-    if total > ceiling + 1e-12:
+    if total > MAX_REAL_MONEY_LEVERAGE + 1e-12:
         raise ValueError(
-            f"RM_CARRY_LEVERAGE + RM_LONG_LEVERAGE ({total:g}) cannot exceed {ceiling:g}: "
-            f"{MAX_REAL_MONEY_LEVERAGE:g}x the wallet is the ceiling on a funded account, "
-            "and the retired-CONTINUOUS token share keeps its 1%"
+            f"RM_CARRY_LEVERAGE + RM_LONG_LEVERAGE ({total:g}) cannot exceed "
+            f"{MAX_REAL_MONEY_LEVERAGE:g}: that much of the wallet is the ceiling "
+            "on a funded account"
         )
     if not math.isfinite(dials.daily_loss_fraction) or not 0.0 < dials.daily_loss_fraction <= 1.0:
         raise ValueError("RM_DAILY_LOSS_FRACTION must sit in (0, 1]")
@@ -199,11 +192,9 @@ def render_real_money_profile_json(
     if _EQUITY_FLOOR_USDT > reference:
         raise ValueError("the equity floor cannot exceed the declared capital reference")
 
-    # The account cap is exactly what the two sleeves plus the retired token
-    # share need: sleeve cap = account cap x share = the dial itself.
-    account_multiple = (dials.carry_leverage + dials.long_leverage) / (
-        1.0 - _CONTINUOUS_GROSS_SHARE
-    )
+    # The account cap is exactly what the two sleeves need: sleeve cap =
+    # account cap x share = the dial itself.
+    account_multiple = dials.carry_leverage + dials.long_leverage
     account_gross = reference * account_multiple
     margin_cap = reference  # margin above the wallet is the venue's business
 
@@ -264,7 +255,6 @@ def render_real_money_profile_json(
             "max_daily_loss_usdt": reference * dials.daily_loss_fraction,
             "sleeve_limits": {
                 "carry": _share(dials.carry_leverage / account_multiple),
-                "continuous": _share(_CONTINUOUS_GROSS_SHARE),
                 "long": _share(dials.long_leverage / account_multiple),
             },
         },
@@ -274,14 +264,6 @@ def render_real_money_profile_json(
             "max_projected_initial_margin_pct_equity": long_margin_cap,
             "order_notional_pct_equity": 0.0,
             "max_new_entries_per_cycle": _LONG_MAX_NEW_ENTRIES_PER_CYCLE,
-        },
-        "continuous": {
-            "max_active": 1,
-            "max_new_entries_per_cycle": 1,
-            "btc_trend_gate": "uptrend",
-            "entry_leverage": leverage,
-            "notional_multiplier": _CONTINUOUS_NOTIONAL_MULTIPLIER,
-            "per_position_notional_pct_equity": 2.0,
         },
         "carry": {
             "notional_multiplier": dials.carry_leverage,

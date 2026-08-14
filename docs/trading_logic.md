@@ -189,10 +189,15 @@ Three things the sleeve left behind are data, not code, and they stay:
 
 - A token CONTINUOUS envelope in both operational profiles, still proved against the account
   caps. Its sizing shape is now frozen as constants in `policy/operational_profile.py`.
-- A `continuous` profile in the frozen candidate universe. The tradable population every
-  producer reads is the union of the three profiles, and the continuous one is the unbounded
-  member — dropping it would narrow what CARRY may trade, and the running fleet would reject
-  its own installed artifact, whose loader rebuilds and re-hashes all three profiles.
+- The tradable population itself, which schema 4 of the frozen candidate universe kept under
+  the `continuous` name. It was never that sleeve's population: every gate in it was off, so
+  it was simply every crypto-linear perpetual the venue listed at snapshot time, minus the
+  shared exclusions. Schema 5 calls it `strategy_instruments` and drops the retired name;
+  the symbols do not move, because each sleeve profile is that set with extra gates switched
+  on and so already sits inside it. Convert an installed schema-4 artifact with
+  [`migrate_candidate_universe_schema.py`](../scripts/maintain/migrate_candidate_universe_schema.py),
+  which rebuilds offline from the raw snapshot, refuses if one symbol would change, and
+  re-keys the retirement registry to the artifact's new hash.
 - `btc_risk_decision_evidence` on journal rows written before the removal, now defined in
   `account/entry_attempts.py` beside the other metadata keys, so an entry's evidence still
   copies forward onto its close.
@@ -243,7 +248,7 @@ decision, not configuration drift — do not "fix" it by raising caps.
 symbol can be skipped without disappearing. A newly observed future `deliveryTime` drops it
 from new-entry membership, and retiring it requires position, component targets, component
 desires, working orders, the aggregate target, **and** the unresolved inbox all flat for that
-symbol (`_assert_scheduled_retirement_flatness`, `account_candidate_universe.py:1225-1279`);
+symbol (`require_scheduled_retirements_flat`, `account_candidate_universe.py:1470-1503`);
 any remainder raises `scheduled-retirement symbols are not account-flat`. The private
 retirement registry preserves the delivery observation after the venue removes the instrument
 row; a moved delivery date updates the record in place, keeping the original first-observed
@@ -258,7 +263,7 @@ evidence stands). Malformed eligibility input still raises.
 
 The frozen candidate artifact is a forward population contract: the active set is the
 intersection of the frozen per-profile population with the current live population
-(`account_candidate_universe.py:1200-1205`), so a post-freeze listing can never enter until
+(`account_candidate_universe.py:1327-1331`), so a post-freeze listing can never enter until
 someone re-freezes, and a frozen symbol failing a dynamic filter is skipped with its exact
 reason written to the cycle receipt (`temporarily_ineligible_candidates_json`) — normal
 ranking movement, distinct from disappearance.

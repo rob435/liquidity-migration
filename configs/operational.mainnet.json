@@ -9,8 +9,8 @@
     "expand_dead_band_fraction": 0.05
   },
   "account_risk": {
-    "max_component_gross_notional_usdt": 176.76767676767676,
-    "max_account_gross_notional_usdt": 176.76767676767676,
+    "max_component_gross_notional_usdt": 175.0,
+    "max_account_gross_notional_usdt": 175.0,
     "max_symbol_notional_usdt": 50.0,
     "max_initial_margin_usdt": 100.0,
     "max_leverage": 2.0,
@@ -19,15 +19,11 @@
     "sleeve_limits": {
       "carry": {
         "max_gross_notional_usdt": 100.0,
-        "max_initial_margin_usdt": 56.57142857142857
-      },
-      "continuous": {
-        "max_gross_notional_usdt": 1.7676767676767677,
-        "max_initial_margin_usdt": 1.0
+        "max_initial_margin_usdt": 57.14285714285714
       },
       "long": {
         "max_gross_notional_usdt": 75.0,
-        "max_initial_margin_usdt": 42.42857142857142
+        "max_initial_margin_usdt": 42.857142857142854
       }
     }
   },
@@ -37,14 +33,6 @@
     "max_projected_initial_margin_pct_equity": 0.375000001,
     "order_notional_pct_equity": 0.0,
     "max_new_entries_per_cycle": 5
-  },
-  "continuous": {
-    "max_active": 1,
-    "max_new_entries_per_cycle": 1,
-    "btc_trend_gate": "uptrend",
-    "entry_leverage": 2.0,
-    "notional_multiplier": 0.001,
-    "per_position_notional_pct_equity": 2.0
   },
   "carry": {
     "notional_multiplier": 1.0,

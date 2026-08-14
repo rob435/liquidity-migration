@@ -113,10 +113,11 @@ def test_a_dial_in_the_env_file_reaches_the_rendered_profile() -> None:
     long_limit = next(row for row in profile.account_risk.sleeve_limits if row.sleeve == "long")
     assert carry.max_gross_notional_usdt == pytest.approx(0.5 * reference)
     assert long_limit.max_gross_notional_usdt == pytest.approx(1.0 * reference)
-    # The account cap is what the sleeves plus the 1% retired token need.
+    # The account cap is exactly what the two sleeves need, with no third claim.
     assert profile.account_risk.max_account_gross_notional_usdt == pytest.approx(
-        (0.5 + 1.0) / 0.99 * reference
+        (0.5 + 1.0) * reference
     )
+    assert {row.sleeve for row in profile.account_risk.sleeve_limits} == {"carry", "long"}
     assert profile.account_risk.max_daily_loss_usdt == pytest.approx(0.05 * reference)
     assert profile.carry.declared_stop_loss_fraction == 0.25
     assert profile.carry.notional_multiplier == 0.5
@@ -203,7 +204,7 @@ def test_dials_past_two_raise_the_venue_entry_leverage_with_them() -> None:
     _data, profile = render_real_money_profile(
         RealMoneyDials(carry_leverage=1.88, long_leverage=1.0)
     )
-    multiple = (1.88 + 1.0) / 0.99
+    multiple = 1.88 + 1.0
     assert profile.account_risk.max_leverage == pytest.approx(multiple)
     assert profile.carry.entry_leverage == pytest.approx(multiple)
     assert profile.long.entry_leverage == pytest.approx(multiple)
@@ -228,8 +229,9 @@ def test_a_mistyped_dial_is_an_error_not_a_silent_default() -> None:
         ({"carry_leverage": 0.0}, "RM_CARRY_LEVERAGE must be finite and positive"),
         ({"long_leverage": -0.5}, "RM_LONG_LEVERAGE must be finite and positive"),
         (
-            {"carry_leverage": 5.0, "long_leverage": 5.0},
-            "cannot exceed 9.9",
+            # 5.0 + 5.0 is exactly the ceiling and allowed; this pair is over it.
+            {"carry_leverage": 6.0, "long_leverage": 5.0},
+            "cannot exceed 10",
         ),
         ({"daily_loss_fraction": 1.5}, "RM_DAILY_LOSS_FRACTION must sit in"),
         ({"carry_stop_loss_fraction": 1.0}, "RM_CARRY_STOP_LOSS_FRACTION must sit in"),
@@ -323,7 +325,7 @@ def test_preflight_reports_a_bad_dial_without_crashing(tmp_path: Path) -> None:
     results = preflight(credential_env=credential, owner_env=owner)
     dials = next(row for row in results if row.name == "dials")
     assert not dials.ok
-    assert "cannot exceed 9.9" in dials.detail
+    assert "cannot exceed 10" in dials.detail
 
 
 def test_preflight_refuses_a_world_readable_credential_file(tmp_path: Path) -> None:

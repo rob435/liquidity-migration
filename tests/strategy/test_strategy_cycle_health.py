@@ -20,9 +20,9 @@ INVOCATION_ID = "12" * 16
 
 def _health(**overrides: object) -> StrategyCycleHealth:
     values: dict[str, object] = {
-        "sleeve": "continuous",
+        "sleeve": "carry",
         "environment": "demo",
-        "cycle_id": "continuous-target-test-1000",
+        "cycle_id": "carry-target-test-1000",
         "cycle_ts_ms": 1_000,
         "completed_ts_ns": 2_000_000_000,
         "invocation_id": INVOCATION_ID,
@@ -41,7 +41,7 @@ def test_round_trip_is_private_atomic_and_replaces_latest(tmp_path: Path) -> Non
     assert read_strategy_cycle_health(tmp_path) == _health()
 
     updated = _health(
-        cycle_id="continuous-target-test-2000",
+        cycle_id="carry-target-test-2000",
         cycle_ts_ms=2_000,
         completed_ts_ns=3_000_000_000,
         ws_kline_store_rows=400_000,

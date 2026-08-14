@@ -48,7 +48,11 @@ from liquidity_migration.research.engine_targets import (
     render_target_book,
     write_target_book,
 )
-from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
+from liquidity_migration.strategy.account_candidate_universe import (
+    carry_profile_universe_inputs,
+    load_candidate_universe,
+    require_profile_binding,
+)
 from liquidity_migration.account.account_intent_client import (
     ENTRY_ATTEMPT_METADATA_KEY,
     ExitFirstPublication,
@@ -1433,9 +1437,21 @@ def _candidate_filtered_universe(
     skipped = 0
     kept = list(top_symbols)
     if candidate_universe_file:
-        allowed = set(
-            load_candidate_universe(candidate_universe_file, realm=realm).symbols
+        frozen = load_candidate_universe(candidate_universe_file, realm=realm)
+        # CARRY's own profile is registered and checked here, but it does NOT
+        # narrow what CARRY trades: the sleeve trades the whole frozen
+        # instrument set, exactly as it did when that set was called the
+        # retired continuous sleeve's profile. Binding to the carry profile
+        # instead would cut the tradable population from every listed
+        # perpetual (510 on demo, 512 on mainnet as of the 2026-08-13 freeze)
+        # to the carry top-150 — a strategy change, not a rename. Whether to
+        # narrow it is an open question for the owner and is not decided here.
+        require_profile_binding(
+            frozen,
+            profile="carry",
+            current_inputs=carry_profile_universe_inputs(),
         )
+        allowed = set(frozen.strategy_instruments)
         kept = [symbol for symbol in top_symbols if symbol in allowed]
         skipped = len(top_symbols) - len(kept)
     return sorted(set(kept) | set(standing_symbols)), skipped

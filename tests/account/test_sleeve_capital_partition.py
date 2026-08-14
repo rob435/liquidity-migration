@@ -301,11 +301,43 @@ def _load(document: dict):
     return load_operational_profile_bytes(json.dumps(document).encode("utf-8"))
 
 
+def test_the_funded_profile_gives_the_retired_sleeve_no_capital(tmp_path: Path) -> None:
+    """CONTINUOUS is retired, so the funded partition must not name it.
+
+    The kernel enforces shares by sleeve name against the policy it is handed,
+    so this drives the real committed mainnet profile rather than a synthetic
+    one: an entry for the dead sleeve has to come back refused, while CARRY
+    keeps its own share.
+    """
+
+    profile = _load(_mainnet_document())
+    policy = profile.account_risk.to_policy()
+    assert {limit.sleeve for limit in policy.sleeve_limits} == {"carry", "long"}
+
+    refused = _submit(
+        _kernel(tmp_path / "dead"),
+        "batch-1",
+        [_target(sleeve="continuous", qty=0.1)],
+        policy,
+    )
+    assert not refused.accepted
+    assert any(
+        key.endswith("unpartitioned_sleeve:continuous") for key in refused.rejection_keys
+    ), refused.rejection_keys
+
+    live = _submit(
+        _kernel(tmp_path / "live"),
+        "batch-1",
+        [_target(sleeve="carry", qty=0.1)],
+        policy,
+    )
+    assert live.accepted, live.rejection_keys
+
+
 def test_the_committed_mainnet_profile_proves(tmp_path: Path) -> None:
     profile = _load(_mainnet_document())
     assert {limit.sleeve for limit in profile.account_risk.sleeve_limits} == {
         "carry",
-        "continuous",
         "long",
     }
 

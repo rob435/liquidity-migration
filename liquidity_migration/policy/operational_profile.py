@@ -23,14 +23,7 @@ OPERATIONAL_PROFILE_KIND = "liquidity_migration_operational_profile"
 
 #: The sleeves a partition may name. Closed, so a typo cannot create a partition
 #: nothing spends while the real sleeve stays unlisted and refused.
-PARTITIONABLE_SLEEVES: tuple[str, ...] = ("carry", "continuous", "hedge", "long")
-
-#: The retired CONTINUOUS sleeve's resolved sizing shape, frozen here now that
-#: its code is deleted. Its token envelope is still proved against the account
-#: caps, so these must keep the values ``continuous_ensemble_v2`` produced: a
-#: single ensemble component at weight 1.0, inverse-vol sizing clamped at 2.0.
-_CONTINUOUS_COMPONENT_WEIGHT = 1.0
-_CONTINUOUS_VOL_WEIGHT_CLAMP = 2.0
+PARTITIONABLE_SLEEVES: tuple[str, ...] = ("carry", "hedge", "long")
 
 
 def _object(
@@ -134,16 +127,6 @@ class LongOperationalSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class ContinuousOperationalSettings:
-    max_active: int
-    max_new_entries_per_cycle: int
-    btc_trend_gate: str
-    entry_leverage: float
-    notional_multiplier: float
-    per_position_notional_pct_equity: float
-
-
-@dataclass(frozen=True, slots=True)
 class HedgeOperationalSettings:
     entry_leverage: float
 
@@ -199,7 +182,6 @@ class OperationalProfile:
     capital_reference_usdt: float
     account_risk: AccountRiskSettings
     long: LongOperationalSettings
-    continuous: ContinuousOperationalSettings
     carry: CarryOperationalSettings
     hedge: HedgeOperationalSettings
     source_sha256: str
@@ -361,43 +343,6 @@ def _parse_long(value: object) -> LongOperationalSettings:
     )
 
 
-def _parse_continuous(value: object) -> ContinuousOperationalSettings:
-    fields = {
-        "max_active",
-        "max_new_entries_per_cycle",
-        "btc_trend_gate",
-        "entry_leverage",
-        "notional_multiplier",
-        "per_position_notional_pct_equity",
-    }
-    row = _object(value, label="operational profile continuous", fields=fields)
-    gate = row["btc_trend_gate"]
-    if gate not in {"off", "uptrend", "downtrend"}:
-        raise ValueError("continuous.btc_trend_gate must be off, uptrend, or downtrend")
-    max_active = _positive_int(row["max_active"], label="continuous.max_active")
-    max_new = _positive_int(
-        row["max_new_entries_per_cycle"],
-        label="continuous.max_new_entries_per_cycle",
-    )
-    if max_new > max_active:
-        raise ValueError("continuous.max_new_entries_per_cycle cannot exceed max_active")
-    return ContinuousOperationalSettings(
-        max_active=max_active,
-        max_new_entries_per_cycle=max_new,
-        btc_trend_gate=gate,
-        entry_leverage=_positive_float(
-            row["entry_leverage"], label="continuous.entry_leverage"
-        ),
-        notional_multiplier=_positive_float(
-            row["notional_multiplier"], label="continuous.notional_multiplier"
-        ),
-        per_position_notional_pct_equity=_positive_float(
-            row["per_position_notional_pct_equity"],
-            label="continuous.per_position_notional_pct_equity",
-        ),
-    )
-
-
 def _parse_carry(value: object) -> CarryOperationalSettings:
     fields = {
         "notional_multiplier",
@@ -450,7 +395,6 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
     tolerance = max(1e-9, profile.capital_reference_usdt * 1e-12)
     leverage_requests = {
         "long": profile.long.entry_leverage,
-        "continuous": profile.continuous.entry_leverage,
         "carry": profile.carry.entry_leverage,
         "hedge": profile.hedge.entry_leverage,
     }
@@ -507,33 +451,6 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
             "long full-book margin projection exceeds its configured equity cap"
         )
 
-    # CONTINUOUS is retired and its sizing code is gone, but the profiles still
-    # carry a token continuous envelope and it still has to fit inside the
-    # account caps checked below. These are the shapes the deleted
-    # ``continuous_ensemble_v2`` profile resolved to: one component at weight
-    # 1.0, and inverse-vol sizing clamped at 2.0.
-    component_weights = [_CONTINUOUS_COMPONENT_WEIGHT]
-    vol_clamp = _CONTINUOUS_VOL_WEIGHT_CLAMP
-    base_fraction = (
-        profile.continuous.per_position_notional_pct_equity
-        * profile.continuous.notional_multiplier
-        / 100.0
-    )
-    continuous_single_symbol = (
-        profile.capital_reference_usdt
-        * base_fraction
-        * sum(component_weights)
-        * vol_clamp
-    )
-    continuous_gross = (
-        profile.capital_reference_usdt
-        * base_fraction
-        * max(component_weights)
-        * vol_clamp
-        * profile.continuous.max_active
-    )
-    continuous_margin = continuous_gross / profile.continuous.entry_leverage
-
     # CARRY worst case from the registered rule constants the producer loads.
     from liquidity_migration.strategy.carry_demo import load_carry_config  # noqa: PLC0415
 
@@ -550,24 +467,20 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
     )
     carry_margin = carry_gross / profile.carry.entry_leverage
 
-    if (
-        max(long_single, continuous_single_symbol, carry_single)
-        > risk.max_symbol_notional_usdt + tolerance
-    ):
+    if max(long_single, carry_single) > risk.max_symbol_notional_usdt + tolerance:
         raise ValueError("producer symbol envelope exceeds account_risk symbol cap")
-    combined_gross = long_gross + continuous_gross + carry_gross
+    combined_gross = long_gross + carry_gross
     if combined_gross > risk.max_component_gross_notional_usdt + tolerance:
         raise ValueError("combined producer envelope exceeds account_risk component cap")
     if combined_gross > risk.max_account_gross_notional_usdt + tolerance:
         raise ValueError("combined producer envelope exceeds account_risk account cap")
-    if long_margin + continuous_margin + carry_margin > risk.max_initial_margin_usdt + tolerance:
+    if long_margin + carry_margin > risk.max_initial_margin_usdt + tolerance:
         raise ValueError("combined producer margin envelope exceeds account_risk margin cap")
 
     # When partitioned, each producer must fit its own share, not just the total.
     if risk.sleeve_limits:
         producer_envelopes = {
             "long": (long_gross, long_margin),
-            "continuous": (continuous_gross, continuous_margin),
             "carry": (carry_gross, carry_margin),
         }
         for sleeve, (sleeve_gross, sleeve_margin) in sorted(producer_envelopes.items()):
@@ -694,7 +607,6 @@ def load_operational_profile_bytes(
         "capital_reference_usdt",
         "account_risk",
         "long",
-        "continuous",
         "carry",
         "hedge",
     }
@@ -715,7 +627,6 @@ def load_operational_profile_bytes(
         ),
         account_risk=_parse_account_risk(row["account_risk"]),
         long=_parse_long(row["long"]),
-        continuous=_parse_continuous(row["continuous"]),
         carry=_parse_carry(row["carry"]),
         hedge=_parse_hedge(row["hedge"]),
         source_sha256=hashlib.sha256(data).hexdigest(),

@@ -136,9 +136,9 @@ def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:
 
     assert profile.capital_reference.tracks_equity
     assert profile.capital_reference.equity_fraction == 1.0
-    # The account cap is exactly what the two sleeve dials plus the retired
-    # token share need: (1.0 carry + 0.75 long) / 0.99, inside the 2x ceiling.
-    gross_multiple = (1.0 + 0.75) / 0.99
+    # The account cap is exactly what the two sleeve dials need:
+    # 1.0 carry + 0.75 long, inside the 2x ceiling.
+    gross_multiple = 1.0 + 0.75
     assert profile.account_risk.max_initial_margin_usdt == pytest.approx(reference)
     assert profile.account_risk.max_account_gross_notional_usdt == pytest.approx(
         gross_multiple * reference
@@ -146,13 +146,10 @@ def test_the_mainnet_profile_is_partitioned_and_equity_anchored() -> None:
     assert profile.account_risk.max_account_gross_notional_usdt <= 2 * reference
     assert profile.account_risk.max_daily_loss_usdt == pytest.approx(0.1 * reference)
     assert profile.account_risk.max_leverage == 2.0
-    # CARRY and LONG both carry real size because the envelope is partitioned.
-    # CONTINUOUS is retired and shrunk to a token envelope rather than removed,
-    # because the profile schema requires all three blocks.
+    # CARRY and LONG both carry real size because the envelope is partitioned,
+    # and they are the only two claims on it.
     assert profile.carry.notional_multiplier == 1.0
     assert profile.long.notional_multiplier > 0.1
-    assert profile.continuous.notional_multiplier <= 0.001
-    assert profile.continuous.max_active == 1
 
     # Every cap is a ratio, so the whole envelope follows the wallet.
     for equity in (200.0, 2_500.0, 40_000.0):
@@ -172,7 +169,7 @@ def test_the_mainnet_partition_is_a_real_partition() -> None:
     risk = profile.account_risk
     shares = {limit.sleeve: limit for limit in risk.sleeve_limits}
 
-    assert set(shares) == {"carry", "continuous", "long"}
+    assert set(shares) == {"carry", "long"}
     assert sum(limit.max_gross_notional_usdt for limit in risk.sleeve_limits) <= (
         risk.max_account_gross_notional_usdt
     )
@@ -182,9 +179,10 @@ def test_the_mainnet_partition_is_a_real_partition() -> None:
     # Neither funded sleeve may reach the whole envelope on its own.
     for sleeve in ("carry", "long"):
         assert shares[sleeve].max_gross_notional_usdt < risk.max_account_gross_notional_usdt
-    # Retired CONTINUOUS has no mainnet unit; a token share, not an exemption.
-    assert shares["continuous"].max_gross_notional_usdt < 0.02 * (
-        risk.max_account_gross_notional_usdt
+    # The two live sleeves take the whole envelope between them, so a sleeve
+    # the partition does not name gets nothing rather than the leftover.
+    assert sum(limit.max_gross_notional_usdt for limit in risk.sleeve_limits) == (
+        pytest.approx(risk.max_account_gross_notional_usdt)
     )
 
     # The partition is a ratio like every other cap, so it follows the wallet.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.strategy.account_candidate_universe import (
     build_candidate_universe_artifact,
     load_candidate_universe,
@@ -31,7 +33,7 @@ PRODUCER_MODULES = (
 )
 
 
-def _instrument(symbol: str) -> dict[str, Any]:
+def _instrument(symbol: str, *, launch_time: str = "1700000000000") -> dict[str, Any]:
     return {
         "symbol": symbol,
         "contractType": "LinearPerpetual",
@@ -40,7 +42,7 @@ def _instrument(symbol: str) -> dict[str, Any]:
         "baseCoin": symbol.removesuffix("USDT"),
         "quoteCoin": "USDT",
         "settleCoin": "USDT",
-        "launchTime": "1700000000000",
+        "launchTime": launch_time,
         "deliveryTime": "0",
         "priceFilter": {"tickSize": "0.1"},
         "lotSizeFilter": {
@@ -217,5 +219,64 @@ def test_carry_producer_reads_the_artifact_of_its_own_environment(tmp_path: Path
             ["AAAUSDT"],
             candidate_universe_file=str(demo),
             realm=candidate_universe_realm("mainnet"),
+            standing_symbols=set(),
+        )
+
+
+def test_carry_trades_the_whole_instrument_set_not_its_own_profile(
+    tmp_path: Path,
+) -> None:
+    """CARRY is bound to its profile but is not narrowed to it.
+
+    NEWUSDT is three days old, so it fails CARRY's 7-day maturity floor and
+    is outside the carry profile, but it is a listed perpetual and so is
+    inside the instrument set. CARRY must still be able to trade it: that is
+    the population it had before the rename, and narrowing it would be a
+    strategy change nobody has decided.
+    """
+
+    snapshot_ms = SNAPSHOT_NS // 1_000_000
+    payload = build_candidate_universe_artifact(
+        [
+            *_INSTRUMENTS,
+            _instrument("NEWUSDT", launch_time=str(snapshot_ms - 3 * 86_400_000)),
+        ],
+        [*_TICKERS, _ticker("NEWUSDT", "9000000")],
+        snapshot_ts_ns=SNAPSHOT_NS,
+        long_config=LongNativeDemoCycleConfig(),
+        realm=VenueRealm.DEMO,
+    )
+    assert "NEWUSDT" not in payload["profile_eligible_symbols"]["carry"]
+    assert "NEWUSDT" in payload["strategy_instruments"]
+    path = write_candidate_universe(tmp_path / "candidate.json", payload)
+
+    assert _candidate_filtered_universe(
+        ["AAAUSDT", "NEWUSDT", "ZZZUSDT"],
+        candidate_universe_file=str(path),
+        realm=candidate_universe_realm("demo"),
+        standing_symbols=set(),
+    ) == (["AAAUSDT", "NEWUSDT"], 1)
+
+
+def test_carry_refuses_an_artifact_whose_carry_profile_drifted(tmp_path: Path) -> None:
+    """A frozen carry profile that no longer matches the live one must stop
+    the sleeve, not be silently traded against."""
+
+    payload = _artifact(VenueRealm.DEMO)
+    payload["profile_inputs"]["carry"]["min_age_days"] = 14
+    payload["profile_input_sha256"]["carry"] = hashlib.sha256(
+        canonical_json(payload["profile_inputs"]["carry"])
+    ).hexdigest()
+    payload["artifact_sha256"] = ""
+    payload["artifact_sha256"] = hashlib.sha256(canonical_json(payload)).hexdigest()
+    path = write_candidate_universe(tmp_path / "drifted.json", payload)
+
+    with pytest.raises(
+        RuntimeError, match="carry: effective universe config differs"
+    ):
+        _candidate_filtered_universe(
+            ["AAAUSDT"],
+            candidate_universe_file=str(path),
+            realm=candidate_universe_realm("demo"),
             standing_symbols=set(),
         )

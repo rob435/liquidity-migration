@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Freeze the pre-signal LONG/CONT/CARRY population from public Bybit data.
+"""Freeze the tradable instrument set and the LONG/CARRY profiles from Bybit.
 
 ``--realm`` selects the endpoint and is stamped into the artifact; the loader
 refuses an artifact frozen from any other realm, so each realm needs its own.
 
-The CARRY profile (top-150 by 24h turnover, 7-day maturity floor) is derived
-inside ``profile_universe_inputs`` from the same effective continuous config,
-so every artifact carries all three profiles.
+The artifact records the venue's whole crypto-linear perpetual set
+(``strategy_instruments``, which is what the account may trade) plus one
+narrower profile per live sleeve: LONG's top-N by 24h turnover with a 30-day
+maturity floor, and CARRY's top-150 with a 7-day one.
 """
 
 from __future__ import annotations

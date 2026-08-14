@@ -11,10 +11,14 @@ import pytest
 from liquidity_migration.strategy.account_candidate_universe import (
     account_exposure_labels,
     build_candidate_universe_artifact,
+    build_profile_universe_tables,
+    carry_profile_universe_inputs,
     enforce_frozen_candidate_frames,
     load_candidate_universe,
+    long_profile_universe_inputs,
     require_scheduled_retirements_flat,
     scheduled_retirement_exposure,
+    strategy_instruments_universe_inputs,
     write_candidate_universe,
 )
 from liquidity_migration.account.account_intent_client import (
@@ -101,28 +105,155 @@ def _payload() -> dict[str, object]:
     )
 
 
-def test_build_records_union_and_exact_exclusion_reasons() -> None:
-    payload = _payload()
-    assert payload["symbols"] == ["AAAUSDT", "BBBUSDT"]
+def downgrade_payload_to_schema_four(payload: dict[str, object]) -> dict[str, object]:
+    """Rewrite a schema-5 payload into the schema-4 shape it replaced.
+
+    Schema 4 is no longer produced anywhere, so the converter and the loader
+    refusal both need one built by hand. This reverses exactly the renames:
+    the instrument set goes back under the retired sleeve's name, and the
+    decision rows go back to ``profiles``/``included_in_union``.
+    """
+
+    old = json.loads(json.dumps(payload))
+    instrument_inputs = old.pop("strategy_instruments_inputs")
+    instrument_hash = old.pop("strategy_instruments_input_sha256")
+    instruments = old.pop("strategy_instruments")
+    old["schema_version"] = 4
+    old["profile_inputs"]["continuous"] = instrument_inputs
+    old["profile_input_sha256"]["continuous"] = instrument_hash
+    old["profile_eligible_symbols"]["continuous"] = instruments
+    for row in old["decisions"]:
+        populations = row.pop("populations")
+        populations["continuous"] = populations.pop("strategy_instruments")
+        row["profiles"] = populations
+        row["included_in_union"] = row.pop("included_in_strategy_instruments")
+    old["artifact_sha256"] = ""
+    old["artifact_sha256"] = hashlib.sha256(canonical_json(old)).hexdigest()
+    return old
+
+
+def test_schema_four_artifact_is_refused_and_names_the_converter(tmp_path: Path) -> None:
+    """An operator meeting an old artifact must be told how to move it."""
+
+    path = write_candidate_universe(
+        tmp_path / "candidate.json",
+        downgrade_payload_to_schema_four(_payload()),
+    )
+    with pytest.raises(ValueError, match="migrate_candidate_universe_schema.py"):
+        load_candidate_universe(path)
+
+
+def _payload_with_three_distinct_populations() -> dict[str, object]:
+    """A snapshot where the three populations are genuinely different sizes.
+
+    AAAUSDT is old and liquid, so every population holds it. BBBUSDT is under
+    LONG's turnover floor. NEWUSDT is three days old, so it is under both
+    sleeves' maturity floors but is still a listed perpetual. Anything
+    checking that the populations relate correctly has to use a fixture like
+    this: on one where they coincide, the check passes no matter what the
+    code does.
+    """
+
+    snapshot_ms = SNAPSHOT_NS // 1_000_000
+    return build_candidate_universe_artifact(
+        [
+            _instrument("AAAUSDT"),
+            _instrument("BBBUSDT"),
+            _instrument(
+                "NEWUSDT",
+                launch_time=str(snapshot_ms - 3 * 24 * 60 * 60 * 1_000),
+            ),
+        ],
+        [
+            _ticker("AAAUSDT", "3000000"),
+            _ticker("BBBUSDT", "1000000"),
+            _ticker("NEWUSDT", "9000000"),
+        ],
+        snapshot_ts_ns=SNAPSHOT_NS,
+        long_config=LongNativeDemoCycleConfig(),
+    )
+
+
+def test_a_young_listing_is_tradable_but_outside_every_sleeve_profile() -> None:
+    """The instrument set is strictly wider than the sleeve profiles."""
+
+    payload = _payload_with_three_distinct_populations()
+
+    assert payload["strategy_instruments"] == ["AAAUSDT", "BBBUSDT", "NEWUSDT"]
+    assert payload["symbols"] == ["AAAUSDT", "BBBUSDT", "NEWUSDT"]
     assert payload["profile_eligible_symbols"] == {
         "long": ["AAAUSDT"],
-        "continuous": ["AAAUSDT", "BBBUSDT"],
         "carry": ["AAAUSDT", "BBBUSDT"],
     }
     decisions = {row["symbol"]: row for row in payload["decisions"]}
-    assert decisions["BBBUSDT"]["profiles"]["long"] == {
+    assert decisions["NEWUSDT"]["populations"]["carry"]["reasons"] == [
+        "listing_age_below_floor"
+    ]
+    assert decisions["NEWUSDT"]["included_in_strategy_instruments"] is True
+
+
+def test_build_records_instrument_set_and_exact_exclusion_reasons() -> None:
+    payload = _payload()
+    assert payload["symbols"] == ["AAAUSDT", "BBBUSDT"]
+    assert payload["strategy_instruments"] == ["AAAUSDT", "BBBUSDT"]
+    assert payload["profile_eligible_symbols"] == {
+        "long": ["AAAUSDT"],
+        "carry": ["AAAUSDT", "BBBUSDT"],
+    }
+    decisions = {row["symbol"]: row for row in payload["decisions"]}
+    assert decisions["BBBUSDT"]["populations"]["long"] == {
         "included": False,
         "reasons": ["turnover_below_floor"],
     }
-    assert decisions["CCCUSDT"]["profiles"]["continuous"]["reasons"] == [
+    assert decisions["CCCUSDT"]["populations"]["strategy_instruments"]["reasons"] == [
         "prelisting"
     ]
-    assert decisions["USDCUSDT"]["profiles"]["continuous"]["reasons"] == [
+    assert decisions["USDCUSDT"]["populations"]["strategy_instruments"]["reasons"] == [
         "excluded_by_config"
     ]
-    assert decisions["TICKERONLYUSDT"]["profiles"]["continuous"]["reasons"] == [
-        "missing_instrument"
-    ]
+    assert decisions["TICKERONLYUSDT"]["populations"]["strategy_instruments"][
+        "reasons"
+    ] == ["missing_instrument"]
+
+
+def test_symbols_equal_what_the_old_three_way_union_produced() -> None:
+    """The rename must not move one symbol.
+
+    Schema 4 built ``symbols`` as ``long | continuous | carry``. Schema 5
+    takes the instrument set directly. Those agree only because every sleeve
+    profile is the instrument set with extra gates switched on, so each one
+    sits inside it — this is the check that the claim still holds.
+    """
+
+    payload = _payload_with_three_distinct_populations()
+    long_config = LongNativeDemoCycleConfig()
+    # Recompute each population straight from the raw snapshot, so the union
+    # this compares against does not come from the same field of the artifact
+    # it is checking.
+    tables = build_profile_universe_tables(
+        payload["raw_snapshot"]["instrument_rows"],
+        payload["raw_snapshot"]["ticker_rows"],
+        population_inputs={
+            "long": long_profile_universe_inputs(long_config),
+            "carry": carry_profile_universe_inputs(),
+            "strategy_instruments": strategy_instruments_universe_inputs(),
+        },
+        snapshot_ts_ms=SNAPSHOT_NS // 1_000_000,
+    )
+    populations = {
+        name: set(table["symbol"].to_list()) for name, table in tables.items()
+    }
+    # A fixture where the populations coincide would pass this whatever the
+    # code did, so refuse to run on one.
+    assert populations["long"] < populations["carry"] < populations["strategy_instruments"]
+
+    schema_four_union = (
+        populations["long"]
+        | populations["carry"]
+        | populations["strategy_instruments"]
+    )
+    assert payload["symbols"] == sorted(schema_four_union)
+    assert payload["strategy_instruments"] == sorted(schema_four_union)
 
 
 def test_builder_excludes_non_crypto_products_before_liquidity_ranking(
@@ -155,13 +286,13 @@ def test_builder_excludes_non_crypto_products_before_liquidity_ranking(
         ),
     )
 
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["strategy_domain"] == "crypto_perpetuals"
     assert payload["strategy_symbol_types"] == ["", "innovation"]
     assert payload["symbols"] == ["AAAUSDT", "INNOVUSDT"]
+    assert payload["strategy_instruments"] == ["AAAUSDT", "INNOVUSDT"]
     assert payload["profile_eligible_symbols"] == {
         "long": ["INNOVUSDT"],
-        "continuous": ["AAAUSDT", "INNOVUSDT"],
         "carry": ["AAAUSDT", "INNOVUSDT"],
     }
     assert payload["raw_source"]["instrument_rows"] == 6
@@ -195,7 +326,7 @@ def test_builder_excludes_non_crypto_products_before_liquidity_ranking(
         },
     ]
     decisions = {row["symbol"]: row for row in payload["decisions"]}
-    assert decisions["AAOIUSDT"]["profiles"]["continuous"] == {
+    assert decisions["AAOIUSDT"]["populations"]["strategy_instruments"] == {
         "included": False,
         "reasons": ["outside_crypto_perp_strategy_domain"],
     }
@@ -231,9 +362,9 @@ def test_profile_specific_population_records_and_reuses_scheduled_retirement(
     )
     assert frozen.profile_symbols == {
         "long": ("AAAUSDT",),
-        "continuous": ("AAAUSDT", "BBBUSDT"),
         "carry": ("AAAUSDT", "BBBUSDT"),
     }
+    assert frozen.strategy_instruments == ("AAAUSDT", "BBBUSDT")
     now_ms = SNAPSHOT_NS // 1_000_000 + 1_000
     delivery_ms = now_ms + 3 * 24 * 60 * 60 * 1_000
     instruments = _normalize_instruments(
@@ -261,17 +392,17 @@ def test_profile_specific_population_records_and_reuses_scheduled_retirement(
     assert long.scheduled_retirements == ()
     assert not registry.exists()
 
-    continuous = enforce_frozen_candidate_frames(
+    carry = enforce_frozen_candidate_frames(
         instruments,
         tickers,
         frozen,
-        profile="continuous",
+        profile="carry",
         snapshot_ts_ms=now_ms,
-        context="test CONT",
+        context="test CARRY",
         retirement_registry_path=registry,
     )
-    assert continuous.active_symbols == ("AAAUSDT",)
-    assert [row.symbol for row in continuous.scheduled_retirements] == ["BBBUSDT"]
+    assert carry.active_symbols == ("AAAUSDT",)
+    assert [row.symbol for row in carry.scheduled_retirements] == ["BBBUSDT"]
     assert registry.stat().st_mode & 0o777 == 0o600
 
     # After venue removal, the prospectively captured observation continues to
@@ -280,9 +411,9 @@ def test_profile_specific_population_records_and_reuses_scheduled_retirement(
         _normalize_instruments([_instrument("AAAUSDT")]),
         _normalize_tickers([_ticker("AAAUSDT", "3000000")]),
         frozen,
-        profile="continuous",
+        profile="carry",
         snapshot_ts_ms=delivery_ms + 1,
-        context="test CONT",
+        context="test CARRY",
         retirement_registry_path=registry,
     )
     assert [row.symbol for row in after_removal.scheduled_retirements] == ["BBBUSDT"]
@@ -378,9 +509,9 @@ def test_delivery_time_change_updates_registry_and_continues(tmp_path: Path) -> 
         ),
         tickers,
         frozen,
-        profile="continuous",
+        profile="carry",
         snapshot_ts_ms=now_ms,
-        context="test CONT",
+        context="test CARRY",
         retirement_registry_path=registry,
     )
     assert [row.delivery_time_ms for row in first.scheduled_retirements] == [
@@ -396,9 +527,9 @@ def test_delivery_time_change_updates_registry_and_continues(tmp_path: Path) -> 
         ),
         tickers,
         frozen,
-        profile="continuous",
+        profile="carry",
         snapshot_ts_ms=now_ms + 1_000,
-        context="test CONT",
+        context="test CARRY",
         retirement_registry_path=registry,
     )
 
@@ -408,6 +539,30 @@ def test_delivery_time_change_updates_registry_and_continues(tmp_path: Path) -> 
     assert row.first_observed_ts_ms == first.scheduled_retirements[0].first_observed_ts_ms
     assert row.evidence_source == "live_instrument_delivery_time_updated"
     assert moved.active_symbols == ("AAAUSDT",)
+
+    # The cycle after the move has to be able to read what the move wrote.
+    # Until 2026-08-14 it could not: the writer recorded the moved date with
+    # its own evidence source and the reader accepted only the original one,
+    # so every pass from here on raised "candidate-retirement registry record
+    # is invalid" — on a path LONG runs every cycle, with real retirements
+    # standing on the funded account.
+    again = enforce_frozen_candidate_frames(
+        _normalize_instruments(
+            [
+                _instrument("AAAUSDT"),
+                _instrument("BBBUSDT", delivery_time=str(moved_delivery_ms)),
+            ]
+        ),
+        tickers,
+        frozen,
+        profile="carry",
+        snapshot_ts_ms=now_ms + 2_000,
+        context="test CARRY",
+        retirement_registry_path=registry,
+    )
+    kept = again.scheduled_retirements[0]
+    assert kept.delivery_time_ms == moved_delivery_ms
+    assert kept.first_observed_ts_ms == first.scheduled_retirements[0].first_observed_ts_ms
 
 
 def test_scheduled_retirement_reentry_stays_nontradable_and_continues(
@@ -432,9 +587,9 @@ def test_scheduled_retirement_reentry_stays_nontradable_and_continues(
         ),
         tickers,
         frozen,
-        profile="continuous",
+        profile="carry",
         snapshot_ts_ms=now_ms,
-        context="test CONT",
+        context="test CARRY",
         retirement_registry_path=registry,
     )
 
@@ -445,9 +600,9 @@ def test_scheduled_retirement_reentry_stays_nontradable_and_continues(
         _normalize_instruments([_instrument("AAAUSDT"), _instrument("BBBUSDT")]),
         tickers,
         frozen,
-        profile="continuous",
+        profile="carry",
         snapshot_ts_ms=now_ms + 1_000,
-        context="test CONT",
+        context="test CARRY",
         retirement_registry_path=registry,
     )
 
@@ -478,9 +633,9 @@ def test_scheduled_retirement_requires_account_and_inbox_flatness(tmp_path: Path
             [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
         ),
         frozen,
-        profile="continuous",
+        profile="carry",
         snapshot_ts_ms=now_ms,
-        context="test CONT",
+        context="test CARRY",
         retirement_registry_path=tmp_path / "retirements.json",
     )
     route = ensure_account_route(
@@ -492,7 +647,7 @@ def test_scheduled_retirement_requires_account_and_inbox_flatness(tmp_path: Path
     require_scheduled_retirements_flat(
         reconciliation,
         route=route,
-        context="test CONT",
+        context="test CARRY",
     )
 
     publisher = AccountTargetPublisher(route)
@@ -517,7 +672,7 @@ def test_scheduled_retirement_requires_account_and_inbox_flatness(tmp_path: Path
         require_scheduled_retirements_flat(
             reconciliation,
             route=route,
-            context="test CONT",
+            context="test CARRY",
         )
 
 
@@ -567,7 +722,7 @@ def test_builder_records_noncanonical_ticker_only_source_rejection(
         long_config=LongNativeDemoCycleConfig(),
     )
 
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["symbols"] == ["AAAUSDT"]
     assert payload["raw_source"]["ticker_rows"] == 2
     assert payload["raw_snapshot"]["ticker_rows"][1] == synthetic
@@ -657,9 +812,9 @@ def _retiring_reconciliation(tmp_path: Path, *, now_ms: int):
             [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "1000000")]
         ),
         frozen,
-        profile="continuous",
+        profile="carry",
         snapshot_ts_ms=now_ms,
-        context="test CONT",
+        context="test CARRY",
         retirement_registry_path=tmp_path / "retirements.json",
     )
 
@@ -710,7 +865,7 @@ def test_retirement_exposure_reports_what_the_raising_form_raises_on(
         require_scheduled_retirements_flat(
             reconciliation,
             route=route,
-            context="test CONT",
+            context="test CARRY",
         )
 
 
