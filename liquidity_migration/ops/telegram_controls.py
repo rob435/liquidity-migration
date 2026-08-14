@@ -17,10 +17,12 @@ and runs three owner actions per environment:
     (a manual owner narrowing is preserved), regenerate the resolved toggles,
     and start whichever producers resolve on.
 
-There is no ``close`` button any more. It market-closed the book by publishing
-zero targets into the account owner's inbox, and the Python owner that drained
-that inbox is gone. Pause still stops new decisions; closing a book is a
-manual job at the venue until the engine grows a flatten path of its own.
+There is no ``close`` button. It market-closed the book by publishing zero
+targets into the deleted Python owner's inbox. ``scripts/ops.sh flatten
+--execute`` does that job again on the engine's own path, and it is left as an
+operator command rather than a button on purpose: it stops the producers, and a
+button that quietly stops a sleeve is the kind of thing somebody presses to see
+what it does. Pause still stops new decisions.
 
 Mainnet rows appear only while the mainnet owner unit is active, i.e. after
 the owner's own arming act; this module never arms anything. Pausing mainnet
@@ -245,11 +247,11 @@ class TelegramApi:
             logger.warning("answerCallbackQuery failed", exc_info=True)
 
 
-# Host actions (systemctl, sleeve resolve, flatten)
+# Host actions (systemctl, sleeve resolve)
 
 
 class VpsFleet:
-    """The subprocess side: unit state, sleeve toggles, and the flatten path."""
+    """The subprocess side: unit state and sleeve toggles."""
 
     def __init__(self, config: ControlsConfig) -> None:
         self._config = config
@@ -445,7 +447,7 @@ class ControlPanel:
         self._api.send_message(
             self._config.chat_id,
             "🎛 Trading controls\nPause stops new decisions; positions stay open. "
-            "There is no close button — flatten a book at the venue by hand.",
+            "There is no close button — use scripts/ops.sh flatten --execute.",
             keyboard=self.keyboard(),
         )
 

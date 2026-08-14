@@ -210,6 +210,17 @@ impl TargetBookFollower {
                 candidates.push(target.symbol.as_str());
             }
         }
+        // And whatever we were holding last time round. Without this an EMPTY
+        // book -- the decision to hold nothing -- only ever closed the seed
+        // list from the config, because a book with no targets adds no names
+        // and the seed is tiny. Every position in a name the book itself
+        // introduced would have been left standing by the one instruction
+        // whose whole meaning is "hold nothing".
+        for symbol in &self.was_held {
+            if !candidates.contains(&symbol.as_str()) {
+                candidates.push(symbol.as_str());
+            }
+        }
         let mut held: Vec<String> = {
             let facts = CtxFacts { ctx: &*ctx, sent_ahead: &self.sent_ahead };
             candidates

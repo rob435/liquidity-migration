@@ -31,6 +31,13 @@ Operator commands:
   stop UNIT...                 stop units
   start UNIT...                start units
   equity [ARGS...]             standard descriptive equity curves
+  flatten --environment demo|mainnet [--reason TEXT] [--execute]
+                               take an account to zero exposure through the
+                               engine: stop the producers, then write a book of
+                               zero rows naming everything it holds. Reports
+                               without --execute. The producers are stopped,
+                               not disabled -- turn the sleeve off to make it
+                               stick across a deploy
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
   venue-accounting [ARGS...]   reconcile demo accounting on the host; LOCAL=1
@@ -216,13 +223,22 @@ exec .venv/bin/python scripts/maintain/reconcile_bybit_demo_accounting.py \
     remote_python_module liquidity_migration.policy.real_money_arming "$@"
     ;;
   flatten)
-    # Retired with the Python account owner. Flatten worked by publishing zero
-    # targets into the owner's intent inbox; the engine reads target book files
-    # and never had an inbox, so there is nothing left to drain them. Closing a
-    # book is a manual job at the venue until the engine grows its own path.
-    echo "ops.sh flatten: retired with the Python account owner." >&2
-    echo "Close positions at the venue by hand, or stop the sleeve and let exits run." >&2
-    exit 2
+    # Back, on the engine's own path. It used to publish zero targets into the
+    # Python owner's intent inbox; it now stops the producers and writes a book
+    # of explicit zero rows naming everything the engine says it holds, which
+    # the engine reads as "hold none of this" and closes.
+    #
+    # Dry run unless --execute, and made explicit here as well as in the script
+    # so neither side alone can turn a report into a close.
+    flatten_args=("$@")
+    has_execute=0
+    for arg in ${flatten_args[@]+"${flatten_args[@]}"}; do
+      [ "$arg" = "--execute" ] && has_execute=1
+    done
+    if (( has_execute == 0 )); then
+      flatten_args=(--dry-run ${flatten_args[@]+"${flatten_args[@]}"})
+    fi
+    remote_exec "$REPO_DIR/scripts/vps/flatten_account.sh" ${flatten_args[@]+"${flatten_args[@]}"}
     ;;
   wedged-command)
     # `report` and `probe` read only. `resolve` writes one journal transition

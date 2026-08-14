@@ -624,3 +624,22 @@ fn probe_a_zero_target_for_a_name_outside_the_config_list_still_exits() {
     assert_eq!(sent.len(), 1, "the zero target is an exit, got {sent:?}");
     assert!(sent[0].reduce_only);
 }
+
+#[test]
+fn an_empty_book_closes_a_name_the_book_itself_introduced() {
+    // The seed list is tiny and the book grows it, so the normal steady state
+    // is positions in names the config never mentioned. Before this, an empty
+    // book -- the one instruction whose whole meaning is "hold nothing" --
+    // closed only the seed list and left every one of those standing.
+    let mut h = bench(&["BTCUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    h.drain();
+
+    h.targets(book(vec![]));
+
+    let intent = h.one_intent();
+    assert_eq!(intent.symbol, h.ctx.id_of("KAITOUSDT"));
+    assert!(intent.reduce_only, "hold nothing means close it");
+}
