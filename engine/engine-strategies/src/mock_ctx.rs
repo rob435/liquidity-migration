@@ -285,7 +285,34 @@ impl Harness {
         self.deliver(EngineEvent::Order(OrderUpdate::Ack(ack)));
     }
 
+    /// A fill that crossed the spread. The common case in these tests, and
+    /// the one a strategy that sends market orders always gets.
     pub fn fill(&mut self, client_order_id: &str, symbol: &str, side: Side, qty: f64, px: f64) {
+        self.fill_as(client_order_id, symbol, side, qty, px, false);
+    }
+
+    /// A fill where we were the resting side. Only a strategy that quotes
+    /// gets these, and telling them apart is the whole point of the flag.
+    pub fn maker_fill(
+        &mut self,
+        client_order_id: &str,
+        symbol: &str,
+        side: Side,
+        qty: f64,
+        px: f64,
+    ) {
+        self.fill_as(client_order_id, symbol, side, qty, px, true);
+    }
+
+    fn fill_as(
+        &mut self,
+        client_order_id: &str,
+        symbol: &str,
+        side: Side,
+        qty: f64,
+        px: f64,
+        is_maker: bool,
+    ) {
         let id = self.ctx.id_of(symbol);
         self.deliver(EngineEvent::Order(OrderUpdate::Fill {
             client_order_id: client_order_id.to_string(),
@@ -294,6 +321,7 @@ impl Harness {
             qty,
             px,
             fee: 0.0,
+            is_maker,
             venue_ts_ms: 0,
             recv_ns: self.ctx.now_ns,
         }));

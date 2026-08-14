@@ -279,7 +279,11 @@ mod tests {
     }
 
     fn sent(id: &str, symbol: u16, side: Side, qty: f64, stop: Option<f64>) -> WalRecord {
-        WalRecord::OrderSent { request: request(id, symbol, side, qty, stop), wire_ns: 1 }
+        WalRecord::OrderSent {
+            request: request(id, symbol, side, qty, stop),
+            wire_ns: 1,
+            arrival_mid: 0.0,
+        }
     }
 
     fn fill(id: &str, symbol: u16, side: Side, qty: f64) -> WalRecord {
@@ -291,6 +295,7 @@ mod tests {
                 qty,
                 px: 100.0,
                 fee: 0.0,
+                is_maker: false,
                 venue_ts_ms: 0,
                 recv_ns: 0,
             },
@@ -479,7 +484,7 @@ mod tests {
         exit.reduce_only = true;
         let log = vec![
             sent("eng-1", 3, Side::Buy, 1.0, Some(88.5)),
-            WalRecord::OrderSent { request: exit, wire_ns: 2 },
+            WalRecord::OrderSent { request: exit, wire_ns: 2, arrival_mid: 0.0 },
             fill("eng-1", 3, Side::Buy, 1.0),
         ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.0, false)]));

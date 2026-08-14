@@ -35,6 +35,7 @@ fn fill(kernel: &mut Kernel, id: &str, intent: &Intent, qty: f64) {
         qty,
         px: 10.0,
         fee: 0.0,
+        is_maker: false,
         venue_ts_ms: 0,
         recv_ns: 0,
     });
@@ -204,6 +205,7 @@ fn a_strategy_over_its_share_cannot_grow() {
         qty: 55.0,
         px: 10.0,
         fee: 0.0,
+        is_maker: false,
         venue_ts_ms: 0,
         recv_ns: 0,
     });
@@ -319,6 +321,7 @@ fn an_unattributed_fill_is_charged_to_every_share() {
         qty: 29.0,
         px: 10.0,
         fee: 0.0,
+        is_maker: false,
         venue_ts_ms: 0,
         recv_ns: 0,
     });

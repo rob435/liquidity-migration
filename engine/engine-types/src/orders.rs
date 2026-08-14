@@ -273,6 +273,18 @@ pub enum OrderUpdate {
         qty: f64,
         px: f64,
         fee: f64,
+        /// We were the resting side: somebody else crossed the spread to
+        /// trade with us. The venue says so on every execution, and it is the
+        /// difference between earning the spread and paying it — so a maker
+        /// share is the first number to look at when asking whether the
+        /// working supervisor is doing its job.
+        ///
+        /// Defaulted on the way in, so a log written before this field
+        /// existed still replays. False is the honest default: an old log
+        /// cannot tell us, and counting an unknown as a maker would flatter
+        /// every number computed from it.
+        #[serde(default)]
+        is_maker: bool,
         venue_ts_ms: i64,
         recv_ns: u64,
     },

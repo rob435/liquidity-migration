@@ -443,5 +443,8 @@ fn sample_record() -> WalRecord {
             reduce_only: false,
         },
         wire_ns: 1_234_567_890,
+        // Carried on the real record too, so the size this measures is the
+        // size the hot path actually writes.
+        arrival_mid: 64_120.25,
     }
 }

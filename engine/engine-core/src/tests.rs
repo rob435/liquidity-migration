@@ -52,6 +52,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::Verdict { .. } => "verdict",
         WalRecord::OrderSent { .. } => "order_sent",
         WalRecord::OrderUpdate { .. } => "order_update",
+        WalRecord::Markout { .. } => "markout",
         WalRecord::CancelSent { .. } => "cancel_sent",
         WalRecord::AmendSent { .. } => "amend_sent",
         WalRecord::LatencyLedger { .. } => "latency_ledger",
@@ -1001,6 +1002,7 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
             reduce_only: false,
         },
         wire_ns: 3,
+        arrival_mid: 0.0,
     }];
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
@@ -1413,6 +1415,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
         WalRecord::OrderSent {
             request: finished.clone(),
             wire_ns: 1,
+            arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
@@ -1422,6 +1425,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
                 qty: 0.01,
                 px: 30_000.0,
                 fee: 0.1,
+                is_maker: false,
                 venue_ts_ms: 2,
                 recv_ns: 2,
             },
@@ -1429,6 +1433,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
         WalRecord::OrderSent {
             request: stale.clone(),
             wire_ns: 3,
+            arrival_mid: 0.0,
         },
     ];
 
@@ -1457,6 +1462,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
             qty: 0.01,
             px: 30_000.0,
             fee: 0.1,
+            is_maker: false,
             venue_ts_ms: 4,
             recv_ns: 4,
         }]),
@@ -2221,14 +2227,17 @@ async fn each_strategy_reads_only_its_own_working_orders() {
         WalRecord::OrderSent {
             request: mine.clone(),
             wire_ns: 1,
+            arrival_mid: 0.0,
         },
         WalRecord::OrderSent {
             request: theirs.clone(),
             wire_ns: 2,
+            arrival_mid: 0.0,
         },
         WalRecord::OrderSent {
             request: finished.clone(),
             wire_ns: 3,
+            arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
@@ -2238,6 +2247,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
                 qty: 0.25,
                 px: 29_000.0,
                 fee: 0.0,
+                is_maker: false,
                 venue_ts_ms: 4,
                 recv_ns: 4,
             },
@@ -3398,4 +3408,135 @@ fn no_configured_path_means_no_heartbeat_writer_at_all() {
     named.heartbeat_path = Some("var/engine-heartbeat.json".into());
     let built = crate::assembly::heartbeat(&named, None, None).expect("a path means a heartbeat");
     assert_eq!(built.path(), std::path::Path::new("var/engine-heartbeat.json"));
+}
+
+// ------------------------------------------------- what the fills cost
+
+#[tokio::test]
+async fn the_order_record_carries_the_midpoint_it_will_be_judged_against() {
+    // Without this the log can say what we sent and what we got, and never
+    // what the difference was worth: by the time a rested entry fills, the
+    // price it was decided against is gone.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let mut feed = ScriptFeed::quotes(symbol, 1, true);
+    engine
+        .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
+        .await
+        .unwrap();
+
+    let records = h.records.borrow();
+    let anchor = records
+        .iter()
+        .find_map(|r| match r {
+            WalRecord::OrderSent { arrival_mid, .. } => Some(*arrival_mid),
+            _ => None,
+        })
+        .expect("an order was sent");
+    // The book the strategy saw: 30,000.0 bid against 30,000.5 ask.
+    assert_eq!(anchor, 30_000.25, "the midpoint when the order left");
+}
+
+#[tokio::test]
+async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
+    // The anchor lives in the log, not in memory, so an order sent before a
+    // restart is still priced correctly when its fill turns up after one.
+    let before = OrderRequest {
+        client_order_id: "eng-1700000000000-4".into(),
+        strategy: StrategyId(0),
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.01,
+        kind: OrderKind::Market,
+        stop: None,
+        reduce_only: false,
+    };
+    let replayed = vec![
+        WalRecord::Boot {
+            version: "old".into(),
+            config_sha256: "abc".into(),
+            wall_ts_ms: 1,
+        },
+        WalRecord::OrderSent {
+            request: before.clone(),
+            wire_ns: 1,
+            arrival_mid: 30_000.0,
+        },
+    ];
+
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (mut engine, _h) = build(
+        false,
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &replayed,
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let mut orders = ScriptOrderFeed {
+        learned: Rc::new(RefCell::new(Vec::new())),
+        updates: VecDeque::from(vec![OrderUpdate::Fill {
+            client_order_id: before.client_order_id.clone(),
+            symbol,
+            side: Side::Buy,
+            // Three basis points above the midpoint that order was sent at.
+            px: 30_009.0,
+            qty: 0.01,
+            fee: 0.0,
+            is_maker: true,
+            venue_ts_ms: 4,
+            recv_ns: 4,
+        }]),
+    };
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut orders,
+            tokio::time::sleep(Duration::from_millis(40)),
+        )
+        .await
+        .unwrap();
+
+    let costs = engine.fills().total();
+    assert_eq!(costs.fills, 1);
+    assert_eq!(costs.maker_fills, 1, "the venue said we rested");
+    let shortfall = costs.arrival_shortfall.mean().expect("priced");
+    assert!((shortfall - 3.0).abs() < 0.01, "3 bp against the old anchor, got {shortfall}");
+}
+
+#[tokio::test]
+async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
+    // A fill for an order this log never sent — somebody hand-trading the
+    // same account. It is not ours to score, and guessing a price for it
+    // would put another person's execution in our own numbers.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (mut engine, _h) =
+        build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let mut orders = ScriptOrderFeed {
+        learned: Rc::new(RefCell::new(Vec::new())),
+        updates: VecDeque::from(vec![OrderUpdate::Fill {
+            client_order_id: "placed-by-hand".into(),
+            symbol,
+            side: Side::Buy,
+            px: 30_009.0,
+            qty: 0.01,
+            fee: 0.0,
+            is_maker: false,
+            venue_ts_ms: 4,
+            recv_ns: 4,
+        }]),
+    };
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut orders,
+            tokio::time::sleep(Duration::from_millis(40)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(engine.fills().total().fills, 0, "not our trade to score");
 }

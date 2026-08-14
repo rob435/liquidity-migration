@@ -89,14 +89,25 @@ pub fn one_line(record: &WalRecord) -> String {
             ),
             engine_types::RiskVerdict::Deny { reason } => format!("refused    {reason:?}"),
         },
-        WalRecord::OrderSent { request, wire_ns } => format!(
-            "sent       {} {:?} {} of symbol {} {} (at +{} from start)",
+        WalRecord::OrderSent {
+            request,
+            wire_ns,
+            arrival_mid,
+        } => format!(
+            "sent       {} {:?} {} of symbol {} {} (at +{} from start){}",
             request.client_order_id,
             request.side,
             request.qty,
             request.symbol.0,
             kind_words(&request.kind),
-            pretty(*wire_ns)
+            pretty(*wire_ns),
+            // The price this order will be judged against. Silent when the
+            // book could not be read, which is what a zero here means.
+            if *arrival_mid > 0.0 {
+                format!(", mid then {arrival_mid}")
+            } else {
+                String::new()
+            }
         ),
         WalRecord::OrderUpdate { update } => format!("news       {}", update_words(update)),
         WalRecord::CancelSent {
@@ -139,6 +150,28 @@ pub fn one_line(record: &WalRecord) -> String {
             pretty(*decide_p99_ns),
             pretty(*wire_p50_ns),
             pretty(*wire_p99_ns)
+        ),
+        WalRecord::Markout {
+            client_order_id,
+            horizon_ms,
+            signed_markout_bps,
+            actual_horizon_ms,
+            ..
+        } => format!(
+            "markout    {client_order_id} after {}s: {}{}",
+            horizon_ms / 1_000,
+            match signed_markout_bps {
+                // Said in words, because the sign is the opposite of every
+                // other number in this log and a bare figure invites the
+                // wrong reading.
+                Some(bps) if *bps >= 0.0 => format!("{bps:.2} bp our way"),
+                Some(bps) => format!("{:.2} bp against us", -bps),
+                None => "no readable book, so never measured".to_string(),
+            },
+            match actual_horizon_ms.saturating_sub(*horizon_ms) {
+                0 => String::new(),
+                late => format!(" (read {late} ms late)"),
+            }
         ),
         WalRecord::Note { source, text } => format!("note       [{source}] {text}"),
         WalRecord::ControlAnchor { source, state } => {
@@ -212,6 +245,7 @@ mod tests {
             WalRecord::OrderSent {
                 request: request("a"),
                 wire_ns: 10,
+                arrival_mid: 0.0,
             },
             WalRecord::OrderUpdate {
                 update: OrderUpdate::Cancelled {
@@ -234,6 +268,7 @@ mod tests {
             &[WalRecord::OrderSent {
                 request: request("b"),
                 wire_ns: 1,
+                arrival_mid: 0.0,
             }],
             true,
         );

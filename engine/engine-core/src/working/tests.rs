@@ -51,6 +51,7 @@ fn sent(id: &str) -> WalRecord {
             reduce_only: false,
         },
         wire_ns: 1,
+        arrival_mid: 0.0,
     }
 }
 
@@ -86,6 +87,7 @@ fn an_order_the_log_has_ended_stops_being_worked() {
                 qty: 1.0,
                 px: 99.0,
                 fee: 0.0,
+                is_maker: false,
                 venue_ts_ms: 0,
                 recv_ns: 0,
             },

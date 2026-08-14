@@ -13,6 +13,7 @@ pub mod clock;
 pub mod config;
 pub mod ctx;
 pub mod engine;
+pub mod execution;
 pub mod heartbeat;
 pub mod inflight;
 pub mod ledger;

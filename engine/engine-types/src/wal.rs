@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::ids::SymbolId;
+use crate::ids::{StrategyId, SymbolId};
 use crate::orders::{AmendSpec, Intent, OrderRequest, OrderUpdate};
 use crate::risk::RiskVerdict;
 
@@ -30,6 +30,19 @@ pub enum WalRecord {
     OrderSent {
         request: OrderRequest,
         wire_ns: u64,
+        /// `M0`: the midpoint of the book at the moment this order left, which
+        /// is what every arrival number is measured against
+        /// (`docs/architecture.md` §Trade diagnostics). Zero means the book
+        /// could not be read, and a zero anchor yields no measurement rather
+        /// than a flattering one.
+        ///
+        /// It is written here, on the send, because this is the only moment
+        /// it exists: a worked entry can rest for a minute before it fills,
+        /// and by then the price it was decided against is gone. Defaulted on
+        /// the way in so a log written before the field existed still replays
+        /// — as unmeasurable, which is the truth about it.
+        #[serde(default)]
+        arrival_mid: f64,
     },
     OrderUpdate {
         update: OrderUpdate,
@@ -48,6 +61,35 @@ pub enum WalRecord {
         client_order_id: String,
         spec: AmendSpec,
         wire_ns: u64,
+    },
+    /// Where the market went after one of our fills.
+    ///
+    /// The one execution-quality number that is an observation rather than
+    /// arithmetic: what a fill cost against the book when the order left can
+    /// always be recomputed from `OrderSent` and the fill, but a price five
+    /// minutes later exists only if somebody wrote it down at the time. So
+    /// this is written when the horizon comes due.
+    ///
+    /// Names and signs are `docs/architecture.md` §Trade diagnostics.
+    Markout {
+        client_order_id: String,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        /// Which fill, by the venue's own stamp — an order can fill more than
+        /// once.
+        fill_ts_ms: i64,
+        horizon_ms: u64,
+        /// `Mh`. Absent when no readable book turned up inside the lateness
+        /// bound, which is a horizon terminally missing rather than a zero.
+        mid: Option<f64>,
+        /// **Positive means the price moved our way.** The opposite sign
+        /// convention from everything else, and it is the doc's.
+        signed_markout_bps: Option<f64>,
+        /// What the horizon actually came to. The engine looks on its
+        /// group-flush tick, so a mark is always a little late.
+        actual_horizon_ms: u64,
+        /// What this mark speaks for, so a rollup can weight it.
+        notional_usdt: f64,
     },
     /// Periodic latency ledger line: histogram quantiles in nanoseconds.
     LatencyLedger {

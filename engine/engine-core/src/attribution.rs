@@ -148,6 +148,7 @@ mod tests {
                 reduce_only: false,
             },
             wire_ns: 1,
+            arrival_mid: 0.0,
         }
     }
 
@@ -160,6 +161,7 @@ mod tests {
                 qty,
                 px: 100.0,
                 fee: 0.0,
+                is_maker: false,
                 venue_ts_ms: 1,
                 recv_ns: 1,
             },

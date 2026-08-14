@@ -56,6 +56,7 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
         qty: 40_000.0,
         px: 10.0,
         fee: 0.0,
+        is_maker: false,
         venue_ts_ms: 0,
         recv_ns: 2 * SEC,
     });

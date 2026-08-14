@@ -34,6 +34,12 @@ pub struct OrderRec {
     pub acked: bool,
     pub filled_qty: f64,
     pub ending: Option<Ending>,
+    /// The midpoint when this order left, carried so a fill arriving a minute
+    /// later can still be priced against it. Zero when the book could not be
+    /// read then. Kept here rather than looked up because the order may have
+    /// been sent in an earlier boot, and this ledger is what a boot rebuilds
+    /// from the log.
+    pub arrival_mid: f64,
 }
 
 impl OrderRec {
@@ -61,7 +67,11 @@ impl LedgerOfOrders {
     pub fn apply(&mut self, record: &WalRecord) {
         match record {
             WalRecord::Boot { .. } => self.boots += 1,
-            WalRecord::OrderSent { request, wire_ns } => {
+            WalRecord::OrderSent {
+                request,
+                wire_ns,
+                arrival_mid,
+            } => {
                 self.orders.insert(
                     request.client_order_id.clone(),
                     OrderRec {
@@ -70,6 +80,7 @@ impl LedgerOfOrders {
                         acked: false,
                         filled_qty: 0.0,
                         ending: None,
+                        arrival_mid: *arrival_mid,
                     },
                 );
             }
@@ -206,6 +217,7 @@ mod tests {
         WalRecord::OrderSent {
             request: request(id, qty),
             wire_ns: 1,
+            arrival_mid: 0.0,
         }
     }
 
@@ -218,6 +230,7 @@ mod tests {
                 qty,
                 px: 100.0,
                 fee: 0.0,
+                is_maker: false,
                 venue_ts_ms: 0,
                 recv_ns: 0,
             },

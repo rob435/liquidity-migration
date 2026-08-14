@@ -46,6 +46,7 @@ use crate::attribution::Attribution;
 use crate::clock;
 use crate::config::EngineSection;
 use crate::ctx::{Ctx, Timers};
+use crate::execution::{self, Fills};
 use crate::heartbeat::{self, Heartbeat};
 use crate::inflight::{self, LedgerOfOrders, OrderRegistry};
 use crate::reconcile;
@@ -145,6 +146,10 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// runs under `--shared-leverage-authority`.
     leverage_at: std::collections::HashMap<SymbolId, f64>,
     ledger: LatencyLedger,
+    /// What the fills cost. The latency ledger beside it measures our own side
+    /// of the wire; this one measures the price, which is the half that
+    /// actually shows up in the account.
+    fills: Fills,
     /// The target book watcher, when one was configured. Parked here between
     /// boot and run; `run` takes it out for the length of the run, because
     /// the loop's `select!` needs it as a local — a future borrowing it out
@@ -330,6 +335,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             leverage_at: std::collections::HashMap::new(),
             may_open,
             ledger: LatencyLedger::new(now),
+            // Deliberately not rebuilt from the log at boot, unlike
+            // attribution: this is a running score for the run in front of
+            // you, and the whole history is one `engine fills` away.
+            fills: Fills::default(),
             targets: TargetBooks::new(Vec::new()),
             heartbeat: None,
             shadow: settings.shadow,
@@ -871,6 +880,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             tracing::info!("latency, {}", self.ledger.plain_line(now));
             self.ledger.reset(now);
         }
+        // Any markout whose horizon has come round. Written down because a log
+        // holds no prices: this is the one execution number that cannot be
+        // worked out later from the records already in it.
+        for mark in self.fills.due(now, &self.market) {
+            self.wal.append(&mark.to_record())?;
+        }
         if now.saturating_sub(self.account.observed_ns) >= self.refresh_after_ns {
             match self.venue.account_view().await {
                 Ok(view) => {
@@ -1218,6 +1233,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let sent_record = WalRecord::OrderSent {
             request: request.clone(),
             wire_ns: clock::now_ns(),
+            // `M0`. Read here rather than at the fill because this is the only
+            // moment it exists: a worked entry can rest for a minute, and by
+            // the time it fills the price it was decided against is gone.
+            // Zero when the book was unreadable, which makes every arrival
+            // number for this order missing rather than flattering.
+            arrival_mid: self.decision_mid(request.symbol),
         };
         self.wal.append(&sent_record)?;
         if !self.shadow {
@@ -1491,7 +1512,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // still arrive for an order older than either.
         if let Some(id) = inflight::client_order_id(&update) {
             match self.orders.owner_of(id) {
-                Some(sid) => self.attribution.on_update(sid, &update),
+                Some(sid) => {
+                    self.attribution.on_update(sid, &update);
+                    self.price_fill(sid, &update);
+                }
                 // Charged to nobody on purpose. `reconcile` is what notices
                 // the account holds more than the log accounts for, and it
                 // already stops the engine opening on top of it.
@@ -1641,6 +1665,50 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .find(|px| *px > 0.0)
     }
 
+    /// Price one fill against the book that was on the screen when its order
+    /// left, and start its markout clock.
+    ///
+    /// The anchor comes off the order ledger rather than out of memory,
+    /// because the ledger is rebuilt from the log at boot: a fill for an order
+    /// sent before a restart is still priced against the right midpoint.
+    fn price_fill(&mut self, strategy: StrategyId, update: &OrderUpdate) {
+        let OrderUpdate::Fill {
+            client_order_id,
+            symbol,
+            side,
+            qty,
+            px,
+            fee,
+            is_maker,
+            venue_ts_ms,
+            ..
+        } = update
+        else {
+            return;
+        };
+        let arrival_mid = self
+            .orders
+            .orders
+            .get(client_order_id)
+            .map(|order| order.arrival_mid)
+            .unwrap_or(0.0);
+        self.fills.on_fill(
+            &execution::Fill {
+                client_order_id: client_order_id.clone(),
+                strategy,
+                symbol: *symbol,
+                side: *side,
+                qty: *qty,
+                px: *px,
+                fee: *fee,
+                is_maker: *is_maker,
+                arrival_mid,
+                venue_ts_ms: *venue_ts_ms,
+            },
+            clock::now_ns(),
+        );
+    }
+
     fn mint_id(&mut self) -> String {
         let orders = &self.orders;
         mint_unused(self.registry.prefix(), &mut self.next_order_n, |candidate| {
@@ -1650,6 +1718,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub fn strategy_names(&self) -> &[String] {
         &self.names
+    }
+
+    /// What the fills have cost so far this run.
+    pub fn fills(&self) -> &Fills {
+        &self.fills
     }
 }
 

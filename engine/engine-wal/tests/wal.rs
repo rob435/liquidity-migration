@@ -60,6 +60,7 @@ fn every_variant() -> Vec<WalRecord> {
                 reduce_only: true,
             },
             wire_ns: 99_000_555_000,
+            arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
@@ -69,6 +70,7 @@ fn every_variant() -> Vec<WalRecord> {
                 qty: 1.25,
                 px: 3120.5,
                 fee: 0.0021,
+                is_maker: true,
                 venue_ts_ms: 1_770_000_000_500,
                 recv_ns: 99_000_999_000,
             },

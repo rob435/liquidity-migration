@@ -502,6 +502,10 @@ pub(crate) fn map_execution_row(
         px: number(row, "execPrice")?,
         // A maker rebate comes back negative; it is a fee either way.
         fee: opt_num_field(row, "execFee").map_err(bad_field)?.unwrap_or(0.0),
+        // Absent means taker. The venue sends this on every execution, so an
+        // absent one is a message shape we do not know — and the expensive
+        // side is the safe thing to assume about a fill we cannot classify.
+        is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
         venue_ts_ms: number(row, "execTime")? as i64,
         recv_ns,
     }))
@@ -651,6 +655,7 @@ mod tests {
                 qty,
                 px,
                 fee,
+                is_maker,
                 venue_ts_ms,
                 recv_ns,
             } => {
@@ -660,11 +665,36 @@ mod tests {
                 assert_eq!(qty, 0.5);
                 assert_eq!(px, 95900.1);
                 assert_eq!(fee, 26.3725275);
+                assert!(!is_maker, "this row does not say it rested");
                 assert_eq!(venue_ts_ms, 1_746_270_400_353);
                 assert_eq!(recv_ns, 99);
             }
             other => panic!("expected Fill, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_venue_says_which_side_of_the_spread_we_were_on() {
+        // Earning the spread and paying it are the same fill until this flag
+        // is read. Bybit sends it on every execution.
+        let resolve = |name: &str| (name == "BTCUSDT").then_some(SymbolId(0));
+        let row = |is_maker: bool| {
+            json!({
+                "execPrice": "95900.1", "execQty": "0.5", "execFee": "26.37",
+                "execTime": "1746270400353", "orderLinkId": "eng-11",
+                "symbol": "BTCUSDT", "side": "Sell", "execType": "Trade",
+                "isMaker": is_maker
+            })
+        };
+        let maker_flag = |is_maker: bool| match map_execution_row(&row(is_maker), &resolve, 1)
+            .unwrap()
+            .unwrap()
+        {
+            OrderUpdate::Fill { is_maker, .. } => is_maker,
+            other => panic!("expected Fill, got {other:?}"),
+        };
+        assert!(maker_flag(true), "we rested and somebody came to us");
+        assert!(!maker_flag(false), "we crossed the spread");
     }
 
     #[test]
