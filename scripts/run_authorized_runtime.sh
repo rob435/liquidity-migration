@@ -76,6 +76,25 @@ case "$UNIT:$ENTRYPOINT" in
             on|ON|On|1|true|TRUE|True|yes|YES|Yes) COMMAND+=(--live) ;;
         esac
         ;;
+    liquidity-migration-engine-mainnet.service:main)
+        # The same binary and the same command line as the demo engine above.
+        # What differs is entirely in the unit's environment files: which
+        # config it reads, and therefore which venue adapter it selects. There
+        # is no realm argument here on purpose — a realm named on a command
+        # line is a realm somebody can mistype.
+        #
+        # Reaching the funded account still needs REAL_MONEY armed in
+        # /etc/liquidity-migration/bybit-mainnet.env, by the owner. Without it
+        # the engine refuses to build a mainnet gateway and exits saying so.
+        COMMAND=(
+            /opt/liquidity-migration-engine/bin/engine
+            run
+            --config "${ENGINE_CONFIG_FILE:?ENGINE_CONFIG_FILE is required}"
+        )
+        case "${ENGINE_LIVE:-}" in
+            on|ON|On|1|true|TRUE|True|yes|YES|Yes) COMMAND+=(--live) ;;
+        esac
+        ;;
     liquidity-migration-demo-liveness.service:main)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
