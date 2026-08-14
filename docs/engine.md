@@ -126,24 +126,42 @@ parallel and integrate by type-check.
 | `engine-types` | every shared type and trait: events, intents, orders, log records, the `Strategy` trait, and the capability traits (`Wal`, `VenueGateway`, `RiskKernel`) |
 | `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation |
 | `engine-marketdata` | Bybit public WebSocket: subscribe, sequence-check, parse once into flat per-symbol state, stamp arrival time |
-| `engine-venue` | the demo venue gateway: HMAC signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, position and wallet reads, the demo private WebSocket for order/fill updates |
+| `engine-venue` | the venue gateway, demo or funded by realm: HMAC signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and wallet reads, the realm's private WebSocket for order/fill updates |
 | `engine-risk` | the four capital controls, ported: account loss guard, equity-anchored envelope, per-strategy capital partition, stop-attach discipline. Fail-closed |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
 | `engine-strategies` | the plugs: a registry from name + TOML to a boxed `Strategy` |
 
 ## Safety posture
 
-- **No mainnet order path, by construction.** The venue crate — the only crate
-  that can send an order — contains the demo hostname and no other, and its
-  own test reads the crate source back and fails on any other host. State that
-  precisely: `engine-marketdata` *does* hold a mainnet host,
-  `wss://stream.bybit.com/v5/public/linear`, because Bybit serves demo public
-  data from the mainnet stream. It is unauthenticated, read-only, and pinned by
-  its own test. So the engine already sees real production market data; what it
-  cannot reach is any account other than a demo one. Real-money arming remains
-  exclusively the Python fleet's `REAL_MONEY` switch, set by the owner's hand;
-  the engine has no equivalent and gets none without an explicit owner
-  decision.
+- **The funded account is reachable, and only with the owner's switch.** This
+  changed on 2026-08-14. The venue crate used to contain no mainnet hostname at
+  all, which made a whole class of mistake impossible and also made the engine
+  unable to do the job it was built for. What replaced it is the Python fleet's
+  own rule, ported so both halves behave identically while both are running:
+
+  - `REAL_MONEY=true`, in the host credential file, set by the account owner.
+    Without it a mainnet gateway fails at the credential read, before a socket
+    opens. **The engine never writes it, and no config can stand in for it.**
+  - It cuts both ways: an armed host refuses to run the *demo* realm, so a box
+    cannot be half-live and half-practice at once.
+  - The two realms read disjoint environment variables, so a demo key cannot
+    authenticate the funded account even if the realm were wrong.
+  - A realm is always named. There is no default to fall back to.
+  - A typo stops the engine. `REAL_MONEY=ture` is not "off"; it is a mistake in
+    the one line that decides whether this is real.
+
+  The structural half is still checked against the source, and now checks
+  something sharper than absence: the four venue hosts may be written in
+  exactly one file, `realm.rs`. That closes the door that opens the moment a
+  mainnet address exists anywhere — the test-only constructor takes a hostname,
+  and no test, benchmark or module can spell one.
+
+  `engine-marketdata` holds `wss://stream.bybit.com/v5/public/linear`
+  separately, because Bybit serves demo public data from the mainnet stream. It
+  is unauthenticated and read-only.
+
+  Nothing has ever been sent to the funded account. The path exists, is fenced,
+  and is tested; it has not been exercised.
 - **Shadow mode is the default.** The engine computes intents and logs them;
   it only sends orders when started with an explicit live flag, and the risk
   kernel still gates every send.
@@ -294,18 +312,38 @@ because the deletion order depends on it:
 | Capability | State |
 | --- | --- |
 | Decide, gate, make durable, sign, send | Done, and measured |
-| The four capital controls | Ported, minus four account caps named in `engine-risk/PORT_NOTES.md` |
+| The four capital controls | Ported whole, including every load-time proof — the last one, that the account gross cap sits inside what the reference could fund, landed 2026-08-14. `engine-risk/PORT_NOTES.md` has the line-by-line |
+| The fleet's own risk limits | Done. `[risk] operational_profile_path` loads `configs/operational.mainnet.json` itself, so a cap the owner tightens tightens for both halves. Measured: the Python and Rust loaders read that file identically, field for field |
 | Quantizing to tick and step, venue minimums | Done |
 | Following a research target book | Built, tested, and run against the demo account. The plug remembers what it sent until the account reading shows it, so the window between a fill and the next reading cannot become a second entry |
+| One account, more than one sleeve | Done. Each sleeve names its own book path and that book reaches that sleeve only. Before this a book went to every strategy, and two followers on one account would have fought over the same positions |
+| Stating leverage at the venue | Done. The leverage a decision was sized at travels with it, and an order whose leverage cannot be set is not sent. Entries only |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
 | Venue reconciliation and restart recovery | Done. Boot reads the venue's working orders and compares them, and the account, against the log |
 | Stop verify, repair, and a durable breach latch | Done. A position missing its stop gets back the one the log says it was opened behind; exposure the log cannot account for latches the engine out of opening |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | Done, by feeding the fleet's own watchdog rather than growing a second one. The engine writes a heartbeat file; `check_fleet_liveness.py` reads it and pages on stale, unreadable, or latched. Off unless a path is configured |
+| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file. **Never exercised** — see below |
+| **The universe is fixed at boot** | **Not done.** A follower's symbols are collected once, when it starts, so it cannot trade a name that first appears in a book written later. The fleet's universe is ~510 symbols and moves with listings and delistings. Widening it means editing the config and restarting |
 
-Every row above is now Done. What is left is not a missing capability but a
-missing account: the engine cannot reach the funded one, and until it can,
-nothing it does replaces anything.
+### What that leaves
+
+Two different kinds of thing, and it is worth not confusing them.
+
+**A capability gap, and it is real.** The universe is fixed at boot. On a
+carry book whose names turn over with the funding table, an engine that cannot
+follow a newly listed symbol is an engine quietly holding a smaller book than
+the research said to hold — and holding it without complaining, because a
+symbol it cannot price is skipped, not refused. That has to be built before
+the engine could own the funded account, and it is the next thing worth
+building.
+
+**No evidence, which is not the same as no capability.** Nothing above has
+ever run against real money. The mainnet path exists, is fenced, and is
+tested; it has never carried an order. A capability that has not been
+exercised is a claim, and the only thing that turns it into a fact is running
+it — in shadow first, against the account, for long enough to compare its
+decisions with the Python owner's.
 
 The Python execution path stays, and not out of caution. Measured 2026-08-14
 by walking the import graph from all nine systemd units: **93 of 135 modules
@@ -313,14 +351,18 @@ are reachable from a live unit, and none of them is demo-only.** Demo and
 mainnet run byte-identical command lines — the realm is a parameter branched
 *inside* shared modules — so there is no demo half to retire first. A
 symbol-level scan of all 45 order-path modules found zero unreferenced
-functions or classes. Deleting any of it would not be a risk taken; it would
-simply stop the funded fleet trading.
+functions or classes. Deleting any of it today would not be a risk taken; it
+would simply stop the funded fleet trading.
 
 There is a further trap worth knowing before anyone tries the obvious first
 step: `verify_topology()` in `scripts/deploy_vps_live.sh` unconditionally
 requires the demo owner to be active, and `staged` reaches it through
 `activate_mode` — so **every mainnet deploy verifies the demo fleet.**
 Removing the demo units breaks the path that ships mainnet changes.
+
+And the producers are not the order path. A carry decision is a batch over
+ninety days of funding and bars; it stays in research and arrives as a target
+book. "Delete the Python one" was never going to mean deleting that.
 
 ### The order it can actually happen in
 
@@ -330,27 +372,32 @@ one is what the step after it needs in order not to be reckless.
 1. **The engine can be seen from outside.** Done — it writes a heartbeat and
    the fleet's watchdog pages on stale, unreadable, or latched. Nothing can
    stand down while nothing can tell you the replacement is sick.
-2. **The engine enforces what the fleet enforces.** Done — the four account
-   caps are ported, so it is no longer looser than the thing it would replace.
-3. **The engine runs as a service, on its own demo account, in shadow.** This
+2. **The engine enforces what the fleet enforces.** Done — and now from the
+   same document rather than a copy of its numbers.
+3. **The engine can hold the book it is given.** Not done: the universe is
+   fixed at boot. Everything else on this list is about trust; this one is
+   about whether it can do the job at all.
+4. **The engine runs as a service, on its own demo account, in shadow.** This
    is the first step that produces evidence continuously rather than once, and
    it is where the comparison against the Python owner's decisions starts.
-4. **The demo Python owner becomes retirable.** That means decoupling
+5. **The demo Python owner becomes retirable.** That means decoupling
    `verify_topology` from it — the sleeve toggles a few lines above already
-   show the shape. Not before step 3 has run long enough to be worth trusting.
-5. **Mainnet.** A mainnet venue adapter, `set_leverage`, the target-book seam
-   proven on real money, and a `REAL_MONEY` equivalent. **This step is the
-   owner's and nobody else's.** The engine's private side reaches demo hosts
-   only, and that is what keeps the funded account out of reach of a mistake.
-6. **Only then, the Python order path**, and even then the deploy engine
+   show the shape. Not before step 4 has run long enough to be worth trusting.
+6. **Mainnet.** The adapter, the leverage call, and the profile are built and
+   fenced. What is left is not code: it is `REAL_MONEY`, set by the owner's
+   own hand in the host credential file, and a shadow run against the funded
+   account long enough to show the engine and the Python owner reaching the
+   same decisions. **This step is the owner's and nobody else's.**
+7. **Only then, the Python order path**, and even then the deploy engine
    (`ops/maintenance_lock.py`, `policy/systemd_environment.py`,
    `policy/real_money_arming.py`, `ops/candidate_rule_coverage.py`,
    `ops/reset_path_safety.py`) must survive or be rebuilt. Those are not the
    trading path; they are what ships it.
 
-The distance left is not capability. Every row in the table above is Done. It
-is one account the engine cannot reach, and one decision that is not a
-programmer's to take.
+What changed on 2026-08-14 is that the distance stopped being mostly capability
+and started being mostly evidence. One real gap remains — the boot-fixed
+universe — and after that the question is no longer what the engine can do but
+whether anyone has watched it do it.
 
 ## What v1 does not do
 

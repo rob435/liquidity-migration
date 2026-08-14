@@ -16,6 +16,73 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 — The engine can be pointed at the funded account, reads the
+  fleet's own risk limits, tells each sleeve's book apart, and states leverage
+  at the venue.** Six commits, `80d31eb8`, `68576db1`, `5283f978`, `39b110fa`,
+  `0f1f1190`, `ea9bb5a0`. Nothing is deployed, nothing is installed, and
+  nothing has been sent to the funded account.
+
+  *The fence changed shape rather than coming down.* The venue crate used to
+  contain no mainnet hostname, and a test read the source back to keep it that
+  way. That made a class of mistake impossible and also made the engine unable
+  to do the job it was built for. What replaced it is the Python fleet's own
+  rule, ported so both halves behave identically while both run: `REAL_MONEY`
+  in the host credential file, set by the owner, or a mainnet gateway fails at
+  the credential read; an armed host refuses the *demo* realm in turn, so a box
+  cannot be half-live; the two realms read disjoint credential variables; a
+  realm is always named, never defaulted; and a typo in the switch stops the
+  engine rather than reading as "off". The structural half now checks something
+  sharper than absence — the four venue hosts may be written in exactly one
+  file, which is what stops a test or a benchmark handing the test-only
+  constructor a real address.
+
+  *One document, not two.* `configs/operational.mainnet.json` says how much of
+  the funded account may be at risk. The engine did not read it; the same
+  numbers were transcribed by hand into a test. `[risk]
+  operational_profile_path` now loads the real file, so a cap the owner
+  tightens tightens for both halves. Measured, not assumed: the Python and Rust
+  loaders read that file identically, field for field, including the two sleeve
+  margin shares that carry repeating decimals and sum to the account margin cap
+  to the last place. Proved by tightening the symbol cap from 50 to 49 in the
+  real profile — two Python tests and one Rust test failed, each naming the
+  field.
+
+  *A book went to every strategy.* `TargetBook.source` said in so many words
+  that it was "for the log, not for routing". Fine with one sleeve; with two —
+  which is what the funded account runs — each follower would take the other's
+  book as instructions, and since the venue holds one position per symbol and
+  no note of who asked for it, they would have fought over the same positions.
+  Books are now routed by configuration: each strategy names its own
+  `book_path`. Proved by restoring the broadcast and watching the carry sleeve
+  hear `["carry x1", "long x2"]`.
+
+  *Leverage was parsed and thrown away.* The target book carries one per name;
+  the follower read it and dropped it, and there was no `set_leverage` anywhere
+  in the Rust order path. Margin posted is notional divided by the symbol's
+  leverage, and the symbol keeps whatever the last person to touch it chose —
+  the owner trades that account by hand. The leverage now travels with the
+  decision and the engine makes the venue agree before the order goes, failing
+  the order closed if it cannot. Two details carried over because both are
+  load-bearing: retCode 110043 ("not modified") is success, and the remembered
+  leverage is forgotten the moment a reading shows the symbol flat.
+
+  *And the last load-time proof.* `PORT_NOTES` had recorded one Python check
+  the Rust kernel did not run. Harmless while the caps were hand-written;
+  not harmless once the engine loads the fleet's own profile, because then a
+  profile Python refuses would have been accepted here. Porting it turned up a
+  rounding fault: the engine holds the account gross cap as a multiple and the
+  profile states it as money, and rebuilding one from the other lands a
+  fraction of a cent off for most numbers — an exact comparison would have
+  refused a profile for agreeing with itself. The two shipped files never
+  showed it because 1.75 and 2.0 are exact in binary.
+
+  *What this does and does not mean.* Every capability above is built, fenced
+  and tested; none has been exercised against real money. One real gap remains:
+  a follower's symbol universe is fixed when it boots, so it cannot trade a
+  name that a later book first mentions — and the fleet's universe moves with
+  listings and delistings. Past that, what is missing is evidence rather than
+  capability. 598 Rust tests, 3002 Python tests.
+
 - **2026-08-14 — The engine stops being looser than the fleet, becomes visible
   from outside, and gets a unit to run under.** Four commits, `f2317a14`,
   `344e9914`, `465e333d`, `e47c917a`. Nothing is deployed and nothing is

@@ -51,11 +51,19 @@ match; never append history to this file.
   against a position it could not account for, and an empty book flattening
   it. The fleet's two leases were held throughout.
 
-  Still: **no systemd unit, no deploy, and no `REAL_MONEY` equivalent at
-  all** — demo hostnames by construction, proved by a test that reads the
-  venue crate back, and shadow by default. The Python fleet owns everything
-  live and stays: the engine cannot reach the funded account, so the Python
-  order path cannot be deleted while it is the only thing that can
+  Since 2026-08-14 the engine **can** be pointed at the funded account, and
+  only with the owner's own switch: `bybit_mainnet` refuses to build unless
+  `REAL_MONEY` is armed in the host credential file, and an armed host refuses
+  to run the demo realm in turn. It also reads
+  `configs/operational.mainnet.json` directly, so the caps it enforces are the
+  fleet's caps rather than a copy, and it states each position's leverage at
+  the venue before the order goes. **Nothing has been sent to the funded
+  account, and no unit is deployed.**
+
+  The Python fleet owns everything live and stays. One real gap remains — a
+  follower's symbol universe is fixed when it boots, so it cannot trade a name
+  a later book first mentions — and beyond that what is missing is evidence,
+  not capability: no shadow run against the funded account has happened
   ([docs/engine.md](docs/engine.md) §What the engine cannot do yet).
 
 ### The funded account
