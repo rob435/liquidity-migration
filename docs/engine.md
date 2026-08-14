@@ -224,6 +224,59 @@ delivered a quote has no touch to rest at, and its order goes as written. A
 target book already on disk at boot is read within a second, before the feed
 connects, so the first entry after a restart crosses.
 
+## What the fills cost
+
+Latency is half the question. The engine measured our own side of the wire to
+the nanosecond and could say nothing about the price it got — and a fast order
+path that quietly pays two basis points more than it needs to is a worse thing
+to own than a slow one that does not. Since 2026-08-14 there is a second
+ledger, for the price.
+
+The names and the signs are the repository's own, from
+[`architecture.md`](architecture.md) §Trade diagnostics, which the Python
+research half already computes against recorded books. `s` is +1 for a buy and
+−1 for a sell, `M0` is the midpoint when the order left, `P` is the fill price,
+`Mh` is the first healthy midpoint at or after the horizon. **Shortfall, spread
+and fee are positive when they cost us**; `signed_markout_bps` is the one
+number with the opposite convention, positive when the price moved our way.
+
+Two facts had to start being kept:
+
+- **`is_maker`.** Bybit sends it on every execution and the parser dropped it.
+  It is the difference between earning the spread and paying it, and
+  [`STATE.md`](../STATE.md) has been waiting on those receipts for the funded
+  maker-share grade.
+- **`M0`, on the `OrderSent` record.** Written at the send, because that is
+  the only moment it exists: a rested entry can wait a minute, and by the time
+  it fills the price it was decided against is gone. Zero means the book could
+  not be read, which makes every arrival number for that order *missing* — the
+  code never turns an unknown into a zero, because a zero reads as "we
+  measured, and it cost nothing".
+
+Everything except the markout is then arithmetic over records the log already
+holds, so the live summary and the report read back off a finished log are the
+same code and cannot drift apart. The markout is the exception — a log holds no
+prices — so it is written down when its horizon comes due, on the group-flush
+tick that is already running. It waits five seconds for a readable book, then
+records the horizon as terminally missing.
+
+```bash
+engine fills --wal /var/lib/liquidity-migration-engine/engine.wal
+```
+
+One row per sleeve and symbol: maker share, fee, arrival shortfall, all-in, and
+the signed markout at 1 s, 15 s, 1 min and 5 min. The footer confesses rather
+than staying silent — what share of the traded notional had a book to be
+measured against, how many horizons never found one, what was dropped, what is
+still waiting. Five of those numbers are also in the heartbeat, so an operator
+sees them without the log.
+
+Two honest differences from the Python half, both stated in the module header:
+`M0` here is the **top of book**, because that is the only book the engine
+carries, so nothing here says anything about market impact and nothing pretends
+to; and rollups weight by **notional** rather than quantity, because a number
+spanning symbols cannot add a quantity of BTC to a quantity of DOGE.
+
 ## Crash safety
 
 One append-only log (`engine.wal`) is the engine's memory. Every record is a
@@ -326,7 +379,10 @@ because the deletion order depends on it:
 | Stop verify, repair, and a durable breach latch | Done. A position missing its stop gets back the one the log says it was opened behind; exposure the log cannot account for latches the engine out of opening |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | Done, by feeding the fleet's own watchdog rather than growing a second one. The engine writes a heartbeat file; `check_fleet_liveness.py` reads it and pages on stale, unreadable, or latched. Off unless a path is configured |
-| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file. **Never exercised** — see below |
+| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file. Deployed and running in shadow since 2026-08-14; **it has never sent an order** — see below |
+| Saying what the fills cost | Done, 2026-08-14. `is_maker` kept from the venue, `M0` written on every send, arrival shortfall / effective spread / fee / all-in derived, and the signed markout at 1s/15s/1m/5m written when its horizon comes due. `engine fills --wal PATH` is the read; five of the numbers are in the heartbeat |
+| Saying what its own ids mean | Done, 2026-08-14. Strategy and symbol ids are positions, so the log records both tables — at boot and again whenever a book names a new symbol. Before this, `engine replay` could say an order was strategy 1's for symbol 4 and no more |
+| A strategy reading its own position | Done, 2026-08-14. `my_position` is that strategy's own fills, moving the instant one arrives. The account reading beside it lags seconds and, on a two-sleeve account, is the sum of both |
 | Following a symbol a book names late | Done. A name the engine has never followed is taken on when a book asks for it: interned, subscribed, added to the gateway, taught to the private stream, and given an instrument rule. The four tables that map names to ids are checked against each other and a symbol they disagree about is dropped rather than traded |
 
 ### What that leaves
@@ -341,64 +397,76 @@ order. A capability that has not been exercised is a claim, and the only thing
 that turns it into a fact is running it — in shadow first, against the account,
 for long enough to watch it.
 
-**The engine is the account owner in the repository, and not yet on the host.**
-The host runs its own installed checkout and keeps trading the old way until
-somebody deploys. **That deploy is currently blocked, and it is not the
-engine's fault.** Verified on the box on 2026-08-14:
+**The engine is the account owner, in the repository and on the host.**
+Deployed 2026-08-14 and watched running: it reads the venue, writes
+`account_equity_usdt` into its heartbeat, both producers size from that
+equity, both write an absolute target book, and the engine reads each book,
+routes it to its own sleeve, and takes on symbols the books name that no
+config listed. It is **live on the demo account** and holds that account's
+single-writer lease. The funded engine runs in **shadow** and has never sent
+an order.
 
-The producers publish per-request files into the account intent inbox, which
-the deleted Python owner drained. The engine reads one target-book JSON file.
-Nothing on the host writes that file. `carry_demo` can — through
-`engine_targets.render_target_book`, gated behind
-`CARRY_ENGINE_TARGET_BOOK_PATH`, which is set nowhere — and
-`long_native_event_demo` cannot at all: it has no book writer.
-
-**So the work that unblocks the handover is on the producer side, not here:
-give LONG a target-book writer like carry's, and switch carry's on.** Until
-then a deploy removes LONG's only execution path and leaves carry's switched
-off, which is a fleet that publishes exits and opens nothing.
-
-The other precondition, once that is done:
+The paragraphs that used to stand here said the deploy was blocked because
+`long_native_event_demo` had no target-book writer and carry's was switched
+off. Both closed on 2026-08-14; see [`CHANGELOG.md`](../CHANGELOG.md) for that
+day.
 
 - **The producers size from the engine.** They read `account_equity_usdt` and
-  `account_observed_ns` out of the heartbeat and plan every entry as blocked
-  when that reading is missing or stale. A host that takes this code with no
-  engine running has a fleet that publishes exits and never opens a position.
-  It fails closed and says so per cycle, but it says so in a cycle field, not
-  in a page. Install, enable and watch the engine beat first.
+  `account_observed_wall_ts_ms` out of the heartbeat and plan every entry as
+  blocked when that reading is missing or stale. A host that takes this code
+  with no engine running has a fleet that publishes exits and never opens a
+  position. It fails closed and says so per cycle, but it says so in a cycle
+  field, not in a page. Install, enable and watch the engine beat first.
 
-**Two capabilities did not survive the deletion**, and the engine does not have
-them:
+  The heartbeat sends an **age**, and the renderer turns it into a wall stamp
+  beside its own. The engine's other clocks are monotonic and count from an
+  arbitrary instant near boot, so an earlier `account_observed_ns` read as
+  fifty-six thousand years stale from outside and blocked every entry.
 
-1. **Flatten.** The operator's "close everything now" — `ops.sh flatten` and
-   the Telegram close button — worked by publishing zero targets into the
-   account owner's intent inbox. The engine reads target *book files* and has
-   no inbox, so nothing drains those requests. Both routes now refuse with that
-   explanation rather than appearing to work. Closing a book is a manual job at
-   the venue, or a matter of stopping the sleeve and letting exits run.
-2. **The hourly digest.** Rendered by the owner from the canonical journal.
-   `docs/notifications.md` keeps its description as the specification for
-   whatever replaces it.
+**Of the two capabilities that did not survive the deletion, one is back:**
 
-Neither is hard to build on top of what exists — a flatten is a target book of
-zeros, which the engine already follows — but neither has been built, and
-saying so is the point of this section.
+1. **Flatten** — `ops.sh flatten`, on the engine's own path. It stops the
+   producers, then writes a book of explicit zero rows naming everything the
+   engine says it holds, which the engine reads as "hold none of this" and
+   closes. Explicit rows rather than an empty book, because an empty book only
+   reaches the names the plug already has in hand. Dry run unless `--execute`.
+2. **The hourly digest** is still owed. It was rendered by the deleted owner
+   from the canonical journal; [`notifications.md`](notifications.md) keeps its
+   description as the specification for whatever replaces it.
 
 And the producers are not the order path. A carry decision is a batch over
 ninety days of funding and bars; it stays in research and arrives as a target
 book. "Delete the Python one" never meant deleting that, and it did not.
 
-### The handover, concretely
+### The funded engine, concretely
 
-Everything below is the owner's. Nothing in this repository does any of it, and
-nothing here is installed on the funded host — the unit and the two templates
-exist so the steps are a command rather than a design exercise.
+**It is installed on the host and running in shadow**, since 2026-08-14. It
+has been watched reading the funded account (552445993) under the mainnet
+profile — reference $100, gross cap $175, a real per-sleeve partition — and
+both mainnet producers write books it reads and routes. It has never sent an
+order and cannot: `shadow = true` in `engine-mainnet.toml` and
+`ENGINE_LIVE=false` in `engine-mainnet.env`, two switches, both the owner's,
+and a shadow engine takes no account lease.
+
+It is left *running* rather than stopped on purpose. Stopped would not stick —
+the deploy starts it wherever its env file and the binary both exist — so a
+stopped unit is a false comfort. Shadow is the state that cannot trade. To keep
+it off for good, delete `/etc/liquidity-migration/engine-mainnet.env`.
+
+Getting there found a fault worth remembering: `account_identity` returned
+`realm: "demo"` as a hardcoded literal, with a comment explaining that the
+crate reached the practice account and nothing else. True when written; not
+after the mainnet adapter landed in the same crate, and nothing failed. Both
+readers would have been wrong in opposite directions — the mainnet producers
+compare realm against their own environment and would have blocked every entry,
+and the single-writer lease is *named* by realm, so a live funded engine would
+have taken a demo-realm lease and protected nothing.
 
 The pieces, all in `deploy/`:
 
 | File | What it is |
 | --- | --- |
-| `systemd/liquidity-migration-engine-mainnet.service` | The unit. Deliberately does **not** conflict with the Python mainnet owner: a shadow engine takes no lease and is meant to run alongside it, which is step 2 below. What stops two *live* writers is the kernel lease, which knows the difference between shadow and live; a systemd conflict does not |
+| `systemd/liquidity-migration-engine-mainnet.service` | The unit. Deliberately does **not** conflict with anything else on the box: what stops two *live* writers is the kernel lease, which knows the difference between shadow and live; a systemd conflict does not |
 | `engine.mainnet.toml.template` | The engine's config: `venue = "bybit_mainnet"`, capital limits loaded from `configs/operational.mainnet.json` itself, one block per sleeve with its own book path |
 | `engine.mainnet.env.template` | Unit settings: which config, shadow or live, where the heartbeat goes |
 
@@ -406,60 +474,41 @@ Both templates ship with `shadow = true` and `ENGINE_LIVE=false`, and both have
 to say otherwise before anything is sent — the flag can only turn shadow off,
 never on.
 
-The symbol lists in the config template are placeholders. Replace them with the
-real per-sleeve universes, and give each sleeve names the other does not trade:
-the engine refuses a config where two strategies claim one symbol, because the
-venue holds one position per symbol and keeps no note of who asked for it.
+Each sleeve must be given names the other does not trade: the engine refuses a
+config where two strategies claim one symbol, because the venue holds one
+position per symbol and keeps no note of who asked for it.
 
-**The order these happen in matters more than any of them.**
-
-1. Install the unit and fill in the two files. Nothing runs yet.
-2. Start it in shadow, alongside the Python owner. A shadow engine takes no
-   lease, so the two coexist. It computes what it would do and logs it, and
-   the heartbeat starts feeding the fleet's own watchdog.
-3. Watch. This is the whole point of the exercise, and there is no shortcut
-   through it. What is being looked for is the engine and the Python owner
-   reaching the same decisions on the same books — and where they differ,
-   which one is right.
-4. Only then, if it has earned it: `ENGINE_LIVE=true` and `shadow = false`,
-   then stop the Python owner and start this. Two commands in that order, by
-   someone who meant it — a live engine refuses to start while the owner holds
-   the account's lease, so the order is not optional. Reversible the same way:
-   stop the engine, start the owner.
-
-`REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env` is a
-precondition for step 2, not part of it. It is already set, by the owner's own
-hand, and it is what the funded fleet runs under today.
+**What is left is evidence, and only time produces it.** Watch the shadow run
+against a funded account that is not near-empty, long enough to see what it
+would have done and what it would have cost — `engine fills` off its log is the
+reading that answers the second half. Only then, if it has earned it:
+`ENGINE_LIVE=true` and `shadow = false`, by someone who meant it. Reversible
+the same way.
 
 ### The order it can actually happen in
 
 Each step earns the next. Nothing here is a policy anyone chose to impose; each
-one is what the step after it needs in order not to be reckless.
+one is what the step after it needs in order not to be reckless. Steps 1 to 5
+closed on 2026-08-14, in one day.
 
 1. **The engine can be seen from outside.** Done — it writes a heartbeat and
-   the fleet's watchdog pages on stale, unreadable, or latched. Nothing can
-   stand down while nothing can tell you the replacement is sick.
-2. **The engine enforces what the fleet enforces.** Done — and now from the
-   same document rather than a copy of its numbers.
+   the fleet's watchdog pages on stale, unreadable, or latched.
+2. **The engine enforces what the fleet enforces.** Done — and from the same
+   document rather than a copy of its numbers.
 3. **The engine can widen its universe without a restart.** Done — a name a
-   book mentions for the first time is taken on while the engine runs. This
-   was the last thing it did worse than the owner it would replace.
-4. **The engine runs as a service, on its own demo account, in shadow.** This
-   is the first step that produces evidence continuously rather than once, and
-   it is where the comparison against the Python owner's decisions starts.
-5. **The demo Python owner becomes retirable.** That means decoupling
-   `verify_topology` from it — the sleeve toggles a few lines above already
-   show the shape. Not before step 4 has run long enough to be worth trusting.
-6. **Mainnet.** The adapter, the leverage call, and the profile are built and
-   fenced. What is left is not code: it is `REAL_MONEY`, set by the owner's
-   own hand in the host credential file, and a shadow run against the funded
-   account long enough to show the engine and the Python owner reaching the
-   same decisions. **This step is the owner's and nobody else's.**
-7. **Only then, the Python order path**, and even then the deploy engine
-   (`ops/maintenance_lock.py`, `policy/systemd_environment.py`,
-   `policy/real_money_arming.py`, `ops/candidate_rule_coverage.py`,
-   `ops/reset_path_safety.py`) must survive or be rebuilt. Those are not the
-   trading path; they are what ships it.
+   book mentions for the first time is taken on while the engine runs.
+4. **The engine runs as a service, live, on a demo account.** Done. It holds
+   that account's lease, both producers feed it, and it is producing evidence
+   continuously rather than once.
+5. **The Python order path is retired.** Done, and deleted — the account
+   owner, its units, its launchers and its risk layer, about 25,000 lines,
+   after the engine carried all four capital controls with parity tests
+   written against them.
+6. **Mainnet.** The adapter, the leverage call and the profile are built,
+   fenced, deployed and running in shadow. What is left is not code: it is
+   `REAL_MONEY`, set by the owner's own hand in the host credential file, and
+   a shadow run against a funded account long enough to be worth trusting.
+   **This step is the owner's and nobody else's.**
 
 What changed on 2026-08-14 is that the distance stopped being capability at
 all. The question now is not what the engine can do but whether anyone has
@@ -470,7 +519,10 @@ watched it do it — and the answer, on the funded account, is nobody, ever.
 - No carry or continuous *decision* port — a carry decision is a batch over
   ninety days of funding and bars, so it stays in research and reaches the
   engine as a target book.
-- No mainnet. The engine builds and runs on the VPS from an isolated clone and
-  has run in shadow against the demo account; it trades nothing.
+- No funded trading. The mainnet path is built, fenced, deployed and running
+  in shadow; it has never sent an order.
+- No market impact measurement. `engine fills` anchors on the top of book,
+  which is the only book the engine carries. Walking a depth-50 book is the
+  Python half's job and stays there.
 - No FPGA/kernel-bypass pretensions: the venue is an HTTPS cloud service and
   single-digit milliseconds on-box is already far below its floor.

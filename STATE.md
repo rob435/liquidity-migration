@@ -193,6 +193,21 @@ match; never append history to this file.
 
 ### Execution and market data
 
+- **The engine says what its fills cost, since 2026-08-14.** It keeps
+  `is_maker` from the venue's execution row and writes the midpoint an order
+  was decided against onto the order's own log record, so arrival shortfall,
+  effective spread, fee and all-in are derivable from the log alone; the signed
+  markout at 1 s / 15 s / 1 min / 5 min is written when its horizon comes due,
+  because a log holds no prices. Names and signs are `docs/architecture.md`
+  §Trade diagnostics, unchanged. `engine fills --wal PATH` is the read, per
+  sleeve and symbol; five of the numbers are in the heartbeat. **`M0` is the
+  top of book**, so nothing here measures impact.
+
+  This replaces a producer the fleet lost: `post_fill_markouts.py` and the
+  owner loop that drained it went with the Python order path, and
+  `market_capture.register_post_fill_markouts` has had no production caller
+  since. The readers survived the writer; the engine is the new writer, for
+  its own fills only.
 - **Entries rest for 45 s, not 120 s.** 15 live resting entries filled at a
   median of 1.28 s and a maximum of 36.6 s, so 45 s keeps every passive fill
   120 s got and bounds the tail; 30 s would have crossed 1 of 15, 15 s, 3 of 15.
@@ -350,7 +365,8 @@ all 2026-08-04 — deployed with `f85371e`). Full statements in
 
 The funded account has no performance record yet: its first night (2026-08-04)
 legitimately decided cash, and the first honest maker-share grade waits on funded
-`is_maker` receipts from a non-empty book. Demo fill economics are not evidence —
+`is_maker` receipts from a non-empty book. Since 2026-08-14 the engine records
+those receipts — what is still missing is a funded account with money in it. Demo fill economics are not evidence —
 demo fills simulate without queue position, and the demo realm's matching engine
 holds phantom internal liquidity its published book does not show.
 

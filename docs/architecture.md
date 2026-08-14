@@ -555,15 +555,27 @@ a claim-validity threshold. Coverage is quantity-weighted (`observed_qty / total
 (`:637-642`) — not a fill-count fraction. **Late, gapped, restarted, unregistered or capacity-rejected
 fills cannot be silently dropped.**
 
-Markout capacity is bounded, so coverage can be incomplete on a busy batch: 8,192 pending horizon tasks
-(`MAX_PENDING_POST_FILL_MARKOUTS`, `market_capture.py:67`); a fill-notification queue of
-`MAX_PENDING_FILL_REGISTRATIONS = 8192 // 4 = 2048` (`post_fill_markouts.py:24-27`) whose overflow makes
-`notify()` return False and increment `dropped_registrations` (`:57, :66-73`) so the fill is never
-registered at all; 128 registrations per owner-loop drain (`MAX_FILL_REGISTRATIONS_PER_DRAIN`, `:29`);
-128 marks per public book update (`MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE`, `market_capture.py:69`, at
-`:1072`). Task symbols stay subscribed only until their tasks clear. Over-capacity schedules come back
-`rejected_capacity` (`market_capture.py:774`); never-registered fills surface as `not_registered`
+Markout capacity is bounded on this route, so coverage can be incomplete on a busy batch: 8,192 pending
+horizon tasks (`MAX_PENDING_POST_FILL_MARKOUTS`, `market_capture.py:67`) and 128 marks per public book
+update (`MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE`, `market_capture.py:69`, at `:1072`). Task symbols stay
+subscribed only until their tasks clear. Over-capacity schedules come back `rejected_capacity`
+(`market_capture.py:774`); never-registered fills surface as `not_registered`
 (`trade_diagnostics.py:460`) and leave no schedule record behind.
+
+**Nothing feeds this route any more, and the reader survived the writer.** The bridge that registered
+fills for marking (`account/post_fill_markouts.py`) and the loop that drained it
+(`runtime/account_service_runner.py`) went with the Python order path on 2026-08-14;
+`market_capture.register_post_fill_markouts` is now called only from `tests/account/test_market_capture.py`.
+The analysis stack above still works against already-captured roots, and produces nothing new. This
+paragraph used to cite line numbers inside the deleted bridge.
+
+**New markouts come from the Rust engine instead**, since 2026-08-14: it marks its own fills at the same
+four horizons with the same signs, writes each one into its log when the horizon comes due, and reports
+them through `engine fills --wal PATH` ([`engine.md`](engine.md) §What the fills cost). Two differences
+are not cosmetic and must not be papered over when the two are read side by side. The engine anchors `M0`
+on the **top of book**, not a depth-50 snapshot, so it can say nothing about `book_walk_*` or impact; and
+it waits five seconds for a healthy midpoint before recording a horizon as terminally missing, where this
+route's bound is the owner's own lateness budget.
 
 **Grains do not interchange.** `command_id` answers "was this order executed well", `(sleeve, symbol,
 signal_ts)` "did this idea work", a target batch "did concurrent ideas share one shock". The command

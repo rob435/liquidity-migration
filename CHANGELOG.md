@@ -16,6 +16,54 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 — The engine says what its fills cost.** It measured our own
+  side of the wire to the nanosecond and could say nothing about the price it
+  got. Two facts were on the wire and thrown away: Bybit sends `is_maker` on
+  every execution and the parser dropped it, and the midpoint an order was
+  decided against lived only in memory, for worked limit orders, and was
+  discarded when the order was reaped — so no finished log could be asked what
+  its trading cost.
+
+  Both are kept now. `is_maker` on the fill; `M0` on the `OrderSent` record,
+  written at the send because that is the only moment it exists. Everything
+  except the markout is then arithmetic over records the log already holds, so
+  the live summary and the report read off a finished log are the same code.
+  The markout is written when its horizon comes due, on the group-flush tick,
+  after waiting five seconds for a readable book — then recorded as terminally
+  missing, never as a zero. Names and signs are `docs/architecture.md` §Trade
+  diagnostics unchanged, so the two halves of the repository stay comparable.
+  **`M0` is the top of book**: nothing here measures impact.
+
+  This also replaces a producer the fleet lost without noticing. The bridge
+  that registered fills for marking and the loop that drained it went with the
+  Python order path, so `market_capture.register_post_fill_markouts` has had
+  no production caller since — the readers survived the writer. The engine is
+  the new writer, for its own fills.
+
+  Read it with `engine fills --wal PATH`, per sleeve and symbol, with a footer
+  that says what share of the traded notional could be measured at all. Five
+  of the numbers are in the heartbeat.
+
+  Two things had to become readable first. The log recorded **strategy and
+  symbol ids**, which are positions, and nothing that said what they meant —
+  `engine replay` could say an order was strategy 1's for symbol 4 and no
+  more. The engine now writes both tables, at boot and again whenever a book
+  names a new symbol.
+
+  And a strategy could not read **its own** position. `StrategyCtx::position`
+  is the venue's account reading: seconds old, and on a two-sleeve account the
+  sum of both. `my_position` is that strategy's own fills, moving the instant
+  one arrives. The quoter is the plug that needed it, and took three other
+  things with it — many symbols instead of one instance per coin, a quote
+  centre that leans against inventory (`skew_bps`, optional, absent means the
+  strategy exactly as it was), and a re-quote on its own fill rather than on
+  the next price. A name another sleeve holds now has our quotes pulled: there
+  is one venue stop per position.
+
+  677 engine tests. Proved both ways round — the write test fails when the
+  anchor is stubbed to zero, the read test fails when the lookup is stubbed
+  out.
+
 - **2026-08-14 — The Python order path is deleted, and the engine is the
   account owner.** Owner-directed. Ten modules reachable only from the account
   owner, its two systemd units, its two launcher scripts, the four dispatcher
