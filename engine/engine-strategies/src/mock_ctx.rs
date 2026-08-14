@@ -136,13 +136,6 @@ impl MockCtx {
         );
     }
 
-    /// Forget a holding, the way a filled exit eventually shows up in the
-    /// next account reading.
-    pub fn clear_position(&mut self, symbol: &str) {
-        let id = self.id_of(symbol);
-        self.positions.remove(&id);
-    }
-
     /// Seed the venue's tick, step and minimums for a symbol.
     pub fn set_rule(&mut self, symbol: &str, rule: InstrumentRule) {
         let id = self.add_symbol(symbol);

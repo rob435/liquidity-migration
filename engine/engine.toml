@@ -14,6 +14,10 @@ account_view_max_age_ms = 5000
 # Compute and log orders, send nothing. `--live` flips this; the risk kernel
 # still gates every send either way.
 shadow = true
+# Where the research system writes its target book. Left out, as it is here,
+# means no watcher runs at all — which is "no decision", not an empty book: a
+# follower plug holds whatever it holds.
+# target_book_path = "var/targets/carry.json"
 
 # The four capital controls. Nothing here has a default: every number is
 # written down, and the Python fleet's values are recorded in

@@ -167,7 +167,7 @@ because the deletion order depends on it:
 | Decide, gate, make durable, sign, send | Done, and measured |
 | The four capital controls | Ported, minus four account caps named in `engine-risk/PORT_NOTES.md` |
 | Quantizing to tick and step, venue minimums | Done |
-| Following a research target book | Seam built; the follower is the current work |
+| Following a research target book | Built, tested, and run in shadow against the demo account. **One known fault**: for the ~2.5 s between a fill and the next account reading, the follower can see neither its own order nor the position it just took, and would enter a second time — only the envelope and partition bound it. Fix it before any live run |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | **Absent.** The engine sends market orders. This is the largest execution-quality gap |
 | Venue reconciliation and restart recovery | **Absent.** The engine replays its own log but never asks the venue what happened to an order it lost |
 | Stop verify, repair, and a durable breach latch | **Attach only.** `set_stop` exists and is not yet called after a fill |

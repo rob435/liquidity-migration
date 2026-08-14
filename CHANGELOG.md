@@ -23,14 +23,24 @@ edit STATE.md to match.
   it, delivered it, and the follower planned `Buy 0.001 BTCUSDT [book-enter]`
   — risk allowed it, the record went durable, and shadow declined the send.
   Research decides, the engine executes, and nothing reached the venue.
-  **One honest artifact of shadow mode**: the follower re-plans on every
-  quote and suppresses a repeat by looking for its own working order, but a
-  shadow order is marked never-sent immediately, so the suppression cannot
-  see it and the entry was re-emitted until **the envelope stopped it**
-  (worst case 1000.40 against a 993.09 allowance). In a live run the order
-  stays in flight and the suppression engages, so this is shadow-only — but
-  the backstop firing on a runaway is exactly what it is for, and it fired
-  without being asked to.
+  The follower re-plans on every quote and suppresses a repeat by looking for
+  its own working order; a shadow order is marked never-sent immediately, so
+  the suppression could not see it and the entry was re-emitted until **the
+  envelope stopped it** (worst case 1000.40 against a 993.09 allowance) — the
+  backstop firing on a runaway without being asked to.
+  **Correction, same day**: an earlier revision of this entry called that
+  shadow-only and said live was covered because the order stays in flight.
+  That is wrong, and the reviewing agent caught it. A fully filled order is
+  ended the moment the fill lands (`inflight.rs` `apply_update`), so it leaves
+  `ctx.resting()` at once, while the account reading only refreshes every
+  `account_view_max_age_ms / 2` — 2.5 s at the shipped 5000. For that window a
+  live run sees **neither a resting order nor a position**, and the follower
+  would enter a second time; only the envelope and partition bound it. The
+  fault is recorded rather than patched at speed: the two candidate fixes
+  (refresh the reading on the fill path, at the cost of a venue round trip
+  there, or have the follower count its own fills until the reading catches
+  up) are a design decision, and the engine trades nothing today. It is on the
+  list that gates retiring the Python execution path.
 
 - **2026-08-14 ~02:00 UTC — The engine learns to cancel and amend, venues
   learn to say what they can do, and carry learns to hand over its book.**

@@ -24,6 +24,13 @@
 //! real universe, and a book naming anything outside it is logged and
 //! skipped, not traded. Widening the universe means editing the config and
 //! restarting. That is a genuine gap, not a policy.
+//!
+//! ## Known limit: positions are read per symbol, not per plug
+//!
+//! What is held comes from the account reading, and a venue holds one
+//! position per symbol however many plugs are running. So two plugs
+//! configured on the same symbol would each read the other's exposure as
+//! their own. Give the follower symbols nobody else trades.
 
 use engine_types::{
     EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, StopSpec, Strategy,
@@ -47,6 +54,10 @@ pub struct TargetBookFollower {
     /// The newest book. `None` until one arrives, and that means no decision.
     book: Option<TargetBook>,
     rules: PlanRules,
+    /// Symbols already complained about for the book in hand. This runs on
+    /// every quote, so without it one unreachable name in a book writes a
+    /// warning a hundred times a second until the next book lands.
+    complained: Vec<String>,
 }
 
 impl TargetBookFollower {
@@ -67,6 +78,7 @@ impl TargetBookFollower {
             symbols,
             book: None,
             rules: PlanRules::FLEET,
+            complained: Vec::new(),
         })
     }
 
@@ -120,16 +132,22 @@ impl TargetBookFollower {
         };
 
         let decided_ns = ctx.now_ns();
+        let mut unreachable: Vec<String> = Vec::new();
         for step in steps {
             let Some(symbol) = ctx.symbol_id(step.symbol()) else {
-                tracing::warn!(
-                    symbol = step.symbol(),
-                    "the book names a symbol outside this plug's universe; nothing sent"
-                );
+                if !self.complained.iter().any(|said| said == step.symbol()) {
+                    tracing::warn!(
+                        symbol = step.symbol(),
+                        "the book names a symbol outside this plug's universe; nothing sent"
+                    );
+                    unreachable.push(step.symbol().to_string());
+                }
                 continue;
             };
+            // Routine and short-lived, so it is not a warning: the order is
+            // out, and the next wake after the fill news will pick this up.
             if busy.contains(&symbol) {
-                tracing::info!(
+                tracing::debug!(
                     symbol = step.symbol(),
                     "an order of ours is still working here; leaving this step for the next wake"
                 );
@@ -190,6 +208,7 @@ impl TargetBookFollower {
             };
             ctx.place(intent);
         }
+        self.complained.append(&mut unreachable);
     }
 }
 
@@ -214,6 +233,9 @@ impl Strategy for TargetBookFollower {
         match event {
             EngineEvent::Targets(book) => {
                 self.book = Some(book.clone());
+                // A new book earns a fresh hearing, including for the names
+                // it could not reach last time.
+                self.complained.clear();
                 self.act(ctx);
             }
             // A price is what sizing needs, so a book that arrived before the

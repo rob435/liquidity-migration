@@ -158,6 +158,21 @@ fn a_follower_with_no_universe_is_refused() {
 }
 
 #[test]
+fn a_blank_entry_among_real_symbols_is_refused_not_quietly_dropped() {
+    // Trading one name fewer than the config asked for is the worst possible
+    // answer to a typo, and it would never show up as an error anywhere.
+    let err = build_err(build_strategy(
+        "target_book",
+        ID,
+        &params("symbols = [\"BTCUSDT\", \"\"]\n"),
+    ));
+    assert!(
+        matches!(err, BuildError::InvalidParam { param: "symbols", .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn a_symbol_list_that_is_not_a_list_of_strings_is_refused() {
     for src in ["symbols = \"BTCUSDT\"\n", "symbols = [1, 2]\n"] {
         let err = build_err(build_strategy("target_book", ID, &params(src)));
