@@ -343,8 +343,22 @@ for long enough to watch it.
 
 **The engine is the account owner in the repository, and not yet on the host.**
 The host runs its own installed checkout and keeps trading the old way until
-somebody deploys. That deploy is the moment this becomes real, and it has one
-precondition that is easy to miss:
+somebody deploys. **That deploy is currently blocked, and it is not the
+engine's fault.** Verified on the box on 2026-08-14:
+
+The producers publish per-request files into the account intent inbox, which
+the deleted Python owner drained. The engine reads one target-book JSON file.
+Nothing on the host writes that file. `carry_demo` can — through
+`engine_targets.render_target_book`, gated behind
+`CARRY_ENGINE_TARGET_BOOK_PATH`, which is set nowhere — and
+`long_native_event_demo` cannot at all: it has no book writer.
+
+**So the work that unblocks the handover is on the producer side, not here:
+give LONG a target-book writer like carry's, and switch carry's on.** Until
+then a deploy removes LONG's only execution path and leaves carry's switched
+off, which is a fleet that publishes exits and opens nothing.
+
+The other precondition, once that is done:
 
 - **The producers size from the engine.** They read `account_equity_usdt` and
   `account_observed_ns` out of the heartbeat and plan every entry as blocked

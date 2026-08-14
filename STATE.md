@@ -22,14 +22,33 @@ match; never append history to this file.
   next deploy is what makes this real, and it is the one that stops the Python
   owner.
 
-  Before that deploy, know what changed underneath the producers. They size
-  from account equity, and they used to read it from the owner's health file;
-  they now read it from the engine's heartbeat
+  **DO NOT DEPLOY MAIN YET. It would stop both sleeves trading.** Verified on
+  the host 2026-08-14, not reasoned from the tree:
+
+  The producers and the engine speak different protocols, and nothing bridges
+  them for LONG. Producers publish **per-request files into the account intent
+  inbox** (`/opt/liquidity-migration/data/bybit-account-intents/arrival/`),
+  which the deleted Python owner drained. The engine reads **one target-book
+  JSON file** (`{version, source, decision_ts_ms, valid_until_ms, targets:[…]}`).
+  There is no such file anywhere on the box, and `find` proves it.
+
+  - **carry** *can* write that book — `engine_targets.render_target_book`, via
+    `carry_demo._write_engine_target_book` — but only when
+    `CARRY_ENGINE_TARGET_BOOK_PATH` names a file, and it is set nowhere on the
+    host. Off.
+  - **LONG has no book writer at all.** Nothing in
+    `long_native_event_demo.py` touches `engine_targets`. Deploying removes
+    LONG's only execution path with nothing to replace it.
+
+  So the missing piece is not the engine and not equity — both are done. It is
+  that **the producers must publish target books**: wire LONG the way carry
+  already is, and turn carry's on. Until then the deletion is correct in the
+  repository and undeployable on the host.
+
+  Separately, and still true: the producers size from account equity, which
+  they now read from the engine's heartbeat
   ([`engine_account_health.py`](liquidity_migration/account/engine_account_health.py)).
-  **A host that deploys this without a running engine has producers that
-  publish exits and never open a position** — fail-closed, logged per cycle,
-  and silent unless somebody reads the cycle error. The demo engine must be
-  installed, enabled and beating before or with that deploy.
+  The engine must also be installed, enabled and beating.
 
   Two things went and did not come back: `ops.sh flatten` and the Telegram
   close button (both worked through the deleted owner's intent inbox), and the
