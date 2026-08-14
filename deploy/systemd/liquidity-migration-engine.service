@@ -1,0 +1,57 @@
+[Unit]
+Description=liquidity-migration Rust execution engine on its own demo account (shadow unless turned on)
+Wants=network-online.target
+# No edge to the account owner or the producers, in either direction. This runs
+# against a different venue account from the one the fleet owns, so whether the
+# fleet is up says nothing about whether this should be. An edge would also let
+# a stuck engine delay the owner that carries the real orders.
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Not the deployed checkout. The engine's log path in engine.toml may be
+# relative, and a relative path resolved inside /opt/liquidity-migration writes
+# an untracked file into the tree the deploy proves clean at every exact-commit
+# step — which would stop the next deploy of the funded fleet. systemd creates
+# this directory before the engine starts.
+StateDirectory=liquidity-migration-engine
+WorkingDirectory=/var/lib/liquidity-migration-engine
+# The engine's OWN demo account, 579580669, whose credentials live in
+# bybit-quote-lab.env. This is NOT the fleet's demo account, 555899665, whose
+# credentials are in bybit-demo.env and belong to
+# liquidity-migration-account-execution.service. Two writers on one venue
+# account wedge each other: on 2026-08-14 01:56 a live engine on the fleet's
+# account blocked the demo owner for ~100 seconds, because the owner's
+# protection reconciliation cannot accept a position it did not place. The
+# engine takes a kernel lock per account, so naming the fleet's file here would
+# not produce two writers — it would simply refuse to start, silently, forever.
+EnvironmentFile=/etc/liquidity-migration/bybit-quote-lab.env
+UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
+# Config path, heartbeat path, and the shadow/live switch. deploy/engine.env.template
+# is the copy to fill in. The engine is shadow unless this file says otherwise.
+EnvironmentFile=/etc/liquidity-migration/engine.env
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-engine.service main
+Restart=always
+RestartSec=5
+KillMode=control-group
+# The engine finishes its current write and drops its account lock on the way
+# out; nothing here waits on a venue round trip.
+TimeoutStopSec=30
+# Behind both account owners (-5) and level with the producers (5). This is an
+# experiment on a demo account and must never take CPU or disk from the units
+# carrying real orders on a two-core box.
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+UMask=0027
+ReadWritePaths=/var/lib/liquidity-migration-engine
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

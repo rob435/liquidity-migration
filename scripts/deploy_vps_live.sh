@@ -1005,6 +1005,40 @@ unit_off() {
         && ! systemctl is-enabled --quiet "$1" 2>/dev/null
 }
 
+# The Rust execution engine. It runs its own demo account and none of the
+# Python fleet's work, so everything about it here is conditional: a host that
+# does not run it must deploy and verify exactly as it does today.
+ENGINE_UNIT=liquidity-migration-engine.service
+# Built in a clone of its own, never the deployed checkout: cargo writes a
+# target/ tree beside the source, and the deployed checkout is proved clean
+# against the exact commit at several points in this script.
+ENGINE_BUILD_DIR=/opt/engine-build
+ENGINE_TOOLCHAIN_DIR=/opt/rust
+ENGINE_BINARY=/opt/liquidity-migration-engine/bin/engine
+ENGINE_ENVIRONMENT=/etc/liquidity-migration/engine.env
+
+# Whether this host runs the engine at all. All three must hold, and each says
+# something the other two do not:
+#   * the unit fragment loads — the manifest install adds it, so this is false
+#     only in the window before the commit that introduces it is installed;
+#   * the binary exists — the build produces it, and a build that failed or a
+#     box with no Rust toolchain leaves it absent;
+#   * the environment file exists — the operator put it there, which is how a
+#     host says it wants the engine.
+# Any one of them false and the engine is not part of this host's topology, so
+# nothing starts it and nothing checks it. Requiring it unconditionally would
+# fail every deploy and every status read, on the funded fleet included, until
+# the unit was installed everywhere.
+#
+# The venue credential file is deliberately not in this test: a missing
+# credential should be a loud unit failure, not a quiet "this host does not run
+# the engine".
+engine_installed() {
+    systemctl cat "$ENGINE_UNIT" >/dev/null 2>&1 \
+        && [ -x "$ENGINE_BINARY" ] \
+        && [ -f "$ENGINE_ENVIRONMENT" ]
+}
+
 # The single arming switch: REAL_MONEY=true in the mainnet credential file,
 # written by the owner's own hand next to the live API key. No file, or any
 # other value, means disarmed. The value is read through the strict private
@@ -1174,6 +1208,13 @@ verify_topology() {
     if systemctl cat liquidity-migration-telegram-controls.service >/dev/null 2>&1; then
         verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
     fi
+    # Same tolerance, one condition wider: the manifest installs the engine's
+    # unit file on every host, so the fragment alone would demand a running
+    # engine on a box that has never built one. Where the engine really is
+    # installed it is verified like anything else.
+    if engine_installed; then
+        verify_unit on "$ENGINE_UNIT" "engine is not active and enabled"
+    fi
     for oneshot in \
         liquidity-migration-demo-liveness.service; do
         if systemctl is-failed --quiet "$oneshot"; then
@@ -1221,6 +1262,108 @@ start_if() {
     fi
 }
 
+# Read-only Git against the engine's own build clone. Same hardened invocation
+# as the deployed checkout's, pointed somewhere else.
+engine_git() {
+    "${GIT_ENV[@]}" /usr/bin/git --no-pager --no-optional-locks \
+        --git-dir="$ENGINE_BUILD_DIR/.git" --work-tree="$ENGINE_BUILD_DIR" \
+        -c "safe.directory=$ENGINE_BUILD_DIR" \
+        -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+        -C "$ENGINE_BUILD_DIR" "$@"
+}
+
+# Build the engine from the commit the fleet is now running, install the
+# binary, and restart it.
+#
+# EVERY PATH HERE RETURNS 0 AND SAYS WHY. The engine is not part of the Python
+# fleet — it trades a demo account of its own — so a missing Rust toolchain, an
+# unreachable crate registry, or code that will not compile must leave the
+# deploy exactly as it is today. Three things make that true, and all three are
+# needed:
+#   * this runs after the fleet is started and verified, so nothing it does can
+#     delay a funded unit coming back up;
+#   * in a rollout it runs after the rollback trap is disarmed, so even an
+#     abort in here cannot reach the machinery that stops the whole fleet;
+#   * it writes only its own build clone and its own binary — never the
+#     deployed checkout, never a fleet unit, never anything under /etc.
+build_engine() {
+    local cargo="$ENGINE_TOOLCHAIN_DIR/cargo/bin/cargo" commit built status=0
+    if [ ! -x "$cargo" ]; then
+        printf 'engine-build-skipped reason=no-toolchain path=%s\n' "$cargo"
+        return 0
+    fi
+    commit="$(safe_git rev-parse HEAD 2>/dev/null)" || commit=""
+    if [ -z "$commit" ]; then
+        printf 'engine-build-skipped reason=cannot-read-installed-commit\n'
+        return 0
+    fi
+    if [ ! -d "$ENGINE_BUILD_DIR/.git" ]; then
+        # First engine build on this host, or one that was hand-copied here
+        # before there was a deploy path. Existing files stay; the reset below
+        # brings them to the commit.
+        if ! "${GIT_ENV[@]}" /usr/bin/git init --quiet "$ENGINE_BUILD_DIR"; then
+            printf 'engine-build-skipped reason=cannot-prepare-build-clone dir=%s\n' \
+                "$ENGINE_BUILD_DIR" >&2
+            return 0
+        fi
+    fi
+    # Fetched from the deployed checkout, not the network: it is already at the
+    # commit this deploy proved is on the branch, and the host may hold no
+    # credential for the remote. A reset drops files the commit deleted; the
+    # untracked target/ cache beside them survives, which is what keeps an
+    # unchanged engine's rebuild short.
+    if ! engine_git fetch --no-tags --quiet "$REPO_DIR" HEAD \
+        || ! engine_git reset --hard --quiet FETCH_HEAD; then
+        printf 'engine-build-skipped reason=cannot-sync-build-clone commit=%s\n' "$commit" >&2
+        return 0
+    fi
+    built="$(engine_git rev-parse HEAD 2>/dev/null)" || built=""
+    if [ "$built" != "$commit" ]; then
+        printf 'engine-build-skipped reason=build-clone-is-%s-not-%s\n' \
+            "${built:-unreadable}" "$commit" >&2
+        return 0
+    fi
+    # One job, lowest priority: the fleet is trading while this runs, and the
+    # box has two cores.
+    (
+        CARGO_HOME="$ENGINE_TOOLCHAIN_DIR/cargo"
+        RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup"
+        PATH="$ENGINE_TOOLCHAIN_DIR/cargo/bin:$PATH"
+        export CARGO_HOME RUSTUP_HOME PATH
+        cd "$ENGINE_BUILD_DIR/engine" || exit 1
+        nice -n 19 "$cargo" build --release --locked -j 1
+    ) || status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'engine-build-failed status=%s commit=%s: the fleet is untouched and the previously installed engine, if any, is still running\n' \
+            "$status" "$commit" >&2
+        return 0
+    fi
+    # Into place under a temporary name and renamed: a half-copied file never
+    # sits at the path the unit starts, and a running engine keeps the file it
+    # was started from until it is restarted below.
+    if ! install -d -o root -g root -m 0755 "${ENGINE_BINARY%/*}" \
+        || ! install -o root -g root -m 0755 \
+            "$ENGINE_BUILD_DIR/engine/target/release/engine" "$ENGINE_BINARY.new" \
+        || ! mv -f "$ENGINE_BINARY.new" "$ENGINE_BINARY"; then
+        printf 'engine-install-failed commit=%s path=%s\n' "$commit" "$ENGINE_BINARY" >&2
+        rm -f "$ENGINE_BINARY.new" 2>/dev/null || true
+        return 0
+    fi
+    if ! engine_installed; then
+        printf 'engine-start-skipped reason=no-environment-file path=%s commit=%s\n' \
+            "$ENGINE_ENVIRONMENT" "$commit"
+        return 0
+    fi
+    systemctl enable "$ENGINE_UNIT" \
+        || printf 'engine-enable-failed unit=%s\n' "$ENGINE_UNIT" >&2
+    if systemctl restart "$ENGINE_UNIT"; then
+        printf 'engine-ok commit=%s binary=%s\n' "$commit" "$ENGINE_BINARY"
+    else
+        printf 'engine-restart-failed unit=%s commit=%s\n' "$ENGINE_UNIT" "$commit" >&2
+    fi
+    return 0
+}
+
 activate_mode() {
     load_authorization
     resolve_stop_first
@@ -1241,6 +1384,18 @@ activate_mode() {
     systemctl enable --now liquidity-migration-telegram-controls.service
     if mainnet_armed; then
         start_mainnet_fleet
+    fi
+    # Last, and never fatal. The loop above disabled every unit in the
+    # manifest, this one included, so a host that runs the engine needs it
+    # started again here — but a start that will not take must be reported by
+    # the verification below, not by aborting an activation that has already
+    # brought the whole trading fleet up. In a rollout an abort here would
+    # reach the rollback trap and stop the fleet again.
+    if engine_installed; then
+        systemctl enable "$ENGINE_UNIT" \
+            || printf 'engine-enable-failed unit=%s\n' "$ENGINE_UNIT" >&2
+        systemctl start "$ENGINE_UNIT" \
+            || printf 'engine-start-failed unit=%s\n' "$ENGINE_UNIT" >&2
     fi
     verify_topology
 }
@@ -1548,6 +1703,12 @@ ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-demo-liveness.service
     liquidity-migration-mainnet-liveness.service
     liquidity-migration-telegram-controls.service
+    # The engine has no edge to anything here; it is in this list because
+    # require_quiescent refuses to install while ANY liquidity-migration-*
+    # unit is running, and stop-first only stops what these lists name. Left
+    # out, a running engine would stop every deploy dead — the funded fleet's
+    # included — with "units still running after stop-first".
+    liquidity-migration-engine.service
     # Retired fleets stay in the stop list so the rollout that carries each
     # retirement quiesces a host still running them; the manifest install
     # then removes the unit files for good. Paper retired 2026-08-03; the
@@ -1706,6 +1867,9 @@ staged_mode() {
     run_strict_phase staged-install install_mode
     run_strict_phase record-installed-profile record_installed_profile
     run_strict_phase staged-activate-and-verify activate_mode
+    # After the fleet is up and verified, and never a strict phase: see
+    # build_engine.
+    run_phase engine-build build_engine
     printf 'staged-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 
@@ -1784,6 +1948,11 @@ rollout_mode() {
     run_strict_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
     ROLLOUT_STOPPED=0
+    # Deliberately after those two lines: they disarm the rollback trap, so
+    # from here nothing can stop the fleet again. The engine build is the one
+    # step in this script that is allowed to fail, and it must not be able to
+    # reach that machinery. See build_engine.
+    run_phase engine-build build_engine
     printf 'rollout-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 

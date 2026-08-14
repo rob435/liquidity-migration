@@ -21,6 +21,7 @@ unit shapes.
 | `liquidity-migration-account-execution-mainnet.service` | Bybit **mainnet** real-money order/fill/position/protection/journal owner |
 | `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers; both start when `REAL_MONEY` is armed, sized by the installed risk profile |
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
+| `liquidity-migration-engine.service` | The Rust execution engine, on a demo account of its own — see below |
 
 The liveness services are invoked by their matching timers.
 Target producers and auxiliary services have private API, mainnet, `REAL_MONEY`,
@@ -47,6 +48,30 @@ No unit can take the fleet down with it.
   resumes, or flattens are stopped. It holds Telegram credentials only — the
   API-key pairs and `REAL_MONEY` are unset — and acts through `systemctl`, the
   sleeve override + resolve library, and the flatten path.
+
+## The engine unit
+
+`liquidity-migration-engine.service` is the odd one, in three ways.
+
+- **It runs a different venue account.** The fleet owns demo account
+  555899665 (`bybit-demo.env`); the engine runs 579580669
+  (`bybit-quote-lab.env`). Two writers on one account wedge each other, and
+  the engine's per-account lock would make that failure silent rather than
+  loud.
+- **The host opts in.** The manifest installs the unit file everywhere, but
+  the deploy starts and verifies it only where `/etc/liquidity-migration/engine.env`
+  and the built binary both exist (`engine_installed` in
+  [`../../scripts/deploy_vps_live.sh`](../../scripts/deploy_vps_live.sh)).
+  Everywhere else the unit sits installed and stopped and nothing asks about
+  it. `deploy/engine.env.template` is the file to fill in.
+- **Its build cannot fail the deploy.** `cargo` runs in a clone of its own at
+  `/opt/engine-build` after the fleet is up and verified, and after a rollout
+  has disarmed its rollback trap. A missing toolchain or a build that will not
+  compile prints a line and leaves the previously installed binary running.
+
+It is not in `LM_AUTHORIZED_UNITS`. That list demands each unit's fragment be
+installed and strip the demo credential pair — and this unit needs that pair,
+for a different account, on hosts that may not have installed it.
 
 ## Owner unit shapes
 

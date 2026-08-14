@@ -98,6 +98,130 @@ def test_authorized_wrapper_owns_every_runtime_argv() -> None:
         assert f"run_authorized_runtime.sh {gated} readiness" in _unit(gated)
 
 
+ENGINE_UNIT = "liquidity-migration-engine.service"
+
+
+def test_engine_unit_runs_its_own_demo_account_and_never_the_fleets() -> None:
+    """Two writers on one venue account wedge each other: on 2026-08-14 a live
+    engine on the fleet's demo account blocked the demo owner for ~100 seconds.
+    The engine's per-account lock makes that a silent refusal to start rather
+    than a loud collision, so the credential file this names is the whole
+    defence.
+    """
+
+    unit = _unit(ENGINE_UNIT)
+    service = _section(unit, "Service")
+    environment_files = [
+        line.removeprefix("EnvironmentFile=")
+        for line in service.splitlines()
+        if line.startswith("EnvironmentFile=")
+    ]
+    assert environment_files == [
+        "/etc/liquidity-migration/bybit-quote-lab.env",
+        "/etc/liquidity-migration/engine.env",
+    ]
+    # The fleet's own demo account and the funded one are both out of reach.
+    # Directives only: the comments name both files on purpose.
+    directives = "\n".join(
+        line for line in service.splitlines() if line and not line.startswith("#")
+    )
+    assert "bybit-demo.env" not in directives
+    assert "bybit-mainnet.env" not in directives
+    unset = " ".join(line for line in service.splitlines() if line.startswith("UnsetEnvironment="))
+    for stripped in ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET", "REAL_MONEY"):
+        assert stripped in unset, stripped
+    # The account it runs, and the one it must not, are named where somebody
+    # editing this file will read them.
+    assert "579580669" in unit
+    assert "555899665" in unit
+
+    assert f"ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh {ENGINE_UNIT} main" in service
+    assert "Restart=always" in service
+    assert "WantedBy=multi-user.target" in _section(unit, "Install")
+    for hardening in (
+        "NoNewPrivileges=true",
+        "PrivateTmp=true",
+        "ProtectSystem=full",
+        "ProtectHome=false",
+        "KillMode=control-group",
+        "MemoryMax=",
+    ):
+        assert hardening in service, hardening
+
+
+def test_engine_never_works_inside_the_deployed_checkout() -> None:
+    """engine.toml's log path may be relative. Resolved inside
+    /opt/liquidity-migration it writes an untracked file into the tree the
+    deploy proves clean at every exact-commit step, and the next deploy of the
+    funded fleet stops on it.
+    """
+
+    service = _section(_unit(ENGINE_UNIT), "Service")
+    working = [
+        line.removeprefix("WorkingDirectory=")
+        for line in service.splitlines()
+        if line.startswith("WorkingDirectory=")
+    ]
+    assert working == ["/var/lib/liquidity-migration-engine"]
+    assert "ReadWritePaths=/var/lib/liquidity-migration-engine" in service
+    # systemd creates it, so the unit does not depend on a deploy step having
+    # run to be startable at all.
+    assert "StateDirectory=liquidity-migration-engine" in service
+    # Every other unit works from the checkout; this one must not.
+    assert "WorkingDirectory=/opt/liquidity-migration\n" not in service
+
+
+def _engine_command(tmp_path: Path, **environment: str) -> subprocess.CompletedProcess[str]:
+    """The real dispatch in run_authorized_runtime.sh, with the exec replaced by
+    a print so the argv it built can be read.
+    """
+
+    script = tmp_path / "wrapper.sh"
+    script.write_text(
+        _read(WRAPPER).replace('exec "${COMMAND[@]}"', 'printf "%s\\n" "${COMMAND[@]}"'),
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["bash", str(script), ENGINE_UNIT, "main"],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", **environment},
+    )
+
+
+def test_the_engine_stays_in_shadow_unless_the_host_file_plainly_says_otherwise(
+    tmp_path: Path,
+) -> None:
+    """Shadow computes and sends nothing. The host's environment file can say
+    "live" and can say nothing else: the argv is committed here.
+    """
+
+    shadow = _engine_command(tmp_path, ENGINE_CONFIG_FILE="/etc/liquidity-migration/engine.toml")
+    assert shadow.returncode == 0, shadow.stdout + shadow.stderr
+    assert shadow.stdout.split() == [
+        "/opt/liquidity-migration-engine/bin/engine",
+        "run",
+        "--config",
+        "/etc/liquidity-migration/engine.toml",
+    ]
+
+    for off in ("false", "0", "no", "off", "", "maybe", "1 --live"):
+        result = _engine_command(tmp_path, ENGINE_CONFIG_FILE="/etc/engine.toml", ENGINE_LIVE=off)
+        assert result.returncode == 0, off
+        assert "--live" not in result.stdout, off
+
+    for on in ("true", "TRUE", "1", "yes", "YES", "on", "On"):
+        result = _engine_command(tmp_path, ENGINE_CONFIG_FILE="/etc/engine.toml", ENGINE_LIVE=on)
+        assert result.returncode == 0, on
+        assert result.stdout.split()[-1] == "--live", on
+
+    # No config, no run: an engine started against a defaulted relative path
+    # would read whatever engine.toml happened to be beside it.
+    missing = _engine_command(tmp_path)
+    assert missing.returncode != 0
+    assert "ENGINE_CONFIG_FILE is required" in missing.stderr
+
+
 def test_only_demo_owner_inherits_demo_credentials() -> None:
     demo_owner = _unit("liquidity-migration-account-execution.service")
     assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" in demo_owner
@@ -574,6 +698,12 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
     assert rollout.index("stopped-install") < rollout.index("post-rule-refresh-flat-account-proof")
     assert rollout.index("post-rule-refresh-flat-account-proof") < rollout.index("record-installed-profile")
     assert rollout.index("record-installed-profile") < rollout.index("activate-and-verify")
+    # The engine build is the one step allowed to fail, so it comes after the
+    # two assignments that disarm the rollback trap. Before them, an abort
+    # inside it would reach the machinery that stops the whole fleet.
+    assert rollout.index("activate-and-verify") < rollout.index("ROLLOUT_COMPLETE=1")
+    assert rollout.index("ROLLOUT_COMPLETE=1") < rollout.index("run_phase engine-build")
+    assert rollout.index("ROLLOUT_STOPPED=0") < rollout.index("run_phase engine-build")
     assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in rollout
     # Every flat-account proof runs in the same order either way; only whether a
     # residual stops the rollout depends on the realm.
@@ -635,6 +765,7 @@ def test_deploy_has_bounded_activation_waits_and_visible_expensive_phases() -> N
         "install-locked-dependencies",
         "demo-tree-preflight",
         "demo-tree-normalize",
+        "engine-build",
     ):
         assert phase in text
 
@@ -1484,15 +1615,30 @@ def _verify_harness(
     enabled: str,
     failed: str = "",
     permissions_status: int = 0,
+    engine_root: Path | None = None,
 ) -> str:
     """The real verify_topology over a stub systemd, so accumulation is exercised
     rather than pattern-matched. Every sleeve off is the smallest topology that
     still covers on-expectations, off-expectations, the
     oneshot sweep and the venue probe.
+
+    ``engine_root``: where the engine's binary and environment file live. None
+    points both at a path that does not exist, which is what almost every host
+    looks like.
     """
 
     text = _read(DEPLOY)
     library = _read("deploy/lib_sleeves.sh")
+    if engine_root is None:
+        engine_binary = "/nonexistent/liquidity-migration-engine/bin/engine"
+        engine_environment = "/nonexistent/liquidity-migration/engine.env"
+    else:
+        engine_binary = str(engine_root / "engine")
+        engine_environment = str(engine_root / "engine.env")
+    engine_override = (
+        f"\nENGINE_BINARY={shlex.quote(engine_binary)}\n"
+        f"ENGINE_ENVIRONMENT={shlex.quote(engine_environment)}\n"
+    )
     return (
         "set -u\n"
         f"MODE={mode}\n"
@@ -1529,6 +1675,9 @@ def _verify_harness(
         + library[library.index("sleeve_on() {") : library.index("lm_write_resolved_sleeve_toggles()")]
         + text[text.index("unit_on() {") : text.index("check_demo_order_permissions() {")]
         + text[text.index("verify_topology()") : text.index("start_if()")]
+        # After the slice that defines them, so the harness decides where this
+        # host keeps the engine rather than reading the deploy's real paths.
+        + engine_override
     )
 
 
@@ -1674,6 +1823,8 @@ def _quiescence_harness(
         lines += (
             "liquidity-migration-account-execution-mainnet.service loaded active running owner\n"
         )
+    if running == "with-engine":
+        lines += "liquidity-migration-engine.service loaded active running engine\n"
     state.write_text(lines, encoding="utf-8")
     return (
         "set -u\n"
@@ -1799,6 +1950,7 @@ def test_staged_installs_records_the_profile_then_activates_in_one_session() -> 
         + 'install_mode() { echo "ran:install"; }\n'
         'record_installed_profile() { echo "ran:profile-marker=$DEPLOY_PROFILE"; }\n'
         'activate_mode() { echo "ran:activate"; }\n'
+        + 'build_engine() { echo "ran:engine-build"; }\n'
         + text[text.index("staged_mode() {") : text.index("# A funded fleet keeps")]
         + "\nstaged_mode\n"
     )
@@ -1807,6 +1959,8 @@ def test_staged_installs_records_the_profile_then_activates_in_one_session() -> 
     assert result.returncode == 0, combined
     assert combined.index("ran:install") < combined.index("ran:profile-marker=operational")
     assert combined.index("ran:profile-marker=operational") < combined.index("ran:activate")
+    # The engine is built after the fleet is up and verified, never before.
+    assert combined.index("ran:activate") < combined.index("ran:engine-build")
     assert "staged-ok commit=abc123 profile=operational" in combined
     # Each step is a strict phase, so a failure aborts rather than continuing to
     # activate a half-installed checkout.
@@ -1819,6 +1973,7 @@ def test_staged_installs_records_the_profile_then_activates_in_one_session() -> 
     assert failing.returncode != 0
     assert "phase-failed name=staged-install" in combined
     assert "ran:activate" not in combined
+    assert "ran:engine-build" not in combined
     assert "staged-ok" not in combined
 
 
@@ -1891,3 +2046,354 @@ def test_mainnet_provision_runs_before_a_blocked_preflight_gate() -> None:
     assert "systemctl:enable" not in combined
     assert "systemctl:start" not in combined
     assert combined.index("render-profile") < combined.index("preflight")
+
+
+def _engine_template() -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in _read("deploy/engine.env.template").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        assert separator, line
+        values[key] = value
+    return values
+
+
+def test_the_engines_heartbeat_reaches_the_fleets_watchdog() -> None:
+    """Two halves that never meet is the failure this guards: the engine writes
+    a file nobody reads, or the watchdog pages about a file nobody writes.
+    """
+
+    template = _engine_template()
+    watchdog = _read("scripts/runtime/check_fleet_liveness.py")
+    variable = "LIVENESS_ENGINE_HEARTBEAT_FILE"
+
+    # The name the watchdog reads is the name the template writes.
+    assert f'os.environ.get("{variable}")' in watchdog
+    assert variable in template
+
+    # And a unit carries it from one to the other. The leading `-` is what
+    # keeps a host without an engine starting its watchdog at all.
+    liveness = _section(_unit("liquidity-migration-demo-liveness.service"), "Service")
+    assert "EnvironmentFile=-/etc/liquidity-migration/engine.env" in liveness
+
+    # The heartbeat lands where the engine is allowed to write.
+    engine = _section(_unit(ENGINE_UNIT), "Service")
+    writable = next(
+        line.removeprefix("ReadWritePaths=") for line in engine.splitlines()
+        if line.startswith("ReadWritePaths=")
+    )
+    assert template[variable].startswith(writable + "/"), template[variable]
+
+    # The switch and the config path the unit's wrapper needs are here too.
+    assert template["ENGINE_CONFIG_FILE"].startswith("/")
+    assert template["ENGINE_LIVE"] == "false"
+
+
+def test_verify_asks_for_the_engine_only_where_the_engine_is_installed(
+    tmp_path: Path,
+) -> None:
+    """The manifest installs the engine's unit file on every host. If that alone
+    made it expected, every ops.sh status and every deploy — the funded fleet's
+    included — would fail on a box that has never built one.
+    """
+
+    absent = subprocess.run(
+        ["bash", "-c", _verify_harness("verify", _VERIFY_GREEN, _VERIFY_GREEN) + "\nverify_topology\n"],
+        capture_output=True,
+        text=True,
+    )
+    combined = absent.stdout + absent.stderr
+    assert absent.returncode == 0, combined
+    assert "verify-ok" in combined
+    assert ENGINE_UNIT not in combined
+
+    installed = tmp_path / "engine-host"
+    installed.mkdir()
+    (installed / "engine").write_text("#!/bin/sh\n", encoding="utf-8")
+    (installed / "engine").chmod(0o755)
+    (installed / "engine.env").write_text("ENGINE_LIVE=false\n", encoding="utf-8")
+
+    stopped = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _verify_harness("activate", _VERIFY_GREEN, _VERIFY_GREEN, engine_root=installed)
+            + "\nverify_topology\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = stopped.stdout + stopped.stderr
+    assert stopped.returncode != 0, combined
+    assert "verify-mismatch engine is not active and enabled" in combined
+    assert "found 1 mismatch(es)" in combined
+
+    running = f"{_VERIFY_GREEN} {ENGINE_UNIT}"
+    green = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _verify_harness("activate", running, running, engine_root=installed)
+            + "\nverify_topology\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = green.stdout + green.stderr
+    assert green.returncode == 0, combined
+    assert f"{ENGINE_UNIT}|on|active|enabled" in combined
+    assert "verify-ok" in combined
+
+    # A built binary with no environment file is a host that never asked for
+    # the engine: nothing to verify.
+    (installed / "engine.env").unlink()
+    unasked = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _verify_harness("activate", _VERIFY_GREEN, _VERIFY_GREEN, engine_root=installed)
+            + "\nverify_topology\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = unasked.stdout + unasked.stderr
+    assert unasked.returncode == 0, combined
+    assert ENGINE_UNIT not in combined
+
+
+def _activate_harness(engine_root: Path | None, start_status: int = 0) -> str:
+    """The real activate_mode over stubs, so what it starts is exercised rather
+    than pattern-matched.
+    """
+
+    text = _read(DEPLOY)
+    if engine_root is None:
+        binary = "/nonexistent/engine"
+        environment = "/nonexistent/engine.env"
+    else:
+        binary = str(engine_root / "engine")
+        environment = str(engine_root / "engine.env")
+    return (
+        "set -Eeuo pipefail\n"
+        f"ENGINE_START_STATUS={start_status}\n"
+        "LONG_SLEEVE=off\nCARRY_SLEEVE=off\n"
+        'fail() { echo "fail:$*" >&2; exit 1; }\n'
+        "load_authorization() { :; }\n"
+        "resolve_stop_first() { :; }\n"
+        "require_quiescent() { :; }\n"
+        "check_demo_order_permissions() { :; }\n"
+        "lm_expected_systemd_units() { :; }\n"
+        "sleeve_on() { return 1; }\n"
+        "mainnet_armed() { return 1; }\n"
+        "start_if() { :; }\n"
+        'verify_topology() { echo "ran:verify"; }\n'
+        "systemctl() {\n"
+        '    printf "systemctl:%s:%s\\n" "$1" "${2:-}"\n'
+        f'    if [ "${{2:-}}" = {ENGINE_UNIT} ] && [ "$1" = start ]; then\n'
+        '        return "$ENGINE_START_STATUS"\n'
+        "    fi\n"
+        "    return 0\n"
+        "}\n"
+        + text[text.index("# The Rust execution engine.") : text.index("# The single arming switch")]
+        + text[text.index("activate_mode() {") : text.index("MAINNET_OWNER_UNIT=")]
+        + f"ENGINE_BINARY={shlex.quote(binary)}\n"
+        f"ENGINE_ENVIRONMENT={shlex.quote(environment)}\n"
+        "activate_mode\n"
+    )
+
+
+def test_activation_starts_the_engine_where_it_is_installed_and_never_dies_on_it(
+    tmp_path: Path,
+) -> None:
+    """activate disables every unit in the manifest before starting the fleet,
+    so a host that runs the engine needs it started again here. A start that
+    will not take is the verification's finding to report — aborting here would,
+    in a rollout, reach the rollback trap and stop the fleet a second time.
+    """
+
+    absent = subprocess.run(
+        ["bash", "-c", _activate_harness(None)], capture_output=True, text=True
+    )
+    combined = absent.stdout + absent.stderr
+    assert absent.returncode == 0, combined
+    assert f"systemctl:start:{ENGINE_UNIT}" not in combined
+    assert "ran:verify" in combined
+
+    installed = tmp_path / "engine-host"
+    installed.mkdir()
+    (installed / "engine").write_text("#!/bin/sh\n", encoding="utf-8")
+    (installed / "engine").chmod(0o755)
+    (installed / "engine.env").write_text("ENGINE_LIVE=false\n", encoding="utf-8")
+
+    started = subprocess.run(
+        ["bash", "-c", _activate_harness(installed)], capture_output=True, text=True
+    )
+    combined = started.stdout + started.stderr
+    assert started.returncode == 0, combined
+    assert f"systemctl:enable:{ENGINE_UNIT}" in combined
+    assert f"systemctl:start:{ENGINE_UNIT}" in combined
+    # After the fleet, and before the verification that reports on it.
+    assert combined.index(f"systemctl:start:{ENGINE_UNIT}") < combined.index("ran:verify")
+
+    refusing = subprocess.run(
+        ["bash", "-c", _activate_harness(installed, start_status=1)],
+        capture_output=True,
+        text=True,
+    )
+    combined = refusing.stdout + refusing.stderr
+    assert refusing.returncode == 0, combined
+    assert "engine-start-failed" in combined
+    assert "ran:verify" in combined
+
+
+def _build_engine_harness(tmp_path: Path, cargo_status: int | None) -> str:
+    """The real build_engine with a stub cargo. ``cargo_status`` None means no
+    toolchain on this host at all.
+    """
+
+    text = _read(DEPLOY)
+    toolchain = tmp_path / "rust"
+    if cargo_status is not None:
+        (toolchain / "cargo" / "bin").mkdir(parents=True)
+        cargo = toolchain / "cargo" / "bin" / "cargo"
+        cargo.write_text(
+            f'#!/bin/sh\necho "cargo $*"\nexit {cargo_status}\n', encoding="utf-8"
+        )
+        cargo.chmod(0o755)
+    build = tmp_path / "engine-build"
+    (build / "engine" / "target" / "release").mkdir(parents=True)
+    (build / "engine" / "target" / "release" / "engine").write_text("#!/bin/sh\n", encoding="utf-8")
+    (build / ".git").mkdir()
+    return (
+        "set -Eeuo pipefail\n"
+        'safe_git() { echo deadbeef; }\n'
+        # The build clone's own Git, stubbed: what it syncs is not what this
+        # test is about, but where it points is.
+        "engine_git() {\n"
+        '    if [ "${1:-}" = rev-parse ]; then echo deadbeef; return 0; fi\n'
+        '    printf "engine_git:%s\\n" "$*"\n'
+        "}\n"
+        'systemctl() { printf "systemctl:%s:%s\\n" "$1" "${2:-}"; return 0; }\n'
+        # The deploy runs as root and this test does not, so the ownership
+        # flags are dropped. Everything else about the install is real.
+        "install() {\n"
+        "    local argument skip=0 kept=()\n"
+        '    for argument in "$@"; do\n'
+        '        if [ "$skip" = 1 ]; then skip=0; continue; fi\n'
+        '        case "$argument" in\n'
+        "            -o|-g) skip=1 ;;\n"
+        '            *) kept+=("$argument") ;;\n'
+        "        esac\n"
+        "    done\n"
+        '    command install "${kept[@]}"\n'
+        "}\n"
+        + text[text.index("fail() {") : text.index("run_phase_pair() {")]
+        + text[text.index("# The Rust execution engine.") : text.index("# The single arming switch")]
+        + text[text.index("build_engine() {") : text.index("activate_mode() {")]
+        # After the slice that defines them: this test decides where the
+        # toolchain, the build clone and the binary live.
+        + f"REPO_DIR={shlex.quote(str(tmp_path / 'checkout'))}\n"
+        + f"ENGINE_TOOLCHAIN_DIR={shlex.quote(str(toolchain))}\n"
+        + f"ENGINE_BUILD_DIR={shlex.quote(str(build))}\n"
+        + f"ENGINE_BINARY={shlex.quote(str(tmp_path / 'installed' / 'bin' / 'engine'))}\n"
+        + f"ENGINE_ENVIRONMENT={shlex.quote(str(tmp_path / 'engine.env'))}\n"
+        + "run_phase engine-build build_engine\n"
+        "echo deploy-continued\n"
+    )
+
+
+def test_a_failed_engine_build_cannot_fail_the_deploy(tmp_path: Path) -> None:
+    """The engine trades a demo account of its own and none of the fleet's work.
+    A toolchain that is missing, or code that will not compile, must leave the
+    deploy of the funded fleet exactly as it is today.
+    """
+
+    (tmp_path / "engine.env").write_text("ENGINE_LIVE=false\n", encoding="utf-8")
+
+    failing = subprocess.run(
+        ["bash", "-c", _build_engine_harness(tmp_path / "broken", cargo_status=1)],
+        capture_output=True,
+        text=True,
+    )
+    combined = failing.stdout + failing.stderr
+    assert failing.returncode == 0, combined
+    assert "engine-build-failed status=1" in combined
+    assert "phase-ok name=engine-build" in combined
+    assert "deploy-continued" in combined
+    # Nothing was installed and nothing was restarted onto a build that failed.
+    assert "systemctl:restart" not in combined
+    assert not (tmp_path / "broken" / "installed" / "bin" / "engine").exists()
+
+    missing = subprocess.run(
+        ["bash", "-c", _build_engine_harness(tmp_path / "no-rust", cargo_status=None)],
+        capture_output=True,
+        text=True,
+    )
+    combined = missing.stdout + missing.stderr
+    assert missing.returncode == 0, combined
+    assert "engine-build-skipped reason=no-toolchain" in combined
+    assert "deploy-continued" in combined
+
+
+def test_a_good_engine_build_installs_the_binary_and_restarts_only_that_unit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "good"
+    (root / "engine.env").parent.mkdir(parents=True, exist_ok=True)
+    harness = _build_engine_harness(root, cargo_status=0)
+    (root / "engine.env").write_text("ENGINE_LIVE=false\n", encoding="utf-8")
+
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "engine-ok commit=deadbeef" in combined
+    installed = root / "installed" / "bin" / "engine"
+    assert installed.exists()
+    # Renamed into place, so a half-copied file is never at the path the unit
+    # starts.
+    assert not (root / "installed" / "bin" / "engine.new").exists()
+    assert f"systemctl:restart:{ENGINE_UNIT}" in combined
+    # Only its own unit. Nothing here touches the fleet.
+    assert combined.count("systemctl:restart") == 1
+    assert "account-execution" not in combined
+
+    # Built in a clone of its own, never the deployed checkout: cargo writes a
+    # target/ tree beside the source, and an untracked file in the deployed
+    # checkout stops the next deploy.
+    assert f"engine_git:fetch --no-tags --quiet {root / 'checkout'} HEAD" in combined
+    assert "engine_git:reset --hard --quiet FETCH_HEAD" in combined
+
+    # No environment file means the host never asked for the engine: the build
+    # still runs and installs, and nothing is started.
+    (root / "engine.env").unlink()
+    unasked = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    combined = unasked.stdout + unasked.stderr
+    assert unasked.returncode == 0, combined
+    assert "engine-start-skipped reason=no-environment-file" in combined
+    assert "systemctl:restart" not in combined
+
+
+def test_a_running_engine_does_not_stop_the_next_deploy(tmp_path: Path) -> None:
+    """require_quiescent refuses to install while ANY liquidity-migration-*
+    unit is running, and stop-first only stops what the rollout lists name.
+    Leaving the engine out of them would stop every deploy dead, the funded
+    fleet's included.
+    """
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _quiescence_harness(tmp_path / "engine", "auto", "off", running="with-engine")
+            + "\nresolve_stop_first\nrequire_quiescent\necho quiescent-ok\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert f"stopped:{ENGINE_UNIT}" in combined
+    assert "quiescent-ok" in combined
+    assert "units still running after stop-first" not in combined

@@ -59,6 +59,23 @@ case "$UNIT:$ENTRYPOINT" in
             -m liquidity_migration.ops.telegram_controls
         )
         ;;
+    liquidity-migration-engine.service:main)
+        # A compiled binary, not a Python module, and installed outside the
+        # checkout — but the reason for coming through here is the same as for
+        # every other unit: the command line is committed and reviewed, so the
+        # host's environment file can say "live" and cannot say anything else.
+        COMMAND=(
+            /opt/liquidity-migration-engine/bin/engine
+            run
+            --config "${ENGINE_CONFIG_FILE:?ENGINE_CONFIG_FILE is required}"
+        )
+        # Shadow computes and sends nothing, and is what the config already
+        # says. The flag only ever turns shadow off; a config that says
+        # `shadow = false` is live whatever this variable holds.
+        case "${ENGINE_LIVE:-}" in
+            on|ON|On|1|true|TRUE|True|yes|YES|Yes) COMMAND+=(--live) ;;
+        esac
+        ;;
     liquidity-migration-demo-liveness.service:main)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python

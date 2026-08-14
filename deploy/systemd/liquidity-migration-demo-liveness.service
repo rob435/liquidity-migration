@@ -17,6 +17,13 @@ WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/account-execution.env
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+# The engine's file, for LIVENESS_ENGINE_HEARTBEAT_FILE — the other half of the
+# heartbeat the engine writes. Leading `-`: most hosts do not run the engine and
+# do not have this file, and a watchdog that will not start is the one failure
+# nothing else would report. No file means the variable is unset, which means
+# the engine check is skipped entirely rather than paging about a heartbeat
+# nobody writes.
+EnvironmentFile=-/etc/liquidity-migration/engine.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1

@@ -322,6 +322,36 @@ requires the demo owner to be active, and `staged` reaches it through
 `activate_mode` — so **every mainnet deploy verifies the demo fleet.**
 Removing the demo units breaks the path that ships mainnet changes.
 
+### The order it can actually happen in
+
+Each step earns the next. Nothing here is a policy anyone chose to impose; each
+one is what the step after it needs in order not to be reckless.
+
+1. **The engine can be seen from outside.** Done — it writes a heartbeat and
+   the fleet's watchdog pages on stale, unreadable, or latched. Nothing can
+   stand down while nothing can tell you the replacement is sick.
+2. **The engine enforces what the fleet enforces.** Done — the four account
+   caps are ported, so it is no longer looser than the thing it would replace.
+3. **The engine runs as a service, on its own demo account, in shadow.** This
+   is the first step that produces evidence continuously rather than once, and
+   it is where the comparison against the Python owner's decisions starts.
+4. **The demo Python owner becomes retirable.** That means decoupling
+   `verify_topology` from it — the sleeve toggles a few lines above already
+   show the shape. Not before step 3 has run long enough to be worth trusting.
+5. **Mainnet.** A mainnet venue adapter, `set_leverage`, the target-book seam
+   proven on real money, and a `REAL_MONEY` equivalent. **This step is the
+   owner's and nobody else's.** The engine's private side reaches demo hosts
+   only, and that is what keeps the funded account out of reach of a mistake.
+6. **Only then, the Python order path**, and even then the deploy engine
+   (`ops/maintenance_lock.py`, `policy/systemd_environment.py`,
+   `policy/real_money_arming.py`, `ops/candidate_rule_coverage.py`,
+   `ops/reset_path_safety.py`) must survive or be rebuilt. Those are not the
+   trading path; they are what ships it.
+
+The distance left is not capability. Every row in the table above is Done. It
+is one account the engine cannot reach, and one decision that is not a
+programmer's to take.
+
 ## What v1 does not do
 
 - No carry or continuous *decision* port — a carry decision is a batch over
