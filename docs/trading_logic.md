@@ -4,10 +4,7 @@ What each sleeve trades, how it sizes, how it exits, and where its evidence stop
 the authority: [`long_native_event_demo.py`](../liquidity_migration/strategy/long_native_event_demo.py)
 and [`long_native.py`](../liquidity_migration/research/backtest/long_native.py),
 [`carry_demo.py`](../liquidity_migration/strategy/carry_demo.py) and
-[`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py),
-[`continuous_demo.py`](../liquidity_migration/strategy/continuous_demo.py) and
-[`continuous_profile.py`](../liquidity_migration/research/backtest/continuous_profile.py),
-[`continuous_hedge_manager.py`](../liquidity_migration/strategy/continuous_hedge_manager.py).
+[`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py).
 
 ## On today
 
@@ -17,8 +14,6 @@ Publication switches live in [`deploy/sleeves.env`](../deploy/sleeves.env).
 | --- | --- | --- | --- |
 | LONG | Long a fresh volume pump, bought on a shallow retrace | on | off |
 | CARRY | Long coins whose shorts pay a deep crowd fee | on | off |
-| CONTINUOUS | Short decile 9 of an hourly pump composite | off | — |
-| Hedge | Long BTC+ETH against the CONTINUOUS short book | off (follows CONTINUOUS) | — |
 
 Producers publish absolute component targets; they never place orders and never own fills,
 funding, or P&L ([`architecture.md`](architecture.md)). The paper fleet — a credential-free
@@ -27,9 +22,9 @@ and the mainnet route is wired but off.
 
 ## LONG — `LongV12WideStop`
 
-**Signal.** Two registered profiles share this signal — `long_v11a_profile()`
-(the deployed profile until 2026-08-03) and `long_v12_profile()` (deployed
-since; they differ only in stop geometry, below) — on fully closed daily bars:
+**Signal.** Two registered profiles share this signal — `long_v11a_profile()` (deployed
+until 2026-08-03) and `long_v12_profile()` (deployed since); they differ only in stop
+geometry, below. On fully closed daily bars:
 
 | Filter | Value |
 | --- | --- |
@@ -54,16 +49,15 @@ refuses to run if projected full-book initial margin exceeds 50% of equity.
 
 ### `LongV12WideStop` — registered 2026-08-01, deployed 2026-08-03
 
-Same signal, same universe, same sizing, same entry. One thing changes: the stop
-starts at **3× the typical daily swing instead of 1.5×**, and tightens back to 1.5×
-once a position is **48 hours old** (`long_v12_profile()`,
-`fc_atr_stop_mult` / `fc_stop_time_decay_hours` / `fc_stop_time_decay_atr_mult`).
+Same signal, same universe, same sizing, same entry. One thing changes: the stop starts at
+**3× the typical daily swing instead of 1.5×**, and tightens back to 1.5× once a position
+is **48 hours old** (`long_v12_profile()`, `fc_atr_stop_mult` /
+`fc_stop_time_decay_hours` / `fc_stop_time_decay_atr_mult`).
 
-The reason the old stop is wrong: ATR-14d is a two-week average, and this signal only
-fires when a coin moved 2.5σ *today*, so the average understates today's range and the
-stop sits inside the noise of the very move that triggered the entry. 67 of 294 trades
-stopped out. v12 gives the trade room through that move and takes the room back once it
-has had two days and gone nowhere.
+Why the old stop is wrong: ATR-14d is a two-week average and this signal only fires when a
+coin moved 2.5σ *today*, so the stop sat inside the noise of the very move that triggered the
+entry — 67 of 294 trades stopped out. v12 gives the trade room through that move and takes it
+back after two flat days.
 
 Every other v11a rule was ablated on the real engine and kept — volume rank, the BTC-and-ETH
 regime gate, the 2.5σ trigger family, the 7-day cooldown, the 3-day hold, the 4×ATR target,
@@ -78,25 +72,22 @@ Lane-1 evidence: simulated on the data that also chose the rule. The forward rec
 at the registering commit. Its identity `long_native_v12_wide_stop` is separate from v11a's
 because that string is a persisted account-journal key.
 
-**How v12 publishes (wired 2026-08-03).** The two halves of the stop live in different
-places by design. The wide initial stop is just a bigger `stop_loss_pct` in the entry
-target's metadata — the account owner derives the resting venue-native stop from it after
-the fill, exactly as for v11a, and that resting stop is never revised. The 48-hour
-tightening is producer-side: each entry also freezes its own decay contract in the same
-metadata (`stop_decay_after_ms`, `decayed_stop_loss_pct` = `fc_stop_time_decay_atr_mult ×
+**How v12 publishes (wired 2026-08-03).** The wide initial stop is a bigger `stop_loss_pct`
+in the entry target's metadata — the account owner derives the resting venue-native stop from
+it after the fill, exactly as for v11a, and never revises it. The 48-hour tightening is
+producer-side: each entry freezes its own decay contract in the same metadata
+(`stop_decay_after_ms`, `decayed_stop_loss_pct` = `fc_stop_time_decay_atr_mult ×
 atr_14d_pct` off the signal-day ATR), and `_plan_time_stop_exits` publishes a zero target
-(journal reason `decayed_stop_loss`) whenever a filled position is past the decay age and
-the live price is at or below `entry_fill_price × (1 − decayed_stop_loss_pct)`. Because
-the contract is frozen per trade at entry, a later profile change cannot rewrite the decay
-of a standing position. The producer checks at its 60s cycle grid against the backtest's
-hourly intrabar lows — finer-grained than the measurement — but the *exit* is a market
-order after the breach is seen rather than a resting order at the level, the same
-delayed-execution family as the entry-price caveat above; the venue-native wide stop
-remains armed underneath throughout. Profile selection is `LONG_STRATEGY_PROFILE`
-(`v11a`/`v12`) in the unit environment → `--strategy-profile` on the CLI; the planner
-plans exits across **both** registered identities, so components opened under v11a before
-the switch keep their published stop/TP/hold terms and drain normally (3-day max hold)
-while new entries publish under `long_native_v12_wide_stop`.
+(journal reason `decayed_stop_loss`) once a filled position is past the decay age and the
+live price is at or below `entry_fill_price × (1 − decayed_stop_loss_pct)`. The contract is
+frozen per trade at entry, so a later profile change cannot rewrite a standing position's
+decay. The producer checks on its 60s cycle grid against the backtest's hourly intrabar lows
+— finer than the measurement — but the *exit* is a market order after the breach is seen, not
+a resting order at the level; the venue-native wide stop stays armed underneath. Profile
+selection is `LONG_STRATEGY_PROFILE` (`v11a`/`v12`) in the unit environment →
+`--strategy-profile`; the planner plans exits across **both** registered identities, so
+components opened under v11a keep their published stop/TP/hold terms and drain normally
+(3-day max hold) while new entries publish under `long_native_v12_wide_stop`.
 
 `order_notional_pct_equity` (0.0 in
 [`configs/operational.demo.json`](../configs/operational.demo.json)) **sets** each entry's
@@ -119,30 +110,29 @@ owner converts both to venue prices off the first attributable fill and places t
 Time stop at 3 days publishes a zero target.
 
 **Limits.** The forward record is demo-only. The retained internal backtest result depends
-materially on take-profit winners, and the research runner does not abort when PIT
-membership is incomplete — only an untainted run whose artifacts establish the population
-supports a historical-universe claim ([`data.md`](data.md)). The runner's scoped run label
-carries a funding-coverage dimension as well as a PIT one, and funding downgrades it
-independently: `pit_required_missing_manifest`, `pit_membership_filtered_current_universe`,
+materially on take-profit winners, and the research runner does not abort when PIT membership
+is incomplete — only an untainted run whose artifacts establish the population supports a
+historical-universe claim ([`data.md`](data.md)). The scoped run label carries a
+funding-coverage dimension as well as a PIT one, and funding downgrades it independently:
+`pit_required_missing_manifest`, `pit_membership_filtered_current_universe`,
 `full_pit_universe_funding_missing`, `full_pit_universe_funding_coverage_low`,
-`full_pit_universe_funding_partial`, `full_pit_universe` (`long_native.py:1440-1458`), plus
-a separate methodology label `invalid` / `biased_benchmark` / `exploratory` derived from
-taint and manifest state (`:1472-1487`). `full_pit_universe_pass=true` beside a
+`full_pit_universe_funding_partial`, `full_pit_universe` (`long_native.py:1440-1458`), plus a
+methodology label `invalid` / `biased_benchmark` / `exploratory` from taint and manifest state
+(`:1472-1487`). `full_pit_universe_pass=true` beside a
 `full_pit_universe_funding_coverage_low` label is not a historical-universe claim.
 
 ## CARRY — `lane2_carry_hold_v4`
 
-> **Promoted 2026-08-03 by owner override** (previously v3; change point and
-> promotion note in [`strategy_program.md`](research/strategy_program.md), deploy
-> receipt in `CHANGELOG.md`). v4 moves the toxic band's high edge to 0% and adds a
-> crowding-persistence size multiplier — both live in the shared registered
-> scorer. Version selection is `CARRY_STRATEGY_PROFILE` (`v3`/`v4`) in the unit
-> environment → `--strategy-profile`, the same dial shape as LONG's; the journal
-> filing id is the version-free `carry_hold` and never changes with the profile
-> (components born under the pre-2026-08-05 `carry_hold_v3` id drain under it).
-> v3 keeps scoring daily as the primary comparator, and the v4−v3 paired
-> differential is the registered forward experiment. At promotion the forward
-> record had **0 scored days**. See [`carry_hold.md`](research/carry_hold.md) §0.1.
+> **Promoted 2026-08-03 by owner override** (previously v3; change point and promotion note in
+> [`strategy_program.md`](research/strategy_program.md), deploy receipt in `CHANGELOG.md`). v4
+> moves the toxic band's high edge to 0% and adds a crowding-persistence size multiplier, both
+> in the shared registered scorer. Selection is `CARRY_STRATEGY_PROFILE` (`v3`/`v4`) in the
+> unit environment → `--strategy-profile`, the same dial shape as LONG's; the journal filing
+> id is the version-free `carry_hold` and never changes with the profile (components born
+> under the pre-2026-08-05 `carry_hold_v3` id drain under it). v3 keeps scoring daily as the
+> primary comparator and the v4−v3 paired differential is the registered forward experiment;
+> at promotion the forward record had **0 scored days**. See
+> [`carry_hold.md`](research/carry_hold.md) §0.1.
 
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
 Bybit hourly data by calling the registered scorer functions directly, so the deployed book
@@ -162,230 +152,64 @@ Null conditioning values fail open. The book is empty on 28% of days in the full
 flat is a state, not a fault.
 
 **Sizing.** `weight = 0.10 × clip(|trailing 24h settled funding| / 120bp-day, 0.25, 1.0)
-× persistence` — the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it
-(a name with fewer than 20 settlements of history fails open at full size) — gross capped
-at 1.0, then `weight × sizing_equity × notional_multiplier` (1.0). Sizing
-equity is anchored to the decision, not the live mark — sizing off the live mark makes the
-day's target a function of the book's own unrealized P&L (2026-07-30: $84.7k traded against
-a ~$30k book in thirteen hours, zero strategy exits). A 5%-of-standing / $1 dead-band is
-the backstop; entries below $10 notional are skipped.
+× persistence` — the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it (a
+name with fewer than 20 settlements of history fails open at full size) — gross capped at
+1.0, then `weight × sizing_equity × notional_multiplier` (1.0). Sizing equity is anchored to
+the decision, not the live mark — sizing off the live mark makes the day's target a function
+of the book's own unrealized P&L (2026-07-30: $84.7k traded against a ~$30k book in thirteen
+hours, zero strategy exits). A 5%-of-standing / $1 dead-band is the backstop; entries below
+$10 notional are skipped.
 
 **Exit.** Exits and resizes are a diff against the account owner's accepted reservations,
 published exit-first. Entry intents expire 6h after the decision bar and are not published
 inside the last 15 minutes of that window. A declared 35% stop backstops each position at
 the venue. No time stop.
 
-**Limits.** Concentrated (~2–3 names when active — v4 holds 22% fewer name-days than v3
-and is flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity
-~$1M at 1% participation. The registered daily frame exits every name
-24h before its final panel bar, worth roughly +0.13 Sharpe. The single-clock level is
-decision-hour lucky: the same construction over 12 daily offsets spans Sharpe 0.30–1.52 and
-midnight is the best cell. The three v3 filters were chosen in-sample in the review that
-registered them; the paired forward differential against v2 grades them. After the funding
-double-count fix, the corrected carry-hold benchmark Sharpe is **1.21 (t 2.31)** — it does
-**not** beat the CONTINUOUS benchmark; the superseded 2.57 / t 4.87 figures are wrong.
-Detail: [`carry_hold.md`](research/carry_hold.md),
+**Limits.** Concentrated (~2–3 names when active — v4 holds 22% fewer name-days than v3 and
+is flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity ~$1M at
+1% participation. The registered daily frame exits every name 24h before its final panel
+bar, worth roughly +0.13 Sharpe. The single-clock level is decision-hour lucky: the same
+construction over 12 daily offsets spans Sharpe 0.30–1.52 and midnight is the best cell. The
+three v3 filters were chosen in-sample in the review that registered them; the paired forward
+differential against v2 grades them. After the funding double-count fix, the corrected
+carry-hold benchmark Sharpe is **1.21 (t 2.31)** — it does **not** beat the CONTINUOUS
+benchmark; the superseded 2.57 / t 4.87 figures are wrong. Detail:
+[`carry_hold.md`](research/carry_hold.md),
 [`research_findings.md`](research/research_findings.md).
 
-## CONTINUOUS — `continuous_ensemble_v2` (retired)
+## Retired sleeves
 
-The sleeve was retired 2026-07-29 and its systemd units and runtime launchers
-left the deploy set on 2026-08-03. The strategy and research modules described
-below remain in the repo, and the registered config still scores in research.
+CONTINUOUS (`continuous_ensemble_v2`) was retired 2026-07-29; its systemd units and runtime
+launchers left the deploy set on 2026-08-03, after the host's hedge book was verified flat.
+A token CONTINUOUS envelope survives in the operational profiles by design, and tests guard
+it.
 
-**Read the numbers from the profile resolver, not the dataclass.**
-`apply_continuous_demo_profile()` (`continuous_demo.py:1604`) is the resolution function
-every runtime path goes through (`continuous_demo_daemon.py:175`,
-`operational_profile.py:502`, `freeze_account_candidate_universe.py:69`,
-`cli_parsers.py:360`) and it overrides seven `ContinuousDemoCycleConfig` defaults:
-`rmom_quantile` 0.33→0.25, `feature_set` (rv_168h, vov, dist_low, xsret7, xsret3)→
-(`max_ret168`,), `max_hold_hours` 48→24, `sizing_mode` flat→inverse_vol,
-`target_vol_per_name` 0.02→0.01, `vol_weight_clamp` 3.0→2.0,
-`entry_btc_risk_sizing_enabled` False→True.
-[`configs/operational.demo.json`](../configs/operational.demo.json) then overrides
-`max_active` (25→1), `max_new_entries_per_cycle` (5→1), `btc_trend_gate`, `entry_leverage`,
-`notional_multiplier` and `per_position_notional_pct_equity` on top of that. Reading the
-dataclass gives seven wrong numbers.
+The hedge that sat against the CONTINUOUS short book — its model code and its committed
+warmstart prior — was removed from the tree in the 2026-08-14 cleanup. Git history holds
+both.
 
-Deployed revision string `active_single_fund0_tp12_sl35_v1` (`continuous_profile.py:16`),
-artifact cell `age240_turn3pop3_fund0_crowd2`, standard run label
-`continuous_ensemble_v2_active_single_fund0_tp12_sl35_v1_historical_equity`
-(`CONTINUOUS_HISTORICAL_RUN_LABEL`), history start 2023-04-01, evidence label
-`exploratory_historical_equity`. `regenerate_hedge_warmstart.py:162,203` and
-`continuous_deployed_equity_refresh.py:480` refuse inputs whose `profile_revision` is not
-that string. The single funding-gated cell replaced three nested-trigger components
-(`turn3_pop3` weight 1/3, `turn4_pop3` 2/9, `turn4_pop5` 4/9).
-
-**Signal.** Shorts decile 9 of the hourly composite through one component
-(`p3` / `turn3_pop3`), after: a 1-hour confirmation delay on closed bars, the causal
-prior-day 30d BTC uptrend gate, **stable** residual momentum in the lowest quartile,
-≥500,000 USDT hourly turnover, a 240-day listing-age floor, and the settled-funding
-admission (last settled print at signal-bar close ≥ 0 — only fade pumps whose longs are
-paying; settled history only, and no observable print admits and is counted as an unknown
-admit).
-
-"Stable" is load-bearing: `require_stable_residual_momentum`
-(`continuous_events.py:197-240`) returns only `is_provisional == false` rows, and raises if
-the source lacks a boolean `is_provisional` column, has null provenance, non-daily or
-duplicate `(symbol, ts_ms)` keys, or null/non-finite `residual_momentum`. A separate
-freshness guard (`_assert_rmom_covers_window`, `RMOM_COVERAGE_TOLERANCE_DAYS = 2`) raises
-when the table lags the kline window by more than 2 days, because the decile build
-left-joins on `(symbol, day_ts)` and a stale table would silently drop every symbol on
-recent days — hence a hard STALE failure rather than an empty decile.
-
-Three admission guards, all scoped **per component book** for parity with the
-independent-books research engine: an entry-anchored re-entry cooldown
-(`entry_reentry_cooldown_enabled=True`, `cooldown_ms = hold_ms`, so a fast take-profit close
-cannot re-enter on the next hourly signal), the crowd-2 gate
-(`entry_crowding_max_fresh = 2`), and one entry per component per `signal_ts` window. A
-sibling component may therefore complete a capacity-truncated stack later in the same
-window; a lifecycle whose trade id cannot be attributed to exactly one component fails safe
-to the `*` wildcard (`_ALL_COMPONENTS`, `continuous_demo.py:877-911`) and blocks every
-component for that symbol. Simplifying the scoping to per-symbol would silently change the
-live book relative to its backtest. Rejections surface as `first_rejection_reason` inside
-`entry_funnel_json` / `qualified_but_blocked_json` and as `entry_first_rejection_reason` at
-cycle level; the value set is `d9`, `liquidity`, `event`, `age`, `funding_admission`,
-`crowding`, `already_reserved`, `entry_cooldown`, `same_signal_reentry`, `capacity`,
-`target_intent_validation`, `unresolved_account_target`, `terminal_entry_attempt`,
-`target_publication`.
-
-New entries pause while the journal shows ≥8 adverse reduction batches in 1,440 minutes
-(`entry_pause_after_adverse_exits=8`, `entry_pause_window_minutes=1440`, `:170-176`). The
-pause gates new entries only — existing targets are untouched and run to their normal
-exits. It is a correlated-squeeze breaker counting `stop_approach`, `failed_fade` and any
-net-negative cover, recomputed from the ledger each cycle (`entry_circuit_breaker_tripped`,
-`:843-857`), so it lifts on its own as the cluster ages out; restarting the producer to
-clear it is unnecessary. The two constants are an operational guardrail, not a validated
-optimum — do not re-optimize them on backtest data. 0 disables it.
-
-Each cycle also persists an **observer-only** component funnel and identity block
-(`:2790-2840`): `entry_observability_scope="observer_only_no_admission_authority"`,
-`entry_funnel_d9`, `entry_funnel_liquidity`, `entry_funnel_event`, `entry_funnel_age`,
-`entry_funnel_funding`, `entry_funnel_available`, `entry_funnel_capacity`,
-`entry_funnel_json`, `funding_admission_rejected`, `funding_admission_unknown_admitted`,
-`qualified_but_blocked_count` / `_symbols` / `_json`, `entry_preselection_rejection_reason`,
-`entry_first_rejection_reason`, `entry_paused`, `recent_adverse_exits`,
-`entry_feature_state_sha256`, `entry_feature_contract_sha256`, `rmom_source_sha256`,
-`rmom_signal_day_sha256`, and `temporarily_ineligible_candidates_json` (also written by the
-LONG producer at `long_native_event_demo.py:530`). These are the fields to grep when
-diagnosing an empty cycle or a vanished symbol. None of them grants admission authority or
-bypasses the BTC, account-health, pause, capacity or account-risk gates — never wire funnel
-state into the admission path.
-
-**Sizing.** `equity × 2% × notional_multiplier × component weight × inverse-vol × BTC-risk`.
-The shared profile sets `notional_multiplier` 1.0 and `per_position_notional_pct_equity`
-2.0, and the single active component `p3` / `turn3_pop3` carries `weight = 1.0`
-(`continuous_profile.py:53`). Entry leverage is 2.0: the multiplier changes target
-quantity, leverage changes only margin. Inverse-vol is `0.01 / rv_168h` clamped to
-[0.5, 2.0]; missing volatility uses 1.0. The BTC-risk overlay (arm id
-`CTRL_BTC_RISK_70_90_35`, `continuous_btc_risk.py:25`, `BTC_RISK_MIN_PRIOR = 50`) starts
-after 50 accepted decisions and multiplies by 0.35 when the causal score sits in
-[0.70, 0.90); the 0.35 applies to every component sharing the decision key
-`{symbol}|{signal_ts_ms}`, duplicate keys raise, and live state is reconstructed by
-replaying accepted account targets in receipt-chain order from
-`btc_risk_sizing_state.parquet` — which is why a research run cannot reconstruct it.
-[`configs/operational.demo.json`](../configs/operational.demo.json) currently holds the
-book to `max_active: 1` and one new entry per cycle.
-
-**Exit.** 12% take-profit off fill VWAP, a declared 35% stop placed at the venue, and a
-zero target 24 hours after the first attributable fill. The 35% stop is modeled identically
-in the research engine, and it **replaces** rather than supplements the account owner's
-disaster stop: `venue_protection.py:280-321` installs one Full-position exchange-native stop
-per net symbol from the *outermost* declared `stop_loss_pct` among the symbol's components,
-anchored to entry fill VWAP, tagged `fill_anchored_outermost_component_stop`; it falls back
-to `explicit_account_fallback_fraction` off `average_price` only when no component declares
-one. A declared value outside (0, 1) raises rather than silently widening to the fallback,
-and `continuous_demo.py:2237-2241` rejects such a component book at startup. CARRY declares
-the same 0.35.
-
-**Limits.** The standard historical curve reproduces the component book, the funding
-admission, inverse-vol sizing, TP12, the 24h hold, the 35% component stop, and the BTC+ETH
-hedge with its regime. It does not reproduce the live accepted-decision BTC-risk state,
-account risk admission, venue rules, fills, or reconciliation. A data root named
-`full_pit` establishes nothing about membership ([`data.md`](data.md)).
-
-## Hedge (retired with CONTINUOUS)
-
-The hedge's runtime — its systemd timer and launcher — left the deploy set on
-2026-08-03 with the continuous units, after the host's hedge book was verified
-flat. The model code (`continuous_hedge_manager.py`) and its committed prior
-stay for research.
-
-Small long BTC and ETH positions sized to the CONTINUOUS short book's causal rolling beta:
-90-day window, 60-observation minimum, 2.0 per-leg cap, 5 bps modeled cost, 30%
-total-equity sanity cap, BTC-vol intensity `lam=0.5` over a 30-day vol window and 250-day
-percentile window. Daily volatility rebalance is disabled. The timer fires every 5 minutes
-and is enabled only while CONTINUOUS is.
-
-There is also a **joint total** cap of `hedge_cap * scale` = 2.0 × scale, separate from the
-per-leg 2.0: `_capped_hedge_legs` (`continuous_rebalance.py:359-376`) clips each leg to
-`hedge_cap` and then, if `r1 + r2` exceeds `hedge_cap * scale`, shrinks both legs
-proportionally. Only after that does the manager apply the 30%-of-equity cap, again
-proportionally (`continuous_hedge_manager.py:297-300`). The worst-case combined hedge ratio
-is 2.0, not 4.0.
-
-Every published hedge target carries the model-prior provenance stamp — eight fields from
-`HedgeModelPrior.provenance()` (`continuous_hedge_manager.py:88-98`): `model_prior_kind` =
-`immutable_historical_model_prior`, `model_prior_artifact_sha256`,
-`model_prior_source_summary_sha256`, `model_prior_start_date`,
-`model_prior_data_through_date`, `model_prior_rows`, `model_prior_live_extension` = `False`,
-and `model_prior_evidence_scope` =
-`sizing_only_not_current_calibration_or_performance_evidence` — the field that forbids
-citing the prior as calibration or performance evidence. A refresh changes
-`model_prior_artifact_sha256`. The stamp was spliced into each target's intent metadata by the retired
-runner. Missing,
-malformed, future-dated or estimator-inadequate prior data fails closed. Prior age is
-informational, not a freshness gate; coefficient drift remains a stated limitation. The
-demo hedge sizes current BTC/ETH targets from live canonical CONTINUOUS gross exposure,
-current account equity and current prices — only the beta and BTC-vol regime inputs come
-from the commit-owned prior.
-
-Betas are rolling OLS over the trailing 90 ledger days of
-[`bybit_warmstart.csv`](../deploy/hedge_warmstart/bybit_warmstart.csv) (200 rows, data
-through 2026-07-09). The runtime never extends that prior with live returns: the live
-account path cannot reconstruct the regression's per-unit book return. Regeneration runs
-via [`regenerate_hedge_warmstart.py`](../scripts/maintain/regenerate_hedge_warmstart.py) after each
-research refresh of the continuous equity pipeline, at least quarterly, from the
-code-defined TP12 component ledgers. `ContinuousHedgeRule` supports `shrinkage_weight` /
-`prior_beta_1` / `prior_beta_2` (`beta = (1−w)·OLS + w·prior`), previous vintage as prior,
-`w = 0.3` intended at the first refresh; the deployed value is `0.0`, so enabling it is a
-committed change. No refresh has run yet — the deployed vintage is still 2026-07-09.
-
-*Regeneration gates.* The script has exactly four refusal conditions (`overwrite_blocked`,
-`scripts/maintain/regenerate_hedge_warmstart.py:413-435`, in this order): no date overlap with the
-existing CSV; `max|delta_unit_ret|` over the overlap above `--max-unit-drift` (default
-1e-3); regenerated row count below the existing row count; and beta drift above
-`MAX_PRIOR_BETA_DRIFT`. A 60-observation minimum is **not** one of them — regenerating from
-a short component ledger writes the CSV, and the runtime then silently produces a zero beta
-from it. (The number 60 lives in two unrelated places: `beta_min_obs = 60`, runtime
-estimator behavior; and `MIN_OBJECT_REFERENCE_OVERLAP = 60` (`:67`), reached only on the
-`--replace-component-object` path.) `MAX_PRIOR_BETA_DRIFT = 0.25` is in hedge-ratio units —
-the same units as the 2.0 per-leg cap — measured as `max(|new_b1 − old_b1|, |new_b2 −
-old_b2|)` between the deployed CSV's betas and the candidate's betas, each **re-estimated**
-with the runtime estimator (`_series_betas` → `compute_hedge_betas_2f`, 90d window / 60-obs
-minimum) at the end of its own series; it is skipped when the two vintages share no dates
-(`:430`, `_beta_drift` at `:391-400`). `--force` is the only override **and requires a
-written review before use** — the refusal message points at this document for it.
-
-*Estimator behavior, not refusals.* Three paths return `(0.0, 0.0)`: `idx −
-beta_extra_lag_days <= 0`, fewer than `beta_min_obs` = 60 joint rows, and zero variance in
-either leg. Collinearity is different: when the two legs are collinear within the window
-(`|corr| > HEDGE_2F_COLLINEARITY_GUARD = 0.995`, `continuous_rebalance.py:303, 349`) or the
-2×2 system is singular (`det <= 0`), `compute_hedge_betas_2f` falls back to the
-single-factor beta on leg 1 (BTC) with `b2` exactly `0.0`; shrinkage still applies to that
-leg-1 beta but `prior_beta_2` is ignored (`:350`). BTC and ETH daily returns routinely
-correlate above 0.9, so a hedge target with a nonzero BTC leg and a zero ETH leg is the
-estimator deliberately collapsing to one factor, not missing ETH data.
+The negative results, and what the retired sleeves did and did not establish, are in
+[`research_findings.md`](research/research_findings.md) and the
+[archive](research/archive/README.md).
 
 ## Shared machinery
 
-[`configs/operational.demo.json`](../configs/operational.demo.json) is the one editable sizing
-surface. Caps are a fraction of observed wallet equity
+[`configs/operational.demo.json`](../configs/operational.demo.json) is the one editable
+sizing surface. Caps are a fraction of observed wallet equity
 ([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py):
 contraction immediate, expansion behind a dead band, unknown equity moves nothing);
-[`account_kernel.py`](../liquidity_migration/account/account_kernel.py) holds each sleeve to its own
-partition of it; [`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py) halts
-the day at a loss ceiling.
+[`account_kernel.py`](../liquidity_migration/account/account_kernel.py) holds each sleeve to
+its own partition of it;
+[`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py) halts the day
+at a loss ceiling.
+
+**The venue stop comes from the outermost declared stop.**
+`venue_protection.py:280-321` installs one Full-position exchange-native stop per net
+symbol, taken from the *outermost* declared `stop_loss_pct` among the symbol's components,
+anchored to entry fill VWAP and tagged `fill_anchored_outermost_component_stop`; it falls
+back to `explicit_account_fallback_fraction` off `average_price` only when no component
+declares one. A declared value outside (0, 1) raises rather than silently widening to the
+fallback. CARRY declares 0.35.
 
 **Profile load refusals** (all in
 [`operational_profile.py`](../liquidity_migration/policy/operational_profile.py)): unknown or
@@ -403,40 +227,37 @@ equity-rescaled profile (`:682`), not only at load. Separately: a normal risk or
 rejection when live account state differs from the validation reference is a safety
 decision, not configuration drift — do not "fix" it by raising caps.
 
-Turnover, listing age, and rank are re-evaluated every cycle, so a
-symbol can be skipped without disappearing; a newly observed future `deliveryTime` drops it
+**Universe membership.** Turnover, listing age, and rank are re-evaluated every cycle, so a
+symbol can be skipped without disappearing. A newly observed future `deliveryTime` drops it
 from new-entry membership, and retiring it requires position, component targets, component
-desires, working orders, the aggregate target, **and** the unresolved inbox all flat for
-that symbol (`_assert_scheduled_retirement_flatness`,
-`account_candidate_universe.py:1225-1279`); any remainder raises `scheduled-retirement
-symbols are not account-flat`. The private retirement registry preserves the delivery
-observation after the venue removes the instrument row, and a moved delivery date updates
-the record in place while keeping the original first-observed timestamp as the causal
-anchor. A symbol that leaves the live population *without* delivery evidence does not fail
-the cycle: it drops to journaled temporary ineligibility and returns automatically when the
-venue restores it. Reasons are `turnover_below_floor`, `listing_age_below_floor`,
+desires, working orders, the aggregate target, **and** the unresolved inbox all flat for that
+symbol (`_assert_scheduled_retirement_flatness`, `account_candidate_universe.py:1225-1279`);
+any remainder raises `scheduled-retirement symbols are not account-flat`. The private
+retirement registry preserves the delivery observation after the venue removes the instrument
+row; a moved delivery date updates the record in place, keeping the original first-observed
+timestamp as the causal anchor. A symbol that leaves the live population *without* delivery
+evidence does not fail the cycle: it drops to journaled temporary ineligibility and returns
+automatically when the venue restores it — a venue hiccup that self-heals must not be
+intervened on. Reasons are `turnover_below_floor`, `listing_age_below_floor`,
 `listing_age_above_ceiling`, `outside_configured_liquidity_rank`,
 `unexplained_absence_from_venue`, and `scheduled_retirement_reentered_eligibility` (a
 cancelled or moved delisting, which leaves the symbol non-tradable while its delivery
-evidence stands). Malformed eligibility input still raises. The distinction matters: a venue
-hiccup that self-heals must not be intervened on.
+evidence stands). Malformed eligibility input still raises.
 
-The frozen candidate artifact is a forward population contract. The active set is the
+The frozen candidate artifact is a forward population contract: the active set is the
 intersection of the frozen per-profile population with the current live population
 (`account_candidate_universe.py:1200-1205`), so a post-freeze listing can never enter until
-someone re-freezes, while turnover, listing age and configured liquidity rank are
-re-evaluated every cycle and a frozen symbol failing one of those dynamic filters is skipped
-with its exact reason written to the cycle receipt
-(`temporarily_ineligible_candidates_json`) — normal ranking movement, distinct from
-disappearance.
+someone re-freezes, and a frozen symbol failing a dynamic filter is skipped with its exact
+reason written to the cycle receipt (`temporarily_ineligible_candidates_json`) — normal
+ranking movement, distinct from disappearance.
 
-Bybit's demo realm rejects orders its own published
-`minNotionalValue` accepts, so
-[`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py) measures the executable
-minimum with bounded probe orders (≤200 USDT, 100 bps away) and caches it per symbol; entry
-dust skips key off that. A component below 4× that minimum is quantization-distorted, so a
-day where such components carry >20% of gross exposure measures plumbing rather than
-economics ([`research_findings.md`](research/research_findings.md)).
+Bybit's demo realm rejects orders its own published `minNotionalValue` accepts, so
+[`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py) measures the
+executable minimum with bounded probe orders (≤200 USDT, 100 bps away) and caches it per
+symbol; entry dust skips key off that. A component below 4× that minimum is
+quantization-distorted, so a day where such components carry >20% of gross exposure measures
+plumbing rather than economics
+([`research_findings.md`](research/research_findings.md)).
 
 Grading rules and the claim boundary are in [`AGENTS.md`](../AGENTS.md); mainnet arming is
 [`operations.md`](operations.md) §Real money.

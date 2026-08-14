@@ -42,11 +42,14 @@ def make_config(tmp_path: Path, **overrides: object) -> ControlsConfig:
 
 
 def test_pause_rewrite_preserves_foreign_lines_and_sets_all_off() -> None:
-    original = "# host note\nRETIRED_TOGGLE=off\nLONG_SLEEVE=on\n"
+    # CONTINUOUS_SLEEVE is a retired toggle: pause must leave an existing line
+    # alone as a foreign line and never add one of its own.
+    original = "# host note\nRETIRED_TOGGLE=off\nCONTINUOUS_SLEEVE=off\nLONG_SLEEVE=on\n"
     rewritten = sleeve_pause_rewrite(original)
     assert "# host note" in rewritten
     assert "RETIRED_TOGGLE=off" in rewritten
-    for key in ("LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CARRY_SLEEVE"):
+    assert rewritten.count("CONTINUOUS_SLEEVE=") == 1
+    for key in ("LONG_SLEEVE", "CARRY_SLEEVE"):
         assert rewritten.count(f"{key}=") == 1
         assert f"{key}=off" in rewritten
     assert rewritten.endswith("\n")
@@ -280,6 +283,9 @@ def test_pause_saves_the_original_override_and_stops_producers(fleet_env) -> Non
     assert "LONG_SLEEVE=off" in written and "CARRY_SLEEVE=off" in written and "# manual note" in written
     stopped = [argv[3] for argv in commands if argv[:3] == ["systemctl", "disable", "--now"]]
     assert set(stopped) == set(tc.SLEEVE_UNITS.values())
+    # The retired CONTINUOUS producer unit no longer exists on the host; a
+    # pause that touched it would collect a spurious systemctl failure.
+    assert "liquidity-migration-bybit-continuous-demo.service" not in stopped
 
 
 def test_second_pause_keeps_the_first_saved_copy(fleet_env) -> None:  # noqa: ANN001

@@ -46,9 +46,11 @@ never copy sleeve status or thresholds here.
 | Command | Does |
 | --- | --- |
 | `scripts/dev.sh doctor` | read-only Git, Python, dependency, and skill diagnostic (`--json` for tools) |
-| `scripts/dev.sh check` | doctor, then Ruff, mypy, pytest |
+| `scripts/dev.sh check` | doctor, then Ruff, mypy, pytest, engine tests |
 | `.venv/bin/python -m pytest -q` | tests |
 | `.venv/bin/python -m ruff check liquidity_migration scripts tests` | lint |
+| `cd engine && cargo test` | engine tests |
+| `cd engine && cargo run --release -- bench` | engine benchmark: re-measures the latency table in [docs/engine.md](docs/engine.md) |
 | `scripts/ops.sh help` | operator router: status, equity, reset, deploy, and the rest |
 | `python -m liquidity_migration --help` | research and data CLI |
 

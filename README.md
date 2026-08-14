@@ -3,6 +3,23 @@
 Research and demo execution for crypto-perpetual strategies, primarily on
 Bybit.
 
+## The execution engine
+
+[`engine/`](engine) is a Rust workspace that trades: one process, one thread,
+one loop from market message to signed order. It is merged but **not deployed
+and not trading** — the Python fleet still runs everything live, and the
+engine's first shadow run against the demo account is still owed.
+
+Measured on-box by `cd engine && cargo run --release -- bench`, with real
+signing and a real disk flush in the chain: the decision itself takes ~83 ns;
+decision → order durable on disk → out the socket takes 3.9 ms median, ~5 ms
+p99. The venue round trip on top is ~175 ms — geography, not software.
+
+Demo only by construction — the venue crate holds the demo hostname and no
+other — and shadow by default: it logs intents and sends nothing without an
+explicit live flag. Design, crates and safety posture:
+[docs/engine.md](docs/engine.md).
+
 ## Sleeves
 
 | Sleeve | Profile | Toggle |
@@ -24,6 +41,7 @@ its journals. What each sleeve trades is in
 | Path | Contents |
 | --- | --- |
 | [`liquidity_migration/`](liquidity_migration/README.md) | the package, in eleven subpackages — `core`, `marketdata`, `data`, `account`, `venue`, `strategy`, `research`, `policy`, `ops`, `cli`, `runtime` |
+| [`engine/`](engine) | the Rust execution engine workspace — seven crates, from the shared types to the loop |
 | [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
 | [`deploy/`](deploy) | `sleeves.env`, systemd units, environment handling |
 | [`configs/`](configs) | Lane-2 strategy registrations and operational profiles |
@@ -36,7 +54,7 @@ its journals. What each sleeve trades is in
 
 ```
 scripts/dev.sh doctor        # read-only Git/Python/dependency/skill diagnostic
-scripts/dev.sh check         # doctor, then ruff, mypy, pytest
+scripts/dev.sh check         # doctor, then ruff, mypy, pytest, engine tests
 .venv/bin/python -m pytest -q
 ```
 
@@ -52,6 +70,7 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology |
 | [docs/notifications.md](docs/notifications.md) | the two Telegram channels, the hourly digest, watchdog alert cadence and escalation, the heartbeat dead-man's switch |
 | [docs/architecture.md](docs/architecture.md) | producers, account owner, journals, how a target becomes an order |
+| [docs/engine.md](docs/engine.md) | the Rust execution engine: crate contracts, latency budget, crash safety, safety posture |
 | [docs/trading_logic.md](docs/trading_logic.md) | what each sleeve trades and why |
 | [docs/research/carry_hold.md](docs/research/carry_hold.md) | the lead strategy in full: mechanism, tests, run rules, kill conditions |
 | [docs/data.md](docs/data.md) | data roots, point-in-time boundaries, refresh workflow |

@@ -26,7 +26,7 @@ Geography is not ours to fix in software. From the current box, one round trip
 to the venue is ~175 ms; no rebuild changes that. What the engine owns is our
 side of the wire, and that is what we measure and promise:
 
-Measured 2026-08-14 by `engine bench` (the real loop, real HMAC signing,
+Measured 2026-08-13 by `engine bench` (the real loop, real HMAC signing,
 the real log with its fsync in the chain, a pretend venue on the same box;
 release build, Apple silicon; 20,000 quotes in, 1,000 orders out):
 
@@ -97,6 +97,8 @@ in flight before touching the venue.
 
 - No carry or continuous port — their edge is measured in hours, not
   milliseconds; they stay on the Python fleet.
-- No mainnet, no VPS deploy, no relocation dependency.
+- No mainnet, no VPS deploy, no relocation dependency. The engine has not been
+  built or run on the VPS at all; the first live shadow run against the demo
+  account is still owed.
 - No FPGA/kernel-bypass pretensions: the venue is an HTTPS cloud service and
   single-digit milliseconds on-box is already far below its floor.

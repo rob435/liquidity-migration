@@ -24,7 +24,8 @@ Non-operational developer commands:
   lint [RUFF_ARGS...]    run Ruff over package, scripts, and tests
   types [MYPY_ARGS...]   run package and supported developer-script mypy
   test [PYTEST_ARGS...]  run pytest (-q by default)
-  check [PYTEST_ARGS...] run doctor, Ruff, mypy, and pytest in sequence
+  check [PYTEST_ARGS...] run doctor, Ruff, mypy, pytest, and the engine's
+                         Rust tests in sequence
   help                   show this help
 
 Environment:
@@ -77,6 +78,15 @@ case "$command" in
     "$PYTHON_BIN" -m mypy "${MYPY_TARGETS[@]}"
     echo "[dev] pytest"
     "$PYTHON_BIN" -m pytest -q "$@"
+    # The Cargo workspace root is engine/, not the repository root.
+    if [[ ! -f "$ROOT_DIR/engine/Cargo.toml" ]]; then
+      echo "[dev] engine tests skipped (no engine workspace)"
+    elif ! command -v cargo >/dev/null 2>&1; then
+      echo "[dev] engine tests skipped (no cargo toolchain)"
+    else
+      echo "[dev] cargo test"
+      (cd "$ROOT_DIR/engine" && cargo test --workspace --quiet)
+    fi
     ;;
   *)
     echo "ERROR: unknown developer command '$command'" >&2

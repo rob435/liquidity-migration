@@ -305,33 +305,31 @@ this same lever already in the profile, and both *cost* Sharpe when widened.
   budgets each sleeve separately and does not see combined per-symbol exposure.
   Small, but it is the only genuine coupling between them.
 
-## What survived the audit
+## Priors from the 2026-07-21 reset
+
+What the audit left standing, and the reset research read behind it. All of it is
+Lane-1 work on already-seen local data: it shaped the new plan and cannot grade
+it. The old reserved V2 label tape was not opened and is not earmarked for
+the new program — a descendant would inherit too much design exposure, while a
+genuinely new strategy is better graded on post-commit days.
 
 | Evidence | Decision-useful conclusion | Decision |
 | --- | --- | --- |
 | Strategy Overhaul V2 | About 29 families and more than 150 configurations exhausted the existing hourly entry/exit/sizing surface. Fixed-capital barebones books were approximately -3.23% LONG and -20.23% CONTINUOUS after modeled costs and funding. Full account parity was not established. | Stop tuning descendants of that surface. |
-| Historical sleeve curves | Some historical curves are positive, but LONG is materially dependent on a small take-profit tail and CONTINUOUS does not have complete live-runtime reconstruction. | Keep as descriptive controls, not promotion evidence. |
+| Historical sleeve curves | Some are positive, but LONG is materially dependent on a small take-profit tail and CONTINUOUS has no complete live-runtime reconstruction. | Keep as descriptive controls, not promotion evidence. |
 | Breadth study | CONTINUOUS increased from about 6.55 to 7.30 bets per open day, but per-bet volatility was about 1,000 bp and average dependence about 0.21. A 25 bp effect would need roughly 5.6 years at that information rate. | Breadth alone is not a research direction. Fix quantization only as an execution-validity issue. |
 | Young-listing lifecycle | The 2021-24 unconditional short effect reversed in 2025-26. A day-0 long was negative or flat. The required listing-week 1-minute cost data had zero symbol/date overlap with the 27,398-row event panel. | Retire calendar-age rules and the proposed T-L v2. |
 | Execution cost | The first 23 measured demo fills showed positive 15-second/1-minute realized spread against our taker flow. The in-flow maker-first A/B froze at 2 of 8 fills when CONTINUOUS retired 2026-07-29 and was itself retired with the paper fleet 2026-08-03 (`docs/research/research_findings.md` §1). | Continue measuring execution separately; do not confuse cost improvement with alpha. |
 | Cross-venue follow-ups merged 2026-07-21 | A Bybit turnover-collapse listing short looked strong by era (+247/+246/+510 bp at day 2) but failed in every Binance era (-415/-41/-290 bp). Hedged extreme-funding carry was negative across every declared arm on both venues. Naive pump-event longs were negative in 23 of 24 venue/era cells; D9 and BTC-uptrend short-path differences were only about +26 to +62 bp and uncertain. | Preserve venue divergence, the post-2025 negative-funding explosion, and the small D9/uptrend directional effect as anomaly leads. Retire the fixed admission bars, bulk reports, and one-off runners. |
-| Book-level overlay follow-ups | A monotone BTC-risk intensity bought roughly 19-33% tail relief for about 3.8 percentage points/year of net premium on the deployed-shape render. A realized daily loss budget helped mainly on the negative barebones surface, while a cluster cap never bound the deployed-shape book. | These are priced, regime-dependent insurance diagnostics—not automatic governors. Retire the staged hardcoded implementations; revisit through open anomaly research if new evidence warrants it. |
+| Book-level overlay follow-ups | A monotone BTC-risk intensity bought roughly 19-33% tail relief for about 3.8 percentage points/year of net premium on the deployed-shape render. A realized daily loss budget helped mainly on the negative barebones surface, while a cluster cap never bound the deployed-shape book. | Priced, regime-dependent insurance diagnostics, not automatic governors. Retire the staged hardcoded implementations; revisit through open anomaly research if new evidence warrants it. |
 
-The old reserved V2 label tape was not opened. It is not earmarked for the new
-program: a descendant would inherit too much design exposure, while a genuinely
-new strategy is better graded on post-commit days.
-
-## Reset research read
-
-All work in this section is Lane-1 exploration on already-seen local data. It
-shaped the new plan and cannot grade it.
-
-### Young listings: turnover decay was the only interesting lead
-
-At event day 2, six rules were declared from price extension, turnover
-retention, and already-settled funding before their day-2-to-day-7 outcomes were
-read. Trades used actual hold-period funding, 100 bp round-trip cost, and a
-listing-month block bootstrap.
+**Young listings: turnover decay was the only interesting lead.** Six event-day-2
+rules were declared from price extension, turnover retention, and already-settled
+funding before their day-2-to-day-7 outcomes were read; trades used actual
+hold-period funding, 100 bp round-trip cost, and a listing-month block bootstrap.
+The turnover-decay short was positive in aggregate but had only nine 2021-22
+observations and each era-specific interval crossed zero — a mechanism lead, not
+a candidate. Persistent-attention continuation was directly refuted.
 
 | Rule | N | Mean net | Median net | 95% block CI |
 | --- | ---: | ---: | ---: | ---: |
@@ -341,18 +339,14 @@ listing-month block bootstrap.
 | Short crowded/decaying listings | 28 | -4,580 bp | +581 bp | -15,462 to +404 bp |
 | Long pumped listings with persistent turnover | 98 | -722 bp | -1,015 bp | -1,341 to -105 bp |
 
-The turnover-decay short was positive in aggregate but had only nine 2021-22
-observations and each era-specific interval crossed zero. It is a mechanism
-lead, not a candidate. Persistent-attention continuation was directly refuted.
-
-### Mature symbols: the simple mechanism did not generalize
-
-The same idea was then falsified on the canonical Bybit daily panel
-(`2022-01-03` through `2026-07-03`, 889 symbols). Signals required 240 observed
-days, at least 12 million USDT daily turnover, exact daily continuity, entry at
-the next daily close, exit five days later, and at least seven days between
-signals for a symbol. This screen includes price and round-trip cost but not
-funding, so it is optimistic for a short strategy.
+**Mature symbols: the simple mechanism did not generalize.** Falsified on the
+canonical Bybit daily panel (`2022-01-03` through `2026-07-03`, 889 symbols).
+Signals required 240 observed days, at least 12 million USDT daily turnover,
+exact daily continuity, entry at the next daily close, exit five days later, and
+at least seven days between signals for a symbol; the screen includes price and
+round-trip cost but not funding, so it is optimistic for a short strategy. Price
+extension, listing age, and turnover retention are context, not a standalone
+signal, and their pooled medians hide severe era dependence.
 
 | Rule | Cost | N | Full mean | 2023-24 mean | 2025-26 mean | 95% block CI, full |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -361,9 +355,6 @@ funding, so it is optimistic for a short strategy.
 | Short pumped + decayed | 100 bp | 241 | -170 bp | -774 bp | +298 bp | -916 to +475 bp |
 | Long pumped + persistent | 100 bp | 5,171 | -119 bp | +71 bp | -312 bp | -320 to +86 bp |
 | Long pumped + persistent | 200 bp | 5,171 | -219 bp | -29 bp | -412 bp | -422 to -11 bp |
-
-Conclusion: price extension, listing age, and turnover retention are context,
-not a standalone signal. Their pooled medians hide severe era dependence.
 
 ## Starting hypothesis, not mandated direction: Crowding Transfer
 

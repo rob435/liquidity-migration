@@ -28,6 +28,12 @@ import polars as pl  # noqa: E402
 
 from liquidity_migration.data.binance_vision import validate_usdm_usdt_symbols  # noqa: E402
 from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
+from liquidity_migration.strategy.carry_demo import CARRY_CONFIG_PATH  # noqa: E402
+
+# The deployed carry config decides which summary the backtest step produces;
+# deriving the name here means a promotion moves this expectation with it.
+CARRY_CONFIG_ID: str = json.loads(CARRY_CONFIG_PATH.read_text(encoding="utf-8"))["config_id"]
+CARRY_SUMMARY_NAME = f"{CARRY_CONFIG_ID}_summary.json"
 PYTHON = REPO / ".venv" / "bin" / "python"
 if not PYTHON.is_file():
     PYTHON = Path(sys.executable)
@@ -807,7 +813,7 @@ def _backtest_step(
     if sleeve == "long":
         expected = report_root / "long" / "long_native_research_report.json"
     elif sleeve == "carry":
-        expected = report_root / "carry" / "lane2_carry_hold_v3_summary.json"
+        expected = report_root / "carry" / CARRY_SUMMARY_NAME
     else:
         expected = report_root / "continuous" / venue / "continuous_equity_summary.json"
     return CommandStep(
@@ -841,9 +847,9 @@ def _validate_backtest_report(
     if sleeve == "carry":
         # The research-config summary carries identity but no window keys, so
         # check the config identity here; the window is pinned by step arguments.
-        path = report_root / "carry" / "lane2_carry_hold_v3_summary.json"
+        path = report_root / "carry" / CARRY_SUMMARY_NAME
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("config_id") != "lane2_carry_hold_v3":
+        if payload.get("config_id") != CARRY_CONFIG_ID:
             raise RuntimeError(f"CARRY report is not the registered config under {path}")
         if "research_seen_data" not in str(payload.get("run_label") or ""):
             raise RuntimeError(f"CARRY report is missing its research label under {path}")
@@ -909,7 +915,7 @@ def _run_summary(
                     "report": str(path),
                 }
             elif sleeve == "carry":
-                path = report_root / "carry" / "lane2_carry_hold_v3_summary.json"
+                path = report_root / "carry" / CARRY_SUMMARY_NAME
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 cells[key] = {
                     "run_label": payload.get("run_label"),

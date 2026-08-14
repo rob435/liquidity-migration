@@ -21,83 +21,80 @@ producer profile `carry_hold_v4_live_v1`, promotion note and forward-record
 caveat (0 scored days at promotion) in
 `docs/research/strategy_program.md`, deploy receipt in `CHANGELOG.md`.)*
 
-## 0. 2026-07-28 correction — read this before any number below
+## 0. Corrections and registrations — read this before any number below
 
-The registration-era scorer **charged every 8h/4h/2h funding settlement
-twice** (float-epsilon age bug; fixed 2026-07-28 with regression tests —
-full statement in `docs/research/archive/2026-07-26-financed-longs.md` §0). Trades,
-entries, exits, price legs, and costs are unchanged; the funding P&L leg was
-inflated. Corrected, on the benchmark window: **Sharpe 1.21 raw / 1.05 vt vs
-the benchmark's 1.84** — carry-hold **no longer beats the deployed sleeve on
-Sharpe** (return still beats; the owner goal was both). Corrected full-sample
-t 2.31 (below the ≈3.4 multiple-testing bar); corrected attribution
-**funding +7.2 units vs price −3.4** (2.1:1, not 3.4:1); corrected eras
-(bp/day): 2021 +3.8 · 2022 +3.0 · 2023 +26.0 · 2024 +13.7 · 2025 +30.3 ·
-2026 +32.5 — the 2021-22 bear-robustness claim is withdrawn. The mechanism
-(crowded shorts pay longs) is real but roughly half the registered size.
-Sections below preserve the registration-era text; funding-dependent numbers
-in them are superseded by this section. Also relevant: Bybit shortened
-funding intervals through 2025-26 (52% of 2025 settlements are 4h, 21% 1h) —
-73–80% of this book's 2025-26 held name-days are on sub-8h names, so the
-per-print −10/−3 bp thresholds mean different daily carry per symbol.
-~~A successor should normalize thresholds to a daily-equivalent rate~~ —
-tested and refuted in the 2026-07-28 quant review (the variant collapses;
-per-print acuteness is load-bearing).
+**The 2026-07-28 funding double-count.** The registration-era scorer **charged
+every 8h/4h/2h funding settlement twice** (float-epsilon age bug; fixed
+2026-07-28 with regression tests — full statement in
+`docs/research/archive/2026-07-26-financed-longs.md` §0). Trades, entries, exits, price
+legs, and costs are unchanged; the funding P&L leg was inflated. Sections below
+preserve the registration-era text; funding-dependent numbers in them are
+superseded by this section, pair for pair:
 
-**2026-07-28 quant review** (`docs/research/archive/2026-07-28-carry-hold-quant-review.md`):
+| quantity (section where the old number still stands) | registration-era | corrected |
+| --- | ---: | --- |
+| benchmark-window Sharpe, raw / vol-targeted (§4) | 2.57 / 2.41 | **1.21 / 1.05** against the benchmark's 1.84 — carry-hold **no longer beats the deployed sleeve on Sharpe** (return still beats; the owner goal was both) |
+| full-sample t (§5.7) | 4.87 | **2.31**, below the ≈3.4 multiple-testing bar then in force |
+| attribution, funding vs price, units of capital (§2) | +13.06 vs −3.86, 3.4:1 | **+7.2 vs −3.4, 2.1:1** |
+| eras 2021 · 2022 · 2023 · 2024 · 2025 · 2026, bp/day (§4) | +25.4 · +19.1 · +54.3 · +32.9 · +77.6 · +71.5 | **+3.8 · +3.0 · +26.0 · +13.7 · +30.3 · +32.5** — the 2021-22 bear-robustness claim is withdrawn |
+| Binance replication (§5.1) | +25.04 bp/day, t 2.73, effect ratio 0.50 | **t 0.4 / Sharpe 0.18 — withdrawn.** The doubled funding leg *was* the replication. Single-venue (Bybit) evidence until shown otherwise |
 
-- The §5 validation battery's **Binance replication is withdrawn** — on the
-  corrected scorer it is t 0.4 / Sharpe 0.18. The doubled funding leg was
-  the replication. Single-venue (Bybit) evidence until shown otherwise.
-- The vol-target overlay hurts on corrected accounting (vt 1.05 < raw 1.21
-  here; worse for v2) — raw is the primary basis.
-- **`configs/lane2_carry_hold_v2.json` is registered** as a sizing
-  refinement: same state machine, each held name's weight scaled by
-  `clip(|trailing 24h settled funding| / 120 bp-per-day, 0.25, 1.0)` — bet
-  size follows the premium being paid. Seen-data effect: same mean (17.0 vs
-  18.0 bp/day, paired t −0.4), max DD −60.0% → −48.6%, Sharpe 1.02 → 1.11,
-  MAR 0.97 → 1.25, turnover −27%. v1 keeps scoring; the paired daily
-  differential is the primary forward comparison.
-- **`configs/lane2_carry_hold_v3.json` is registered** (same-day wave 2):
-  v2 plus a toxic-band filter (no entries, holds suspended, while the 3d
-  return sits in [−30%, −5%) — the shorts-slowly-winning cohort), a 5%/day
-  minimum-vol entry floor (pinned prices have no squeeze fuel), and a
-  +30 bp/2d trail-recovery exit (squeeze over). Seen-data: Sharpe 1.38 /
-  MAR 2.84 / DD −28.7% vs v2's 1.09 / 1.21 / −48.6%. Read its
-  `honesty_notes` before quoting any number: the single-clock level rides
-  midnight decision-hour luck (12-offset sweep 0.30–1.52; ensemble ~1.2),
-  the daily frame carries a terminal-day look-ahead (~+0.13), and the
-  owner's unconditional Sharpe-2 target was NOT reached — the supportable
-  version is conditional (2.15–2.35 on the PIT deep-funding half of days).
-- **`configs/lane2_funding_spread_v1.json` is registered** (wave 3): the
-  same premium captured market-neutrally as a cross-venue funding spread
-  (Sharpe 1.34 full / 1.61 bench, DD −16.7%, offset-stable, corr +0.09 to
-  v3). The two-book funding-carry program (PIT vol-parity) measures
-  bench-window Sharpe 2.34 (1.93–2.34 across clocks) / full-window
-  1.55–1.87 — the Sharpe-2 target met on the program's standard quote
-  basis, not on the strictest one. Review §10.
+The optional vol-target overlay (§3) hurts on corrected accounting — vt 1.05 <
+raw 1.21 here, worse for v2 — so **raw is the primary basis**. The mechanism
+(crowded shorts pay longs) is real but roughly half the registered
+size. Bybit also shortened funding intervals — the mix went 100% 8h in 2021 to
+**52% 4h / 21% 1h in 2025**, and 73–80% of this book's 2025-26 held name-days are
+on sub-8h names, so the per-print −10/−3 bp thresholds mean different daily carry
+per symbol. ~~A successor should normalize thresholds to a daily-equivalent
+rate~~ — tested and refuted in the 2026-07-28 quant review: the variant
+collapses, per-print acuteness is load-bearing.
 
-## 0.1 2026-07-31 — v4 registered, and the program bar moved to 2.5
+**Registered by that review**
+(`docs/research/archive/2026-07-28-carry-hold-quant-review.md`); v1 keeps scoring, and
+the paired daily differential is the primary forward comparison:
+
+- **`configs/lane2_carry_hold_v2.json`** — a sizing refinement: same state
+  machine, each held name's weight scaled by `clip(|trailing 24h settled
+  funding| / 120 bp-per-day, 0.25, 1.0)`, so bet size follows the premium being
+  paid. Seen-data effect: same mean (17.0 vs 18.0 bp/day, paired t −0.4), max DD
+  −60.0% → −48.6%, Sharpe 1.02 → 1.11, MAR 0.97 → 1.25, turnover −27%.
+- **`configs/lane2_carry_hold_v3.json`** (same-day wave 2) — v2 plus a toxic-band
+  filter (no entries, holds suspended, while the 3d return sits in [−30%, −5%) —
+  the shorts-slowly-winning cohort), a 5%/day minimum-vol entry floor (pinned
+  prices have no squeeze fuel), and a +30 bp/2d trail-recovery exit (squeeze
+  over). Seen-data: Sharpe 1.38 / MAR 2.84 / DD −28.7% vs v2's 1.09 / 1.21 /
+  −48.6%. Read its `honesty_notes` before quoting any number: the single-clock
+  level rides midnight decision-hour luck (12-offset sweep 0.30–1.52; ensemble
+  ~1.2), the daily frame carries a terminal-day look-ahead (~+0.13), and the
+  owner's unconditional Sharpe-2 target was NOT reached — the supportable version
+  is conditional (2.15–2.35 on the PIT deep-funding half of days).
+- **`configs/lane2_funding_spread_v1.json`** (wave 3) — the same premium captured
+  market-neutrally as a cross-venue funding spread (Sharpe 1.34 full / 1.61
+  bench, DD −16.7%, offset-stable, corr +0.09 to v3). The two-book funding-carry
+  program (PIT vol-parity) measures bench-window Sharpe 2.34 (1.93–2.34 across
+  clocks) / full-window 1.55–1.87 — the Sharpe-2 target met on the program's
+  standard quote basis, not on the strictest one. Review §10.
+
+### 0.1 2026-07-31 — v4 registered, and the program bar moved to 2.5
 
 Two changes, one config (`configs/lane2_carry_hold_v4.json`), both on seen data
 and therefore grading nothing yet.
 
-**The new feature is crowding persistence, used as a size and not a screen.**
-The share of a symbol's last 20 **settlements** that printed deeper than the
-10 bp entry threshold. It is a different question from v2's depth ladder —
-depth is how much the crowd is paying now, persistence is whether this name
-pays habitually — and the two multiply. Counted in the symbol's own settlement
-sequence, never on a clock: Bybit's interval mix went 100% 8h in 2021 to 52%
-4h / 21% 1h in 2025, so an hours-based version reports cadence, and the
-confound has an era gradient. The isolated deep print is the only losing cohort
-in v3's book (−16.7 bp/name-day over a third of held name-days); every bucket
-above the 10% cut earns +99 to +135.
+**Crowding persistence, used as a size and not a screen** — the share of a
+symbol's last 20 **settlements** that printed deeper than the 10 bp entry
+threshold. Depth (v2's ladder) is how much the crowd is paying now, persistence
+is whether this name pays habitually, and the two multiply. Counted in the
+symbol's own settlement sequence, never on a clock: given the shifting interval
+mix above, an hours-based version reports cadence, and the confound has an era
+gradient. The isolated deep print is the only losing cohort in v3's book (−16.7
+bp/name-day over a third of held name-days); every bucket above the 10% cut earns
++99 to +135.
 
-**The second change is the toxic band's high edge, −5% → 0%.** The [−5%, 0)
-cohort earns −34.4 bp/name-day and v3 keeps it. On its own this change measures
-**t 1.12 — it does not clear the bar even at 2.5**, and it is in v4 at the
-owner's direction. Its contribution is on its own line in the config so a later
-reader can withdraw it without touching the sizing result.
+**The toxic band's high edge, −5% → 0%.** The [−5%, 0) cohort earns −34.4
+bp/name-day and v3 keeps it. On its own this change measures **t 1.12 — it does
+not clear the bar even at 2.5**, and it is in v4 at the owner's direction. Its
+contribution is on its own line in the config so a later reader can withdraw it
+without touching the sizing result.
 
 **Read the numbers in this order.** v4 and v3 do not span the same record
 (1,756 days vs 1,894 — v4 does not trade early-2021). On the shared spine:
@@ -112,40 +109,36 @@ MAR is compounded annualised return ÷ max drawdown — the convention v3 regist
 and `scripts/research/equity_curves.sh` renders. Simple annualisation of the daily
 mean gives 2.69 / 3.31 / 3.47 for the same three rows; do not mix them.
 
-- **At its own capital v4 is not a return improvement**: +1.07 bp/day, t 0.47.
-  Do not cite it as one.
-- **The claim is capital efficiency.** Run at v3's average capital the paired
-  differential is **+10.76 bp/day, t 3.23** — that is the registered forward
-  experiment.
-- **And that leverage costs drawdown**: at v3's capital v4's worst dip is 33.5%,
-  *worse* than v3's 28.7%. At its own capital it is better, 24.5%. You get one
-  or the other, and which one is a leverage choice.
 - **Sharpe 1.41 → 1.64 is scale-free** and holds either way — cite it first. MAR
   is *not* scale-free: 3.08 → 4.14 at v4's own capital, 3.08 → 4.67 at v3's.
   Always say which capital a MAR is on.
+- **At its own capital v4 is not a return improvement**: +1.07 bp/day, t 0.47 —
+  do not cite it as one. **The claim is capital efficiency**: run at v3's average
+  capital the paired differential is **+10.76 bp/day, t 3.23**, and that is the
+  registered forward experiment. **And that leverage costs drawdown** — at v3's
+  capital v4's worst dip is 33.5%, *worse* than v3's 28.7%; at its own capital it
+  is better, 24.5%. You get one or the other, and which one is a leverage choice.
 - Benchmark window: v4 Sharpe **1.88**, the first carry-hold render above the
   retired CONTINUOUS research benchmark of 1.84 — on seen data, so it grades
-  nothing, and that benchmark is a retired research render, not the shipped
-  book (1.45). On that window v4 is MAR 6.11 against v3's 4.85.
-- **The curve is a 2025-26 story.** Rendered through the standard chart
-  (`reports/equity_curves/research/lane2_carry_hold_v4/`), **76.2% of the log
-  growth is 2025-26**: the book is at 2.21x on 2025-01-01 after three years and
-  finishes at 28.83x. By year: 2021 −0.6%, 2022 +23.5%, 2023 +48.7%, 2024
-  +24.1%, 2025 +260.5%, 2026 +266.1% (207 days). v3 has the same shape (76.7%,
-  2.13x) — this is the mechanism's regime dependence, not something v4 added.
-
-**What it costs.** v4 is more concentrated than v3: 2,050 held name-days over
-944 active days at 2.17 names per active day, against 3,314 / 1,211 / 2.74. It
-is out of the market 46% of days against v3's 31%. The measured drawdown is
-lower anyway, but concentration risk taken on the same history that selected
-the rule is not evidence about the next drawdown.
-
-**Placebos, which are why this was registered at all.** Sizing *up* the isolated
-prints: −14.44 bp/day (t −2.73). Handing the identical distribution of position
-sizes to the wrong names: −15.26 (t −2.71) — the load-bearing control, because
-it holds size distribution and gross constant. Null persistence fails open and
-never fires on this book (0 of 3,314 held name-days), so it is not a listing-age
-screen.
+  nothing, and that benchmark is a retired research render, not the shipped book
+  (1.45). On that window v4 is MAR 6.11 against v3's 4.85.
+- **The curve is a 2025-26 story**, rendered through the standard chart
+  (`reports/equity_curves/research/lane2_carry_hold_v4/`): **76.2% of the log
+  growth is 2025-26** — 2.21x on 2025-01-01 after three years, finishing at
+  28.83x. By year: 2021 −0.6%, 2022 +23.5%, 2023 +48.7%, 2024 +24.1%, 2025
+  +260.5%, 2026 +266.1% (207 days). v3 has the same shape (76.7%, 2.13x) — the
+  mechanism's regime dependence, not something v4 added.
+- **What it costs**: v4 is more concentrated than v3 — 2,050 held name-days over
+  944 active days at 2.17 names per active day, against 3,314 / 1,211 / 2.74 —
+  and out of the market 46% of days against v3's 31%. The measured drawdown is
+  lower anyway, but concentration risk taken on the same history that selected
+  the rule is not evidence about the next drawdown.
+- **Placebos, which are why this was registered at all**: sizing *up* the
+  isolated prints, −14.44 bp/day (t −2.73); handing the identical distribution of
+  position sizes to the wrong names, −15.26 (t −2.71) — the load-bearing control,
+  because it holds size distribution and gross constant. Null persistence fails
+  open and never fires on this book (0 of 3,314 held name-days), so it is not a
+  listing-age screen.
 
 **The program bar is now t ≥ 2.5** (`docs/research/governance.md` §2, owner decision
 2026-07-31), replacing the family-wise ≈3.25/3.58. It is prospective: verdicts
@@ -264,9 +257,8 @@ grind-downs where shorts are not paying.
    2.57 → 2.53.
 7. **Multiple testing**: registration-era t 4.87 (full sample, full-calendar
    basis; 4.88 on the superseded active-days-only basis) against the ≈3.4
-   Bonferroni threshold then in force. **Both halves of that sentence are
-   superseded.** The t is withdrawn by the §0 funding correction — v1's citable
-   figure is t 2.31 — and the threshold was replaced on 2026-07-31 by a fixed
+   Bonferroni threshold then in force. **Both halves are superseded**: §0
+   corrects the t to 2.31, and 2026-07-31 replaced the threshold with a fixed
    t ≥ 2.5 (`docs/research/governance.md` §2). v1 clears the current bar on the corrected
    number; it did not clear the one in force when it was registered.
 8. **Funding-sign accounting** is covered by unit tests
@@ -343,8 +335,8 @@ and deploy this strategy in its place. The runtime now exists:
    — and **not one beats the baseline on mean bp/day**. 2026 falls +74.1 →
    +18.9 bp/day at a +40% take-profit. The price leg is −1.45 bp/day against
    the crowd fee's +24.57, so the price run is a cost the book carries, not
-   a profit it is failing to bank. A second wave then took the owner's
-   "sell the top" question seriously — 34 more cells across seven adaptive
+   a profit it is failing to bank. A second wave took the owner's
+   "sell the top" question — 34 more cells across seven adaptive
    families (fee-gated, vol-scaled, run-fraction give-back, ratchet floors,
    depth-relative funding exit, blow-off spike, carry-vs-gain, volume climax,
    stall) — and **the eight cells that beat the baseline at midnight are all

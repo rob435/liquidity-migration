@@ -48,6 +48,19 @@ jobs:
       - name: Pytest
         run: scripts/dev.sh test
 
+  # The Rust execution engine. Independent of `ci`: a Python failure should not
+  # hide an engine failure, or the other way round.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Stable Rust toolchain
+        run: rustup default stable
+      # The Cargo workspace root is engine/, not the repository root.
+      - name: Cargo test
+        run: cargo test --workspace
+        working-directory: engine
+
   vps:
     if: github.event_name == 'workflow_dispatch'
     needs: ci

@@ -24,38 +24,37 @@ Both scripts are environment-only and refuse positional arguments. Other variabl
 the ThreadPoolExecutor's `max_workers`, the actual concurrency knob), `BINANCE_JOB_BATCH_SIZE` (48 — a
 scheduling/memory bound, not parallelism: it sizes the slice of jobs submitted at a time,
 `binance_vision.py:1493-1494, :953-954`, and doubles as the pending-frame flush threshold at `:1514`),
-`BINANCE_MAX_FAILURE_RATIO` (0 — one failed download aborts). Bybit
-stages: `archive-manifest` → `archive-download-klines-1h-api` → `validate-manifest` → `download-data`
-ancillaries. Binance: `binance_vision build-binance-oos` (monthly plus daily tail, klines and manifest
-published as one atomic pair) → `download-binance-proxy`. Monthly history and the bounded current-month
-daily tail are assembled in **one** staging generation specifically so daily-only new contracts cannot
-be dropped before a later top-up, and membership is then derived from their *combined* ≥20-bar coverage
-(`scripts/data/build_full_pit_binance.sh:56-59`). Splitting that into a cheaper two-pass reintroduces the
-survivorship hole it closes.
+`BINANCE_MAX_FAILURE_RATIO` (0 — one failed download aborts). Bybit stages: `archive-manifest` →
+`archive-download-klines-1h-api` → `validate-manifest` → `download-data` ancillaries. Binance:
+`binance_vision build-binance-oos` (monthly plus daily tail, klines and manifest published as one
+atomic pair) → `download-binance-proxy`. Monthly history and the bounded current-month daily tail are
+assembled in **one** staging generation so daily-only new contracts cannot be dropped before a later
+top-up, and membership is derived from their *combined* ≥20-bar coverage
+(`scripts/data/build_full_pit_binance.sh:56-59`). Splitting that into a cheaper two-pass reintroduces
+the survivorship hole it closes.
 
 - `symbol=` components are percent-encoded by [`symbol_codec.py`](../liquidity_migration/core/symbol_codec.py). Decode with that module; never read the directory name as an exchange symbol. ASCII symbols are unchanged.
 - Unsupported, ambiguous, or path-like identifiers fail with `SymbolIdentityError` *before* any root mutation. `normalize_exchange_symbol` (`symbol_codec.py:14-36`) NFC-normalizes, then rejects: anything that is not one non-blank untrimmed `str`; any value whose NFKC form differs from its NFC form (compatibility/confusable); identifiers over 192 UTF-8 bytes; any character outside Unicode categories L/N; any character where `c != c.upper()`. Two upstream identifiers that normalize to the same key are also rejected (`:73, :91-96`). A build aborting on one odd venue symbol is that guard, not a bug.
-- An *ordinary* Binance publication failure rolls back — the new trees are quarantined, the backups restored, a `prior_presence` invariant checked per dataset — and then `marker_path.unlink(missing_ok=True)`: the root is intact and **no** marker is left. Retry. `.binance_vision_publish_incomplete.json` survives only a hard process kill or an *incomplete* rollback, where `RuntimeError("Binance publication failed and rollback was incomplete: ...")` is raised before the unlink (`binance_vision.py:1241-1276`, docstring `:1181-1185`). A marker that is present therefore means one of those two things; the second needs the backup root inspected, not just a retry. The next build refuses before any network access — read the marker's staging and backup paths and recover deliberately.
-- Publication runs inside the per-dataset `exclusive_file_lock`s, acquired in sorted dataset order with `stale_seconds=21_600` (`:1219-1227`, via `storage.dataset_lock_path`), so a build can legitimately appear to hang while blocked on a dataset lock. A concurrent publisher that already owns the marker is refused outright — "Binance build REFUSED: another publication owns {marker_path}" (`:1210-1215`) — and that loser deletes its own staging/backup without touching live data.
-- **Universe-shrink gate**, three distinct refusals. Two fire before any download, off the discovery inventory: `historical_dropped_symbols` → "binance OOS build REFUSED: current daily inventory cannot replace missing monthly history for N persisted symbols" (`:1464-1470`, only when a daily tail is staged) and `dropped_symbols` → "binance OOS build REFUSED: combined archive universe (N symbols) shrank vs the persisted klines_1h (M symbols) — K symbols would be stranded" (`:1471-1478`). The third fires after staging: `missing_persisted` → "binance OOS build REFUSED: verified monthly-plus-daily staging lost N persisted symbols" (`:1553-1558`). `--allow-degraded` / `allow_degraded=True` is the only override (`:1359, :1632`) and `scripts/data/build_full_pit_binance.sh` never passes it — overriding means invoking `binance_vision build-binance-oos` by hand, and overwriting a wide root with a narrow one after a transient S3 listing shortfall is exactly what the gate exists to stop. Separately, the staged `klines_1h` + `archive_trade_manifest` pair is verified from persisted Parquet, not in-memory inputs (`_verify_staged_binance_datasets`, `:1047-1052`), and re-verified against the live root after the rename (`after_publish`, `:1608-1614`).
-- The `bybit_render_1m` and `binance_vision_alt` plans and their fetchers were removed 2026-07-21. Do not recreate them from old documents. **This has already misled one research pass**: the 2026-08-01 settlement-sawtooth closure was written against `~/SHARED_DATA/bybit_render_1m/klines_1m` and cited its pre-removal validation receipt, and none of those numbers were reproducible (`docs/research/archive/2026-08-01-settlement-sawtooth-program.md`, provenance correction).
-- `bybit/klines_1m` is the supported 1-minute root, added 2026-08-01 by [`scripts/data/download_bybit_klines_1m.py`](../scripts/data/download_bybit_klines_1m.py). Same `date=/symbol=/part.parquet` layout and same schema as `klines_1h`, fetched through `BybitMarketData.get_klines(..., "1", ...)` with `category=linear` — the same client path the 1h builder uses. Resumable at (symbol, date) and flushed every 14 days, so an interrupted run keeps what it has. It is a dataset *inside* `bybit_full_pit`, not a revival of the retired plan above. Bybit's v5 endpoint serves 1-minute klines back to at least 2021-06 (verified 2026-08-01).
+- An *ordinary* Binance publication failure rolls back — trees quarantined, backups restored, a `prior_presence` invariant checked per dataset — then `marker_path.unlink(missing_ok=True)`: the root is intact and **no** marker is left. Retry. `.binance_vision_publish_incomplete.json` survives only a hard process kill or an *incomplete* rollback, where `RuntimeError("Binance publication failed and rollback was incomplete: ...")` is raised before the unlink (`binance_vision.py:1241-1276`, docstring `:1181-1185`). A present marker means one of those two; the second needs the backup root inspected, not just a retry. The next build refuses before any network access — read the marker's staging and backup paths and recover deliberately.
+- Publication runs inside the per-dataset `exclusive_file_lock`s, acquired in sorted dataset order with `stale_seconds=21_600` (`:1219-1227`, via `storage.dataset_lock_path`), so a build can legitimately appear to hang while blocked on a dataset lock. A concurrent publisher that already owns the marker is refused — "Binance build REFUSED: another publication owns {marker_path}" (`:1210-1215`) — and that loser deletes its own staging/backup without touching live data.
+- **Universe-shrink gate**, three refusals. Two fire before any download, off the discovery inventory: `historical_dropped_symbols` → "binance OOS build REFUSED: current daily inventory cannot replace missing monthly history for N persisted symbols" (`:1464-1470`, only when a daily tail is staged) and `dropped_symbols` → "binance OOS build REFUSED: combined archive universe (N symbols) shrank vs the persisted klines_1h (M symbols) — K symbols would be stranded" (`:1471-1478`). The third fires after staging: `missing_persisted` → "binance OOS build REFUSED: verified monthly-plus-daily staging lost N persisted symbols" (`:1553-1558`). `--allow-degraded` / `allow_degraded=True` is the only override (`:1359, :1632`) and `scripts/data/build_full_pit_binance.sh` never passes it. Separately, the staged `klines_1h` + `archive_trade_manifest` pair is verified from persisted Parquet, not in-memory inputs (`_verify_staged_binance_datasets`, `:1047-1052`), and re-verified against the live root after the rename (`after_publish`, `:1608-1614`).
+- The `bybit_render_1m` and `binance_vision_alt` plans and their fetchers are removed. Do not recreate them from old documents, and do not reuse numbers cited against `~/SHARED_DATA/bybit_render_1m/klines_1m` — they are not reproducible (provenance correction in `docs/research/archive/2026-08-01-settlement-sawtooth-program.md`).
+- `bybit/klines_1m` is the supported 1-minute root, built by [`scripts/data/download_bybit_klines_1m.py`](../scripts/data/download_bybit_klines_1m.py). Same `date=/symbol=/part.parquet` layout and schema as `klines_1h`, fetched through `BybitMarketData.get_klines(..., "1", ...)` with `category=linear`. Resumable at (symbol, date), flushed every 14 days. A dataset *inside* `bybit_full_pit`. Bybit's v5 endpoint serves 1-minute klines back to at least 2021-06.
 
 ## Coverage census
 
-A directory existing is not a panel, and a partition count of zero is not an empty dataset —
-some roots are keyed by symbol. The tiers below are the durable shape of each root; for the
-current spans, symbol counts and day counts, run
-`python -m liquidity_migration --data-root ROOT coverage`. Recount before designing a claim.
+A directory existing is not a panel, and a partition count of zero is not an empty dataset — some roots
+are keyed by symbol. The tiers are the durable shape of each root; for current spans, symbol counts and
+day counts run `python -m liquidity_migration --data-root ROOT coverage`. Recount before designing a claim.
 
 | Tier | Datasets | Shape, and how it misleads |
 | --- | --- | --- |
-| A — deep, both venues | `bybit/{klines_1h,funding,premium_index_1h,mark_price_1h,index_price_1h,archive_trade_manifest}`; `binance/{klines_1h,archive_trade_manifest}`, `binance_usdm_funding`, `binance_usdm_{premium_index,mark_price,index_price}_1h` | Real cross-sectional panels back to 2021 (Bybit) and 2019–2020 (Binance). Only a subset of symbols is common to both kline roots, so a cross-venue study is bounded by the intersection, not by either venue. |
-| B — deep, Bybit only | `bybit/open_interest` | A real panel, but Bybit-only, so it cannot carry a cross-venue claim. |
-| C — wide, shallow, Binance only | `binance_usdm_open_interest`, `binance_usdm_taker_flow_1h` | Many symbols, very few days. Wide enough to look like a panel in a symbol count and far too short for anything with a lookback. |
-| D — **not a panel** | `bybit/taker_flow_5m`, `bybit/tick_ohlc_1m` | Event windows: a few hundred symbols holding a median of days apiece, not a continuous history. No cross-sectional flow or microstructure study can be built on them. A non-recursive `*.parquet` glob against the `date=/symbol=/` layout returns zero and has been misread as "empty" — count recursively. |
-| F — 1-minute klines | `bybit/klines_1m` | A real panel where it is filled, built symbol-by-symbol in deep-funding-print order so a partial root is still usable. Fill is the thing to check: compare `find <root>/klines_1m -name part.parquet \| wc -l` against the intended symbol set before assuming full coverage. |
-| E — per-symbol layout, not date-partitioned | `bybit/positioning_lsr`, `binance_usdm_metrics_5m`, `binance/klines_5m` | These hold real data. They are keyed by symbol, not `date=`, so a partition-name count reports zero. Count files, not partitions. |
+| A — deep, both venues | `bybit/{klines_1h,funding,premium_index_1h,mark_price_1h,index_price_1h,archive_trade_manifest}`; `binance/{klines_1h,archive_trade_manifest}`, `binance_usdm_funding`, `binance_usdm_{premium_index,mark_price,index_price}_1h` | Real cross-sectional panels back to 2021 (Bybit) and 2019–2020 (Binance). Only a subset of symbols is common to both kline roots, so a cross-venue study is bounded by the intersection. |
+| B — deep, Bybit only | `bybit/open_interest` | A real panel, Bybit-only, so it cannot carry a cross-venue claim. |
+| C — wide, shallow, Binance only | `binance_usdm_open_interest`, `binance_usdm_taker_flow_1h` | Many symbols, very few days. Wide enough to look like a panel in a symbol count, far too short for anything with a lookback. |
+| D — **not a panel** | `bybit/taker_flow_5m`, `bybit/tick_ohlc_1m` | Event windows: a few hundred symbols holding a median of days apiece, not a continuous history. A non-recursive `*.parquet` glob against the `date=/symbol=/` layout returns zero and has been misread as "empty" — count recursively. |
+| F — 1-minute klines | `bybit/klines_1m` | A real panel where it is filled, built symbol-by-symbol in deep-funding-print order so a partial root is still usable. Compare `find <root>/klines_1m -name part.parquet \| wc -l` against the intended symbol set before assuming full coverage. |
+| E — per-symbol layout, not date-partitioned | `bybit/positioning_lsr`, `binance_usdm_metrics_5m`, `binance/klines_5m` | Real data keyed by symbol, not `date=`, so a partition-name count reports zero. Count files, not partitions. |
 
 ## Timestamps
 
@@ -70,11 +69,11 @@ Every research field is **milliseconds**. Every account-journal clock is **nanos
 | `date=` partition | UTC date derived from `ts_ms`. `volume_events_pit.py` raises if a declared `date` disagrees with its `ts_ms`. |
 | `residual_momentum.parquet` | `(symbol, ts_ms, residual_momentum, is_provisional)`. `is_provisional=true` is a tail row a later refresh may change. |
 
-Every canonical journal event carries `wall_ts_ns` (owner's wall clock at append), `monotonic_ns`
-(local sequencing and latency), `exchange_ts_ns` (venue timestamp when supplied, else `0` — **zero
-means absent, not Unix epoch**), and a root-global `sequence`, the durable ordering authority. Venue
-latency, fill price, fee, close and P&L come from acknowledgement/fill/P&L events — never from a
-planning timestamp below, never from file-write time.
+Every canonical journal event carries `wall_ts_ns` (owner's wall clock at append), `monotonic_ns` (local
+sequencing and latency), `exchange_ts_ns` (venue timestamp when supplied, else `0` — **zero means
+absent, not Unix epoch**), and a root-global `sequence`, the durable ordering authority. Venue latency,
+fill price, fee, close and P&L come from acknowledgement/fill/P&L events — never from a planning
+timestamp below, never from file-write time.
 
 Those top-level clocks cannot supply an execution-latency measurement. Every venue-sourced event is
 stamped `wall_ts_ns = max(local_receive_ts_ns, 1)` (`account_kernel.py:2687, 2717, 2787, 2836, 2869,
@@ -85,9 +84,8 @@ order_status / venue_snapshot) or `local_ack_ts_ns` (ack, ack_observation) — a
 measured from those: payload `local_receive_ts_ns` minus payload `exchange_ts_ns`.
 
 The canonical strategy read model joins sleeve target metadata to execution anchors reconstructed from
-the journal; target clocks and fill clocks stay on separate planes, which is why some columns are
-null-before-fill and others are always populated, and why `entry_target_*` and `entry_fill_*` prefixes
-sit side by side (`account_strategy_state.py:1660-1705`).
+the journal. Target clocks and fill clocks stay on separate planes, which is why some columns are
+null-before-fill and `entry_target_*` sits beside `entry_fill_*` (`account_strategy_state.py:1660-1705`).
 
 | Strategy projection | Meaning |
 | --- | --- |
@@ -101,36 +99,35 @@ sit side by side (`account_strategy_state.py:1660-1705`).
 | target parquet `ts_ms` | Local projection write time. Orders projection writes only; not authoritative over `sequence`. |
 
 Fill-derived lifecycle fields are never replaced by, or derived from, target acceptance time.
-`entry_ts_ms` is never backfilled with the target-acceptance clock, and `max_hold_deadline_ts_ms` is
-never derived from target acceptance — only from the attributable first fill plus the declared
-duration. This is enforced, not aspirational: `account_strategy_state.py:1662` marks the target-plane
-clocks as never lifecycle fallbacks, and `:1776-1788` re-applies the four `max_hold_*` fields *after*
-the `**lifecycle["planning_metadata"]` splat under "Never let target metadata overwrite fill-derived
-lifecycle fields." A null `entry_ts_ms` beside a populated `entry_target_ts_ms` is not licence to use
-the target time.
+`entry_ts_ms` is never backfilled with the target-acceptance clock, and `max_hold_deadline_ts_ms` comes
+only from the attributable first fill plus the declared duration. Enforced:
+`account_strategy_state.py:1662` marks the target-plane clocks as never lifecycle fallbacks, and
+`:1776-1788` re-applies the four `max_hold_*` fields *after* the `**lifecycle["planning_metadata"]`
+splat under "Never let target metadata overwrite fill-derived lifecycle fields." A null `entry_ts_ms`
+beside a populated `entry_target_ts_ms` is not licence to use the target time.
 
 Passing `max_hold_deadline_ts_ms` makes the sleeve publish a replacement zero target
-(`continuous_demo.py:811-818`, `long_native_event_demo.py:1086-1128`); it asserts nothing about when
-the account owner fills the resulting aggregate order. The actual close is a later journal fill event,
+(`continuous_demo.py:811-818`, `long_native_event_demo.py:1086-1128`); it asserts nothing about when the
+account owner fills the resulting aggregate order. The actual close is a later journal fill event,
 surfaced as `exit_ts_ms` / `closed_at_ms` (`account_strategy_state.py:1725-1726`).
 
 Two ordering invariants, unenforced by code but load-bearing when auditing a projection or a replay:
-`signal_ts_ms` must not be later than the strategy decision that cites it (it holds by construction —
-it is the closed-bar boundary), and `entry_target_ts_ms` must not precede the signal decision that
-produced it. `entry_target_ts_ms` comes from an independent journal clock on a locally-originated
-target event (`account_kernel.py:2053`), so a row violating the second is a genuine defect.
+`signal_ts_ms` must not be later than the strategy decision that cites it (it holds by construction), and
+`entry_target_ts_ms` must not precede the signal decision that produced it. `entry_target_ts_ms` comes
+from an independent journal clock on a locally-originated target event (`account_kernel.py:2053`), so a
+row violating the second is a genuine defect.
 
-*Component* stop and take-profit prices derive from confirmed fill VWAP, never a decision
-reference price (`protection_engine.py:123-151`);
-[`tests/strategy/test_account_strategy_state.py`](../tests/strategy/test_account_strategy_state.py) pins this. The
-account owner's venue-native entry stop is the other plane and is anchored to the decision
-reference price, because it is armed in the same `place_order` call as the entry and no fill exists
-yet ([`architecture.md`](architecture.md), *Venue-native protection*). Four
-distinct legacy semantics for `entry_ts_ms` exist in archived roots: an actual fill time; in retired
-paper roots, a submit-time idealization; the planning/target-acceptance clock now exposed as `entry_target_ts_ms`
-(which may precede a fill); and the 2026-05-25 WAVESUSDT rows from a retired path that decoded an
-order-link signal timestamp into that field — making the position look hours older than the venue fill.
-Do not merge those rows with current projections unlabelled.
+*Component* stop and take-profit prices derive from confirmed fill VWAP, never a decision reference price
+(`protection_engine.py:123-151`);
+[`tests/strategy/test_account_strategy_state.py`](../tests/strategy/test_account_strategy_state.py) pins
+this. The account owner's venue-native entry stop is the other plane, anchored to the decision reference
+price ([`architecture.md`](architecture.md), *Venue-native protection*).
+
+Four legacy semantics for `entry_ts_ms` exist in archived roots: an actual fill time; in retired paper
+roots, a submit-time idealization; the planning/target-acceptance clock now exposed as
+`entry_target_ts_ms`; and 2026-05-25 WAVESUSDT rows from a retired path that decoded an order-link signal
+timestamp into that field, making the position look hours older than the venue fill. Do not merge those
+rows with current projections unlabelled.
 
 ## Point-in-time membership
 
@@ -150,45 +147,25 @@ incarnations without upgrading an inferred row to an observation.
 
 **The rule.** A symbol may enter the universe on day D only if the manifest lists it as a member on D,
 and that filter runs *before* any rolling feature or cross-sectional rank —
-`filter_klines_to_pit_membership` in [`volume_events_pit.py`](../liquidity_migration/data/volume_events_pit.py).
-A later filter can stop an ineligible symbol trading but cannot undo its influence on ranks, cut-offs,
-and rolling state.
+`filter_klines_to_pit_membership` in
+[`volume_events_pit.py`](../liquidity_migration/data/volume_events_pit.py). A later filter can stop an
+ineligible symbol trading but cannot undo its influence on ranks, cut-offs and rolling state.
 
 **Trading-day key.** A daily-close signal for trading day D is stamped 00:00 UTC on D+1, so the
 membership day is `date(signal_ts_ms - 1ms)`, not the stamp date. `latest_signal_trading_day()` in
 [`pit_coverage.py`](../liquidity_migration/data/pit_coverage.py) is `today_utc - 1`. Hourly bars key on
 their own bar-stamp date, unadjusted.
 
-**What kline coverage is required.** Not every manifest row. Coverage is required only for manifest
-`(date, symbol)` pairs inside each symbol's traded span `[first_kline_date, last_kline_date]`
-(`_required_pit_date_symbols`, `volume_events_pit.py:292`; pinned by
-`tests/data/test_volume_events_pit.py`). Rows before the first kline (listing or
-announcement precedes the first trade bar) and after the last kline (an isolated 0-trade
-settlement/marker archive object landing weeks-to-months later) are excluded: genuinely empty archive
-objects, untradable, and re-downloading them returns Empty every time. A gap *inside* the span is still
-required and still fails the gate — FHEUSDT 2025-08-29..10-21, a 54-day archive-download hole, was
-correctly flagged and then backfilled.
+**What kline coverage is required.** Not every manifest row — only manifest `(date, symbol)` pairs inside
+each symbol's traded span `[first_kline_date, last_kline_date]` (`_required_pit_date_symbols`,
+`volume_events_pit.py:292`; pinned by `tests/data/test_volume_events_pit.py`). Rows before the first
+kline and after the last kline are excluded: genuinely empty archive objects, untradable, and
+re-downloading them returns Empty every time. A gap *inside* the span is still required and still fails
+the gate. Three corrections that keep that rule from reading false-permissive:
 
-Three corrections that keep that rule from reading false-permissive:
-
-- The span exclusion is one-sided at the top. A pair sourced `bybit_v5_listing` (`V5_LISTING_SOURCE` /
-  `V5_LISTING_URL_SENTINEL`, `archive_manifest.py:40`) at or after the symbol's first observed kline is
-  required **even beyond the current kline tail**, because that provenance independently records the
-  symbol as `Trading` through the manifest build boundary. Inferring the upper bound from the klines
-  under validation would let an incomplete active-symbol tail redefine itself as a completed lifespan
-  and false-pass. The same provenance creates no requirement *before* the first kline. So a
-  currently-listed coin can fail the gate on days with no klines at all.
-- Bounds are per **ticker incarnation**, not per symbol. The span is split at every persisted v5
-  `launchTime` (`v5_observed_launch_date`) observed strictly after the symbol's first stored kline, and
-  min/max recomputed inside each segment (`_incarnation_segment_bounds` + `bisect_right`), so a reused
-  ticker's post-delist tail and its pre-relist interval fall outside the requirement while a gap inside
-  either traded incarnation still fails.
-- Symbol-level coverage is a separate, unconditional condition the span rule does not relax.
-  `FullPitUniverseCoverage.passed` requires all four of: a non-empty manifest symbol set;
-  `missing_symbols` empty (`manifest_symbols - kline_symbols` — any manifest symbol with no klines
-  *anywhere* fails, even though it contributes zero required date-pairs); a non-empty required
-  date-symbol set; and `missing_required_date_symbols` empty. A wholly-missing delisted coin fails on
-  `missing_symbols`; `validate-manifest` reports it as "N manifest symbol(s) have no klines".
+- The span exclusion is one-sided at the top. A pair sourced `bybit_v5_listing` (`V5_LISTING_SOURCE` / `V5_LISTING_URL_SENTINEL`, `archive_manifest.py:40`) at or after the symbol's first observed kline is required **even beyond the current kline tail**, because that provenance independently records the symbol as `Trading` through the manifest build boundary. Inferring the upper bound from the klines under validation would let an incomplete active-symbol tail redefine itself as a completed lifespan and false-pass. The same provenance creates no requirement *before* the first kline. So a currently-listed coin can fail the gate on days with no klines at all.
+- Bounds are per **ticker incarnation**, not per symbol. The span is split at every persisted v5 `launchTime` (`v5_observed_launch_date`) observed strictly after the symbol's first stored kline, and min/max recomputed inside each segment (`_incarnation_segment_bounds` + `bisect_right`), so a reused ticker's post-delist tail and its pre-relist interval fall outside the requirement while a gap inside either traded incarnation still fails.
+- Symbol-level coverage is a separate, unconditional condition the span rule does not relax. `FullPitUniverseCoverage.passed` requires all four of: a non-empty manifest symbol set; `missing_symbols` empty (`manifest_symbols - kline_symbols` — any manifest symbol with no klines *anywhere* fails, even though it contributes zero required date-pairs); a non-empty required date-symbol set; and `missing_required_date_symbols` empty. A wholly-missing delisted coin fails on `missing_symbols`; `validate-manifest` reports it as "N manifest symbol(s) have no klines".
 
 So `manifest_date_symbols_missing_from_klines > 0` beside `full_pit_universe_pass = true` is the gate
 working, not the gate leaking.
@@ -199,57 +176,48 @@ freshly downloaded root can carry stale membership and hard-reject recent signal
 stale, prints a WARNING block carrying the exact remediation command and the `--refresh-manifest`
 alternative (`_download_manifest_staleness_lines`, `cli/commands.py:40` →
 `coverage_status`/`format_coverage` in
-[`pit_coverage.py`](../liquidity_migration/data/pit_coverage.py); reads `date=` partition names only, no
-parquet, no network). That output also reports manifest end, kline end, latest signal day, margin in
-days, manifest-vs-kline lag, and up to five per-symbol lag examples — the fastest way to tell whole-root
-staleness from a handful of newly listed symbols.
+[`pit_coverage.py`](../liquidity_migration/data/pit_coverage.py)). That output reports manifest end,
+kline end, latest signal day, margin in days, manifest-vs-kline lag, and up to five per-symbol lag
+examples — the fastest way to tell whole-root staleness from a handful of newly listed symbols.
 
-The same table is available on its own, without downloading anything:
+The same table on its own, and the remediation:
 
 ```bash
 python -m liquidity_migration --data-root ROOT coverage
-```
-
-`coverage` reads `date=` partition directory names only — no parquet, no network, no
-mutation — so it is the cheap way to ask what a root actually holds.
-
-The remediation:
-
-```bash
 python -m liquidity_migration --data-root ROOT archive-manifest --start YYYY-MM-DD --end YYYY-MM-DD
 python -m liquidity_migration.data.binance_vision validate-manifest --data-root ROOT
 ```
 
-The printed `--start` is one week behind the latest signal day. Passing `--refresh-manifest`
-to `download-data` refreshes **that same one-week window**, not a full-epoch rescan, so the
-three routes — the printed remediation, the flag, and a hand-run `archive-manifest` over the
-same span — do the same work.
+`coverage` reads `date=` partition directory names only — no parquet, no network, no mutation. The
+printed `--start` is one week behind the latest signal day; `--refresh-manifest` on `download-data`
+refreshes **that same one-week window**, not a full-epoch rescan, so the three routes do the same work.
 
 `validate-manifest` fails on missing kline coverage (≥20 hourly bars per symbol-day) without deleting
 membership rows. `filter-manifest` conforms a manifest to observed klines and is correct only where
-archive klines *are* the declared membership source (Binance Vision); it refuses provenance-bearing
-Bybit manifests, because deleting an uncovered row would make the check self-certifying. Note that the
-routine Binance tail refresh performs exactly that rewrite — see Refresh below.
+archive klines *are* the declared membership source (Binance Vision); it refuses provenance-bearing Bybit
+manifests, because deleting an uncovered row would make the check self-certifying. The routine Binance
+tail refresh performs exactly that rewrite — see *Refresh*.
 
-The LONG research runner always measures manifest/kline agreement and records
-`full_pit_universe_pass`, with no switch to disable it — the `require_full_pit_universe` strategy
-switch no longer exists and must not be recreated; a non-passing run can be a current-universe or
-data diagnostic, not a historical-universe performance claim. It also stamps, per run, a warning list
-([`run_diagnostics.py`](../liquidity_migration/research/backtest/run_diagnostics.py) `RunWarning`: stable greppable
-`code`, `severity` in `info` < `warn` < `tainted`, one-sentence `message`, one-line `fix`; the PIT codes
-are `PIT_MANIFEST_EMPTY` and `PIT_SURVIVORSHIP`, both `tainted`), a data-integrity `run_label`, and a
-`methodology_run_label` (`exploratory` | `biased_benchmark` | `invalid`). Any `tainted` warning means
-the result is survivorship- or look-ahead-biased and must not be cited as clean. Both labels are printed
-at the top of the long-native report and are the cheapest thing to check before quoting any LONG number;
-the full label vocabulary is in [`trading_logic.md`](trading_logic.md). The CONTINUOUS equity runner
-reads the kline root, which establishes nothing about historical membership. Changing the population
-treatment after seeing a result does not rescue the original claim.
+The LONG research runner always measures manifest/kline agreement and records `full_pit_universe_pass`,
+with no switch to disable it — the `require_full_pit_universe` strategy switch no longer exists and must
+not be recreated; a non-passing run can be a current-universe or data diagnostic, not a
+historical-universe performance claim. It also stamps, per run, a warning list
+([`run_diagnostics.py`](../liquidity_migration/research/backtest/run_diagnostics.py) `RunWarning`: stable
+greppable `code`, `severity` in `info` < `warn` < `tainted`, one-sentence `message`, one-line `fix`; the
+PIT codes are `PIT_MANIFEST_EMPTY` and `PIT_SURVIVORSHIP`, both `tainted`), a data-integrity `run_label`,
+and a `methodology_run_label` (`exploratory` | `biased_benchmark` | `invalid`). Any `tainted` warning
+means the result is survivorship- or look-ahead-biased and must not be cited as clean. Both labels are
+printed at the top of the long-native report; the label vocabulary is in
+[`trading_logic.md`](trading_logic.md). The CONTINUOUS equity runner reads the kline root, which
+establishes nothing about historical membership. Changing the population treatment after seeing a result
+does not rescue the original claim.
 
 ## Refresh
 
 [`scripts/ops.sh research-refresh`](../scripts/ops.sh) →
-[`scripts/research/research_refresh.sh`](../scripts/research/research_refresh.sh) → `scripts/research/research_refresh.py`.
-Offline: no orders, no private venue APIs, no VPS checkout, no promotion.
+[`scripts/research/research_refresh.sh`](../scripts/research/research_refresh.sh) →
+`scripts/research/research_refresh.py`. Offline: no orders, no private venue APIs, no VPS checkout, no
+promotion.
 
 ```bash
 scripts/ops.sh research-refresh plan --end 2026-07-31   # print, mutate nothing
@@ -264,110 +232,101 @@ scripts/ops.sh research-refresh run  --end YYYY-MM-DD --start YYYY-MM-DD \
 | Bybit klines | Recheck the trailing `--overlap-days` (default 7), fetch missing or sub-20-bar partitions, validate the whole root against the manifest. Failure triggers a full missing-only scan. |
 | Binance klines/membership | Append strict current-month daily archives; crossing an unmaterialized month falls back to the atomic monthly builder. `topup-daily-klines` discovers symbols from the daily archive, writes only archive-backed rows, then **rewrites** `archive_trade_manifest` from actual kline coverage — `rewrite_manifest_to_coverage(root, archive_membership_source="binance_vision_archive")`, keeping only `(symbol, date)` pairs with ≥20 hourly bars and stamping them `membership_inferred=False` (`binance_vision.py:464-478, :554-557, :680-760`, `MIN_HOURLY_BARS = 20` at `:73`). A routine `run --end` therefore can change Binance membership. |
 | Ancillary, **both venues** | Its own tail phase per venue: `data.bybit.ancillary_tail` (`download-data`: funding, open_interest, mark_price_1h, index_price_1h, premium_index_1h, `research_refresh.py:507-537`) and `data.binance.ancillary_tail` (`download-binance-proxy`: the same five plus taker_flow_1h, `:587-617`). Each starts from the stalest of its own venue's ancillary datasets minus `--overlap-days`, clamped to `[base_start, end-1d]` (`:170-185`), over that venue's whole validated manifest. Bybit ancillaries are **not** skipped by a tail run. |
-| Residual momentum | Recompute a fixed **14-day** checked overlap (`DEFAULT_APPEND_OVERLAP_DAYS = 14`, `scripts/data/precompute_residual_momentum.py:67` — `research_refresh.py` never passes `--append-overlap-days`, so `--overlap-days` does not move it), require stable rows unchanged, atomically append the provisional tail. Rows older than the overlap window are preserved verbatim, so final causal rows survive for symbols that have since aged out. A table lacking `is_provisional`, or unreadable, is automatically promoted to one atomic full rewrite (reason `legacy_schema` / `unreadable_existing_table`); every *other* stable-overlap mismatch — key count, NaN positions, changed values, or a stable row demoted to provisional — fails closed for inspection (`:183-204`). `--force-rmom-full-rewrite` is the explicit recovery path, not a waiver. |
+| Residual momentum | Recompute a fixed **14-day** checked overlap (`DEFAULT_APPEND_OVERLAP_DAYS = 14`, `scripts/data/precompute_residual_momentum.py:67` — `research_refresh.py` never passes `--append-overlap-days`, so `--overlap-days` does not move it), require stable rows unchanged, atomically append the provisional tail. Rows older than the overlap window are preserved verbatim. A table lacking `is_provisional`, or unreadable, is promoted to one atomic full rewrite (reason `legacy_schema` / `unreadable_existing_table`); every *other* stable-overlap mismatch — key count, NaN positions, changed values, or a stable row demoted to provisional — fails closed for inspection (`:183-204`). `--force-rmom-full-rewrite` is the explicit recovery path, not a waiver. |
 | Backtests | Reuse an identical completed run-scoped report, else recompute the fixed window from a clean sleeve directory. No incremental replay is appended to an old account journal. |
 
-The download stages reuse valid existing data rather than re-fetching it: per-symbol ancillary writers
-keep `_download_markers/{symbol}_{start_ms}_{end_ms}.done` files and skip or tail-trim any range already
+Download stages reuse valid existing data rather than re-fetching: per-symbol ancillary writers keep
+`_download_markers/{symbol}_{start_ms}_{end_ms}.done` files and skip or tail-trim any range already
 covered (`downloaders.py:47, :453-495`), and the Bybit kline tail runs with `--min-existing-bars 20`
-(`research_refresh.py:463-464`). This holds under `--data-mode canonical` too — the full-PIT builders
-call the same writers — with the Binance monthly membership/kline pair as the exception, rebuilt in
-verified staging and republished atomically. Corollary trap: deleting a dataset directory while keeping
-its markers produces a silent stale skip.
+(`research_refresh.py:463-464`). This holds under `--data-mode canonical` too, with the Binance monthly
+membership/kline pair as the exception, rebuilt in verified staging and republished atomically.
+Corollary trap: deleting a dataset directory while keeping its markers produces a silent stale skip.
 
 `--data-mode canonical` invokes both full-PIT builders and regenerates residual momentum from its fixed
 causal start. Every selected dataset must expose a partition for `end - 1 day`, manifest validation must
 pass on all roots, and each backtest summary must match the frozen start/end at 1x modeled exposure.
-`--force-rmom-full-rewrite` touches only the feature table — it rebuilds residual momentum from
-`--start 2023-03-01` and leaves `tail` market-data behavior unchanged. The choice and its reason
-(`operator_forced`, `canonical_data_mode`, `legacy_schema`, `unreadable_existing_table`) are frozen in
-the run manifest configuration and in that step's command fingerprint, so using it is permanently
-visible in the run identity. `--preregistration PATH` (on `plan`/`run`, not `reconcile`) resolves the
-path strictly, hashes the file, and freezes `{"path": ..., "sha256": ...}` into the manifest's
-configuration — which is also the block a resumed `--run-id` must match exactly. It is the mechanism
-binding a canonical rebuild to a named contract.
+`--force-rmom-full-rewrite` touches only the feature table — it rebuilds residual momentum from `--start
+2023-03-01` and leaves `tail` market-data behavior unchanged. The choice and its reason
+(`operator_forced`, `canonical_data_mode`, `legacy_schema`, `unreadable_existing_table`) are frozen in the
+run manifest configuration and in that step's command fingerprint, so using it is permanently visible in
+the run identity. `--preregistration PATH` (on `plan`/`run`) resolves the path strictly, hashes the file,
+and freezes `{"path": ..., "sha256": ...}` into the manifest's configuration — also the block a resumed
+`--run-id` must match exactly.
 
-A partial sleeve makes `scripts/research/equity_curves.sh` return nonzero: the runner keeps going across sleeves
-but exits 1 if any sleeve errored (`scripts/research/equity_curves.py:512-514`), so a driver cannot accept an
-incomplete benchmark as complete. A failed step leaves its record in `events.jsonl` and its output in
-`logs/`; a retry clears only that run's partial derived sleeve directory under
-`reports/research-refresh/<run-id>/backtests/<venue>/equity_curves/<sleeve>` (`equity_curves.sh` runs
-with `--fresh-output`, which rmtree's exactly that one directory and refuses to replace a
-non-directory). Raw data roots are never touched by a retry — re-running is cheap. `logs/<step>.log` is
-opened in **append** mode (`research_refresh.py:326-328`), each attempt separated by a `$ <command>`
-line, so earlier failure output survives a resume.
+A partial sleeve makes `scripts/research/equity_curves.sh` return nonzero: the runner keeps going across
+sleeves but exits 1 if any sleeve errored (`scripts/research/equity_curves.py:512-514`), so a driver
+cannot accept an incomplete benchmark as complete. A failed step leaves its record in `events.jsonl` and
+its output in `logs/`; a retry clears only that run's partial derived sleeve directory under
+`reports/research-refresh/<run-id>/backtests/<venue>/equity_curves/<sleeve>` (`equity_curves.sh` runs with
+`--fresh-output`, which rmtree's exactly that one directory and refuses to replace a non-directory). Raw
+data roots are never touched by a retry. `logs/<step>.log` is opened in **append** mode
+(`research_refresh.py:326-328`), each attempt separated by a `$ <command>` line.
 
 Artifacts land in `reports/research-refresh/<run-id>/`: `manifest.json` (code/config/root/window
 identity), `events.jsonl` (append-only start/failure/success/resume ledger), `logs/`,
 `summary.<hash>.json`, `backtests/<venue>/`, `reconciliation/`. `summary.<hash>.json` is the run's
-immutable card — a coverage snapshot per venue, one cell result per venue/sleeve (run label,
-window/date range, stats or summary, warnings, report path) and a sha256 plus byte size for every
-emitted artifact; the filename carries the first 16 hex of the payload sha256, and rewriting it with
-different bytes raises `run summary hash collision or changed immutable artifact` rather than
-overwriting (`:887-969`). Reusing a `--run-id` skips only a step whose exact command fingerprint
-succeeded and whose artifact still exists; changed windows, roots, source commits, or configuration are
-refused under an existing ID.
+immutable card — a coverage snapshot per venue, one cell result per venue/sleeve (run label, window/date
+range, stats or summary, warnings, report path) and a sha256 plus byte size for every emitted artifact;
+the filename carries the first 16 hex of the payload sha256, and rewriting it with different bytes raises
+`run summary hash collision or changed immutable artifact` rather than overwriting (`:887-969`). Reusing
+a `--run-id` skips only a step whose exact command fingerprint succeeded and whose artifact still exists;
+changed windows, roots, source commits, or configuration are refused under an existing ID.
 
-**Three-way reconciliation (retired).** The demo/paper/backtest reconciliation tool and the
-`research-refresh reconcile` subcommand were removed with the paper fleet; the reconciliation
-reports produced while it ran remain under their dated run directories.
+The three-way demo/paper/backtest reconciliation tool and the `research-refresh reconcile` subcommand
+were removed with the paper fleet; the reports it produced remain under their dated run directories.
 
 ## Operational roots
 
 Exact VPS paths come from the host env file, not from this document:
-`/etc/liquidity-migration/account-execution.env`. The route names its own
-`ACCOUNT_EXECUTION_ROOT` (canonical journal), `ACCOUNT_INTENT_INBOX_ROOT` (target inbox) and
-`ACCOUNT_CAPTURE_ROOT` (market capture); account roots are absolute, **real**,
-**owner-controlled**, pairwise-disjoint and non-nested. Real and owner-controlled are
-code-enforced, not stylistic: `reset_path_safety.py` ("private runtime root must be a real
+`/etc/liquidity-migration/account-execution.env`. The route names its own `ACCOUNT_EXECUTION_ROOT`
+(canonical journal), `ACCOUNT_INTENT_INBOX_ROOT` (target inbox) and `ACCOUNT_CAPTURE_ROOT` (market
+capture); account roots are absolute, **real**, **owner-controlled**, pairwise-disjoint and non-nested.
+Real and owner-controlled are code-enforced: `reset_path_safety.py` ("private runtime root must be a real
 directory", the private lock namespace, "private runtime tree contains a symlink") and the demo
 root/leaf/lock-namespace checks, plus the uid/gid/mode rebinding. A symlinked account root or a
-convenience bind mount is not a legal layout. The demo account owner alone mutates Bybit. Its
-journal owns lifecycle and accounting state, and Parquet views are rebuildable projections.
-Strategy `DATA_ROOT` directories hold signal inputs, caches and cycle telemetry — not position or
-P&L authority. (The retired paper route's roots and journals remain on disk as history; nothing
-routes to them.)
+convenience bind mount is not a legal layout. The demo account owner alone mutates Bybit. Its journal
+owns lifecycle and accounting state, and Parquet views are rebuildable projections. Strategy `DATA_ROOT`
+directories hold signal inputs, caches and cycle telemetry — not position or P&L authority. (The retired
+paper route's roots and journals remain on disk; nothing routes to them.)
 
-Dataset and account roots use persistent `flock(2)` leaves: ownership is the kernel lock on the open
-file description, not the file's contents, and release or crash recovery never unlinks the leaf. Never
-delete a lock file as "stale". The protocol requires a **local POSIX filesystem with working advisory
-`flock(2)`** and cooperative repository clients (`exclusive_file_lock`'s own contract,
-`storage.py:222-225`); putting a dataset root or an account root on NFS or any network filesystem
-silently voids the mutex. These are advisory, cooperative locks and not protection against a hostile
-privileged process: the Bash descriptor handoff cannot itself request `O_NOFOLLOW`, so
-private/root-controlled parent namespaces and the helper's post-open identity validation are part of
-the boundary, and that validation detects a replacement without undoing an open-time side effect.
-Explicitly forking inside a held critical section is unsupported; fork/exec
-helpers and forks from other threads are cleaned up by the module's at-fork handler, which closes every
-inherited flock descriptor in the child and re-creates the module's thread mutexes (`:41-77`). Adding
-multiprocessing or a `fork()` inside a locked section silently double-owns the mutex.
+Dataset and account roots use persistent `flock(2)` leaves: ownership is the kernel lock on the open file
+description, not the file's contents, and release or crash recovery never unlinks the leaf. **Never
+delete a lock file as "stale".** The protocol requires a **local POSIX filesystem with working advisory
+`flock(2)`** and cooperative repository clients (`exclusive_file_lock`'s contract, `storage.py:222-225`);
+putting a dataset root or an account root on NFS or any network filesystem silently voids the mutex.
+These are advisory, cooperative locks and not protection against a hostile privileged process: the Bash
+descriptor handoff cannot itself request `O_NOFOLLOW`, so private/root-controlled parent namespaces and
+the helper's post-open identity validation are part of the boundary, and that validation detects a
+replacement without undoing an open-time side effect. Forking inside a held critical section is
+unsupported; fork/exec helpers and forks from other threads are cleaned up by the module's at-fork
+handler, which closes every inherited flock descriptor in the child and re-creates the module's thread
+mutexes (`:41-77`). Adding multiprocessing or a `fork()` inside a locked section silently double-owns the
+mutex.
 
 Pre-existing JSON or empty lock leaves from the retired create/PID/unlink protocol are adopted in place
-rather than replaced, and `fchmod`-ed to `0600` after safe acquisition (`storage.py:248-250`, bracketed
-by two `_validate_lock_fd_path` calls); multiply-linked leaves are reconciled by
-`_recover_internal_lock_alias` (`:439-463`). The mode change is the migration, not corruption — do not
-hand-clean them.
+rather than replaced, and `fchmod`-ed to `0600` after safe acquisition (`storage.py:248-250`, bracketed by
+two `_validate_lock_fd_path` calls); multiply-linked leaves are reconciled by `_recover_internal_lock_alias`
+(`:439-463`). The mode change is the migration, not corruption — do not hand-clean them.
 
-`.locks` directories and leaves are owned by the data root's owner, mode `0700`. Deployment
-pre-creates them via `liquidity_migration.ops.reset_path_safety normalize-private` /
-`normalize-demo` (`os.mkdir(".locks", 0o700, dir_fd=root_fd)` with owner rebinding/validation).
-Reset restores the same boundary before restarting services. At runtime root may *observe* an
-owner-controlled lock but a non-root user may only use its own (`_lock_owner_allowed`); when euid 0
-is the first reader of a root owned by another identity, `_ensure_lock_directory` fchowns/fchmods
-the directory to the *data root's* owner and 0700. The lock directory — real, not
-group/world-writable — is the ownership authority for its leaves, and a leaf whose uid does not
-match its directory is rejected: "lock path owner must match its lock directory".
+`.locks` directories and leaves are owned by the data root's owner, mode `0700`. Deployment pre-creates
+them via `liquidity_migration.ops.reset_path_safety normalize-private` / `normalize-demo`
+(`os.mkdir(".locks", 0o700, dir_fd=root_fd)` with owner rebinding/validation). Reset restores the same
+boundary before restarting services. At runtime root may *observe* an owner-controlled lock but a non-root
+user may only use its own (`_lock_owner_allowed`); when euid 0 is the first reader of a root owned by
+another identity, `_ensure_lock_directory` fchowns/fchmods the directory to the *data root's* owner and
+0700. The lock directory — real, not group/world-writable — is the ownership authority for its leaves, and
+a leaf whose uid does not match its directory is rejected: "lock path owner must match its lock directory".
 
 Host-maintenance and account-owner leases follow the same persistent-inode rule: parent namespaces and
-leaves are opened with no-follow descriptors and checked for single-link ownership and mount identity;
-normal owners keep the validated descriptor. During reset the leases are opened and held in one
-process (`liquidity_migration/ops/demo_ledger_reset.py`, the reset orchestrator since 2026-08-03):
-each prepared leaf is opened without truncation, revalidated against its (device, inode) identity at
-acquisition, and the held descriptor is revalidated again immediately before the epoch clear
+leaves are opened with no-follow descriptors and checked for single-link ownership and mount identity.
+During reset the leases are opened and held in one process
+(`liquidity_migration/ops/demo_ledger_reset.py`, the reset orchestrator): each prepared leaf is opened
+without truncation, revalidated against its (device, inode) identity at acquisition, and the held
+descriptor revalidated again immediately before the epoch clear
 (`revalidate_inherited_account_owner_lease` in `account_owner_lease.py`) — account-lease metadata is
 written only after the descriptor still matches the prepared path **and** holds the kernel flock. The
-canonical demo lease directory is `/run/lock/liquidity-migration`; the host maintenance lock dir is
-the different path `/run/liquidity-migration`. Simplifying that handoff to a plain path breaks the
+canonical demo lease directory is `/run/lock/liquidity-migration`; the host maintenance lock dir is the
+different path `/run/liquidity-migration`. Simplifying that handoff to a plain path breaks the
 revalidation.
 
 The "never delete a lock" rule has exactly one exception: a separately designed full-root retirement may
@@ -376,9 +335,7 @@ boundary. Consistent with `account_route.py:484-501`, where a persistent lock in
 under `.locks`, regular, `st_nlink == 1`, uid == root uid, mode 0600) is classified as infrastructure
 rather than prior account state during cutover.
 
-[`deploy/sleeves.env`](../deploy/sleeves.env) is the repository ceiling for target producers, and a host
-override can only narrow it. Turning a producer off stops publication; it does not erase its last
-accepted target or flatten the account. Inspect with `scripts/ops.sh status` (runtime topology) and
-`scripts/ops.sh venue-accounting` (stopped demo accounting interval). Research evidence and runtime
-accounting stay separate; neither upgrades the other. See [`AGENTS.md`](../AGENTS.md) for how
-evidence is graded and [`architecture.md`](architecture.md) for module ownership.
+Inspect with `scripts/ops.sh status` (runtime topology) and `scripts/ops.sh venue-accounting` (stopped
+demo accounting interval). Research evidence and runtime accounting stay separate; neither upgrades the
+other. Evidence grading: [`AGENTS.md`](../AGENTS.md). Sleeve toggles and operator routes:
+[`operations.md`](operations.md). Module ownership: [`architecture.md`](architecture.md).

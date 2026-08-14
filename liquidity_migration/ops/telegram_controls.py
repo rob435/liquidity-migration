@@ -69,7 +69,6 @@ __all__ = [
 #: producer unit each one publishes through.
 SLEEVE_UNITS: dict[str, str] = {
     "LONG_SLEEVE": "liquidity-migration-bybit-long-demo.service",
-    "CONTINUOUS_SLEEVE": "liquidity-migration-bybit-continuous-demo.service",
     "CARRY_SLEEVE": "liquidity-migration-bybit-carry-demo.service",
 }
 MAINNET_OWNER_UNIT = "liquidity-migration-account-execution-mainnet.service"

@@ -58,15 +58,14 @@ The two owners are deliberately different.
 | Memory | `MemoryMax=1024M`, no `MemoryHigh` | `MemoryHigh=384M`, `MemoryMax=512M` |
 | `RestartSec` | 5 | 2 |
 
-The demo owner has **no** `ExecStartPost` readiness gate: a failing gate killed
-a live owner that was still draining exits. Every invariant it asserted is
-enforced at the point of use — producers re-check owner health per cycle,
-queued entries self-expire, exits never expire, submission is gated inside the
-owner, and the watchdog re-reads the same artifacts every 3 minutes. The
-readiness module stays for manual and `verify` use. `MemoryHigh` is likewise
-absent on demo: reclaim throttling on the latency-critical owner stretched
-venue round-trips into the stale-exposure wedge, and `MemoryMax` already bounds
-it.
+The demo owner has **no** `ExecStartPost` readiness gate — a failing gate kills
+an owner that may still be draining exits. Every invariant it would assert is
+enforced at the point of use instead: producers re-check owner health per
+cycle, queued entries self-expire, exits never expire, submission is gated
+inside the owner, and the watchdog re-reads the same artifacts every 3 minutes.
+The readiness module stays for manual and `verify` use. `MemoryHigh` is
+likewise absent on demo: reclaim throttling on the latency-critical owner
+stretches venue round trips, and `MemoryMax` already bounds it.
 
 Mainnet units are installed by the manifest and started only when the single
 arming switch — `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env`
@@ -81,11 +80,10 @@ arming switch — `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.e
 | `demo-liveness.timer` | `OnActiveSec=1min` | `OnUnitActiveSec=3min` |
 | `mainnet-liveness.timer` | `OnActiveSec=10min` | `OnUnitActiveSec=3min` |
 
-The demo observer fires a minute after the timer arms — cold-start noise is
-handled by the watchdog's own startup grace (`--max-cycle-age-min 10`), not by
-staying blind for ten minutes. Both run with `--cooldown-min 60`, so a repeated
-condition pages hourly rather than every pass. It alerts on a service that is
-enabled but not active.
+The demo observer fires a minute after the timer arms; cold-start noise is
+handled by the watchdog's own startup grace (`--max-cycle-age-min 10`). Both
+run with `--cooldown-min 60`, so a repeated condition pages hourly rather than
+every pass. Both alert on a service that is enabled but not active.
 
 Strategy cycle `ts_ms` is the causal scheduling input, not a completion
 timestamp. Once cycle output, target capture, and the decision outcome are
