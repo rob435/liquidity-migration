@@ -1,8 +1,11 @@
 [Unit]
 Description=liquidity-migration LONG MAINNET target producer (LongV12WideStop)
 Wants=network-online.target
-Requires=liquidity-migration-account-execution-mainnet.service
-After=network-online.target liquidity-migration-account-execution-mainnet.service
+# No account owner to depend on any more. This producer's whole output is a
+# target book on disk; the engine reads that book and owns the account. The old
+# Requires= existed so a dead owner stopped the producer feeding it; with the
+# owner gone there is nothing here to bind to.
+After=network-online.target
 
 [Service]
 Type=simple

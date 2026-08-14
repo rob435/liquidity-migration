@@ -17,11 +17,10 @@ and runs three owner actions per environment:
     (a manual owner narrowing is preserved), regenerate the resolved toggles,
     and start whichever producers resolve on.
 
-``close``
-    Two-tap market close: pause first so a producer cannot republish, then run
-    the existing flatten path (zero targets through the account owner's own
-    inbox — every close is an ordinary reduce-only command). Trading stays
-    paused afterwards until the owner presses resume.
+There is no ``close`` button any more. It market-closed the book by publishing
+zero targets into the account owner's inbox, and the Python owner that drained
+that inbox is gone. Pause still stops new decisions; closing a book is a
+manual job at the venue until the engine grows a flatten path of its own.
 
 Mainnet rows appear only while the mainnet owner unit is active, i.e. after
 the owner's own arming act; this module never arms anything. Pausing mainnet
@@ -40,7 +39,6 @@ import argparse
 import json
 import logging
 import os
-import secrets
 import subprocess
 import time
 import urllib.error
@@ -71,12 +69,12 @@ SLEEVE_UNITS: dict[str, str] = {
     "LONG_SLEEVE": "liquidity-migration-bybit-long-demo.service",
     "CARRY_SLEEVE": "liquidity-migration-bybit-carry-demo.service",
 }
-MAINNET_OWNER_UNIT = "liquidity-migration-account-execution-mainnet.service"
+MAINNET_OWNER_UNIT = "liquidity-migration-engine-mainnet.service"
 MAINNET_PRODUCER_UNITS = (
     "liquidity-migration-bybit-carry-mainnet.service",
     "liquidity-migration-bybit-long-mainnet.service",
 )
-DEMO_OWNER_UNIT = "liquidity-migration-account-execution.service"
+DEMO_OWNER_UNIT = "liquidity-migration-engine.service"
 
 _PAUSE_MARKER = "# paused by telegram-controls; resume restores the saved original"
 _ENVIRONMENTS = ("demo", "mainnet")
@@ -102,8 +100,6 @@ class ControlsConfig:
     saved_sleeves_path: Path
     poll_timeout_seconds: int = 50
     api_timeout_seconds: float = 20.0
-    confirm_ttl_seconds: float = 120.0
-    flatten_wait_seconds: float = 240.0
 
 
 def load_config_from_environment(repo_dir: Path) -> ControlsConfig | None:
@@ -388,30 +384,6 @@ class VpsFleet:
         names = ", ".join(unit.removeprefix("liquidity-migration-bybit-").removesuffix(".service") for unit in to_start)
         return f"▶️ Demo trading resumed: {names or 'no sleeve resolves on'}."
 
-    def close_positions(self, environment: str) -> str:
-        pause_note = self.pause(environment)
-        if pause_note.startswith("🚨"):
-            return pause_note + "\nMarket close NOT run — producers may still be publishing."
-        argv = [
-            "bash",
-            str(self._config.repo_dir / "scripts" / "vps" / "flatten_account.sh"),
-            "--environment",
-            environment,
-            "--execute",
-            "--operator",
-            "telegram-controls",
-            "--reason",
-            "owner pressed market-close in Telegram",
-            "--wait-seconds",
-            str(self._config.flatten_wait_seconds),
-        ]
-        try:
-            proc = self._run(argv, timeout=self._config.flatten_wait_seconds + 180.0)
-        except subprocess.TimeoutExpired:
-            return "🚨 Market close is taking too long to report back — check the fleet before assuming flat."
-        outcome = _parse_flatten_output(proc.stdout)
-        return _describe_flatten(environment, proc.returncode, outcome, proc.stderr)
-
     def status_text(self) -> str:
         now = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
         toggles = self.resolved_sleeves()
@@ -432,46 +404,8 @@ class VpsFleet:
         return "\n".join(lines)
 
 
-def _parse_flatten_output(stdout: str) -> dict[str, Any] | None:
-    start = stdout.find("{")
-    if start < 0:
-        return None
-    try:
-        parsed = json.loads(stdout[start:])
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _describe_flatten(environment: str, returncode: int, outcome: dict[str, Any] | None, stderr: str) -> str:
-    label = "real-money" if environment == "mainnet" else "demo"
-    if outcome is None:
-        return f"🚨 {label} market close gave no readable report (exit {returncode}): {stderr.strip()[:300]}"
-    status = str(outcome.get("status") or "")
-    planned = len((outcome.get("plan") or {}).get("components") or [])
-    residual = outcome.get("residual") or {}
-    positions = residual.get("positions") or []
-    if status == "already_flat":
-        return f"✅ Nothing to close — the {label} book was already flat. Trading stays paused."
-    if status == "flat":
-        return f"✅ Closed {planned} {label} position(s); the book is flat. Trading stays paused until you press Resume."
-    if status == "dust_limited":
-        rendered = ", ".join(f"{p.get('symbol')}={p.get('signed_qty')}" for p in positions)
-        return (
-            f"⚠️ Closed what the venue allows; leftover crumbs below the minimum order size remain: {rendered}. "
-            "Trading stays paused."
-        )
-    detail = str(outcome.get("detail") or "").strip()
-    return f"🚨 {label} market close did not finish cleanly ({status or f'exit {returncode}'}): {detail[:300]}"
-
 
 # The panel
-
-
-@dataclass(slots=True)
-class _PendingClose:
-    environment: str
-    issued_monotonic: float
 
 
 class ControlPanel:
@@ -489,7 +423,6 @@ class ControlPanel:
         self._api = api
         self._fleet = fleet
         self._monotonic = monotonic
-        self._pending_close: dict[str, _PendingClose] = {}
 
     def keyboard(self) -> list[list[dict[str, str]]]:
         rows = [
@@ -498,7 +431,6 @@ class ControlPanel:
                 {"text": "⏸ Pause demo trading", "callback_data": "pause:demo"},
                 {"text": "▶️ Resume demo", "callback_data": "resume:demo"},
             ],
-            [{"text": "🚨 Close ALL demo positions", "callback_data": "close:demo"}],
         ]
         if self._fleet.mainnet_present():
             rows.append(
@@ -507,14 +439,13 @@ class ControlPanel:
                     {"text": "▶️ Resume real money", "callback_data": "resume:mainnet"},
                 ]
             )
-            rows.append([{"text": "🚨 Close ALL real-money positions", "callback_data": "close:mainnet"}])
         return rows
 
     def send_panel(self) -> None:
         self._api.send_message(
             self._config.chat_id,
             "🎛 Trading controls\nPause stops new decisions; positions stay open. "
-            "Close pauses first, then market-closes everything.",
+            "There is no close button — flatten a book at the venue by hand.",
             keyboard=self.keyboard(),
         )
 
@@ -555,44 +486,9 @@ class ControlPanel:
         elif action == "resume" and argument in _ENVIRONMENTS:
             self._api.answer_callback(callback_id, "Resuming…")
             self._api.send_message(self._config.chat_id, self._safe_action(self._fleet.resume, argument))
-        elif action == "close" and argument in _ENVIRONMENTS:
-            self._api.answer_callback(callback_id)
-            self._offer_close_confirm(argument)
-        elif action == "closego":
-            self._confirm_close(callback_id, argument)
-        elif action == "closecancel":
-            self._pending_close.pop(argument, None)
-            self._api.answer_callback(callback_id, "Cancelled.")
-            self._api.send_message(self._config.chat_id, "Market close cancelled — nothing was done.")
         else:
             self._api.answer_callback(callback_id, "Unknown button.")
 
-    def _offer_close_confirm(self, environment: str) -> None:
-        nonce = secrets.token_hex(8)
-        self._pending_close[nonce] = _PendingClose(environment=environment, issued_monotonic=self._monotonic())
-        label = "REAL-MONEY" if environment == "mainnet" else "demo"
-        self._api.send_message(
-            self._config.chat_id,
-            f"⚠️ Close every open {label} position at market and pause trading?\n"
-            f"This cannot be undone. Confirm within {int(self._config.confirm_ttl_seconds)}s.",
-            keyboard=[
-                [{"text": f"✅ Yes, close all {label} positions", "callback_data": f"closego:{nonce}"}],
-                [{"text": "❌ Cancel", "callback_data": f"closecancel:{nonce}"}],
-            ],
-        )
-
-    def _confirm_close(self, callback_id: str, nonce: str) -> None:
-        pending = self._pending_close.pop(nonce, None)
-        if pending is None:
-            self._api.answer_callback(callback_id, "That confirmation is stale — press Close again.")
-            return
-        if self._monotonic() - pending.issued_monotonic > self._config.confirm_ttl_seconds:
-            self._api.answer_callback(callback_id, "Confirmation expired — press Close again.")
-            return
-        self._api.answer_callback(callback_id, "Closing…")
-        label = "real-money" if pending.environment == "mainnet" else "demo"
-        self._api.send_message(self._config.chat_id, f"⏳ Pausing trading and market-closing the {label} book…")
-        self._api.send_message(self._config.chat_id, self._safe_action(self._fleet.close_positions, pending.environment))
 
     def _safe_action(self, action: Callable[[str], str], environment: str) -> str:
         try:

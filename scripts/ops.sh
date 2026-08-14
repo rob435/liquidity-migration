@@ -33,14 +33,6 @@ Operator commands:
   equity [ARGS...]             standard descriptive equity curves
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
-  flatten --environment ENV [--reason TEXT] [ARGS...]
-                               report how one account owner would be taken to
-                               zero exposure; reads only
-  flatten --execute --environment ENV [ARGS...]
-                               publish the zero targets and wait for the owner
-                               to converge. ENV is demo|mainnet and has no
-                               default. Stop the producing sleeve first, or it
-                               can republish while this converges.
   venue-accounting [ARGS...]   reconcile demo accounting on the host; LOCAL=1
                                runs it against this checkout instead
   wedged-command [--environment demo|mainnet] [ARGS...]
@@ -224,11 +216,13 @@ exec .venv/bin/python scripts/maintain/reconcile_bybit_demo_accounting.py \
     remote_python_module liquidity_migration.policy.real_money_arming "$@"
     ;;
   flatten)
-    # Publishes zero targets through the account owner and watches the journal
-    # until it converges. Reads only until --execute. It stops no unit: a
-    # producer left running can republish, and the report says so.
-    remote_exec 'cd "$REPO_DIR"
-exec bash scripts/vps/flatten_account.sh "${REMOTE_ARGS[@]}"' "$@"
+    # Retired with the Python account owner. Flatten worked by publishing zero
+    # targets into the owner's intent inbox; the engine reads target book files
+    # and never had an inbox, so there is nothing left to drain them. Closing a
+    # book is a manual job at the venue until the engine grows its own path.
+    echo "ops.sh flatten: retired with the Python account owner." >&2
+    echo "Close positions at the venue by hand, or stop the sleeve and let exits run." >&2
+    exit 2
     ;;
   wedged-command)
     # `report` and `probe` read only. `resolve` writes one journal transition

@@ -1165,8 +1165,6 @@ verify_topology() {
     VERIFY_UNIT_ROWS=()
     VERIFY_MISMATCHES=()
 
-    verify_unit on liquidity-migration-account-execution.service "demo owner is not active and enabled"
-
     if sleeve_on "$LONG_SLEEVE"; then
         verify_unit on liquidity-migration-bybit-long-demo.service "LONG demo producer is not active"
     else
@@ -1181,8 +1179,6 @@ verify_topology() {
     # verification; armed, the funded fleet is verified exactly like the
     # others.
     if mainnet_armed; then
-        verify_unit on liquidity-migration-account-execution-mainnet.service \
-            "mainnet owner is not active and enabled"
         verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
         verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
         verify_unit on liquidity-migration-mainnet-liveness.timer "mainnet liveness timer is not active"
