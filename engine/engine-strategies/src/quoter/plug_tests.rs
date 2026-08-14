@@ -390,3 +390,137 @@ fn an_empty_symbol_list_is_refused() {
     .expect("test config parses");
     assert!(Quoter::from_params(engine_types::StrategyId(0), &bad).is_err());
 }
+
+#[test]
+fn one_order_is_asked_to_cancel_once_however_many_prices_arrive() {
+    // An order stays in this strategy's own book until the log records it
+    // cancelled, and the venue takes a round trip to say so. Without pacing,
+    // every price in between asked again -- ten prices, ten signed venue
+    // calls for one order, and a liquid symbol delivers far more than ten a
+    // second.
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "eng-bid".into(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+    h.ctx.set_foreign_position("BTCUSDT", Side::Buy, 1.0, 100.0);
+    for i in 0..10 {
+        h.quote("BTCUSDT", 99.0 + i as f64 * 0.01, 101.0);
+    }
+    let cancels = h
+        .drain_actions()
+        .into_iter()
+        .filter(|a| matches!(a, Action::Cancel { .. }))
+        .count();
+    assert_eq!(cancels, 1, "one order, one ask");
+}
+
+#[test]
+fn a_full_side_is_not_asked_to_cancel_on_every_price_either() {
+    // The same hole on the path that predates the foreign-name branch: at the
+    // inventory ceiling the planner pulls the side on every single requote.
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "eng-bid".into(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+    h.ctx.set_my_position("BTCUSDT", 0.3);
+    for _ in 0..10 {
+        h.quote("BTCUSDT", 99.0, 101.0);
+    }
+    let cancels = h
+        .drain_actions()
+        .into_iter()
+        .filter(|a| matches!(a, Action::Cancel { .. }))
+        .count();
+    assert_eq!(cancels, 1, "one order, one ask");
+}
+
+#[test]
+fn a_cancel_the_venue_never_took_is_asked_again_after_a_while() {
+    // Paced, not latched. A cancel the venue refused leaves the order resting,
+    // and a strategy that asked once and never again would leave it there for
+    // good.
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "eng-bid".into(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+    h.ctx.set_foreign_position("BTCUSDT", Side::Buy, 1.0, 100.0);
+    h.quote("BTCUSDT", 99.0, 101.0);
+    h.quote("BTCUSDT", 99.0, 101.0);
+    assert_eq!(cancel_count(&mut h), 1, "still inside the pacing window");
+
+    // The order is still resting a second and a half later: the venue never
+    // took it.
+    h.ctx.set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 1_500_000_000);
+    h.quote("BTCUSDT", 99.0, 101.0);
+    assert_eq!(cancel_count(&mut h), 1, "asked again once the window passed");
+}
+
+#[test]
+fn an_order_that_went_away_is_forgotten_rather_than_remembered_for_ever() {
+    // The record of who has been asked is pruned to what is still working, so
+    // a long-running quoter does not accumulate one entry per order it ever
+    // pulled.
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "eng-bid".into(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+    h.ctx.set_foreign_position("BTCUSDT", Side::Buy, 1.0, 100.0);
+    h.quote("BTCUSDT", 99.0, 101.0);
+    assert_eq!(cancel_count(&mut h), 1);
+
+    // The venue took it, so the engine's book no longer carries it. A new
+    // order with the same id would be a new order, and must be askable.
+    h.ctx.resting.clear();
+    h.quote("BTCUSDT", 99.0, 101.0);
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "eng-bid".into(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+    h.quote("BTCUSDT", 99.0, 101.0);
+    assert_eq!(cancel_count(&mut h), 1, "a fresh order is asked, not skipped");
+}
+
+fn cancel_count(h: &mut Harness) -> usize {
+    h.drain_actions()
+        .into_iter()
+        .filter(|a| matches!(a, Action::Cancel { .. }))
+        .count()
+}

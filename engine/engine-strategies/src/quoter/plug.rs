@@ -31,6 +31,8 @@
 //! every fill it takes is priced and marked out, so `engine fills` can say
 //! whether the quoting pays.
 
+use std::collections::HashMap;
+
 use engine_types::{
     EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, OrderUpdate, Side, StopSpec,
     Strategy, StrategyCtx, StrategyId, Subscription, SymbolId, TimeInForce,
@@ -44,6 +46,21 @@ pub const NAME: &str = "quoter";
 
 const QUOTE_TAG: &str = "quote";
 
+/// How often the same order may be asked to cancel.
+///
+/// An order stays in this strategy's own book until the log records it
+/// cancelled, and the venue takes a round trip to say so -- about 175 ms from
+/// this box. Every price in between would otherwise ask again, and a liquid
+/// symbol delivers tens of prices a second: one order, tens of signed venue
+/// calls, straight into the venue's order-rate limit and blocking the loop
+/// each time.
+///
+/// Paced rather than latched, for the reason the engine's own working
+/// supervisor paces it (`engine-core/src/working/plan.rs`): a cancel the venue
+/// refused leaves the order resting, and a strategy that asked once and never
+/// again would leave it there for good.
+const CANCEL_AGAIN_AFTER_NS: u64 = 1_000_000_000;
+
 pub struct Quoter {
     id: StrategyId,
     /// The venue's spellings, and the ids once the engine has interned them.
@@ -54,6 +71,9 @@ pub struct Quoter {
     /// Scratch, kept between wakes so reading our own book allocates nothing
     /// on the hot path.
     working: Vec<Resting>,
+    /// When each order was last asked to cancel. Pruned every pass to what is
+    /// still working, so it cannot outgrow the book.
+    asked_to_cancel: HashMap<String, u64>,
 }
 
 impl Quoter {
@@ -130,6 +150,7 @@ impl Quoter {
                 stop_loss_fraction,
             },
             working: Vec::new(),
+            asked_to_cancel: HashMap::new(),
         })
     }
 
@@ -146,6 +167,17 @@ impl Quoter {
 
     fn mine(&self, symbol: SymbolId) -> bool {
         self.ids.contains(&Some(symbol))
+    }
+
+    /// Ask the venue to pull an order, unless we have just asked.
+    fn pull(&mut self, symbol: SymbolId, id: &str, now_ns: u64, ctx: &mut dyn StrategyCtx) {
+        if let Some(asked_ns) = self.asked_to_cancel.get(id) {
+            if now_ns.saturating_sub(*asked_ns) < CANCEL_AGAIN_AFTER_NS {
+                return;
+            }
+        }
+        self.asked_to_cancel.insert(id.to_string(), now_ns);
+        ctx.cancel(symbol, id);
     }
 
     fn requote(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) {
@@ -166,12 +198,24 @@ impl Quoter {
         }
         drop(out);
 
+        // An order the log has ended is gone from the book above, so its entry
+        // here is spent. Pruned every pass rather than on an event, because
+        // this is the one place that knows what is still working.
+        let now_ns = ctx.now_ns();
+        if !self.asked_to_cancel.is_empty() {
+            let working = &self.working;
+            self.asked_to_cancel
+                .retain(|id, _| working.iter().any(|o| o.client_order_id == *id));
+        }
+
         // Somebody else's name. Pull anything of ours that is resting in it
         // and leave it: there is one venue stop per position, so two sleeves
         // here would have one stop between them.
         if ctx.foreign_position(symbol) {
-            for order in &self.working {
-                ctx.cancel(symbol, &order.client_order_id);
+            let mine: Vec<String> =
+                self.working.iter().map(|o| o.client_order_id.clone()).collect();
+            for id in mine {
+                self.pull(symbol, &id, now_ns, ctx);
             }
             return;
         }
@@ -193,7 +237,9 @@ impl Quoter {
                     &client_order_id,
                     engine_types::AmendSpec { px: Some(px), qty: None },
                 ),
-                QuoteStep::Pull { client_order_id } => ctx.cancel(symbol, &client_order_id),
+                QuoteStep::Pull { client_order_id } => {
+                    self.pull(symbol, &client_order_id, now_ns, ctx)
+                }
             }
         }
     }
