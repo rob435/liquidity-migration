@@ -1,0 +1,69 @@
+[Unit]
+Description=liquidity-migration Rust execution engine on the FUNDED account (shadow unless the owner turns it on)
+Wants=network-online.target
+After=network-online.target
+
+# The two processes that can own the funded account. One venue account takes
+# one kernel lease, so they were never going to run together — but a lease
+# collision is a silent refusal to start, and this makes it a loud one that
+# systemd itself enforces. Starting either stops the other.
+#
+# `Conflicts` is symmetric: `systemctl start` on this unit stops the Python
+# owner, and vice versa. That is the intended handover, and it is also why
+# this unit must not be enabled casually — enabling it means the next boot
+# picks the engine over the fleet.
+Conflicts=liquidity-migration-account-execution-mainnet.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Not the deployed checkout: a relative log path inside /opt/liquidity-migration
+# would write an untracked file into the tree the deploy proves clean, and stop
+# the next deploy of the fleet. Its own directory, separate from the demo
+# engine's, so the two never share a log or a heartbeat.
+StateDirectory=liquidity-migration-engine-mainnet
+WorkingDirectory=/var/lib/liquidity-migration-engine-mainnet
+
+# The funded account's credentials, and REAL_MONEY.
+#
+# This file is the owner's. `REAL_MONEY=true` in it is the single switch that
+# lets anything reach the funded account, it is set by the owner's own hand,
+# and nothing in this repository writes it. Without it the engine refuses to
+# build a mainnet gateway at all — it fails at the credential read, before a
+# socket is opened, and says which switch is missing.
+EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
+# Deliberately NOT unsetting the demo variables here. The engine reads only its
+# own realm's pair (BYBIT_REAL_API_KEY / BYBIT_REAL_API_SECRET), and a demo key
+# cannot authenticate mainnet whatever is in the environment.
+
+# Config path, heartbeat path, and the shadow/live switch.
+# deploy/engine.mainnet.env.template is the copy to fill in. Shadow unless this
+# file says otherwise, and the config has to agree — the flag can only turn
+# shadow off, never on.
+EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
+
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-engine-mainnet.service main
+Restart=always
+RestartSec=5
+KillMode=control-group
+# The engine finishes its current write and drops its account lease on the way
+# out; nothing here waits on a venue round trip.
+TimeoutStopSec=30
+
+# Level with the Python owner it would replace, not behind it like the demo
+# engine. This one carries real orders; it does not yield CPU to a producer.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+UMask=0027
+ReadWritePaths=/var/lib/liquidity-migration-engine-mainnet
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

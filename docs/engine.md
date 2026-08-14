@@ -356,6 +356,47 @@ And the producers are not the order path. A carry decision is a batch over
 ninety days of funding and bars; it stays in research and arrives as a target
 book. "Delete the Python one" was never going to mean deleting that.
 
+### The handover, concretely
+
+Everything below is the owner's. Nothing in this repository does any of it, and
+nothing here is installed on the funded host — the unit and the two templates
+exist so the steps are a command rather than a design exercise.
+
+The pieces, all in `deploy/`:
+
+| File | What it is |
+| --- | --- |
+| `systemd/liquidity-migration-engine-mainnet.service` | The unit. `Conflicts=` the Python mainnet owner, so systemd itself refuses to run both — one venue account takes one lease, and a lease collision is otherwise a silent refusal to start |
+| `engine.mainnet.toml.template` | The engine's config: `venue = "bybit_mainnet"`, capital limits loaded from `configs/operational.mainnet.json` itself, one block per sleeve with its own book path |
+| `engine.mainnet.env.template` | Unit settings: which config, shadow or live, where the heartbeat goes |
+
+Both templates ship with `shadow = true` and `ENGINE_LIVE=false`, and both have
+to say otherwise before anything is sent — the flag can only turn shadow off,
+never on.
+
+The symbol lists in the config template are placeholders. Replace them with the
+real per-sleeve universes, and give each sleeve names the other does not trade:
+the engine refuses a config where two strategies claim one symbol, because the
+venue holds one position per symbol and keeps no note of who asked for it.
+
+**The order these happen in matters more than any of them.**
+
+1. Install the unit and fill in the two files. Nothing runs yet.
+2. Start it in shadow, alongside the Python owner. A shadow engine takes no
+   lease, so the two coexist. It computes what it would do and logs it, and
+   the heartbeat starts feeding the fleet's own watchdog.
+3. Watch. This is the whole point of the exercise, and there is no shortcut
+   through it. What is being looked for is the engine and the Python owner
+   reaching the same decisions on the same books — and where they differ,
+   which one is right.
+4. Only then, if it has earned it: `ENGINE_LIVE=true` and `shadow = false`.
+   Starting the unit stops the Python owner, because they conflict. That is the
+   handover, and it is reversible by starting the Python owner again.
+
+`REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env` is a
+precondition for step 2, not part of it. It is already set, by the owner's own
+hand, and it is what the funded fleet runs under today.
+
 ### The order it can actually happen in
 
 Each step earns the next. Nothing here is a policy anyone chose to impose; each

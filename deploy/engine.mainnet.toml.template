@@ -1,0 +1,101 @@
+# /etc/liquidity-migration/engine-mainnet.toml  --  root-owned, mode 0600
+#
+# The engine's config for the FUNDED account. Copy this file to the path above
+# on the VPS and edit it there; no deploy writes it.
+#
+# There is no venue address in here and no way to put one there. `venue` is a
+# name that picks one of the adapters compiled into the engine, and every host
+# any of them knows is written in one source file which a test reads back.
+# Naming the funded account here is also not permission to trade it: the
+# gateway refuses to build unless REAL_MONEY is armed in
+# /etc/liquidity-migration/bybit-mainnet.env, by you.
+
+[engine]
+# The funded account. The long name is deliberate — this is the string that
+# decides whether this process can lose real money, and it should read like it.
+venue = "bybit_mainnet"
+
+wal_path = "/var/lib/liquidity-migration-engine-mainnet/engine.wal"
+
+# Compute and log orders, send nothing. LEAVE THIS TRUE until a shadow run
+# against this account has been watched for long enough to trust. The env
+# file's live flag can only turn shadow off, never on, so both have to agree
+# before anything is sent.
+shadow = true
+
+# One line of JSON, rewritten every few seconds, saying when it was written,
+# live or shadow, whose account it is on, whether it is still allowed to open
+# positions, and what it has seen and sent. scripts/runtime/check_fleet_liveness.py
+# reads it and pages on stale, unreadable, or latched.
+heartbeat_path = "/var/lib/liquidity-migration-engine-mainnet/heartbeat.json"
+
+# How often buffered log bytes are pushed to the OS. Order records do not wait
+# for this — they are forced to disk before the order goes out.
+group_flush_ms = 250
+
+# How often the engine refreshes its account reading (it refreshes at half
+# this). The risk kernel's own staleness bound is [risk] max_account_view_age_s.
+account_view_max_age_ms = 5000
+
+# ---------------------------------------------------------------------------
+# Capital limits: the fleet's own document, not a copy of its numbers
+# ---------------------------------------------------------------------------
+# The engine loads configs/operational.mainnet.json itself, so a cap you
+# tighten tightens for the Python fleet and the engine at once. Measured: both
+# loaders read that file identically, field for field.
+#
+# Nothing else may be written in this block. An [risk.envelope] section or a
+# stray `leverage` is refused, because two documents that both claim to set the
+# caps disagree eventually and nobody finds out until it matters.
+[risk]
+operational_profile_path = "/opt/liquidity-migration/configs/operational.mainnet.json"
+
+# The three numbers the profile does not carry.
+#
+# How far a position may move against it before its stop ends it. Same value as
+# DISASTER_STOP_FRACTION in the Python owner's env file — keep them equal or
+# the two halves are sizing worst-case loss differently.
+disaster_stop_fraction = 0.35
+# An order smaller than this after the partition clamp is refused, not sent.
+min_order_notional_usdt = 1.0
+# An account reading older than this is not evidence about the account now.
+max_account_view_age_s = 120
+
+# ---------------------------------------------------------------------------
+# The two sleeves
+# ---------------------------------------------------------------------------
+# Each takes its capital share from the profile's sleeve of the same name, and
+# reads its own book. Books are routed, not broadcast: each one reaches its own
+# sleeve and no other. That is what stops two followers on one account acting
+# on each other's decisions — the venue holds one position per symbol and keeps
+# no note of who asked for it.
+#
+# `symbols` is the universe each sleeve starts with. A name a book mentions
+# that is not listed here is taken on while the engine runs, so this list is a
+# starting point rather than a ceiling — but every name in it is subscribed at
+# boot, which is quicker than admitting it later.
+
+[[strategy]]
+name = "target_book"
+sleeve = "carry"
+book_path = "/var/lib/liquidity-migration/targets/carry-mainnet.json"
+# Rest entries at the touch and let the engine work them in, rather than
+# crossing the spread. Off by default in the plug; on here because carry
+# entries are not urgent and the spread is the largest cost they pay.
+rest_entries = true
+symbols = ["BTCUSDT", "ETHUSDT"]
+
+[[strategy]]
+name = "target_book"
+sleeve = "long"
+book_path = "/var/lib/liquidity-migration/targets/long-mainnet.json"
+rest_entries = true
+symbols = ["SOLUSDT", "XRPUSDT"]
+
+# NOTE ON THE SYMBOL LISTS ABOVE. They are placeholders and must be replaced
+# with the real per-sleeve universes before this config is used, for one
+# reason that is not obvious: the engine refuses a config where two strategies
+# claim the same symbol. The venue holds one position per symbol and keeps no
+# note of who asked for it, so two sleeves on one name would each read the
+# other's exposure as their own. Give each sleeve names the other does not
+# trade.
