@@ -16,6 +16,36 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 ~01:05 UTC — The engine runs on the production box, and its
+  signing is venue-proven: first shadow run against the demo account.** Built
+  on the VPS in an isolated clone (`/opt/engine-build`, never the deployed
+  checkout the fleet runs from): rustup + `cargo build --release` took 4m34s
+  on the 2-core box. **Measured there by `engine bench`** (real loop, real
+  signing, real fsync in the chain, pretend venue on the box; 4,000 quotes,
+  200 orders): decision **448 ns**, durable **2.14 ms**, whole chain
+  **2.60 ms median / 5.65 ms p99 / 10.12 ms worst**. Linux `fdatasync` beats
+  macOS's full flush exactly as wave 3 predicted, so the chain is shorter
+  here than on the laptop despite a slower CPU. The comparison that counts:
+  the Python fleet's software time on that same box is 25.7 ms median —
+  **about ten times longer for the same job**. Then the **first live shadow
+  run against the demo account**: the engine connected to the public feed,
+  and **the private stream authenticated** — the HMAC signing had only ever
+  been proven against test vectors, and Bybit has now accepted it. It read
+  real equity (1,413.82 USDT), the touch fired, the risk kernel allowed the
+  order, the record was made durable, and the send was declined because
+  shadow mode declines it. Nothing reached the venue, so the one-writer rule
+  with the Python fleet holds. Two faults the run found and fixed: the engine
+  **refused to boot** because the demo account holds HOMEUSDT, a symbol no
+  strategy subscribed to — now read as somebody else's position and left
+  alone, which is the fleet's own separate-books rule and necessary on an
+  account the owner hand-trades (the old behaviour meant any unfamiliar
+  holding stopped the engine dead); and that warning repeated on every
+  account refresh (~30k lines/day, and log spam filled this box's disk once
+  before), now said once per symbol. Two config mistakes of mine were caught
+  by the engine's own gates, which is the gates working: a size below the
+  venue minimum, and a partition share above the account gross cap.
+  `engine/` is still not deployed and trades nothing.
+
 - **2026-08-14 00:20 UTC — First carry boundary on the wave-3 order path, and
   it worked as designed.** Receipts from the demo carry producer's journal:
   `froze_ahead=True` at 00:18:45 (the pre-boundary freeze), then the deadline

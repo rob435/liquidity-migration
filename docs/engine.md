@@ -13,6 +13,33 @@ with a hard wall between them.
 The seam between them is the strategy plug: research emits a config, the
 engine loads it by name. Nothing else crosses the wall.
 
+### Two kinds of strategy, one seam
+
+Strategies differ in where the decision has to happen, and the seam carries
+both:
+
+- **Decide in the loop.** A quoting or sniping strategy reacts to a price in
+  microseconds, so its whole decision lives in Rust as a plug. It reads
+  market state, its own resting orders, and emits places, cancels and
+  amends. Config is a `[[strategy]]` block of parameters.
+- **Decide in research, execute in the loop.** A strategy whose decision is
+  a batch over months of history — carry reads ninety days of settled
+  funding and hourly bars, and holds a state machine across all of it —
+  cannot and should not compute that inside a trading process. Python
+  decides on its own clock and writes a *target book*: absolute notional per
+  symbol, the stop each carries, and how long it may be acted on. The engine
+  follows it — diff against position, exits first, size, quantize, quote,
+  attach stops — and every risk gate applies exactly as it does to any other
+  order.
+
+The target book is written by
+[`engine_targets.py`](../liquidity_migration/research/engine_targets.py),
+atomically, so a reader sees a whole book or the previous one. A missing or
+stale book means *no decision*, and the engine holds its position steady; an
+empty book means *hold nothing*, which is a decision and does get acted on.
+Those two are deliberately different, because confusing them flattens a live
+book on a data outage.
+
 ## The one-sentence design
 
 One process, one thread, one loop: a market message arrives on a socket, is
@@ -46,6 +73,22 @@ about one TLS record's work. Numbers are re-measured by running
 The <100 ms decision-to-execution goal is met on our side of the wire with
 a ~25× margin at p99; the venue round trip on top is the same geography
 every non-colocated participant pays.
+
+### On the production box
+
+Measured 2026-08-14 by the same command on the VPS the fleet runs on (2
+cores, Linux, `fdatasync`; 4,000 quotes in, 200 orders out):
+
+| Segment | median | p99 | worst |
+| --- | --- | --- | --- |
+| market message in → decision made | 448 ns | 852 ns | 948 ns |
+| decision → order durable in the log | 2.14 ms | 4.83 ms | 8.45 ms |
+| **in → durable → out the socket** | **2.60 ms** | **5.65 ms** | **10.12 ms** |
+
+The box's CPU is slower than the laptop's, so thinking costs more; its disk
+is faster to make durable, so the chain is shorter overall. The comparison
+that matters is against the Python fleet on that same box: 25.7 ms of
+software time per order, median. Same hardware, same venue, ~10× less time.
 
 ## Layout
 
