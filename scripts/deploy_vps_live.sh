@@ -1415,7 +1415,18 @@ activate_mode() {
     verify_topology
 }
 
-MAINNET_OWNER_UNIT=liquidity-migration-account-execution-mainnet.service
+# The engine owns the funded account now. The Python owner this used to name
+# was deleted with the rest of the Python order path, so starting it here
+# failed the strict activate phase on any host with REAL_MONEY armed -- the
+# unit file is not in the manifest and never will be again.
+#
+# Naming the engine is not arming it. The mainnet gateway refuses to build
+# unless REAL_MONEY is set in the host credential file by the account owner,
+# so the worst this can do is start a process that reads and reports.
+MAINNET_OWNER_UNIT=liquidity-migration-engine-mainnet.service
+# Stopped, never started: a host that has not been through this deploy may
+# still be running it, and it must not be left holding the account.
+RETIRED_MAINNET_OWNER_UNIT=liquidity-migration-account-execution-mainnet.service
 MAINNET_LIVENESS_TIMER=liquidity-migration-mainnet-liveness.timer
 MAINNET_LIVENESS_SERVICE=liquidity-migration-mainnet-liveness.service
 
@@ -1668,8 +1679,21 @@ start_mainnet_fleet() {
     provision_mainnet_prerequisites
     ensure_mainnet_state_roots
     require_mainnet_preflight
-    systemctl enable "$MAINNET_OWNER_UNIT"
-    systemctl start "$MAINNET_OWNER_UNIT"
+    # Two hosts cannot both own one account, and the retired Python owner
+    # takes the kernel lease if it is still running.
+    if systemctl cat "$RETIRED_MAINNET_OWNER_UNIT" >/dev/null 2>&1; then
+        systemctl disable --now "$RETIRED_MAINNET_OWNER_UNIT" 2>/dev/null || true
+    fi
+    # Same shape as the demo engine's gate: a host says it runs the funded
+    # engine by having its environment file, and one that does not runs the
+    # producers alone rather than failing the deploy.
+    if [ -x "$ENGINE_BINARY" ] && [ -f /etc/liquidity-migration/engine-mainnet.env ]; then
+        systemctl enable "$MAINNET_OWNER_UNIT"
+        systemctl start "$MAINNET_OWNER_UNIT"
+    else
+        printf 'mainnet-engine-skipped reason=no-binary-or-environment unit=%s\n' \
+            "$MAINNET_OWNER_UNIT" >&2
+    fi
     systemctl enable --now liquidity-migration-bybit-carry-mainnet.service
     systemctl enable --now liquidity-migration-bybit-long-mainnet.service
     systemctl enable --now "$MAINNET_LIVENESS_TIMER"
@@ -1687,6 +1711,7 @@ stop_mainnet_mode() {
         liquidity-migration-bybit-carry-mainnet.service
         liquidity-migration-bybit-long-mainnet.service
         "$MAINNET_OWNER_UNIT"
+        "$RETIRED_MAINNET_OWNER_UNIT"
     )
     for unit in "${units[@]}"; do
         if systemctl cat "$unit" >/dev/null 2>&1; then

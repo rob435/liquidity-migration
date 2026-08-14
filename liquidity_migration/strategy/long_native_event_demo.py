@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -45,7 +46,10 @@ from typing import Any
 import polars as pl
 
 from liquidity_migration.core._common import MS_PER_DAY, exact_duration_ms, is_weekend_ms
-from liquidity_migration.account.account_intent_client import publish_exit_first_target_requests
+from liquidity_migration.account.account_intent_client import (
+    ExitFirstPublication,
+    publish_exit_first_target_requests,
+)
 from liquidity_migration.strategy.account_candidate_universe import (
     enforce_frozen_candidate_frames,
     load_candidate_universe,
@@ -108,6 +112,18 @@ from liquidity_migration.account.strategy_funnel import (
     observe_funnel_rows_safely,
 )
 from liquidity_migration.account.strategy_targets import component_target_intent, exit_target_intents
+from liquidity_migration.research.engine_targets import (
+    EngineTarget,
+    render_target_book,
+    write_target_book,
+)
+from liquidity_migration.strategy.long_book_state import (
+    LongBookEntry,
+    LongBookState,
+    long_book_state_path,
+    read_book_state,
+    write_book_state,
+)
 from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 from liquidity_migration.data.universe import build_current_universe_table
 
@@ -115,6 +131,26 @@ from liquidity_migration.data.universe import build_current_universe_table
 # Signals older than this aren't acted on. Without this bound a missed-cycle
 # event would later trigger a stale fill long after the retrace window closed.
 SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
+
+#: Where this producer writes the book the engine follows. Unset means it
+#: writes none and publishes intents the old way, which is what the fleet ran
+#: before the engine owned the account.
+ENGINE_TARGET_BOOK_PATH_ENV = "LONG_ENGINE_TARGET_BOOK_PATH"
+
+#: How long a LONG book may be acted on. It must clear the engine's own
+#: fifteen-minute entry cutoff by enough to be useful, and it is the answer to
+#: "how long should a dead producer go on opening positions" -- an hour, not
+#: the twenty-four hours a LONG signal stays actionable for.
+LONG_BOOK_VALIDITY_MS = exact_duration_ms(hours=1)
+
+#: Kept past the cooldown before a departed name is forgotten, so a clock skew
+#: or a slow cycle cannot let a name back in early.
+_COOLDOWN_KEEP_MS = exact_duration_ms(days=1)
+
+#: What the cycle reports when the book replaced the inbox. Nothing was
+#: published because nothing reads the inbox any more, and the summary fields
+#: that counted publications say zero rather than going missing.
+_EMPTY_PUBLICATION = ExitFirstPublication(exit_requests=(), entry_requests=(), errors=())
 _LOGGER = logging.getLogger(__name__)
 
 # The wakes whose whole point is speed: a time stop coming due, and a price
@@ -503,6 +539,23 @@ def run_long_native_demo_cycle(
         unresolved_targets = planning.unresolved_targets
         all_trades = planning.canonical_trades
         terminal_entry_attempts = planning.terminal_entry_attempts
+
+        # Where the engine executes, this producer's own record replaces the
+        # account journal. The journal is written by an owner that no longer
+        # exists, so it is not empty -- it is frozen, which is worse: every
+        # name in it would be believed held for ever. See `long_book_state`.
+        engine_book_path = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
+        book_state: LongBookState | None = None
+        book_state_path: Path | None = None
+        if engine_book_path:
+            book_state_path = long_book_state_path()
+            if book_state_path is None:
+                raise ValueError(
+                    f"{ENGINE_TARGET_BOOK_PATH_ENV} is set but no book state path is; "
+                    "a producer that writes a book must remember what it asked for"
+                )
+            book_state = read_book_state(book_state_path)
+            all_trades = book_state.as_trade_rows()
         margin_projection = projected_long_initial_margin_pct_equity(demo, strategy)
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
@@ -567,13 +620,45 @@ def run_long_native_demo_cycle(
         unresolved_exit_suppressions = suppression.unresolved_exit_suppressions
         unresolved_entry_suppressions = suppression.unresolved_entry_suppressions
         terminal_entry_suppressions = suppression.terminal_entry_attempt_suppressions
-        publication = publish_exit_first_target_requests(
-            target_publisher,
-            batch_prefix=f"long-target/{strategy_id}/{cycle_now_ms}",
-            exit_intents=exit_target_intents,
-            entry_intents=entry_target_intents,
-            created_ts_ns=cycle_now_ms * 1_000_000,
-        )
+        if book_state is not None:
+            # The book is absolute and replaces both halves at once: a name
+            # this producer stopped asking for is simply absent, which the
+            # engine reads as "hold none of it". Nothing is published to the
+            # inbox, because nothing reads the inbox any more.
+            book_state = _advance_long_book_state(
+                book_state,
+                exit_plans=exit_plans,
+                candidates=candidates,
+                demo=demo,
+                equity_usdt=equity_usdt,
+                order_notional_pct_equity=order_notional_pct_equity,
+                price_by_symbol=price_by_symbol,
+                strategy_id=strategy_id,
+                now_ms=cycle_now_ms,
+                cooldown_days=int(strategy.cooldown_days),
+            )
+            # The record is written first. A book the record does not back
+            # would have this producer asking for a name it will not remember
+            # next cycle, and so re-entering it for ever.
+            assert book_state_path is not None  # set with book_state above
+            write_book_state(book_state_path, book_state)
+            write_target_book(
+                Path(engine_book_path),
+                _long_engine_target_book(
+                    book_state,
+                    decision_ts_ms=cycle_now_ms,
+                    strategy_profile=str(strategy_id),
+                ),
+            )
+            publication = _EMPTY_PUBLICATION
+        else:
+            publication = publish_exit_first_target_requests(
+                target_publisher,
+                batch_prefix=f"long-target/{strategy_id}/{cycle_now_ms}",
+                exit_intents=exit_target_intents,
+                entry_intents=entry_target_intents,
+                created_ts_ns=cycle_now_ms * 1_000_000,
+            )
         published_exit_intents = len(publication.exit_requests)
         published_entry_intents = len(entry_target_intents) if publication.entry_requests else 0
         account_target_requests = {
@@ -1487,6 +1572,126 @@ def _long_entry_target_intents(
             )
         )
     return intents
+
+
+def _advance_long_book_state(
+    state: LongBookState,
+    *,
+    exit_plans: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    demo: LongNativeDemoCycleConfig,
+    equity_usdt: float,
+    order_notional_pct_equity: float,
+    price_by_symbol: dict[str, float],
+    strategy_id: str,
+    now_ms: int,
+    cooldown_days: int,
+) -> LongBookState:
+    """Move the record on by one cycle: drop what exited, add what entered.
+
+    The sizing is the same expression `_long_entry_target_intents` uses, on
+    purpose -- the book replaces those intents, and a second way of working out
+    a size would be a second strategy. A name already in the record keeps the
+    notional it entered with; re-sizing every open name off today's equity each
+    cycle is a different strategy, not a translation of this one.
+    """
+
+    exited = {
+        str(plan.get("symbol") or "").upper()
+        for plan in exit_plans
+        if str(plan.get("symbol") or "")
+    }
+    held = {symbol: entry for symbol, entry in state.held.items() if symbol not in exited}
+    left_at_ms = dict(state.left_at_ms)
+    for symbol in exited:
+        left_at_ms[symbol] = now_ms
+
+    for candidate in candidates:
+        trade_id = str(candidate.get("trade_id") or "")
+        symbol = str(candidate.get("symbol") or "").upper()
+        price = price_by_symbol.get(symbol, _float(candidate.get("live_price")))
+        if not trade_id or not symbol or price <= 0.0 or symbol in held:
+            continue
+        stop_loss_fraction = _float(candidate.get("stop_loss_pct"))
+        # `render_target_book` refuses a stop outside (0, 1), and a target with
+        # no stop is not admissible anyway. Dropping the name is the only
+        # honest answer: this producer does not invent a stop.
+        if not 0.0 < stop_loss_fraction < 1.0:
+            _LOGGER.warning(
+                "long book: %s has no usable stop (%r); it is not entered",
+                symbol,
+                candidate.get("stop_loss_pct"),
+            )
+            continue
+        notional = (
+            equity_usdt
+            * demo.wallet_balance_fraction
+            * order_notional_pct_equity
+            * _float(candidate.get("position_weight") or 1.0)
+        )
+        if notional <= 0.0:
+            continue
+        max_hold_days = _float(candidate.get("max_hold_days") or 3.0)
+        held[symbol] = LongBookEntry(
+            trade_id=trade_id,
+            symbol=symbol,
+            strategy_id=strategy_id,
+            notional_usdt=notional,
+            stop_loss_fraction=stop_loss_fraction,
+            leverage=float(demo.entry_leverage),
+            entered_ts_ms=now_ms,
+            entry_price=price,
+            max_hold_deadline_ts_ms=now_ms + exact_duration_ms(days=max_hold_days),
+            signal_ts_ms=int(candidate.get("signal_ts_ms") or 0),
+            stop_decay_after_ms=int(_float(candidate.get("stop_decay_after_ms"))),
+            decayed_stop_loss_pct=_float(candidate.get("decayed_stop_loss_pct")),
+            atr_14d_pct=_float(candidate.get("atr_14d_pct")),
+            pattern=str(candidate.get("pattern") or ""),
+            entry_reason=str(candidate.get("entry_reason") or "long_entry"),
+        )
+        left_at_ms.pop(symbol, None)
+
+    # A name out of cooldown no longer changes any decision, and keeping every
+    # symbol ever traded would grow this file without end.
+    horizon_ms = now_ms - exact_duration_ms(days=max(cooldown_days, 0)) - _COOLDOWN_KEEP_MS
+    left_at_ms = {
+        symbol: when for symbol, when in left_at_ms.items() if when >= horizon_ms
+    }
+    return LongBookState(held=held, left_at_ms=left_at_ms)
+
+
+def _long_engine_target_book(
+    state: LongBookState,
+    *,
+    decision_ts_ms: int,
+    strategy_profile: str,
+) -> str:
+    """Render what this producer is asking the engine to hold.
+
+    Absolute, so a name that has left the record is simply absent, and the
+    engine reads that as "hold none of it" without a special case.
+
+    The validity window is an hour. It has to clear the engine's own
+    fifteen-minute entry cutoff or the book would open nothing at all, and the
+    rest of it is how long a producer that has died should go on opening
+    positions -- an hour, not LONG's twenty-four-hour signal life. Exits keep
+    working past expiry either way.
+    """
+
+    return render_target_book(
+        source=strategy_profile,
+        decision_ts_ms=decision_ts_ms,
+        valid_until_ms=decision_ts_ms + LONG_BOOK_VALIDITY_MS,
+        targets=[
+            EngineTarget(
+                symbol=entry.symbol,
+                notional_usdt=entry.notional_usdt,
+                stop_loss_fraction=entry.stop_loss_fraction,
+                leverage=entry.leverage,
+            )
+            for entry in sorted(state.held.values(), key=lambda e: e.symbol)
+        ],
+    )
 
 
 def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:
