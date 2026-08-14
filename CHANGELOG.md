@@ -16,6 +16,22 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 01:42 UTC — The target-book seam runs end to end on the
+  production box.** A book rendered by the Python side
+  (`carry_hold_v4_live_v1`, one 120 USDT BTCUSDT target, 0.35 stop) was
+  written to the host; the engine logged `watching for a target book`, read
+  it, delivered it, and the follower planned `Buy 0.001 BTCUSDT [book-enter]`
+  — risk allowed it, the record went durable, and shadow declined the send.
+  Research decides, the engine executes, and nothing reached the venue.
+  **One honest artifact of shadow mode**: the follower re-plans on every
+  quote and suppresses a repeat by looking for its own working order, but a
+  shadow order is marked never-sent immediately, so the suppression cannot
+  see it and the entry was re-emitted until **the envelope stopped it**
+  (worst case 1000.40 against a 993.09 allowance). In a live run the order
+  stays in flight and the suppression engages, so this is shadow-only — but
+  the backstop firing on a runaway is exactly what it is for, and it fired
+  without being asked to.
+
 - **2026-08-14 ~02:00 UTC — The engine learns to cancel and amend, venues
   learn to say what they can do, and carry learns to hand over its book.**
   Not deployed; the fleet is untouched and still runs `2bd3a00`. Three
