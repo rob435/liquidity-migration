@@ -336,15 +336,48 @@ order. A capability that has not been exercised is a claim, and the only thing
 that turns it into a fact is running it — in shadow first, against the
 account, for long enough to compare its decisions with the Python owner's.
 
-The Python execution path stays, and not out of caution. Measured 2026-08-14
-by walking the import graph from all nine systemd units: **93 of 135 modules
-are reachable from a live unit, and none of them is demo-only.** Demo and
-mainnet run byte-identical command lines — the realm is a parameter branched
-*inside* shared modules — so there is no demo half to retire first. A
-symbol-level scan of all 45 order-path modules found zero unreferenced
-functions or classes. Deleting any of it today would not be a risk taken; it
-would simply stop the funded fleet trading, because nothing is deployed to
-take over.
+The Python execution path stays, and not out of caution.
+
+**How much of it is actually the order path — measured, and smaller than the
+number this document used to quote.** An earlier pass reported "93 of 135
+modules reachable from a live unit", which is true and misleading: it is the
+whole fleet's closure, not the order path's. Re-measured 2026-08-14 seeding
+from every script as well as every unit, so operator tooling counts as a
+consumer:
+
+- The account owner's own closure is **79 modules**.
+- **Ten of them are reachable only from the owner.** The other 69 are shared
+  with `ops.sh status`, the CLI, research tooling and the deploy readiness
+  check — `venue/bybit.py` among them, which four operator scripts import
+  directly. Deleting on the larger figure would have taken those with it.
+
+So "the Python order path" as a deletable thing is ten modules, two systemd
+units, their dispatcher arms, and the tests that cover them. Roughly 8,000
+lines. Not 93 modules.
+
+Two things about those ten are worth knowing before anyone acts on the number:
+
+1. **Three of them are `policy/account_loss_guard.py`,
+   `policy/equity_anchored_envelope.py` and `venue/venue_protection.py`** —
+   which `AGENTS.md` names and says are not to be removed. They are the order
+   path's risk layer and nothing else reaches them, so they cannot stay behind
+   without becoming unreachable files. Their function is ported to
+   `engine-risk`, with parity tests written against these very modules. That
+   is a conflict between two standing instructions and it needs the owner to
+   resolve it, not a programmer.
+2. **`check_fleet_liveness.py` imports the owner's readiness module.** The
+   watchdog is meant to survive, and the function it uses reads a sidecar the
+   owner *writes* — so this is not a dependency that can be tidied away first.
+   When the owner goes, that check has nothing to read and has to go with it.
+
+Demo and mainnet still run byte-identical command lines — the realm is a
+parameter branched *inside* shared modules — so there is no demo half to
+retire first.
+
+And deleting it from the repository does not stop the funded fleet. The host
+runs its own installed checkout; it keeps trading until somebody deploys. What
+the deletion does is make the next deploy the thing that stops it, and block
+shipping any fix without also shipping the removal.
 
 There is a further trap worth knowing before anyone tries the obvious first
 step: `verify_topology()` in `scripts/deploy_vps_live.sh` unconditionally
