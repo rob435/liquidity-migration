@@ -16,6 +16,43 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 ~02:00 UTC — The engine learns to cancel and amend, venues
+  learn to say what they can do, and carry learns to hand over its book.**
+  Not deployed; the fleet is untouched and still runs `2bd3a00`. Three
+  pieces. (1) **A strategy could only place**, which is no vocabulary for a
+  market maker: an action is now place, cancel or amend, and a strategy can
+  read its own working orders (`ctx.resting`) because the engine mints the
+  ids. Under a flood, cancels and exits keep flowing while entries and
+  amends are dropped. **An amend that raises size adds exposure, so it is
+  made durable before the wire exactly as a send is**; repricing and
+  shrinking are not, and ride the group flush — a distinction the reviewing
+  agent raised and left to a decision, with a test that fails without it.
+  (2) **Venues now state their capabilities** — native position stop, amend
+  in place, post-only, batching — and the engine refuses what a venue cannot
+  honour rather than substituting cancel-and-replace, which is a different
+  trade at a different queue position. That is what makes a second venue
+  (Hyperliquid, MEXC) an adapter rather than a rewrite; `docs/engine.md`
+  §Adding a venue says what one has to implement. (3) **The second plug
+  seam**: carry's decision reads ninety days of settled funding and hourly
+  bars and runs a state machine over all of it, so it stays in Python and
+  hands the engine a *target book* — absolute notional per symbol, the stop
+  each carries, how long it may be acted on. Carry writes one when
+  `CARRY_ENGINE_TARGET_BOOK_PATH` is set (off by default, and wrapped so a
+  failed write can never raise into the sleeve that is trading). The
+  follower's planner is pure and tested: exits before entries, the
+  max(1 USDT, 5%) resize dead band, the entry cutoff, and a resize that adds
+  to a position re-declaring its stop **anchored on the entry price, not
+  today's** — anchoring on today's price loosens the stop on size already
+  held. **No book means no decision and the position is held; an empty book
+  means hold nothing and is acted on** — confusing those two flattens a live
+  book on a data outage. Also: a systemd helper that two producers imported
+  from the account owner moved to `core`, removing a decision-side
+  dependency on the execution path. `docs/engine.md` now carries a table of
+  what the engine still cannot do — resting entry quoting, venue
+  reconciliation and restart recovery, the single-writer lease, and any
+  watchdog — because the order in which the Python execution path can be
+  deleted depends on that list being honest.
+
 - **2026-08-14 ~01:05 UTC — The engine runs on the production box, and its
   signing is venue-proven: first shadow run against the demo account.** Built
   on the VPS in an isolated clone (`/opt/engine-build`, never the deployed
