@@ -4,7 +4,7 @@
 //! a fixed position in one symbol — so that everything around the decision is
 //! real and only the decision needs replacing. It is compiled and tested with
 //! the rest of the crate, so it cannot rot, and it is deliberately **not**
-//! registered in [`crate::KNOWN_STRATEGIES`], so no config can run it by
+//! registered in [`crate::known_strategies`], so no config can run it by
 //! accident. Registering yours is one of the steps below.
 //!
 //! # The shape
@@ -65,12 +65,11 @@
 //! 1. `cp -r template mine`, then rename the module in `lib.rs`.
 //! 2. Change `NAME` in `plug.rs`. It is the string a config names.
 //! 3. Replace `plan.rs` with your decision, and its tests with yours.
-//! 4. Add your name to [`crate::KNOWN_STRATEGIES`] and to the match in
-//!    [`crate::build_strategy`].
+//! 4. Add one line to the `PLUGS` table in `lib.rs`.
 //! 5. Write the config block into `docs/engine.md`'s strategy table.
 //!
 //! There is no registration file to edit, no trait to derive, and no macro.
-//! The whole seam is those two lists in `lib.rs`.
+//! The whole seam is that one table in `lib.rs`.
 //!
 //! # What good tests look like here
 //!

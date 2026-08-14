@@ -195,7 +195,7 @@ fn the_template_is_not_something_a_config_can_run() {
     // It is here to be copied, not deployed. Registering yours is a step the
     // author takes deliberately; see the module docs.
     assert!(
-        !crate::KNOWN_STRATEGIES.contains(&super::plug::NAME),
+        !crate::known_strategies().contains(&super::plug::NAME),
         "the template must stay out of the registry"
     );
     assert!(crate::build_strategy(super::plug::NAME, StrategyId(0), &config()).is_err());

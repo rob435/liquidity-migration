@@ -11,7 +11,7 @@ mod params;
 pub mod quoter;
 pub mod target_book;
 /// A copy-me starting point. Compiled and tested with the rest so it cannot
-/// rot, and deliberately absent from [`KNOWN_STRATEGIES`] so no config can
+/// rot, and deliberately absent from [`PLUGS`] so no config can
 /// run it by accident.
 pub mod template;
 mod touch_sniper;
@@ -28,9 +28,33 @@ use engine_types::{Strategy, StrategyId};
 pub use target_book::TargetBookFollower;
 pub use touch_sniper::TouchSniper;
 
-/// Every name [`build_strategy`] answers to.
-pub const KNOWN_STRATEGIES: &[&str] =
-    &[quoter::plug::NAME, target_book::follower::NAME, touch_sniper::NAME];
+/// How one plug is built from its id and its parameter table.
+type Builder = fn(StrategyId, &toml::Value) -> Result<Box<dyn Strategy>, BuildError>;
+
+/// Every plug the engine can load, and how to load it.
+///
+/// One table, rather than the name list beside a `match` that used to stand
+/// here. Those were two places that had to agree about the same fact, and a
+/// plug added to one and not the other is either a name the engine advertises
+/// and cannot build, or one it can build and will not admit to. Adding a plug
+/// is now one line, and forgetting the other half is no longer possible.
+const PLUGS: &[(&str, Builder)] = &[
+    (target_book::follower::NAME, |id, params| {
+        Ok(Box::new(TargetBookFollower::from_params(id, params)?))
+    }),
+    (quoter::plug::NAME, |id, params| {
+        Ok(Box::new(quoter::Quoter::from_params(id, params)?))
+    }),
+    (touch_sniper::NAME, |id, params| {
+        Ok(Box::new(TouchSniper::from_params(id, params)?))
+    }),
+];
+
+/// Every name [`build_strategy`] answers to, in the order the table lists
+/// them.
+pub fn known_strategies() -> Vec<&'static str> {
+    PLUGS.iter().map(|(name, _)| *name).collect()
+}
 
 /// Why a config block could not become a strategy.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +76,7 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BuildError::UnknownStrategy { name } => {
-                write!(f, "unknown strategy \"{name}\" (known: {})", KNOWN_STRATEGIES.join(", "))
+                write!(f, "unknown strategy \"{name}\" (known: {})", known_strategies().join(", "))
             }
             BuildError::ParamsNotATable { strategy, got } => {
                 write!(f, "{strategy}: expected a table of parameters, got {got}")
@@ -114,12 +138,8 @@ pub fn build_strategy(
     strategy_id: StrategyId,
     params: &toml::Value,
 ) -> Result<Box<dyn Strategy>, BuildError> {
-    match name {
-        target_book::follower::NAME => {
-            Ok(Box::new(TargetBookFollower::from_params(strategy_id, params)?))
-        }
-        quoter::plug::NAME => Ok(Box::new(quoter::Quoter::from_params(strategy_id, params)?)),
-        touch_sniper::NAME => Ok(Box::new(TouchSniper::from_params(strategy_id, params)?)),
-        other => Err(BuildError::UnknownStrategy { name: other.to_string() }),
+    match PLUGS.iter().find(|(known, _)| *known == name) {
+        Some((_, build)) => build(strategy_id, params),
+        None => Err(BuildError::UnknownStrategy { name: name.to_string() }),
     }
 }

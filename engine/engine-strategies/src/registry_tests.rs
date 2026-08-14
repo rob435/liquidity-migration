@@ -276,3 +276,25 @@ fn leaked(param: &str) -> &'static str {
         .find(|known| *known == param)
         .expect("a known parameter name")
 }
+
+#[test]
+fn every_name_the_registry_advertises_is_one_it_can_reach() {
+    // The property the single table buys. When the name list and the builder
+    // were two things, a plug could be added to one and not the other: either
+    // a name the engine offers and cannot build, or one it builds and will not
+    // admit to. Neither can happen from one table, and this says so out loud.
+    for name in crate::known_strategies() {
+        let err = build_err(build_strategy(name, ID, &params("")));
+        assert!(
+            !matches!(err, BuildError::UnknownStrategy { .. }),
+            "{name} is advertised but the registry does not know it: {err}"
+        );
+    }
+    assert!(
+        matches!(
+            build_err(build_strategy("no_such_plug", ID, &params(""))),
+            BuildError::UnknownStrategy { .. }
+        ),
+        "a name that is not in the table must still be refused"
+    );
+}

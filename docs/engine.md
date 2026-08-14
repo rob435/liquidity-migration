@@ -47,7 +47,7 @@ It is a working, tested plug that does something trivial, so everything around
 the decision is real and only the decision needs replacing. Its module doc is
 the authoring guide: what a strategy may touch, what the engine holds it to,
 and the five steps to register one. It is compiled and tested with the rest so
-it cannot rot, and left out of `KNOWN_STRATEGIES` so no config can run it by
+it cannot rot, and left out of the `PLUGS` table so no config can run it by
 accident.
 
 Two rules make strategies independent rather than merely separate:
