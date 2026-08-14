@@ -1692,7 +1692,7 @@ start_mainnet_fleet() {
     # Same shape as the demo engine's gate: a host says it runs the funded
     # engine by having its environment file, and one that does not runs the
     # producers alone rather than failing the deploy.
-    if [ -x "$ENGINE_BINARY" ] && [ -f /etc/liquidity-migration/engine-mainnet.env ]; then
+    if [ -x "${ENGINE_BINARY:-}" ] && [ -f /etc/liquidity-migration/engine-mainnet.env ]; then
         systemctl enable "$MAINNET_OWNER_UNIT"
         systemctl start "$MAINNET_OWNER_UNIT"
     else

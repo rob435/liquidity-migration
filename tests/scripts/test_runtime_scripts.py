@@ -92,12 +92,18 @@ def test_authorized_wrapper_owns_every_runtime_argv() -> None:
 ENGINE_UNIT = "liquidity-migration-engine.service"
 
 
-def test_engine_unit_runs_its_own_demo_account_and_never_the_fleets() -> None:
-    """Two writers on one venue account wedge each other: on 2026-08-14 a live
-    engine on the fleet's demo account blocked the demo owner for ~100 seconds.
-    The engine's per-account lock makes that a silent refusal to start rather
-    than a loud collision, so the credential file this names is the whole
-    defence.
+def test_engine_unit_runs_the_fleets_demo_account_and_never_the_funded_one() -> None:
+    """The engine is what executes on the demo account now.
+
+    It used to name bybit-quote-lab.env, a second demo account (579580669),
+    because liquidity-migration-account-execution.service owned the fleet's
+    account and two writers on one venue account wedge each other -- on
+    2026-08-14 a live engine here blocked that owner for about a hundred
+    seconds. That owner was deleted with the Python order path, and the
+    producers publish their books to this account and size from its equity, so
+    the engine has to be on it.
+
+    The funded account stays out of reach, and that half has not changed.
     """
 
     unit = _unit(ENGINE_UNIT)
@@ -108,23 +114,27 @@ def test_engine_unit_runs_its_own_demo_account_and_never_the_fleets() -> None:
         if line.startswith("EnvironmentFile=")
     ]
     assert environment_files == [
-        "/etc/liquidity-migration/bybit-quote-lab.env",
+        "/etc/liquidity-migration/bybit-demo.env",
         "/etc/liquidity-migration/engine.env",
     ]
-    # The fleet's own demo account and the funded one are both out of reach.
-    # Directives only: the comments name both files on purpose.
+    # Directives only: the comments name the other files on purpose.
     directives = "\n".join(
         line for line in service.splitlines() if line and not line.startswith("#")
     )
-    assert "bybit-demo.env" not in directives
     assert "bybit-mainnet.env" not in directives
+    assert "bybit-quote-lab.env" not in directives
     unset = " ".join(line for line in service.splitlines() if line.startswith("UnsetEnvironment="))
     for stripped in ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET", "REAL_MONEY"):
         assert stripped in unset, stripped
-    # The account it runs, and the one it must not, are named where somebody
-    # editing this file will read them.
-    assert "579580669" in unit
+    # The demo credential file carries the owner's Telegram tokens. The engine
+    # sends no messages, and a process that cannot reach the chat cannot post
+    # to it by accident.
+    for stripped in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERT_CHAT_ID"):
+        assert stripped in unset, stripped
+    # Both accounts are named where somebody editing this file will read them:
+    # the one it runs, and the one it stopped running and why.
     assert "555899665" in unit
+    assert "579580669" in unit
 
     assert f"ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh {ENGINE_UNIT} main" in service
     assert "Restart=always" in service
@@ -1094,13 +1104,33 @@ def test_mainnet_start_creates_roots_then_gates_on_preflight() -> None:
     )
     assert combined.index("install:") < combined.index("default-telegram")
     assert combined.index("render-profile") < combined.index("create-state-roots")
+    # The Python mainnet owner was deleted with the rest of the order path. It
+    # is stopped here and never started: a host that has not been through this
+    # deploy may still be running it, and two writers cannot both own one
+    # account. Starting it is what used to fail the strict activate phase --
+    # the unit file is not in the manifest any more.
     assert (
-        "systemctl:enable liquidity-migration-account-execution-mainnet.service" in combined
+        "systemctl:disable --now liquidity-migration-account-execution-mainnet.service"
+        in combined
     )
-    # The owner starts first; both registered producers always start — the
-    # installed risk profile, not a toggle, decides their shares.
     assert (
-        combined.index("systemctl:enable liquidity-migration-account-execution-mainnet.service")
+        "systemctl:enable liquidity-migration-account-execution-mainnet.service"
+        not in combined
+    )
+    # The engine owns the account now, and this host has no engine binary, so
+    # it says so and carries on rather than failing the deploy. Same shape as
+    # the demo engine's gate.
+    assert (
+        "mainnet-engine-skipped reason=no-binary-or-environment "
+        "unit=liquidity-migration-engine-mainnet.service" in combined
+    )
+    # The retired owner is stopped before any producer starts; both registered
+    # producers always start — the installed risk profile, not a toggle,
+    # decides their shares.
+    assert (
+        combined.index(
+            "systemctl:disable --now liquidity-migration-account-execution-mainnet.service"
+        )
         < combined.index("systemctl:enable --now liquidity-migration-bybit-carry-mainnet.service")
     )
     assert (

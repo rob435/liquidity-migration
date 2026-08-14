@@ -871,3 +871,88 @@ disaster_stop_fraction = 0.35
         assert!(err.to_string().contains("sleeve"), "{err}");
     }
 }
+
+/// The templates the fleet is actually deployed from.
+///
+/// A config file that ships in this repo and is copied to a host by hand is an
+/// artifact like any other, and the only place its mistakes show up otherwise
+/// is a unit that will not start. These read the real templates, point the
+/// profile path at the repo's own copy, and assemble the whole thing.
+#[cfg(test)]
+mod deployed_templates {
+    use super::*;
+    use crate::config::Config;
+
+    /// The template with its host paths made local: the profile it names lives
+    /// under /opt on a VPS and under the repo root here.
+    fn config_from(template: &str, profile: &str) -> Config {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("the repo root is two above this crate");
+        let text = std::fs::read_to_string(root.join("deploy").join(template))
+            .unwrap_or_else(|e| panic!("{template} is a shipped artifact and must be readable: {e}"))
+            .replace(
+                &format!("/opt/liquidity-migration/configs/{profile}"),
+                root.join("configs").join(profile).to_str().expect("a utf-8 path"),
+            );
+        toml::from_str::<Config>(&text)
+            .unwrap_or_else(|e| panic!("{template} must parse: {e}"))
+    }
+
+    fn assemble(template: &str, profile: &str) -> Config {
+        let config = config_from(template, profile);
+        let built = strategies(&config.strategies)
+            .unwrap_or_else(|e| panic!("{template} must build its strategies: {e}"));
+        risk(&config.risk, &config.strategies)
+            .unwrap_or_else(|e| panic!("{template} must build its risk kernel: {e}"));
+        target_books(&config.engine, &config.strategies, &built)
+            .unwrap_or_else(|e| panic!("{template} must wire its books: {e}"));
+        config
+    }
+
+    // `target_books` starts a watcher task, so these need a runtime under
+    // them the way the engine has one.
+    #[tokio::test]
+    async fn the_demo_template_assembles_whole() {
+        let config = assemble("engine.demo.toml.template", "operational.demo.json");
+        assert_eq!(config.engine.venue, "bybit_demo");
+        assert!(config.engine.shadow, "a template must never ship live");
+        assert!(
+            config.engine.heartbeat_path.is_some(),
+            "both producers size from the equity in the heartbeat; without a path \
+             they block every entry, quietly"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_mainnet_template_assembles_whole() {
+        let config = assemble("engine.mainnet.toml.template", "operational.mainnet.json");
+        assert_eq!(config.engine.venue, "bybit_mainnet");
+        assert!(config.engine.shadow, "a template must never ship live");
+    }
+
+    #[test]
+    fn the_demo_template_runs_carry_first_and_long_second() {
+        // A strategy's id is its position in the file, and the engine's record
+        // of whose position is whose is keyed on it and rebuilt from the log.
+        // Reordering these blocks hands one sleeve's fill history to the other.
+        let config = config_from("engine.demo.toml.template", "operational.demo.json");
+        let sleeves: Vec<&str> = config.strategies.iter().map(|s| s.sleeve_name()).collect();
+        assert_eq!(sleeves, ["carry", "long"]);
+    }
+
+    #[test]
+    fn each_sleeve_in_the_demo_template_reads_its_own_book() {
+        // Books are routed, not broadcast. Two sleeves sharing one path would
+        // each act on the other's decisions.
+        let config = config_from("engine.demo.toml.template", "operational.demo.json");
+        let paths: Vec<&std::path::Path> = config
+            .strategies
+            .iter()
+            .map(|s| s.book_path.as_deref().expect("every sleeve names a book"))
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert_ne!(paths[0], paths[1], "one file cannot be two sleeves' decisions");
+    }
+}
