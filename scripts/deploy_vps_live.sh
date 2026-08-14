@@ -1381,6 +1381,27 @@ build_engine() {
     else
         printf 'engine-restart-failed unit=%s commit=%s\n' "$ENGINE_UNIT" "$commit" >&2
     fi
+    # And the funded engine, which shares this binary.
+    #
+    # It is started in the activate phase, which runs BEFORE this build, so
+    # without this line a deploy left it running whatever binary it came up
+    # on: the demo engine got the new code and the funded one silently kept
+    # the old. Found on 2026-08-14 by reading the two heartbeats after a
+    # deploy and seeing them disagree about something only new code changed.
+    #
+    # Same gate as everywhere else -- a host says it runs the funded engine by
+    # having its environment file -- and never fatal, for the same reason the
+    # demo restart is not: a fleet that is already up must not be torn down by
+    # a report.
+    if [ -f /etc/liquidity-migration/engine-mainnet.env ] \
+        && systemctl cat "$MAINNET_OWNER_UNIT" >/dev/null 2>&1; then
+        if systemctl restart "$MAINNET_OWNER_UNIT"; then
+            printf 'mainnet-engine-ok commit=%s binary=%s\n' "$commit" "$ENGINE_BINARY"
+        else
+            printf 'mainnet-engine-restart-failed unit=%s commit=%s\n' \
+                "$MAINNET_OWNER_UNIT" "$commit" >&2
+        fi
+    fi
     return 0
 }
 
