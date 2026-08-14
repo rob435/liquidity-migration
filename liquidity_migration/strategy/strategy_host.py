@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from liquidity_migration.account.account_kernel import account_transactions_path
-from liquidity_migration.account.account_owner_health import validate_systemd_invocation_id
+from liquidity_migration.core.env_flags import validate_systemd_invocation_id
 from liquidity_migration.core.fs_watch import DirectoryRenameWatch
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData, BybitPublicTickerStream
 from liquidity_migration.core.config import ResearchConfig

@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from liquidity_migration.account.account_owner_health import validate_systemd_invocation_id
+from liquidity_migration.core.env_flags import validate_systemd_invocation_id
 from liquidity_migration.core.artifact_snapshot import read_stable_file
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.account.execution_environment import EXECUTION_ENVIRONMENT_VALUES

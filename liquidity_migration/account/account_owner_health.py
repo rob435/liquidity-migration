@@ -18,6 +18,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
+from liquidity_migration.core.env_flags import validate_systemd_invocation_id
 from liquidity_migration.core.artifact_snapshot import read_stable_file
 from liquidity_migration.account.account_contracts import (
     AccountEvent,
@@ -66,18 +67,6 @@ class AccountOwnerMarketWarmupPending(RuntimeError):
 
 class AccountOwnerHealthHeadPending(RuntimeError):
     """Fresh healthy owner evidence is briefly behind an advancing journal."""
-
-
-def validate_systemd_invocation_id(value: object, *, label: str = "systemd INVOCATION_ID") -> str:
-    """Return one canonical non-zero systemd invocation identifier."""
-
-    if type(value) is not str or len(value) != 32 or any(
-        character not in "0123456789abcdef" for character in value
-    ):
-        raise ValueError(f"{label} must be exactly 32 lowercase hexadecimal characters")
-    if value == "0" * 32:
-        raise ValueError(f"{label} cannot be the zero identifier")
-    return value
 
 
 def require_systemd_invocation_id(
