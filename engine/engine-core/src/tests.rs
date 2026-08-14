@@ -53,6 +53,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::OrderSent { .. } => "order_sent",
         WalRecord::OrderUpdate { .. } => "order_update",
         WalRecord::Markout { .. } => "markout",
+        WalRecord::Names { .. } => "names",
         WalRecord::CancelSent { .. } => "cancel_sent",
         WalRecord::AmendSent { .. } => "amend_sent",
         WalRecord::LatencyLedger { .. } => "latency_ledger",
@@ -796,6 +797,7 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     let want = [
         "boot",
         "note", // boot says which mode it is in
+        "names", // and what its sleeve and symbol ids mean
         "reconciled", // and what the venue said, against the log
         "intent",
         "verdict",
@@ -949,7 +951,7 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     let kinds = appends(&h.tape);
     assert_eq!(
         kinds,
-        ["boot", "note", "reconciled", "intent", "verdict", "note", "latency_ledger"]
+        ["boot", "note", "names", "reconciled", "intent", "verdict", "note", "latency_ledger"]
     );
     assert!(h.sends.borrow().is_empty());
     let note = note_saying(&h.records, "not sent");
@@ -1633,8 +1635,13 @@ async fn boot_reads_the_rules_and_the_account_before_anything_else() {
     let steps = h.tape.borrow().clone();
     assert_eq!(steps[0], Step::Append("boot".into()));
     assert_eq!(steps[1], Step::Append("note".into()), "which mode it is in");
-    assert_eq!(steps[2], Step::ReadRules);
-    assert_eq!(steps[3], Step::ReadAccount);
+    assert_eq!(
+        steps[2],
+        Step::Append("names".into()),
+        "what the ids mean, before any record uses one"
+    );
+    assert_eq!(steps[3], Step::ReadRules);
+    assert_eq!(steps[4], Step::ReadAccount);
 }
 
 #[tokio::test]

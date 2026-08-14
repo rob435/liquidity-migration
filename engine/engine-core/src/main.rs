@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use engine_core::bench::{self, BenchOptions};
+use engine_core::execution;
 use engine_core::replay;
 use engine_core::runner;
 
@@ -24,6 +25,11 @@ engine — the execution loop
 
   engine replay --wal PATH
       Print the log in words, and what was still in flight at each point.
+
+  engine fills --wal PATH
+      What the trading cost: maker share, fee, how far each fill landed from
+      the price on the screen when its order left, and where the market went
+      afterwards. Per sleeve and symbol.
 ";
 
 fn main() -> ExitCode {
@@ -97,6 +103,19 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
                 report.in_flight.len(),
                 replay::listed(&report.in_flight)
             );
+            Ok(())
+        }
+        "fills" => {
+            let path = value(args, "--wal").ok_or("fills needs --wal PATH")?;
+            let (replayed, torn) = engine_wal::replay_scan(&PathBuf::from(path))?;
+            let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
+            print!("{}", execution::report::of_log(&records));
+            if torn {
+                println!(
+                    "\n  the log ends part-way through a record; anything after that point is \
+                     not in these numbers."
+                );
+            }
             Ok(())
         }
         "-h" | "--help" | "help" => {

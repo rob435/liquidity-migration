@@ -226,6 +226,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         routing.size_to(market.table.len());
+        // Say what the ids mean before any record uses one. Without this every
+        // later line names a number, and a log read a week later cannot say
+        // which coin an order was for.
+        wal.append(&names_record(&names, &market))?;
 
         let mut rules = vec![None; market.table.len()];
         for (name, rule) in venue.instrument_rules().await? {
@@ -746,6 +750,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if admitted == 0 {
             return Ok(());
         }
+        // The table grew, so say what it is now. Ids are only appended, so
+        // this is the earlier one plus the new names.
+        self.wal.append(&names_record(&self.names, &self.market))?;
         // One venue read covers everything admitted this pass. Without a rule
         // there is no way to quantize, so the symbol is followed but nothing
         // can be sent for it — which is the same state as a symbol whose rule
@@ -927,6 +934,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let Engine {
             heartbeat,
             ledger,
+            fills,
             names,
             may_open,
             shadow,
@@ -958,6 +966,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 )
             })
             .collect();
+        // Rolled up once, here, rather than kept as a running total: the
+        // per-sleeve rows are what the ledger is for, and adding them up is
+        // cheaper than keeping a second copy correct.
+        let costs = fills.total();
         heartbeat.write(
             now_ns,
             &heartbeat::Facts {
@@ -975,6 +987,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 account_age_ns: (account.observed_ns != 0)
                     .then(|| now_ns.saturating_sub(account.observed_ns)),
                 holdings: &holdings,
+                costs: &costs,
             },
         );
     }
@@ -1822,5 +1835,16 @@ fn arrival_ns(event: &MarketEvent, fallback: u64) -> u64 {
         fallback
     } else {
         stamp
+    }
+}
+
+/// Both id tables as a log record, so every number in the log can be turned
+/// back into a sleeve and a coin.
+fn names_record(strategies: &[String], market: &MarketState) -> WalRecord {
+    WalRecord::Names {
+        strategies: strategies.to_vec(),
+        symbols: (0..market.table.len())
+            .map(|i| market.table.name(SymbolId(i as u16)).to_string())
+            .collect(),
     }
 }

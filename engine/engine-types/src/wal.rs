@@ -62,6 +62,25 @@ pub enum WalRecord {
         spec: AmendSpec,
         wire_ns: u64,
     },
+    /// What the ids in this log mean.
+    ///
+    /// Both [`StrategyId`] and [`SymbolId`] are indexes handed out by
+    /// position — the strategy's place in the config, the order a symbol was
+    /// interned in — so every other record's `strategy` and `symbol` fields
+    /// are numbers that mean nothing on their own. A log read a week later
+    /// could say an order was strategy 1's, for symbol 4, and no more. This
+    /// is the record that makes it readable.
+    ///
+    /// Written after boot interns what the strategies asked for, and again
+    /// whenever a book names a symbol the engine had never followed. The whole
+    /// table each time: ids are only ever appended, so the newest record is a
+    /// superset of every earlier one and a reader can simply keep the last.
+    Names {
+        /// `strategies[i]` is the name of `StrategyId(i)`.
+        strategies: Vec<String>,
+        /// `symbols[i]` is the name of `SymbolId(i)`.
+        symbols: Vec<String>,
+    },
     /// Where the market went after one of our fills.
     ///
     /// The one execution-quality number that is an observation rather than

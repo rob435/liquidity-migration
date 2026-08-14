@@ -40,6 +40,7 @@ use engine_types::{AccountIdentity, Side};
 
 use crate::clock;
 use crate::engine::ENGINE_VERSION;
+use crate::execution::Costs;
 use crate::ledger::Quantiles;
 
 /// How often the file is rewritten. Far slower than the group-flush tick it
@@ -104,6 +105,16 @@ pub struct Facts<'a> {
     /// a restart would report every position closed and every producer would
     /// drop its whole book at once. The venue's answer cannot do that.
     pub holdings: &'a [(String, Side, f64, f64)],
+    /// What the fills have cost so far this run.
+    ///
+    /// Five numbers, and they answer the question the latency pair beside them
+    /// cannot: the engine can be fast and still be trading badly. Everything
+    /// unmeasured is null rather than zero — a zero here would read as "we
+    /// checked, and it cost nothing", which is the opposite of the truth.
+    ///
+    /// The full picture, per sleeve and symbol and at every horizon, is
+    /// `engine fills --wal PATH` off the log. This is the glance.
+    pub costs: &'a Costs,
 }
 
 /// The heartbeat writer: where the file goes, how often, and the facts about
@@ -212,6 +223,29 @@ impl Heartbeat {
             ("decide_p50_ns", figure(facts.decide.count, facts.decide.p50_ns)),
             ("decide_p99_ns", figure(facts.decide.count, facts.decide.p99_ns)),
             ("engine_version", quoted(ENGINE_VERSION)),
+            ("fills", facts.costs.fills.to_string()),
+            (
+                // Positive is adverse, throughout. The exception is the
+                // markout below, and its key says so.
+                "fill_all_in_arrival_bps",
+                or_null(facts.costs.all_in_arrival_bps().map(bps)),
+            ),
+            (
+                "fill_arrival_shortfall_bps",
+                or_null(facts.costs.arrival_shortfall.mean().map(bps)),
+            ),
+            (
+                // The other way round: positive means the price moved our way
+                // after the fill, so a persistently negative one is a book
+                // being picked off. Named for its horizon, because a markout
+                // without one is meaningless.
+                "fill_markout_1m_our_way_bps",
+                or_null(facts.costs.markout[2].mean().map(bps)),
+            ),
+            (
+                "fills_maker_share",
+                or_null(facts.costs.maker_share().map(|share| format!("{share:.4}"))),
+            ),
             (
                 "lease_path",
                 or_null(self.lease_path.as_ref().map(|p| quoted(&p.display().to_string()))),
@@ -298,6 +332,16 @@ fn or_null(value: Option<String>) -> String {
     value.unwrap_or_else(|| "null".to_string())
 }
 
+/// A basis-point figure, to two places. An unreal one is null rather than a
+/// number JSON cannot hold.
+fn bps(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.2}")
+    } else {
+        "null".to_string()
+    }
+}
+
 /// A latency figure, or null when nothing has been measured in this window.
 /// Zero would read as "instant" rather than "no orders yet".
 fn figure(count: u64, ns: u64) -> String {
@@ -345,7 +389,7 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 19] = [
+    const KEYS: [&str; 24] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -353,6 +397,11 @@ mod tests {
         "decide_p50_ns",
         "decide_p99_ns",
         "engine_version",
+        "fill_all_in_arrival_bps",
+        "fill_arrival_shortfall_bps",
+        "fill_markout_1m_our_way_bps",
+        "fills",
+        "fills_maker_share",
         "lease_path",
         "market_events",
         "may_open",
@@ -371,8 +420,33 @@ mod tests {
         Quantiles { count, p50_ns, p90_ns: p50_ns, p99_ns, max_ns: p99_ns }
     }
 
+    /// An engine that has traded a little: one fill, and it cost something.
+    pub(super) fn some_costs() -> Costs {
+        let mut fills = crate::execution::Fills::default();
+        fills.on_fill(
+            &crate::execution::Fill {
+                client_order_id: "eng-1".into(),
+                strategy: engine_types::StrategyId(0),
+                symbol: engine_types::SymbolId(0),
+                side: Side::Buy,
+                qty: 1.0,
+                px: 101.0,
+                fee: 0.0555,
+                is_maker: true,
+                arrival_mid: 100.0,
+                venue_ts_ms: 1,
+            },
+            0,
+        );
+        fills.total()
+    }
+
     fn facts<'a>(strategies: &'a [String], held: &'a [(String, Side, f64, f64)]) -> Facts<'a> {
+        // An engine that has not filled anything, which is what every test
+        // that is not about fill costs means.
+        static NOTHING_YET: std::sync::OnceLock<Costs> = std::sync::OnceLock::new();
         Facts {
+            costs: NOTHING_YET.get_or_init(Costs::default),
             shadow: true,
             may_open: true,
             market_events: 1234,
@@ -672,5 +746,66 @@ mod tests {
         let mut beat = Heartbeat::with_every(path, None, None, Duration::from_secs(5));
         beat.write(1_000, &facts(&names, &held));
         assert!(!beat.due(1_000 + 4_999_999_999), "a failed write reset the cadence");
+    }
+}
+
+#[cfg(test)]
+mod fill_cost_tests {
+    use super::tests::some_costs;
+    use super::*;
+
+    fn beat_with(costs: &Costs) -> serde_json::Value {
+        let facts = Facts {
+            shadow: true,
+            may_open: true,
+            market_events: 1,
+            orders_sent: 1,
+            strategies: &[],
+            decide: Quantiles::default(),
+            wire: Quantiles::default(),
+            equity_usdt: 100.0,
+            available_usdt: 100.0,
+            account_age_ns: Some(1),
+            holdings: &[],
+            costs,
+        };
+        let beat = Heartbeat::new("unused".into(), None, None);
+        serde_json::from_str(&beat.render(&facts, 1_700_000_000_000)).expect("valid json")
+    }
+
+    #[test]
+    fn the_beat_says_what_the_fills_cost() {
+        // The engine can be fast and still be trading badly. The latency pair
+        // beside these cannot tell anybody which.
+        let fields = beat_with(&some_costs());
+        assert_eq!(fields["fills"], 1);
+        assert_eq!(fields["fills_maker_share"], 1.0, "the one fill rested");
+        assert_eq!(fields["fill_arrival_shortfall_bps"], 100.0);
+        assert_eq!(fields["fill_all_in_arrival_bps"], 105.5, "plus 5.5 bp of fee");
+    }
+
+    #[test]
+    fn nothing_filled_yet_reads_as_null_and_never_as_zero() {
+        // A zero here would say "we checked, and it cost nothing", which is
+        // the opposite of the truth about an engine that has not traded.
+        let fields = beat_with(&Costs::default());
+        assert_eq!(fields["fills"], 0, "the count is a real zero");
+        for key in [
+            "fills_maker_share",
+            "fill_arrival_shortfall_bps",
+            "fill_all_in_arrival_bps",
+            "fill_markout_1m_our_way_bps",
+        ] {
+            assert!(fields[key].is_null(), "{key} should be null: {}", fields[key]);
+        }
+    }
+
+    #[test]
+    fn a_markout_that_has_not_come_round_is_null_beside_a_priced_fill() {
+        // The arrival numbers land the moment a fill does; the markout waits
+        // for its horizon. One being absent must not make the other absent.
+        let fields = beat_with(&some_costs());
+        assert!(fields["fill_markout_1m_our_way_bps"].is_null());
+        assert!(!fields["fill_arrival_shortfall_bps"].is_null());
     }
 }

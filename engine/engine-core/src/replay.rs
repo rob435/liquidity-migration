@@ -30,8 +30,13 @@ pub fn describe(records: &[WalRecord], torn_tail: bool) -> ReplayReport {
     let mut lines = Vec::with_capacity(records.len());
     let mut last_in_flight: Vec<String> = Vec::new();
 
+    // Ids are positions, so a record's `strategy` and `symbol` fields mean
+    // nothing without the tables the run was using. The log says so as it
+    // goes; ids are only appended, so the newest table is the fullest.
+    let mut names = LogNames::default();
     for (index, record) in records.iter().enumerate() {
-        lines.push(format!("{:>6}  {}", index + 1, one_line(record)));
+        names.learn(record);
+        lines.push(format!("{:>6}  {}", index + 1, one_line(record, &names)));
         ledger.apply(record);
         let now: Vec<String> = ledger.in_flight_ids().iter().map(|s| s.to_string()).collect();
         if now != last_in_flight {
@@ -60,7 +65,50 @@ pub fn listed(ids: &[String]) -> String {
     }
 }
 
-pub fn one_line(record: &WalRecord) -> String {
+/// What the ids in a log are called, learned from the log itself.
+///
+/// A log written before the engine recorded its tables still reads — as
+/// numbers, which is what it always was.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LogNames {
+    pub strategies: Vec<String>,
+    pub symbols: Vec<String>,
+}
+
+impl LogNames {
+    /// Take the tables from a record that carries them, and ignore the rest.
+    /// Ids are only appended, so the newest record is the fullest.
+    pub fn learn(&mut self, record: &WalRecord) {
+        if let WalRecord::Names { strategies, symbols } = record {
+            self.strategies = strategies.clone();
+            self.symbols = symbols.clone();
+        }
+    }
+
+    pub fn of_log(records: &[WalRecord]) -> Self {
+        let mut me = LogNames::default();
+        for record in records {
+            me.learn(record);
+        }
+        me
+    }
+
+    pub fn strategy(&self, id: engine_types::StrategyId) -> String {
+        self.strategies
+            .get(id.0 as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("strategy {}", id.0))
+    }
+
+    pub fn symbol(&self, id: engine_types::SymbolId) -> String {
+        self.symbols
+            .get(id.0 as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("symbol {}", id.0))
+    }
+}
+
+pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
     match record {
         WalRecord::Boot {
             version,
@@ -71,11 +119,11 @@ pub fn one_line(record: &WalRecord) -> String {
             &config_sha256[..config_sha256.len().min(12)]
         ),
         WalRecord::Intent { intent } => format!(
-            "wants      strategy {} {:?} {} of symbol {} {} [{}]",
-            intent.strategy.0,
+            "wants      {} {:?} {} of {} {} [{}]",
+            names.strategy(intent.strategy),
             intent.side,
             intent.qty,
-            intent.symbol.0,
+            names.symbol(intent.symbol),
             kind_words(&intent.kind),
             intent.tag
         ),
@@ -94,11 +142,11 @@ pub fn one_line(record: &WalRecord) -> String {
             wire_ns,
             arrival_mid,
         } => format!(
-            "sent       {} {:?} {} of symbol {} {} (at +{} from start){}",
+            "sent       {} {:?} {} of {} {} (at +{} from start){}",
             request.client_order_id,
             request.side,
             request.qty,
-            request.symbol.0,
+            names.symbol(request.symbol),
             kind_words(&request.kind),
             pretty(*wire_ns),
             // The price this order will be judged against. Silent when the
@@ -109,14 +157,14 @@ pub fn one_line(record: &WalRecord) -> String {
                 String::new()
             }
         ),
-        WalRecord::OrderUpdate { update } => format!("news       {}", update_words(update)),
+        WalRecord::OrderUpdate { update } => format!("news       {}", update_words(update, names)),
         WalRecord::CancelSent {
             symbol,
             client_order_id,
             wire_ns,
         } => format!(
-            "pulled     {client_order_id} on symbol {} (at +{} from start)",
-            symbol.0,
+            "pulled     {client_order_id} on {} (at +{} from start)",
+            names.symbol(*symbol),
             pretty(*wire_ns)
         ),
         WalRecord::AmendSent {
@@ -125,8 +173,8 @@ pub fn one_line(record: &WalRecord) -> String {
             spec,
             wire_ns,
         } => format!(
-            "moved      {client_order_id} on symbol {} to{}{} (at +{} from start)",
-            symbol.0,
+            "moved      {client_order_id} on {} to{}{} (at +{} from start)",
+            names.symbol(*symbol),
             match spec.px {
                 Some(px) => format!(" price {px}"),
                 None => String::new(),
@@ -173,6 +221,13 @@ pub fn one_line(record: &WalRecord) -> String {
                 late => format!(" (read {late} ms late)"),
             }
         ),
+        WalRecord::Names { strategies, symbols } => format!(
+            "names      {} sleeve(s): {}; {} symbol(s): {}",
+            strategies.len(),
+            listed(strategies),
+            symbols.len(),
+            listed(symbols)
+        ),
         WalRecord::Note { source, text } => format!("note       [{source}] {text}"),
         WalRecord::ControlAnchor { source, state } => {
             format!("anchor     [{source}] {state}")
@@ -192,7 +247,7 @@ fn kind_words(kind: &OrderKind) -> String {
     }
 }
 
-fn update_words(update: &engine_types::OrderUpdate) -> String {
+fn update_words(update: &engine_types::OrderUpdate, names: &LogNames) -> String {
     use engine_types::OrderUpdate as U;
     match update {
         U::Ack(ack) => format!("{} accepted as {}", ack.client_order_id, ack.venue_order_id),
@@ -211,7 +266,7 @@ fn update_words(update: &engine_types::OrderUpdate) -> String {
         U::Cancelled { client_order_id, .. } => format!("{client_order_id} cancelled"),
         U::StopAttached {
             symbol, trigger_px, ..
-        } => format!("stop on symbol {} at {trigger_px}", symbol.0),
+        } => format!("stop on {} at {trigger_px}", names.symbol(*symbol)),
         U::StreamReset { .. } => "private stream reconnected; gap possible".to_string(),
     }
 }
