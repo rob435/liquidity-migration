@@ -1,8 +1,9 @@
 //! `engine.toml`: what the engine reads at boot.
 //!
-//! The file never contains a venue address. Where the engine trades is fixed
-//! in the venue crate (demo only); config chooses strategies, sizes, and
-//! timings, nothing about the destination.
+//! The file never contains a venue address. `venue` names one of the adapters
+//! compiled into the venue crate, and every host that crate knows is a demo
+//! host; config chooses strategies, sizes, timings, and which adapter runs,
+//! but nothing about the destination.
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +40,11 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize)]
 pub struct EngineSection {
     pub wal_path: PathBuf,
+    /// Which venue adapter to run, by name — not an address. Left out means
+    /// the Bybit demo account, which is what every config meant before this
+    /// key existed. An unknown name is refused at assembly, not defaulted.
+    #[serde(default = "default_venue")]
+    pub venue: String,
     /// How often buffered log bytes are pushed to the OS.
     #[serde(default = "default_group_flush_ms")]
     pub group_flush_ms: u64,
@@ -63,6 +69,14 @@ pub struct StrategyConfig {
     /// Everything else in the block, handed to the strategy as written.
     #[serde(flatten)]
     pub params: toml::Table,
+}
+
+/// Spelled out rather than imported so this layer stays ignorant of the venue
+/// crate — `assembly.rs` is the one place that names the concrete crates. A
+/// test below pins the two spellings together, so they cannot drift apart
+/// without the suite saying so.
+fn default_venue() -> String {
+    "bybit_demo".to_string()
 }
 
 fn default_group_flush_ms() -> u64 {
@@ -135,6 +149,10 @@ symbols = ["BTCUSDT"]
         assert_eq!(cfg.engine.group_flush_ms, 250);
         assert!(cfg.engine.shadow, "shadow is the default");
         assert_eq!(
+            cfg.engine.venue, engine_venue::BYBIT_DEMO,
+            "a config written before the key existed still means the demo venue"
+        );
+        assert_eq!(
             cfg.engine.target_book_path, None,
             "no path means no watcher, which is no decision"
         );
@@ -158,6 +176,16 @@ symbols = ["BTCUSDT"]
             cfg.engine.target_book_path,
             Some(PathBuf::from("var/targets/carry.json"))
         );
+    }
+
+    #[test]
+    fn a_named_venue_is_read_as_written() {
+        let src = SAMPLE.replace(
+            "wal_path = \"engine.wal\"",
+            "wal_path = \"engine.wal\"\nvenue = \"some_other_venue\"",
+        );
+        let cfg: Config = toml::from_str(&src).unwrap();
+        assert_eq!(cfg.engine.venue, "some_other_venue");
     }
 
     #[test]

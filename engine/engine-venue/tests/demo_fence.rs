@@ -2,7 +2,9 @@
 //!
 //! This crate may name two venue hosts and no others. The test reads every
 //! source file back and fails on anything else, so a mainnet host cannot be
-//! added — by hand or by accident — without turning the suite red.
+//! added — by hand or by accident — without turning the suite red. Config
+//! picks a venue adapter by name, and this is why that is safe: the name
+//! reaches only what is compiled in, and what is compiled in is scanned here.
 //!
 //! Every needle below is assembled from fragments at runtime, so this file
 //! never contains a hostname of its own for the scan to trip over.
@@ -122,6 +124,83 @@ fn the_scanner_would_notice_a_mainnet_host() {
     let found = hosts_in(&planted);
     assert_eq!(found.len(), 1);
     assert!(!allowed_hosts().contains(&found[0]), "{found:?}");
+}
+
+#[test]
+fn the_scan_reaches_every_module_the_crate_declares() {
+    // The scan is only a fence if it reads the whole crate. A future adapter
+    // arrives as a new `mod` in lib.rs, so check each declared module is a
+    // file the scan actually collected — a scan narrowed to a hand-written
+    // list of files would fail here rather than pass while missing an
+    // adapter.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    let scanned = crate_sources();
+
+    let mut checked = 0;
+    for line in lib.lines() {
+        let Some(name) = declared_module(line) else { continue };
+        let flat = root.join("src").join(format!("{name}.rs"));
+        let nested = root.join("src").join(&name).join("mod.rs");
+        assert!(
+            scanned.contains(&flat) || scanned.contains(&nested),
+            "module {name} is declared but the host scan never reads it"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 5, "only {checked} modules found; the parse is wrong");
+}
+
+/// `mod name;` from a line of lib.rs, however it is qualified. Only the
+/// one-line form, which is the only form this crate uses.
+fn declared_module(line: &str) -> Option<String> {
+    let line = line.trim();
+    let rest = line
+        .strip_prefix("pub(crate) mod ")
+        .or_else(|| line.strip_prefix("pub mod "))
+        .or_else(|| line.strip_prefix("mod "))?;
+    let name = rest.strip_suffix(';')?;
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        .then(|| name.to_string())
+}
+
+#[test]
+fn no_venue_name_sounds_like_real_money() {
+    // The scanner above is the real fence: it reads the source back, and a
+    // venue whose host is not a demo host cannot pass it whatever it is
+    // called. This is the cheap second check — a name is what an operator
+    // types into engine.toml, and one that reads like a real-money endpoint
+    // would be a trap even with every host correct.
+    for name in engine_venue::KNOWN_VENUES {
+        let lower = name.to_ascii_lowercase();
+        for word in ["main", "prod", "live"] {
+            assert!(
+                !lower.contains(word),
+                "the venue name {name} contains \"{word}\", which reads like real money"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_known_venue_name_reaches_its_own_adapter() {
+    assert!(!engine_venue::KNOWN_VENUES.is_empty(), "no venue is selectable");
+    for name in engine_venue::KNOWN_VENUES {
+        // Credentials come from the environment, which a test box may or may
+        // not have; either the venue is built or it stops at the credential
+        // read. What must never happen is a listed name the constructor does
+        // not know, which is what a forgotten match arm looks like.
+        match engine_venue::Venue::by_name(name, vec!["BTCUSDT".to_string()]) {
+            Ok(venue) => assert_eq!(
+                venue.name(),
+                *name,
+                "{name} built a venue that calls itself something else"
+            ),
+            Err(engine_types::VenueError::Credentials(_)) => {}
+            Err(other) => panic!("{name} is listed as known but does not build: {other}"),
+        }
+    }
 }
 
 #[test]

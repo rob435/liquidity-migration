@@ -113,6 +113,8 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
     let venue_addr = start_mock_venue()?;
     let settings = EngineSection {
         wal_path: options.wal_path.clone(),
+        // Named but unused: the bench builds its own pretend venue below.
+        venue: engine_venue::BYBIT_DEMO.to_string(),
         group_flush_ms: 250,
         account_view_max_age_ms: 60_000,
         shadow: false,

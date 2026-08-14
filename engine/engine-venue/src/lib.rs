@@ -1,11 +1,14 @@
-//! The demo venue gateway: Bybit v5 over HTTPS, and the private order stream.
+//! The venue adapters: Bybit v5 over HTTPS, and the private order stream.
 //!
 //! Demo only, by construction. The two hostnames below are the only venue
 //! hosts anywhere in this crate — there is no mainnet path to misconfigure.
-//! The runtime config carries no URL at all; a base URL can be supplied only
+//! The runtime config picks an adapter by *name* ([`Venue::by_name`]) and
+//! never carries a URL, so config chooses which of the compiled-in adapters
+//! runs and cannot introduce an endpoint. A base URL can be supplied only
 //! through the `for_test` constructors, which is how the tests and the
 //! engine's mock-venue benchmark reach localhost. `tests/demo_fence.rs`
-//! reads the crate source back and fails if any other venue host appears.
+//! reads the whole crate source back — every module, adapters included — and
+//! fails if any other venue host appears.
 //!
 //! Credentials come from the environment and are never taken as arguments in
 //! the live path. A missing key or secret is a `VenueError::Credentials` at
@@ -16,6 +19,7 @@ mod creds;
 mod fmt;
 mod gateway;
 mod parse;
+mod registry;
 mod rest;
 mod sign;
 mod tls;
@@ -23,6 +27,7 @@ mod ws;
 
 pub use creds::{Credentials, API_KEY_ENV, API_SECRET_ENV};
 pub use gateway::BybitGateway;
+pub use registry::{Venue, BYBIT_DEMO, KNOWN_VENUES};
 pub use ws::BybitOrderFeed;
 
 /// Bybit demo REST base. The only REST host this crate knows.

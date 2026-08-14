@@ -23,6 +23,7 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         config = %config_path.display(),
         hash = %loaded.sha256,
         shadow = settings.shadow,
+        venue = %settings.venue,
         strategies = loaded.config.strategies.len(),
         "starting"
     );
@@ -37,7 +38,7 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     let symbols = assembly::symbol_order(&wanted);
     let risk = assembly::risk(&loaded.config.risk, &loaded.config.strategies)?;
-    let venue = assembly::venue(symbols.clone())?;
+    let venue = assembly::venue(&settings.venue, symbols.clone())?;
     let mut market_feed = assembly::market_feed(&wanted);
     let mut order_feed = assembly::order_feed(symbols)?;
 

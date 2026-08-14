@@ -15,7 +15,7 @@ use engine_strategies::build_strategy;
 use engine_types::{
     Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
 };
-use engine_venue::{BybitGateway, BybitOrderFeed};
+use engine_venue::{BybitOrderFeed, Venue};
 use engine_wal::WalWriter;
 use serde::Deserialize;
 
@@ -54,9 +54,12 @@ pub fn order_feed(symbols: Vec<Symbol>) -> Result<BybitOrderFeed, VenueError> {
     BybitOrderFeed::new(symbols)
 }
 
-/// The demo venue gateway (credentials from the environment).
-pub fn venue(symbols: Vec<Symbol>) -> Result<BybitGateway, VenueError> {
-    BybitGateway::new(symbols)
+/// The venue the config named (credentials from the environment). The name
+/// picks one of the adapters compiled into the venue crate — it is not an
+/// address, and an unknown name is refused rather than defaulted to
+/// somewhere nobody chose.
+pub fn venue(name: &str, symbols: Vec<Symbol>) -> Result<Venue, VenueError> {
+    Venue::by_name(name, symbols)
 }
 
 /// The target book watcher, but only when the config names a path. No path

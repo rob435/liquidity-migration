@@ -495,6 +495,9 @@ impl Strategy for Ticker {
 fn settings(shadow: bool) -> EngineSection {
     EngineSection {
         wal_path: "unused-in-mocks.wal".into(),
+        // Named but unused: these tests hand the engine a mock venue
+        // directly rather than going through assembly.
+        venue: engine_venue::BYBIT_DEMO.to_string(),
         group_flush_ms: 250,
         account_view_max_age_ms: 60_000,
         shadow,
