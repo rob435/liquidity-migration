@@ -10,13 +10,13 @@ mod support;
 use engine_types::{
     AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, VenueGateway,
 };
-use engine_venue::{BybitGateway, Credentials, Venue, BYBIT_DEMO};
+use engine_venue::{BybitGateway, Credentials, Venue, VenueRealm, BYBIT_DEMO};
 use support::TestServer;
 
 fn adapter(server: &TestServer) -> BybitGateway {
     BybitGateway::for_test(
         &server.base_url(),
-        Credentials::new("demoKey000000000001", "demoSecret00000000000000000001"),
+        Credentials::new(VenueRealm::Demo, "demoKey000000000001", "demoSecret00000000000000000001"),
         vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
     )
 }
@@ -60,7 +60,7 @@ fn answer(path: &str) -> (u16, String) {
 async fn every_method_reaches_the_adapter_behind_the_name() {
     // One stub arm on the enum would be an order that silently never left.
     let server = TestServer::start(|request, _| answer(&request.path)).await;
-    let mut venue = Venue::BybitDemo(adapter(&server));
+    let mut venue = Venue::Bybit(adapter(&server));
 
     assert!(venue.caps().native_position_stop, "caps came from the adapter");
     venue.send_order(&market_order()).await.unwrap();
@@ -97,7 +97,7 @@ async fn every_method_reaches_the_adapter_behind_the_name() {
 async fn the_chosen_venue_puts_the_same_bytes_on_the_wire_as_the_adapter() {
     let server = TestServer::start(|request, _| answer(&request.path)).await;
     let mut direct = adapter(&server);
-    let mut chosen = Venue::BybitDemo(adapter(&server));
+    let mut chosen = Venue::Bybit(adapter(&server));
 
     assert_eq!(chosen.caps(), direct.caps());
     direct.send_order(&market_order()).await.unwrap();
@@ -115,5 +115,5 @@ async fn the_chosen_venue_puts_the_same_bytes_on_the_wire_as_the_adapter() {
 #[tokio::test]
 async fn a_built_venue_knows_the_name_it_was_chosen_by() {
     let server = TestServer::start(|request, _| answer(&request.path)).await;
-    assert_eq!(Venue::BybitDemo(adapter(&server)).name(), BYBIT_DEMO);
+    assert_eq!(Venue::Bybit(adapter(&server)).name(), BYBIT_DEMO);
 }

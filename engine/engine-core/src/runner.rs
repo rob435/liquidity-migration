@@ -63,7 +63,7 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
     let _log_claim = engine_wal::lock(&settings.wal_path)?;
 
     let mut market_feed = assembly::market_feed(&wanted);
-    let mut order_feed = assembly::order_feed(symbols)?;
+    let mut order_feed = assembly::order_feed(venue.realm(), symbols)?;
 
     let (wal, replayed) = assembly::wal(&settings.wal_path)?;
 

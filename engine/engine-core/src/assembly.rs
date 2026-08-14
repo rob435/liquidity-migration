@@ -15,7 +15,7 @@ use engine_strategies::build_strategy;
 use engine_types::{
     AccountIdentity, Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
 };
-use engine_venue::{BybitOrderFeed, Venue};
+use engine_venue::{BybitOrderFeed, Venue, VenueRealm};
 use engine_wal::WalWriter;
 use serde::Deserialize;
 
@@ -49,10 +49,13 @@ pub fn market_feed(wanted: &[Subscription]) -> BybitPublicFeed {
     BybitPublicFeed::new(wanted)
 }
 
-/// The venue's private order stream (demo host, credentials from the
-/// environment).
-pub fn order_feed(symbols: Vec<Symbol>) -> Result<BybitOrderFeed, VenueError> {
-    BybitOrderFeed::new(symbols)
+/// The venue's private order stream, on the same account the gateway trades.
+///
+/// The realm is taken from the built venue rather than re-read from config,
+/// so the stream that reports fills and the gateway that causes them cannot
+/// end up on different accounts.
+pub fn order_feed(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<BybitOrderFeed, VenueError> {
+    BybitOrderFeed::new(realm, symbols)
 }
 
 /// The venue the config named (credentials from the environment). The name

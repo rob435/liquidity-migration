@@ -1,4 +1,9 @@
-//! The demo gateway: the [`VenueGateway`] contract over Bybit v5.
+//! The Bybit gateway: the [`VenueGateway`] contract over Bybit v5.
+//!
+//! One adapter, two realms. Which account it reaches is decided once, at
+//! construction, by the [`VenueRealm`] handed to [`BybitGateway::new`] — and
+//! the host is derived from that realm rather than passed alongside it, so the
+//! two cannot disagree.
 
 use std::collections::HashMap;
 
@@ -18,8 +23,9 @@ use crate::parse::{
     parse_instruments, parse_order_ack, parse_positions, parse_wallet, parse_working_orders,
     venue_result,
 };
+use crate::realm::VenueRealm;
 use crate::rest::RestClient;
-use crate::{CATEGORY, DEMO_REST_BASE};
+use crate::CATEGORY;
 
 const PATH_TIME: &str = "/v5/market/time";
 const PATH_ORDER_CREATE: &str = "/v5/order/create";
@@ -37,34 +43,69 @@ const PATH_ORDERS_OPEN: &str = "/v5/order/realtime";
 const MAX_PAGES: usize = 20;
 
 pub struct BybitGateway {
+    realm: VenueRealm,
     rest: RestClient,
     names: Vec<Symbol>,
     ids: HashMap<Symbol, SymbolId>,
 }
 
 impl BybitGateway {
-    /// The live gateway: demo host, credentials from the environment. There
-    /// is no argument for the host on purpose.
+    /// The live gateway: the realm's host, and the realm's credentials from
+    /// the environment. There is no argument for the host on purpose — it is
+    /// derived from the realm, so the account being addressed and the account
+    /// being signed for are one decision, not two that must be kept in step.
+    ///
+    /// For `VenueRealm::Mainnet` this fails unless the owner has armed
+    /// `REAL_MONEY` on the host, and it fails at the credential read, before
+    /// any socket is opened.
     ///
     /// `symbols` is the engine's symbol table in `SymbolId` order — position
     /// `i` is the name of `SymbolId(i)`.
-    pub fn new(symbols: Vec<Symbol>) -> Result<Self, VenueError> {
-        Ok(Self::build(DEMO_REST_BASE, Credentials::from_env()?, symbols))
+    pub fn new(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
+        let creds = Credentials::from_env(realm)?;
+        let built = Self::build(realm.rest_base(), creds, symbols);
+        // The Python fleet reads the resolved endpoint back and compares it to
+        // the realm it asked for (`bybit._require_realm_endpoint`), because
+        // there the transport picks its own host from a separate argument.
+        // Here one function derives it, so this can only fail if someone later
+        // reintroduces a second way to set the host — which is exactly when
+        // you want to hear about it.
+        if built.rest.base() != realm.rest_base() {
+            return Err(VenueError::BadRequest(format!(
+                "realm {realm} resolved to {}, but only {} is permitted for that realm",
+                built.rest.base(),
+                realm.rest_base()
+            )));
+        }
+        Ok(built)
     }
 
     /// Point the gateway at a local server. Tests and the mock-venue
     /// benchmark only; the live path is [`BybitGateway::new`].
+    ///
+    /// This is the one constructor that takes a host, so it is the one that
+    /// could name a real venue. `tests/venue_fence.rs` is what stops that:
+    /// no venue host may be written anywhere outside `realm.rs`, test files
+    /// included.
     pub fn for_test(base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
         Self::build(base_url, creds, symbols)
     }
 
+    /// Which account this gateway addresses. Taken from the credentials, so it
+    /// is the realm that will actually sign, not one recorded alongside them.
+    pub fn realm(&self) -> VenueRealm {
+        self.realm
+    }
+
     fn build(base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
+        let realm = creds.realm();
         let ids = symbols
             .iter()
             .enumerate()
             .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
             .collect();
         Self {
+            realm,
             rest: RestClient::new(base_url, creds),
             names: symbols,
             ids,
@@ -414,7 +455,7 @@ mod tests {
     fn an_unknown_symbol_id_cannot_become_a_request() {
         let gw = BybitGateway::for_test(
             "http://127.0.0.1:1",
-            Credentials::new("k", "s"),
+            Credentials::new(VenueRealm::Demo, "k", "s"),
             vec!["BTCUSDT".to_string()],
         );
         assert!(gw.name_of(SymbolId(0)).is_ok());
@@ -425,7 +466,7 @@ mod tests {
     fn added_symbols_keep_their_position_as_the_id() {
         let mut gw = BybitGateway::for_test(
             "http://127.0.0.1:1",
-            Credentials::new("k", "s"),
+            Credentials::new(VenueRealm::Demo, "k", "s"),
             vec!["BTCUSDT".to_string()],
         );
         assert_eq!(gw.add_symbol("ETHUSDT"), SymbolId(1));

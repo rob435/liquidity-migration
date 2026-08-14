@@ -32,8 +32,8 @@ use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStre
 use crate::clock::{mono_ns, wall_ms};
 use crate::creds::Credentials;
 use crate::parse::{num_field, opt_num_field, str_field};
+use crate::realm::VenueRealm;
 use crate::sign::ws_signature;
-use crate::DEMO_PRIVATE_WS;
 
 /// Bybit drops a private socket that goes quiet for 30 seconds.
 const PING_EVERY: Duration = Duration::from_secs(20);
@@ -64,9 +64,12 @@ pub struct BybitOrderFeed {
 }
 
 impl BybitOrderFeed {
-    /// The live feed: demo stream, credentials from the environment.
-    pub fn new(symbols: Vec<Symbol>) -> Result<Self, VenueError> {
-        Ok(Self::build(DEMO_PRIVATE_WS, Credentials::from_env()?, symbols))
+    /// The live feed: the realm's private stream, and the realm's credentials
+    /// from the environment. Like the gateway, mainnet fails here unless the
+    /// owner has armed `REAL_MONEY`.
+    pub fn new(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
+        let creds = Credentials::from_env(realm)?;
+        Ok(Self::build(realm.private_ws(), creds, symbols))
     }
 
     /// Point the feed at a local server. Tests and the mock venue only.

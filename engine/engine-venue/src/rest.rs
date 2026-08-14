@@ -31,6 +31,12 @@ pub(crate) struct RestClient {
 }
 
 impl RestClient {
+    /// The host this client actually sends to. Read back by the live gateway
+    /// constructor to check the realm and the host agree.
+    pub(crate) fn base(&self) -> &str {
+        &self.base
+    }
+
     pub(crate) fn new(base: impl Into<String>, creds: Credentials) -> Self {
         crate::tls::install_crypto_provider();
 
