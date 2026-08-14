@@ -155,15 +155,25 @@ fn footer(total: &Costs, fills: &Fills) -> String {
             fills.pending()
         ));
     }
-    // A restart ends every horizon a fill was still owed, and nothing records
-    // that it did. So the long-horizon columns are measured over fewer fills
-    // than the short ones, and which fills is not random: restarts cluster on
-    // deploys, and deploys cluster on the days something changed.
+    if fills.stream_gaps > 0 {
+        out.push_str(&format!(
+            "  the private stream reconnected {} time(s). Fills that happened inside those\n  \
+             gaps were never delivered and are in none of these numbers.\n",
+            fills.stream_gaps
+        ));
+    }
+    // The later columns are measured over fewer fills than the earlier ones,
+    // for two quite different reasons, and the difference matters: one is a
+    // run that simply has not aged yet, the other is measurement that was lost
+    // and will not come back. Naming only the alarming one would have this
+    // line cry wolf on every short run, so it names both and leaves the
+    // reader to tell which they are looking at.
     if total.markout[0].weight > total.markout[HORIZONS_MS.len() - 1].weight {
         out.push_str(
-            "  the later horizons cover less than the earlier ones. A restart ends every\n  \
-             horizon a fill was still owed, so a run with restarts in it measures the\n  \
-             five-minute column over fewer fills than the one-second column.\n",
+            "  the later horizons cover less of the trading than the earlier ones, because\n  \
+             a fill is owed its five-minute mark five minutes later. Either the run is\n  \
+             younger than that, or it restarted -- a restart ends every horizon a fill was\n  \
+             still owed, and restarts cluster on deploys.\n",
         );
     }
     out

@@ -116,16 +116,37 @@ pub fn signed_markout_bps(side: Side, fill_px: f64, later_mid: f64) -> Option<f6
     Some(10_000.0 * sign(side) * (later_mid - fill_px) / fill_px)
 }
 
-/// The midpoint of a two-sided book, or `None` when there is not one to read.
+/// The midpoint of a two-sided book, and when that book arrived.
 ///
 /// A crossed or one-sided book is not a price. The Python calls this a book
 /// that is not healthy and refuses to mark against it; so does this.
-pub fn healthy_mid(market: &MarketState, symbol: SymbolId) -> Option<f64> {
+pub fn healthy_mid(market: &MarketState, symbol: SymbolId) -> Option<(f64, u64)> {
     let quote = market.quotes.get(symbol.0 as usize)?;
     if !usable(quote.bid_px) || !usable(quote.ask_px) || quote.ask_px < quote.bid_px {
         return None;
     }
-    Some((quote.bid_px + quote.ask_px) / 2.0)
+    Some(((quote.bid_px + quote.ask_px) / 2.0, quote.recv_ns))
+}
+
+/// The midpoint, but only from a book that has arrived since a fill.
+///
+/// A markout asks where the price went *after* we traded. If no price has
+/// arrived since, there is no answer yet — and the book still sitting there is
+/// not evidence that nothing moved, it is evidence that nobody told us.
+///
+/// This is not a staleness threshold and deliberately not one: any constant
+/// would be wrong for both a name that trades every millisecond and one that
+/// trades twice an hour. The requirement is logical rather than numerical, so
+/// it needs no tuning and cannot be tuned wrong.
+///
+/// It matters because the failure is invisible without it. A halted or
+/// delisted symbol keeps its last quote for ever, and every horizon then marks
+/// against the identical mid — four consistent numbers that read exactly like
+/// a measurement and are a measurement of nothing. This fleet has been bitten
+/// by a delisted symbol before.
+pub fn mid_after(market: &MarketState, symbol: SymbolId, after_ns: u64) -> Option<f64> {
+    let (mid, recv_ns) = healthy_mid(market, symbol)?;
+    (recv_ns > after_ns).then_some(mid)
 }
 
 /// A running mean that remembers what it was averaged over.
@@ -298,9 +319,24 @@ pub struct Fills {
     pending: VecDeque<Owed>,
     /// Fills dropped from `pending` because too many were waiting at once.
     pub dropped: u64,
+    /// Private-stream reconnections. Every one is a window in which fills
+    /// happened and were never delivered, so everything here is short by
+    /// however many — and a report that did not say so would be claiming to
+    /// be a complete account of what the trading cost.
+    pub stream_gaps: u64,
 }
 
 impl Fills {
+    /// The private stream reconnected, so fills may have been lost in the gap.
+    ///
+    /// Nothing here can recover them: the engine refreshes its account reading
+    /// to repair its idea of exposure, but the individual fills and their
+    /// prices are gone. All this can do is remember that the account below is
+    /// incomplete, and say so.
+    pub fn stream_gap(&mut self) {
+        self.stream_gaps += 1;
+    }
+
     /// Price one fill and start its markout clock.
     pub fn on_fill(&mut self, fill: &Fill, now_ns: u64) {
         let notional = (fill.px * fill.qty).abs();
@@ -375,7 +411,7 @@ impl Fills {
                 if owed.owed & bit == 0 || age_ms < *horizon_ms {
                     continue;
                 }
-                let mid = healthy_mid(market, owed.symbol);
+                let mid = mid_after(market, owed.symbol, owed.filled_ns);
                 let gave_up = age_ms >= horizon_ms.saturating_add(LATENESS_BOUND_MS);
                 if mid.is_none() && !gave_up {
                     // "The first healthy midpoint at or after h" — so wait for
@@ -550,6 +586,9 @@ impl Fills {
                     actual_horizon_ms: *actual_horizon_ms,
                     notional_usdt: *notional_usdt,
                 }),
+                WalRecord::OrderUpdate {
+                    update: OrderUpdate::StreamReset { .. },
+                } => me.stream_gap(),
                 _ => {}
             }
         }

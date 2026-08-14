@@ -1573,6 +1573,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // A private-stream gap may have swallowed fills. Refresh the account
         // reading now rather than trusting exposure across the gap.
         if let OrderUpdate::StreamReset { .. } = update {
+            // Exposure can be repaired from the venue; the fills themselves
+            // cannot. Remembered so the cost ledger does not go on claiming to
+            // be a complete account of what the trading cost.
+            self.fills.stream_gap();
             match self.venue.account_view().await {
                 Ok(view) => self.adopt_view(view),
                 Err(e) => {

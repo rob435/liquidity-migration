@@ -284,6 +284,20 @@ measured against, how many horizons never found one, what was dropped, what is
 still waiting. Five of those numbers are also in the heartbeat, so an operator
 sees them without the log.
 
+Two rules keep it from measuring nothing and calling it something. A markout
+is only taken against a book that **arrived after the fill** — a halted or
+delisted symbol keeps its last quote for ever, and four horizons marking
+against the identical mid read exactly like a measurement while being a
+measurement of nothing. And a mark that turns up long after its horizon is not
+that horizon: a stall or a replayed backlog would otherwise be averaged into
+the one-second column at full weight.
+
+What it cannot repair, it confesses. A private-stream reconnection is a window
+in which fills happened and were never delivered; the engine repairs its idea
+of exposure from the venue but the fills themselves are gone, so the footer
+says how many gaps there were. A restart ends every horizon a fill was still
+owed, so the later columns cover less of the trading than the earlier ones.
+
 Two honest differences from the Python half, both stated in the module header:
 `M0` here is the **top of book**, because that is the only book the engine
 carries, so nothing here says anything about market impact and nothing pretends

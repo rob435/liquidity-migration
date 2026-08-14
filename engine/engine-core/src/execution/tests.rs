@@ -22,6 +22,11 @@ fn market(bid: f64, ask: f64) -> MarketState {
             quote: Quote {
                 bid_px: bid,
                 ask_px: ask,
+                // Stamped, because a markout is only measured against a book
+                // that arrived after the fill and a book stamped at zero never
+                // did. A live feed always carries one; a test fixture has to
+                // say so.
+                recv_ns: 1,
                 ..Quote::default()
             },
         });
@@ -113,10 +118,56 @@ fn an_anchor_we_never_read_measures_nothing_rather_than_zero() {
 
 #[test]
 fn a_book_that_is_not_a_book_has_no_midpoint() {
-    assert_eq!(healthy_mid(&market(99.0, 101.0), BTC), Some(100.0));
+    assert_eq!(healthy_mid(&market(99.0, 101.0), BTC).map(|(m, _)| m), Some(100.0));
     assert_eq!(healthy_mid(&market(101.0, 99.0), BTC), None, "crossed");
     assert_eq!(healthy_mid(&market(0.0, 101.0), BTC), None, "one-sided");
     assert_eq!(healthy_mid(&MarketState::default(), BTC), None, "no symbol");
+}
+
+#[test]
+fn a_book_that_has_not_moved_since_the_fill_answers_nothing() {
+    // A markout asks where the price went after we traded. If no price has
+    // arrived since, there is no answer -- and the book still sitting there is
+    // not evidence that nothing moved, it is evidence that nobody told us.
+    let mut market = market(99.0, 101.0);
+    market.quotes[BTC.0 as usize].recv_ns = 500;
+    assert_eq!(mid_after(&market, BTC, 400), Some(100.0), "it arrived after");
+    assert_eq!(mid_after(&market, BTC, 500), None, "same instant is not after");
+    assert_eq!(mid_after(&market, BTC, 900), None, "the fill is newer than the book");
+}
+
+#[test]
+fn a_symbol_that_stopped_publishing_is_never_marked_against_its_last_price() {
+    // The failure this exists for, and it is invisible without it: a halted or
+    // delisted symbol keeps its last quote for ever, so every horizon would
+    // mark against the identical mid -- four consistent numbers that read like
+    // a measurement and measure nothing. This fleet has met a delisted symbol.
+    let mut fills = Fills::default();
+    let mut halted = market(99.0, 101.0);
+    halted.quotes[BTC.0 as usize].recv_ns = 10;
+    fills.on_fill(&fill(Side::Buy, 100.0, 10.0, 100.0), 1_000);
+
+    assert!(fills.due(1_000 + 1_100 * MS, &halted).is_empty(), "waiting for a price");
+    let gave_up = fills.due(1_000 + (1_000 + LATENESS_BOUND_MS) * MS, &halted);
+    assert_eq!(gave_up.len(), 1);
+    assert_eq!(gave_up[0].mid, None, "never measured, and it says so");
+    assert_eq!(fills.total().marks_unmeasurable, 1);
+}
+
+#[test]
+fn a_stream_gap_is_remembered_because_the_fills_in_it_are_not() {
+    // Nothing can recover them. All this can do is stop the report claiming to
+    // be a complete account of what the trading cost.
+    let log = vec![
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 101.0, false),
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::StreamReset { recv_ns: 1 },
+        },
+    ];
+    let fills = Fills::from_records(&log);
+    assert_eq!(fills.stream_gaps, 1);
+    assert_eq!(fills.total().fills, 1, "the one we did see still counts");
 }
 
 #[test]
