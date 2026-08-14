@@ -55,11 +55,8 @@ from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     load_demo_rules,
 )
 from liquidity_migration.account.account_owner_health import (  # noqa: E402
-    AccountOwnerMarketWarmupPending,
-    require_recent_account_owner_health,
     validate_systemd_invocation_id,
 )
-from liquidity_migration.runtime.account_owner_readiness import latest_market_readiness  # noqa: E402
 from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes  # noqa: E402
 from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
 from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
@@ -81,8 +78,8 @@ def _plain_name(label: str) -> str:
     return name.replace("-", " ") or label
 DEMO_RULE_MAINTENANCE_WARNING_HOURS = 24.0
 
-_DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution.service"
-_MAINNET_ACCOUNT_OWNER_UNIT = "liquidity-migration-account-execution-mainnet.service"
+_DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-engine.service"
+_MAINNET_ACCOUNT_OWNER_UNIT = "liquidity-migration-engine-mainnet.service"
 _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT,)
 _ACCOUNT_SCOPES = ("demo", "mainnet")
 _LONG_DEMO_UNIT = "liquidity-migration-bybit-long-demo.service"
@@ -1191,90 +1188,18 @@ def gather_carry_alerts(
     return alerts
 
 
-def gather_account_capture_alerts(
-    *,
-    capture_root: Path,
-    now_ms: int | None = None,
-    max_age_minutes: float,
-    label: str = "",
-    expected_owner_uid: int | None = None,
-    startup_grace_minutes: float = 0.0,
-    unit_runtime: UnitRuntime | None = None,
-) -> list[Alert]:
-    """Detect an owner that is active/restarting but no longer ingesting L2.
-
-    The "capture" naming is kept only so existing alert cooldown keys stay
-    stable; the checked artifact is a bounded live-market readiness sidecar.
-    An owner inside its startup grace has not subscribed yet; that window is a
-    restart, not an outage.
-    """
-    suffix = f"_{label}" if label else ""
-    owner_label = f"{label} account execution" if label else "account execution"
-    in_startup_grace = _within_startup_grace(unit_runtime, max_age_minutes=startup_grace_minutes)
-    try:
-        readiness = latest_market_readiness(
-            capture_root,
-            expected_owner_uid=expected_owner_uid,
-        )
-        oldest_required_ns = readiness.oldest_required_receive_ts_ns
-        if oldest_required_ns is None:
-            raise RuntimeError("required live-L2 receive timestamp is unavailable")
-        newest_ms = oldest_required_ns // 1_000_000
-    except (OSError, RuntimeError, ValueError) as exc:
-        if in_startup_grace:
-            return []
-        return [
-            Alert(
-                key=f"account_capture_missing{suffix}",
-                severity=CRITICAL,
-                message=(
-                    f"{owner_label} owner has no usable bounded live-L2 readiness; "
-                    f"decisions cannot be executed safely ({type(exc).__name__}: {str(exc)[:160]})."
-                ),
-                headline=(
-                    f"The {owner_label} owner has no live price feed — it cannot trade safely."
-                ),
-            )
-        ]
-    observed_now_ms = _now_ms() if now_ms is None else now_ms
-    age_minutes = (observed_now_ms - newest_ms) / 60_000.0
-    if age_minutes > max_age_minutes and not in_startup_grace:
-        return [
-            Alert(
-                key=f"account_capture_stale{suffix}",
-                severity=CRITICAL,
-                message=(
-                    f"{owner_label} live L2 is {age_minutes:.1f} min stale "
-                    f"(> {max_age_minutes:g} min); owner may be hung or disconnected."
-                ),
-                headline=(
-                    f"Live prices for the {owner_label} owner are {age_minutes:.0f} min stale — "
-                    "it may be hung or disconnected."
-                ),
-            )
-        ]
-    return []
-
-
-# Sub-minute proof that the owner is still reading the venue comes from
-# venue_facts_at_ns in the owner-health file, checked below. The journal now
-# records venue-fact changes on a ten-minute floor, so this bound only has to
-# catch a journal that stopped receiving venue facts at all: two missed
+# Sub-minute proof that the account is still being read from the venue. The
+# journal records venue-fact changes on a ten-minute floor, so this bound only
+# has to catch a journal that stopped receiving venue facts at all: two missed
 # checkpoints plus one 3-minute watchdog interval, rounded up.
 VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 25.0
 
-# How old the owner's last authenticated venue observation may be. One minute,
-# the same bound the owner-health projection itself gets, so an owner that is
-# alive but whose venue loop is wedged pages at least as fast as it did when
-# the journal carried this proof.
-VENUE_FACT_AGE_FLOOR_MINUTES = 1.0
-
 # The freshness check needs the newest venue snapshot, not a genesis replay:
 # a full verified read cost ~20s CPU and ~250MB peak at 28.5k segments, every
-# 3 minutes, re-verifying a chain each owner generation already verified at
-# startup. Deep enough that a ten-minute checkpoint is always inside it unless
-# the journal is taking more than one transaction per second, ~250x the
-# observed non-snapshot rate.
+# 3 minutes, re-verifying a chain each generation already verified at startup.
+# Deep enough that a ten-minute checkpoint is always inside it unless the
+# journal is taking more than one transaction per second, ~250x the observed
+# non-snapshot rate.
 ACCOUNT_HEALTH_TAIL_SEGMENTS = 1024
 
 
@@ -1350,116 +1275,6 @@ def gather_account_health_alerts(
             )
         ]
     return []
-
-
-def gather_account_owner_health_alerts(
-    *,
-    account_root: Path,
-    environment: str,
-    max_age_minutes: float,
-    now_ms: int | None = None,
-    startup_grace_minutes: float = 0.0,
-    unit_runtime: UnitRuntime | None = None,
-) -> list[Alert]:
-    """Require fresh process, capital, rule-readiness, and status evidence."""
-    try:
-        max_age_ns = max(1, int(max_age_minutes * 60 * 1_000_000_000))
-        venue_fact_max_age_ns = max(
-            max_age_ns,
-            int(VENUE_FACT_AGE_FLOOR_MINUTES * 60 * 1_000_000_000),
-        )
-        # head_binding="allow_behind": liveness needs freshness and healthy
-        # status, not the exact-head capital binding sizing consumers require —
-        # during active trading the journal normally runs one transaction ahead
-        # of the on-disk health projection.
-        if now_ms is None:
-            require_recent_account_owner_health(
-                account_root,
-                environment=environment,
-                max_age_ns=max_age_ns,
-                max_venue_fact_age_ns=venue_fact_max_age_ns,
-                head_binding="allow_behind",
-            )
-        else:
-            require_recent_account_owner_health(
-                account_root,
-                environment=environment,
-                max_age_ns=max_age_ns,
-                max_venue_fact_age_ns=venue_fact_max_age_ns,
-                now_ns=now_ms * 1_000_000,
-                head_binding="allow_behind",
-            )
-    except (OSError, RuntimeError, ValueError) as exc:
-        if isinstance(exc, AccountOwnerMarketWarmupPending):
-            # Nonterminal <=30s dynamic-subscription transition; the owner stays
-            # blocked and producers still fail closed. A latched warmup timeout
-            # raises a different error and still pages.
-            return []
-        if not str(exc).startswith(_OWNER_BLOCKED_PREFIX) and _within_startup_grace(
-            unit_runtime, max_age_minutes=startup_grace_minutes
-        ):
-            # A freshly (re)started owner has not written its first health
-            # projection for this generation yet. Nothing is unprotected in that
-            # window — producers plan entries as blocked and keep publishing
-            # exits — so paging on missing/stale/previous-generation evidence
-            # turns every routine restart into a CRITICAL. An owner that is
-            # alive enough to report BLOCKED still pages: that is evidence, not
-            # the absence of it.
-            return []
-        detail = str(exc)
-        if detail.startswith(_OWNER_BLOCKED_PREFIX):
-            headline = (
-                f"The {environment} account owner is blocked: "
-                f"{detail[len(_OWNER_BLOCKED_PREFIX):].strip()[:160]}"
-            )
-        elif detail.startswith("account-owner venue facts are stale"):
-            headline = (
-                f"The {environment} account owner is running but has not read "
-                "the exchange recently — its venue loop may be stuck."
-            )
-        else:
-            headline = f"The {environment} account owner has no fresh proof it is healthy."
-        return [
-            Alert(
-                key=f"account_owner_health:{environment}",
-                severity=CRITICAL,
-                message=(
-                    f"{environment} account owner has no fresh healthy status/capital evidence: "
-                    f"{type(exc).__name__}: {str(exc)[:400]}"
-                ),
-                headline=headline,
-            )
-        ]
-    return []
-
-
-def coalesce_demo_account_alerts(
-    reconciliation_alerts: list[Alert],
-    owner_alerts: list[Alert],
-) -> list[Alert]:
-    """Drop only the owner-health echo of an already-reported root mismatch."""
-    reconciliation_unhealthy = any(
-        alert.key == "account_health_unhealthy"
-        for alert in reconciliation_alerts
-    )
-    if not reconciliation_unhealthy:
-        return [*reconciliation_alerts, *owner_alerts]
-    dependent_fragments = (
-        "account reconciliation unhealthy",
-        "account reconciliation mismatch",
-    )
-    independent_owner_alerts = [
-        alert
-        for alert in owner_alerts
-        if not (
-            alert.key == "account_owner_health:demo"
-            and any(
-                fragment in alert.message.lower()
-                for fragment in dependent_fragments
-            )
-        )
-    ]
-    return [*reconciliation_alerts, *independent_owner_alerts]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1644,45 +1459,15 @@ def main() -> int:
                 realm="mainnet" if mainnet else "demo",
             )
         )
-    alerts.extend(
-        gather_account_capture_alerts(
-            capture_root=Path(args.account_capture_root),
-            max_age_minutes=args.max_account_capture_age_min,
-            # Both watchdogs page the same chat; an unlabelled owner alert cannot
-            # be told apart from the demo one.
-            label="mainnet" if mainnet else "",
-            startup_grace_minutes=args.max_cycle_age_min,
-            unit_runtime=unit_runtime.get(
-                _MAINNET_ACCOUNT_OWNER_UNIT if mainnet else _DEMO_ACCOUNT_OWNER_UNIT
-            ),
-        )
-    )
-    if mainnet:
+    if not mainnet:
+        # The owner-health file had exactly one writer, the Python account
+        # owner, and it is gone. What survives is the account journal's own
+        # reconciliation evidence, which the engine writes through the same
+        # kernel. The engine's own liveness is its heartbeat, checked above.
         alerts.extend(
-            gather_account_owner_health_alerts(
+            gather_account_health_alerts(
                 account_root=Path(args.account_root),
-                environment="mainnet",
                 max_age_minutes=args.max_account_health_age_min,
-                startup_grace_minutes=args.max_cycle_age_min,
-                unit_runtime=unit_runtime.get(_MAINNET_ACCOUNT_OWNER_UNIT),
-            )
-        )
-    else:
-        demo_reconciliation_alerts = gather_account_health_alerts(
-            account_root=Path(args.account_root),
-            max_age_minutes=args.max_account_health_age_min,
-        )
-        demo_owner_alerts = gather_account_owner_health_alerts(
-            account_root=Path(args.account_root),
-            environment="demo",
-            max_age_minutes=args.max_account_health_age_min,
-            startup_grace_minutes=args.max_cycle_age_min,
-            unit_runtime=unit_runtime.get(_DEMO_ACCOUNT_OWNER_UNIT),
-        )
-        alerts.extend(
-            coalesce_demo_account_alerts(
-                demo_reconciliation_alerts,
-                demo_owner_alerts,
             )
         )
     if not mainnet and long_root is not None:

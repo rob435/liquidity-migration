@@ -16,6 +16,68 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-14 — The Python order path is deleted, and the engine is the
+  account owner.** Owner-directed. Ten modules reachable only from the account
+  owner, its two systemd units, its two launcher scripts, the four dispatcher
+  arms, and thirty-one test files: about 25,000 lines. Among them the three
+  capital-preservation modules `AGENTS.md` had named as off-limits —
+  `account_loss_guard.py`, `equity_anchored_envelope.py`, `venue_protection.py`
+  — removed on the owner's explicit instruction after the engine carried all
+  three with parity tests written against those very files. That rule in
+  `AGENTS.md` now names the Rust originals; the controls did not go, they
+  moved. Nothing is deployed: the host still runs `2bd3a00` and keeps trading
+  until somebody deploys.
+
+  *The producers could not have traded without a second change, and it is the
+  substance of this entry.* They do not merely tolerate an account owner —
+  they **size from it**. Every cycle read `equity_usdt` out of the owner's
+  `account_owner_health.json` and planned every entry as blocked when it was
+  missing or stale (`strategy_planning.account_owner_equity_or_error` returns
+  `(0.0, error)` and the caller blocks). Deleting the owner with nothing else
+  changed would have left a fleet that ran, published exits, and never opened
+  another position — quietly, with no error anywhere. So the engine now
+  publishes what the producers need in its heartbeat:
+  `account_equity_usdt`, `account_available_usdt`, and
+  `account_observed_ns`, read through the new
+  [`engine_account_health.py`](liquidity_migration/account/engine_account_health.py).
+
+  Three details of that seam are deliberate. **The timestamp is the venue's
+  reading time, not the file's write time** — an engine whose loop keeps
+  beating while its venue reads fail ages out on exactly the number that
+  matters, which is the case the check exists for. **An engine that has not
+  read the venue yet writes null, not zero**, so a producer can tell "no
+  reading" from "no money". **The account id is compared**, and a mismatch
+  blocks entries with both values in the message, because the route's id and
+  the id the engine authenticated as could not be proved equal offline; if
+  they ever disagree it says so in one line instead of going quiet.
+
+  Two capabilities did not survive, and neither is a test problem. **Flatten
+  is gone**: it market-closed a book by publishing zero targets into the
+  owner's intent inbox, and the engine reads target *book files* and has no
+  inbox, so nothing drains them. `ops.sh flatten` now refuses with that
+  explanation and the Telegram close button is removed rather than left as a
+  button that cannot work — closing a book is a manual job at the venue until
+  the engine grows a path of its own. **The hourly digest is gone** with the
+  owner that rendered it; `docs/notifications.md` keeps its shape as the
+  specification for whatever replaces it.
+
+  The rest is plumbing that hung off the owner, repointed: the producers no
+  longer order themselves after it (`Wants=`/`Requires=` removed — they write
+  a book on disk and the engine reads it), the engine units take the owner's
+  place in `ROLLOUT_OWNER_UNITS` so they stop last and start first,
+  `lib_sleeves.sh` requires the engine unit in the manifest instead of the
+  owner, and the watchdog and Telegram controls watch the engine units. The
+  watchdog's owner-artifact checks — market-readiness sidecar, owner-health
+  file, notification state — were removed rather than repointed, because their
+  writer is gone; its unit-liveness and account-journal checks stay.
+  `verify_topology()` no longer demands the demo owner, which was the trap that
+  would have broken every deploy after this one.
+
+  `scripts/dev.sh check` green: 2444 Python tests, 600 Rust tests, ruff and
+  mypy clean. Each new check landed with a failing-first proof — removing the
+  venue-reading staleness check or the account-id comparison turns exactly its
+  own test red.
+
 - **2026-08-14 — The engine can be pointed at the funded account, reads the
   fleet's own risk limits, tells each sleeve's book apart, and states leverage
   at the venue.** Six commits, `80d31eb8`, `68576db1`, `5283f978`, `39b110fa`,

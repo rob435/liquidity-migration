@@ -1165,8 +1165,10 @@ verify_topology() {
     VERIFY_UNIT_ROWS=()
     VERIFY_MISMATCHES=()
 
-    verify_unit on liquidity-migration-account-execution.service "demo owner is not active and enabled"
-
+    # No unconditional account-owner row here. The Python owner used to be one;
+    # the engine that replaced it is checked further down, but only where it is
+    # installed, because a host that has not taken the engine yet must still be
+    # deployable — that is how it gets one.
     if sleeve_on "$LONG_SLEEVE"; then
         verify_unit on liquidity-migration-bybit-long-demo.service "LONG demo producer is not active"
     else
@@ -1181,8 +1183,6 @@ verify_topology() {
     # verification; armed, the funded fleet is verified exactly like the
     # others.
     if mainnet_armed; then
-        verify_unit on liquidity-migration-account-execution-mainnet.service \
-            "mainnet owner is not active and enabled"
         verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
         verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
         verify_unit on liquidity-migration-mainnet-liveness.timer "mainnet liveness timer is not active"
@@ -1193,7 +1193,7 @@ verify_topology() {
         fi
     else
         for mainnet_unit in \
-            liquidity-migration-account-execution-mainnet.service \
+            liquidity-migration-engine-mainnet.service \
             liquidity-migration-bybit-carry-mainnet.service \
             liquidity-migration-bybit-long-mainnet.service \
             liquidity-migration-mainnet-liveness.timer; do
@@ -1389,9 +1389,9 @@ activate_mode() {
     for unit in $(lm_expected_systemd_units); do
         systemctl disable --now "$unit" 2>/dev/null || true
     done
-    systemctl enable liquidity-migration-account-execution.service
-    systemctl start liquidity-migration-account-execution.service
-
+    # The account owner is started below by the engine block, which is
+    # conditional on the engine being installed. There is no Python owner to
+    # enable here any more.
     start_if "$LONG_SLEEVE" liquidity-migration-bybit-long-demo.service
     start_if "$CARRY_SLEEVE" liquidity-migration-bybit-carry-demo.service
 
@@ -1718,12 +1718,6 @@ ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-demo-liveness.service
     liquidity-migration-mainnet-liveness.service
     liquidity-migration-telegram-controls.service
-    # The engine has no edge to anything here; it is in this list because
-    # require_quiescent refuses to install while ANY liquidity-migration-*
-    # unit is running, and stop-first only stops what these lists name. Left
-    # out, a running engine would stop every deploy dead — the funded fleet's
-    # included — with "units still running after stop-first".
-    liquidity-migration-engine.service
     # Retired fleets stay in the stop list so the rollout that carries each
     # retirement quiesces a host still running them; the manifest install
     # then removes the unit files for good. Paper retired 2026-08-03; the
@@ -1739,10 +1733,17 @@ ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-continuous-hedge.service
     liquidity-migration-continuous-rmom-refresh.service
 )
-# Owners stop last and start first: every mainnet producer declares
-# Requires=/After= on the mainnet owner. The retired paper owner stays here
-# for the same transition reason as the retired producers above.
+# Owners stop last and start first. The engines are the owners now: they hold
+# the account lease and carry the orders, and a producer publishing a book
+# nobody owns is the state this ordering exists to keep short. They are also
+# what `require_quiescent` needs named, since it refuses to install while any
+# liquidity-migration-* unit is running and stop-first only stops what these
+# lists name. The retired Python owners stay listed so a rollout onto a host
+# still running them stops them before the manifest install removes their unit
+# files for good.
 ROLLOUT_OWNER_UNITS=(
+    liquidity-migration-engine.service
+    liquidity-migration-engine-mainnet.service
     liquidity-migration-account-execution.service
     liquidity-migration-account-paper-execution.service
     liquidity-migration-account-execution-mainnet.service

@@ -30,7 +30,6 @@ def make_config(tmp_path: Path, **overrides: object) -> ControlsConfig:
         "offset_path": tmp_path / "offset.json",
         "host_sleeves_env": tmp_path / "sleeves.env",
         "saved_sleeves_path": tmp_path / "sleeves_before_pause.txt",
-        "confirm_ttl_seconds": 120.0,
     }
     values.update(overrides)
     return ControlsConfig(**values)  # type: ignore[arg-type]
@@ -166,7 +165,10 @@ def test_controls_command_sends_panel_without_mainnet_rows(tmp_path: Path) -> No
     panel.handle_update({"message": {"chat": {"id": 777}, "text": "/controls"}})
     keyboard = api.sent[-1]["keyboard"]
     flat = json.dumps(keyboard)
-    assert "close:demo" in flat
+    assert "pause:demo" in flat
+    # No close button anywhere: it published zero targets into the deleted
+    # owner's inbox, and a button that cannot work is worse than no button.
+    assert "close" not in flat
     assert "mainnet" not in flat
 
 
@@ -175,7 +177,8 @@ def test_panel_grows_mainnet_rows_when_owner_is_active(tmp_path: Path) -> None:
     panel.send_panel()
     flat = json.dumps(api.sent[-1]["keyboard"])
     assert "pause:mainnet" in flat
-    assert "close:mainnet" in flat
+    assert "resume:mainnet" in flat
+    assert "close" not in flat
 
 
 def test_pause_and_resume_presses_reach_the_fleet(tmp_path: Path) -> None:
@@ -184,39 +187,6 @@ def test_pause_and_resume_presses_reach_the_fleet(tmp_path: Path) -> None:
     panel.handle_update(_press("resume:demo"))
     assert fleet.calls == [("pause", "demo"), ("resume", "demo")]
     assert [m["text"] for m in api.sent] == ["paused", "resumed"]
-
-
-def test_close_needs_a_fresh_confirmation(tmp_path: Path) -> None:
-    panel, api, fleet, _ = make_panel(tmp_path)
-    panel.handle_update(_press("close:demo"))
-    assert fleet.calls == []  # nothing closed yet
-    keyboard = api.sent[-1]["keyboard"]
-    confirm_data = keyboard[0][0]["callback_data"]
-    assert confirm_data.startswith("closego:")
-    panel.handle_update(_press(confirm_data))
-    assert ("close", "demo") in fleet.calls
-
-
-def test_expired_or_stale_confirmations_do_nothing(tmp_path: Path) -> None:
-    clock = [0.0]
-    panel, api, fleet, _ = make_panel(tmp_path, now=clock)
-    panel.handle_update(_press("close:demo"))
-    confirm_data = api.sent[-1]["keyboard"][0][0]["callback_data"]
-    clock[0] = 500.0  # past the 120s ttl
-    panel.handle_update(_press(confirm_data))
-    assert fleet.calls == []
-    panel.handle_update(_press("closego:deadbeef"))  # never issued
-    assert fleet.calls == []
-
-
-def test_cancel_clears_the_pending_confirmation(tmp_path: Path) -> None:
-    panel, api, fleet, _ = make_panel(tmp_path)
-    panel.handle_update(_press("close:demo"))
-    confirm_data = api.sent[-1]["keyboard"][0][0]["callback_data"]
-    nonce = confirm_data.split(":", 1)[1]
-    panel.handle_update(_press(f"closecancel:{nonce}"))
-    panel.handle_update(_press(confirm_data))
-    assert fleet.calls == []
 
 
 def test_unauthorized_press_is_answered_but_never_acted_on(tmp_path: Path) -> None:
@@ -344,18 +314,3 @@ def _outcome(status: str, *, components: int = 2, positions=None, detail: str = 
     }
 
 
-def test_flatten_summaries_read_plainly() -> None:
-    assert "already flat" in tc._describe_flatten("demo", 0, _outcome("already_flat"), "")
-    assert "Closed 2 demo position(s)" in tc._describe_flatten("demo", 0, _outcome("flat"), "")
-    dust = tc._describe_flatten(
-        "demo", 4, _outcome("dust_limited", positions=[{"symbol": "AUSDT", "signed_qty": 0.1}]), ""
-    )
-    assert "AUSDT" in dust and "minimum order size" in dust
-    assert "did not finish cleanly" in tc._describe_flatten("demo", 5, _outcome("timed_out", detail="positions remain"), "")
-    assert "no readable report" in tc._describe_flatten("demo", 1, None, "boom")
-
-
-def test_parse_flatten_output_finds_json_after_noise() -> None:
-    payload = json.dumps({"status": "flat"})
-    assert tc._parse_flatten_output(f"resolve noise\n{payload}\n") == {"status": "flat"}
-    assert tc._parse_flatten_output("no json here") is None

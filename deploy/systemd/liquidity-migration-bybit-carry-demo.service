@@ -1,11 +1,11 @@
 [Unit]
 Description=liquidity-migration Bybit carry-hold demo target producer (lane2_carry_hold_v4)
 Wants=network-online.target
-# Wants=, not Requires=: a dead owner must not take the producers down with it.
-# Producers re-check owner health per cycle and plan entries as blocked while
-# still publishing exits, so a degraded fleet keeps draining risk.
-Wants=liquidity-migration-account-execution.service
-After=network-online.target liquidity-migration-account-execution.service
+# No account owner to depend on any more. This producer's whole output is a
+# target book on disk; the engine reads that book and owns the account. A
+# producer running while the engine is down just writes a book nobody has read
+# yet, which is why there is no ordering between them.
+After=network-online.target
 
 [Service]
 Type=simple

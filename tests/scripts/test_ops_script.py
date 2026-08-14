@@ -169,17 +169,6 @@ def test_wedged_command_passes_its_subcommand_through_untouched(tmp_path: Path) 
     assert "REMOTE_ARGS=( report )" in capture.read_text(encoding="utf-8")
 
 
-def test_flatten_passes_through_without_reordering(tmp_path: Path) -> None:
-    capture, environment = _ssh_capture(tmp_path)
-    result = _run(
-        "flatten", "--execute", "--environment", "demo", env=environment
-    )
-    assert result.returncode == 0, result.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert "REMOTE_ARGS=( --execute --environment demo )" in payload
-    assert "flatten_account.sh" in payload
-
-
 def test_venue_accounting_runs_on_the_host_where_the_evidence_is(tmp_path: Path) -> None:
     """Locally there is neither an account journal nor a credential, so the local exec
     could only ever fail. LOCAL=1 keeps the old behavior for a checkout that has both.

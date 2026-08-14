@@ -64,7 +64,7 @@ def _run(tmp_path: Path, body: str) -> tuple[int, str, str]:
     return proc.returncode, log.read_text(), proc.stderr
 def test_unknown_liquidity_migration_unit_is_cleaned_and_verified(tmp_path: Path) -> None:
     rc, calls, err = _run(tmp_path, """
-        systemctl enable --now liquidity-migration-account-execution.service
+        systemctl enable --now liquidity-migration-engine.service
         lm_verify_no_unknown_liqmig_units
         systemctl enable --now liquidity-migration-stale-alpha.service
         if lm_verify_no_unknown_liqmig_units; then

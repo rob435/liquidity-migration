@@ -14,10 +14,6 @@ import pytest
 
 from liquidity_migration.ops import demo_ledger_reset as reset
 from liquidity_migration.ops.demo_ledger_reset import (
-    ACCOUNT_BOUND_UNITS,
-    DOWNSTREAM_RESTART_UNITS,
-    NON_RESTARTABLE_ONESHOTS,
-    OWNER_RESTART_UNITS,
     RESTART_UNITS,
     STOP_UNITS,
     CleanCheckout,
@@ -276,66 +272,6 @@ def test_archive_dir_must_be_outside_reset_targets(tmp_path: Path) -> None:
     with pytest.raises(ResetError, match="must not contain reset targets"):
         check_archive_dir_containment("data", ("data/bybit-long-demo-event",), tmp_path)
     check_archive_dir_containment("data/_archive", ("data/bybit-long-demo-event",), tmp_path)
-
-
-def test_stop_order_quiesces_producers_before_the_account_owner() -> None:
-    owner = "liquidity-migration-account-execution.service"
-    assert STOP_UNITS[-1] == owner
-    for producer in (
-        "liquidity-migration-bybit-long-demo.service",
-        "liquidity-migration-bybit-carry-demo.service",
-    ):
-        assert STOP_UNITS.index(producer) < STOP_UNITS.index(owner)
-    # Restart is the reverse handoff: the owner starts first, producers follow.
-    assert RESTART_UNITS[0] == owner
-    assert OWNER_RESTART_UNITS == (owner,)
-    assert owner in ACCOUNT_BOUND_UNITS
-    for oneshot in NON_RESTARTABLE_ONESHOTS:
-        assert oneshot in STOP_UNITS
-        assert oneshot not in RESTART_UNITS
-
-
-def test_restart_handoff_is_owner_first_with_settle_and_verification() -> None:
-    systemctl = FakeSystemctl()
-    execution = Execution(
-        systemctl=systemctl,  # type: ignore[arg-type]
-        options=ResetOptions(settle_seconds=0),
-        active_before=RESTART_UNITS,
-    )
-    assert execution.restart_previously_active("test")
-    starts = [unit for verb, unit in systemctl.calls if verb == "start"]
-    assert starts == list(RESTART_UNITS)
-    assert starts[0] == "liquidity-migration-account-execution.service"
-
-
-def test_failed_owner_start_leaves_downstream_stopped() -> None:
-    owner = "liquidity-migration-account-execution.service"
-    systemctl = FakeSystemctl(fail_start={owner})
-    execution = Execution(
-        systemctl=systemctl,  # type: ignore[arg-type]
-        options=ResetOptions(settle_seconds=0),
-        active_before=RESTART_UNITS,
-    )
-    assert not execution.restart_previously_active("test")
-    starts = [unit for verb, unit in systemctl.calls if verb == "start"]
-    assert starts == [owner]
-    assert not any(unit in starts for unit in DOWNSTREAM_RESTART_UNITS)
-
-
-def test_failed_handoff_fails_closed_to_every_unit_stopped() -> None:
-    owner = "liquidity-migration-account-execution.service"
-    systemctl = FakeSystemctl(fail_start={owner})
-    execution = Execution(
-        systemctl=systemctl,  # type: ignore[arg-type]
-        options=ResetOptions(settle_seconds=0),
-        active_before=RESTART_UNITS,
-        services_stopped=True,
-        failure_recovery_allowed=True,
-    )
-    execution.fail_closed_cleanup()
-    stops = [unit for verb, unit in systemctl.calls if verb == "stop"]
-    assert stops == list(STOP_UNITS)
-    assert not systemctl.active
 
 
 def test_no_auto_restart_after_the_destructive_boundary() -> None:

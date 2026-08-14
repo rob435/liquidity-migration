@@ -38,9 +38,7 @@ def _stub_account_authority(monkeypatch) -> None:
         "evaluate_required_account_owner_states",
         lambda _states, **_kwargs: [],
     )
-    monkeypatch.setattr(M, "gather_account_capture_alerts", lambda **_kwargs: [])
     monkeypatch.setattr(M, "gather_account_health_alerts", lambda **_kwargs: [])
-    monkeypatch.setattr(M, "gather_account_owner_health_alerts", lambda **_kwargs: [])
     monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
 
 
@@ -506,197 +504,6 @@ def test_gather_carry_alerts_skips_when_root_absent(tmp_path) -> None:
     )
 
 
-def test_account_capture_liveness_missing_fresh_and_stale(tmp_path) -> None:
-    from liquidity_migration.account.market_capture import MarketCaptureConfig, SequenceAwareMarketRecorder
-
-    capture = tmp_path / "capture"
-    missing = M.gather_account_capture_alerts(capture_root=capture, now_ms=1_000 * HOUR, max_age_minutes=3)
-    assert [alert.key for alert in missing] == ["account_capture_missing"]
-
-    receive_ns = 1_800_000_000_000_000_000
-    recorder = SequenceAwareMarketRecorder(
-        capture,
-        config=MarketCaptureConfig(
-            min_free_disk_bytes=1,
-            persist_raw_market=False,
-        ),
-        owner_invocation_id="a1" * 16,
-    )
-    recorder.on_message(
-        {
-            "topic": "orderbook.50.BTCUSDT",
-            "type": "snapshot",
-            "ts": 1_800_000_000_000,
-            "cts": 1_800_000_000_000,
-            "data": {
-                "s": "BTCUSDT",
-                "b": [["10", "1"]],
-                "a": [["11", "1"]],
-                "u": 1,
-                "seq": 1,
-            },
-        },
-        local_receive_ts_ns=receive_ns,
-    )
-    recorder.close()
-    receive_ms = receive_ns // 1_000_000
-    assert M.gather_account_capture_alerts(capture_root=capture, now_ms=receive_ms + 2 * MIN, max_age_minutes=3) == []
-    assert (
-        M.gather_account_capture_alerts(
-            capture_root=capture,
-            now_ms=receive_ms + 2 * MIN,
-            max_age_minutes=3,
-            expected_owner_uid=(capture / "account_owner_market_readiness.json").stat().st_uid,
-        )
-        == []
-    )
-    wrong_owner = M.gather_account_capture_alerts(
-        capture_root=capture,
-        now_ms=receive_ms + 2 * MIN,
-        max_age_minutes=3,
-        expected_owner_uid=(capture / "account_owner_market_readiness.json").stat().st_uid + 1,
-    )
-    assert [alert.key for alert in wrong_owner] == ["account_capture_missing"]
-    stale = M.gather_account_capture_alerts(capture_root=capture, now_ms=receive_ms + 4 * MIN, max_age_minutes=3)
-    assert [alert.key for alert in stale] == ["account_capture_stale"]
-    mainnet = M.gather_account_capture_alerts(
-        capture_root=tmp_path / "mainnet-missing",
-        now_ms=receive_ms,
-        max_age_minutes=3,
-        label="mainnet",
-    )
-    assert [alert.key for alert in mainnet] == ["account_capture_missing_mainnet"]
-    assert "mainnet account execution" in mainnet[0].message
-
-    # An owner inside its startup grace has not subscribed yet; a restart is not
-    # an outage. Grace is opt-in, so the calls above are unaffected by it.
-    starting = M.UnitRuntime(invocation_id=CURRENT_INVOCATION_ID, active_age_minutes=2.0)
-    assert (
-        M.gather_account_capture_alerts(
-            capture_root=tmp_path / "never-written",
-            now_ms=receive_ms,
-            max_age_minutes=3,
-            startup_grace_minutes=10,
-            unit_runtime=starting,
-        )
-        == []
-    )
-    assert (
-        M.gather_account_capture_alerts(
-            capture_root=capture,
-            now_ms=receive_ms + 4 * MIN,
-            max_age_minutes=3,
-            startup_grace_minutes=10,
-            unit_runtime=starting,
-        )
-        == []
-    )
-    # Past the grace window the same two conditions page again.
-    established = M.UnitRuntime(invocation_id=CURRENT_INVOCATION_ID, active_age_minutes=10.01)
-    assert [
-        alert.key
-        for alert in M.gather_account_capture_alerts(
-            capture_root=capture,
-            now_ms=receive_ms + 4 * MIN,
-            max_age_minutes=3,
-            startup_grace_minutes=10,
-            unit_runtime=established,
-        )
-    ] == ["account_capture_stale"]
-    # An unknown generation earns no grace at all.
-    assert [
-        alert.key
-        for alert in M.gather_account_capture_alerts(
-            capture_root=capture,
-            now_ms=receive_ms + 4 * MIN,
-            max_age_minutes=3,
-            startup_grace_minutes=10,
-            unit_runtime=M.UnitRuntime(invocation_id=None, active_age_minutes=2.0),
-        )
-    ] == ["account_capture_stale"]
-
-
-def test_owner_health_startup_grace_covers_absent_evidence_but_never_a_blocked_owner(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """The demo owner restarts routinely now that no ExecStartPost gate kills it, and
-    its first health projection lands a cycle later. Paging on that window turns every
-    restart into a CRITICAL. An owner alive enough to report BLOCKED still pages: that
-    is evidence, not the absence of it.
-    """
-    starting = M.UnitRuntime(invocation_id=CURRENT_INVOCATION_ID, active_age_minutes=3.0)
-    established = M.UnitRuntime(invocation_id=CURRENT_INVOCATION_ID, active_age_minutes=10.01)
-
-    def stale(*_args, **_kwargs) -> None:
-        raise RuntimeError("account-owner health is stale: age_ns=999")
-
-    monkeypatch.setattr(M, "require_recent_account_owner_health", stale)
-    for runtime in (starting,):
-        assert (
-            M.gather_account_owner_health_alerts(
-                account_root=tmp_path,
-                environment="demo",
-                max_age_minutes=1,
-                startup_grace_minutes=10,
-                unit_runtime=runtime,
-            )
-            == []
-        )
-    # Same condition, established generation -> pages.
-    assert [
-        alert.key
-        for alert in M.gather_account_owner_health_alerts(
-            account_root=tmp_path,
-            environment="demo",
-            max_age_minutes=1,
-            startup_grace_minutes=10,
-            unit_runtime=established,
-        )
-    ] == ["account_owner_health:demo"]
-    # No runtime metadata, or no grace configured -> no grace.
-    for runtime, grace in ((None, 10), (starting, 0.0)):
-        assert [
-            alert.key
-            for alert in M.gather_account_owner_health_alerts(
-                account_root=tmp_path,
-                environment="demo",
-                max_age_minutes=1,
-                startup_grace_minutes=grace,
-                unit_runtime=runtime,
-            )
-        ] == ["account_owner_health:demo"]
-
-    def missing(*_args, **_kwargs) -> None:
-        raise ValueError("cannot read account-owner health artifact")
-
-    monkeypatch.setattr(M, "require_recent_account_owner_health", missing)
-    assert (
-        M.gather_account_owner_health_alerts(
-            account_root=tmp_path,
-            environment="demo",
-            max_age_minutes=1,
-            startup_grace_minutes=10,
-            unit_runtime=starting,
-        )
-        == []
-    )
-
-    def blocked(*_args, **_kwargs) -> None:
-        raise RuntimeError("account owner is blocked: disaster stop latched")
-
-    monkeypatch.setattr(M, "require_recent_account_owner_health", blocked)
-    inside_grace = M.gather_account_owner_health_alerts(
-        account_root=tmp_path,
-        environment="demo",
-        max_age_minutes=1,
-        startup_grace_minutes=10,
-        unit_runtime=starting,
-    )
-    assert [alert.key for alert in inside_grace] == ["account_owner_health:demo"]
-    assert inside_grace[0].severity == M.CRITICAL
-
-
 def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> None:
     from liquidity_migration.account.account_kernel import AccountExecutionKernel
 
@@ -793,59 +600,6 @@ def test_account_health_production_time_is_read_adjacent(tmp_path, monkeypatch) 
     assert "-0.0 min old" in explicit_future[0].message
 
 
-def test_account_owner_health_requires_fresh_matching_healthy_projection(tmp_path) -> None:
-    from liquidity_migration.account.account_owner_health import (
-        TEST_ACCOUNT_OWNER_INVOCATION_ID,
-        AccountOwnerHealth,
-        write_account_owner_health,
-    )
-
-    now_ms = 1_000 * HOUR
-    demo_root = tmp_path / "demo"
-    health = AccountOwnerHealth(
-        owner="account_execution",
-        environment="demo",
-        account_id="demo",
-        status="healthy",
-        observed_ts_ns=(now_ms - 30_000) * 1_000_000,
-        loop_sequence=1,
-        journal_sequence=0,
-        journal_state_hash="0" * 64,
-        equity_usdt=10_000.0,
-        available_margin_usdt=9_000.0,
-        requested_symbols_ready=True,
-        venue_facts_at_ns=(now_ms - 30_000) * 1_000_000,
-        venue_facts_healthy=True,
-        invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
-    )
-    write_account_owner_health(demo_root, health)
-    assert (
-        M.gather_account_owner_health_alerts(
-            account_root=demo_root,
-            environment="demo",
-            now_ms=now_ms,
-            max_age_minutes=1,
-        )
-        == []
-    )
-
-    stale = M.gather_account_owner_health_alerts(
-        account_root=demo_root,
-        environment="demo",
-        now_ms=now_ms + 2 * MIN,
-        max_age_minutes=1,
-    )
-    assert [alert.key for alert in stale] == ["account_owner_health:demo"]
-
-    wrong_environment = M.gather_account_owner_health_alerts(
-        account_root=demo_root,
-        environment="mainnet",
-        now_ms=now_ms,
-        max_age_minutes=1,
-    )
-    assert [alert.key for alert in wrong_environment] == ["account_owner_health:mainnet"]
-
-
 def _write_owner_health_for(
     root, *, environment: str, now_ms: int, venue_fact_age_ms: int
 ) -> None:
@@ -874,54 +628,6 @@ def _write_owner_health_for(
             invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
         ),
     )
-
-
-@pytest.mark.parametrize("environment", ("demo", "mainnet"))
-def test_owner_alive_with_a_wedged_venue_loop_pages(tmp_path, environment) -> None:
-    """Health keeps refreshing while the exchange reads stopped landing."""
-
-    now_ms = 1_000 * HOUR
-    root = tmp_path / environment
-    _write_owner_health_for(
-        root, environment=environment, now_ms=now_ms, venue_fact_age_ms=90_000
-    )
-
-    alerts = M.gather_account_owner_health_alerts(
-        account_root=root,
-        environment=environment,
-        now_ms=now_ms,
-        max_age_minutes=1,
-    )
-
-    assert [alert.key for alert in alerts] == [f"account_owner_health:{environment}"]
-    assert alerts[0].severity == M.CRITICAL
-    assert "venue facts are stale" in alerts[0].message
-    assert "has not read the exchange recently" in alerts[0].headline
-
-
-def test_fresh_venue_facts_do_not_page(tmp_path) -> None:
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "demo"
-    _write_owner_health_for(
-        root, environment="demo", now_ms=now_ms, venue_fact_age_ms=30_000
-    )
-
-    assert (
-        M.gather_account_owner_health_alerts(
-            account_root=root,
-            environment="demo",
-            now_ms=now_ms,
-            max_age_minutes=1,
-        )
-        == []
-    )
-
-
-def test_venue_fact_bound_stays_tighter_than_the_journal_snapshot_bound() -> None:
-    """The owner-health proof is what replaced the sub-minute journal bound."""
-
-    assert M.VENUE_FACT_AGE_FLOOR_MINUTES <= 2.0
-    assert M.VENUE_FACT_AGE_FLOOR_MINUTES <= M.VENUE_SNAPSHOT_AGE_FLOOR_MINUTES
 
 
 def test_account_health_tail_window_survives_bursty_non_snapshot_traffic(
@@ -961,150 +667,6 @@ def test_account_health_tail_window_survives_bursty_non_snapshot_traffic(
         )
         == []
     )
-
-
-def test_account_owner_health_production_time_is_read_adjacent(tmp_path, monkeypatch) -> None:
-    from liquidity_migration.account import account_owner_health as owner_health_module
-    from liquidity_migration.account.account_owner_health import (
-        TEST_ACCOUNT_OWNER_INVOCATION_ID,
-        AccountOwnerHealth,
-        write_account_owner_health,
-    )
-
-    outer_now_ms = 1_000 * HOUR
-    published_ns = outer_now_ms * 1_000_000 + 84_000_000
-    demo_root = tmp_path / "demo"
-    write_account_owner_health(
-        demo_root,
-        AccountOwnerHealth(
-            owner="account_execution",
-            environment="demo",
-            account_id="demo",
-            status="healthy",
-            observed_ts_ns=published_ns,
-            loop_sequence=1,
-            journal_sequence=0,
-            journal_state_hash="0" * 64,
-            equity_usdt=10_000.0,
-            available_margin_usdt=9_000.0,
-            requested_symbols_ready=True,
-            venue_facts_at_ns=published_ns,
-            venue_facts_healthy=True,
-            invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
-        ),
-    )
-    monkeypatch.setattr(owner_health_module.time, "time_ns", lambda: published_ns + 1_000_000)
-
-    assert (
-        M.gather_account_owner_health_alerts(
-            account_root=demo_root,
-            environment="demo",
-            max_age_minutes=1,
-        )
-        == []
-    )
-
-    explicit_future = M.gather_account_owner_health_alerts(
-        account_root=demo_root,
-        environment="demo",
-        max_age_minutes=1,
-        now_ms=outer_now_ms,
-    )
-    assert [alert.key for alert in explicit_future] == ["account_owner_health:demo"]
-    assert "age_ns=-84000000" in explicit_future[0].message
-
-
-def test_nonterminal_queue_head_market_warmup_is_suppressed_until_its_latched_timeout(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    def queue_head_block(*_args, **_kwargs) -> None:
-        raise M.AccountOwnerMarketWarmupPending(
-            "account owner is blocked: waiting for queue-head market data: "
-            "ETHUSDT:stale_book"
-        )
-
-    monkeypatch.setattr(M, "require_recent_account_owner_health", queue_head_block)
-    starting = M.UnitRuntime(
-        invocation_id=CURRENT_INVOCATION_ID,
-        active_age_minutes=8.0,
-    )
-    assert (
-        M.gather_account_owner_health_alerts(
-            account_root=tmp_path,
-            environment="demo",
-            max_age_minutes=1,
-            startup_grace_minutes=10,
-            unit_runtime=starting,
-        )
-        == []
-    )
-
-    established_service = M.gather_account_owner_health_alerts(
-        account_root=tmp_path,
-        environment="demo",
-        max_age_minutes=1,
-        startup_grace_minutes=10,
-        unit_runtime=M.UnitRuntime(
-            invocation_id=CURRENT_INVOCATION_ID,
-            active_age_minutes=10.01,
-        ),
-    )
-    assert established_service == []
-
-    def terminal_timeout(*_args, **_kwargs) -> None:
-        raise RuntimeError(
-            "account owner is blocked: queue-head market warmup timed out after 30s; "
-            "request remains pending and owner epoch is closed: ETHUSDT"
-        )
-
-    monkeypatch.setattr(M, "require_recent_account_owner_health", terminal_timeout)
-    terminal = M.gather_account_owner_health_alerts(
-        account_root=tmp_path,
-        environment="demo",
-        max_age_minutes=1,
-        startup_grace_minutes=10,
-        unit_runtime=starting,
-    )
-    assert [alert.key for alert in terminal] == ["account_owner_health:demo"]
-
-    def other_block(*_args, **_kwargs) -> None:
-        raise RuntimeError("account owner is blocked: reconciliation mismatch")
-
-    monkeypatch.setattr(M, "require_recent_account_owner_health", other_block)
-    unrelated = M.gather_account_owner_health_alerts(
-        account_root=tmp_path,
-        environment="demo",
-        max_age_minutes=1,
-        startup_grace_minutes=10,
-        unit_runtime=starting,
-    )
-    assert [alert.key for alert in unrelated] == ["account_owner_health:demo"]
-
-
-def test_demo_account_alerts_coalesce_only_the_dependent_owner_echo() -> None:
-    root = M.Alert(
-        key="account_health_unhealthy",
-        severity=M.CRITICAL,
-        message="canonical account reconciliation is UNHEALTHY: TLMUSDT:unowned",
-    )
-    dependent = M.Alert(
-        key="account_owner_health:demo",
-        severity=M.CRITICAL,
-        message=(
-            "demo account owner has no fresh healthy status/capital evidence: "
-            "RuntimeError: account reconciliation unhealthy: TLMUSDT:unowned"
-        ),
-    )
-    capital = M.Alert(
-        key="account_owner_health:demo",
-        severity=M.CRITICAL,
-        message="demo account owner has no fresh capital evidence: wallet unavailable",
-    )
-
-    assert M.coalesce_demo_account_alerts([root], [dependent]) == [root]
-    assert M.coalesce_demo_account_alerts([root], [capital]) == [root, capital]
-    assert M.coalesce_demo_account_alerts([], [dependent]) == [dependent]
 
 
 def test_current_generation_completion_outranks_a_newer_in_flight_cycle_row(
@@ -1617,13 +1179,7 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
     )
     # Each gather also reports the root it was handed: a mainnet-labelled call
     # against a demo root is the silent failure this scope exists to avoid.
-    monkeypatch.setattr(
-        M,
-        "gather_account_capture_alerts",
-        lambda **kwargs: calls.append(("capture", Path(kwargs["capture_root"]).name)) or [],
-    )
     for name, root_kwarg in (
-        ("gather_account_owner_health_alerts", "account_root"),
         ("gather_carry_alerts", "carry_root"),
         ("gather_long_alerts", "long_root"),
     ):
@@ -1655,8 +1211,6 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
     assert M.main() == 0
     assert calls == [
         ("demo_rules:mainnet", "demo-rules.json"),
-        ("capture", "capture-mainnet"),
-        ("gather_account_owner_health_alerts:mainnet", "account-mainnet"),
         ("gather_carry_alerts:mainnet", "bybit-carry-mainnet-event"),
         ("gather_long_alerts:mainnet", "bybit-long-mainnet-event"),
     ]

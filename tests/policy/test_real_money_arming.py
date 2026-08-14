@@ -433,7 +433,17 @@ def test_the_owner_template_declares_disjoint_mainnet_roots() -> None:
     # The frozen universe and the owner's symbol list must be the same file.
     assert values["CANDIDATE_UNIVERSE_FILE"] == values["ACCOUNT_SYMBOLS_FILE"]
     # Disjoint from the demo roots, which live under different names entirely.
-    demo_env = (REPO / "deploy" / "systemd" / "liquidity-migration-account-execution.service").read_text()
+    # Checked against the demo producers now: the demo account-owner unit that
+    # used to carry these roots went with the Python order path, and these are
+    # the units still reading that environment.
+    demo_env = "".join(
+        (REPO / "deploy" / "systemd" / name).read_text()
+        for name in (
+            "liquidity-migration-bybit-long-demo.service",
+            "liquidity-migration-bybit-carry-demo.service",
+            "liquidity-migration-demo-liveness.service",
+        )
+    )
     for root in roots:
         assert root not in demo_env
 

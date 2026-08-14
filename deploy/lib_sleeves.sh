@@ -10,7 +10,7 @@ LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}
 
 # These units keep their whole workload argv in run_authorized_runtime.sh, so a
 # drop-in or alternate fragment cannot replace it after the commit is reviewed.
-LM_AUTHORIZED_UNITS="liquidity-migration-account-execution.service liquidity-migration-account-execution-mainnet.service liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-telegram-controls.service"
+LM_AUTHORIZED_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-telegram-controls.service"
 
 lm_parse_sleeve_environment() {
     _lpe_file="$1"
@@ -256,20 +256,8 @@ lm_verify_guarded_unit_surfaces() {
                 return 1
                 ;;
         esac
-        case "$_lvgus_unit" in
-            # Only the mainnet owner keeps an ExecStartPost readiness gate; the
-            # demo owner deliberately has none since 2026-08-03.
-            liquidity-migration-account-execution-mainnet.service)
-                _lvgus_post="$(systemctl show "$_lvgus_unit" --property=ExecStartPost --value --no-pager)" || return 1
-                case "$_lvgus_post" in
-                    *"argv[]=/opt/liquidity-migration/scripts/run_authorized_runtime.sh $_lvgus_unit readiness ;"*) ;;
-                    *)
-                        echo "verify failed: guarded owner has unexpected effective ExecStartPost: $_lvgus_unit -> $_lvgus_post" >&2
-                        return 1
-                        ;;
-                esac
-                ;;
-        esac
+        # No unit keeps an ExecStartPost readiness gate any more. The only one
+        # that ever did was the mainnet account owner, and it is gone.
     done
 }
 
@@ -278,8 +266,8 @@ lm_verify_guarded_unit_surfaces() {
 # order mutator cannot survive alongside the single-owner topology.
 lm_install_current_systemd_units() {
     _licsu_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [ ! -f "$_licsu_dir/systemd/liquidity-migration-account-execution.service" ]; then
-        echo "install failed: required account owner unit is absent from manifest: liquidity-migration-account-execution.service" >&2
+    if [ ! -f "$_licsu_dir/systemd/liquidity-migration-engine.service" ]; then
+        echo "install failed: required account owner unit is absent from manifest: liquidity-migration-engine.service" >&2
         return 1
     fi
     mkdir -p "$LM_SYSTEMD_UNIT_DIR"

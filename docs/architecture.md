@@ -5,8 +5,17 @@ generated artifacts define behavior when this file drifts; deployed state is
 [`STATE.md`](../STATE.md), its dated history [`CHANGELOG.md`](../CHANGELOG.md).
 
 The program has two parts: the research system, in Python, and the execution engine, in Rust
-([`engine.md`](engine.md)) — the direction for the order path, not yet deployed. This document
-describes the Python fleet that currently trades.
+([`engine.md`](engine.md)). The engine is the order path now: the Python one was deleted on
+2026-08-14 (CHANGELOG that date), though the host still runs its installed copy until the next
+deploy.
+
+**Scope warning.** Much of what follows describes that deleted Python order path — the account
+owner, its inbox, its protection modules, its journal transitions — in the present tense, and cites
+line numbers in files that no longer exist. It is kept because it is the most precise description
+of the behaviour the engine had to reproduce, and because the host still runs it today. Read it as
+the specification it became, not as a map of the current tree; `engine.md` is the current tree. The
+producer half of this document — universes, target books, sleeve planning — is unaffected and
+current.
 
 ## Producer / owner split
 
@@ -204,22 +213,22 @@ partition does not name gets nothing (`unpartitioned_sleeve`); an untouched, non
 skipped, so a sleeve over its share cannot veto another's de-risking.
 
 **Equity-anchored envelope**
-([`equity_anchored_envelope.py`](../liquidity_migration/policy/equity_anchored_envelope.py)). The profile
+([`envelope.rs`](../engine/engine-risk/src/envelope.rs)). The profile
 is a set of ratios; the capital reference is the scale. Caps are a fraction of observed wallet equity,
 not a pinned number. Equity down rescales immediately; equity up waits for a move past a dead band. A
 missing, non-finite, non-positive or stale reading holds the current reference — unknown is not evidence
 of small.
 
 **Daily loss halt**
-([`account_loss_guard.py`](../liquidity_migration/policy/account_loss_guard.py)). Account-level, because
+([`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs)). Account-level, because
 the failure that matters is the whole book moving together. `OK`; `BLOCKED` when equity is too stale to
 judge (no new risk, positions stay under their venue stops); `TRIPPED` when the daily ceiling breaks
 against a fresh reading (flatten and stop, never self-clears). The anchor is the day's opening equity,
 not a high-water mark, snapshotted so a restart cannot refresh the budget.
 
 **Venue-native protection**
-([`venue_protection.py`](../liquidity_migration/venue/venue_protection.py),
-[`protection_engine.py`](../liquidity_migration/venue/protection_engine.py)). Every exposure-increasing
+([`working.rs`](../engine/engine-core/src/working.rs),
+[`reconcile.rs`](../engine/engine-core/src/reconcile.rs)). Every exposure-increasing
 demo command durably carries a Full-position MarkPrice stop before any provider call — `stopLoss`,
 `slTriggerBy=MarkPrice`, `tpslMode=Full`, `slOrderType=Market` in the create request. A position without
 a durable active stop cannot be scaled up; an existing stop never moves inward. Order creation is

@@ -98,15 +98,17 @@ STOP_UNITS = (
     "liquidity-migration-bybit-long-demo.service",
     "liquidity-migration-bybit-carry-demo.service",
     "liquidity-migration-demo-liveness.service",
-    "liquidity-migration-account-execution.service",
 )
-# The account owner is the only venue-mutating process and must use the exact
-# credential file selected by --env-file (after symlink/path resolution).
-ACCOUNT_BOUND_UNITS = ("liquidity-migration-account-execution.service",)
+# Empty since the Python account owner was deleted. These held the one
+# venue-mutating process, which had to load exactly the credential file
+# selected by --env-file. The engine that replaced it does not read the
+# account route env file at all — it has its own env, its own state
+# directory, and its own log — so no unit is bound to that file now.
+ACCOUNT_BOUND_UNITS: tuple[str, ...] = ()
 NON_RESTARTABLE_ONESHOTS = (
     "liquidity-migration-demo-liveness.service",
 )
-OWNER_RESTART_UNITS = ("liquidity-migration-account-execution.service",)
+OWNER_RESTART_UNITS: tuple[str, ...] = ()
 DOWNSTREAM_RESTART_UNITS = (
     "liquidity-migration-bybit-long-demo.service",
     "liquidity-migration-bybit-carry-demo.service",
@@ -1078,21 +1080,10 @@ def run_reset(argv: Sequence[str], *, repository: Path | None = None) -> int:
                 f"{env_file}); refusing before stopping services"
             ),
         )
-    # The reset must archive the same canonical roots that the running owner
-    # will reopen. Reject a drop-in or extra env file that redirects the owner
-    # after the reset has already removed a different route.
-    verify_exclusive_unit_environment(
-        execution.systemctl,
-        "liquidity-migration-account-execution.service",
-        account_env_file,
-        frozenset({"ACCOUNT_EXECUTION_ROOT", "ACCOUNT_INTENT_INBOX_ROOT", "ACCOUNT_CAPTURE_ROOT"}),
-        protected_prefix=None,
-        failure=(
-            "owner liquidity-migration-account-execution.service has an ambiguous route "
-            f"environment or does not exclusively load {account_env_file}; refusing "
-            "before stopping services"
-        ),
-    )
+    # There is no longer a unit to check here. This verified that the account
+    # owner loaded exactly --env-file, so the reset archived the same roots the
+    # owner would reopen. The owner is deleted and the engine does not read
+    # that file, so the check has no subject.
 
     for unit in NON_RESTARTABLE_ONESHOTS:
         if execution.was_active(unit):
