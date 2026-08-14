@@ -5,7 +5,7 @@
 //! which log format, or which kernel it is running.
 
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use engine_marketdata::BybitPublicFeed;
 use engine_risk::{
@@ -13,13 +13,14 @@ use engine_risk::{
 };
 use engine_strategies::build_strategy;
 use engine_types::{
-    Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
+    AccountIdentity, Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
 };
 use engine_venue::{BybitOrderFeed, Venue};
 use engine_wal::WalWriter;
 use serde::Deserialize;
 
 use crate::config::{EngineSection, StrategyConfig};
+use crate::heartbeat::Heartbeat;
 use crate::targets::TargetBookWatcher;
 
 /// Open the log and replay what an earlier run left. The writer truncates a
@@ -69,6 +70,25 @@ pub fn target_book(settings: &EngineSection) -> Option<TargetBookWatcher> {
     let path = settings.target_book_path.as_ref()?;
     tracing::info!(path = %path.display(), "watching for a target book");
     Some(TargetBookWatcher::start(path.clone()))
+}
+
+/// The heartbeat writer, but only when the config names a path. No path means
+/// no file is written and nothing at all is said about it — an engine nobody
+/// asked to report on itself is not a fault, and a line every few seconds
+/// saying so would be noise in every log the fleet keeps.
+///
+/// `account` and `lease_path` are what the run has already learned: whose
+/// account these credentials open, and the lock file this process holds. A
+/// shadow run holds no lease, and a run that cannot reach the venue never
+/// learns the account; both are written into the file as null.
+pub fn heartbeat(
+    settings: &EngineSection,
+    account: Option<AccountIdentity>,
+    lease_path: Option<PathBuf>,
+) -> Option<Heartbeat> {
+    let path = settings.heartbeat_path.as_ref()?;
+    tracing::info!(path = %path.display(), "writing a heartbeat file");
+    Some(Heartbeat::new(path.clone(), account, lease_path))
 }
 
 /// The `[risk]` block, exactly as engine.toml spells it. There are no

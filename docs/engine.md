@@ -301,7 +301,11 @@ because the deletion order depends on it:
 | Venue reconciliation and restart recovery | Done. Boot reads the venue's working orders and compares them, and the account, against the log |
 | Stop verify, repair, and a durable breach latch | Done. A position missing its stop gets back the one the log says it was opened behind; exposure the log cannot account for latches the engine out of opening |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
-| Notifications and a liveness watchdog | **Absent.** Nothing outside the process can tell whether the engine is healthy |
+| Notifications and a liveness watchdog | Done, by feeding the fleet's own watchdog rather than growing a second one. The engine writes a heartbeat file; `check_fleet_liveness.py` reads it and pages on stale, unreadable, or latched. Off unless a path is configured |
+
+Every row above is now Done. What is left is not a missing capability but a
+missing account: the engine cannot reach the funded one, and until it can,
+nothing it does replaces anything.
 
 The Python execution path stays, and not out of caution. Measured 2026-08-14
 by walking the import graph from all nine systemd units: **93 of 135 modules

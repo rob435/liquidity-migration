@@ -45,6 +45,7 @@ use engine_types::{
 use crate::clock;
 use crate::config::EngineSection;
 use crate::ctx::{Ctx, Timers};
+use crate::heartbeat::{self, Heartbeat};
 use crate::inflight::{self, LedgerOfOrders, OrderRegistry};
 use crate::reconcile;
 use crate::ledger::{LatencyLedger, Segment};
@@ -127,6 +128,9 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// the loop's `select!` needs it as a local — a future borrowing it out
     /// of `self` would lock out every branch that has work to do.
     targets: Option<TargetBookWatcher>,
+    /// The heartbeat file, when one was configured. Telemetry only: nothing
+    /// in the loop reads it and nothing in the loop waits on it.
+    heartbeat: Option<Heartbeat>,
     /// Whether boot's comparison against the venue left this engine free to
     /// add exposure. False latches: it is written into the log and read back
     /// on the next boot, so a restart cannot quietly clear it.
@@ -297,6 +301,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             may_open,
             ledger: LatencyLedger::new(now),
             targets: None,
+            heartbeat: None,
             shadow: settings.shadow,
             group_flush: Duration::from_millis(settings.group_flush_ms.max(1)),
             refresh_after_ns: settings.account_view_max_age_ms.saturating_mul(1_000_000) / 2,
@@ -423,6 +428,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// never hears about one, and a follower plug holds whatever it holds.
     pub fn watch_targets(&mut self, watcher: TargetBookWatcher) {
         self.targets = Some(watcher);
+    }
+
+    /// Say how this engine is, in a file. Optional: with no heartbeat the
+    /// engine writes nothing about itself and nothing outside the process can
+    /// tell whether it is well.
+    pub fn write_heartbeat(&mut self, heartbeat: Heartbeat) {
+        self.heartbeat = Some(heartbeat);
     }
 
     pub fn in_flight_ids(&self) -> Vec<&str> {
@@ -678,6 +690,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     async fn on_tick(&mut self) -> Result<(), EngineError> {
         self.wal.flush()?;
         let now = clock::now_ns();
+        // First, and on this tick rather than on a market message: it is the
+        // cheapest point in the tick, and it is in front of the account
+        // refresh below, which is a venue round trip.
+        self.beat(now);
         if self.ledger.due(now) {
             let record = self.ledger.record_for_wal(now);
             self.wal.append(&record)?;
@@ -716,6 +732,44 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         // Through the ordinary queue, so the flood cap counts these too.
         self.drain(now).await
+    }
+
+    /// Write the heartbeat file, when one was asked for and its own cadence
+    /// has come round.
+    ///
+    /// Nothing here returns an error, because there is nothing an error here
+    /// should change: the file is how something outside tells whether this
+    /// engine is well, and an engine that stopped trading because it could
+    /// not describe itself would be a worse answer than one nobody can see.
+    fn beat(&mut self, now_ns: u64) {
+        let Engine {
+            heartbeat,
+            ledger,
+            names,
+            may_open,
+            shadow,
+            events_seen,
+            orders_sent,
+            ..
+        } = self;
+        let Some(heartbeat) = heartbeat.as_mut() else {
+            return;
+        };
+        if !heartbeat.due(now_ns) {
+            return;
+        }
+        heartbeat.write(
+            now_ns,
+            &heartbeat::Facts {
+                shadow: *shadow,
+                may_open: *may_open,
+                market_events: *events_seen,
+                orders_sent: *orders_sent,
+                strategies: names,
+                decide: ledger.quantiles(Segment::Decide),
+                wire: ledger.quantiles(Segment::Wire),
+            },
+        );
     }
 
     async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {

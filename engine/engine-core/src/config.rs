@@ -60,6 +60,12 @@ pub struct EngineSection {
     /// a follower plug holds whatever it holds.
     #[serde(default)]
     pub target_book_path: Option<PathBuf>,
+    /// Where to write the heartbeat file — one line saying how this engine
+    /// is, for something outside the process to read. Left out means none is
+    /// written and nothing is said about it: an engine nobody asked to report
+    /// on itself is not a fault.
+    #[serde(default)]
+    pub heartbeat_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -156,6 +162,10 @@ symbols = ["BTCUSDT"]
             cfg.engine.target_book_path, None,
             "no path means no watcher, which is no decision"
         );
+        assert_eq!(
+            cfg.engine.heartbeat_path, None,
+            "no path means no heartbeat is written and nothing is said about it"
+        );
         assert_eq!(cfg.engine.account_view_max_age_ms, 4000);
         assert_eq!(cfg.risk.get("max_symbols").unwrap().as_integer(), Some(4));
         let s = &cfg.strategies[0];
@@ -175,6 +185,19 @@ symbols = ["BTCUSDT"]
         assert_eq!(
             cfg.engine.target_book_path,
             Some(PathBuf::from("var/targets/carry.json"))
+        );
+    }
+
+    #[test]
+    fn a_named_heartbeat_path_is_read_as_written() {
+        let src = SAMPLE.replace(
+            "wal_path = \"engine.wal\"",
+            "wal_path = \"engine.wal\"\nheartbeat_path = \"var/engine-heartbeat.json\"",
+        );
+        let cfg: Config = toml::from_str(&src).unwrap();
+        assert_eq!(
+            cfg.engine.heartbeat_path,
+            Some(PathBuf::from("var/engine-heartbeat.json"))
         );
     }
 

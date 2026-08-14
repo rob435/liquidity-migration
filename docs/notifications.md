@@ -95,7 +95,7 @@ timer so a hung run goes `failed` rather than silently never re-firing.
 What it checks: systemd unit states — including a service that is enabled but not active (debounced one
 interval, then CRITICAL); account-owner health and readiness freshness; live-L2 capture freshness;
 per-sleeve producer cycle age; the frozen demo-rule receipt's remaining life; free disk; and the owner's
-digest.
+digest. Optionally, and off unless a path is given, the engine's own heartbeat file.
 
 | Threshold | Default | Meaning |
 | --- | --- | --- |
@@ -103,7 +103,26 @@ digest.
 | `--max-account-health-age-min` | 1 | owner-health or reconciliation projection is older than this, and how stale the owner's last authenticated exchange read may be |
 | `--max-account-capture-age-min` | 3 | canonical live L2 is older than this |
 | `--max-ws-lag-hours` | 6 | WS kline feed lag warning |
+| `--max-engine-heartbeat-age-sec` | 60 | the engine's heartbeat is older than this (only read when one is configured) |
 | `--cooldown-min` | 30 | re-alert interval; **deployed as 60 for both demo and mainnet** |
+
+### The engine's heartbeat
+
+`--engine-heartbeat-file` (or `LIVENESS_ENGINE_HEARTBEAT_FILE`) points at the small JSON file the engine
+rewrites every few seconds. **Unset — which is how the fleet runs today — the file is never opened and
+nothing new can alert.** Given a path, three things page:
+
+| Alert | Severity | Means |
+| --- | --- | --- |
+| `engine_heartbeat_stale` | CRITICAL | it stopped being written, so the engine is dead or stuck — or it is dated in the future, so its age cannot be judged at all |
+| `engine_heartbeat_latched` | CRITICAL live, WARNING in shadow | the engine has latched itself out of opening new positions. It is alive, its heartbeat is healthy, every other check is green, and it opens nothing. Nothing else reports this — a person has to read the engine's log |
+| `engine_heartbeat_unreadable` | CRITICAL | missing, empty, half-written, missing a field this check reads, or in a mode this checker does not know. The engine's state is then unknown |
+
+Every message names the mode, because a latch means something different when the engine was in shadow
+and sending nothing anyway. The mode is a word — `live` or `shadow` — and an unrecognised one is refused
+rather than guessed at. The account number, the lease path and the process id are optional: a shadow run
+may hold no lease and may never have asked the venue who it is. Anything else the engine writes is
+ignored.
 
 ### How an alert behaves
 

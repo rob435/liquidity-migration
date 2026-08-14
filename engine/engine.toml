@@ -24,6 +24,15 @@ shadow = true
 # means no watcher runs at all — which is "no decision", not an empty book: a
 # follower plug holds whatever it holds.
 # target_book_path = "var/targets/carry.json"
+# Where to write the heartbeat file: one line of JSON, rewritten every few
+# seconds, saying when it was written, live or shadow, whose account it is on,
+# whether it is still allowed to open positions, and what it has seen and sent.
+# It decides nothing — whether any of that is alarming is the fleet watchdog's
+# job. Left out, as it is here, means no file is written and nothing is said
+# about it. `wall_ts_ms` is when it was written, the same spelling the log
+# uses; `decide_*` is thinking time and `wire_*` is time to the wire, both in
+# nanoseconds, and both null until an order has been through.
+# heartbeat_path = "var/engine-heartbeat.json"
 
 # The four capital controls. Nothing here has a default: every number is
 # written down, and the Python fleet's values are recorded in

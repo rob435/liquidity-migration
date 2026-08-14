@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -2274,3 +2275,316 @@ def test_mainnet_venue_rule_age_alerts_use_their_own_key_and_remedy() -> None:
     assert demo is not None
     assert demo.key == "demo_rules_age"
     assert "require a full probe" in demo.message
+
+
+# --------------------------------------------------------------------------- #
+# The engine's heartbeat file
+# --------------------------------------------------------------------------- #
+ENGINE_NOW_MS = 1_800_000_000_000
+#: Override marker for "this key is not in the file at all".
+_ABSENT = object()
+
+
+def _engine_heartbeat_payload(**overrides) -> dict:
+    """A fresh, healthy, live reading, written the way the engine writes it.
+
+    The engine also writes keys this check never reads. They are in every
+    fixture on purpose, so the tests prove the extras are ignored rather than
+    tested against a document the engine does not actually produce.
+    """
+    payload = {
+        "account_user_id": "104729361",
+        "decide_p50_ns": 83,
+        "decide_p99_ns": 210,
+        "engine_version": "0.1.0",
+        "lease_path": "/opt/liquidity-migration/data/engine/engine.lease",
+        "market_events": 41_233,
+        "may_open": True,
+        "mode": "live",
+        "orders_sent": 187,
+        "pid": 8891,
+        "realm": "mainnet",
+        "strategies": ["carry"],
+        "wall_ts_ms": ENGINE_NOW_MS - 2_000,
+        "wire_p50_ns": 3_900_000,
+        "wire_p99_ns": 5_100_000,
+    }
+    payload.update(overrides)
+    return {key: value for key, value in payload.items() if value is not _ABSENT}
+
+
+def _write_engine_heartbeat(path: Path, **overrides) -> Path:
+    """Write it the way the engine does: sorted keys, trailing newline."""
+    path.write_text(json.dumps(_engine_heartbeat_payload(**overrides), sort_keys=True) + "\n")
+    return path
+
+
+def _engine_alerts(path: Path, *, max_age_seconds: float = 60.0, now_ms: int = ENGINE_NOW_MS):
+    return M.gather_engine_heartbeat_alerts(
+        heartbeat_path=path,
+        max_age_seconds=max_age_seconds,
+        now_ms=now_ms,
+    )
+
+
+def test_engine_heartbeat_fresh_and_healthy_is_silent(tmp_path) -> None:
+    """Shadow is not a fault on its own — running an engine that sends nothing is
+    a normal thing to do — so only the age and the latch may page here. The
+    keys this check never reads must not page either.
+    """
+    assert _engine_alerts(_write_engine_heartbeat(tmp_path / "live.json")) == []
+    assert _engine_alerts(_write_engine_heartbeat(tmp_path / "shadow.json", mode="shadow")) == []
+    # Exactly at the configured age is still inside the bound.
+    at_bound = _write_engine_heartbeat(tmp_path / "at_bound.json", wall_ts_ms=ENGINE_NOW_MS - 60_000)
+    assert _engine_alerts(at_bound) == []
+
+
+def test_engine_heartbeat_needs_no_account_lease_or_pid(tmp_path) -> None:
+    """A shadow run may hold no lease and may never have asked the venue who it
+    is. Requiring either would turn an ordinary shadow engine into a permanent
+    page, so they are printed when present and left out when not.
+    """
+    anonymous = _write_engine_heartbeat(
+        tmp_path / "anonymous.json",
+        mode="shadow",
+        account_user_id=_ABSENT,
+        lease_path=_ABSENT,
+        pid=_ABSENT,
+    )
+    assert _engine_alerts(anonymous) == []
+
+    stale = _write_engine_heartbeat(
+        tmp_path / "anonymous_stale.json",
+        mode="shadow",
+        account_user_id=_ABSENT,
+        lease_path=_ABSENT,
+        pid=_ABSENT,
+        wall_ts_ms=ENGINE_NOW_MS - 300_000,
+    )
+    alerts = _engine_alerts(stale)
+    assert [alert.key for alert in alerts] == ["engine_heartbeat_stale"]
+    assert "mode shadow, 41233 market events seen, 187 orders sent" in alerts[0].message
+    assert "account" not in alerts[0].message
+    assert "pid" not in alerts[0].message
+
+
+def test_engine_heartbeat_unknown_mode_is_read_as_unreadable_not_guessed(tmp_path) -> None:
+    """A mode this checker has never heard of is where a guess is worst: reading
+    it as live overstates what is at risk, reading it as shadow hides a real one.
+    """
+    unknown = _write_engine_heartbeat(tmp_path / "unknown_mode.json", mode="rehearsal")
+    alerts = _engine_alerts(unknown)
+
+    assert [alert.key for alert in alerts] == ["engine_heartbeat_unreadable"]
+    assert alerts[0].severity == M.CRITICAL
+    assert 'the mode is "rehearsal", which this checker does not know' in alerts[0].message
+
+    # A latched engine in an unknown mode is still not read as latched: the
+    # document is refused whole rather than half-believed.
+    latched = _write_engine_heartbeat(tmp_path / "unknown_latched.json", mode="LIVE", may_open=False)
+    assert [alert.key for alert in _engine_alerts(latched)] == ["engine_heartbeat_unreadable"]
+
+
+def test_engine_heartbeat_stale_pages_with_the_mode_and_last_counts(tmp_path) -> None:
+    """The whole point: a dead or wedged engine stops writing, and nothing else
+    on the box would notice.
+    """
+    stale = _write_engine_heartbeat(tmp_path / "stale.json", wall_ts_ms=ENGINE_NOW_MS - 300_000)
+    alerts = _engine_alerts(stale)
+
+    assert [alert.key for alert in alerts] == ["engine_heartbeat_stale"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "300s old" in alerts[0].message
+    assert "dead or stuck" in alerts[0].headline
+    # Which mode it died in, which process to go and look at, and what it had
+    # done by then.
+    assert "mode live" in alerts[0].message
+    assert "41233 market events seen, 187 orders sent" in alerts[0].message
+    assert "104729361" in alerts[0].message
+    assert "pid 8891" in alerts[0].message
+
+    one_ms_past = _write_engine_heartbeat(tmp_path / "past.json", wall_ts_ms=ENGINE_NOW_MS - 60_001)
+    assert [alert.key for alert in _engine_alerts(one_ms_past)] == ["engine_heartbeat_stale"]
+
+
+def test_engine_heartbeat_future_dated_pages_instead_of_reading_as_fresh(tmp_path) -> None:
+    """A clock ahead of ours makes every staleness reading meaningless, and the
+    direction of the error is the dangerous one: a dead engine looks fresh.
+    """
+    future = _write_engine_heartbeat(tmp_path / "future.json", wall_ts_ms=ENGINE_NOW_MS + 5_000)
+    alerts = _engine_alerts(future)
+
+    assert [alert.key for alert in alerts] == ["engine_heartbeat_stale"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "5s in the future" in alerts[0].message
+    assert "clock is wrong" in alerts[0].headline
+
+
+def test_engine_heartbeat_latched_pages_and_says_what_it_means(tmp_path) -> None:
+    """An engine that has latched itself out of opening positions is alive,
+    writing healthy heartbeats, and green on every other check here. Live it is
+    critical; in shadow nothing was reaching the venue anyway.
+    """
+    latched = _write_engine_heartbeat(tmp_path / "latched.json", may_open=False)
+    alerts = _engine_alerts(latched)
+
+    assert [alert.key for alert in alerts] == ["engine_heartbeat_latched"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "stopped opening new positions" in alerts[0].headline
+    assert "read the engine's log" in alerts[0].headline
+    assert "may_open is false" in alerts[0].message
+    assert "It will open nothing new." in alerts[0].message
+    assert "Read the engine's log to find out why it latched." in alerts[0].message
+
+    shadow = _write_engine_heartbeat(tmp_path / "shadow_latched.json", may_open=False, mode="shadow")
+    shadow_alerts = _engine_alerts(shadow)
+    assert [alert.key for alert in shadow_alerts] == ["engine_heartbeat_latched"]
+    assert shadow_alerts[0].severity == M.WARNING
+    # The headline says why this one is only a warning.
+    assert "shadow — it was sending nothing anyway" in shadow_alerts[0].headline
+
+
+def test_engine_heartbeat_malformed_alerts_instead_of_raising(tmp_path) -> None:
+    """Another process writes this file. Absent, empty, half-written, an older
+    build with fewer fields, or a type nobody expected must each degrade to an
+    alert — this script exits 0, and a traceback would take the whole run down.
+    """
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+    truncated = tmp_path / "truncated.json"
+    truncated.write_text('{"account_user_id": "104729361", "may_open": tr')
+    empty = tmp_path / "empty.json"
+    empty.write_text("")
+    not_an_object = tmp_path / "list.json"
+    not_an_object.write_text("[1, 2, 3]")
+    # What an older engine wrote before the field names were settled: a shadow
+    # flag instead of a mode, and the market-event count under its old name.
+    # Half-reading this would report a live engine that nobody is running.
+    before_the_rename = tmp_path / "old.json"
+    before_the_rename.write_text(
+        json.dumps(
+            {
+                "account_user_id": "104729361",
+                "events_seen": 41_233,
+                "may_open": True,
+                "orders_sent": 187,
+                "shadow": False,
+                "wall_ts_ms": ENGINE_NOW_MS,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    cases = {
+        "the file does not exist": tmp_path / "never-written.json",
+        "IsADirectoryError": directory,
+        "the file is empty": empty,
+        "it is not valid JSON": truncated,
+        "the top level is a list": not_an_object,
+        "these fields are missing or the wrong type: mode, market_events": before_the_rename,
+    }
+    for expected_reason, path in cases.items():
+        alerts = _engine_alerts(path)
+        assert [alert.key for alert in alerts] == ["engine_heartbeat_unreadable"], path
+        assert alerts[0].severity == M.CRITICAL, path
+        assert expected_reason in alerts[0].message, path
+        assert "cannot tell what the engine is doing" in alerts[0].headline, path
+
+
+def test_engine_heartbeat_string_false_is_not_read_as_permission_to_open(tmp_path) -> None:
+    """``"false"`` is a truthy string in Python, so a naive read of a wrong-typed
+    ``may_open`` turns a latched engine into a healthy one.
+    """
+    wrong_type = _write_engine_heartbeat(tmp_path / "wrong.json", may_open="false")
+    alerts = _engine_alerts(wrong_type)
+
+    assert [alert.key for alert in alerts] == ["engine_heartbeat_unreadable"]
+    assert "may_open" in alerts[0].message
+
+    # bool is a subclass of int, so the timestamp needs the same care.
+    bool_ts = _write_engine_heartbeat(tmp_path / "bool_ts.json", wall_ts_ms=True)
+    assert [alert.key for alert in _engine_alerts(bool_ts)] == ["engine_heartbeat_unreadable"]
+    assert "wall_ts_ms" in _engine_alerts(bool_ts)[0].message
+
+
+def _engine_main_argv(tmp_path, state_name: str, *extra: str) -> list[str]:
+    return [
+        "check_fleet_liveness.py",
+        "--long-root",
+        "",
+        "--carry-root",
+        "",
+        "--state-file",
+        str(tmp_path / state_name),
+        *extra,
+    ]
+
+
+def test_engine_heartbeat_unconfigured_reads_nothing_and_alerts_nothing(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The fleet runs this script every three minutes with no engine heartbeat
+    provisioned. Unset must mean the file is never opened and no alert exists.
+    """
+    reads: list[Path] = []
+    _stub_account_authority(monkeypatch)
+    monkeypatch.delenv("LIVENESS_ENGINE_HEARTBEAT_FILE", raising=False)
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_unit_states", lambda units: {})
+    monkeypatch.setattr(
+        M,
+        "gather_engine_heartbeat_alerts",
+        lambda **kwargs: reads.append(kwargs["heartbeat_path"]) or [],
+    )
+    monkeypatch.setattr("sys.argv", _engine_main_argv(tmp_path, "state.json"))
+
+    assert M.main() == 0
+    assert reads == []
+    assert "engine_heartbeat" not in capsys.readouterr().out
+
+
+def test_engine_heartbeat_file_can_be_wired_through_the_environment(monkeypatch) -> None:
+    """The unit wires it via EnvironmentFile, the way --heartbeat-url already is."""
+    monkeypatch.setenv("LIVENESS_ENGINE_HEARTBEAT_FILE", "/opt/liquidity-migration/data/engine/heartbeat.json")
+    assert (
+        M.build_arg_parser().parse_args([]).engine_heartbeat_file
+        == "/opt/liquidity-migration/data/engine/heartbeat.json"
+    )
+
+    monkeypatch.delenv("LIVENESS_ENGINE_HEARTBEAT_FILE", raising=False)
+    assert M.build_arg_parser().parse_args([]).engine_heartbeat_file == ""
+
+
+def test_main_pages_every_broken_heartbeat_and_still_exits_zero(tmp_path, monkeypatch, capsys) -> None:
+    """End to end through main(): each condition reaches the operator, and no
+    shape of this file can stop the watchdog exiting 0.
+    """
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_unit_states", lambda units: {})
+
+    healthy = _write_engine_heartbeat(tmp_path / "healthy.json", wall_ts_ms=M._now_ms() - 2_000)
+    stale = _write_engine_heartbeat(tmp_path / "stale.json", wall_ts_ms=M._now_ms() - 900_000)
+    latched = _write_engine_heartbeat(tmp_path / "latched.json", may_open=False, wall_ts_ms=M._now_ms() - 2_000)
+    empty = tmp_path / "empty.json"
+    empty.write_text("")
+
+    cases = [
+        (healthy, ""),
+        (stale, "engine_heartbeat_stale"),
+        (latched, "engine_heartbeat_latched"),
+        (tmp_path / "absent.json", "engine_heartbeat_unreadable"),
+        (empty, "engine_heartbeat_unreadable"),
+    ]
+    for index, (path, expected_key) in enumerate(cases):
+        monkeypatch.setattr(
+            "sys.argv",
+            _engine_main_argv(tmp_path, f"state-{index}.json", "--engine-heartbeat-file", str(path)),
+        )
+        assert M.main() == 0, path
+        out = capsys.readouterr().out
+        if expected_key:
+            assert expected_key in out, path
+        else:
+            assert "engine_heartbeat" not in out, path

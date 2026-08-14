@@ -12,7 +12,7 @@ pub mod clock;
 pub mod config;
 pub mod ctx;
 pub mod engine;
-
+pub mod heartbeat;
 pub mod inflight;
 pub mod ledger;
 pub mod reconcile;

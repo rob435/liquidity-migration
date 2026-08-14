@@ -8,6 +8,12 @@ checks live here because an execution owner cannot detect a hung signal
 scheduler or an empty/stale signal source. The ``mainnet`` scope is disjoint
 from the demo roots and runs only its own owner and producers.
 
+--engine-heartbeat-file (or LIVENESS_ENGINE_HEARTBEAT_FILE) adds the engine's
+own heartbeat file: how long ago it was written, and whether the engine has
+latched itself out of opening new positions — a state that looks perfectly
+healthy from every other check here. Unset, the file is never opened and
+nothing new can alert; no engine heartbeat is provisioned by default.
+
 Alerts are de-duplicated with a cooldown state file: a new condition alerts
 immediately, a persisting one re-alerts at most every --cooldown-min, and a
 cleared one sends a one-line "resolved" note. --heartbeat-url (or
@@ -510,6 +516,223 @@ def evaluate_notification_delivery(
             f"The hourly digest has not arrived for {missed} hour(s) — "
             "the main Telegram line may be dead."
         ),
+    )
+
+
+# The engine writes this small JSON file every few seconds and nothing else
+# reads it, so the watchdog is the only thing that can notice it stopped.
+ENGINE_MODE_LIVE = "live"
+ENGINE_MODE_SHADOW = "shadow"
+ENGINE_MODES = (ENGINE_MODE_LIVE, ENGINE_MODE_SHADOW)
+
+
+@dataclass(frozen=True)
+class EngineHeartbeat:
+    """One checked reading of the engine's heartbeat file."""
+
+    wall_ts_ms: int
+    mode: str
+    may_open: bool
+    market_events: int
+    orders_sent: int
+    #: A shadow run may never have asked the venue who it is, so both of these
+    #: can be absent from an ordinary healthy heartbeat.
+    account_user_id: str | None
+    pid: int | None
+
+    @property
+    def shadow(self) -> bool:
+        return self.mode == ENGINE_MODE_SHADOW
+
+    @property
+    def mode_note(self) -> str:
+        """Spelled out where the mode changes what the alert is worth."""
+        return "shadow — it was sending nothing anyway" if self.shadow else "live"
+
+    @property
+    def detail(self) -> str:
+        parts = [f"mode {self.mode}"]
+        if self.account_user_id is not None:
+            parts.append(f"account {self.account_user_id}")
+        if self.pid is not None:
+            # The number an operator uses to go and look at the process.
+            parts.append(f"pid {self.pid}")
+        parts.append(f"{self.market_events} market events seen")
+        parts.append(f"{self.orders_sent} orders sent")
+        return ", ".join(parts)
+
+
+def _engine_heartbeat_unreadable(path: Path, reason: str) -> Alert:
+    return Alert(
+        key="engine_heartbeat_unreadable",
+        severity=CRITICAL,
+        message=(
+            f"engine heartbeat at {path} cannot be read: {reason}. The engine's own state is "
+            "unknown — it may be running, stopped, or refusing to open positions."
+        ),
+        headline="The engine's heartbeat cannot be read — we cannot tell what the engine is doing.",
+    )
+
+
+def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
+    """Check the raw file into a reading, or raise ValueError saying what is wrong.
+
+    Every field is checked before it is believed. A ``may_open`` that arrived as
+    the string ``"false"`` is truthy in Python, so an engine that had latched
+    itself out of opening positions would read as healthy; the same trap sits
+    under ``bool`` being a subclass of ``int`` for the timestamp.
+    """
+    if not data.strip():
+        raise ValueError("the file is empty")
+    try:
+        payload = json.loads(data)
+    except ValueError as exc:  # JSONDecodeError and bad UTF-8 both land here
+        raise ValueError(f"it is not valid JSON ({str(exc)[:120]})") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"the top level is a {type(payload).__name__}, not a JSON object")
+
+    # Every field the decision rests on is required: a heartbeat missing one of
+    # them is a different contract from the one built against, and saying so
+    # beats half-trusting the rest of the document. The account number, the
+    # process id, and the lease path are not in here — a shadow run may hold no
+    # lease and may never have asked the venue who it is, so requiring either
+    # would turn an ordinary shadow engine into a permanent page. Everything
+    # else the engine writes is ignored.
+    wrong: list[str] = []
+    for field, expected in (
+        ("wall_ts_ms", int),
+        ("mode", str),
+        ("may_open", bool),
+        ("market_events", int),
+        ("orders_sent", int),
+    ):
+        value = payload.get(field)
+        if expected is int and isinstance(value, bool):
+            wrong.append(field)
+        elif not isinstance(value, expected):
+            wrong.append(field)
+    if wrong:
+        raise ValueError("these fields are missing or the wrong type: " + ", ".join(wrong))
+
+    mode = str(payload["mode"])
+    if mode not in ENGINE_MODES:
+        # Guessing is worse than paging here: reading an unknown mode as live
+        # overstates what is at risk, reading it as shadow hides a real one.
+        raise ValueError(f'the mode is "{mode[:40]}", which this checker does not know')
+
+    account = payload.get("account_user_id")
+    pid = payload.get("pid")
+    return EngineHeartbeat(
+        wall_ts_ms=int(payload["wall_ts_ms"]),
+        mode=mode,
+        may_open=bool(payload["may_open"]),
+        market_events=int(payload["market_events"]),
+        orders_sent=int(payload["orders_sent"]),
+        account_user_id=account if isinstance(account, str) else None,
+        pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+    )
+
+
+def evaluate_engine_heartbeat(
+    *,
+    heartbeat: EngineHeartbeat,
+    now_ms: int,
+    max_age_seconds: float,
+) -> list[Alert]:
+    """Report an engine that stopped writing, and one that stopped opening positions.
+
+    Being in shadow mode is not an alert by itself — running an engine that
+    sends nothing is a normal thing to do — but every message names the mode,
+    because both conditions mean something different when nothing was going to
+    reach the venue anyway.
+    """
+    alerts: list[Alert] = []
+    age_seconds = (now_ms - heartbeat.wall_ts_ms) / 1000.0
+    if age_seconds < 0.0:
+        alerts.append(
+            Alert(
+                key="engine_heartbeat_stale",
+                severity=CRITICAL,
+                message=(
+                    f"engine heartbeat is dated {-age_seconds:.0f}s in the future; its age cannot be "
+                    f"trusted, so a dead engine would still read as fresh. Its last write said: "
+                    f"{heartbeat.detail}."
+                ),
+                headline=(
+                    "The engine's heartbeat is dated in the future — the clock is wrong, "
+                    "so we cannot tell whether the engine is alive."
+                ),
+            )
+        )
+    elif age_seconds > max_age_seconds:
+        alerts.append(
+            Alert(
+                key="engine_heartbeat_stale",
+                severity=CRITICAL,
+                message=(
+                    f"engine heartbeat is {age_seconds:.0f}s old (allowed {max_age_seconds:.0f}s): it has "
+                    f"stopped being written, so the engine is dead or stuck. Its last write said: "
+                    f"{heartbeat.detail}."
+                ),
+                headline=(
+                    f"The engine stopped writing its heartbeat {age_seconds:.0f}s ago — "
+                    f"it is dead or stuck ({heartbeat.mode})."
+                ),
+            )
+        )
+    if not heartbeat.may_open:
+        # Live, this is the alert that would otherwise never arrive: the engine
+        # is alive, its heartbeat is healthy, every other check is green, and it
+        # is quietly opening nothing. In shadow nothing was reaching the venue
+        # anyway, so it is worth knowing but not worth a night page.
+        alerts.append(
+            Alert(
+                key="engine_heartbeat_latched",
+                severity=WARNING if heartbeat.shadow else CRITICAL,
+                message=(
+                    "engine has latched itself out of opening new positions (may_open is false): it is "
+                    "alive and writing healthy heartbeats, so nothing else reports this. It will open "
+                    f"nothing new. Its last write said: {heartbeat.detail}. Read the engine's log to "
+                    "find out why it latched."
+                ),
+                headline=(
+                    f"The engine is alive but has stopped opening new positions ({heartbeat.mode_note}) — "
+                    "someone has to read the engine's log to find out why."
+                ),
+            )
+        )
+    return alerts
+
+
+def gather_engine_heartbeat_alerts(
+    *,
+    heartbeat_path: Path,
+    max_age_seconds: float,
+    now_ms: int | None = None,
+) -> list[Alert]:
+    """Read the engine's heartbeat file, or report that it could not be read.
+
+    Another process writes this file, so it can be absent, empty, half-written
+    by a crash, from an older engine build with fewer fields, or hold a type
+    that was never expected. Each of those degrades to an alert: this script
+    exits 0 by design, and a traceback here would take every other check in the
+    run down with it.
+    """
+    try:
+        data = heartbeat_path.read_bytes()
+    except FileNotFoundError:
+        return [_engine_heartbeat_unreadable(heartbeat_path, "the file does not exist")]
+    except Exception as exc:  # noqa: BLE001 — an unreadable file must page, not crash the watchdog
+        return [_engine_heartbeat_unreadable(heartbeat_path, f"{type(exc).__name__}: {str(exc)[:160]}")]
+    try:
+        heartbeat = parse_engine_heartbeat(data)
+    except Exception as exc:  # noqa: BLE001 — same for anything the file's contents can throw
+        detail = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
+        return [_engine_heartbeat_unreadable(heartbeat_path, detail[:300])]
+    return evaluate_engine_heartbeat(
+        heartbeat=heartbeat,
+        now_ms=_now_ms() if now_ms is None else now_ms,
+        max_age_seconds=max_age_seconds,
     )
 
 
@@ -1306,6 +1529,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="critical alert if owner or demo reconciliation health is older than this",
     )
+    p.add_argument(
+        "--engine-heartbeat-file",
+        default=os.environ.get("LIVENESS_ENGINE_HEARTBEAT_FILE") or "",
+        help=(
+            "the engine's heartbeat file; alerts when it stops being written, cannot be read, or says "
+            "the engine has latched itself out of opening positions ('' to skip). Defaults to the "
+            "LIVENESS_ENGINE_HEARTBEAT_FILE env var so a unit can wire it via EnvironmentFile"
+        ),
+    )
+    p.add_argument(
+        "--max-engine-heartbeat-age-sec",
+        type=float,
+        default=60.0,
+        help="critical alert if the engine's heartbeat is older than this (it writes every few seconds)",
+    )
     p.add_argument("--cooldown-min", type=float, default=30.0, help="re-alert interval for a persisting condition")
     p.add_argument(
         "--heartbeat-url",
@@ -1490,6 +1728,16 @@ def main() -> int:
     disk_alert = evaluate_disk_space(path=str(_REPO_ROOT))
     if disk_alert is not None:
         alerts.append(disk_alert)
+    if str(args.engine_heartbeat_file).strip():
+        # Unset means the file is never opened and nothing new can alert: no
+        # engine heartbeat is provisioned on the fleet as it runs today.
+        alerts.extend(
+            gather_engine_heartbeat_alerts(
+                heartbeat_path=Path(args.engine_heartbeat_file),
+                max_age_seconds=args.max_engine_heartbeat_age_sec,
+                now_ms=now_ms,
+            )
+        )
     if str(args.account_notification_state).strip():
         digest_alert = evaluate_notification_delivery(
             state_path=Path(args.account_notification_state),
