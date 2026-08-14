@@ -329,9 +329,16 @@ impl VenueGateway for BybitGateway {
 
         Ok(AccountIdentity {
             user_id,
-            // This crate reaches the practice account and nothing else, so
-            // the realm is not a reading — it is what the adapter is.
-            realm: crate::lease::REALM_DEMO.to_string(),
+            // Which realm this gateway was built for, not a reading and not
+            // a guess. This said `demo` unconditionally until 2026-08-14,
+            // from a time when the crate reached the practice account and
+            // nothing else — so the funded engine published `realm: "demo"`
+            // beside the funded account's own user id. Both halves that read
+            // a realm would then have been wrong: the mainnet producers check
+            // it against their own environment and would have blocked every
+            // entry, and the single-writer lease is named by it, so a live
+            // funded engine would have taken a lease in the demo realm's name.
+            realm: realm_name(self.realm).to_string(),
         })
     }
 
@@ -464,6 +471,22 @@ fn percent_encode(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn each_realm_reports_its_own_name_and_never_the_other() {
+        // Found on the funded account's first shadow run: the engine
+        // authenticated as 552445993 and published `realm: "demo"` beside it.
+        // The mainnet producers compare that against their own environment and
+        // would have blocked every entry; the single-writer lease is named by
+        // it, so a live funded engine would have taken a demo-realm lease.
+        assert_eq!(realm_name(VenueRealm::Demo), "demo");
+        assert_eq!(realm_name(VenueRealm::Mainnet), "mainnet");
+        assert_ne!(
+            realm_name(VenueRealm::Mainnet),
+            realm_name(VenueRealm::Demo),
+            "one name for both realms is the bug this exists to stop"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -503,5 +526,23 @@ mod tests {
         assert_eq!(gw.add_symbol("ETHUSDT"), SymbolId(1));
         assert_eq!(gw.add_symbol("ETHUSDT"), SymbolId(1));
         assert_eq!(gw.name_of(SymbolId(1)).unwrap(), "ETHUSDT");
+    }
+}
+
+/// The realm's name as everything outside this crate spells it: the lease
+/// file, the heartbeat, and the environment the target producers check their
+/// own against.
+///
+/// This was `demo` unconditionally until 2026-08-14, left over from a time
+/// when the crate reached the practice account and nothing else. The funded
+/// engine therefore published `realm: "demo"` beside the funded account's own
+/// user id, and both halves that read a realm would have been wrong: the
+/// mainnet producers compare it against their own environment and would have
+/// blocked every entry, and the single-writer lease is named by it, so a live
+/// funded engine would have taken its lease in the demo realm's name.
+fn realm_name(realm: VenueRealm) -> &'static str {
+    match realm {
+        VenueRealm::Demo => crate::lease::REALM_DEMO,
+        VenueRealm::Mainnet => crate::lease::REALM_MAINNET,
     }
 }

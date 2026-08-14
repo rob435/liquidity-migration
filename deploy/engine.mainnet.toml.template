@@ -92,10 +92,14 @@ book_path = "/var/lib/liquidity-migration/targets/long-mainnet.json"
 rest_entries = true
 symbols = ["SOLUSDT", "XRPUSDT"]
 
-# NOTE ON THE SYMBOL LISTS ABOVE. They are placeholders and must be replaced
-# with the real per-sleeve universes before this config is used, for one
-# reason that is not obvious: the engine refuses a config where two strategies
-# claim the same symbol. The venue holds one position per symbol and keeps no
-# note of who asked for it, so two sleeves on one name would each read the
-# other's exposure as their own. Give each sleeve names the other does not
-# trade.
+# NOTE ON THE SYMBOL LISTS ABOVE. They are a seed, not a universe. The engine
+# takes on any name a book asks for while it runs, so these only save the
+# admission round trip for the names each sleeve holds most often -- replacing
+# them with the real universes is an optimisation, not a precondition.
+#
+# The two lists must not overlap: the engine refuses a config where two
+# strategies claim one symbol. That check only sees this file, though, and the
+# books can name the same symbol hours after boot. The engine handles that at
+# run time -- whichever sleeve is holding a name keeps it and the other leaves
+# it alone until it is flat -- because the venue's stop belongs to the position
+# and two sleeves on one name would have one stop between them.
