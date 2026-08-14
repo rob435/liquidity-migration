@@ -54,6 +54,10 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
     )
     .await?;
 
+    if let Some(watcher) = assembly::target_book(&settings) {
+        engine.watch_targets(watcher);
+    }
+
     let outcome = engine
         .run(&mut market_feed, &mut order_feed, async {
             let _ = tokio::signal::ctrl_c().await;

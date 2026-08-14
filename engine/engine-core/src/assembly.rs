@@ -19,7 +19,8 @@ use engine_venue::{BybitGateway, BybitOrderFeed};
 use engine_wal::WalWriter;
 use serde::Deserialize;
 
-use crate::config::StrategyConfig;
+use crate::config::{EngineSection, StrategyConfig};
+use crate::targets::TargetBookWatcher;
 
 /// Open the log and replay what an earlier run left. The writer truncates a
 /// torn tail at the crash point before appending continues.
@@ -56,6 +57,15 @@ pub fn order_feed(symbols: Vec<Symbol>) -> Result<BybitOrderFeed, VenueError> {
 /// The demo venue gateway (credentials from the environment).
 pub fn venue(symbols: Vec<Symbol>) -> Result<BybitGateway, VenueError> {
     BybitGateway::new(symbols)
+}
+
+/// The target book watcher, but only when the config names a path. No path
+/// means no watcher runs, and no book ever reaches a strategy — *no
+/// decision*, which is not the same as an empty book.
+pub fn target_book(settings: &EngineSection) -> Option<TargetBookWatcher> {
+    let path = settings.target_book_path.as_ref()?;
+    tracing::info!(path = %path.display(), "watching for a target book");
+    Some(TargetBookWatcher::start(path.clone()))
 }
 
 /// The `[risk]` block, exactly as engine.toml spells it. There are no

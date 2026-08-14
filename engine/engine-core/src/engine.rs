@@ -14,6 +14,7 @@
 //!
 //! - the market feed
 //! - the private order feed
+//! - the research system's target book, when one is being watched
 //! - the next due strategy timer
 //! - the group-flush tick (also the moment the account reading is refreshed)
 //! - shutdown
@@ -37,8 +38,8 @@ use std::time::Duration;
 use engine_types::{
     quantize, AccountView, Action, AmendSpec, EngineEvent, InstrumentRule, Intent, MarketEvent,
     MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate, RiskKernel,
-    RiskVerdict, StopSpec, Strategy, StrategyId, Subscription, SymbolId, VenueError, VenueGateway,
-    Wal, WalError, WalRecord,
+    RiskVerdict, StopSpec, Strategy, StrategyId, Subscription, SymbolId, TargetBook, VenueError,
+    VenueGateway, Wal, WalError, WalRecord,
 };
 
 use crate::clock;
@@ -47,6 +48,7 @@ use crate::ctx::{Ctx, Timers};
 use crate::inflight::{self, LedgerOfOrders, OrderRegistry};
 use crate::ledger::{LatencyLedger, Segment};
 use crate::routing::Routing;
+use crate::targets::TargetBookWatcher;
 
 /// A strategy that emits from every order update it hears could keep the loop
 /// busy forever. One wake handles this many actions; past that only the ones
@@ -115,6 +117,11 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     registry: OrderRegistry,
     orders: LedgerOfOrders,
     ledger: LatencyLedger,
+    /// The target book watcher, when one was configured. Parked here between
+    /// boot and run; `run` takes it out for the length of the run, because
+    /// the loop's `select!` needs it as a local — a future borrowing it out
+    /// of `self` would lock out every branch that has work to do.
+    targets: Option<TargetBookWatcher>,
     shadow: bool,
     group_flush: Duration,
     refresh_after_ns: u64,
@@ -255,6 +262,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             registry,
             orders,
             ledger: LatencyLedger::new(now),
+            targets: None,
             shadow: settings.shadow,
             group_flush: Duration::from_millis(settings.group_flush_ms.max(1)),
             refresh_after_ns: settings.account_view_max_age_ms.saturating_mul(1_000_000) / 2,
@@ -267,6 +275,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub fn subscriptions(&self) -> &[Subscription] {
         &self.subscriptions
+    }
+
+    /// Follow a target book. Optional: with no watcher the engine simply
+    /// never hears about one, and a follower plug holds whatever it holds.
+    pub fn watch_targets(&mut self, watcher: TargetBookWatcher) {
+        self.targets = Some(watcher);
     }
 
     pub fn in_flight_ids(&self) -> Vec<&str> {
@@ -306,6 +320,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut stopped_by = StopReason::Shutdown;
         let mut order_feed_open = true;
+        // Out of `self` for the length of the run: a select! branch waiting
+        // on it must not borrow the engine the other branches need.
+        let mut targets = self.targets.take();
+        let mut targets_open = targets.is_some();
 
         loop {
             let timer_wait = self.timers.next_deadline().map(|deadline| {
@@ -343,6 +361,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                 },
+                book = next_book(&mut targets), if targets_open => match book {
+                    Some(book) => self.on_targets(book).await?,
+                    // The worker only stops when it is dropped, so this is a
+                    // surprise worth a loud line. Nothing else changes: no
+                    // book means no decision, and followers hold.
+                    None => {
+                        tracing::error!("the target book watcher stopped; no further books will arrive");
+                        targets_open = false;
+                    }
+                },
                 _ = tokio::time::sleep(timer_wait.unwrap_or_default()), if timer_wait.is_some() => {
                     self.on_timers().await?;
                 }
@@ -350,6 +378,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
 
+        self.targets = targets;
         self.finish().await?;
         Ok(RunOutcome {
             stopped_by,
@@ -396,6 +425,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 routing,
                 orders,
                 registry,
+                account,
+                rules,
                 ..
             } = self;
             let count = strategies.len();
@@ -403,6 +434,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 feed_strategy(
                     strategies,
                     market,
+                    account,
+                    rules,
                     timers,
                     pending,
                     orders,
@@ -444,11 +477,58 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 pending,
                 orders,
                 registry,
+                account,
+                rules,
                 ..
             } = self;
             feed_strategy(
-                strategies, market, timers, pending, orders, registry, sid, &event, now,
+                strategies, market, account, rules, timers, pending, orders, registry, sid, &event,
+                now,
             );
+        }
+        self.drain(now).await
+    }
+
+    /// A fresh target book. Every strategy hears it, the way a feed reset is
+    /// heard: which of them follows a book is the plug's business, not the
+    /// loop's. Nothing arrives here unless a whole book was read, so this is
+    /// only ever called with a decision in hand.
+    async fn on_targets(&mut self, book: TargetBook) -> Result<(), EngineError> {
+        let now = clock::now_ns();
+        tracing::info!(
+            source = %book.source,
+            targets = book.targets.len(),
+            valid_until_ms = book.valid_until_ms,
+            "a target book reached the strategies"
+        );
+        let event = EngineEvent::Targets(book);
+        {
+            let Engine {
+                strategies,
+                market,
+                timers,
+                pending,
+                orders,
+                registry,
+                account,
+                rules,
+                ..
+            } = self;
+            for index in 0..strategies.len() {
+                feed_strategy(
+                    strategies,
+                    market,
+                    account,
+                    rules,
+                    timers,
+                    pending,
+                    orders,
+                    registry,
+                    StrategyId(index as u16),
+                    &event,
+                    now,
+                );
+            }
         }
         self.drain(now).await
     }
@@ -953,10 +1033,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         pending,
                         orders,
                         registry,
+                        account,
+                        rules,
                         ..
                     } = self;
                     feed_strategy(
-                        strategies, market, timers, pending, orders, registry, sid, &event, now,
+                        strategies, market, account, rules, timers, pending, orders, registry, sid,
+                        &event, now,
                     );
                 }
                 None => {
@@ -976,11 +1059,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         routing,
                         orders,
                         registry,
+                        account,
+                        rules,
                         ..
                     } = self;
                     for sid in routing.all_listeners(symbol) {
                         feed_strategy(
-                            strategies, market, timers, pending, orders, registry, sid, &event, now,
+                            strategies, market, account, rules, timers, pending, orders, registry,
+                            sid, &event, now,
                         );
                     }
                 }
@@ -1033,6 +1119,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 fn feed_strategy(
     strategies: &mut [Box<dyn Strategy>],
     market: &MarketState,
+    account: &AccountView,
+    rules: &[Option<InstrumentRule>],
     timers: &mut Timers,
     pending: &mut VecDeque<Action>,
     orders: &LedgerOfOrders,
@@ -1046,6 +1134,8 @@ fn feed_strategy(
     };
     let mut ctx = Ctx {
         market,
+        account,
+        rules,
         now_ns,
         strategy: sid,
         out: pending,
@@ -1054,6 +1144,16 @@ fn feed_strategy(
         registry,
     };
     strategy.on_event(event, &mut ctx);
+}
+
+/// One receive on the book watcher, or a future that never resolves when
+/// there is nothing to watch. The loop guards this branch anyway; the
+/// pending arm means the function is honest on its own.
+async fn next_book(watcher: &mut Option<TargetBookWatcher>) -> Option<TargetBook> {
+    match watcher {
+        Some(watcher) => watcher.next_book().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// When this message reached us. The whole chain is measured from here.

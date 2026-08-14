@@ -8,6 +8,7 @@
 //! the events it is handed and the context it is given.
 
 mod params;
+pub mod quoter;
 pub mod target_book;
 mod touch_sniper;
 
@@ -20,10 +21,11 @@ use std::fmt;
 
 use engine_types::{Strategy, StrategyId};
 
+pub use target_book::TargetBookFollower;
 pub use touch_sniper::TouchSniper;
 
 /// Every name [`build_strategy`] answers to.
-pub const KNOWN_STRATEGIES: &[&str] = &[touch_sniper::NAME];
+pub const KNOWN_STRATEGIES: &[&str] = &[target_book::follower::NAME, touch_sniper::NAME];
 
 /// Why a config block could not become a strategy.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,12 +93,26 @@ impl std::error::Error for BuildError {}
 /// take_px = 61800.0       # optional: leave here for a profit
 /// ttl_s = 900             # optional: leave anyway after this long
 /// ```
+///
+/// The follower's block is shorter, because everything it trades comes from
+/// the book rather than from config. `symbols` is its universe, and the
+/// engine collects it once at boot:
+///
+/// ```toml
+/// [[strategy]]
+/// name = "target_book"
+/// capital_usdt = 200.0
+/// symbols = ["KAITOUSDT", "COTIUSDT"]
+/// ```
 pub fn build_strategy(
     name: &str,
     strategy_id: StrategyId,
     params: &toml::Value,
 ) -> Result<Box<dyn Strategy>, BuildError> {
     match name {
+        target_book::follower::NAME => {
+            Ok(Box::new(TargetBookFollower::from_params(strategy_id, params)?))
+        }
         touch_sniper::NAME => Ok(Box::new(TouchSniper::from_params(strategy_id, params)?)),
         other => Err(BuildError::UnknownStrategy { name: other.to_string() }),
     }

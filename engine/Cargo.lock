@@ -352,6 +352,7 @@ dependencies = [
  "engine-types",
  "serde",
  "toml",
+ "tracing",
 ]
 
 [[package]]

@@ -1,6 +1,8 @@
 use crate::ids::{SymbolId, TimerId};
 use crate::market::{MarketEvent, Quote, Subscription, Ticker};
-use crate::orders::{Action, AmendSpec, Intent, OrderUpdate, RestingOrder};
+use crate::orders::{Action, AmendSpec, InstrumentRule, Intent, OrderUpdate, RestingOrder};
+use crate::risk::PositionView;
+use crate::targets::TargetBook;
 
 /// Everything a strategy can be woken by.
 #[derive(Clone, Debug, PartialEq)]
@@ -8,16 +10,40 @@ pub enum EngineEvent {
     Market(MarketEvent),
     Timer { id: TimerId, now_ns: u64 },
     Order(OrderUpdate),
+    /// A new target book from the research system.
+    ///
+    /// It arrives only when a whole book was read and understood. No file,
+    /// an unreadable one, or a version the engine does not know delivers
+    /// nothing at all — strategies are not woken, which is *no decision*,
+    /// and a follower goes on holding what it holds. An empty book is the
+    /// opposite: it is delivered, and it says hold nothing.
+    Targets(TargetBook),
 }
 
-/// The strategy's window into the engine. Read market state and your own
-/// resting orders, emit actions, arm timers. No venue access, no log access,
-/// no clock other than this.
+/// The strategy's window into the engine. Read market state, the account
+/// reading, and your own resting orders; emit actions, arm timers. No venue
+/// access, no log access, no clock other than these.
 pub trait StrategyCtx {
     fn quote(&self, symbol: SymbolId) -> &Quote;
     fn ticker(&self, symbol: SymbolId) -> &Ticker;
     fn symbol_id(&self, name: &str) -> Option<SymbolId>;
     fn now_ns(&self) -> u64;
+    /// What the engine's latest account reading says is held in this symbol,
+    /// or `None` when it is flat or the reading does not mention it. This is
+    /// the venue's own picture, refreshed on the engine's schedule — not a
+    /// running total of the strategy's fills.
+    fn position(&self, symbol: SymbolId) -> Option<PositionView>;
+    /// Tick, step and minimums, as the venue stated them at boot. `None`
+    /// means nothing can be quantized for that symbol, so nothing can be
+    /// sent for it either.
+    fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule>;
+    /// Wall-clock milliseconds since the unix epoch, comparable with venue
+    /// timestamps. Every other clock in here is monotonic on purpose; this
+    /// one exists because a target book carries a validity window written by
+    /// another process, and only a clock of the same kind can say whether it
+    /// has run out. Never measure latency with it — it can be stepped, and
+    /// two readings can come back in the wrong order.
+    fn wall_ms(&self) -> i64;
     /// Hand an action to the engine. The risk kernel still gates every send.
     fn emit(&mut self, action: Action);
     /// One-shot timer; fires as [`EngineEvent::Timer`] after `after_ns`.

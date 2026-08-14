@@ -50,6 +50,30 @@ impl<'a> Params<'a> {
         }
     }
 
+    /// A list of non-empty strings. An empty entry is refused rather than
+    /// dropped: a blank symbol in a list is a mistake in the config, and
+    /// silently trading one fewer name is the worst way to answer it.
+    pub(crate) fn strings(&self, param: &'static str) -> Result<Vec<String>, BuildError> {
+        let value = self.get(param)?;
+        let Some(items) = value.as_array() else {
+            return Err(self.invalid(param, format!("expected a list, got {}", type_name(value))));
+        };
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            match item.as_str() {
+                Some(text) if !text.is_empty() => out.push(text.to_string()),
+                Some(_) => return Err(self.invalid(param, "one of the entries is an empty string")),
+                None => {
+                    return Err(self.invalid(
+                        param,
+                        format!("expected a list of strings, found {} in it", type_name(item)),
+                    ))
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// A finite number, greater than zero. Integers are accepted so a config
     /// may say `qty = 1` rather than `qty = 1.0`.
     pub(crate) fn positive(&self, param: &'static str) -> Result<f64, BuildError> {

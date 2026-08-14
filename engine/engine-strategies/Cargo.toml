@@ -8,3 +8,4 @@ license.workspace = true
 engine-types = { path = "../engine-types" }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
+tracing = "0.1.44"

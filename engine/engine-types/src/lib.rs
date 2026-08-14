@@ -18,6 +18,7 @@ pub mod orders;
 pub mod quantize;
 pub mod risk;
 pub mod strategy;
+pub mod targets;
 pub mod wal;
 
 pub use ids::{StrategyId, Symbol, SymbolId, SymbolTable, TimerId};
@@ -30,6 +31,7 @@ pub use orders::{
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{EngineEvent, Strategy, StrategyCtx};
+pub use targets::{BookTarget, TargetBook};
 pub use wal::{Wal, WalError, WalRecord};
 
 /// What a venue can actually do. Venues differ in kind, not just in address:

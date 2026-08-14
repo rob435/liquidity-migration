@@ -498,6 +498,8 @@ fn settings(shadow: bool) -> EngineSection {
         group_flush_ms: 250,
         account_view_max_age_ms: 60_000,
         shadow,
+        // A test that wants a book hands the engine a watcher itself.
+        target_book_path: None,
     }
 }
 
@@ -2104,4 +2106,134 @@ async fn an_order_the_log_has_ended_leaves_the_strategys_book() {
         );
     }
     assert!(seen.borrow().len() >= 3, "it was woken after the rejection");
+}
+
+// ------------------------------------------------- the target book seam
+
+/// Writes down every book the loop hands it, and places nothing.
+struct BookListener {
+    symbol: String,
+    heard: Rc<RefCell<Vec<String>>>,
+}
+
+impl BookListener {
+    fn new(symbol: &str) -> (Self, Rc<RefCell<Vec<String>>>) {
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        (
+            BookListener {
+                symbol: symbol.to_string(),
+                heard: heard.clone(),
+            },
+            heard,
+        )
+    }
+}
+
+impl Strategy for BookListener {
+    fn name(&self) -> &str {
+        "book_listener"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, _ctx: &mut dyn StrategyCtx) {
+        if let EngineEvent::Targets(book) = event {
+            self.heard
+                .borrow_mut()
+                .push(format!("{} x{}", book.source, book.targets.len()));
+        }
+    }
+}
+
+const BOOK_JSON: &str = r#"{"version":1,"source":"carry","decision_ts_ms":1700000000000,
+"valid_until_ms":1700086400000,"targets":[{"symbol":"BTCUSDT","notional_usdt":50.0,
+"stop_loss_fraction":0.35,"leverage":2.0}]}"#;
+
+/// Stop the loop as soon as the strategy has heard something, or give up
+/// after a while so a failure reads as an assertion and not a hung test.
+async fn until_heard(heard: Rc<RefCell<Vec<String>>>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while heard.borrow().is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_book_on_disk_reaches_the_strategies_through_the_loop() {
+    let path = temp_path("book-seam");
+    std::fs::write(&path, BOOK_JSON).expect("writes the book");
+    let (listener, heard) = BookListener::new("BTCUSDT");
+    let (mut engine, _h) =
+        build(true, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    engine.watch_targets(crate::targets::TargetBookWatcher::with_poll(
+        path.path().to_path_buf(),
+        Duration::from_millis(5),
+    ));
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            until_heard(heard.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        heard.borrow().as_slice(),
+        ["carry x1"],
+        "the book reached the strategy whole"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_book_wakes_nobody() {
+    // No decision, not an empty one. A strategy that were woken here with
+    // nothing in hand would have to guess, and the guess that empties an
+    // account is the one it would make.
+    let path = temp_path("book-seam-torn");
+    std::fs::write(&path, "{ not json at all").expect("writes the file");
+    let (listener, heard) = BookListener::new("BTCUSDT");
+    let (mut engine, _h) =
+        build(true, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    engine.watch_targets(crate::targets::TargetBookWatcher::with_poll(
+        path.path().to_path_buf(),
+        Duration::from_millis(5),
+    ));
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(heard.borrow().is_empty(), "nothing was delivered");
+}
+
+#[tokio::test]
+async fn with_no_watcher_the_loop_runs_as_it_always_did() {
+    let (listener, heard) = BookListener::new("BTCUSDT");
+    let (mut engine, h) =
+        build(true, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 3, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert!(heard.borrow().is_empty());
+    assert!(h.sends.borrow().is_empty());
 }

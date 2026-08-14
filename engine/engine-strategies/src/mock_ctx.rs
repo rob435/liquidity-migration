@@ -22,8 +22,9 @@
 use std::collections::HashMap;
 
 use engine_types::{
-    Action, EngineEvent, Intent, MarketEvent, OrderAck, OrderKind, OrderUpdate, Quote,
-    RestingOrder, Side, Strategy, StrategyCtx, SymbolId, Ticker, TimerId,
+    Action, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderAck, OrderKind, OrderUpdate,
+    PositionView, Quote, RestingOrder, Side, Strategy, StrategyCtx, SymbolId, TargetBook, Ticker,
+    TimerId,
 };
 
 /// A timer the strategy asked for, and when it comes due.
@@ -52,7 +53,18 @@ pub struct MockCtx {
     symbols: HashMap<String, SymbolId>,
     quotes: Vec<Quote>,
     tickers: Vec<Ticker>,
+    /// What the engine's account reading would say is held. Empty unless a
+    /// test seeds it.
+    positions: HashMap<SymbolId, PositionView>,
+    /// What the venue said about tick and step. Empty unless a test seeds it,
+    /// and an unseeded symbol reads the way an unknown one does: nothing can
+    /// be quantized for it.
+    rules: HashMap<SymbolId, InstrumentRule>,
     now_ns: u64,
+    /// The wall clock, separate from `now_ns` on purpose: a target book's
+    /// validity window is wall time, and a test has to be able to move it
+    /// without touching the monotonic one.
+    wall_ms: i64,
     /// Everything the strategy emitted, oldest first.
     pub emitted: Vec<Action>,
     /// Timers still waiting to fire.
@@ -70,7 +82,12 @@ impl MockCtx {
             symbols: HashMap::new(),
             quotes: Vec::new(),
             tickers: Vec::new(),
+            positions: HashMap::new(),
+            rules: HashMap::new(),
             now_ns: 1_000,
+            // An ordinary unix millisecond stamp, so anything that reads like
+            // a real clock reads like a real clock in tests too.
+            wall_ms: 1_700_000_000_000,
             emitted: Vec::new(),
             timers: Vec::new(),
             arm_calls: Vec::new(),
@@ -98,6 +115,39 @@ impl MockCtx {
     pub fn set_now(&mut self, now_ns: u64) {
         self.now_ns = now_ns;
     }
+
+    pub fn set_wall_ms(&mut self, wall_ms: i64) {
+        self.wall_ms = wall_ms;
+    }
+
+    /// Seed what the account reading says is held. Interns the symbol if it
+    /// is new, the way a subscription would have.
+    pub fn set_position(&mut self, symbol: &str, side: Side, qty: f64, entry_px: f64) {
+        let id = self.add_symbol(symbol);
+        self.positions.insert(
+            id,
+            PositionView {
+                symbol: id,
+                side,
+                qty,
+                entry_px,
+                stop_attached: true,
+            },
+        );
+    }
+
+    /// Forget a holding, the way a filled exit eventually shows up in the
+    /// next account reading.
+    pub fn clear_position(&mut self, symbol: &str) {
+        let id = self.id_of(symbol);
+        self.positions.remove(&id);
+    }
+
+    /// Seed the venue's tick, step and minimums for a symbol.
+    pub fn set_rule(&mut self, symbol: &str, rule: InstrumentRule) {
+        let id = self.add_symbol(symbol);
+        self.rules.insert(id, rule);
+    }
 }
 
 impl StrategyCtx for MockCtx {
@@ -115,6 +165,19 @@ impl StrategyCtx for MockCtx {
 
     fn now_ns(&self) -> u64 {
         self.now_ns
+    }
+
+    fn position(&self, symbol: SymbolId) -> Option<PositionView> {
+        // Flat is not a position, same as the engine's own context.
+        self.positions.get(&symbol).filter(|p| p.qty > 0.0).cloned()
+    }
+
+    fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
+        self.rules.get(&symbol).copied()
+    }
+
+    fn wall_ms(&self) -> i64 {
+        self.wall_ms
     }
 
     fn emit(&mut self, action: Action) {
@@ -181,6 +244,13 @@ impl Harness {
         };
         self.ctx.quotes[id.0 as usize] = quote;
         self.deliver(EngineEvent::Market(MarketEvent::Quote { symbol: id, quote }));
+    }
+
+    /// A target book reaching the strategies. Only ever delivered when a
+    /// whole book was read, which is why there is no verb here for "the book
+    /// was unreadable": that case delivers nothing at all.
+    pub fn targets(&mut self, book: TargetBook) {
+        self.deliver(EngineEvent::Targets(book));
     }
 
     pub fn feed_reset(&mut self) {

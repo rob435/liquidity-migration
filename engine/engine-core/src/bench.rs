@@ -118,6 +118,7 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         shadow: false,
         // Shadow off on purpose: the point is to measure a real send. The
         // venue on the other end is the pretend one started just above.
+        target_book_path: None,
     };
     // The real log, so the measured barrier is the shipping fsync path.
     let (wal, _replayed) = engine_wal::WalWriter::open(&options.wal_path)?;

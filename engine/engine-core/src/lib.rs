@@ -18,6 +18,7 @@ pub mod ledger;
 pub mod replay;
 pub mod routing;
 pub mod runner;
+pub mod targets;
 
 #[cfg(test)]
 mod testpath;

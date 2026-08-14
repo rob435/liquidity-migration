@@ -49,6 +49,11 @@ pub struct EngineSection {
     /// True: compute and log orders, send nothing.
     #[serde(default = "default_shadow")]
     pub shadow: bool,
+    /// Where the research system writes its target book. Left out means no
+    /// watcher is started at all — which is *no decision*, not an empty book:
+    /// a follower plug holds whatever it holds.
+    #[serde(default)]
+    pub target_book_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -129,6 +134,10 @@ symbols = ["BTCUSDT"]
         let cfg: Config = toml::from_str(SAMPLE).unwrap();
         assert_eq!(cfg.engine.group_flush_ms, 250);
         assert!(cfg.engine.shadow, "shadow is the default");
+        assert_eq!(
+            cfg.engine.target_book_path, None,
+            "no path means no watcher, which is no decision"
+        );
         assert_eq!(cfg.engine.account_view_max_age_ms, 4000);
         assert_eq!(cfg.risk.get("max_symbols").unwrap().as_integer(), Some(4));
         let s = &cfg.strategies[0];
@@ -136,6 +145,19 @@ symbols = ["BTCUSDT"]
         assert_eq!(s.capital_usdt, 250.0);
         assert_eq!(s.params.get("every_nth_quote").unwrap().as_integer(), Some(20));
         assert!(s.params.get("name").is_none(), "name is not a param");
+    }
+
+    #[test]
+    fn a_named_target_book_path_is_read_as_written() {
+        let src = SAMPLE.replace(
+            "wal_path = \"engine.wal\"",
+            "wal_path = \"engine.wal\"\ntarget_book_path = \"var/targets/carry.json\"",
+        );
+        let cfg: Config = toml::from_str(&src).unwrap();
+        assert_eq!(
+            cfg.engine.target_book_path,
+            Some(PathBuf::from("var/targets/carry.json"))
+        );
     }
 
     #[test]

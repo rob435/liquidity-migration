@@ -283,6 +283,10 @@ impl Strategy for TouchSniper {
             }
             EngineEvent::Timer { .. } => {}
             EngineEvent::Order(update) => self.on_order(update, ctx),
+            // This plug's decision is its config, not a book. Research
+            // changing what carry holds says nothing about a level someone
+            // asked this one to watch.
+            EngineEvent::Targets(_) => {}
         }
     }
 }

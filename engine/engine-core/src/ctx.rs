@@ -1,16 +1,18 @@
 //! The window a strategy sees, and the timers it can set.
 //!
-//! A strategy gets read-only market state, the clock, its own resting orders,
-//! a way to hand back an action, and one-shot timers. Nothing else: no venue,
-//! no log, no other strategy's state. Timers are scoped per strategy, so two
-//! strategies may both use timer 1 without colliding, and re-arming the same
-//! number before it fires replaces the old one.
+//! A strategy gets read-only market state, the account reading, the
+//! instrument rules, the clock, its own resting orders, a way to hand back an
+//! action, and one-shot timers. Nothing else: no venue, no log, no other
+//! strategy's state. Timers are scoped per strategy, so two strategies may
+//! both use timer 1 without colliding, and re-arming the same number before
+//! it fires replaces the old one.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use engine_types::{
-    Action, MarketState, Quote, RestingOrder, StrategyCtx, StrategyId, SymbolId, Ticker, TimerId,
+    AccountView, Action, InstrumentRule, MarketState, PositionView, Quote, RestingOrder,
+    StrategyCtx, StrategyId, SymbolId, Ticker, TimerId,
 };
 
 use crate::inflight::{LedgerOfOrders, OrderRegistry};
@@ -73,6 +75,13 @@ impl Timers {
 /// Handed to one strategy for the length of one callback.
 pub struct Ctx<'a> {
     pub market: &'a MarketState,
+    /// The engine's own account reading, the same one the risk kernel judges
+    /// against. Shared rather than copied per strategy: one reading, one
+    /// truth, and nobody can edit it on the way past.
+    pub account: &'a AccountView,
+    /// The venue's instrument rules, indexed by symbol, exactly as the
+    /// engine quantizes against.
+    pub rules: &'a [Option<InstrumentRule>],
     pub now_ns: u64,
     pub strategy: StrategyId,
     pub out: &'a mut VecDeque<Action>,
@@ -100,6 +109,26 @@ impl StrategyCtx for Ctx<'_> {
 
     fn now_ns(&self) -> u64 {
         self.now_ns
+    }
+
+    fn position(&self, symbol: SymbolId) -> Option<PositionView> {
+        // A row saying zero is a flat symbol, and flat is not a position: an
+        // exit sized off one would be an order for nothing.
+        self.account
+            .positions
+            .iter()
+            .find(|p| p.symbol == symbol && p.qty > 0.0)
+            .cloned()
+    }
+
+    fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
+        self.rules.get(symbol.0 as usize).copied().flatten()
+    }
+
+    fn wall_ms(&self) -> i64 {
+        // Read when asked rather than stamped once per wake, so a strategy
+        // that never asks the wall clock never pays for it.
+        engine_types::clock::wall_ms()
     }
 
     fn emit(&mut self, action: Action) {
@@ -148,6 +177,8 @@ impl StrategyCtx for Ctx<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+
     use super::*;
     use engine_types::{Intent, OrderKind, OrderRequest, OrderUpdate, Side, WalRecord};
 
@@ -170,6 +201,17 @@ mod tests {
         }
     }
 
+    /// An account reading with nothing open, which is what most of these
+    /// tests want the context to be sitting on.
+    fn flat_account() -> AccountView {
+        AccountView {
+            equity_usdt: 1_000.0,
+            available_usdt: 1_000.0,
+            positions: Vec::new(),
+            observed_ns: 1,
+        }
+    }
+
     /// One context over a hand-built book, so the filters can be read off
     /// directly instead of through a whole engine run.
     fn ctx_over<'a>(
@@ -180,8 +222,11 @@ mod tests {
         registry: &'a OrderRegistry,
         strategy: StrategyId,
     ) -> Ctx<'a> {
+        static FLAT: OnceLock<AccountView> = OnceLock::new();
         Ctx {
             market,
+            account: FLAT.get_or_init(flat_account),
+            rules: &[],
             now_ns: 42,
             strategy,
             out,
@@ -332,6 +377,89 @@ mod tests {
         ctx.resting(&mut seen);
         let ids: Vec<&str> = seen.iter().map(|o| o.client_order_id).collect();
         assert_eq!(ids, vec!["theirs"]);
+    }
+
+    const RULE: InstrumentRule = InstrumentRule {
+        tick_size: 0.5,
+        qty_step: 0.001,
+        min_qty: 0.001,
+        min_notional: 5.0,
+    };
+
+    fn holding(symbol: SymbolId, side: Side, qty: f64) -> PositionView {
+        PositionView {
+            symbol,
+            side,
+            qty,
+            entry_px: 100.0,
+            stop_attached: true,
+        }
+    }
+
+    #[test]
+    fn a_strategy_reads_the_position_the_rule_and_the_wall_clock_the_engine_holds() {
+        let market = MarketState::default();
+        let mut out = VecDeque::new();
+        let mut timers = Timers::default();
+        let orders = LedgerOfOrders::default();
+        let registry = OrderRegistry::default();
+        let account = AccountView {
+            positions: vec![holding(SymbolId(1), Side::Sell, 3.0)],
+            ..flat_account()
+        };
+        let rules = [None, Some(RULE)];
+        let ctx = Ctx {
+            market: &market,
+            account: &account,
+            rules: &rules,
+            now_ns: 42,
+            strategy: StrategyId(0),
+            out: &mut out,
+            timers: &mut timers,
+            orders: &orders,
+            registry: &registry,
+        };
+
+        assert_eq!(ctx.position(SymbolId(1)), Some(holding(SymbolId(1), Side::Sell, 3.0)));
+        assert_eq!(ctx.position(SymbolId(0)), None, "nothing is held in that one");
+        assert_eq!(ctx.instrument(SymbolId(1)), Some(RULE));
+        assert_eq!(ctx.instrument(SymbolId(0)), None, "the venue named no rule for it");
+        assert_eq!(ctx.instrument(SymbolId(7)), None, "past the end of the table");
+
+        // Wall time, not the monotonic stamp: a book's validity window can
+        // only be judged against a clock of the same kind.
+        let wall = ctx.wall_ms();
+        let now = crate::clock::wall_ms();
+        assert!(wall > 1_600_000_000_000, "expected a unix millisecond stamp, got {wall}");
+        assert!((now - wall).abs() < 60_000, "the ctx clock is the engine's: {wall} vs {now}");
+        assert_ne!(wall as u64, ctx.now_ns(), "the two clocks are not the same clock");
+    }
+
+    #[test]
+    fn a_flat_row_in_the_account_reading_is_not_a_position() {
+        // A venue that reports a symbol it once held with size zero must not
+        // read as something to exit: the exit would be an order for nothing.
+        let market = MarketState::default();
+        let mut out = VecDeque::new();
+        let mut timers = Timers::default();
+        let orders = LedgerOfOrders::default();
+        let registry = OrderRegistry::default();
+        let account = AccountView {
+            positions: vec![holding(SymbolId(0), Side::Buy, 0.0)],
+            ..flat_account()
+        };
+        let ctx = Ctx {
+            market: &market,
+            account: &account,
+            rules: &[],
+            now_ns: 42,
+            strategy: StrategyId(0),
+            out: &mut out,
+            timers: &mut timers,
+            orders: &orders,
+            registry: &registry,
+        };
+        assert_eq!(ctx.position(SymbolId(0)), None);
     }
 
     #[test]

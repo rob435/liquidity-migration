@@ -102,6 +102,78 @@ fn an_unknown_name_says_so_and_lists_what_it_knows() {
     let text = err.to_string();
     assert!(text.contains("moon_lander"), "{text}");
     assert!(text.contains("touch_sniper"), "{text}");
+    assert!(text.contains("target_book"), "{text}");
+}
+
+/// The follower's block, as the registry documents it.
+const FOLLOWER_BLOCK: &str = r#"
+[[strategy]]
+name = "target_book"
+capital_usdt = 200.0
+symbols = ["KAITOUSDT", "COTIUSDT"]
+"#;
+
+#[test]
+fn the_documented_target_book_block_builds_and_subscribes_to_its_universe() {
+    let doc: toml::Value = params(FOLLOWER_BLOCK);
+    let blocks = doc.get("strategy").expect("a [[strategy]] array").as_array().expect("an array");
+    let name = blocks[0].get("name").unwrap().as_str().unwrap().to_string();
+    let mut table = blocks[0].as_table().expect("a table").clone();
+    table.remove("name");
+    table.remove("capital_usdt");
+    let strategy = build_strategy(&name, StrategyId(1), &toml::Value::Table(table))
+        .expect("the block builds");
+
+    assert_eq!(strategy.name(), "target_book");
+    let symbols: Vec<String> = strategy.subscriptions().into_iter().map(|s| s.symbol).collect();
+    assert_eq!(symbols, vec!["KAITOUSDT".to_string(), "COTIUSDT".to_string()]);
+}
+
+#[test]
+fn the_followers_unknown_keys_are_refused_by_name_too() {
+    let err = build_err(build_strategy(
+        "target_book",
+        ID,
+        &params("symbols = [\"BTCUSDT\"]\nsymbol = \"BTCUSDT\"\n"),
+    ));
+    let words = err.to_string();
+    assert!(words.contains("symbol\""), "the error names the key: {words}");
+    assert!(words.contains("symbols"), "and the keys that exist: {words}");
+}
+
+#[test]
+fn a_follower_with_no_universe_is_refused() {
+    // The engine collects subscriptions once at boot, so an empty list is a
+    // plug that can never trade anything, whatever a later book says.
+    for src in ["symbols = []\n", "symbols = [\"\"]\n"] {
+        let err = build_err(build_strategy("target_book", ID, &params(src)));
+        match &err {
+            BuildError::InvalidParam { strategy, param, .. } => {
+                assert_eq!(*strategy, "target_book");
+                assert_eq!(*param, "symbols");
+            }
+            other => panic!("expected an invalid-param error for {src:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_symbol_list_that_is_not_a_list_of_strings_is_refused() {
+    for src in ["symbols = \"BTCUSDT\"\n", "symbols = [1, 2]\n"] {
+        let err = build_err(build_strategy("target_book", ID, &params(src)));
+        assert!(
+            matches!(err, BuildError::InvalidParam { param: "symbols", .. }),
+            "{src:?} gave {err:?}"
+        );
+    }
+}
+
+#[test]
+fn the_follower_needs_its_symbols() {
+    assert_eq!(
+        build_err(build_strategy("target_book", ID, &params("\n"))),
+        BuildError::MissingParam { strategy: "target_book", param: "symbols" }
+    );
 }
 
 #[test]

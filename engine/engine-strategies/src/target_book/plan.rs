@@ -35,6 +35,11 @@ pub struct Held {
     pub side: Side,
     /// Mark or last price, used to value the holding and to size against.
     pub px: f64,
+    /// What the position was opened at. A stop covers the whole position, so
+    /// adding to one re-declares the stop from here rather than from today's
+    /// price: anchoring on the entry is never looser than anchoring on a
+    /// blend, and a stop that loosens when you add is not a stop.
+    pub entry_px: f64,
 }
 
 impl Held {
@@ -66,6 +71,11 @@ pub enum Step {
         side: Side,
         qty: f64,
         reduce_only: bool,
+        /// Set when the resize adds to the position. Adding is opening, and
+        /// the risk kernel refuses an opening order that carries no stop; the
+        /// venue's stop covers the whole position, so it is re-declared on
+        /// every addition rather than left at the size it was written for.
+        stop_px: Option<f64>,
     },
 }
 
@@ -263,6 +273,11 @@ pub fn plan(
                     side,
                     qty,
                     reduce_only: !growing,
+                    stop_px: growing.then(|| {
+                        let anchor =
+                            if position.entry_px > 0.0 { position.entry_px } else { px };
+                        stop_price(anchor, want_side, target.stop_loss_fraction)
+                    }),
                 };
                 if growing {
                     opens.push(step);
@@ -311,7 +326,7 @@ mod tests {
             me
         }
         fn holding(mut self, symbol: &str, qty: f64, side: Side, px: f64) -> Self {
-            self.held.insert(symbol.into(), Held { qty, side, px });
+            self.held.insert(symbol.into(), Held { qty, side, px, entry_px: px });
             self.px.insert(symbol.into(), px);
             self.rules.insert(symbol.into(), RULE);
             self
@@ -420,9 +435,31 @@ mod tests {
                 symbol: "A".into(),
                 side: Side::Buy,
                 qty: 5.0,
-                reduce_only: false
+                reduce_only: false,
+                stop_px: Some(6.5),
             }]
         );
+    }
+
+    #[test]
+    fn adding_to_a_position_anchors_its_stop_on_the_entry_not_todays_price() {
+        // A stop covers the whole position. Anchoring an addition on today's
+        // price would move the stop down when you add to a long that has
+        // fallen — loosening protection on the size you already held.
+        let mut facts = Facts::default();
+        facts.held.insert(
+            "A".into(),
+            Held { qty: 10.0, side: Side::Buy, px: 8.0, entry_px: 10.0 },
+        );
+        facts.px.insert("A".into(), 8.0);
+        facts.rules.insert("A".into(), RULE);
+        let plan = plan_now(&[target("A", 160.0)], &["A".into()], &facts);
+        match &plan.steps[0] {
+            Step::Resize { stop_px, .. } => {
+                assert_eq!(*stop_px, Some(6.5), "anchored on the 10.0 entry, not the 8.0 mark");
+            }
+            other => panic!("expected a resize, got {other:?}"),
+        }
     }
 
     #[test]
@@ -435,7 +472,8 @@ mod tests {
                 symbol: "A".into(),
                 side: Side::Sell,
                 qty: 10.0,
-                reduce_only: true
+                reduce_only: true,
+                stop_px: None,
             }]
         );
     }

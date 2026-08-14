@@ -10,6 +10,8 @@
 //! [`plan`] is the whole decision and it is pure, so every rule in it can be
 //! tested on its own.
 
+pub mod follower;
 pub mod plan;
 
+pub use follower::TargetBookFollower;
 pub use plan::{Held, Plan, PlanRules, Skipped, Step, SymbolFacts, Target};
