@@ -15,22 +15,41 @@
 //! - **An empty book.** A book arrived and names nothing. That is a decision
 //!   to hold nothing, and everything open is exited.
 //!
-//! ## Known limit: the symbol list is fixed at boot
+//! ## A name that goes flat under us is not re-entered
 //!
-//! The engine collects subscriptions once, when it starts, so this plug
-//! cannot follow a symbol that first appears in a book written later — there
-//! is no price for it, no instrument rule, and no `SymbolId` to place an
-//! order against. The `symbols` list in the config block is therefore the
-//! real universe, and a book naming anything outside it is logged and
-//! skipped, not traded. Widening the universe means editing the config and
-//! restarting. That is a genuine gap, not a policy.
+//! The book says hold something; the venue says we hold none of it; nothing
+//! this plug sent closed it. A venue stop fired, or somebody closed it by
+//! hand, or it was liquidated. Acting on the book alone would buy it straight
+//! back on the next quote — the stop undone seconds after it worked, which is
+//! not a stop at all.
 //!
-//! ## Known limit: positions are read per symbol, not per plug
+//! So the name is latched and left completely alone: no entry, and no exit
+//! either. The latch lifts when the producer stops asking for the symbol,
+//! because that is the producer having taken the news into account. It
+//! deliberately does *not* lift on the next book: a producer writing the same
+//! decision every minute would otherwise clear the latch every minute, which
+//! is the loop this exists to stop.
 //!
-//! What is held comes from the account reading, and a venue holds one
-//! position per symbol however many plugs are running. So two plugs
-//! configured on the same symbol would each read the other's exposure as
-//! their own. Give the follower symbols nobody else trades.
+//! ## A name another strategy holds is not ours
+//!
+//! The venue holds one position per symbol however many plugs run, and the
+//! account reading says nothing about whose it is. So this plug asks the
+//! engine, which minted every order and knows: a name another strategy is
+//! holding is skipped entirely — not entered, not resized, not exited.
+//!
+//! It is refused wholesale rather than shared pro-rata because the venue's
+//! stop is attached to the *position*, and there is one position per symbol.
+//! Two plugs holding one name would have one stop between them, set by
+//! whichever placed the last opening order — so the second one's stop would
+//! quietly replace the first one's. Whoever got there first keeps the name
+//! until it is flat.
+//!
+//! ## The symbol list is a seed, not a ceiling
+//!
+//! The `symbols` list is what this plug subscribes to at boot. A book naming
+//! something outside it is not skipped — the engine takes the name on and
+//! subscribes to it (`engine.rs`, `admit_wanted`), and the plug trades it once
+//! it has a price and an instrument rule.
 
 use engine_types::{
     EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec,
@@ -50,7 +69,8 @@ const RESIZE_TAG: &str = "book-resize";
 
 pub struct TargetBookFollower {
     id: StrategyId,
-    /// The universe, fixed at boot. See the module note above.
+    /// What this plug subscribes to at boot. A seed, not a ceiling: see
+    /// the module note.
     symbols: Vec<String>,
     /// The newest book. `None` until one arrives, and that means no decision.
     book: Option<TargetBook>,
@@ -62,6 +82,19 @@ pub struct TargetBookFollower {
     /// every quote, so without it one unreachable name in a book writes a
     /// warning a hundred times a second until the next book lands.
     complained: Vec<String>,
+    /// Names that went flat while the book still wanted them. See the module
+    /// note: something other than this plug closed them, and buying them back
+    /// would undo it. Cleared per symbol when the book stops asking.
+    closed_under_us: Vec<String>,
+    /// Which of the book's names were held last time `act` ran. Without it a
+    /// position that *disappeared* cannot be told from one that was never
+    /// there, and every unfilled entry would latch itself.
+    was_held: Vec<String>,
+    /// Names this plug has sent a reduce for and not yet seen go flat. A
+    /// position that vanishes after we asked it to vanished because of us, so
+    /// it must not latch — otherwise every ordinary exit would block the name
+    /// the next time the book wanted it.
+    we_reduced: Vec<String>,
     /// Signed quantity this plug has sent that the account reading has not
     /// caught up with yet, per symbol.
     ///
@@ -82,6 +115,14 @@ struct SentAhead {
     symbol: SymbolId,
     view_at_send: f64,
     sent: f64,
+}
+
+/// Whether the book in hand asks for any of this name. Exactly zero is an
+/// instruction to hold none, so it does not count as wanting it.
+fn wants(targets: &[Target], symbol: &str) -> bool {
+    targets
+        .iter()
+        .any(|target| target.symbol == symbol && target.notional_usdt != 0.0)
 }
 
 /// What the account reading says is held, signed. Positive is long.
@@ -118,6 +159,9 @@ impl TargetBookFollower {
             book: None,
             rules: PlanRules::FLEET,
             complained: Vec::new(),
+            closed_under_us: Vec::new(),
+            was_held: Vec::new(),
+            we_reduced: Vec::new(),
             sent_ahead: Vec::new(),
         })
     }
@@ -147,7 +191,7 @@ impl TargetBookFollower {
 
         let now_ms = ctx.wall_ms();
         let valid_until_ms = book.valid_until_ms;
-        let targets: Vec<Target> = book
+        let mut targets: Vec<Target> = book
             .targets
             .iter()
             .map(|t| Target {
@@ -157,23 +201,90 @@ impl TargetBookFollower {
             })
             .collect();
 
-        let steps = {
-            let facts = CtxFacts { ctx: &*ctx, sent_ahead: &self.sent_ahead };
-            // Everything this plug could be holding: its own universe, plus
-            // anything the book names. A symbol the book has stopped naming
-            // is only exited if we go looking for it.
-            let mut candidates: Vec<&str> = self.symbols.iter().map(String::as_str).collect();
-            for target in &book.targets {
-                if !candidates.contains(&target.symbol.as_str()) {
-                    candidates.push(target.symbol.as_str());
-                }
+        // Everything this plug could be holding: its own universe, plus
+        // anything the book names. A symbol the book has stopped naming
+        // is only exited if we go looking for it.
+        let mut candidates: Vec<&str> = self.symbols.iter().map(String::as_str).collect();
+        for target in &book.targets {
+            if !candidates.contains(&target.symbol.as_str()) {
+                candidates.push(target.symbol.as_str());
             }
-            let held: Vec<String> = candidates
+        }
+        let mut held: Vec<String> = {
+            let facts = CtxFacts { ctx: &*ctx, sent_ahead: &self.sent_ahead };
+            candidates
                 .into_iter()
                 .filter(|symbol| facts.held(symbol).is_some())
                 .map(str::to_string)
-                .collect();
+                .collect()
+        };
 
+        // A name the other sleeve is holding is not ours at all. See the
+        // module note: the venue's stop belongs to the position, and there is
+        // one position per symbol, so two plugs cannot both hold one name
+        // without one of them silently overwriting the other's stop.
+        let mut foreign: Vec<String> = Vec::new();
+        for symbol in targets
+            .iter()
+            .map(|target| target.symbol.clone())
+            .chain(held.iter().cloned())
+        {
+            if foreign.contains(&symbol) {
+                continue;
+            }
+            if ctx
+                .symbol_id(&symbol)
+                .is_some_and(|id| ctx.foreign_position(id))
+            {
+                if !self.complained.contains(&symbol) {
+                    tracing::warn!(
+                        symbol = %symbol,
+                        "another strategy on this account is holding this name; leaving it alone"
+                    );
+                    self.complained.push(symbol.clone());
+                }
+                foreign.push(symbol);
+            }
+        }
+        targets.retain(|target| !foreign.contains(&target.symbol));
+        held.retain(|symbol| !foreign.contains(symbol));
+
+        // The latch lifts when the producer stops asking for the name, not
+        // when the next book lands. See the module note: a producer writing
+        // the same decision every minute would clear it every minute.
+        self.closed_under_us.retain(|symbol| wants(&targets, symbol));
+        for symbol in &self.was_held {
+            if held.contains(symbol) {
+                continue;
+            }
+            // It has gone flat. If we asked for that, it is ours and the
+            // record is spent; either way nothing latches on our own exit.
+            if let Some(at) = self.we_reduced.iter().position(|name| name == symbol) {
+                self.we_reduced.swap_remove(at);
+                continue;
+            }
+            if !wants(&targets, symbol) || self.closed_under_us.contains(symbol) {
+                continue;
+            }
+            tracing::warn!(
+                symbol = %symbol,
+                "this went flat while the book still wanted it, and nothing this plug sent \
+                 closed it; leaving it alone until the book stops asking"
+            );
+            self.closed_under_us.push(symbol.clone());
+        }
+        self.was_held.clear();
+        self.was_held.extend(held.iter().cloned());
+
+        // Latched names are left completely alone: no entry, and no exit
+        // either, because an exit for something we are not holding is an
+        // order for nothing and an exit for something somebody else opened is
+        // not ours to send.
+        targets.retain(|target| !self.closed_under_us.contains(&target.symbol));
+        held.retain(|symbol| !self.closed_under_us.contains(symbol));
+
+        let steps = {
+            let facts = CtxFacts { ctx: &*ctx, sent_ahead: &self.sent_ahead };
             plan(&targets, &held, &facts, now_ms, valid_until_ms, self.rules).steps
         };
 
@@ -208,6 +319,13 @@ impl TargetBookFollower {
                     .find(|t| t.symbol == step.symbol())
                     .map(|t| t.leverage)
             });
+            // Remember a reduce before it goes out, so the flat that follows
+            // is read as ours rather than as somebody else closing the name.
+            if matches!(step, Step::Exit { .. } | Step::Resize { reduce_only: true, .. })
+                && !self.we_reduced.iter().any(|name| name == step.symbol())
+            {
+                self.we_reduced.push(step.symbol().to_string());
+            }
             let intent = match step {
                 Step::Enter {
                     side,
@@ -301,8 +419,8 @@ impl Strategy for TargetBookFollower {
         true
     }
 
-    /// The universe from the config block. The engine asks once, at boot, so
-    /// this cannot grow with a later book — see the module note.
+    /// The universe from the config block. The engine asks once, at boot,
+    /// and takes on anything a later book names on top — see the module note.
     fn subscriptions(&self) -> Vec<Subscription> {
         self.symbols
             .iter()

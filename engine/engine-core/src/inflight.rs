@@ -113,6 +113,17 @@ impl LedgerOfOrders {
         self.orders.contains_key(client_order_id)
     }
 
+    /// Which strategy placed an order. Wider than [`OrderRegistry::owner_of`],
+    /// which knows only the ids this boot minted and the ones that were in
+    /// flight when it started: every order the log ever recorded is here, and
+    /// each one carries its own strategy. A fill can still arrive for an order
+    /// that ended in an earlier boot, and it must land on the right strategy.
+    pub fn owner_of(&self, client_order_id: &str) -> Option<StrategyId> {
+        self.orders
+            .get(client_order_id)
+            .map(|order| order.request.strategy)
+    }
+
     pub fn in_flight(&self) -> Vec<&OrderRec> {
         self.orders.values().filter(|o| o.in_flight()).collect()
     }

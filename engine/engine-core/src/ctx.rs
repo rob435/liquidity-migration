@@ -15,6 +15,7 @@ use engine_types::{
     StrategyCtx, StrategyId, SymbolId, Ticker, TimerId,
 };
 
+use crate::attribution::Attribution;
 use crate::inflight::{LedgerOfOrders, OrderRegistry};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -92,6 +93,10 @@ pub struct Ctx<'a> {
     /// Who placed each order. Without it one strategy could read — and then
     /// cancel — another's working orders.
     pub registry: &'a OrderRegistry,
+    /// Whose each position is, summed from the fills of the orders each
+    /// strategy placed. The account reading above is per symbol and says
+    /// nothing about whose a position is.
+    pub attribution: &'a Attribution,
 }
 
 impl StrategyCtx for Ctx<'_> {
@@ -119,6 +124,10 @@ impl StrategyCtx for Ctx<'_> {
             .iter()
             .find(|p| p.symbol == symbol && p.qty > 0.0)
             .cloned()
+    }
+
+    fn foreign_position(&self, symbol: SymbolId) -> bool {
+        self.attribution.held_by_another(self.strategy, symbol)
     }
 
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
@@ -222,7 +231,10 @@ mod tests {
         registry: &'a OrderRegistry,
         strategy: StrategyId,
     ) -> Ctx<'a> {
-        static FLAT: OnceLock<AccountView> = OnceLock::new();
+        /// An empty attribution: no fill has been charged to anybody, which is
+    /// what every test that is not about attribution means.
+    static NOBODY: OnceLock<Attribution> = OnceLock::new();
+    static FLAT: OnceLock<AccountView> = OnceLock::new();
         Ctx {
             market,
             account: FLAT.get_or_init(flat_account),
@@ -233,6 +245,7 @@ mod tests {
             timers,
             orders,
             registry,
+            attribution: NOBODY.get_or_init(Attribution::default),
         }
     }
 
@@ -410,6 +423,7 @@ mod tests {
             ..flat_account()
         };
         let rules = [None, Some(RULE)];
+        let attribution = Attribution::default();
         let ctx = Ctx {
             market: &market,
             account: &account,
@@ -420,6 +434,7 @@ mod tests {
             timers: &mut timers,
             orders: &orders,
             registry: &registry,
+            attribution: &attribution,
         };
 
         assert_eq!(ctx.position(SymbolId(1)), Some(holding(SymbolId(1), Side::Sell, 3.0)));
@@ -450,6 +465,7 @@ mod tests {
             positions: vec![holding(SymbolId(0), Side::Buy, 0.0)],
             ..flat_account()
         };
+        let attribution = Attribution::default();
         let ctx = Ctx {
             market: &market,
             account: &account,
@@ -460,6 +476,7 @@ mod tests {
             timers: &mut timers,
             orders: &orders,
             registry: &registry,
+            attribution: &attribution,
         };
         assert_eq!(ctx.position(SymbolId(0)), None);
     }

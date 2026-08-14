@@ -426,10 +426,15 @@ pub fn strategies(configured: &[StrategyConfig]) -> Result<Vec<Box<dyn Strategy>
 ///
 /// The venue holds one position per symbol and keeps no note of who asked for
 /// it, so `StrategyCtx::position` reports the account's holding, not the
-/// caller's. Two strategies on one symbol therefore each read the other's
-/// fills as their own and size against them — the second one enters on top of
-/// a position it did not open, and both try to exit it. There is no way for a
-/// strategy to tell the difference, so the config is refused here instead.
+/// caller's. Two strategies claiming one symbol is a config saying two things
+/// at once, and it is refused here rather than resolved at run time.
+///
+/// This is not the only line of defence, and no longer the load-bearing one.
+/// A target book may name a symbol no config listed, and the engine takes that
+/// name on while it runs, so overlap can arrive hours after boot where this
+/// check cannot see it. `StrategyCtx::foreign_position` is what answers it
+/// then: a plug leaves alone any name another strategy is holding. This stays
+/// because a config that means to overlap should be corrected, not tolerated.
 ///
 /// Two behaviours on one symbol is one strategy with two branches.
 fn one_owner_per_symbol(built: &[Box<dyn Strategy>]) -> Result<(), Box<dyn Error>> {

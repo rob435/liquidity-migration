@@ -42,6 +42,7 @@ use engine_types::{
     TargetBook, TimeInForce, VenueError, VenueGateway, Wal, WalError, WalRecord, WorkPolicy,
 };
 
+use crate::attribution::Attribution;
 use crate::clock;
 use crate::config::EngineSection;
 use crate::ctx::{Ctx, Timers};
@@ -119,6 +120,10 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     account: AccountView,
     registry: OrderRegistry,
     orders: LedgerOfOrders,
+    /// Whose each position is. The account reading is per symbol and
+    /// carries no strategy on it, so this is summed from the fills of the
+    /// orders each strategy placed, and rebuilt from the log at boot.
+    attribution: Attribution,
     /// The resting entries this engine is advancing. Empty unless a strategy
     /// asked for one to be worked.
     working: WorkingOrders,
@@ -176,6 +181,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         replayed: &[WalRecord],
     ) -> Result<Self, EngineError> {
         let orders = LedgerOfOrders::from_records(replayed);
+        // Same records, same join: a restart must not forget whose
+        // position is whose, or the other sleeve trades straight into it.
+        let attribution = Attribution::from_records(replayed);
         let recovered = orders.in_flight().len();
 
         let boot_ms = clock::wall_ms();
@@ -311,6 +319,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             account,
             registry,
             orders,
+            attribution,
             // Deliberately not restored from the log. The window is measured
             // from a monotonic clock that does not survive a restart, and the
             // venue's own creation time is not something this engine can ask
@@ -606,6 +615,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 routing,
                 orders,
                 registry,
+                attribution,
                 account,
                 rules,
                 ..
@@ -621,6 +631,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     pending,
                     orders,
                     registry,
+                    attribution,
                     sid,
                     &engine_event,
                     now,
@@ -658,12 +669,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 pending,
                 orders,
                 registry,
+                attribution,
                 account,
                 rules,
                 ..
             } = self;
             feed_strategy(
-                strategies, market, account, rules, timers, pending, orders, registry, sid, &event,
+                strategies, market, account, rules, timers, pending, orders, registry, attribution, sid, &event,
                 now,
             );
         }
@@ -823,6 +835,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 pending,
                 orders,
                 registry,
+                attribution,
                 account,
                 rules,
                 ..
@@ -836,6 +849,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 pending,
                 orders,
                 registry,
+                attribution,
                 strategy,
                 &event,
                 now,
@@ -1449,6 +1463,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         })?;
         self.risk.on_update(&update);
         self.orders.apply_update(&update);
+        // Whose fill it was, before any strategy is woken, so the one that
+        // placed the order sees its own position already changed. The ledger
+        // is asked rather than the registry: the registry knows only this
+        // boot's ids and the ones in flight when it started, and a fill can
+        // still arrive for an order older than either.
+        if let Some(id) = inflight::client_order_id(&update) {
+            match self.orders.owner_of(id) {
+                Some(sid) => self.attribution.on_update(sid, &update),
+                // Charged to nobody on purpose. `reconcile` is what notices
+                // the account holds more than the log accounts for, and it
+                // already stops the engine opening on top of it.
+                None if matches!(update, OrderUpdate::Fill { .. }) => tracing::warn!(
+                    id,
+                    "a fill for an order this log never recorded sending; it is charged to \
+                     no strategy"
+                ),
+                None => {}
+            }
+        }
 
         // A private-stream gap may have swallowed fills. Refresh the account
         // reading now rather than trusting exposure across the gap.
@@ -1473,12 +1506,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         pending,
                         orders,
                         registry,
+                        attribution,
                         account,
                         rules,
                         ..
                     } = self;
                     feed_strategy(
-                        strategies, market, account, rules, timers, pending, orders, registry, sid,
+                        strategies, market, account, rules, timers, pending, orders, registry, attribution, sid,
                         &event, now,
                     );
                 }
@@ -1499,13 +1533,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         routing,
                         orders,
                         registry,
+                        attribution,
                         account,
                         rules,
                         ..
                     } = self;
                     for sid in routing.all_listeners(symbol) {
                         feed_strategy(
-                            strategies, market, account, rules, timers, pending, orders, registry,
+                            strategies, market, account, rules, timers, pending, orders, registry, attribution,
                             sid, &event, now,
                         );
                     }
@@ -1607,6 +1642,7 @@ fn feed_strategy(
     pending: &mut VecDeque<Action>,
     orders: &LedgerOfOrders,
     registry: &OrderRegistry,
+    attribution: &Attribution,
     sid: StrategyId,
     event: &EngineEvent,
     now_ns: u64,
@@ -1624,6 +1660,7 @@ fn feed_strategy(
         timers,
         orders,
         registry,
+        attribution,
     };
     strategy.on_event(event, &mut ctx);
 }

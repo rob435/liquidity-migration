@@ -19,7 +19,7 @@
 //! A plug is a pure state machine, so the bench needs no threads, no sleeps
 //! and no fake sockets: time only moves when a test moves it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use engine_types::{
     Action, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderAck, OrderKind, OrderUpdate,
@@ -56,6 +56,11 @@ pub struct MockCtx {
     /// What the engine's account reading would say is held. Empty unless a
     /// test seeds it.
     positions: HashMap<SymbolId, PositionView>,
+    /// Symbols another strategy on this account is holding. Kept apart from
+    /// `positions` on purpose: the whole point of `foreign_position` is that
+    /// the account reading cannot tell you this, so a mock that derived one
+    /// from the other could not show the difference.
+    foreign: HashSet<SymbolId>,
     /// What the venue said about tick and step. Empty unless a test seeds it,
     /// and an unseeded symbol reads the way an unknown one does: nothing can
     /// be quantized for it.
@@ -83,6 +88,7 @@ impl MockCtx {
             quotes: Vec::new(),
             tickers: Vec::new(),
             positions: HashMap::new(),
+            foreign: HashSet::new(),
             rules: HashMap::new(),
             now_ns: 1_000,
             // An ordinary unix millisecond stamp, so anything that reads like
@@ -120,10 +126,15 @@ impl MockCtx {
         self.wall_ms = wall_ms;
     }
 
-    /// Seed what the account reading says is held. Interns the symbol if it
-    /// is new, the way a subscription would have.
+    /// Seed what the account reading says is held, as this strategy's own.
+    /// Interns the symbol if it is new, the way a subscription would have.
+    ///
+    /// It clears any foreign mark, so seeding a position after
+    /// [`MockCtx::set_foreign_position`] is how a test says the other sleeve
+    /// let the name go — including seeding it flat.
     pub fn set_position(&mut self, symbol: &str, side: Side, qty: f64, entry_px: f64) {
         let id = self.add_symbol(symbol);
+        self.foreign.remove(&id);
         self.positions.insert(
             id,
             PositionView {
@@ -134,6 +145,16 @@ impl MockCtx {
                 stop_attached: true,
             },
         );
+    }
+
+    /// Seed a holding the venue reports that belongs to *another* strategy on
+    /// the same account — the other sleeve's position, in other words. It
+    /// shows in `position` and is foreign to whoever is asking, which is the
+    /// exact shape that used to make one follower close another's book.
+    pub fn set_foreign_position(&mut self, symbol: &str, side: Side, qty: f64, entry_px: f64) {
+        self.set_position(symbol, side, qty, entry_px);
+        let id = self.id_of(symbol);
+        self.foreign.insert(id);
     }
 
     /// Seed the venue's tick, step and minimums for a symbol.
@@ -163,6 +184,10 @@ impl StrategyCtx for MockCtx {
     fn position(&self, symbol: SymbolId) -> Option<PositionView> {
         // Flat is not a position, same as the engine's own context.
         self.positions.get(&symbol).filter(|p| p.qty > 0.0).cloned()
+    }
+
+    fn foreign_position(&self, symbol: SymbolId) -> bool {
+        self.foreign.contains(&symbol)
     }
 
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {

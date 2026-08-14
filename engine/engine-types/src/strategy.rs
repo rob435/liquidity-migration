@@ -33,6 +33,25 @@ pub trait StrategyCtx {
     /// the venue's own picture, refreshed on the engine's schedule — not a
     /// running total of the strategy's fills.
     fn position(&self, symbol: SymbolId) -> Option<PositionView>;
+    /// Whether a strategy other than this one is holding this symbol.
+    ///
+    /// [`StrategyCtx::position`] above is the account's holding and says
+    /// nothing about whose it is, so on an account running two strategies it
+    /// is not enough to act on: the second one would size against exposure it
+    /// never opened, and exit it. This answers the question that matters
+    /// before touching a name at all.
+    ///
+    /// It is asked per symbol rather than per quantity because the venue's
+    /// stop is attached to the *position*, and there is one position per
+    /// symbol. Two strategies holding one symbol would have one stop between
+    /// them, set by whichever placed the last opening order — so sharing is
+    /// not something to be sized around. Whoever got there first keeps the
+    /// name until it is flat.
+    ///
+    /// Exposure the engine's own log has no fills for belongs to nobody here:
+    /// a hand trade reads as `false`. Boot's reconciliation is what notices
+    /// that and stops the engine opening on top of it.
+    fn foreign_position(&self, symbol: SymbolId) -> bool;
     /// Tick, step and minimums, as the venue stated them at boot. `None`
     /// means nothing can be quantized for that symbol, so nothing can be
     /// sent for it either.

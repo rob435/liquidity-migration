@@ -7,6 +7,7 @@
 //! being written. `assembly.rs` is where those get plugged in.
 
 pub mod assembly;
+pub mod attribution;
 pub mod bench;
 pub mod clock;
 pub mod config;

@@ -433,3 +433,178 @@ fn a_rest_entries_value_that_is_not_true_or_false_is_refused() {
     .expect("test config parses");
     assert!(TargetBookFollower::from_params(StrategyId(0), &bad).is_err());
 }
+
+// ---- A name that goes flat under us ----
+//
+// Before these, a stop that fired was undone by the very next quote: the book
+// still said hold it, the position was gone, so the plug bought it straight
+// back at full size with a fresh stop. Seconds, not minutes.
+
+/// Hold what the book asks, then take the position away the way a venue stop
+/// leaves it: flat, with nothing sent by us.
+fn stopped_out(h: &mut Harness) {
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert!(h.drain().is_empty(), "already at target, so nothing is sent");
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 0.0, 10.0);
+}
+
+#[test]
+fn a_stop_that_fired_is_not_undone_by_the_next_quote() {
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    stopped_out(&mut h);
+
+    h.quote("KAITOUSDT", 9.5, 10.5);
+
+    assert!(
+        h.drain().is_empty(),
+        "the position went flat without us; buying it back undoes the stop"
+    );
+}
+
+#[test]
+fn the_same_book_written_again_does_not_clear_the_latch() {
+    // The case that matters for a producer on a one-minute clock: if a new
+    // book lifted the latch, the loop would just run a minute slower.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    stopped_out(&mut h);
+
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+
+    assert!(h.drain().is_empty(), "a fresh copy of the same decision is not new news");
+}
+
+#[test]
+fn the_producer_dropping_the_name_lifts_the_latch() {
+    // The producer has taken the news into account -- it stopped asking. A
+    // later book that asks again is a new decision, and is acted on.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    stopped_out(&mut h);
+
+    h.targets(book(vec![]));
+    assert!(h.drain().is_empty(), "nothing held, nothing to exit");
+
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+
+    let intent = h.one_intent();
+    assert_eq!(intent.side, Side::Buy);
+    assert_eq!(intent.tag, "book-enter");
+}
+
+#[test]
+fn a_latched_name_is_not_exited_either() {
+    // Left alone means left alone. If the position comes back -- a late fill,
+    // somebody re-opening by hand -- it is not ours to close.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    stopped_out(&mut h);
+    h.quote("KAITOUSDT", 9.5, 10.5);
+    h.drain();
+
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
+    h.quote("KAITOUSDT", 9.5, 10.5);
+
+    assert!(h.drain().is_empty(), "no exit for a name we were told to leave alone");
+}
+
+#[test]
+fn an_entry_still_on_its_way_does_not_latch_its_own_symbol() {
+    // Nothing was ever held, so nothing went flat. Without the was-held check
+    // an entry would latch its own symbol the moment `sent_ahead` lapsed, and
+    // the plug would open that name once and never again.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert_eq!(h.drain().len(), 1, "the entry goes out");
+
+    // Sent but not yet in the reading: the plug counts it as held and does
+    // not send it twice.
+    h.quote("KAITOUSDT", 9.5, 10.5);
+    assert!(h.drain().is_empty(), "one decision is one order");
+
+    // The reading catches up, and the name is still perfectly tradable: a
+    // bigger book resizes it up rather than finding it latched.
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 200.0)]));
+
+    let intent = h.one_intent();
+    assert_eq!(intent.tag, "book-resize");
+    assert!(!intent.reduce_only, "it grew");
+}
+
+#[test]
+fn a_name_we_exited_ourselves_can_be_entered_again() {
+    // The book said hold none, we closed it, it went flat. That is us, not
+    // somebody else, so nothing latches and a later book re-enters.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 0.0)]));
+    let exit = h.one_intent();
+    assert!(exit.reduce_only, "that is an exit");
+
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 0.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+
+    let intent = h.one_intent();
+    assert_eq!(intent.tag, "book-enter");
+}
+
+// ---- Two sleeves, one account ----
+//
+// The venue holds one position per symbol however many plugs run, and the
+// account reading says nothing about whose it is. Before these, a carry
+// follower and a long follower on one account would each read the other's
+// exposure as their own.
+
+#[test]
+fn a_follower_does_not_exit_a_position_another_sleeve_opened() {
+    // The bug, exactly: our book does not name BTCUSDT, the account holds
+    // some, so the plug closed it -- a full-size reduce-only on a position it
+    // never opened.
+    let mut h = bench(&["KAITOUSDT", "BTCUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_foreign_position("BTCUSDT", Side::Buy, 1.0, 60_000.0);
+
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+
+    let sent = h.drain();
+    let btc = h.ctx.id_of("BTCUSDT");
+    assert!(
+        sent.iter().all(|intent| intent.symbol != btc),
+        "the other sleeve's position is not ours to close, got {sent:?}"
+    );
+    assert_eq!(sent.len(), 1, "our own name is still entered");
+}
+
+#[test]
+fn a_follower_does_not_enter_a_name_another_sleeve_is_holding() {
+    // Both books want it. The first one there keeps it: one venue stop per
+    // position means the second entry would silently replace the first's.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_foreign_position("KAITOUSDT", Side::Buy, 5.0, 10.0);
+
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+
+    assert!(
+        h.drain().is_empty(),
+        "the other sleeve got there first; sizing on top would share one stop"
+    );
+}
+
+#[test]
+fn a_name_the_other_sleeve_lets_go_of_becomes_ours_again() {
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_foreign_position("KAITOUSDT", Side::Buy, 5.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert!(h.drain().is_empty(), "not ours yet");
+
+    // They closed it. Nobody holds it now.
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 0.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+
+    let intent = h.one_intent();
+    assert_eq!(intent.tag, "book-enter");
+}
