@@ -366,7 +366,7 @@ The pieces, all in `deploy/`:
 
 | File | What it is |
 | --- | --- |
-| `systemd/liquidity-migration-engine-mainnet.service` | The unit. `Conflicts=` the Python mainnet owner, so systemd itself refuses to run both — one venue account takes one lease, and a lease collision is otherwise a silent refusal to start |
+| `systemd/liquidity-migration-engine-mainnet.service` | The unit. Deliberately does **not** conflict with the Python mainnet owner: a shadow engine takes no lease and is meant to run alongside it, which is step 2 below. What stops two *live* writers is the kernel lease, which knows the difference between shadow and live; a systemd conflict does not |
 | `engine.mainnet.toml.template` | The engine's config: `venue = "bybit_mainnet"`, capital limits loaded from `configs/operational.mainnet.json` itself, one block per sleeve with its own book path |
 | `engine.mainnet.env.template` | Unit settings: which config, shadow or live, where the heartbeat goes |
 
@@ -389,9 +389,11 @@ venue holds one position per symbol and keeps no note of who asked for it.
    through it. What is being looked for is the engine and the Python owner
    reaching the same decisions on the same books — and where they differ,
    which one is right.
-4. Only then, if it has earned it: `ENGINE_LIVE=true` and `shadow = false`.
-   Starting the unit stops the Python owner, because they conflict. That is the
-   handover, and it is reversible by starting the Python owner again.
+4. Only then, if it has earned it: `ENGINE_LIVE=true` and `shadow = false`,
+   then stop the Python owner and start this. Two commands in that order, by
+   someone who meant it — a live engine refuses to start while the owner holds
+   the account's lease, so the order is not optional. Reversible the same way:
+   stop the engine, start the owner.
 
 `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env` is a
 precondition for step 2, not part of it. It is already set, by the owner's own
