@@ -608,3 +608,19 @@ fn a_name_the_other_sleeve_lets_go_of_becomes_ours_again() {
     let intent = h.one_intent();
     assert_eq!(intent.tag, "book-enter");
 }
+
+#[test]
+fn probe_a_zero_target_for_a_name_outside_the_config_list_still_exits() {
+    // What the live fleet actually asked for: carry's config lists BTCUSDT,
+    // its book named HOMEUSDT at zero, and the engine had taken HOMEUSDT on
+    // from the book itself.
+    let mut h = bench(&["BTCUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_position("HOMEUSDT", Side::Buy, 14110.0, 0.01);
+
+    h.targets(book(vec![target("HOMEUSDT", 0.0)]));
+
+    let sent = h.drain();
+    assert_eq!(sent.len(), 1, "the zero target is an exit, got {sent:?}");
+    assert!(sent[0].reduce_only);
+}

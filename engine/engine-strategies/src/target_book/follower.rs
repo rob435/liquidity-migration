@@ -283,10 +283,26 @@ impl TargetBookFollower {
         targets.retain(|target| !self.closed_under_us.contains(&target.symbol));
         held.retain(|symbol| !self.closed_under_us.contains(symbol));
 
-        let steps = {
+        let (steps, skipped) = {
             let facts = CtxFacts { ctx: &*ctx, sent_ahead: &self.sent_ahead };
-            plan(&targets, &held, &facts, now_ms, valid_until_ms, self.rules).steps
+            let plan = plan(&targets, &held, &facts, now_ms, valid_until_ms, self.rules);
+            (plan.steps, plan.skipped)
         };
+        // What the plug decided and why, on every wake. Off at info, because
+        // this runs per quote; on when something has plainly not happened and
+        // the log otherwise says nothing at all about the decision.
+        tracing::debug!(
+            strategy = self.id.0,
+            targets = targets.len(),
+            held = held.len(),
+            latched = self.closed_under_us.len(),
+            foreign = foreign.len(),
+            now_ms,
+            valid_until_ms,
+            steps = steps.len(),
+            ?skipped,
+            "the book and what is held came out as this"
+        );
 
         let decided_ns = ctx.now_ns();
         let mut unreachable: Vec<String> = Vec::new();
