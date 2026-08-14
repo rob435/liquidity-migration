@@ -5,7 +5,8 @@
 //! payload is one [`WalRecord`] as JSON. Sequence numbers are not stored on
 //! disk: a record's sequence is its frame index, counting from 1.
 //!
-//! One writer. Appends are buffered; [`Wal::flush`] hands the bytes to the OS,
+//! One writer — [`lock`] is how that is made true rather than assumed.
+//! Appends are buffered; [`Wal::flush`] hands the bytes to the OS,
 //! [`Wal::barrier`] also waits for the disk and is the durability point used
 //! before an order leaves the socket.
 //!
@@ -14,10 +15,12 @@
 //! does not match — is cut off, and appending resumes on that boundary. A bad
 //! header is refused instead: a file that is not ours is not ours to truncate.
 
+use std::ffi::CString;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub use engine_types::wal::{Wal, WalError, WalRecord};
@@ -134,6 +137,117 @@ impl fmt::Debug for WalWriter {
             .field("buffered_bytes", &self.buf.len())
             .finish()
     }
+}
+
+// ------------------------------------------------------------- one writer
+
+/// A held claim on one log file: while this value is alive, no other process
+/// can open the same log for writing.
+///
+/// The log is written on the promise of a single appender — sequence numbers
+/// are frame positions, and a torn tail is truncated on open. Two engines
+/// sharing one file break both: they hand out the same sequence twice, and
+/// the second one's open truncates whatever the first has not yet fsynced.
+/// Nothing in the frame format can detect that afterwards, so it is stopped
+/// at the door instead.
+///
+/// This is deliberately not the account lease in `engine-venue`. That one
+/// guards a venue account against every process in the fleet and carries the
+/// Python protocol's identity re-proof and note; this guards one file against
+/// a second engine, needs no protocol, and must never write into the file it
+/// is locking.
+#[derive(Debug)]
+pub struct WalLock {
+    fd: libc::c_int,
+    path: PathBuf,
+}
+
+impl WalLock {
+    /// The log file being held.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for WalLock {
+    /// Closing releases the lock: `flock` lives on the open file description,
+    /// and this is its only one. A crash releases it the same way, which is
+    /// why there is no timeout to get wrong.
+    fn drop(&mut self) {
+        unsafe { libc::close(self.fd) };
+    }
+}
+
+/// Why a log could not be claimed.
+#[derive(Debug)]
+pub enum WalLockError {
+    /// Another process is writing this log right now.
+    AlreadyHeld { path: PathBuf },
+    Io { path: PathBuf, source: io::Error },
+}
+
+impl fmt::Display for WalLockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WalLockError::AlreadyHeld { path } => write!(
+                f,
+                "another engine is already writing the log at {}; two writers on one log \
+                 corrupt it",
+                path.display()
+            ),
+            WalLockError::Io { path, source } => {
+                write!(f, "cannot claim the log at {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for WalLockError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WalLockError::Io { source, .. } => Some(source),
+            WalLockError::AlreadyHeld { .. } => None,
+        }
+    }
+}
+
+/// Claim a log file for this process, without waiting and without touching a
+/// byte of it.
+///
+/// Take this *before* opening the writer: [`WalWriter::open`] truncates a torn
+/// tail, and doing that to a log another engine is appending to is the very
+/// damage the claim is for. Symlinks are followed here, unlike the account
+/// lease — the log path comes from the operator's own config, where pointing
+/// it at another disk is a reasonable thing to do.
+pub fn lock(path: impl AsRef<Path>) -> Result<WalLock, WalLockError> {
+    let path = path.as_ref();
+    let failed = |source: io::Error| WalLockError::Io { path: path.to_path_buf(), source };
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| failed(io::Error::new(io::ErrorKind::InvalidInput, "path has a zero byte")))?;
+    // O_CREAT so the claim can be made before the log exists; no truncation,
+    // and nothing is ever written through this descriptor.
+    let flags = libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC;
+    const OWNER_ONLY: libc::c_uint = 0o600;
+    let fd = unsafe { libc::open(c_path.as_ptr(), flags, OWNER_ONLY) };
+    if fd < 0 {
+        return Err(failed(io::Error::last_os_error()));
+    }
+    let held = WalLock { fd, path: path.to_path_buf() };
+
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } < 0 {
+        let err = io::Error::last_os_error();
+        let busy = matches!(
+            err.raw_os_error(),
+            Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+        );
+        return if busy {
+            Err(WalLockError::AlreadyHeld { path: held.path.clone() })
+        } else {
+            Err(failed(err))
+        };
+    }
+    Ok(held)
 }
 
 /// Read a log without changing it: the good prefix, stopping exactly where a

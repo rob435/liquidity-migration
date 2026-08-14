@@ -88,6 +88,18 @@ impl<'a> Params<'a> {
         }
     }
 
+    /// A true/false switch, with a value to use when the config is silent.
+    /// A key that is present but not a boolean is refused rather than read as
+    /// true — `rest_entries = "yes"` should be an error, not a surprise.
+    pub(crate) fn bool_or(&self, param: &'static str, default: bool) -> Result<bool, BuildError> {
+        let Some(value) = self.table.get(param) else {
+            return Ok(default);
+        };
+        value
+            .as_bool()
+            .ok_or_else(|| self.invalid(param, format!("expected true or false, got {}", type_name(value))))
+    }
+
     pub(crate) fn opt_u64(&self, param: &'static str) -> Result<Option<u64>, BuildError> {
         let Some(value) = self.table.get(param) else {
             return Ok(None);

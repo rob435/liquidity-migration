@@ -64,6 +64,13 @@ impl RestClient {
         }
     }
 
+    /// The key these requests are signed with. Not a secret — it goes out in
+    /// a header on every signed call — and the account-identity check needs
+    /// it to compare against the key the venue says it saw.
+    pub(crate) fn api_key(&self) -> &str {
+        self.creds.key()
+    }
+
     fn url(&self, path: &str, query: &str) -> String {
         if query.is_empty() {
             format!("{}{}", self.base, path)

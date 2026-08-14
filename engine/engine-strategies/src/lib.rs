@@ -10,6 +10,10 @@
 mod params;
 pub mod quoter;
 pub mod target_book;
+/// A copy-me starting point. Compiled and tested with the rest so it cannot
+/// rot, and deliberately absent from [`KNOWN_STRATEGIES`] so no config can
+/// run it by accident.
+pub mod template;
 mod touch_sniper;
 
 #[cfg(test)]

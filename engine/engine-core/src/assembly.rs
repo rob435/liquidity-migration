@@ -156,5 +156,100 @@ pub fn strategies(configured: &[StrategyConfig]) -> Result<Vec<Box<dyn Strategy>
         let params = toml::Value::Table(cfg.params.clone());
         out.push(build_strategy(&cfg.name, id, &params).map_err(|e| e.to_string())?);
     }
+    one_owner_per_symbol(&out)?;
     Ok(out)
+}
+
+/// Refuse a config where two strategies want the same symbol.
+///
+/// The venue holds one position per symbol and keeps no note of who asked for
+/// it, so `StrategyCtx::position` reports the account's holding, not the
+/// caller's. Two strategies on one symbol therefore each read the other's
+/// fills as their own and size against them — the second one enters on top of
+/// a position it did not open, and both try to exit it. There is no way for a
+/// strategy to tell the difference, so the config is refused here instead.
+///
+/// Two behaviours on one symbol is one strategy with two branches.
+fn one_owner_per_symbol(built: &[Box<dyn Strategy>]) -> Result<(), Box<dyn Error>> {
+    let mut claimed: Vec<(String, &str)> = Vec::new();
+    for strategy in built {
+        let mut mine: Vec<String> = Vec::new();
+        for sub in strategy.subscriptions() {
+            // A strategy may want two feeds on one symbol; that is one claim.
+            if mine.iter().any(|s| s == &sub.symbol) {
+                continue;
+            }
+            mine.push(sub.symbol.clone());
+        }
+        for symbol in mine {
+            if let Some((_, first)) = claimed.iter().find(|(name, _)| name == &symbol) {
+                return Err(format!(
+                    "{symbol} is claimed by both \"{first}\" and \"{}\": the venue holds one \
+                     position per symbol and cannot say which strategy it belongs to, so each \
+                     would read the other's fills as its own",
+                    strategy.name()
+                )
+                .into());
+            }
+            claimed.push((symbol, strategy.name()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sniper(symbol: &str) -> StrategyConfig {
+        let params: toml::Table = toml::from_str(&format!(
+            r#"
+            symbol = "{symbol}"
+            side = "buy"
+            trigger_px = 100.0
+            qty = 0.01
+            stop_px = 90.0
+        "#
+        ))
+        .expect("test config parses");
+        StrategyConfig { name: "touch_sniper".into(), capital_usdt: 50.0, params }
+    }
+
+    fn quoter(symbol: &str) -> StrategyConfig {
+        let params: toml::Table = toml::from_str(&format!(
+            r#"
+            symbol = "{symbol}"
+            half_spread_bps = 10.0
+            requote_bps = 2.0
+            qty = 0.1
+            max_position = 0.3
+            stop_loss_fraction = 0.35
+        "#
+        ))
+        .expect("test config parses");
+        StrategyConfig { name: "quoter".into(), capital_usdt: 50.0, params }
+    }
+
+    #[test]
+    fn strategies_on_different_symbols_are_fine() {
+        let built = strategies(&[sniper("BTCUSDT"), quoter("ETHUSDT")])
+            .expect("two strategies, two symbols");
+        assert_eq!(built.len(), 2);
+    }
+
+    #[test]
+    fn two_strategies_on_one_symbol_are_refused() {
+        let Err(err) = strategies(&[sniper("BTCUSDT"), quoter("BTCUSDT")]) else {
+            panic!("the venue cannot say whose position BTCUSDT is; this must not boot");
+        };
+        let text = err.to_string();
+        assert!(text.contains("BTCUSDT"), "{text}");
+        assert!(text.contains("touch_sniper"), "{text}");
+        assert!(text.contains("quoter"), "{text}");
+    }
+
+    #[test]
+    fn the_same_strategy_twice_on_one_symbol_is_refused() {
+        assert!(strategies(&[sniper("BTCUSDT"), sniper("BTCUSDT")]).is_err());
+    }
 }

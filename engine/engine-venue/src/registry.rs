@@ -17,9 +17,9 @@
 //! visible in one place, which is the property the fence depends on.
 
 use engine_types::ids::{Symbol, SymbolId};
-use engine_types::orders::{AmendSpec, InstrumentRule, OrderAck, OrderRequest};
+use engine_types::orders::{AmendSpec, InstrumentRule, OrderAck, OrderRequest, VenueOrder};
 use engine_types::risk::AccountView;
-use engine_types::{VenueCaps, VenueError, VenueGateway};
+use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
 
 use crate::gateway::BybitGateway;
 
@@ -105,6 +105,12 @@ impl VenueGateway for Venue {
         }
     }
 
+    async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        match self {
+            Venue::BybitDemo(gw) => gw.account_identity().await,
+        }
+    }
+
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         match self {
             Venue::BybitDemo(gw) => gw.account_view().await,
@@ -114,6 +120,12 @@ impl VenueGateway for Venue {
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
         match self {
             Venue::BybitDemo(gw) => gw.instrument_rules().await,
+        }
+    }
+
+    async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
+        match self {
+            Venue::BybitDemo(gw) => gw.working_orders().await,
         }
     }
 }

@@ -27,12 +27,28 @@ pub use market::{
 };
 pub use orders::{
     Action, AmendSpec, Intent, InstrumentRule, OrderAck, OrderKind, OrderRequest, OrderUpdate,
-    RestingOrder, Side, StopSpec, TimeInForce, VenueError,
+    RestingOrder, Side, StopSpec, TimeInForce, VenueError, VenueOrder, WorkPolicy,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{EngineEvent, Strategy, StrategyCtx};
 pub use targets::{BookTarget, TargetBook};
 pub use wal::{Wal, WalError, WalRecord};
+
+/// Which venue account a gateway's credentials actually reach, as the venue
+/// itself reports it.
+///
+/// Read from the venue rather than from config on purpose: config says which
+/// key to sign with, and only the venue can say whose account that key opens.
+/// Two engines pointed at one account by two different config files have to
+/// arrive at the same answer here, because this is what names the lock that
+/// keeps them from both sending.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountIdentity {
+    /// The venue's own account number, as a decimal string.
+    pub user_id: String,
+    /// Which venue the account lives on: `demo` or `mainnet`.
+    pub realm: String,
+}
 
 /// What a venue can actually do. Venues differ in kind, not just in address:
 /// one holds a position-level stop for you, the next expects you to work the
@@ -67,6 +83,11 @@ pub struct VenueCaps {
 pub trait VenueGateway {
     /// What this venue can do. Read before asking it for anything exotic.
     fn caps(&self) -> VenueCaps;
+    /// Whose account these credentials open. Asked once at boot, before
+    /// anything is sent: it is what the single-writer lock is named after, so
+    /// an engine that cannot answer it does not know what it would be
+    /// stepping on.
+    async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError>;
     /// Place an order. The caller has already made the intent durable.
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError>;
     /// Cancel by the engine's own client order id.
@@ -91,4 +112,8 @@ pub trait VenueGateway {
     async fn account_view(&mut self) -> Result<AccountView, VenueError>;
     /// Tick size, quantity step, and minimums for every tradable symbol.
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError>;
+    /// Every order the venue is currently working on this account, whoever
+    /// placed it. Read at boot: the log says what this engine sent, and only
+    /// the venue can say what is actually out there.
+    async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError>;
 }

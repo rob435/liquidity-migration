@@ -15,10 +15,12 @@ pub mod engine;
 
 pub mod inflight;
 pub mod ledger;
+pub mod reconcile;
 pub mod replay;
 pub mod routing;
 pub mod runner;
 pub mod targets;
+pub mod working;
 
 #[cfg(test)]
 mod testpath;

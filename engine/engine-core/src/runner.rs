@@ -3,15 +3,27 @@
 //! Every part comes from `assembly.rs`. While a crate is still empty its
 //! constructor returns "not wired yet", so this command starts, names the
 //! missing part, and stops without writing to the log or touching a venue.
+//!
+//! Two claims are staked before any of it runs: the venue account, so this
+//! engine is not sending orders beside the Python fleet, and the log file, so
+//! it is not appending beside another engine. Both are kernel locks that die
+//! with the process.
 
 use std::error::Error;
 use std::path::Path;
 
-use engine_types::Strategy;
+use engine_types::{Strategy, VenueGateway};
+use engine_venue::lease::{self, AccountLease, LeaseError, LeaseHolder};
+use engine_venue::Venue;
 
 use crate::assembly;
 use crate::config;
 use crate::engine::Engine;
+
+/// What the engine writes into the lease file, so an operator who finds the
+/// account held knows which of the fleet's programs is holding it. The Python
+/// side spells its own roles the same way — `ledger_reset`, and so on.
+const LEASE_ROLE: &str = "engine";
 
 pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
     let loaded = config::load(config_path)?;
@@ -31,6 +43,8 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         tracing::warn!("live: orders will be sent, and the risk kernel gates every one of them");
     }
 
+    // Building a strategy is reading its config block: no clock, no socket,
+    // no decision. Nothing below has happened yet when the lease is taken.
     let strategies: Vec<Box<dyn Strategy>> = assembly::strategies(&loaded.config.strategies)?;
     let wanted: Vec<_> = strategies
         .iter()
@@ -38,7 +52,16 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     let symbols = assembly::symbol_order(&wanted);
     let risk = assembly::risk(&loaded.config.risk, &loaded.config.strategies)?;
-    let venue = assembly::venue(&settings.venue, symbols.clone())?;
+    let mut venue = assembly::venue(&settings.venue, symbols.clone())?;
+
+    // Held for the whole run. Dropped at the end of this function, and by the
+    // kernel if the process dies first.
+    let _account_lease = single_writer(&mut venue, settings.shadow).await?;
+    // Before the log is opened, because opening it truncates a torn tail —
+    // doing that to a log another engine is appending to is the damage this
+    // is here to prevent. Shadow runs take it too: they write the same log.
+    let _log_claim = engine_wal::lock(&settings.wal_path)?;
+
     let mut market_feed = assembly::market_feed(&wanted);
     let mut order_feed = assembly::order_feed(symbols)?;
 
@@ -66,4 +89,70 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         .await?;
     tracing::info!(?outcome, "stopped");
     Ok(())
+}
+
+/// Make sure nothing else is sending orders to this venue account.
+///
+/// The lock is the Python fleet's own — same directory, same file name, same
+/// protocol — so the engine and the owner service contend with each other
+/// rather than each holding a lock the other has never heard of. See
+/// `engine_venue::lease`.
+///
+/// Live: take it before the engine boots, and refuse to start if somebody
+/// already has it. Shadow: never take it. A shadow run sends nothing, and a
+/// shadow run that held the lease would be locking out the writer that does.
+/// It reports what it found instead.
+async fn single_writer(
+    venue: &mut Venue,
+    shadow: bool,
+) -> Result<Option<AccountLease>, Box<dyn Error>> {
+    if shadow {
+        // Information only, so nothing here stops the run: a shadow engine
+        // that cannot reach the venue still has a log to write and a loop to
+        // exercise.
+        match venue.account_identity().await {
+            Ok(who) => match lease::probe(&who.realm, &who.user_id) {
+                Ok(LeaseHolder::Free) => tracing::info!(
+                    account = %who.user_id,
+                    realm = %who.realm,
+                    "shadow: nothing holds this account; a live engine could start"
+                ),
+                Ok(LeaseHolder::Held { note }) => tracing::info!(
+                    account = %who.user_id,
+                    realm = %who.realm,
+                    holder = note.as_deref().unwrap_or("no note"),
+                    "shadow: something already holds this account"
+                ),
+                Err(e) => tracing::warn!(error = %e, "shadow: cannot tell who holds this account"),
+            },
+            Err(e) => tracing::warn!(error = %e, "shadow: cannot ask the venue whose account this is"),
+        }
+        return Ok(None);
+    }
+
+    // Live from here. Not knowing whose account this is means not knowing
+    // which lock to take, which means not knowing who would be stepped on.
+    let who = venue.account_identity().await?;
+    match lease::acquire(&who.realm, &who.user_id, LEASE_ROLE) {
+        Ok(lease) => {
+            tracing::info!(
+                account = %who.user_id,
+                realm = %who.realm,
+                lease = %lease.path().display(),
+                "this engine is the one writer for this account"
+            );
+            Ok(Some(lease))
+        }
+        Err(LeaseError::AlreadyHeld { path, holder }) => {
+            tracing::error!(
+                account = %who.user_id,
+                realm = %who.realm,
+                lease = %path.display(),
+                holder = holder.as_deref().unwrap_or("no note"),
+                "refusing to start: something else is already sending orders to this account"
+            );
+            Err(Box::new(LeaseError::AlreadyHeld { path, holder }))
+        }
+        Err(e) => Err(Box::new(e)),
+    }
 }

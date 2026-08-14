@@ -34,6 +34,7 @@ fn every_variant() -> Vec<WalRecord> {
                 reduce_only: false,
                 tag: "entry".to_string(),
                 decided_ns: 99_000_111_222,
+                work: Some(engine_types::WorkPolicy::default()),
             },
         },
         WalRecord::Verdict {
@@ -380,4 +381,64 @@ fn prints_append_and_barrier_cost() {
     assert_eq!(costs.barriers, 100);
     assert!(costs.append_p50_us > 0.0);
     assert!(costs.barrier_p50_us > 0.0);
+}
+
+// ------------------------------------------------------------- one writer
+
+#[test]
+fn a_second_engine_cannot_claim_the_same_log() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+
+    let first = engine_wal::lock(&path).expect("the first claim");
+    assert_eq!(first.path(), path);
+
+    // flock lives on the open file description, so a second claim in this
+    // same process contends exactly as a second engine would.
+    let second = engine_wal::lock(&path);
+    assert!(
+        matches!(second, Err(engine_wal::WalLockError::AlreadyHeld { .. })),
+        "two engines were allowed onto one log: {second:?}"
+    );
+}
+
+#[test]
+fn letting_go_of_a_log_lets_the_next_engine_have_it() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+
+    drop(engine_wal::lock(&path).expect("the first claim"));
+    assert!(engine_wal::lock(&path).is_ok(), "the log was never handed back");
+}
+
+#[test]
+fn claiming_a_log_does_not_disturb_a_byte_of_it() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    wal.append(&note("before the claim")).unwrap();
+    wal.barrier().unwrap();
+    drop(wal);
+    let before = fs::read(&path).unwrap();
+
+    let held = engine_wal::lock(&path).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), before, "the claim wrote into the log");
+    // And the writer that follows the claim reads back what was there.
+    let (_, replayed) = WalWriter::open(&path).unwrap();
+    assert_eq!(replayed.len(), 1);
+    drop(held);
+}
+
+#[test]
+fn a_log_that_does_not_exist_yet_can_still_be_claimed() {
+    // The claim comes before the writer opens the file, so on a fresh box
+    // there is nothing there to lock yet.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("not-yet.wal");
+    let held = engine_wal::lock(&path).expect("a fresh log could not be claimed");
+    assert!(path.exists());
+    // Empty, so the writer still lays down its own header.
+    assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+    drop(held);
 }

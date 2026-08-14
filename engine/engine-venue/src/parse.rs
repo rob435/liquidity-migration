@@ -6,7 +6,7 @@
 //! risk kernel a picture of an account that does not exist.
 
 use engine_types::ids::{Symbol, SymbolId};
-use engine_types::orders::{InstrumentRule, OrderAck};
+use engine_types::orders::{InstrumentRule, OrderAck, VenueOrder};
 use engine_types::risk::PositionView;
 use engine_types::{Side, VenueError};
 use serde_json::Value;
@@ -151,6 +151,44 @@ pub(crate) fn parse_positions(
             qty,
             entry_px: num_field(row, "avgPrice")?,
             stop_attached,
+        });
+    }
+    Ok((out, next_cursor(result)))
+}
+
+/// Every order the venue says is working, whoever placed it.
+///
+/// Unlike positions, nothing is skipped here. A position in a symbol no
+/// strategy subscribed to cannot be addressed and so is not the engine's
+/// business; an order is different — it is evidence about who else is on this
+/// account, and boot has to be able to say so. Symbols stay in the venue's own
+/// spelling for the same reason: the caller decides what it recognises.
+pub(crate) fn parse_working_orders(
+    result: &Value,
+) -> Result<(Vec<VenueOrder>, String), VenueError> {
+    let rows = list_field(result)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let symbol = str_field(row, "symbol")?;
+        let side = match str_field(row, "side")?.as_str() {
+            "Buy" => Side::Buy,
+            "Sell" => Side::Sell,
+            other => {
+                return Err(VenueError::BadReply(format!(
+                    "working order in {symbol} has an unknown side {other:?}"
+                )))
+            }
+        };
+        out.push(VenueOrder {
+            // The exchange's own orders — the stop it attaches to a position —
+            // carry no id of ours. Kept rather than dropped: an empty id is
+            // how the caller tells them apart from a second writer's order.
+            client_order_id: str_field(row, "orderLinkId").unwrap_or_default(),
+            symbol,
+            side,
+            qty: num_field(row, "qty")?,
+            filled_qty: opt_num_field(row, "cumExecQty")?.unwrap_or(0.0),
+            reduce_only: row.get("reduceOnly").and_then(Value::as_bool).unwrap_or(false),
         });
     }
     Ok((out, next_cursor(result)))

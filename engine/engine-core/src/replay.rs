@@ -144,6 +144,11 @@ pub fn one_line(record: &WalRecord) -> String {
         WalRecord::ControlAnchor { source, state } => {
             format!("anchor     [{source}] {state}")
         }
+        WalRecord::Reconciled { findings, may_open, .. } => format!(
+            "reconciled {} finding(s), may open: {may_open}{}",
+            findings.len(),
+            findings.iter().map(|f| format!("\n             {f}")).collect::<String>()
+        ),
     }
 }
 

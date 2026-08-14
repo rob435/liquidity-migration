@@ -5,15 +5,19 @@ use std::collections::HashMap;
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
     AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce,
+    VenueOrder,
 };
 use engine_types::risk::AccountView;
-use engine_types::{VenueCaps, VenueError, VenueGateway};
+use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
 use serde_json::{Map, Value};
 
 use crate::clock::mono_ns;
 use crate::creds::Credentials;
 use crate::fmt::venue_num;
-use crate::parse::{parse_instruments, parse_order_ack, parse_positions, parse_wallet, venue_result};
+use crate::parse::{
+    parse_instruments, parse_order_ack, parse_positions, parse_wallet, parse_working_orders,
+    venue_result,
+};
 use crate::rest::RestClient;
 use crate::{CATEGORY, DEMO_REST_BASE};
 
@@ -25,6 +29,8 @@ const PATH_TRADING_STOP: &str = "/v5/position/trading-stop";
 const PATH_WALLET: &str = "/v5/account/wallet-balance";
 const PATH_POSITIONS: &str = "/v5/position/list";
 const PATH_INSTRUMENTS: &str = "/v5/market/instruments-info";
+const PATH_QUERY_API: &str = "/v5/user/query-api";
+const PATH_ORDERS_OPEN: &str = "/v5/order/realtime";
 
 /// Enough to cover every linear contract several times over; a cursor that
 /// never empties is a venue fault, not a reason to loop forever.
@@ -212,6 +218,51 @@ impl VenueGateway for BybitGateway {
         Ok(())
     }
 
+    async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        let envelope = self.rest.get_signed(PATH_QUERY_API, "").await?;
+        let result = venue_result(envelope)?;
+
+        // The venue is asked which key it just authenticated, and the answer
+        // has to be the key we signed with. Without this the reply could be
+        // about some other account and we would take out a lock in its name
+        // while trading this one. The key is not a secret — it rides in a
+        // header on every signed request — so a plain comparison is enough;
+        // what matters is that the comparison happens at all.
+        let reported = result
+            .get("apiKey")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if reported.is_empty() || reported != self.rest.api_key() {
+            return Err(VenueError::Credentials(
+                "the venue says this reply is about a different API key than the one it was \
+                 signed with"
+                    .to_string(),
+            ));
+        }
+
+        // Bybit sends userID as a number here and as a string elsewhere; both
+        // are the same account and both are read.
+        let raw = match result.get("userID") {
+            Some(Value::String(text)) => text.clone(),
+            Some(Value::Number(number)) => number.to_string(),
+            _ => String::new(),
+        };
+        let user_id = crate::lease::account_id_text(&raw).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "the venue gave no usable account number ({raw:?}), so there is nothing to name \
+                 the single-writer lock after"
+            ))
+        })?;
+
+        Ok(AccountIdentity {
+            user_id,
+            // This crate reaches the practice account and nothing else, so
+            // the realm is not a reading — it is what the adapter is.
+            realm: crate::lease::REALM_DEMO.to_string(),
+        })
+    }
+
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         // Wallet and positions are separate endpoints, so this is two round
         // trips however it is written — they at least go out together.
@@ -253,6 +304,36 @@ impl VenueGateway for BybitGateway {
             positions: open,
             observed_ns,
         })
+    }
+
+    async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
+        // `settleCoin` rather than a symbol list: the point of this read is to
+        // find orders nobody here placed, and asking only about the symbols
+        // the engine knows would hide exactly those.
+        let mut out = Vec::new();
+        let mut cursor = String::new();
+        for _ in 0..MAX_PAGES {
+            let query = if cursor.is_empty() {
+                format!("category={CATEGORY}&settleCoin=USDT&limit=50")
+            } else {
+                format!(
+                    "category={CATEGORY}&settleCoin=USDT&limit=50&cursor={}",
+                    percent_encode(&cursor)
+                )
+            };
+            let envelope = self.rest.get_signed(PATH_ORDERS_OPEN, &query).await?;
+            let (rows, next) = parse_working_orders(&venue_result(envelope)?)?;
+            out.extend(rows);
+            if next.is_empty() {
+                return Ok(out);
+            }
+            cursor = next;
+        }
+        // A truncated list would say "nobody else is here" when somebody is,
+        // which is the one answer this read must never give by accident.
+        Err(VenueError::BadReply(format!(
+            "working-order listing still had pages after {MAX_PAGES}"
+        )))
     }
 
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {

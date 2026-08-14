@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 crc32c = "0.6.8"
 engine-types = { path = "../engine-types" }
+# One writer per log file, enforced by the kernel — see `lock` in src/lib.rs.
+# Already in the workspace lock through tokio, so nothing new is pulled in.
+libc = "0.2.189"
 serde_json = "1.0.151"
 
 [dev-dependencies]

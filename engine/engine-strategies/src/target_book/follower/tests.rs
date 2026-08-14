@@ -349,3 +349,87 @@ fn only_places_are_emitted_nothing_is_cancelled_or_amended() {
         );
     }
 }
+
+#[test]
+fn entries_cross_the_spread_unless_the_config_asks_them_to_rest() {
+    // The default is what the follower always did. Turning resting on is a
+    // decision somebody makes, not one they inherit with an upgrade.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 60.0)]));
+    let intent = h.one_intent();
+    assert!(intent.work.is_none(), "an entry crosses unless asked otherwise");
+}
+
+/// The same bench, but with the follower told to rest its entries.
+fn resting_bench(symbols: &[&str], px: f64) -> Harness {
+    let list = symbols
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let config: toml::Value =
+        toml::from_str(&format!("symbols = [{list}]\nrest_entries = true\n"))
+            .expect("test config parses");
+    let plug = TargetBookFollower::from_params(StrategyId(0), &config).expect("it builds");
+    let mut h = Harness::new(Box::new(plug));
+    h.ctx.set_wall_ms(NOW_MS);
+    for symbol in symbols {
+        h.ctx.set_rule(symbol, RULE);
+        h.quote(symbol, px - 0.5, px + 0.5);
+    }
+    h.drain();
+    h
+}
+
+#[test]
+fn a_follower_told_to_rest_its_entries_asks_for_them_to_be_worked() {
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 60.0)]));
+    let intent = h.one_intent();
+    assert!(intent.work.is_some(), "the entry should be worked in");
+}
+
+#[test]
+fn a_full_exit_is_never_worked_however_the_follower_is_configured() {
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 6.0, 10.0);
+    h.targets(book(vec![]));
+    let intent = h.one_intent();
+    assert!(intent.reduce_only);
+    assert!(
+        intent.work.is_none(),
+        "a resting exit is exposure nobody wanted, still on the book"
+    );
+}
+
+#[test]
+fn trimming_a_position_is_not_worked_either() {
+    // A shrink is an exit in all but name, and it comes down the resize path
+    // rather than the exit one — so it needs its own test, or the rule is
+    // only enforced on the half that happened to be looked at.
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 6.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 30.0)]));
+    let intent = h.one_intent();
+    assert!(intent.reduce_only, "60 USDT down to 30 is a trim");
+    assert!(intent.work.is_none(), "a trim takes exposure off; it does not wait for a price");
+}
+
+#[test]
+fn adding_to_a_position_is_worked_like_any_other_entry() {
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 3.0, 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 60.0)]));
+    let intent = h.one_intent();
+    assert!(!intent.reduce_only, "30 USDT up to 60 adds exposure");
+    assert!(intent.work.is_some(), "the half that adds is an entry");
+}
+
+#[test]
+fn a_rest_entries_value_that_is_not_true_or_false_is_refused() {
+    let bad: toml::Value = toml::from_str(
+        "symbols = [\"KAITOUSDT\"]\nrest_entries = \"yes\"\n",
+    )
+    .expect("test config parses");
+    assert!(TargetBookFollower::from_params(StrategyId(0), &bad).is_err());
+}

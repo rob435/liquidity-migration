@@ -457,3 +457,62 @@ async fn an_unquantized_quantity_never_reaches_the_venue() {
     assert!(gw.send_order(&request).await.is_err());
     assert!(server.requests().is_empty(), "nothing should have been sent");
 }
+
+#[tokio::test]
+async fn account_identity_asks_the_venue_whose_account_this_is() {
+    let server = TestServer::start(|_, _| {
+        ok(&format!(r#"{{"id":"1","apiKey":"{KEY}","userID":6039967,"readOnly":0}}"#))
+    })
+    .await;
+    let mut gw = gateway(&server);
+
+    let who = gw.account_identity().await.unwrap();
+    assert_eq!(who.user_id, "6039967");
+    assert_eq!(who.realm, "demo");
+
+    let request = server.only("/v5/user/query-api");
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.query, "", "the identity read takes no parameters");
+    assert_signed(&request, "");
+}
+
+#[tokio::test]
+async fn an_account_number_sent_as_text_reads_the_same() {
+    // Bybit sends userID as a number here and as a string elsewhere. Both
+    // have to land on the same lock file name or the two engines miss.
+    let server = TestServer::start(|_, _| {
+        ok(&format!(r#"{{"apiKey":"{KEY}","userID":"0006039967"}}"#))
+    })
+    .await;
+    assert_eq!(gateway(&server).account_identity().await.unwrap().user_id, "6039967");
+}
+
+#[tokio::test]
+async fn an_identity_about_a_different_api_key_is_refused() {
+    // Whatever produced this reply, it was not the key we signed with — so
+    // the account number in it is somebody else's, and taking a lock in that
+    // name would leave this account unguarded.
+    let server = TestServer::start(|_, _| {
+        ok(r#"{"apiKey":"someoneElsesKey0001","userID":9999999}"#)
+    })
+    .await;
+    let refused = gateway(&server).account_identity().await;
+    assert!(
+        matches!(refused, Err(VenueError::Credentials(_))),
+        "a reply about another key was trusted: {refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_identity_with_no_usable_account_number_is_refused() {
+    for result in [r#"{"apiKey":"KEYHERE"}"#, r#"{"apiKey":"KEYHERE","userID":0}"#,
+                   r#"{"apiKey":"KEYHERE","userID":"nope"}"#] {
+        let body = result.replace("KEYHERE", KEY);
+        let server = TestServer::start(move |_, _| ok(&body)).await;
+        let refused = gateway(&server).account_identity().await;
+        assert!(
+            matches!(refused, Err(VenueError::BadReply(_))),
+            "{result} was accepted as an account number: {refused:?}"
+        );
+    }
+}

@@ -147,6 +147,7 @@ pub fn entry(
         reduce_only: false,
         tag: "test".to_string(),
         decided_ns,
+        work: None,
     }
 }
 

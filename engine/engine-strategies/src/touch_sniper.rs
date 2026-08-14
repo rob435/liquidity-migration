@@ -141,6 +141,7 @@ impl TouchSniper {
             reduce_only: false,
             tag: ENTRY_TAG.to_string(),
             decided_ns,
+            work: None,
         });
         self.state = State::EntrySent;
     }
@@ -160,6 +161,7 @@ impl TouchSniper {
             reduce_only: true,
             tag: EXIT_TAG.to_string(),
             decided_ns,
+            work: None,
         });
         self.exit_order = None;
         self.resend_exit_on_next_quote = false;

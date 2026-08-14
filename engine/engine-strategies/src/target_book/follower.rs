@@ -55,6 +55,9 @@ pub struct TargetBookFollower {
     /// The newest book. `None` until one arrives, and that means no decision.
     book: Option<TargetBook>,
     rules: PlanRules,
+    /// How an entry is placed. `None` crosses the spread as it always did;
+    /// `Some` rests it at the touch and lets the engine work it in.
+    entry_work: Option<engine_types::WorkPolicy>,
     /// Symbols already complained about for the book in hand. This runs on
     /// every quote, so without it one unreachable name in a book writes a
     /// warning a hundred times a second until the next book lands.
@@ -93,7 +96,12 @@ fn view_signed(ctx: &dyn StrategyCtx, id: SymbolId) -> f64 {
 impl TargetBookFollower {
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
         let p = Params::new(NAME, params)?;
-        p.reject_unknown(&["symbols"])?;
+        p.reject_unknown(&["symbols", "rest_entries"])?;
+
+        // Entries rest at the touch and are worked by the engine instead of
+        // crossing the spread. Off by default so turning it on is a decision
+        // somebody made, not one they inherited.
+        let rest_entries = p.bool_or("rest_entries", false)?;
 
         let symbols = p.strings("symbols")?;
         if symbols.is_empty() {
@@ -104,6 +112,7 @@ impl TargetBookFollower {
         }
 
         Ok(Self {
+            entry_work: rest_entries.then(engine_types::WorkPolicy::default),
             id,
             symbols,
             book: None,
@@ -208,6 +217,7 @@ impl TargetBookFollower {
                     reduce_only: false,
                     tag: ENTER_TAG.to_string(),
                     decided_ns,
+                    work: self.entry_work,
                 },
                 Step::Exit { side, qty, .. } => Intent {
                     strategy: self.id,
@@ -219,6 +229,7 @@ impl TargetBookFollower {
                     reduce_only: true,
                     tag: EXIT_TAG.to_string(),
                     decided_ns,
+                    work: None,
                 },
                 // A resize that adds is an opening order, and the risk kernel
                 // refuses one with no stop. The planner says whether this is
@@ -241,6 +252,9 @@ impl TargetBookFollower {
                     reduce_only,
                     tag: RESIZE_TAG.to_string(),
                     decided_ns,
+                    // A shrink is an exit in all but name, and an exit never
+                    // rests. Only the half that adds exposure is worked.
+                    work: if reduce_only { None } else { self.entry_work },
                 },
             };
             // Remember it against the reading it was decided from, so the

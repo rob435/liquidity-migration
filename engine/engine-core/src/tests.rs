@@ -10,11 +10,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use engine_types::{
-    AccountView, AmendSpec, DenyReason, EngineEvent, Feed, FeedError, InstrumentRule, Intent,
+    AccountIdentity, AccountView, AmendSpec, DenyReason, EngineEvent, Feed, FeedError,
+    InstrumentRule, Intent,
     MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote,
     RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription,
     Symbol, SymbolId, TimerId, VenueCaps, VenueError, VenueGateway, Wal, WalError, WalRecord,
-};
+    WorkPolicy, VenueOrder,};
 
 use crate::bench::{self, BenchOptions};
 use crate::clock;
@@ -54,27 +55,63 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::LatencyLedger { .. } => "latency_ledger",
         WalRecord::Note { .. } => "note",
         WalRecord::ControlAnchor { .. } => "control_anchor",
+        WalRecord::Reconciled { .. } => "reconciled",
     }
     .to_string()
 }
 
-/// True when the tape's only fsync is the final one after the last append —
-/// the shutdown barrier that makes the log's tail durable on the way out.
+/// True when the only fsync that trading paid for is the final one after the
+/// last append — the shutdown barrier that makes the log's tail durable on the
+/// way out.
+///
+/// Boot's own barrier does not count. It makes the reconciliation record
+/// durable before a single order can be judged, so that a crash cannot lose a
+/// latch that has just been set; it happens once, before any of this runs, and
+/// it is not on any order's path.
 fn only_the_shutdown_barrier(tape: &Tape) -> bool {
+    let start = after_boot(tape);
     let tape = tape.borrow();
     let barriers: Vec<usize> = tape
         .iter()
         .enumerate()
-        .filter(|(_, s)| matches!(s, Step::Barrier))
+        .filter(|(i, s)| *i >= start && matches!(s, Step::Barrier))
         .map(|(i, _)| i)
         .collect();
     let last_append = tape.iter().rposition(|s| matches!(s, Step::Append(_)));
     barriers.len() == 1 && last_append.is_some_and(|a| barriers[0] > a)
 }
 
+/// The first tape index that belongs to trading rather than to coming up.
+///
+/// Boot writes the reconciliation record and fsyncs it, so that a crash
+/// cannot lose a latch it has just set. That fsync is not on any order's
+/// path, and a test measuring what an order costs has to start after it.
+fn after_boot(tape: &Tape) -> usize {
+    let tape = tape.borrow();
+    let reconciled = tape
+        .iter()
+        .position(|s| matches!(s, Step::Append(kind) if kind == "reconciled"));
+    match reconciled {
+        Some(at) => tape
+            .iter()
+            .skip(at)
+            .position(|s| matches!(s, Step::Barrier))
+            .map(|i| at + i + 1)
+            .unwrap_or(at + 1),
+        None => 0,
+    }
+}
+
 /// Where a step first appears on the tape.
 fn at(tape: &Tape, step: &Step) -> Option<usize> {
     tape.borrow().iter().position(|s| s == step)
+}
+
+/// Where a step first appears after some earlier point. Boot writes and
+/// fsyncs its own records, so a test about an order's barrier has to look
+/// past them.
+fn after(tape: &Tape, step: &Step, from: usize) -> Option<usize> {
+    tape.borrow().iter().skip(from).position(|s| s == step).map(|i| i + from)
 }
 
 /// The first note whose text contains `needle`. Boot writes a note of its
@@ -166,6 +203,9 @@ struct MockVenue {
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
     caps: VenueCaps,
     reply: Option<VenueError>,
+    /// What the venue would say it is working. Seeded by a test that wants
+    /// boot to find an order the log does not know about.
+    working: Vec<VenueOrder>,
 }
 
 impl MockVenue {
@@ -194,6 +234,7 @@ impl MockVenue {
                 amends: Rc::new(RefCell::new(Vec::new())),
                 caps: bybit_like_caps(),
                 reply: None,
+                working: Vec::new(),
             },
             sends,
         )
@@ -203,6 +244,13 @@ impl MockVenue {
 impl VenueGateway for MockVenue {
     fn caps(&self) -> VenueCaps {
         self.caps
+    }
+
+    async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        Ok(AccountIdentity {
+            user_id: "7000001".to_string(),
+            realm: "demo".to_string(),
+        })
     }
 
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
@@ -260,6 +308,13 @@ impl VenueGateway for MockVenue {
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
         self.tape.borrow_mut().push(Step::ReadRules);
         Ok(self.rules.clone())
+    }
+
+    /// Whatever a test seeded. Empty by default, which is a venue working
+    /// nothing — the ordinary case for a mock that has never been told
+    /// otherwise.
+    async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
+        Ok(self.working.clone())
     }
 }
 
@@ -342,6 +397,31 @@ impl ScriptFeed {
             close_at_end,
         }
     }
+
+    /// The same walk, wide enough for a resting entry to be worth placing:
+    /// eight ticks, and more than a hundredth of a percent of the price.
+    /// `quotes` above is one tick wide on purpose and falls back to a market
+    /// order.
+    fn wide_quotes(symbol: SymbolId, count: usize, close_at_end: bool) -> Self {
+        let events = (0..count)
+            .map(|i| MarketEvent::Quote {
+                symbol,
+                quote: Quote {
+                    bid_px: 30_000.0 + i as f64,
+                    bid_qty: 1.0,
+                    ask_px: 30_004.0 + i as f64,
+                    ask_qty: 1.0,
+                    venue_ts_ms: 1,
+                    recv_ns: clock::now_ns(),
+                    seq: i as u64,
+                },
+            })
+            .collect();
+        ScriptFeed {
+            events,
+            close_at_end,
+        }
+    }
 }
 
 impl MarketFeed for ScriptFeed {
@@ -382,6 +462,8 @@ struct Buyer {
     qty: f64,
     seen: u64,
     heard: Rc<RefCell<Vec<String>>>,
+    /// Asks the engine to rest and work the entry instead of crossing.
+    work: Option<WorkPolicy>,
 }
 
 impl Buyer {
@@ -394,9 +476,22 @@ impl Buyer {
                 qty,
                 seen: 0,
                 heard: heard.clone(),
+                work: None,
             },
             heard,
         )
+    }
+
+    /// The same buyer, but asking for its entry to be worked.
+    fn working(
+        symbol: &str,
+        every_nth: u64,
+        qty: f64,
+        work: WorkPolicy,
+    ) -> (Self, Rc<RefCell<Vec<String>>>) {
+        let (mut buyer, heard) = Buyer::new(symbol, every_nth, qty);
+        buyer.work = Some(work);
+        (buyer, heard)
     }
 }
 
@@ -431,6 +526,7 @@ impl Strategy for Buyer {
                     reduce_only: false,
                     tag: "buy".into(),
                     decided_ns: ctx.now_ns(),
+                    work: self.work,
                 });
             }
             EngineEvent::Order(update) => {
@@ -522,9 +618,23 @@ async fn build(
     symbols: &[&str],
     replayed: &[WalRecord],
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    build_with_venue_orders(shadow, verdict, strategies, symbols, replayed, Vec::new()).await
+}
+
+/// The same, with the venue already working some orders — which is how a boot
+/// finds out somebody else is on the account.
+async fn build_with_venue_orders(
+    shadow: bool,
+    verdict: RiskVerdict,
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+    replayed: &[WalRecord],
+    working: Vec<VenueOrder>,
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
-    let (venue, sends) = MockVenue::new(tape.clone(), symbols);
+    let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
+    venue.working = working;
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
@@ -574,6 +684,7 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     let want = [
         "boot",
         "note", // boot says which mode it is in
+        "reconciled", // and what the venue said, against the log
         "intent",
         "verdict",
         "order_sent",
@@ -583,7 +694,9 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     assert_eq!(kinds, want, "log records in order");
 
     let sent_at = at(&h.tape, &Step::Append("order_sent".into())).unwrap();
-    let barrier_at = at(&h.tape, &Step::Barrier).unwrap();
+    // The first barrier on the tape is boot's; the one this test is about is
+    // the order's, which comes after the order was written down.
+    let barrier_at = after(&h.tape, &Step::Barrier, sent_at).unwrap();
     let send_at = at(
         &h.tape,
         &Step::Send(h.sends.borrow()[0].client_order_id.clone()),
@@ -724,7 +837,7 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     let kinds = appends(&h.tape);
     assert_eq!(
         kinds,
-        ["boot", "note", "intent", "verdict", "note", "latency_ledger"]
+        ["boot", "note", "reconciled", "intent", "verdict", "note", "latency_ledger"]
     );
     assert!(h.sends.borrow().is_empty());
     let note = note_saying(&h.records, "not sent");
@@ -918,6 +1031,7 @@ impl Strategy for BurstEmitter {
                     reduce_only: exit,
                     tag: if exit { "burst-exit".into() } else { "burst-entry".into() },
                     decided_ns: ctx.now_ns(),
+                    work: None,
                 });
             }
         }
@@ -984,6 +1098,7 @@ impl Strategy for SloppyExiter {
                     reduce_only: true,
                     tag: "sloppy-exit".into(),
                     decided_ns: ctx.now_ns(),
+                    work: None,
                 });
             }
         }
@@ -1633,6 +1748,7 @@ impl Strategy for MixedBurst {
                     reduce_only: false,
                     tag: "flood-entry".into(),
                     decided_ns: ctx.now_ns(),
+                    work: None,
                 });
             }
             for i in 0..self.cancels {
@@ -1828,13 +1944,16 @@ async fn an_amend_that_raises_the_size_is_durable_before_it_goes_out() {
         .await
         .unwrap();
 
+    let start = after_boot(&h.tape);
     let written = at(&h.tape, &Step::Append("amend_sent".into())).unwrap();
     let sent = at(&h.tape, &Step::Amend("eng-old-1".into())).unwrap();
     let barrier = h
         .tape
         .borrow()
         .iter()
-        .position(|s| matches!(s, Step::Barrier))
+        .enumerate()
+        .find(|(i, s)| *i >= start && matches!(s, Step::Barrier))
+        .map(|(i, _)| i)
         .expect("a size-raising amend must be made durable");
     assert!(written < barrier, "the record is written before the fsync");
     assert!(barrier < sent, "it is on disk before it is on the wire");
@@ -1947,6 +2066,7 @@ impl Strategy for Watcher {
                 reduce_only: false,
                 tag: "watch".into(),
                 decided_ns: ctx.now_ns(),
+                work: None,
             });
         }
     }
@@ -2239,4 +2359,340 @@ async fn with_no_watcher_the_loop_runs_as_it_always_did() {
         .unwrap();
     assert!(heard.borrow().is_empty());
     assert!(h.sends.borrow().is_empty());
+}
+
+// ------------------------------------------------ working a resting entry
+
+#[tokio::test]
+async fn an_entry_asked_to_be_worked_rests_at_the_touch_instead_of_crossing() {
+    let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, WorkPolicy::default());
+    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::wide_quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.borrow();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(
+        sends[0].kind,
+        OrderKind::Limit {
+            px: 30_000.0,
+            tif: engine_types::TimeInForce::Gtc
+        },
+        "a limit at the bid, not a market order across the spread"
+    );
+}
+
+#[tokio::test]
+async fn a_spread_too_thin_to_pay_for_still_sends_the_market_order() {
+    // The one-tick book. Below two ticks the taker cost is already near the
+    // maker floor, so the order goes out exactly as it did before any of this
+    // existed.
+    let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, WorkPolicy::default());
+    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(h.sends.borrow()[0].kind, OrderKind::Market);
+}
+
+#[tokio::test]
+async fn an_exit_is_sent_as_written_even_when_it_asks_to_be_worked() {
+    // A resting exit that does not fill is exposure nobody wanted, still on
+    // the book.
+    struct Exiter {
+        sent: bool,
+    }
+    impl Strategy for Exiter {
+        fn name(&self) -> &str {
+            "exiter"
+        }
+        fn subscriptions(&self) -> Vec<Subscription> {
+            vec![Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            }]
+        }
+        fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+            let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event else {
+                return;
+            };
+            if self.sent {
+                return;
+            }
+            self.sent = true;
+            ctx.place(Intent {
+                strategy: StrategyId(0),
+                symbol: *symbol,
+                side: Side::Sell,
+                qty: 0.01,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: true,
+                tag: "exit".into(),
+                decided_ns: ctx.now_ns(),
+                work: Some(WorkPolicy::default()),
+            });
+        }
+    }
+
+    let (mut engine, h) = build(
+        false,
+        allow_all(),
+        vec![Box::new(Exiter { sent: false })],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::wide_quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        h.sends.borrow()[0].kind,
+        OrderKind::Market,
+        "the spread was wide enough to rest in; it is an exit that stops it"
+    );
+}
+
+#[tokio::test]
+async fn the_group_flush_tick_walks_a_resting_entry_after_the_market() {
+    // The supervisor has no clock of its own: it rides the tick the loop
+    // already had.
+    let quick = WorkPolicy {
+        reprice_ms: 1,
+        ..WorkPolicy::default()
+    };
+    let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, quick);
+    let tape = tape();
+    let (wal, _records) = MockWal::new(tape.clone());
+    let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let amends = venue.amends.clone();
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let mut fast = settings(false);
+    fast.group_flush_ms = 5;
+    let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
+        .await
+        .unwrap();
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    // Two quotes: the first places the entry at 30_000, the second moves the
+    // bid up to 30_001 and overtakes it.
+    engine
+        .run(
+            &mut ScriptFeed::wide_quotes(symbol, 2, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(60)),
+        )
+        .await
+        .unwrap();
+
+    let id = sends.borrow()[0].client_order_id.clone();
+    let amends = amends.borrow();
+    assert!(!amends.is_empty(), "the overtaken order was not moved");
+    assert_eq!(amends[0].1, id);
+    assert_eq!(
+        amends[0].2,
+        AmendSpec {
+            px: Some(30_001.0),
+            qty: None
+        },
+        "back to the touch that overtook it, price only"
+    );
+}
+
+#[tokio::test]
+async fn repricing_a_resting_entry_never_costs_an_fsync() {
+    // Only an amend that raises the size adds exposure. If a reprice ever
+    // barriered, every worked order would pay a disk sync several times a
+    // minute — which is the whole latency budget.
+    let quick = WorkPolicy {
+        reprice_ms: 1,
+        ..WorkPolicy::default()
+    };
+    let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, quick);
+    let tape = tape();
+    let (wal, _records) = MockWal::new(tape.clone());
+    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let amends = venue.amends.clone();
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let mut fast = settings(false);
+    fast.group_flush_ms = 5;
+    let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
+        .await
+        .unwrap();
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::wide_quotes(symbol, 2, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(60)),
+        )
+        .await
+        .unwrap();
+    assert!(!amends.borrow().is_empty(), "there was a reprice to measure");
+
+    // Between writing the reprice down and putting it on the wire is exactly
+    // where a barrier would sit if one were added.
+    let steps = tape.borrow();
+    let mut checked = 0;
+    for (i, step) in steps.iter().enumerate() {
+        if *step != Step::Append("amend_sent".into()) {
+            continue;
+        }
+        let wire = i + steps[i..]
+            .iter()
+            .position(|s| matches!(s, Step::Amend(_)))
+            .expect("the reprice reaches the venue");
+        assert!(
+            !steps[i..wire].contains(&Step::Barrier),
+            "a reprice forced the log to disk"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no reprice was written down");
+}
+
+// ---------------------------------------------------------------------------
+// Boot compares the log against the venue
+// ---------------------------------------------------------------------------
+
+fn someone_elses_order(symbol: &str) -> VenueOrder {
+    VenueOrder {
+        client_order_id: "not-ours-1".into(),
+        symbol: symbol.into(),
+        side: Side::Buy,
+        qty: 1.0,
+        filled_qty: 0.0,
+        reduce_only: false,
+    }
+}
+
+#[tokio::test]
+async fn a_quiet_account_leaves_the_engine_free_to_trade() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(h.sends.borrow().len(), 1, "nothing was in the way");
+    let latched = h.records.borrow().iter().any(|r| {
+        matches!(r, WalRecord::Reconciled { may_open, .. } if !may_open)
+    });
+    assert!(!latched, "there was nothing to latch on");
+}
+
+#[tokio::test]
+async fn an_order_this_engine_never_placed_stops_it_opening() {
+    // Another writer on the account makes every number the kernel works from
+    // measure somebody else's trading as well as its own.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build_with_venue_orders(
+        false,
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &[],
+        vec![someone_elses_order("BTCUSDT")],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert!(h.sends.borrow().is_empty(), "no order should have left the box");
+    let records = h.records.borrow();
+    assert!(
+        records.iter().any(|r| matches!(r, WalRecord::Reconciled { may_open: false, .. })),
+        "boot must write down that it stopped opening"
+    );
+    // The intent is still recorded, and refused. A strategy that is never
+    // told no is a strategy nobody can debug.
+    assert!(records.iter().any(|r| matches!(r, WalRecord::Intent { .. })));
+    assert!(records.iter().any(|r| matches!(
+        r,
+        WalRecord::Verdict { client_order_id: None, verdict: RiskVerdict::Deny { .. } }
+    )));
+}
+
+#[tokio::test]
+async fn a_hand_trade_in_a_symbol_nobody_here_trades_does_not_stop_it() {
+    // The owner trades this account by hand. Stopping for an order in a
+    // symbol no strategy can even address would mean stopping most days.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build_with_venue_orders(
+        false,
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &[],
+        vec![someone_elses_order("DOGEUSDT")],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(h.sends.borrow().len(), 1, "it should still be trading");
+}
+
+#[tokio::test]
+async fn a_latch_from_an_earlier_boot_survives_the_restart() {
+    // The whole point of writing it down. A restart that cleared the latch
+    // would turn "stop and tell somebody" into "stop until the next crash",
+    // and something restarts this process automatically.
+    let earlier = vec![WalRecord::Reconciled {
+        wall_ts_ms: 1,
+        findings: vec!["someone else was working an order".to_string()],
+        may_open: false,
+    }];
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    // The venue is quiet now: whatever it was has gone. The latch still holds.
+    let (mut engine, h) =
+        build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert!(h.sends.borrow().is_empty(), "the latch did not survive the restart");
 }

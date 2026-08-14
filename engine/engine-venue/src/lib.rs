@@ -13,11 +13,16 @@
 //! Credentials come from the environment and are never taken as arguments in
 //! the live path. A missing key or secret is a `VenueError::Credentials` at
 //! construction, so a misconfigured host cannot start an unsigned engine.
+//!
+//! [`lease`] is the odd one out: it names accounts rather than reaching them,
+//! and one of the names it can spell is `mainnet`. That is a lock file's name,
+//! not an endpoint — the fence above still holds, and the module says why.
 
 mod clock;
 mod creds;
 mod fmt;
 mod gateway;
+pub mod lease;
 mod parse;
 mod registry;
 mod rest;

@@ -40,6 +40,30 @@ empty book means *hold nothing*, which is a decision and does get acted on.
 Those two are deliberately different, because confusing them flattens a live
 book on a data outage.
 
+### Writing a new one
+
+Copy [`engine-strategies/src/template/`](../engine/engine-strategies/src/template.rs).
+It is a working, tested plug that does something trivial, so everything around
+the decision is real and only the decision needs replacing. Its module doc is
+the authoring guide: what a strategy may touch, what the engine holds it to,
+and the five steps to register one. It is compiled and tested with the rest so
+it cannot rot, and left out of `KNOWN_STRATEGIES` so no config can run it by
+accident.
+
+Two rules make strategies independent rather than merely separate:
+
+- **A strategy owns its symbols.** The venue holds one position per symbol and
+  keeps no note of who asked for it, so two plugs on one symbol each read the
+  other's fills as their own. The engine refuses to boot such a config.
+- **A strategy owns its config.** Everything it needs comes from its own
+  `[[strategy]]` block. Deleting a strategy must leave nothing behind that
+  anything else reads.
+
+One thing the engine does not protect you from: `StrategyId` is the block's
+position in the config, and it is written into the log with every order. Do not
+reorder `[[strategy]]` blocks while orders are in flight — a restart would
+re-register them against the wrong strategy's share of capital.
+
 ## The one-sentence design
 
 One process, one thread, one loop: a market message arrives on a socket, is
@@ -122,16 +146,29 @@ parallel and integrate by type-check.
   `venue_protection.py`, the partition in `account_kernel.py`) stay untouched
   and remain the reference; the Rust kernel carries table-driven parity tests
   against their decision semantics. Unknown state refuses the order.
-- **One writer per account — measured, not assumed.** On 2026-08-14 the
+- **One writer per account — measured, then enforced.** On 2026-08-14 the
   engine held a 0.001 BTCUSDT position on the demo account for about a
   hundred seconds. The Python owner refused new intents for the whole of it:
   its native-protection reconciliation requires the venue's size and its own
   reconstruction to agree per symbol, and a position it did not place never
   can. It recovered by itself once the engine closed out. The separate-books
   policy covers a foreign position for trading; it does not cover this. So
-  the two **cannot share an account**, even briefly, and the engine has no
-  lease yet: it runs against a fleet-owned account in shadow only, until it
-  either holds a lease or has an account of its own.
+  the two **cannot share an account**, even briefly.
+
+  The engine now takes the fleet's own lease rather than relying on that
+  being remembered. It is one kernel `flock` per venue account, at
+  `/run/lock/liquidity-migration/bybit-{realm}-user-{userID}.lock`, and the
+  engine joins it exactly — same directory, same name from the venue's own
+  authenticated account number, same open flags, same re-proof after the lock
+  that the file locked is still the file at that path. A lease that differed
+  in any one of those would protect nothing: two processes would hold two
+  different locks and each would believe it was alone. A live engine takes
+  it before it boots and refuses to start if somebody has it, naming the
+  holder. A shadow engine only looks, because a shadow run holding the lease
+  would lock out the writer that does. There is no heartbeat and no expiry —
+  the kernel drops the lock when the holder dies, which is the only expiry
+  that cannot be wrong. The log file is claimed the same way, so two engines
+  cannot share one log either.
 
 ## Crash safety
 
@@ -201,7 +238,7 @@ because the deletion order depends on it:
 | Resting entry quoting (place at touch, reprice, escalate, cross) | **Absent.** The engine sends market orders. This is the largest execution-quality gap |
 | Venue reconciliation and restart recovery | **Absent.** The engine replays its own log but never asks the venue what happened to an order it lost |
 | Stop verify, repair, and a durable breach latch | **Attach only.** `set_stop` exists and is not yet called after a fill |
-| Single-writer lease | **Absent.** Nothing but deployment discipline stops the engine and the Python fleet trading one account at once — the wedge we already lived through |
+| Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | **Absent.** Nothing outside the process can tell whether the engine is healthy |
 
 Until the four absent rows are built and proven, the Python execution path

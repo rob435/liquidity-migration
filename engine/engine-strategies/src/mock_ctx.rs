@@ -421,6 +421,7 @@ mod tests {
             reduce_only: false,
             tag: "t".into(),
             decided_ns: 7,
+            work: None,
         });
         let Action::Place(intent) = ctx.emitted.remove(0) else {
             panic!("expected a placement");

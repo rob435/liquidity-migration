@@ -21,11 +21,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use engine_types::{
-    AccountView, AmendSpec, EngineEvent, Feed, FeedError, InstrumentRule, Intent, MarketEvent,
+    AccountIdentity, AccountView, AmendSpec, EngineEvent, Feed, FeedError, InstrumentRule, Intent,
+    MarketEvent,
     MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote, RiskKernel,
     RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, Symbol, SymbolId,
-    VenueCaps, VenueError, VenueGateway, Wal, WalRecord,
-};
+    VenueCaps, VenueError, VenueGateway, Wal, WalRecord, VenueOrder,};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -305,6 +305,10 @@ impl Strategy for BenchStrategy {
             reduce_only: false,
             tag: "bench".into(),
             decided_ns: ctx.now_ns(),
+            // The bench measures the order path itself, so nothing is worked:
+            // a resting entry would put a reprice in the middle of the
+            // numbers the latency table is read off.
+            work: None,
         });
     }
 }
@@ -398,6 +402,16 @@ impl VenueGateway for HttpVenue {
         }
     }
 
+    /// The bench never takes an account lease — it is a pretend venue on this
+    /// box — but the loop is generic over the whole contract, so the answer
+    /// has to exist.
+    async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        Ok(AccountIdentity {
+            user_id: "7000001".to_string(),
+            realm: "demo".to_string(),
+        })
+    }
+
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
         let px = match req.kind {
             OrderKind::Limit { px, .. } => px,
@@ -478,6 +492,13 @@ impl VenueGateway for HttpVenue {
             positions: Vec::new(),
             observed_ns: clock::now_ns(),
         })
+    }
+
+    /// The benchmark measures the order path, and this read happens once at
+    /// boot, so it costs nothing to answer honestly: a pretend venue with a
+    /// pretend book is working nothing.
+    async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
+        Ok(Vec::new())
     }
 
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {

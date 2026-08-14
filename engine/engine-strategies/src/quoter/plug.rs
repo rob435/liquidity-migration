@@ -169,6 +169,10 @@ impl Quoter {
             reduce_only: false,
             tag: QUOTE_TAG.to_string(),
             decided_ns: ctx.now_ns(),
+            // A maker already places where it means to and moves its own
+            // quotes; handing them to the engine's supervisor as well would
+            // give one order two minds.
+            work: None,
         });
     }
 }

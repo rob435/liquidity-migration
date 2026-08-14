@@ -37,6 +37,64 @@ pub struct StopSpec {
     pub trigger_px: f64,
 }
 
+/// Rest an entry at the touch and work it, instead of crossing the spread and
+/// paying the taker fee. Attached to an [`Intent`] as `work`; the engine's own
+/// supervisor does the working, so no strategy writes a repricing loop.
+///
+/// Every number here was measured in the Python fleet's quote-forge night
+/// replay (34 symbols, 199,785 paired attempts): the recipe came out
+/// 0.36 bp per entry cheaper than plainly joining the touch and repricing.
+/// The defaults are that recipe.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkPolicy {
+    /// How long the order may rest before it crosses the spread and takes
+    /// whatever is left.
+    pub window_ms: u64,
+    /// The floor on how often the order is moved. Also paces the retries of a
+    /// cross and of the cancel that follows one.
+    pub reprice_ms: u64,
+    /// After the cross, how long to wait for the rest to fill before pulling
+    /// the order and letting the strategy decide again.
+    pub cross_grace_ms: u64,
+    /// How many moves are budgeted. Soft: past `urgency_join_frac` of the
+    /// window the escalation outranks it, because the budget is a schedule
+    /// and not a protection.
+    pub max_amends: u32,
+    /// Book lean at or above this rests one tick inside the spread. Zero
+    /// turns that off.
+    pub improve_lean: f64,
+    /// Book lean at or below minus this rests one tick behind the touch.
+    /// Zero turns that off.
+    pub back_lean: f64,
+    /// Past this fraction of the window, never rest behind the touch.
+    pub urgency_join_frac: f64,
+    /// Past this fraction of the window, rest inside the spread when there is
+    /// room for it.
+    pub urgency_improve_frac: f64,
+    /// The fee term in the early cross: leave patience once the market has
+    /// run against the decision by more than twice the half-spread plus this.
+    /// Zero turns the early cross off. Measured on the same night replay:
+    /// making this trigger MORE sensitive was the only dial that was clearly
+    /// harmful.
+    pub drift_cross_fee_bp: f64,
+}
+
+impl Default for WorkPolicy {
+    fn default() -> Self {
+        WorkPolicy {
+            window_ms: 120_000,
+            reprice_ms: 3_000,
+            cross_grace_ms: 20_000,
+            max_amends: 8,
+            improve_lean: 0.15,
+            back_lean: 0.15,
+            urgency_join_frac: 0.5,
+            urgency_improve_frac: 0.85,
+            drift_cross_fee_bp: 5.5,
+        }
+    }
+}
+
 /// What a strategy asks for. Strategies never build venue payloads; they
 /// emit intents and the engine does the rest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,6 +111,13 @@ pub struct Intent {
     pub tag: String,
     /// Engine monotonic nanoseconds when the strategy decided.
     pub decided_ns: u64,
+    /// Rest this entry and let the engine work it. `None` sends the order
+    /// exactly as written, which is what every strategy did before this
+    /// field existed — and what an exit always gets, whatever it asks for.
+    /// Defaulted on the way in so a log written before the field existed
+    /// still replays.
+    #[serde(default)]
+    pub work: Option<WorkPolicy>,
 }
 
 /// A new price and/or size for an order already resting at the venue.
@@ -102,6 +167,26 @@ impl Action {
             Action::Cancel { symbol, .. } | Action::Amend { symbol, .. } => *symbol,
         }
     }
+}
+
+/// One order the venue says is working, as the venue says it.
+///
+/// Not [`RestingOrder`]: that is the engine's own picture, built from its log
+/// and borrowed from it. This is the venue's answer to "what have you got",
+/// which is the only way to learn about an order the log never saw — one
+/// placed by hand, by another process, or by the exchange itself. The symbol
+/// is the venue's own spelling, because an order in a symbol no strategy
+/// subscribed to has no id here and is still worth knowing about.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VenueOrder {
+    /// The venue calls this `orderLinkId`. Empty for orders the exchange
+    /// created itself, above all the stop attached to a position.
+    pub client_order_id: String,
+    pub symbol: String,
+    pub side: Side,
+    pub qty: f64,
+    pub filled_qty: f64,
+    pub reduce_only: bool,
 }
 
 /// One of a strategy's own orders that the log says is still working. Handed

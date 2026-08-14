@@ -71,6 +71,19 @@ pub enum WalRecord {
         source: String,
         state: String,
     },
+    /// What boot found when it compared this log against the venue, and
+    /// whether the engine may open new exposure afterwards.
+    ///
+    /// `may_open` false is a latch, and it is written here rather than held in
+    /// memory for the same reason the loss guard's trip is: a restart that
+    /// cleared it would turn "stop and tell somebody" into "stop until the
+    /// next crash". Boot reads the newest one back before it reads anything
+    /// from the venue.
+    Reconciled {
+        wall_ts_ms: i64,
+        findings: Vec<String>,
+        may_open: bool,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
