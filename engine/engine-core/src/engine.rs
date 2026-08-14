@@ -918,6 +918,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             events_seen,
             orders_sent,
             account,
+            market,
             ..
         } = self;
         let Some(heartbeat) = heartbeat.as_mut() else {
@@ -926,6 +927,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !heartbeat.due(now_ns) {
             return;
         }
+        // Named, because the producers that read this file know symbols by
+        // name and nothing else. Flat rows are dropped the way every other
+        // reader of this view drops them: flat is not a holding.
+        let holdings: Vec<(String, engine_types::Side, f64, f64)> = account
+            .positions
+            .iter()
+            .filter(|p| p.qty > 0.0)
+            .map(|p| {
+                (
+                    market.table.name(p.symbol).to_string(),
+                    p.side,
+                    p.qty,
+                    p.entry_px,
+                )
+            })
+            .collect();
         heartbeat.write(
             now_ns,
             &heartbeat::Facts {
@@ -942,6 +959,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // and means nothing outside this process.
                 account_age_ns: (account.observed_ns != 0)
                     .then(|| now_ns.saturating_sub(account.observed_ns)),
+                holdings: &holdings,
             },
         );
     }

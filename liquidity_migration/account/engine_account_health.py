@@ -50,6 +50,7 @@ import json
 import math
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +58,7 @@ from liquidity_migration.core.artifact_snapshot import read_stable_file
 
 __all__ = [
     "ENGINE_HEARTBEAT_PATH_ENV",
+    "engine_held_symbols",
     "EngineAccountReading",
     "engine_heartbeat_path",
     "read_engine_account",
@@ -88,6 +90,14 @@ class EngineAccountReading:
     account_user_id: str
     #: "demo" or "mainnet", as the engine resolved it.
     realm: str
+    #: Symbols the venue says are held, upper-cased.
+    #:
+    #: A producer writes an *absolute* book -- it says what it wants held -- so
+    #: the one thing it cannot work out alone is whether a name it asked for is
+    #: actually there. `None` means the engine did not say: an older engine, or
+    #: one that has not read the venue. That is not the same as holding nothing,
+    #: and a producer must not act on it.
+    held_symbols: frozenset[str] | None
 
 
 def engine_heartbeat_path(environment: str) -> Path:
@@ -131,6 +141,7 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     observed = payload.get("account_observed_wall_ts_ms")
     account_user_id = payload.get("account_user_id")
     realm = payload.get("realm")
+    positions = payload.get("positions")
     if equity is None or observed is None:
         raise ValueError(
             "engine heartbeat carries no account reading yet "
@@ -152,12 +163,20 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         raise ValueError("engine heartbeat carries no account_user_id")
     if not isinstance(realm, str) or not realm:
         raise ValueError("engine heartbeat carries no realm")
+    held_symbols: frozenset[str] | None = None
+    if isinstance(positions, list):
+        held_symbols = frozenset(
+            str(row.get("symbol") or "").upper()
+            for row in positions
+            if isinstance(row, Mapping) and str(row.get("symbol") or "")
+        )
     return EngineAccountReading(
         equity_usdt=equity_usdt,
         available_usdt=available_usdt,
         observed_wall_ts_ms=observed_wall_ts_ms,
         account_user_id=account_user_id,
         realm=realm,
+        held_symbols=held_symbols,
     )
 
 
@@ -189,3 +208,26 @@ def require_recent_engine_account(
             f"(bound {int(max_age_ns) / 1e9:.1f}s); the engine is not reading the venue"
         )
     return reading
+
+
+def engine_held_symbols(
+    environment: str,
+    *,
+    max_age_ns: int,
+    path: str | Path | None = None,
+) -> frozenset[str] | None:
+    """What the engine says is held, or `None` when it did not say.
+
+    `None` is the answer for every kind of not-knowing: no heartbeat, an
+    unreadable one, a stale reading, an engine too old to publish positions.
+    A producer must treat that as "no news" and leave its record alone --
+    reading it as "holds nothing" would drop every open name at once, which is
+    exactly the mistake this exists to prevent in the other direction.
+    """
+
+    try:
+        return require_recent_engine_account(
+            environment, max_age_ns=max_age_ns, path=path
+        ).held_symbols
+    except (OSError, ValueError):
+        return None

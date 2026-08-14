@@ -36,7 +36,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use engine_types::AccountIdentity;
+use engine_types::{AccountIdentity, Side};
 
 use crate::clock;
 use crate::engine::ENGINE_VERSION;
@@ -88,6 +88,22 @@ pub struct Facts<'a> {
     pub available_usdt: f64,
     /// `None` when the engine has not read the venue yet.
     pub account_age_ns: Option<u64>,
+    /// What the venue says is held, by name, from the same reading as the
+    /// equity above.
+    ///
+    /// Also not telemetry. A producer writes an **absolute** book -- it says
+    /// what it wants held -- so the one thing it cannot work out on its own is
+    /// whether a name it asked for is actually there. Without this, a venue
+    /// stop that fires is invisible to the producer: it goes on asking for the
+    /// name, the engine refuses to buy it back, and the slot stays occupied
+    /// until the producer's own deadline drops it, up to three days later.
+    ///
+    /// The venue's own per-symbol reading is published rather than the
+    /// engine's per-strategy attribution, and that is the conservative choice.
+    /// Attribution is summed from the log and starts empty on a fresh one, so
+    /// a restart would report every position closed and every producer would
+    /// drop its whole book at once. The venue's answer cannot do that.
+    pub holdings: &'a [(String, Side, f64, f64)],
 }
 
 /// The heartbeat writer: where the file goes, how often, and the facts about
@@ -206,6 +222,7 @@ impl Heartbeat {
             ("orders_sent", facts.orders_sent.to_string()),
             ("pid", std::process::id().to_string()),
             ("realm", or_null(self.account.as_ref().map(|a| quoted(&a.realm)))),
+            ("positions", positions(facts.holdings)),
             ("strategies", list(facts.strategies)),
             ("wall_ts_ms", wall_ts_ms.to_string()),
             ("wire_p50_ns", figure(facts.wire.count, facts.wire.p50_ns)),
@@ -291,6 +308,32 @@ fn figure(count: u64, ns: u64) -> String {
     }
 }
 
+/// What is held, as an array of objects. Empty is a real answer and means
+/// the account holds nothing -- not the same as the key being absent, which
+/// would mean an engine too old to say.
+fn positions(held: &[(String, Side, f64, f64)]) -> String {
+    let rows: Vec<String> = held
+        .iter()
+        .map(|(symbol, side, qty, entry_px)| {
+            format!(
+                "{{{}: {}, {}: {}, {}: {}, {}: {}}}",
+                quoted("symbol"),
+                quoted(symbol),
+                quoted("side"),
+                quoted(match side {
+                    Side::Buy => "long",
+                    Side::Sell => "short",
+                }),
+                quoted("qty"),
+                amount(*qty),
+                quoted("entry_px"),
+                amount(*entry_px),
+            )
+        })
+        .collect();
+    format!("[{}]", rows.join(", "))
+}
+
 fn list(names: &[String]) -> String {
     let names: Vec<String> = names.iter().map(|name| quoted(name.as_str())).collect();
     format!("[{}]", names.join(", "))
@@ -302,7 +345,7 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 18] = [
+    const KEYS: [&str; 19] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -316,6 +359,7 @@ mod tests {
         "mode",
         "orders_sent",
         "pid",
+        "positions",
         "realm",
         "strategies",
         "wall_ts_ms",
@@ -327,7 +371,7 @@ mod tests {
         Quantiles { count, p50_ns, p90_ns: p50_ns, p99_ns, max_ns: p99_ns }
     }
 
-    fn facts(strategies: &[String]) -> Facts<'_> {
+    fn facts<'a>(strategies: &'a [String], held: &'a [(String, Side, f64, f64)]) -> Facts<'a> {
         Facts {
             shadow: true,
             may_open: true,
@@ -340,7 +384,14 @@ mod tests {
             available_usdt: 4_100.25,
             // Two seconds old, on the engine's own monotonic clock.
             account_age_ns: Some(2_000_000_000),
+            holdings: held,
         }
+    }
+
+    /// One position, so the shape of the array is exercised rather than only
+    /// the empty case.
+    fn one_holding() -> Vec<(String, Side, f64, f64)> {
+        vec![("HOMEUSDT".to_string(), Side::Buy, 14_110.0, 0.009_7)]
     }
 
     #[test]
@@ -352,9 +403,10 @@ mod tests {
         // every entry, quietly, per cycle.
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
         let names = vec!["target_book".to_string()];
+        let held = one_holding();
         let wall_ts_ms = 1_786_737_867_645_i64;
 
-        let fields = parsed(&beat.render(&facts(&names), wall_ts_ms));
+        let fields = parsed(&beat.render(&facts(&names, &held), wall_ts_ms));
 
         let observed = fields["account_observed_wall_ts_ms"]
             .as_i64()
@@ -363,6 +415,43 @@ mod tests {
         assert!(
             observed > 1_700_000_000_000,
             "a unix millisecond stamp, not a count since boot: {observed}"
+        );
+    }
+
+    #[test]
+    fn what_is_held_is_published_by_name_for_the_producers_to_read() {
+        // A producer writes an absolute book, so the one thing it cannot work
+        // out for itself is whether a name it asked for is actually there. Not
+        // telemetry: without this a venue stop that fires is invisible to the
+        // producer, which goes on asking for the name until its own deadline.
+        let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
+        let names = vec!["target_book".to_string()];
+        let held = one_holding();
+
+        let fields = parsed(&beat.render(&facts(&names, &held), 1_755_000_000_000));
+
+        let rows = fields["positions"].as_array().expect("an array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["symbol"], "HOMEUSDT", "by name, not by engine id");
+        assert_eq!(rows[0]["side"], "long");
+        assert_eq!(rows[0]["qty"].as_f64(), Some(14_110.0));
+        assert!(rows[0]["entry_px"].as_f64().is_some_and(|px| px > 0.0));
+    }
+
+    #[test]
+    fn holding_nothing_is_an_empty_array_and_not_a_missing_key() {
+        // The difference a producer has to be able to tell: an account that
+        // holds nothing, versus an engine too old to say what it holds. One
+        // means drop the book; the other means do not act on this at all.
+        let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
+        let names = vec!["target_book".to_string()];
+
+        let fields = parsed(&beat.render(&facts(&names, &[]), 1_755_000_000_000));
+
+        assert_eq!(
+            fields["positions"].as_array().map(Vec::len),
+            Some(0),
+            "present and empty, never absent"
         );
     }
 
@@ -387,8 +476,9 @@ mod tests {
     #[test]
     fn the_heartbeat_says_who_and_what_this_engine_is() {
         let names = vec!["touch_sniper".to_string(), "carry_follower".to_string()];
+        let held = one_holding();
         let raw = on_the_demo_account("unused.json".into())
-            .render(&facts(&names), 1_755_000_000_000);
+            .render(&facts(&names, &held), 1_755_000_000_000);
 
         assert!(raw.ends_with('\n'), "a newline after it, like the lease note: {raw:?}");
         assert_eq!(raw.lines().count(), 1, "one line: {raw:?}");
@@ -421,8 +511,9 @@ mod tests {
         // Sorted the way Python's json.dumps(sort_keys=True) writes it, so a
         // person diffing two heartbeats sees only what changed.
         let names = vec!["touch_sniper".to_string()];
+        let held = one_holding();
         let raw = on_the_demo_account("unused.json".into())
-            .render(&facts(&names), 1_755_000_000_000);
+            .render(&facts(&names, &held), 1_755_000_000_000);
         let mut last = 0;
         for key in KEYS {
             let at = raw
@@ -436,13 +527,14 @@ mod tests {
     #[test]
     fn it_says_shadow_in_shadow_and_live_when_live() {
         let names = vec!["touch_sniper".to_string()];
+        let held = one_holding();
         let beat = on_the_demo_account("unused.json".into());
 
-        let mut in_shadow = facts(&names);
+        let mut in_shadow = facts(&names, &held);
         in_shadow.shadow = true;
         assert_eq!(parsed(&beat.render(&in_shadow, 1))["mode"], "shadow");
 
-        let mut sending = facts(&names);
+        let mut sending = facts(&names, &held);
         sending.shadow = false;
         assert_eq!(parsed(&beat.render(&sending, 1))["mode"], "live");
     }
@@ -452,7 +544,8 @@ mod tests {
         // The reason this field is here at all: everything else about a
         // latched engine reads healthy.
         let names = vec!["touch_sniper".to_string()];
-        let mut latched = facts(&names);
+        let held = one_holding();
+        let mut latched = facts(&names, &held);
         latched.may_open = false;
         let fields = parsed(&on_the_demo_account("unused.json".into()).render(&latched, 1));
         assert_eq!(fields["may_open"].as_bool(), Some(false));
@@ -461,7 +554,8 @@ mod tests {
     #[test]
     fn a_latency_nobody_has_measured_is_null_and_not_zero() {
         let names = vec!["touch_sniper".to_string()];
-        let mut quiet = facts(&names);
+        let held = one_holding();
+        let mut quiet = facts(&names, &held);
         quiet.decide = measured(0, 0, 0);
         quiet.wire = measured(0, 0, 0);
         let fields = parsed(&on_the_demo_account("unused.json".into()).render(&quiet, 1));
@@ -475,7 +569,8 @@ mod tests {
         // A shadow run holds no lease, and one that cannot reach the venue
         // never learns the account number.
         let names = vec!["touch_sniper".to_string()];
-        let fields = parsed(&Heartbeat::new("unused.json".into(), None, None).render(&facts(&names), 1));
+        let held = one_holding();
+        let fields = parsed(&Heartbeat::new("unused.json".into(), None, None).render(&facts(&names, &held), 1));
         for key in ["account_user_id", "realm", "lease_path"] {
             assert!(fields[key].is_null(), "{key} was guessed at: {fields:?}");
         }
@@ -491,16 +586,17 @@ mod tests {
         // holding the file open never sees half of anything.
         let path = temp_path("heartbeat-replaced");
         let names = vec!["touch_sniper".to_string()];
+        let held = one_holding();
         let mut beat = on_the_demo_account(path.path().to_path_buf());
 
-        let mut first = facts(&names);
+        let mut first = facts(&names, &held);
         first.market_events = 11;
         beat.write(1, &first);
 
         let link = temp_path("heartbeat-link");
         std::fs::hard_link(path.path(), link.path()).expect("a second name for the file");
 
-        let mut second = facts(&names);
+        let mut second = facts(&names, &held);
         second.market_events = 22;
         beat.write(1, &second);
 
@@ -521,13 +617,14 @@ mod tests {
         // heartbeat at all.
         let path = temp_path("heartbeat-temp");
         let names = vec!["touch_sniper".to_string()];
+        let held = one_holding();
         let mut beat = on_the_demo_account(path.path().to_path_buf());
         assert_eq!(
             beat.temp_path().parent(),
             path.path().parent(),
             "the temp file has to be on the same filesystem"
         );
-        beat.write(1, &facts(&names));
+        beat.write(1, &facts(&names, &held));
         assert!(path.path().exists(), "the heartbeat landed");
         assert!(!beat.temp_path().exists(), "the temp file was left behind");
     }
@@ -537,8 +634,9 @@ mod tests {
         let missing = temp_path("heartbeat-nowhere");
         let path = missing.path().join("no-such-directory").join("beat.json");
         let names = vec!["touch_sniper".to_string()];
+        let held = one_holding();
         let mut beat = Heartbeat::new(path.clone(), None, None);
-        beat.write(1, &facts(&names));
+        beat.write(1, &facts(&names, &held));
         assert!(!path.exists(), "nothing should have been written");
         assert!(!beat.temp_path().exists(), "nor a temp file");
     }
@@ -553,10 +651,11 @@ mod tests {
             Duration::from_secs(5),
         );
         let names = vec!["touch_sniper".to_string()];
+        let held = one_holding();
 
         // Due straight away: the first tick of a run writes one.
         assert!(beat.due(0));
-        beat.write(1_000, &facts(&names));
+        beat.write(1_000, &facts(&names, &held));
         assert!(!beat.due(1_000 + 4_999_999_999), "under five seconds is too soon");
         assert!(beat.due(1_000 + 5_000_000_000), "five seconds on, it is due");
     }
@@ -569,8 +668,9 @@ mod tests {
         let missing = temp_path("heartbeat-no-retry");
         let path = missing.path().join("no-such-directory").join("beat.json");
         let names = vec!["touch_sniper".to_string()];
+        let held = one_holding();
         let mut beat = Heartbeat::with_every(path, None, None, Duration::from_secs(5));
-        beat.write(1_000, &facts(&names));
+        beat.write(1_000, &facts(&names, &held));
         assert!(!beat.due(1_000 + 4_999_999_999), "a failed write reset the cadence");
     }
 }

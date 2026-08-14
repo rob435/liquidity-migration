@@ -22,13 +22,16 @@ fill the owner had attributed. It now means a name this producer is asking for.
 Those differ for as long as an entry takes to fill, which is the engine's
 business and no longer something the producer guesses at.
 
-**What it cannot see, said plainly.** A venue stop that fires is not in here.
-The producer goes on asking for that name until its time stop drops it, and the
-engine refuses to buy it back -- the follower latches a name that goes flat
-under a book that still wants it. So the position stays closed, which is the
-safe direction, but the slot stays occupied until the deadline. Closing that
-gap means the engine telling the producers what it holds, which it does not do
-yet.
+**A stop that fires is news, and it arrives from the engine.** The engine
+publishes what the venue says is held in its heartbeat, and `seen_held` below
+is how that gets used: a name the engine confirmed and then stopped reporting
+was closed by something this producer did not ask for, so it leaves the record
+and starts its cooldown. A name the engine has *never* confirmed is left alone
+-- that is an entry still on its way, not a stop.
+
+The engine saying nothing at all (no heartbeat, a stale one, an older engine)
+is a third answer, and it means leave the record exactly as it is. Reading it
+as "holds nothing" would drop every open name at once.
 """
 
 from __future__ import annotations
@@ -79,6 +82,14 @@ class LongBookEntry:
     #: The price it was decided against, for the decayed-stop comparison.
     entry_price: float
     max_hold_deadline_ts_ms: int
+    #: Whether the engine has ever reported this name as actually held.
+    #:
+    #: The book is a want, not a holding, and the two differ for as long as an
+    #: entry takes to fill. Dropping a name the engine has never confirmed
+    #: would abandon every entry the moment it was written; dropping one it
+    #: confirmed and then stopped reporting is a stop that fired, a
+    #: liquidation, or a hand close -- news the producer must act on.
+    seen_held: bool = False
     signal_ts_ms: int = 0
     stop_decay_after_ms: int = 0
     decayed_stop_loss_pct: float = 0.0
@@ -208,6 +219,7 @@ def read_book_state(path: str | Path) -> LongBookState:
                 entry_price=float(row.get("entry_price") or 0.0),
                 max_hold_deadline_ts_ms=int(row.get("max_hold_deadline_ts_ms") or 0),
                 signal_ts_ms=int(row.get("signal_ts_ms") or 0),
+                seen_held=bool(row.get("seen_held")),
                 stop_decay_after_ms=int(row.get("stop_decay_after_ms") or 0),
                 decayed_stop_loss_pct=float(row.get("decayed_stop_loss_pct") or 0.0),
                 atr_14d_pct=float(row.get("atr_14d_pct") or 0.0),

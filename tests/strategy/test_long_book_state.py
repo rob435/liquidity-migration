@@ -139,6 +139,7 @@ def _advance(state: LongBookState, **overrides: object) -> LongBookState:
         "strategy_id": "long_v12",
         "now_ms": NOW_MS,
         "cooldown_days": 7,
+        "held_symbols": None,
     }
     kwargs.update(overrides)
     return long_demo._advance_long_book_state(state, **kwargs)  # type: ignore[arg-type]
@@ -259,3 +260,73 @@ def test_an_empty_record_writes_an_empty_book_not_no_book() -> None:
     )
 
     assert book["targets"] == []
+
+
+# ---- What the engine says is held ----
+#
+# The book is a want, not a holding. Before these, a venue stop that fired was
+# invisible: LONG went on asking for the name, the engine refused to buy it
+# back, and the slot stayed occupied for up to three days.
+
+
+def test_a_name_the_engine_confirms_is_marked_as_actually_held() -> None:
+    before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT")})
+
+    after = _advance(before, held_symbols=frozenset({"KAITOUSDT"}))
+
+    assert after.held["KAITOUSDT"].seen_held is True
+
+
+def test_a_name_that_was_held_and_is_gone_leaves_the_book() -> None:
+    """A stop fired, or somebody closed it. Nothing this producer asked for
+    did, so the name leaves the record and starts its cooldown."""
+
+    before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT", seen_held=True)})
+
+    after = _advance(before, held_symbols=frozenset())
+
+    assert after.held == {}
+    assert after.left_at_ms == {"KAITOUSDT": NOW_MS}
+
+
+def test_an_entry_the_engine_has_never_confirmed_is_left_alone() -> None:
+    """The window between writing the book and the entry filling. Dropping
+    here would abandon every entry the moment it was written."""
+
+    before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT", seen_held=False)})
+
+    after = _advance(before, held_symbols=frozenset())
+
+    assert list(after.held) == ["KAITOUSDT"]
+    assert after.left_at_ms == {}
+
+
+def test_an_engine_that_says_nothing_leaves_the_whole_record_alone() -> None:
+    """No heartbeat, a stale one, an engine too old to publish positions. That
+    is not "holds nothing", and reading it that way drops the whole book."""
+
+    before = LongBookState(
+        held={
+            "KAITOUSDT": _entry("KAITOUSDT", seen_held=True),
+            "COTIUSDT": _entry("COTIUSDT", seen_held=True),
+        }
+    )
+
+    after = _advance(before, held_symbols=None)
+
+    assert sorted(after.held) == ["COTIUSDT", "KAITOUSDT"]
+    assert after.left_at_ms == {}
+
+
+def test_being_confirmed_once_is_remembered_across_cycles() -> None:
+    # Confirmed, then the engine's reading momentarily omits it while it is
+    # still there -- the flag must not flap, or the next cycle reads a
+    # never-filled entry and never drops it.
+    state = _advance(
+        LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT")}),
+        held_symbols=frozenset({"KAITOUSDT"}),
+    )
+    assert state.held["KAITOUSDT"].seen_held is True
+
+    written_and_read = state.held["KAITOUSDT"]
+    assert written_and_read.seen_held is True

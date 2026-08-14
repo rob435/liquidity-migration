@@ -38,7 +38,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -99,7 +99,9 @@ from liquidity_migration.research.backtest.long_identity import (
     long_profile_display_name,
     long_trade_id,
 )
+from liquidity_migration.account.engine_account_health import engine_held_symbols
 from liquidity_migration.strategy.strategy_planning import (
+    TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     OwnerHealthReading,
     account_owner_health_reading,
     sleeve_planning_snapshot,
@@ -636,6 +638,9 @@ def run_long_native_demo_cycle(
                 strategy_id=strategy_id,
                 now_ms=cycle_now_ms,
                 cooldown_days=int(strategy.cooldown_days),
+                held_symbols=engine_held_symbols(
+                    owner_environment, max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS
+                ),
             )
             # The record is written first. A book the record does not back
             # would have this producer asking for a name it will not remember
@@ -1586,6 +1591,7 @@ def _advance_long_book_state(
     strategy_id: str,
     now_ms: int,
     cooldown_days: int,
+    held_symbols: frozenset[str] | None,
 ) -> LongBookState:
     """Move the record on by one cycle: drop what exited, add what entered.
 
@@ -1601,9 +1607,42 @@ def _advance_long_book_state(
         for plan in exit_plans
         if str(plan.get("symbol") or "")
     }
-    held = {symbol: entry for symbol, entry in state.held.items() if symbol not in exited}
+    # A name the engine confirmed as held and then stopped reporting was closed
+    # by something this producer did not ask for: a venue stop firing, a
+    # liquidation, a hand close. It leaves the record and starts its cooldown,
+    # exactly like an exit this producer planned.
+    #
+    # `held_symbols is None` means the engine said nothing -- no heartbeat, a
+    # stale one, an older engine. That is not "holds nothing", and reading it
+    # that way would drop the whole book at once.
+    closed_elsewhere: set[str] = set()
+    if held_symbols is not None:
+        closed_elsewhere = {
+            symbol
+            for symbol, entry in state.held.items()
+            if entry.seen_held and symbol not in held_symbols
+        }
+        for symbol in sorted(closed_elsewhere):
+            _LOGGER.warning(
+                "long book: %s was held and is not any more; nothing this producer "
+                "asked for closed it, so it leaves the book",
+                symbol,
+            )
+    gone = exited | closed_elsewhere
+
+    held = {}
+    for symbol, entry in state.held.items():
+        if symbol in gone:
+            continue
+        # Confirmed once, remembered for good: an entry that fills and is later
+        # closed must read differently from one that never filled at all.
+        held[symbol] = (
+            entry
+            if entry.seen_held or held_symbols is None or symbol not in held_symbols
+            else replace(entry, seen_held=True)
+        )
     left_at_ms = dict(state.left_at_ms)
-    for symbol in exited:
+    for symbol in gone:
         left_at_ms[symbol] = now_ms
 
     for candidate in candidates:
