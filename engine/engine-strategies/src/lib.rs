@@ -25,7 +25,8 @@ pub use target_book::TargetBookFollower;
 pub use touch_sniper::TouchSniper;
 
 /// Every name [`build_strategy`] answers to.
-pub const KNOWN_STRATEGIES: &[&str] = &[target_book::follower::NAME, touch_sniper::NAME];
+pub const KNOWN_STRATEGIES: &[&str] =
+    &[quoter::plug::NAME, target_book::follower::NAME, touch_sniper::NAME];
 
 /// Why a config block could not become a strategy.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +114,7 @@ pub fn build_strategy(
         target_book::follower::NAME => {
             Ok(Box::new(TargetBookFollower::from_params(strategy_id, params)?))
         }
+        quoter::plug::NAME => Ok(Box::new(quoter::Quoter::from_params(strategy_id, params)?)),
         touch_sniper::NAME => Ok(Box::new(TouchSniper::from_params(strategy_id, params)?)),
         other => Err(BuildError::UnknownStrategy { name: other.to_string() }),
     }

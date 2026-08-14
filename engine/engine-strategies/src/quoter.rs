@@ -10,5 +10,9 @@
 //! [`plan::plan_quotes`] is the decision and it is pure.
 
 pub mod plan;
+pub mod plug;
+#[cfg(test)]
+mod plug_tests;
 
 pub use plan::{QuoteRules, QuoteStep, Resting, plan_quotes};
+pub use plug::Quoter;
