@@ -136,12 +136,53 @@ in-flight order) → venue ack or reject → fills. On boot the engine replays
 the log, truncates a torn tail at the crash point, and reconstructs what was
 in flight before touching the venue.
 
+## Adding a venue
+
+Venues differ in kind, not just in address, so a venue states what it can do
+rather than the engine assuming. `VenueCaps` declares four things — whether
+the venue holds a position-level stop the engine can set, whether a resting
+order can be amended in place, whether post-only is honoured, whether orders
+batch — and the engine refuses an action a venue cannot honour instead of
+quietly substituting a different one. Cancel-and-replace is not an amend: it
+is a new order at the back of the queue at a fresh price, and a strategy that
+asked to move a quote would never learn it had been given something else.
+
+To add one (Hyperliquid, MEXC): implement `VenueGateway` in a crate of its
+own — `caps`, `send_order`, `cancel_order`, `amend_order`, `set_stop`,
+`account_view`, `instrument_rules` — and state the capabilities honestly. A
+venue with no native position stop is not a broken venue; it is a venue where
+an entry carrying a stop is refused, because the risk kernel's
+every-entry-carries-a-stop rule would otherwise be silently unenforced.
+Whether an adapter may touch real money is that adapter's own decision, made
+in its own crate: the trait cannot express an endpoint.
+
+## What the engine cannot do yet
+
+Measured against the Python fleet it is meant to replace, and kept honest
+because the deletion order depends on it:
+
+| Capability | State |
+| --- | --- |
+| Decide, gate, make durable, sign, send | Done, and measured |
+| The four capital controls | Ported, minus four account caps named in `engine-risk/PORT_NOTES.md` |
+| Quantizing to tick and step, venue minimums | Done |
+| Following a research target book | Seam built; the follower is the current work |
+| Resting entry quoting (place at touch, reprice, escalate, cross) | **Absent.** The engine sends market orders. This is the largest execution-quality gap |
+| Venue reconciliation and restart recovery | **Absent.** The engine replays its own log but never asks the venue what happened to an order it lost |
+| Stop verify, repair, and a durable breach latch | **Attach only.** `set_stop` exists and is not yet called after a fill |
+| Single-writer lease | **Absent.** Nothing but deployment discipline stops the engine and the Python fleet trading one account at once — the wedge we already lived through |
+| Notifications and a liveness watchdog | **Absent.** Nothing outside the process can tell whether the engine is healthy |
+
+Until the four absent rows are built and proven, the Python execution path
+stays: deleting it would not be a risk, it would simply stop the fleet
+trading.
+
 ## What v1 does not do
 
-- No carry or continuous port — their edge is measured in hours, not
-  milliseconds; they stay on the Python fleet.
-- No mainnet, no VPS deploy, no relocation dependency. The engine has not been
-  built or run on the VPS at all; the first live shadow run against the demo
-  account is still owed.
+- No carry or continuous *decision* port — a carry decision is a batch over
+  ninety days of funding and bars, so it stays in research and reaches the
+  engine as a target book.
+- No mainnet. The engine builds and runs on the VPS from an isolated clone and
+  has run in shadow against the demo account; it trades nothing.
 - No FPGA/kernel-bypass pretensions: the venue is an HTTPS cloud service and
   single-digit milliseconds on-box is already far below its floor.
