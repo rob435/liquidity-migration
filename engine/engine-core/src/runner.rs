@@ -52,6 +52,10 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     let symbols = assembly::symbol_order(&wanted);
     let risk = assembly::risk(&loaded.config.risk, &loaded.config.strategies)?;
+    // Checked here, while the strategies are still in hand and before the
+    // account lease is taken: a config that wires a book to the wrong plug is
+    // a mistake to make at the door, not after claiming an account.
+    let books = assembly::target_books(&settings, &loaded.config.strategies, &strategies)?;
     let mut venue = assembly::venue(&settings.venue, symbols.clone())?;
 
     // Held for the whole run. Dropped at the end of this function, and by the
@@ -78,9 +82,7 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
     )
     .await?;
 
-    if let Some(watcher) = assembly::target_book(&settings) {
-        engine.watch_targets(watcher);
-    }
+    engine.watch_targets(books);
     if let Some(heartbeat) = assembly::heartbeat(
         &settings,
         claimed.account.clone(),

@@ -50,7 +50,7 @@ use crate::inflight::{self, LedgerOfOrders, OrderRegistry};
 use crate::reconcile;
 use crate::ledger::{LatencyLedger, Segment};
 use crate::routing::Routing;
-use crate::targets::TargetBookWatcher;
+use crate::targets::TargetBooks;
 use crate::working::{self, WorkingOrders};
 
 /// A strategy that emits from every order update it hears could keep the loop
@@ -127,7 +127,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// boot and run; `run` takes it out for the length of the run, because
     /// the loop's `select!` needs it as a local — a future borrowing it out
     /// of `self` would lock out every branch that has work to do.
-    targets: Option<TargetBookWatcher>,
+    targets: TargetBooks,
     /// The heartbeat file, when one was configured. Telemetry only: nothing
     /// in the loop reads it and nothing in the loop waits on it.
     heartbeat: Option<Heartbeat>,
@@ -300,7 +300,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             working: WorkingOrders::default(),
             may_open,
             ledger: LatencyLedger::new(now),
-            targets: None,
+            targets: TargetBooks::new(Vec::new()),
             heartbeat: None,
             shadow: settings.shadow,
             group_flush: Duration::from_millis(settings.group_flush_ms.max(1)),
@@ -426,8 +426,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Follow a target book. Optional: with no watcher the engine simply
     /// never hears about one, and a follower plug holds whatever it holds.
-    pub fn watch_targets(&mut self, watcher: TargetBookWatcher) {
-        self.targets = Some(watcher);
+    pub fn watch_targets(&mut self, books: TargetBooks) {
+        self.targets = books;
     }
 
     /// Say how this engine is, in a file. Optional: with no heartbeat the
@@ -476,8 +476,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut order_feed_open = true;
         // Out of `self` for the length of the run: a select! branch waiting
         // on it must not borrow the engine the other branches need.
-        let mut targets = self.targets.take();
-        let mut targets_open = targets.is_some();
+        let mut targets = std::mem::replace(&mut self.targets, TargetBooks::new(Vec::new()));
+        let mut targets_open = !targets.is_empty();
 
         loop {
             let timer_wait = self.timers.next_deadline().map(|deadline| {
@@ -515,13 +515,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                 },
-                book = next_book(&mut targets), if targets_open => match book {
-                    Some(book) => self.on_targets(book).await?,
-                    // The worker only stops when it is dropped, so this is a
-                    // surprise worth a loud line. Nothing else changes: no
-                    // book means no decision, and followers hold.
+                book = targets.next_book(), if targets_open => match book {
+                    Some((strategy, book)) => self.on_targets(strategy, book).await?,
+                    // Every watcher has gone. Each one's own departure was
+                    // logged as it happened; this is the last of them.
+                    // Nothing else changes: no book means no decision, and
+                    // followers hold what they hold.
                     None => {
-                        tracing::error!("the target book watcher stopped; no further books will arrive");
+                        tracing::error!("every target book watcher has stopped; no further books will arrive");
                         targets_open = false;
                     }
                 },
@@ -647,13 +648,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// heard: which of them follows a book is the plug's business, not the
     /// loop's. Nothing arrives here unless a whole book was read, so this is
     /// only ever called with a decision in hand.
-    async fn on_targets(&mut self, book: TargetBook) -> Result<(), EngineError> {
+    /// One book, to the one strategy that asked for its path.
+    ///
+    /// Not broadcast. Two sleeves on one account each have their own book, and
+    /// the venue holds one position per symbol — so a book delivered to the
+    /// wrong follower is that follower trying to hold another sleeve's
+    /// positions.
+    async fn on_targets(
+        &mut self,
+        strategy: StrategyId,
+        book: TargetBook,
+    ) -> Result<(), EngineError> {
         let now = clock::now_ns();
         tracing::info!(
+            strategy = strategy.0,
             source = %book.source,
             targets = book.targets.len(),
             valid_until_ms = book.valid_until_ms,
-            "a target book reached the strategies"
+            "a target book reached its strategy"
         );
         let event = EngineEvent::Targets(book);
         {
@@ -668,21 +680,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 rules,
                 ..
             } = self;
-            for index in 0..strategies.len() {
-                feed_strategy(
-                    strategies,
-                    market,
-                    account,
-                    rules,
-                    timers,
-                    pending,
-                    orders,
-                    registry,
-                    StrategyId(index as u16),
-                    &event,
-                    now,
-                );
-            }
+            feed_strategy(
+                strategies,
+                market,
+                account,
+                rules,
+                timers,
+                pending,
+                orders,
+                registry,
+                strategy,
+                &event,
+                now,
+            );
         }
         self.drain(now).await
     }
@@ -1458,16 +1468,6 @@ fn feed_strategy(
         registry,
     };
     strategy.on_event(event, &mut ctx);
-}
-
-/// One receive on the book watcher, or a future that never resolves when
-/// there is nothing to watch. The loop guards this branch anyway; the
-/// pending arm means the function is honest on its own.
-async fn next_book(watcher: &mut Option<TargetBookWatcher>) -> Option<TargetBook> {
-    match watcher {
-        Some(watcher) => watcher.next_book().await,
-        None => std::future::pending().await,
-    }
 }
 
 /// When this message reached us. The whole chain is measured from here.

@@ -29,6 +29,13 @@ shadow = true
 # Where the research system writes its target book. Left out, as it is here,
 # means no watcher runs at all — which is "no decision", not an empty book: a
 # follower plug holds whatever it holds.
+#
+# This line only works when exactly one strategy follows books, because it does
+# not say which one it belongs to. An account running two sleeves puts the path
+# in the strategy block instead (`book_path = "..."`), and then each book
+# reaches its own sleeve and no other. That routing is what stops two followers
+# on one account from acting on each other's decisions — the venue keeps one
+# position per symbol and no note of who asked for it.
 # target_book_path = "var/targets/carry.json"
 # Where to write the heartbeat file: one line of JSON, rewritten every few
 # seconds, saying when it was written, live or shadow, whose account it is on,

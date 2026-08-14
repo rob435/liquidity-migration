@@ -21,7 +21,7 @@ use serde::Deserialize;
 
 use crate::config::{EngineSection, StrategyConfig};
 use crate::heartbeat::Heartbeat;
-use crate::targets::TargetBookWatcher;
+use crate::targets::{TargetBookWatcher, TargetBooks};
 
 /// Open the log and replay what an earlier run left. The writer truncates a
 /// torn tail at the crash point before appending continues.
@@ -66,13 +66,106 @@ pub fn venue(name: &str, symbols: Vec<Symbol>) -> Result<Venue, VenueError> {
     Venue::by_name(name, symbols)
 }
 
-/// The target book watcher, but only when the config names a path. No path
-/// means no watcher runs, and no book ever reaches a strategy — *no
-/// decision*, which is not the same as an empty book.
-pub fn target_book(settings: &EngineSection) -> Option<TargetBookWatcher> {
-    let path = settings.target_book_path.as_ref()?;
-    tracing::info!(path = %path.display(), "watching for a target book");
-    Some(TargetBookWatcher::start(path.clone()))
+/// Every target book this engine watches, each bound to the one strategy that
+/// named its path. No paths means no watcher runs and no book ever reaches a
+/// strategy — *no decision*, which is not the same as an empty book.
+///
+/// Two ways to say it, and they cannot be mixed:
+///
+/// - `book_path` inside a `[[strategy]]` block. This is how an account with
+///   more than one sleeve is configured, because it says which book is whose.
+/// - `target_book_path` in `[engine]`, which predates routing and means "the
+///   one follower's book". Kept because it is what existing configs say, and
+///   refused the moment there is more than one follower to give it to.
+///
+/// Both directions of the wiring are checked. A path on a strategy that
+/// ignores books is a file nobody reads; a follower with no path is a sleeve
+/// that will never be told what to hold, and would sit there looking healthy.
+pub fn target_books(
+    settings: &EngineSection,
+    configured: &[StrategyConfig],
+    built: &[Box<dyn Strategy>],
+) -> Result<TargetBooks, Box<dyn Error>> {
+    let followers: Vec<usize> = built
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.follows_a_target_book())
+        .map(|(index, _)| index)
+        .collect();
+
+    let mut paths: Vec<(usize, PathBuf)> = Vec::new();
+    for (index, cfg) in configured.iter().enumerate() {
+        let Some(path) = cfg.book_path.as_ref() else {
+            continue;
+        };
+        if !followers.contains(&index) {
+            return Err(format!(
+                "strategy \"{}\" names a book_path, but it does not act on target books \
+                 at all — that file would never be read",
+                cfg.name
+            )
+            .into());
+        }
+        paths.push((index, path.clone()));
+    }
+
+    if let Some(engine_path) = settings.target_book_path.as_ref() {
+        if !paths.is_empty() {
+            return Err("[engine] target_book_path and a strategy's own book_path are two \
+                        ways of saying the same thing; keep the per-strategy one, which \
+                        says whose book it is"
+                .to_string()
+                .into());
+        }
+        match followers.as_slice() {
+            [] => {
+                return Err(
+                    "[engine] target_book_path is set, but no strategy acts on target books"
+                        .to_string()
+                        .into(),
+                )
+            }
+            [only] => paths.push((*only, engine_path.clone())),
+            many => {
+                return Err(format!(
+                    "[engine] target_book_path cannot say which of the {} book-following \
+                     strategies it belongs to; give each one its own book_path",
+                    many.len()
+                )
+                .into())
+            }
+        }
+    }
+
+    for index in &followers {
+        if !paths.iter().any(|(at, _)| at == index) {
+            return Err(format!(
+                "strategy \"{}\" follows a target book but no path was given for it; it \
+                 would run, and hold nothing, for ever",
+                configured
+                    .get(*index)
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("?")
+            )
+            .into());
+        }
+    }
+
+    let watchers = paths
+        .into_iter()
+        .map(|(index, path)| {
+            tracing::info!(
+                strategy = index,
+                path = %path.display(),
+                "watching for a target book"
+            );
+            (
+                StrategyId(index as u16),
+                TargetBookWatcher::start(path),
+            )
+        })
+        .collect();
+    Ok(TargetBooks::new(watchers))
 }
 
 /// The heartbeat writer, but only when the config names a path. No path means
@@ -381,7 +474,7 @@ mod tests {
         "#
         ))
         .expect("test config parses");
-        StrategyConfig { name: "touch_sniper".into(), capital_usdt: Some(50.0), sleeve: None, params }
+        StrategyConfig { name: "touch_sniper".into(), capital_usdt: Some(50.0), sleeve: None, book_path: None, params }
     }
 
     fn quoter(symbol: &str) -> StrategyConfig {
@@ -396,7 +489,7 @@ mod tests {
         "#
         ))
         .expect("test config parses");
-        StrategyConfig { name: "quoter".into(), capital_usdt: Some(50.0), sleeve: None, params }
+        StrategyConfig { name: "quoter".into(), capital_usdt: Some(50.0), sleeve: None, book_path: None, params }
     }
 
     /// The shipped engine.toml `[risk]` block.
@@ -581,6 +674,162 @@ disaster_stop_fraction = 0.35
         ];
         let err = refusal(risk(&profile_risk("operational.mainnet.json"), &sleeves), "one share of the account was handed to two strategies");
         assert!(err.to_string().contains("carry"), "{err}");
+    }
+
+    // ----------------------------------------------------------------------
+    // Which book belongs to which strategy
+    // ----------------------------------------------------------------------
+
+    /// A strategy that follows books, and one that does not, without
+    /// depending on any real plug's parameter schema.
+    struct Listener {
+        follows: bool,
+    }
+
+    impl engine_types::Strategy for Listener {
+        fn name(&self) -> &str {
+            "listener"
+        }
+        fn subscriptions(&self) -> Vec<Subscription> {
+            Vec::new()
+        }
+        fn on_event(
+            &mut self,
+            _event: &engine_types::EngineEvent,
+            _ctx: &mut dyn engine_types::StrategyCtx,
+        ) {
+        }
+        fn follows_a_target_book(&self) -> bool {
+            self.follows
+        }
+    }
+
+    fn built(follows: &[bool]) -> Vec<Box<dyn Strategy>> {
+        follows
+            .iter()
+            .map(|f| Box::new(Listener { follows: *f }) as Box<dyn Strategy>)
+            .collect()
+    }
+
+    fn blocks(paths: &[Option<&str>]) -> Vec<StrategyConfig> {
+        paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| StrategyConfig {
+                name: format!("s{i}"),
+                capital_usdt: Some(10.0),
+                sleeve: None,
+                book_path: path.map(PathBuf::from),
+                params: toml::Table::new(),
+            })
+            .collect()
+    }
+
+    fn settings(engine_level_book: Option<&str>) -> EngineSection {
+        EngineSection {
+            wal_path: PathBuf::from("engine.wal"),
+            venue: "bybit_demo".into(),
+            group_flush_ms: 250,
+            account_view_max_age_ms: 5_000,
+            shadow: true,
+            target_book_path: engine_level_book.map(PathBuf::from),
+            heartbeat_path: None,
+        }
+    }
+
+    fn books_error(
+        engine_level: Option<&str>,
+        paths: &[Option<&str>],
+        follows: &[bool],
+        what: &str,
+    ) -> String {
+        match target_books(&settings(engine_level), &blocks(paths), &built(follows)) {
+            Ok(_) => panic!("{what}"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn two_sleeves_each_get_their_own_book() {
+        let books = target_books(
+            &settings(None),
+            &blocks(&[Some("carry.json"), Some("long.json")]),
+            &built(&[true, true]),
+        )
+        .expect("two sleeves with two books is the funded shape");
+        assert_eq!(books.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_engine_level_path_still_works_for_a_single_follower() {
+        // What configs written before routing say. It still means what it
+        // meant, because there is only one strategy it could have meant.
+        let books = target_books(
+            &settings(Some("carry.json")),
+            &blocks(&[None]),
+            &built(&[true]),
+        )
+        .expect("one follower, one book");
+        assert_eq!(books.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_engine_level_path_is_refused_once_there_are_two_followers() {
+        // It has no way to say whose book it is, and guessing would hand one
+        // sleeve's decisions to whichever plug happened to be first.
+        let err = books_error(
+            Some("carry.json"),
+            &[None, None],
+            &[true, true],
+            "an ambiguous book path was accepted",
+        );
+        assert!(err.contains("book_path"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn saying_it_both_ways_at_once_is_refused() {
+        let err = books_error(
+            Some("carry.json"),
+            &[Some("carry.json")],
+            &[true],
+            "two ways of naming one book were accepted",
+        );
+        assert!(err.contains("target_book_path"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_book_given_to_a_strategy_that_ignores_books_is_refused() {
+        // The file would never be read, and the operator would be watching a
+        // producer write into nothing.
+        let err = books_error(
+            None,
+            &[Some("carry.json")],
+            &[false],
+            "a book for a strategy that ignores books was accepted",
+        );
+        assert!(err.contains("never be read"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_follower_with_no_book_is_refused() {
+        // It would boot, subscribe, and hold nothing for ever -- which from
+        // outside looks exactly like a sleeve with nothing to do.
+        let err = books_error(
+            None,
+            &[None],
+            &[true],
+            "a follower with no book was accepted",
+        );
+        assert!(err.contains("no path was given"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn no_books_at_all_is_a_normal_config() {
+        // Nothing here follows a book, so nothing is watched. That is the
+        // touch-sniper shape, and it is not a fault.
+        let books = target_books(&settings(None), &blocks(&[None]), &built(&[false]))
+            .expect("a config with no books at all is fine");
+        assert!(books.is_empty());
     }
 
     #[test]

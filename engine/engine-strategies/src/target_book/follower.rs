@@ -279,6 +279,12 @@ impl Strategy for TargetBookFollower {
         NAME
     }
 
+    /// Holding what a book says is the whole of this plug, so it must be
+    /// given a book path — the engine refuses a config where it is not.
+    fn follows_a_target_book(&self) -> bool {
+        true
+    }
+
     /// The universe from the config block. The engine asks once, at boot, so
     /// this cannot grow with a later book — see the module note.
     fn subscriptions(&self) -> Vec<Subscription> {

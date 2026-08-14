@@ -83,4 +83,17 @@ pub trait Strategy {
     /// Market data wanted, collected once at boot.
     fn subscriptions(&self) -> Vec<Subscription>;
     fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx);
+
+    /// Whether this strategy acts on [`EngineEvent::Targets`].
+    ///
+    /// Books are routed, not broadcast: each one goes to the single strategy
+    /// whose config named its path. The engine uses this to check the wiring
+    /// at boot — a book path given to a strategy that ignores books is a file
+    /// nobody reads, and a book-follower with no path is a sleeve that will
+    /// never be told what to hold.
+    ///
+    /// Default false, which is right for anything that decides for itself.
+    fn follows_a_target_book(&self) -> bool {
+        false
+    }
 }

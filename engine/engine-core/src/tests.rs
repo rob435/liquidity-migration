@@ -2309,10 +2309,13 @@ async fn a_book_on_disk_reaches_the_strategies_through_the_loop() {
     let (listener, heard) = BookListener::new("BTCUSDT");
     let (mut engine, _h) =
         build(true, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
-    engine.watch_targets(crate::targets::TargetBookWatcher::with_poll(
-        path.path().to_path_buf(),
-        Duration::from_millis(5),
-    ));
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![(
+        StrategyId(0),
+        crate::targets::TargetBookWatcher::with_poll(
+            path.path().to_path_buf(),
+            Duration::from_millis(5),
+        ),
+    )]));
 
     engine
         .run(
@@ -2330,6 +2333,80 @@ async fn a_book_on_disk_reaches_the_strategies_through_the_loop() {
     );
 }
 
+/// A second sleeve's book, on a different symbol and from a different
+/// producer, so a crossover shows up as the wrong name in the wrong place.
+const LONG_BOOK_JSON: &str = r#"{"version":1,"source":"long","decision_ts_ms":1700000000000,
+"valid_until_ms":1700086400000,"targets":[{"symbol":"ETHUSDT","notional_usdt":40.0,
+"stop_loss_fraction":0.35,"leverage":2.0},{"symbol":"BTCUSDT","notional_usdt":10.0,
+"stop_loss_fraction":0.35,"leverage":2.0}]}"#;
+
+fn book_watcher(path: &crate::testpath::TempPath) -> crate::targets::TargetBookWatcher {
+    crate::targets::TargetBookWatcher::with_poll(
+        path.path().to_path_buf(),
+        Duration::from_millis(5),
+    )
+}
+
+/// Wait until both sleeves have heard something, or give up.
+async fn until_both_heard(a: Rc<RefCell<Vec<String>>>, b: Rc<RefCell<Vec<String>>>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while (a.borrow().is_empty() || b.borrow().is_empty())
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    // A crossover would arrive on the same poll as the right book, so give the
+    // loop a moment to deliver a second one before deciding nothing did.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+}
+
+#[tokio::test]
+async fn each_sleeve_hears_only_its_own_book() {
+    // The whole reason books are routed rather than broadcast. Two sleeves
+    // share one account and one position per symbol, so a follower handed the
+    // other's book would start holding the other's positions -- and both books
+    // below name BTCUSDT, which is exactly where that would show.
+    let carry_path = temp_path("book-two-carry");
+    let long_path = temp_path("book-two-long");
+    std::fs::write(&carry_path, BOOK_JSON).expect("writes the carry book");
+    std::fs::write(&long_path, LONG_BOOK_JSON).expect("writes the long book");
+
+    let (carry, carry_heard) = BookListener::new("BTCUSDT");
+    let (long, long_heard) = BookListener::new("ETHUSDT");
+    let (mut engine, _h) = build(
+        true,
+        allow_all(),
+        vec![Box::new(carry), Box::new(long)],
+        &["BTCUSDT", "ETHUSDT"],
+        &[],
+    )
+    .await;
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![
+        (StrategyId(0), book_watcher(&carry_path)),
+        (StrategyId(1), book_watcher(&long_path)),
+    ]));
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            until_both_heard(carry_heard.clone(), long_heard.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        carry_heard.borrow().as_slice(),
+        ["carry x1"],
+        "the carry sleeve heard something other than its own book"
+    );
+    assert_eq!(
+        long_heard.borrow().as_slice(),
+        ["long x2"],
+        "the long sleeve heard something other than its own book"
+    );
+}
+
 #[tokio::test]
 async fn an_unreadable_book_wakes_nobody() {
     // No decision, not an empty one. A strategy that were woken here with
@@ -2340,10 +2417,13 @@ async fn an_unreadable_book_wakes_nobody() {
     let (listener, heard) = BookListener::new("BTCUSDT");
     let (mut engine, _h) =
         build(true, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
-    engine.watch_targets(crate::targets::TargetBookWatcher::with_poll(
-        path.path().to_path_buf(),
-        Duration::from_millis(5),
-    ));
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![(
+        StrategyId(0),
+        crate::targets::TargetBookWatcher::with_poll(
+            path.path().to_path_buf(),
+            Duration::from_millis(5),
+        ),
+    )]));
 
     engine
         .run(

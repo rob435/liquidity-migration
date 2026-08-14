@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use engine_types::{BookTarget, TargetBook};
+use engine_types::{BookTarget, StrategyId, TargetBook};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -157,6 +157,89 @@ impl TargetBookWatcher {
     /// which is what the loop's `select!` needs.
     pub async fn next_book(&mut self) -> Option<TargetBook> {
         self.books.recv().await
+    }
+}
+
+/// Every target book this engine watches, each bound to the one strategy that
+/// asked for it.
+///
+/// Routing is by configuration, not by anything inside the file. A book's
+/// `source` field says which producer wrote it and is for the log; trusting it
+/// to decide who acts on a book would mean a producer could rename itself and
+/// silently take over another sleeve's positions. So the engine is told, once,
+/// which path belongs to which strategy, and a book reaches that strategy and
+/// nobody else.
+///
+/// This is what lets one engine own an account that runs two sleeves. Before
+/// it, every book went to every strategy, so two followers would each try to
+/// hold the other's book — and since the venue keeps one position per symbol,
+/// they would have fought over the same positions with no way to tell whose
+/// was whose.
+pub struct TargetBooks {
+    watchers: Vec<(StrategyId, TargetBookWatcher)>,
+    /// Where the next poll starts, so a book that arrives often cannot starve
+    /// one that arrives rarely. Books are seconds apart at their fastest, so
+    /// this is tidiness rather than a measured problem.
+    start: usize,
+}
+
+impl TargetBooks {
+    pub fn new(watchers: Vec<(StrategyId, TargetBookWatcher)>) -> Self {
+        TargetBooks { watchers, start: 0 }
+    }
+
+    /// No paths were configured, so no book will ever arrive. Distinct from an
+    /// empty book: this is *no decision at all*, and every follower holds
+    /// whatever it holds.
+    pub fn is_empty(&self) -> bool {
+        self.watchers.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.watchers.len()
+    }
+
+    /// The next book and whose it is, or `None` once every watcher has gone.
+    ///
+    /// Cancel-safe: each watcher's own receive is, and this only polls them.
+    pub async fn next_book(&mut self) -> Option<(StrategyId, TargetBook)> {
+        std::future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+
+    fn poll_next(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<(StrategyId, TargetBook)>> {
+        use std::task::Poll;
+        let count = self.watchers.len();
+        if count == 0 {
+            return Poll::Ready(None);
+        }
+        for step in 0..count {
+            let index = (self.start + step) % count;
+            let (strategy, watcher) = &mut self.watchers[index];
+            let strategy = *strategy;
+            match watcher.books.poll_recv(cx) {
+                Poll::Ready(Some(book)) => {
+                    self.start = (index + 1) % count;
+                    return Poll::Ready(Some((strategy, book)));
+                }
+                Poll::Ready(None) => {
+                    // One worker stopped. Only that strategy loses its books;
+                    // the others carry on, so this drops the dead one and
+                    // starts the sweep again rather than closing the lot.
+                    tracing::error!(
+                        strategy = strategy.0,
+                        "a target book watcher stopped; that strategy will get no more books"
+                    );
+                    self.watchers.remove(index);
+                    self.start = 0;
+                    return self.poll_next(cx);
+                }
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
     }
 }
 

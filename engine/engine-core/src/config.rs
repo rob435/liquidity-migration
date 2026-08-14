@@ -89,6 +89,13 @@ pub struct StrategyConfig {
     /// Only read in profile mode.
     #[serde(default)]
     pub sleeve: Option<String>,
+    /// Where the producer writes this strategy's target book.
+    ///
+    /// Books are routed, not broadcast: this one reaches this strategy and no
+    /// other. Two sleeves on one account each name their own file, which is
+    /// the only thing that keeps them from acting on each other's decisions.
+    #[serde(default)]
+    pub book_path: Option<PathBuf>,
     /// Everything else in the block, handed to the strategy as written.
     #[serde(flatten)]
     pub params: toml::Table,
