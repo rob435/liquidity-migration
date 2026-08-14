@@ -386,6 +386,11 @@ retire_paper_host_config() {
 prepare_demo_runtime_config() {
     [ "$REPO_DIR" = /opt/liquidity-migration ] \
         || fail "systemd runtime paths require REPO_DIR=/opt/liquidity-migration"
+    # Where the producers write their books and the engine reads them. Made
+    # here because both halves need it to exist before either runs, and the
+    # producer that creates it on first write would create it after the engine
+    # has already logged that it cannot find its book.
+    install -d -o root -g root -m 0750 /var/lib/liquidity-migration/targets
     for path in \
         /etc/liquidity-migration/account-execution.env \
         /etc/liquidity-migration/bybit-demo.env; do

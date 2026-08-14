@@ -25,6 +25,12 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # Registered CARRY deployment (rule file + journaled profile name), the same
 # dial shape as LONG_STRATEGY_PROFILE on the LONG units.
 Environment=CARRY_STRATEGY_PROFILE=v4
+# Where this producer writes the book the engine follows. It must be the same
+# path as the carry sleeve's `book_path` in /etc/liquidity-migration/engine.toml,
+# and nothing checks that agreement for you: two different paths means this
+# producer writes a file nobody reads and the engine waits on one nobody
+# writes, which from outside looks like a sleeve with no signals.
+Environment=CARRY_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/carry-demo.json
 # The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
 Environment=LOOKBACK_DAYS=90
 Environment=WORKERS=2

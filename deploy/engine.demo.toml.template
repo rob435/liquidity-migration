@@ -1,0 +1,105 @@
+# /etc/liquidity-migration/engine.toml  --  root-owned, mode 0600
+#
+# The engine's config for the FLEET'S DEMO ACCOUNT (555899665). Copy this file
+# to the path above on the VPS and edit it there; no deploy writes it.
+#
+# There is no venue address in here and no way to put one there. `venue` is a
+# name that picks one of the adapters compiled into the engine, and every host
+# any of them knows is written in one source file which a test reads back.
+#
+# This is the account the two demo producers publish their books to, and the
+# account whose equity they size from -- they read `account_equity_usdt` out of
+# the heartbeat below and block every entry when it is missing or stale. So the
+# venue, the credential file on the unit, and the two book paths all have to
+# name the same account, and nothing checks that agreement for you.
+
+[engine]
+venue = "bybit_demo"
+
+wal_path = "/var/lib/liquidity-migration-engine/engine.wal"
+
+# Compute and log orders, send nothing.
+#
+# Turning this off is what makes the demo fleet trade again. There is no
+# Python owner behind it any more: with `shadow = true` the producers publish
+# books, the engine reads them and works out every order, and none of them are
+# sent. That is the right state to watch first and the wrong state to leave it
+# in, because a shadow engine and a stopped fleet look identical from outside.
+shadow = true
+
+# One line of JSON, rewritten every few seconds. Two readers, both load-bearing:
+# scripts/runtime/check_fleet_liveness.py pages on stale, unreadable, or
+# latched; and BOTH PRODUCERS size from `account_equity_usdt` in it. Leave this
+# path out and the producers block every entry, per cycle, quietly.
+heartbeat_path = "/var/lib/liquidity-migration-engine/heartbeat.json"
+
+group_flush_ms = 250
+
+# How often the engine refreshes its account reading (it refreshes at half
+# this). The risk kernel's own staleness bound is [risk] max_account_view_age_s.
+account_view_max_age_ms = 5000
+
+# ---------------------------------------------------------------------------
+# Capital limits
+# ---------------------------------------------------------------------------
+# The engine loads configs/operational.demo.json itself, so a cap tightened
+# there tightens for the producers and the engine at once.
+#
+# READ THIS BEFORE TRUSTING THE PARTITION: operational.demo.json carries no
+# `sleeve_limits` block. An empty partition is legal and means there is no
+# per-sleeve share at all -- both sleeves draw on the account-wide caps and
+# either one can spend the lot. That is the demo profile as it stands, not
+# something this file can fix. Add `sleeve_limits` there if you want the two
+# sleeves fenced from each other.
+#
+# Nothing else may be written in this block. An [risk.envelope] section or a
+# stray `leverage` beside the profile path is refused at boot.
+[risk]
+operational_profile_path = "/opt/liquidity-migration/configs/operational.demo.json"
+
+# The three numbers the profile does not carry.
+disaster_stop_fraction = 0.35
+min_order_notional_usdt = 1.0
+max_account_view_age_s = 120
+
+# ---------------------------------------------------------------------------
+# The two sleeves
+# ---------------------------------------------------------------------------
+# Each reads its own book. Books are routed, not broadcast: one reaches its own
+# sleeve and no other.
+#
+# ORDER MATTERS AND IS NOT COSMETIC. A strategy's id is its position in this
+# file, and the engine's record of whose position is whose is keyed on that id
+# and rebuilt from the log at boot. Putting a new block ahead of `carry` would
+# hand carry's whole fill history to whatever took its place. Append; never
+# insert.
+#
+# `symbols` is what each sleeve subscribes to at boot. It is a seed, not a
+# ceiling: a name a book mentions that is not listed here is taken on while the
+# engine runs. Listing the names each sleeve most often holds only saves the
+# admission round trip the first time.
+#
+# The two lists must not overlap -- the engine refuses a config where two
+# strategies claim one symbol. If their books later name the same symbol
+# anyway, which they can, the engine handles it at run time: whichever sleeve
+# is holding the name keeps it, and the other leaves it alone until it is flat.
+# That is not a reason to be careless here.
+
+[[strategy]]
+name = "target_book"
+sleeve = "carry"
+book_path = "/var/lib/liquidity-migration/targets/carry-demo.json"
+# Rest entries at the touch and let the engine work them in, rather than
+# crossing the spread. Carry entries are not urgent and the spread is the
+# largest cost they pay.
+rest_entries = true
+symbols = ["BTCUSDT", "ETHUSDT"]
+
+[[strategy]]
+name = "target_book"
+sleeve = "long"
+book_path = "/var/lib/liquidity-migration/targets/long-demo.json"
+# LONG enters on a breakout that has already happened, so a resting entry can
+# sit behind a market that has left. It crosses.
+rest_entries = false
+symbols = ["SOLUSDT", "XRPUSDT"]

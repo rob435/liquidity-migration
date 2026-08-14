@@ -34,6 +34,17 @@ Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
 # exits. Standing v11a components keep their published terms and drain under
 # the same planner.
 Environment=LONG_STRATEGY_PROFILE=v12
+# Where this producer writes the book the engine follows, and where it keeps
+# its own record of what it asked for. Both are required together: the book is
+# absolute, so a producer that forgot what it asked for last cycle would
+# re-enter every name it holds, for ever. The book path must match the long
+# sleeve's `book_path` in /etc/liquidity-migration/engine.toml.
+#
+# The state file is this producer's memory and replaces the account journal,
+# which the deleted Python owner used to write. It is not in the deployed
+# checkout: the deploy proves that tree clean at every exact-commit step.
+Environment=LONG_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/long-demo.json
+Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/long-demo-state.json
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-long-demo.service main
 Restart=always
 RestartSec=30
