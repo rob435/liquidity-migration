@@ -33,7 +33,8 @@
 //! their own. Give the follower symbols nobody else trades.
 
 use engine_types::{
-    EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, StopSpec, Strategy,
+    EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec,
+    Strategy,
     StrategyCtx, StrategyId, Subscription, SymbolId, TargetBook,
 };
 
@@ -58,6 +59,35 @@ pub struct TargetBookFollower {
     /// every quote, so without it one unreachable name in a book writes a
     /// warning a hundred times a second until the next book lands.
     complained: Vec<String>,
+    /// Signed quantity this plug has sent that the account reading has not
+    /// caught up with yet, per symbol.
+    ///
+    /// A resting order covers the gap between sending and filling, but not
+    /// the gap between filling and *seeing* the fill: the log ends a fully
+    /// filled order at once, while the account reading is up to half its
+    /// staleness bound behind. In that window the position exists at the
+    /// venue and shows nowhere the plug can look, and a plug that decides
+    /// from "target minus position" would buy it a second time.
+    sent_ahead: Vec<SentAhead>,
+}
+
+/// One symbol's sent-but-not-yet-visible quantity, with the reading it was
+/// sent against. When the reading moves off `view_at_send` it has taken the
+/// fill into account and the record is dropped — no timer, no guess.
+#[derive(Copy, Clone, Debug)]
+struct SentAhead {
+    symbol: SymbolId,
+    view_at_send: f64,
+    sent: f64,
+}
+
+/// What the account reading says is held, signed. Positive is long.
+fn view_signed(ctx: &dyn StrategyCtx, id: SymbolId) -> f64 {
+    match ctx.position(id) {
+        Some(p) if p.side == Side::Buy => p.qty,
+        Some(p) => -p.qty,
+        None => 0.0,
+    }
 }
 
 impl TargetBookFollower {
@@ -79,6 +109,7 @@ impl TargetBookFollower {
             book: None,
             rules: PlanRules::FLEET,
             complained: Vec::new(),
+            sent_ahead: Vec::new(),
         })
     }
 
@@ -99,6 +130,12 @@ impl TargetBookFollower {
         let busy: Vec<SymbolId> = working.iter().map(|order| order.symbol).collect();
         drop(working);
 
+        // A reading that has moved since a send has taken that fill into
+        // account, so the record is no longer needed. Anything still here is
+        // exposure the reading cannot see yet.
+        self.sent_ahead
+            .retain(|record| view_signed(&*ctx, record.symbol) == record.view_at_send);
+
         let now_ms = ctx.wall_ms();
         let valid_until_ms = book.valid_until_ms;
         let targets: Vec<Target> = book
@@ -112,7 +149,7 @@ impl TargetBookFollower {
             .collect();
 
         let steps = {
-            let facts = CtxFacts { ctx: &*ctx };
+            let facts = CtxFacts { ctx: &*ctx, sent_ahead: &self.sent_ahead };
             // Everything this plug could be holding: its own universe, plus
             // anything the book names. A symbol the book has stopped naming
             // is only exited if we go looking for it.
@@ -206,6 +243,17 @@ impl TargetBookFollower {
                     decided_ns,
                 },
             };
+            // Remember it against the reading it was decided from, so the
+            // window between the fill and the next reading cannot look flat.
+            let signed = match intent.side {
+                Side::Buy => intent.qty,
+                Side::Sell => -intent.qty,
+            };
+            self.sent_ahead.push(SentAhead {
+                symbol,
+                view_at_send: view_signed(&*ctx, symbol),
+                sent: signed,
+            });
             ctx.place(intent);
         }
         self.complained.append(&mut unreachable);
@@ -253,21 +301,48 @@ impl Strategy for TargetBookFollower {
 /// The planner's view of one symbol, answered from the engine's context.
 struct CtxFacts<'a> {
     ctx: &'a dyn StrategyCtx,
+    sent_ahead: &'a [SentAhead],
+}
+
+impl CtxFacts<'_> {
+    /// Signed quantity sent for this symbol that the reading has not shown
+    /// yet. Positive is long.
+    fn ahead(&self, id: SymbolId) -> f64 {
+        self.sent_ahead
+            .iter()
+            .filter(|record| record.symbol == id)
+            .map(|record| record.sent)
+            .sum()
+    }
 }
 
 impl SymbolFacts for CtxFacts<'_> {
     fn held(&self, symbol: &str) -> Option<Held> {
-        let id = self.ctx.symbol_id(symbol)?;
-        let position = self.ctx.position(id)?;
+        let Some(id) = self.ctx.symbol_id(symbol) else {
+            return None;
+        };
+        let position = self.ctx.position(id);
+        let entry_px = position.as_ref().map(|p| p.entry_px).unwrap_or(0.0);
+        let ahead = self.ahead(id);
+        // What the reading shows, plus what was sent and has not appeared in
+        // it yet. Without the second part the window between a fill and the
+        // next reading looks flat, and the plug buys the same target twice.
+        let signed = position
+            .map(|p| if p.side == Side::Buy { p.qty } else { -p.qty })
+            .unwrap_or(0.0)
+            + ahead;
+        if signed.abs() <= f64::EPSILON {
+            return None;
+        }
         // Value it at the market when there is a market, and at what it was
         // opened at when there is not. An exit needs only a side and a size,
         // so a symbol whose feed has gone quiet can still be closed.
-        let px = market_px(self.ctx, id).unwrap_or(position.entry_px);
+        let px = market_px(self.ctx, id).unwrap_or(entry_px);
         Some(Held {
-            qty: position.qty,
-            side: position.side,
+            qty: signed.abs(),
+            side: if signed > 0.0 { Side::Buy } else { Side::Sell },
             px,
-            entry_px: position.entry_px,
+            entry_px: if entry_px > 0.0 { entry_px } else { px },
         })
     }
 

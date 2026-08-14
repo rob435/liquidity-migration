@@ -189,19 +189,21 @@ fn a_second_identical_book_does_not_resend_an_order_that_is_already_resting() {
 }
 
 #[test]
-fn every_quote_would_resend_without_the_resting_check() {
-    // The same book, a fill that has not arrived, and no working order to
-    // find: this is the shape the resting check exists to stop, and it is
-    // worth pinning so the check cannot be quietly dropped.
+fn what_was_sent_is_remembered_until_the_reading_shows_it() {
+    // The dangerous shape: the order has left the resting set (a filled one
+    // is ended the moment the fill lands) and the account reading has not
+    // caught up, so both places a plug can look say flat. Without a memory
+    // of what it sent, it buys the same target a second time.
     let mut h = bench(&["KAITOUSDT"], 10.0);
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));
-    assert_eq!(h.drain().len(), 1);
+    assert_eq!(h.drain().len(), 1, "the entry goes out once");
     h.quote("KAITOUSDT", 9.5, 10.5);
-    assert_eq!(
-        h.drain().len(),
-        1,
-        "with nothing resting the plug does try again, which is why the check matters"
+    assert!(
+        h.drain().is_empty(),
+        "nothing resting and a stale reading must not become a second entry"
     );
+    h.quote("KAITOUSDT", 9.4, 10.6);
+    assert!(h.drain().is_empty(), "and it does not drift back on later quotes");
 }
 
 #[test]

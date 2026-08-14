@@ -36,11 +36,15 @@ edit STATE.md to match.
   `account_view_max_age_ms / 2` — 2.5 s at the shipped 5000. For that window a
   live run sees **neither a resting order nor a position**, and the follower
   would enter a second time; only the envelope and partition bound it. The
-  fault is recorded rather than patched at speed: the two candidate fixes
-  (refresh the reading on the fill path, at the cost of a venue round trip
-  there, or have the follower count its own fills until the reading catches
-  up) are a design decision, and the engine trades nothing today. It is on the
-  list that gates retiring the Python execution path.
+  **Fixed the same night**, by the second of the two candidates: the plug now
+  remembers what it sent against the reading it was decided from, and folds
+  that into the position the planner sees. The record is dropped when the
+  reading moves off the value it was sent against — no timer and no guess —
+  and the fill path pays no venue round trip. Proven by reverting it: the test
+  fails with "nothing resting and a stale reading must not become a second
+  entry". The test that shipped alongside the fault had pinned the wrong
+  behaviour ("with nothing resting the plug does try again"), and now pins the
+  right one.
 
 - **2026-08-14 ~02:00 UTC — The engine learns to cancel and amend, venues
   learn to say what they can do, and carry learns to hand over its book.**
