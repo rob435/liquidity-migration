@@ -47,34 +47,19 @@ edit STATE.md to match.
   argument block went together, which is what keeps a host env file from
   passing a flag the owner no longer accepts. `scripts/dev.sh check` green:
   3200 → 2966 tests, the whole 234-test drop being tests of deleted code.
-
-- **2026-08-14 ~02:45 UTC — The retired CONTINUOUS sleeve is gone: 14,631
-  lines across 25 files.** Not deployed; the fleet is untouched and no unit
-  ran this code. The sleeve was retired 2026-07-29 and its units left the
-  deploy set 2026-08-03, but the code stayed in the tree until now: the
-  producer and its daemon, the cycle-status reader, the identity and
-  component-source helpers, the five backtest modules (`continuous_events`,
-  `continuous_btc_risk`, `continuous_profile`, `continuous_rebalance`,
-  `continuous_regime`), two continuous-only research scripts, and the
-  thirteen test files that covered them. The `continuous-event-demo-cycle`
-  CLI subcommand went with it.
-  **What did not move, on purpose**: `configs/operational.demo.json` and
-  `configs/operational.mainnet.json` are byte-identical — the retired
-  sleeve's token envelope entry is capital configuration installed on the
-  host, and a cleanup does not get to change a risk number. The account
-  owner's behaviour is unchanged apart from no longer reading a status file
-  for a sleeve that does not run. Constants live code genuinely needed (the
-  BTC-risk journal metadata key) moved to a live home rather than dying with
-  their old module.
-  **One honest consequence**: an open item in the research queue named one of
-  the deleted scripts. Rather than quietly break it, the item now says it is
-  blocked by this deletion, that git history holds the tooling, and that
-  retiring the item is an owner decision — a cleanup does not close research
-  questions. `docs/research/research_findings.md` had two markdown links to
-  deleted modules; they are now plain names with the same pointer. No number,
-  conclusion or negative result was touched.
-  Python 2,966 tests and the engine's Rust suites green; the live modules
-  (`account_service_runner`, `operational_profile`, `carry_demo`) import.
+  **Three honest consequences.** An open item in the research queue named one
+  of the deleted scripts; rather than quietly break it, the item now says it
+  is blocked by this deletion, that git history holds the tooling, and that
+  retiring a research question is an owner decision, not a cleanup's.
+  `docs/research/research_findings.md` had two markdown links to deleted
+  modules — now plain names with the same pointer, no claim touched.
+  And one behaviour did change: the residual-momentum refresh in
+  `research_refresh.py` was gated on `"continuous" in sleeves` and is now
+  gated on `--skip-features` alone, so under the shipped default it runs as
+  before, but `--sleeves long` now runs it where it did not.
+  **Coverage genuinely lost, not papered over**: `_build_path_labels` and
+  `_bars_by_symbol` in the candidate tape have no test now. Replacing them
+  needs a real fixture, and a silently-empty one would be worse than none.
 
 - **2026-08-14 ~02:20 UTC — The engine becomes plug-and-play on both axes:
   a venue chosen by name, and a market maker beside the book follower.** Not
