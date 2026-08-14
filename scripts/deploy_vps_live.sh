@@ -1212,8 +1212,23 @@ verify_topology() {
     # unit file on every host, so the fragment alone would demand a running
     # engine on a box that has never built one. Where the engine really is
     # installed it is verified like anything else.
+    # Reported, never a mismatch. Every other unit here carries orders, so a
+    # dead one is a reason to stop and fix. The engine carries none — it trades
+    # a demo account of its own — and a rollout that treats its silence as a
+    # failure reaches the cleanup that stops the whole funded fleet. A bad
+    # engine.toml, a held account lock, or a credential that has expired would
+    # then take the funded account down with it, which is the opposite of what
+    # an experiment on a practice account is allowed to do. The row still
+    # prints, so an operator reading the table sees it is not running.
     if engine_installed; then
-        verify_unit on "$ENGINE_UNIT" "engine is not active and enabled"
+        local engine_active engine_enabled
+        engine_active="$(systemctl is-active "$ENGINE_UNIT" 2>/dev/null || true)"
+        engine_enabled="$(systemctl is-enabled "$ENGINE_UNIT" 2>/dev/null || true)"
+        VERIFY_UNIT_ROWS+=("$ENGINE_UNIT|on(reported)|${engine_active:-unknown}|${engine_enabled:-unknown}")
+        if ! unit_on "$ENGINE_UNIT"; then
+            printf 'engine-not-running unit=%s active=%s enabled=%s (reported, not a deploy failure)\n' \
+                "$ENGINE_UNIT" "${engine_active:-unknown}" "${engine_enabled:-unknown}" >&2
+        fi
     fi
     for oneshot in \
         liquidity-migration-demo-liveness.service; do

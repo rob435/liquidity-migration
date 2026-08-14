@@ -2124,10 +2124,19 @@ def test_verify_asks_for_the_engine_only_where_the_engine_is_installed(
         capture_output=True,
         text=True,
     )
+    # Reported, never a mismatch. Every other unit in this table carries
+    # orders; the engine carries none — it trades a demo account of its own.
+    # A rollout that read its silence as a failure would reach the cleanup
+    # that stops the whole funded fleet, so a bad engine.toml or an expired
+    # demo credential would take the funded account down with it.
     combined = stopped.stdout + stopped.stderr
-    assert stopped.returncode != 0, combined
-    assert "verify-mismatch engine is not active and enabled" in combined
-    assert "found 1 mismatch(es)" in combined
+    assert stopped.returncode == 0, combined
+    assert "engine-not-running" in combined
+    assert "not a deploy failure" in combined
+    assert "verify-mismatch" not in combined
+    assert "verify-ok" in combined
+    # The operator still sees it in the table rather than having to know to look.
+    assert f"{ENGINE_UNIT}|on(reported)|inactive" in combined
 
     running = f"{_VERIFY_GREEN} {ENGINE_UNIT}"
     green = subprocess.run(
@@ -2142,7 +2151,7 @@ def test_verify_asks_for_the_engine_only_where_the_engine_is_installed(
     )
     combined = green.stdout + green.stderr
     assert green.returncode == 0, combined
-    assert f"{ENGINE_UNIT}|on|active|enabled" in combined
+    assert f"{ENGINE_UNIT}|on(reported)|active|enabled" in combined
     assert "verify-ok" in combined
 
     # A built binary with no environment file is a host that never asked for
