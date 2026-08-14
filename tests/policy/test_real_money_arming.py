@@ -919,3 +919,57 @@ def test_default_telegram_fails_closed_when_the_source_lacks_the_pair(
     )
     assert rc == 2
     assert credential.read_bytes() == before
+
+
+# --------------------------------------------------------------------------
+# The Rust engine reads the same file and gets the same numbers
+# --------------------------------------------------------------------------
+
+
+def test_the_engine_and_the_fleet_read_the_same_caps_from_the_same_file() -> None:
+    """The twin of engine/engine-risk/tests/operational_profile.rs.
+
+    Both halves now load ``configs/operational.mainnet.json`` directly, so the
+    funded account is governed by one document rather than by a document and a
+    copy of it. These are the exact numbers the Rust test asserts. If either
+    loader ever reads the file differently, one of the two suites goes red and
+    names the field.
+
+    Repeating decimals are written out in full on purpose: the two sleeve
+    margin shares sum to the account margin cap to the last place, and that
+    exactness is what makes the partition proof bind instead of leaving slack.
+    """
+
+    profile = load_operational_profile_bytes(
+        (REPO / "configs" / "operational.mainnet.json").read_bytes()
+    )
+    account = profile.account_risk
+
+    assert profile.capital_reference_usdt == 100.0
+    assert account.max_account_gross_notional_usdt == 175.0
+    assert account.max_component_gross_notional_usdt == 175.0
+    assert account.max_symbol_notional_usdt == 50.0
+    assert account.max_initial_margin_usdt == 100.0
+    assert account.max_leverage == 2.0
+    assert account.quantity_tolerance == 1e-12
+    assert account.max_daily_loss_usdt == 10.0
+
+    # The engine holds the account gross cap as a multiple of the reference,
+    # because its reference follows the wallet. Same number, stated the way
+    # each side needs it.
+    assert account.max_account_gross_notional_usdt / profile.capital_reference_usdt == 1.75
+
+    reference = profile.capital_reference
+    assert reference.tracks_equity is True
+    assert reference.equity_fraction == 1.0
+    assert reference.floor_usdt == 100.0
+    assert reference.expand_dead_band_fraction == 0.05
+
+    shares = {limit.sleeve: limit for limit in account.sleeve_limits}
+    assert shares["carry"].max_gross_notional_usdt == 100.0
+    assert shares["carry"].max_initial_margin_usdt == 57.14285714285714
+    assert shares["long"].max_gross_notional_usdt == 75.0
+    assert shares["long"].max_initial_margin_usdt == 42.857142857142854
+
+    assert sum(s.max_gross_notional_usdt for s in shares.values()) == 175.0
+    assert sum(s.max_initial_margin_usdt for s in shares.values()) == 100.0
