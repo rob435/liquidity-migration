@@ -13,47 +13,55 @@ match; never append history to this file.
 
 ### The fleet
 
-- **The repository no longer contains a Python order path; the host still runs
-  one.** Deleted 2026-08-14 on the owner's instruction (CHANGELOG 2026-08-14):
-  the account owner, its two units, its launcher scripts and its risk layer,
-  about 25,000 lines. The engine is the account owner in the repository now.
-  **Nothing is deployed** — the host runs its own installed checkout at
-  `2bd3a00` and keeps trading exactly as before until somebody deploys. The
-  next deploy is what makes this real, and it is the one that stops the Python
-  owner.
+- **The engine owns the demo account, and both sleeves feed it.** Deployed
+  2026-08-14 20:34 UTC from main (`staged-ok commit=4c914435
+  profile=operational`, `verify-ok … mainnet=armed`). The Python order path is
+  gone from the repository and from the host: the account owner, its two
+  units, its launcher scripts and its risk layer, about 25,000 lines.
 
-  **DO NOT DEPLOY MAIN YET. It would stop both sleeves trading.** Verified on
-  the host 2026-08-14, not reasoned from the tree:
+  The chain runs end to end and was watched doing it:
 
-  The producers and the engine speak different protocols, and nothing bridges
-  them for LONG. Producers publish **per-request files into the account intent
-  inbox** (`/opt/liquidity-migration/data/bybit-account-intents/arrival/`),
-  which the deleted Python owner drained. The engine reads **one target-book
-  JSON file** (`{version, source, decision_ts_ms, valid_until_ms, targets:[…]}`).
-  There is no such file anywhere on the box, and `find` proves it.
+  - the engine reads the venue and writes `account_equity_usdt` into its
+    heartbeat;
+  - both producers size from that equity (`carry … equity=$1,412.58 err=none`,
+    `long … equity=$1,412.57 owner=healthy`);
+  - both write an absolute target book —
+    `/var/lib/liquidity-migration/targets/{carry,long}-demo.json`;
+  - the engine reads each book, routes it to its own sleeve, and takes on
+    symbols the books name that no config listed (`following a symbol a book
+    named symbol=HOMEUSDT`).
 
-  - **carry** *can* write that book — `engine_targets.render_target_book`, via
-    `carry_demo._write_engine_target_book` — but only when
-    `CARRY_ENGINE_TARGET_BOOK_PATH` names a file, and it is set nowhere on the
-    host. Off.
-  - **LONG has no book writer at all.** Nothing in
-    `long_native_event_demo.py` touches `engine_targets`. Deploying removes
-    LONG's only execution path with nothing to replace it.
+  It has sent orders on this path: in shadow the log records `wants strategy 0
+  Sell 14110 of symbol 4 [book-exit]` and `allowed … for 14110`, against a
+  zero target carry published while its equity read was blocked. Live, carry
+  now wants $141.09 of HOMEUSDT against about $137 held, and the engine
+  correctly does nothing — $4.09 is inside the 5% dead band.
 
-  So the missing piece is not the engine and not equity — both are done. It is
-  that **the producers must publish target books**: wire LONG the way carry
-  already is, and turn carry's on. Until then the deletion is correct in the
-  repository and undeployable on the host.
+  **The engine is LIVE on the demo account** (`ENGINE_LIVE=true`, and it holds
+  the single-writer lease `bybit-demo-user-555899665.lock`). It is *shadow* in
+  `engine.toml`; the env flag is what turns that off, and only ever off.
 
-  Separately, and still true: the producers size from account equity, which
-  they now read from the engine's heartbeat
-  ([`engine_account_health.py`](liquidity_migration/account/engine_account_health.py)).
-  The engine must also be installed, enabled and beating.
+  What is not done, plainly:
 
-  Two things went and did not come back: `ops.sh flatten` and the Telegram
-  close button (both worked through the deleted owner's intent inbox), and the
-  hourly Telegram digest. Closing a book is a manual job at the venue.
-- **The host runs `2bd3a00`**, deployed 2026-08-13 23:46 UTC by `staged
+  - **The funded engine is not running.** `deploy` stops the retired Python
+    mainnet owner and skips the engine because
+    `/etc/liquidity-migration/engine-mainnet.env` does not exist. So the
+    funded account (holding $0.04) has mainnet producers publishing and
+    nothing executing. Writing that file is an owner act, not a deploy act.
+  - **`operational.demo.json` carries no `sleeve_limits`**, so there is no
+    per-sleeve capital partition on demo: both sleeves draw on the
+    account-wide caps and either can spend the lot. The engine logs
+    `sleeves=0` at boot.
+  - **LONG cannot see a stop that fires.** It keeps asking for the name until
+    its three-day time stop drops it. The engine will not buy it back — the
+    follower latches a name that goes flat under a book that still wants it —
+    so the position stays closed and the slot stays occupied. Closing that gap
+    needs the engine to publish what it holds.
+  - Two things went and did not come back: `ops.sh flatten` and the Telegram
+    close button (both worked through the deleted owner's intent inbox), and
+    the hourly Telegram digest. Closing a book is a manual job at the venue.
+
+- **Before this, the host ran `2bd3a00`**, deployed 2026-08-13 23:46 UTC by `staged
   --stop-first` from main (`staged-ok
   commit=2bd3a0090deb2dbf34f04e34df14f320f190744f profile=operational`,
   `verify-ok … mainnet=armed`). All nine units active and enabled, zero

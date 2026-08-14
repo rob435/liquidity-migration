@@ -2756,6 +2756,68 @@ edit STATE.md to match.
   arming remains the owner's separate act. Change point recorded in
   `docs/research/strategy_program.md` §2026-08-03; mechanism in `docs/trading_logic.md`.
 
+
+## 2026-08-14 — the engine owns the demo account, live
+
+Deployed `4c914435` by `staged --profile operational --stop-first`; the engine
+is live on the fleet's demo account (555899665) and holds its single-writer
+lease. The Python order path is gone from the host as well as the repository.
+
+Four faults were found and fixed getting there, three of which only a live run
+could have surfaced.
+
+**A stop that fired was undone by the next quote.** The book said hold the
+name, the venue stop closed it, the book still said hold it, so the follower
+bought it straight back at full size seconds later. This applied to carry too,
+the sleeve that was called ready. A name that goes flat under a book that
+still wants it is now latched and left alone until the producer stops asking;
+the latch deliberately survives a new book, because LONG rewrites the same
+decision every sixty seconds.
+
+**Each follower read the other sleeve's position as its own.** The venue holds
+one position per symbol and its reading carries no strategy. A carry follower
+whose book did not name a symbol LONG held would send a full-size reduce-only
+and close it. `attribution.rs` now sums filled quantity per strategy and
+symbol from the log — the order says who sent it, the fill says which order —
+and rebuilds it at boot. A name another strategy holds is skipped wholesale,
+not shared pro-rata, because the venue's stop belongs to the position and two
+sleeves on one name would have one stop between them.
+
+**The account journal was frozen, not empty.** Every producer learned what it
+held by reading the journal the deleted owner wrote. The file is still on
+disk, so a producer reading it believes it holds whatever the owner last
+wrote, for ever. `long_book_state.py` is LONG's own memory of what it asked
+for, shaped to read back as the table the journal produced so the entry
+screen, exit planner and cooldown are unchanged.
+
+**The heartbeat's account stamp was on the engine's monotonic clock.** Found
+in the first cycle after the producers came up: a healthy engine six seconds
+old published `account_observed_ns: 5530327701`, the producers compared it
+against the wall clock, and both sleeves blocked every entry as fifty-six
+thousand years stale. The age crosses now, rendered as a wall stamp beside
+`wall_ts_ms`. Nothing caught it because both halves were tested against
+themselves; both now have a test that says which clock it is.
+
+Verified live: producers size from the engine's equity (`equity=$1,412.58
+err=none`, `owner=healthy`), both write books, the engine routes each to its
+own sleeve and takes on symbols the books name that no config listed. In
+shadow the log records `wants strategy 0 Sell 14110 [book-exit]` and `allowed
+… for 14110`. Live, carry wants $141.09 of HOMEUSDT against ~$137 held and the
+engine does nothing, correctly — $4.09 is inside the 5% dead band.
+
+Also on the way: `start_mainnet_fleet` still ran `systemctl enable` on the
+deleted Python mainnet owner, which would have failed the strict activate
+phase on any host with real money armed. It names the mainnet engine now,
+guarded, and stops the retired unit. The demo engine unit moved from its own
+second demo account to the fleet's, because nothing else writes there any
+more. A schema-4 candidate-universe artifact on the host was migrated to
+schema 5 (510 symbols in, 510 out, unchanged).
+
+Not done: the funded engine is not running — `engine-mainnet.env` does not
+exist and writing it is an owner act. `operational.demo.json` has no
+`sleeve_limits`, so demo has no per-sleeve partition. LONG still cannot see a
+stop that fires.
+
 ## Earlier entries
 
 Entries dated before 2026-08-01 live in
