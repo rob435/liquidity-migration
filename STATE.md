@@ -43,23 +43,32 @@ match; never append history to this file.
 
   What is not done, plainly:
 
-  - **The funded engine is not running.** `deploy` stops the retired Python
-    mainnet owner and skips the engine because
-    `/etc/liquidity-migration/engine-mainnet.env` does not exist. So the
-    funded account (holding $0.04) has mainnet producers publishing and
-    nothing executing. Writing that file is an owner act, not a deploy act.
+  - **The funded engine runs in shadow and has never sent an order.** Its
+    config and env file are on the host, both mainnet producers write books,
+    and it has been watched reading the funded account (552445993, equity
+    $0.0397) under the mainnet profile — reference $100, gross cap $175, a real
+    per-sleeve partition. It sends nothing: `shadow = true` in
+    `engine-mainnet.toml` and `ENGINE_LIVE=false` in `engine-mainnet.env`, two
+    switches, both the owner's, and it takes no account lease while shadow.
+
+    It is left *running* rather than stopped on purpose. Stopped would not
+    stick — the deploy starts it wherever its env file and the binary both
+    exist — so a stopped unit would be a false comfort. Shadow is the state
+    that cannot trade. To keep it off for good, delete
+    `/etc/liquidity-migration/engine-mainnet.env`.
+
+  - **The hourly Telegram digest did not come back.** Pause and resume did;
+    `ops.sh flatten` did, on the engine's own path.
+
   - **`operational.demo.json` carries no `sleeve_limits`**, so there is no
     per-sleeve capital partition on demo: both sleeves draw on the
     account-wide caps and either can spend the lot. The engine logs
-    `sleeves=0` at boot.
-  - **LONG cannot see a stop that fires.** It keeps asking for the name until
-    its three-day time stop drops it. The engine will not buy it back — the
-    follower latches a name that goes flat under a book that still wants it —
-    so the position stays closed and the slot stays occupied. Closing that gap
-    needs the engine to publish what it holds.
-  - Two things went and did not come back: `ops.sh flatten` and the Telegram
-    close button (both worked through the deleted owner's intent inbox), and
-    the hourly Telegram digest. Closing a book is a manual job at the venue.
+    `sleeves=0` at boot, against `sleeves=2` on mainnet. It is left alone
+    deliberately: demo's `capital_reference_usdt` is 250,000 against an account
+    holding about $1,400, so every cap in that profile is already far above
+    anything the account can reach and a partition drawn from it would never
+    bind. Making it mean something is a retune of the reference, which is a
+    dial the owner sets.
 
 - **Before this, the host ran `2bd3a00`**, deployed 2026-08-13 23:46 UTC by `staged
   --stop-first` from main (`staged-ok

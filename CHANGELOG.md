@@ -2757,6 +2757,53 @@ edit STATE.md to match.
   `docs/research/strategy_program.md` §2026-08-03; mechanism in `docs/trading_logic.md`.
 
 
+
+## 2026-08-14 — the four gaps closed, and two more faults out of them
+
+Deployed `a4bb8b88`. Everything STATE.md listed as not done this morning is
+done except the two that are the owner's to decide, and both of those are
+written down with their reason rather than left implied.
+
+**The engine says what it holds.** Its heartbeat carries `positions`, by name,
+from the same venue reading the equity comes from. LONG uses it in three
+states: confirmed held, mark it seen; confirmed before and not now, something
+closed it that this producer never asked for, so it leaves the book and starts
+its cooldown; never confirmed, leave alone — that is an entry still on its way.
+A fourth sits above them: the engine saying *nothing* is not "holds nothing",
+so `positions` is always present and sometimes empty, never absent. It
+publishes the venue's per-symbol reading rather than per-strategy attribution
+on purpose — attribution starts empty on a fresh log, so a restart would report
+every position closed and every producer would drop its whole book at once.
+
+**Flatten is back**, and restoring it found a fault. An empty book did not
+close everything: with no targets the follower's candidate names collapsed to
+the seed list from `engine.toml`, two symbols a sleeve, and the seed is
+explicitly not a ceiling — the normal steady state is positions in names the
+config never mentioned. Every one of those was left standing by the single
+instruction whose whole meaning is "hold nothing". The plug now also looks at
+what it held last time round. Flatten itself writes explicit zero rows naming
+everything the engine reports, stops the producers first, and clears LONG's
+record so a restart cannot republish what it just closed.
+
+**The funded engine can run, and it was calling itself demo.** Setting it up
+and watching one shadow run found `account_identity` hardcoding the demo realm
+— left from when this crate reached the practice account and nothing else. The
+funded engine published `realm: "demo"` beside the funded account's own user
+id. The mainnet producers compare that against their own environment and would
+have blocked every entry; the single-writer lease is named by it, so a live
+funded engine would have taken a demo-realm lease. Fixed and confirmed live:
+the funded engine now reports `realm: "mainnet"` on account 552445993.
+
+It is left in shadow and has never sent an order. Two switches stand between
+it and live, both the owner's. It is left running rather than stopped because
+stopped does not stick — the deploy starts it wherever its env file and binary
+both exist — so shadow, which cannot trade, is the honest resting state.
+
+Left alone, with the reason: demo has no per-sleeve partition, and drawing one
+from a profile whose capital reference is 250,000 against a $1,400 account
+would produce a control that never binds. Retuning that reference is a dial the
+owner sets.
+
 ## 2026-08-14 — the engine owns the demo account, live
 
 Deployed `4c914435` by `staged --profile operational --stop-first`; the engine
