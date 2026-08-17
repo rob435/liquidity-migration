@@ -408,6 +408,14 @@ re-diagnose a page that has already been explained.
 | `account execution live L2 is N min stale` (~1.5×/day, 3–8 min) | Root-caused 2026-07-27: venue-side quiet subscription on the owner's single-topic BTCUSDT book feed — the socket stays up and answers pings, Bybit stops pushing frames. Not the host, not scheduled, not load. A single stall self-heals in ~2.5 min via the 120 s internal watchdog and never alerts; the alerted episodes are rebuilds that came up quiet again, stretched by the old per-attempt clock reset (fixed in `d11db79`+`7af59f3`, deployed 2026-07-27 ~14:03 UTC). Fails closed; zero trades lost. If quiet-stalls persist, next lever is a second heartbeat topic or proactive resubscribe. |
 | `unadopted external execution: external protection fill is not position-reducing` | Seen once (2026-07-27 10:47:20): a manual ~10 USDT spot BTCUSDT buy in the demo account UI. The kernel manages linear perps only and was flat, so it correctly refused adoption, surfaced the error once, and returned green; no reconciliation drift. Since 2026-08-07 an execution with nothing to reduce is logged as foreign and ignored, so the shape no longer latches. |
 | `ignoring foreign … execution … with no owned position to reduce` | Normal since 2026-08-07: the owner trading by hand on the same venue account. Recorded, never traded. Only a `venue=…:reconstructed=…:unbacked=…` line is a real fault. |
+| `engine_heartbeat_stale: … dated 1s in the future`, firing and clearing all day | Fixed 2026-08-17 (`e547041c`). Not a clock fault: the watchdog sampled its clock at the top of a ~2 s run and compared it to a file the engine rewrites every 5 s. Reads the file then the clock now. If this shape returns, a clock really is wrong. |
+| `account_health_stale` / `account_digest_stale` on demo, never clearing | Fixed 2026-08-17. Both read files whose only writer, the Python account owner, was deleted 2026-08-14 19:58. Freshness now comes from the engine's heartbeat; the digest check is unprovisioned. A check that cannot clear is broken, not informative. |
+
+**Alert-channel health, 2026-08-17.** For three days the fleet sent 273 alerts a
+day and none described a live fault. That is recorded here because the failure
+mode is not noise but blindness: the one real signal in the stream was
+indistinguishable from 250 false ones. If the chat is loud and the fleet is
+green, treat the checks as the suspect.
 
 ## Open operational defects
 
@@ -422,6 +430,9 @@ re-diagnose a page that has already been explained.
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7.5 states it rather than treating it as settled |
+| Nothing watches the venue and our records disagreeing | Since 2026-08-14. `account_health_unhealthy` had one writer, the deleted Python owner; the engine reconciles but publishes no mismatch. Freshness was retargeted at the engine's heartbeat on 08-17, agreement was not. `gather_account_health_alerts()` is kept uncalled as the specification. Needs the engine to publish a mismatch — a design question, owner to decide ([`docs/notifications.md`](docs/notifications.md) §What stopped being watched) |
+| No positive liveness signal reaches the chat | The hourly digest was retired with the Python owner and the dead-man's switch URL is unprovisioned, so silence means either a healthy fleet or a dead box. The engine's heartbeat is checked on-box only, and an on-box watchdog cannot report that the box died |
+| The demo instrument-rule receipt is expired | Last probed 2026-08-09; the 168-hour bound passed on 08-16. Nothing in the runtime path reads it, so nothing refuses to start, but the research and candidate-universe tooling reads stale evidence. Refresh with a deploy carrying `--refresh-demo-rules` (live PostOnly orders, ≤200 USDT per symbol) |
 
 Audit reports are not kept as standing files. Their findings live in the topic
 docs — `docs/research/research_findings.md`, `docs/architecture.md`,

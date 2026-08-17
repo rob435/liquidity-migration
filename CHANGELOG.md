@@ -16,6 +16,60 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-17 — 273 Telegram alerts a day, none of them a live fault.**
+  Reported by the owner as "a lot of critical errors". Four causes, and the
+  fleet was healthy throughout: `verify-ok`, every unit active, producers
+  `err=none`, engine trading demo with a fresh account view.
+
+  **180/day — the watchdog was timing the engine against its own start.**
+  `engine_heartbeat_stale` fired and cleared ninety times a day saying the
+  heartbeat was "dated 1s in the future". Nothing was wrong with any clock: the
+  box is NTP-synced and the engine stamps a plain `SystemTime::now()`. The
+  watchdog read its clock once at the top of a run, then spent a second or two
+  on datasets and `systemctl` before opening a file the engine rewrites every
+  five seconds, so anything written in between came out negative. The identical
+  trap had already been found and tested for the carry check; the engine check,
+  added later, was handed `main`'s opening reading. It now reads the file and
+  then asks the clock, in that order. Fixed in `e547041c`, deployed the same
+  evening.
+
+  **70/day — two checks reading a component deleted on 2026-08-14.**
+  `/opt/liquidity-migration/data/bybit-account-execution/` stopped being written
+  at 19:58 that day, when the Python order path went. `account_health_stale` and
+  `account_digest_stale` went on ageing the frozen files and reporting a dead
+  component's last words as illness, 70 times a day, never able to clear. The
+  call site carried a comment claiming the engine kept feeding the journal
+  "through the same kernel" — it does not; no engine crate names the journal,
+  verified by grep over every crate. Account freshness is now taken from the
+  engine's own heartbeat (`engine_account_view_stale`), which has a live writer,
+  and the digest check defaults to unprovisioned.
+
+  **23/day — a warning whose consequence no longer existed.** `demo_rules_age`
+  said an expired receipt meant "the next authorized runtime start will fail
+  closed". True while the Python owner loaded the receipt at startup; false
+  since. `run_authorized_runtime.sh` has no rule gate, neither producer script
+  mentions one, and the engine parses instrument rules straight off the venue.
+  Now a WARNING naming the deploy flag that refreshes it. Mainnet's receipt does
+  gate the funded owner and is untouched.
+
+  The lasting finding is the gap this hid: demo has had **no working
+  account-health alerting since 2026-08-14**, and "the exchange and our records
+  disagree" (`account_health_unhealthy`) still has no writer — the engine
+  reconciles but publishes no mismatch. `gather_account_health_alerts()` is kept
+  uncalled as the specification for whatever writes that evidence next. A
+  channel that is entirely false positives is worse than a quiet one, because
+  the real alert lands in a habit of ignoring it.
+
+  One self-inflicted bug caught in review before it shipped: the first cut of
+  the retarget passed `--max-account-health-age-min` (default 1 minute) straight
+  into the new check, where the old code had applied `max(dial, 25 min)`. That
+  silently tightened the bound 25× against a reading that refreshes every few
+  seconds, and would have reintroduced exactly the flapping being removed. The
+  floor now lives inside the check where no caller can bypass it.
+
+  Deployed `e547041c` with `--stop-first`, which is required while real money is
+  armed — the owner's call, asked and given. Both engines rebuilt.
+
 - **2026-08-14 — A deploy left the funded engine on the previous binary.**
   Found by deploying the entry below and reading both heartbeats. The two
   engines share one binary; the activate phase starts the funded one and the

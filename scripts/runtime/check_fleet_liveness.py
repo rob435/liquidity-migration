@@ -352,16 +352,36 @@ def evaluate_demo_rule_age(
             headline="The trading-rules receipt is future-dated — invalid.",
         )
     if remaining_hours <= 0.0:
-        remedy = (
-            "the next authorized runtime start will fail closed and require a full probe."
-            if realm == "demo"
-            else "the funded owner will refuse to start; any deploy renews it (read-only freeze)."
-        )
+        # Demo's expiry was a start refusal while the Python account owner
+        # loaded the receipt as it came up. That owner was deleted on
+        # 2026-08-14: run_authorized_runtime.sh has no rule gate, neither
+        # producer script mentions one, and the engine reads instrument rules
+        # off the venue. So nothing fails closed, and calling it CRITICAL taught
+        # the operator that CRITICAL can be ignored. What is genuinely stale is
+        # the bound receipt the research and candidate-universe tooling reads.
+        #
+        # Mainnet keeps both the severity and the claim: its receipt does gate
+        # the funded owner, and every deploy renews it.
+        demo = realm == "demo"
         return Alert(
             key=key,
-            severity=CRITICAL,
-            message=f"{label} evidence expired {abs(remaining_hours):.1f}h ago; " + remedy,
-            headline="The trading-rules receipt has expired — the next restart will refuse to start.",
+            severity=WARNING if demo else CRITICAL,
+            message=(
+                f"{label} evidence expired {abs(remaining_hours):.1f}h ago; "
+                + (
+                    "nothing in the runtime path reads it, so no unit will refuse to start — what is "
+                    "stale is the bound receipt the research and candidate-universe tooling reads. "
+                    "Refresh it on a deploy carrying --refresh-demo-rules (live PostOnly orders, "
+                    "<=200 USDT per symbol)."
+                    if demo
+                    else "the funded owner will refuse to start; any deploy renews it (read-only freeze)."
+                )
+            ),
+            headline=(
+                "The demo trading-rules receipt has expired — stale evidence, nothing refuses to start."
+                if demo
+                else "The trading-rules receipt has expired — the next restart will refuse to start."
+            ),
         )
     if remaining_hours <= DEMO_RULE_MAINTENANCE_WARNING_HOURS:
         remedy = (
@@ -522,6 +542,21 @@ ENGINE_MODE_LIVE = "live"
 ENGINE_MODE_SHADOW = "shadow"
 ENGINE_MODES = (ENGINE_MODE_LIVE, ENGINE_MODE_SHADOW)
 
+# How far behind its own beat the engine's reading of the account may fall.
+#
+# The engine refreshes that reading every few seconds — measured at 3.0s and
+# 5.4s on the two live engines — so this bound is a couple of hundred times the
+# working cadence. It is deliberately loose: the job is to catch a view that has
+# stopped arriving altogether, not to grade the venue's latency, and a tight
+# bound here would page on ordinary jitter. Tightening it is an operator dial,
+# not a thing to discover by being woken up.
+#
+# It carried the same number when the reading came from the Python account
+# owner's journal, where the justification was that journal's ten-minute
+# checkpoint. That owner is gone; the number is kept because it is safe for the
+# new reader too, not because the old reasoning still applies.
+VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 25.0
+
 
 @dataclass(frozen=True)
 class EngineHeartbeat:
@@ -536,6 +571,24 @@ class EngineHeartbeat:
     #: can be absent from an ordinary healthy heartbeat.
     account_user_id: str | None
     pid: int | None
+    #: When the venue reading this beat carries was taken, on the same clock as
+    #: ``wall_ts_ms``. Absent until the engine has taken one at all.
+    account_observed_wall_ts_ms: int | None = None
+
+    @property
+    def account_view_lag_minutes(self) -> float | None:
+        """How far behind the beat the account reading is, by the engine's own
+        arithmetic.
+
+        Both stamps are written by one process off one clock, so this number
+        owes nothing to the clock on the box reading it. That is the whole
+        point: the age of the *beat* has to be measured against our clock and
+        was the source of a long-running false alarm, while the lag *inside* the
+        beat cannot be.
+        """
+        if self.account_observed_wall_ts_ms is None:
+            return None
+        return (self.wall_ts_ms - self.account_observed_wall_ts_ms) / 60_000.0
 
     @property
     def shadow(self) -> bool:
@@ -619,6 +672,10 @@ def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
 
     account = payload.get("account_user_id")
     pid = payload.get("pid")
+    # Optional for the same reason the account id is: an engine that has not
+    # read the venue yet writes it as null. `bool` being a subclass of `int`
+    # would let `true` through as a timestamp, so it is excluded by hand.
+    observed = payload.get("account_observed_wall_ts_ms")
     return EngineHeartbeat(
         wall_ts_ms=int(payload["wall_ts_ms"]),
         mode=mode,
@@ -627,6 +684,7 @@ def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
         orders_sent=int(payload["orders_sent"]),
         account_user_id=account if isinstance(account, str) else None,
         pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+        account_observed_wall_ts_ms=(observed if isinstance(observed, int) and not isinstance(observed, bool) else None),
     )
 
 
@@ -635,6 +693,7 @@ def evaluate_engine_heartbeat(
     heartbeat: EngineHeartbeat,
     now_ms: int,
     max_age_seconds: float,
+    max_account_view_age_minutes: float = VENUE_SNAPSHOT_AGE_FLOOR_MINUTES,
 ) -> list[Alert]:
     """Report an engine that stopped writing, and one that stopped opening positions.
 
@@ -698,6 +757,46 @@ def evaluate_engine_heartbeat(
                 ),
             )
         )
+    lag_minutes = heartbeat.account_view_lag_minutes
+    # The floor lives here, not at the call site, so no caller can tighten the
+    # bound below it by accident. The operator dial it is fed from defaults to
+    # one minute — against a reading that refreshes every few seconds that
+    # sounds generous, but it is only twelve times the working cadence, and one
+    # slow venue reply would page. The journal check this replaced applied the
+    # same floor for the same reason.
+    bound_minutes = max(max_account_view_age_minutes, VENUE_SNAPSHOT_AGE_FLOOR_MINUTES)
+    # Absent is not a fault: a shadow run may never ask the venue anything, and
+    # a live one has not asked yet in its first moments. Paging on that would
+    # make every boot an alert. It must not read as fresh either, which is why
+    # nothing here fills in a default.
+    if lag_minutes is not None and (lag_minutes < 0.0 or lag_minutes > bound_minutes):
+        incoherent = lag_minutes < 0.0
+        alerts.append(
+            Alert(
+                key="engine_account_view_stale",
+                severity=CRITICAL,
+                message=(
+                    (
+                        f"engine's account reading is stamped {-lag_minutes:.1f} min after the beat "
+                        "carrying it; both stamps come off one clock in one process, so the freshness "
+                        "arithmetic is wrong rather than the account being old."
+                        if incoherent
+                        else f"engine's reading of the account is {lag_minutes:.1f} min old (allowed "
+                        f"0..{bound_minutes:g} min): the engine is alive and writing "
+                        "beats, but it has stopped hearing what the account holds, so its idea of the "
+                        "position is guesswork."
+                    )
+                    + f" Its last write said: {heartbeat.detail}."
+                ),
+                headline=(
+                    "The engine's account reading is dated after the beat carrying it — "
+                    "its freshness cannot be trusted."
+                    if incoherent
+                    else f"The engine has not heard what the account holds for {lag_minutes:.0f} min "
+                    f"({heartbeat.mode_note})."
+                ),
+            )
+        )
     return alerts
 
 
@@ -705,6 +804,7 @@ def gather_engine_heartbeat_alerts(
     *,
     heartbeat_path: Path,
     max_age_seconds: float,
+    max_account_view_age_minutes: float = VENUE_SNAPSHOT_AGE_FLOOR_MINUTES,
     now_ms: int | None = None,
 ) -> list[Alert]:
     """Read the engine's heartbeat file, or report that it could not be read.
@@ -736,6 +836,7 @@ def gather_engine_heartbeat_alerts(
         heartbeat=heartbeat,
         now_ms=observed_now_ms,
         max_age_seconds=max_age_seconds,
+        max_account_view_age_minutes=max_account_view_age_minutes,
     )
 
 
@@ -1374,12 +1475,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--account-notification-state",
-        default=(
-            str(Path(os.environ["ACCOUNT_EXECUTION_ROOT"]) / "account_notifications.json")
-            if os.environ.get("ACCOUNT_EXECUTION_ROOT")
-            else ""
+        # Empty by default because the hourly digest was retired with the Python
+        # account owner on 2026-08-14 and nothing has written this file since.
+        # Defaulting it from ACCOUNT_EXECUTION_ROOT, as it used to, pointed both
+        # fleets at a frozen file and paged 47 times a day about a notification
+        # channel that was not broken but abolished. The flag still works if a
+        # digest ever returns and is pointed at it explicitly.
+        default="",
+        help=(
+            "committed notification state to age-check; alerts when the digest stalls. Empty by "
+            "default: the digest is retired and nothing writes this file"
         ),
-        help="demo owner's committed notification state; alerts when the hourly digest stalls ('' to skip)",
     )
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")
     p.add_argument(
@@ -1465,17 +1571,20 @@ def main() -> int:
                 realm="mainnet" if mainnet else "demo",
             )
         )
-    if not mainnet:
-        # The owner-health file had exactly one writer, the Python account
-        # owner, and it is gone. What survives is the account journal's own
-        # reconciliation evidence, which the engine writes through the same
-        # kernel. The engine's own liveness is its heartbeat, checked above.
-        alerts.extend(
-            gather_account_health_alerts(
-                account_root=Path(args.account_root),
-                max_age_minutes=args.max_account_health_age_min,
-            )
-        )
+    # The account journal is not read here any more. When the Python order path
+    # was deleted on 2026-08-14 this call stayed, on the belief — written into
+    # the comment that used to sit here — that the engine kept feeding the
+    # journal through the same kernel. It does not: no engine crate names the
+    # journal, and the demo file has not moved since 19:58 that day. So the
+    # check spent three days reporting a deleted component's last words as
+    # illness, 23 times a day, and could never clear.
+    #
+    # What replaced it is the engine's own account reading, checked inside the
+    # heartbeat above, which has a live writer. What is genuinely not replaced
+    # is `account_health_unhealthy` — "the exchange and our records disagree".
+    # The engine reconciles but publishes no mismatch, so nothing watches that
+    # today. `gather_account_health_alerts` is kept, uncalled, because it is the
+    # specification for whatever writes that evidence next.
     if not mainnet and long_root is not None:
         alerts.extend(
             gather_long_alerts(
@@ -1526,6 +1635,10 @@ def main() -> int:
             gather_engine_heartbeat_alerts(
                 heartbeat_path=Path(args.engine_heartbeat_file),
                 max_age_seconds=args.max_engine_heartbeat_age_sec,
+                # The same operator dial that used to bound the journal's venue
+                # snapshot now bounds the engine's own account reading: one knob,
+                # pointed at the reader that actually has a writer.
+                max_account_view_age_minutes=args.max_account_health_age_min,
                 # No now_ms: the engine rewrites this file every few seconds, and
                 # by the time this run reaches it the clock sampled at the top of
                 # main() is a second or two behind. Handing that stale reading in

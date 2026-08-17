@@ -82,8 +82,51 @@ def test_demo_rule_age_warns_before_expiry_and_fails_closed_after() -> None:
         now_ns=verified + 169 * hour_ns,
     )
     assert expired is not None
-    assert expired.severity == M.CRITICAL
+    # Demo's expiry stopped being a start refusal when the Python order path was
+    # deleted: see the dedicated test below for what it says now.
+    assert expired.severity == M.WARNING
     assert "expired 1.0h ago" in expired.message
+
+    expired_mainnet = M.evaluate_demo_rule_age(
+        verified_ts_ns=verified,
+        now_ns=verified + 169 * hour_ns,
+        realm="mainnet",
+    )
+    assert expired_mainnet is not None
+    assert expired_mainnet.severity == M.CRITICAL
+
+
+def test_expired_demo_rules_no_longer_claim_the_next_start_fails_closed() -> None:
+    """Demo's expiry used to refuse the next authorized runtime start, because
+    the Python account owner loaded the receipt as it came up. That owner was
+    deleted on 2026-08-14. Nothing in the demo runtime path reads the receipt
+    now — run_authorized_runtime.sh has no rule gate, neither producer script
+    mentions one, and the engine parses instrument rules straight off the venue.
+
+    So the fleet spent three days being told every hour that its next restart
+    would refuse to start, which was not true and would not have been noticed if
+    it were, because it shared a channel with 250 other false alarms a day.
+
+    Mainnet is untouched: its receipt really does gate the funded owner, and
+    every deploy renews it.
+    """
+    hour_ns = 3_600_000_000_000
+    verified = 1_780_000_000 * 1_000_000_000
+    demo = M.evaluate_demo_rule_age(verified_ts_ns=verified, now_ns=verified + 200 * hour_ns)
+    assert demo is not None
+    assert demo.severity == M.WARNING
+    assert "fail closed" not in demo.message
+    assert "refuse to start" not in demo.headline
+    assert "--refresh-demo-rules" in demo.message
+
+    mainnet = M.evaluate_demo_rule_age(
+        verified_ts_ns=verified,
+        now_ns=verified + 200 * hour_ns,
+        realm="mainnet",
+    )
+    assert mainnet is not None
+    assert mainnet.severity == M.CRITICAL
+    assert "refuse to start" in mainnet.message
 
     future = M.evaluate_demo_rule_age(
         verified_ts_ns=verified,
@@ -1824,11 +1867,13 @@ def test_mainnet_venue_rule_age_alerts_use_their_own_key_and_remedy() -> None:
     assert expired.severity == M.CRITICAL
     assert "the funded owner will refuse to start" in expired.message
 
-    # Demo strings are untouched: same key, same probe remedy.
+    # Demo keeps its own key and its own remedy, which is now the deploy flag
+    # rather than a start refusal that no longer exists.
     demo = M.evaluate_demo_rule_age(verified_ts_ns=expired_ns, now_ns=now_ns)
     assert demo is not None
     assert demo.key == "demo_rules_age"
-    assert "require a full probe" in demo.message
+    assert "--refresh-demo-rules" in demo.message
+    assert "the funded owner will refuse to start" not in demo.message
 
 
 # --------------------------------------------------------------------------- #
@@ -2142,6 +2187,147 @@ def test_main_pages_every_broken_heartbeat_and_still_exits_zero(tmp_path, monkey
             assert expected_key in out, path
         else:
             assert "engine_heartbeat" not in out, path
+
+
+def test_the_retired_digest_is_not_provisioned_from_the_account_root(monkeypatch) -> None:
+    """This used to default from ACCOUNT_EXECUTION_ROOT, which pointed both
+    fleets at a file the deleted Python owner used to write. It paged 47 times a
+    day about a notification channel that was not broken but abolished.
+
+    Empty means the file is never opened. The flag still works if a digest ever
+    comes back and someone points it at one.
+    """
+    monkeypatch.setenv("ACCOUNT_EXECUTION_ROOT", "/opt/liquidity-migration/data/bybit-account-execution")
+    assert M.build_arg_parser().parse_args([]).account_notification_state == ""
+
+    explicit = M.build_arg_parser().parse_args(["--account-notification-state", "/tmp/digest.json"])
+    assert explicit.account_notification_state == "/tmp/digest.json"
+
+
+def test_main_does_not_read_the_deleted_owners_account_journal(tmp_path, monkeypatch, capsys) -> None:
+    """No engine crate writes that journal, and the demo file stopped moving at
+    19:58 on 2026-08-14. Reading it could only ever report a frozen file as
+    illness, so main must not reach for it at all.
+    """
+    reads: list[object] = []
+    monkeypatch.setattr(
+        M,
+        "evaluate_required_account_owner_states",
+        lambda _states, **_kwargs: [],
+    )
+    monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
+    monkeypatch.setattr(
+        M,
+        "gather_account_health_alerts",
+        lambda **kwargs: reads.append(kwargs) or [],
+    )
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_unit_states", lambda units: {})
+    monkeypatch.setattr("sys.argv", _engine_main_argv(tmp_path, "state-no-journal.json"))
+
+    assert M.main() == 0
+    assert reads == []
+    assert "account_health" not in capsys.readouterr().out
+
+
+def test_engine_account_view_lag_is_measured_between_the_engine_s_own_two_stamps(tmp_path) -> None:
+    """How old the engine's reading of the account is, on the engine's clock.
+
+    The engine stamps both the beat and the reading it is reporting, so the lag
+    between them is entirely its own arithmetic. Reading it that way — instead
+    of against this box's clock — is what keeps this check free of the race that
+    made the heartbeat-age check page 90 times a day: our clock never enters it.
+
+    This replaces the journal-backed account-health check, whose only writer was
+    the Python account owner. That owner was deleted on 2026-08-14 and the file
+    has not moved since, so the check reported a frozen file as illness.
+    """
+    fresh = _write_engine_heartbeat(
+        tmp_path / "fresh.json",
+        wall_ts_ms=ENGINE_NOW_MS - 2_000,
+        account_observed_wall_ts_ms=ENGINE_NOW_MS - 2_000 - 5_000,
+    )
+    assert _engine_alerts(fresh) == []
+
+    # Sitting exactly on the bound is not yet late.
+    at_bound = _write_engine_heartbeat(
+        tmp_path / "at_bound.json",
+        wall_ts_ms=ENGINE_NOW_MS - 2_000,
+        account_observed_wall_ts_ms=ENGINE_NOW_MS - 2_000 - int(M.VENUE_SNAPSHOT_AGE_FLOOR_MINUTES * 60_000),
+    )
+    assert _engine_alerts(at_bound) == []
+
+    stale = _write_engine_heartbeat(
+        tmp_path / "stale.json",
+        wall_ts_ms=ENGINE_NOW_MS - 2_000,
+        account_observed_wall_ts_ms=ENGINE_NOW_MS - 2_000 - 40 * 60_000,
+    )
+    alerts = _engine_alerts(stale)
+    assert [alert.key for alert in alerts] == ["engine_account_view_stale"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "40.0 min" in alerts[0].message
+
+
+def test_engine_account_view_bound_cannot_be_tightened_below_the_floor(tmp_path) -> None:
+    """--max-account-health-age-min defaults to one minute, and main feeds it
+    straight in. Against a reading that refreshes every few seconds that is only
+    twelve times the working cadence: one slow venue reply and the fleet is
+    paging again. The journal check this replaced applied the same floor, which
+    is why its 1-minute dial never actually meant one minute.
+    """
+    lagging = _write_engine_heartbeat(
+        tmp_path / "lagging.json",
+        wall_ts_ms=ENGINE_NOW_MS - 2_000,
+        account_observed_wall_ts_ms=ENGINE_NOW_MS - 2_000 - 10 * 60_000,
+    )
+    assert (
+        M.evaluate_engine_heartbeat(
+            heartbeat=M.parse_engine_heartbeat(lagging.read_bytes()),
+            now_ms=ENGINE_NOW_MS,
+            max_age_seconds=60.0,
+            max_account_view_age_minutes=1.0,
+        )
+        == []
+    )
+
+
+def test_engine_account_view_is_not_faulted_for_being_absent(tmp_path) -> None:
+    """A shadow run may never ask the venue anything, and a live one has not
+    asked yet in its first moments. Neither is a fault, and paging on it would
+    turn every boot into an alert — the same self-inflicted noise this whole
+    change is removing. What an absent reading must never do is read as fresh.
+    """
+    for mode in ("live", "shadow"):
+        absent = _write_engine_heartbeat(
+            tmp_path / f"absent_{mode}.json",
+            mode=mode,
+            wall_ts_ms=ENGINE_NOW_MS - 2_000,
+            account_observed_wall_ts_ms=None,
+        )
+        assert _engine_alerts(absent) == [], mode
+
+    missing_key = _write_engine_heartbeat(
+        tmp_path / "missing_key.json",
+        wall_ts_ms=ENGINE_NOW_MS - 2_000,
+        account_observed_wall_ts_ms=_ABSENT,
+    )
+    assert _engine_alerts(missing_key) == []
+
+
+def test_engine_account_view_stamped_after_the_beat_is_incoherent(tmp_path) -> None:
+    """Both stamps come off one clock in one process, so a reading dated after
+    the beat carrying it cannot happen. If it does, the arithmetic behind the
+    freshness number is wrong and saying so beats reporting a negative age as
+    healthy.
+    """
+    ahead = _write_engine_heartbeat(
+        tmp_path / "ahead.json",
+        wall_ts_ms=ENGINE_NOW_MS - 2_000,
+        account_observed_wall_ts_ms=ENGINE_NOW_MS - 2_000 + 30_000,
+    )
+    alerts = _engine_alerts(ahead)
+    assert [alert.key for alert in alerts] == ["engine_account_view_stale"]
+    assert "after" in alerts[0].message
 
 
 def test_engine_heartbeat_is_aged_against_a_clock_read_after_the_file(tmp_path, monkeypatch, capsys) -> None:
