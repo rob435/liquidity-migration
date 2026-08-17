@@ -2142,3 +2142,57 @@ def test_main_pages_every_broken_heartbeat_and_still_exits_zero(tmp_path, monkey
             assert expected_key in out, path
         else:
             assert "engine_heartbeat" not in out, path
+
+
+def test_engine_heartbeat_is_aged_against_a_clock_read_after_the_file(tmp_path, monkeypatch, capsys) -> None:
+    """The engine rewrites this file every few seconds while the watchdog runs.
+
+    A run takes a second or two — it reads datasets and shells out to systemctl
+    before it ever opens the heartbeat — so a clock sampled at the top of main()
+    is already behind by the time the file is read, and any heartbeat written in
+    between reads as dated in the future. That is not a clock fault, it is the
+    watchdog timing itself against its own start, and on the demo fleet it paged
+    and cleared 90 times a day.
+
+    Sampling the clock after the read makes a negative age impossible from this
+    cause, and leaves the future-dated alert meaning what it says.
+    """
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_unit_states", lambda units: {})
+
+    started_ms = M._now_ms()
+    run_takes_ms = 2_000
+    calls: list[int] = []
+
+    def advancing_clock() -> int:
+        # The first reading is main()'s own; everything later happens after the
+        # run has spent its couple of seconds getting to the heartbeat.
+        calls.append(len(calls))
+        return started_ms if len(calls) == 1 else started_ms + run_takes_ms
+
+    monkeypatch.setattr(M, "_now_ms", advancing_clock)
+
+    # Written a second into the run: newer than main()'s sample, older than now.
+    mid_run = _write_engine_heartbeat(tmp_path / "mid_run.json", wall_ts_ms=started_ms + 1_000)
+    monkeypatch.setattr(
+        "sys.argv",
+        _engine_main_argv(tmp_path, "state-mid-run.json", "--engine-heartbeat-file", str(mid_run)),
+    )
+
+    assert M.main() == 0
+    assert "engine_heartbeat" not in capsys.readouterr().out
+
+    # A clock genuinely ahead of this box still pages: the alert keeps its
+    # meaning, it just stops firing on the watchdog's own runtime.
+    really_ahead = _write_engine_heartbeat(
+        tmp_path / "really_ahead.json", wall_ts_ms=started_ms + run_takes_ms + 90_000
+    )
+    calls.clear()
+    monkeypatch.setattr(
+        "sys.argv",
+        _engine_main_argv(tmp_path, "state-ahead.json", "--engine-heartbeat-file", str(really_ahead)),
+    )
+
+    assert M.main() == 0
+    assert "engine_heartbeat_stale" in capsys.readouterr().out

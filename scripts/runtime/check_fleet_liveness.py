@@ -726,9 +726,15 @@ def gather_engine_heartbeat_alerts(
     except Exception as exc:  # noqa: BLE001 — same for anything the file's contents can throw
         detail = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
         return [_engine_heartbeat_unreadable(heartbeat_path, detail[:300])]
+    # Read the file first, ask the clock second. The content in hand was written
+    # before the read, so it cannot be newer than a reading taken now, and the
+    # age cannot come out negative unless a clock genuinely disagrees. Sampling
+    # first — or being handed a caller's earlier sample — is what made this page
+    # every time the engine wrote its heartbeat mid-run.
+    observed_now_ms = _now_ms() if now_ms is None else now_ms
     return evaluate_engine_heartbeat(
         heartbeat=heartbeat,
-        now_ms=_now_ms() if now_ms is None else now_ms,
+        now_ms=observed_now_ms,
         max_age_seconds=max_age_seconds,
     )
 
@@ -1520,7 +1526,12 @@ def main() -> int:
             gather_engine_heartbeat_alerts(
                 heartbeat_path=Path(args.engine_heartbeat_file),
                 max_age_seconds=args.max_engine_heartbeat_age_sec,
-                now_ms=now_ms,
+                # No now_ms: the engine rewrites this file every few seconds, and
+                # by the time this run reaches it the clock sampled at the top of
+                # main() is a second or two behind. Handing that stale reading in
+                # dates any heartbeat written since as being in the future. The
+                # gather reads the file and then asks the clock, in that order,
+                # so the age cannot go negative unless a clock really is wrong.
             )
         )
     if str(args.account_notification_state).strip():
