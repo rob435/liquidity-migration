@@ -256,7 +256,7 @@ def _cmd_archive_download_klines_1h_api(args: argparse.Namespace, config: Resear
 
 
 def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
-    from liquidity_migration.research.backtest.long_native import resolve_long_strategy_profile
+    from liquidity_migration.rules.long_native import resolve_long_strategy_profile
     from liquidity_migration.strategy.long_native_event_demo import (
         LongNativeDemoCycleConfig,
         format_long_demo_cycle_summary,

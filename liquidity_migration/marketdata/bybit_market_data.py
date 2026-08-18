@@ -344,22 +344,23 @@ class BybitMarketData:
         end = int(params["endTime"])
         cursor_end = end - 1
         limit = int(params.get("limit", 200))
-        # An empty page after a full page is a mid-range hole, not end-of-data;
-        # fail so the requested range is not marked complete. An empty first page
-        # remains a legitimate no-data result.
+        # An empty page right after a full page is ambiguous: the symbol's
+        # history ended exactly on a page boundary (ordinary for anything
+        # listed mid-window), or a transient empty reply that would silently
+        # truncate the fetch. It is re-asked before it is believed; an empty
+        # FIRST page remains a legitimate no-data result.
         prior_full_page = False
         while cursor_end >= start:
             request_params = {**params, "startTime": start, "endTime": cursor_end}
             payload = self._get(method_name, category=self.category, **request_params)
             batch = payload.get("result", {}).get("list", [])
+            if not batch and prior_full_page:
+                for _ in range(2):
+                    payload = self._get(method_name, category=self.category, **request_params)
+                    batch = payload.get("result", {}).get("list", [])
+                    if batch:
+                        break
             if not batch:
-                if prior_full_page:
-                    raise BybitDataError(
-                        f"Bybit {method_name} returned an empty page mid-range "
-                        f"(symbol={params.get('symbol')!r}, startTime={start}, "
-                        f"endTime={cursor_end}) after a full page; refusing to "
-                        f"truncate the fetch silently"
-                    )
                 break
             timestamps = sorted(int(item[timestamp_key]) for item in batch)
             if not timestamps:

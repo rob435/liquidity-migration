@@ -1,6 +1,6 @@
 # liquidity_migration/
 
-135 modules in eleven subpackages. The path tells you what a module is for; the
+112 modules in twelve subpackages. The path tells you what a module is for; the
 import order tells you what it is allowed to know.
 
 ## Where things are
@@ -11,15 +11,16 @@ import order tells you what it is allowed to know.
 | `marketdata/` | The credential-free public price plane: Bybit public REST/WS, the Binance public client, the WS kline pipeline, the ticker cache | Anything authenticated — that is `venue/` |
 | `data/` | The data root on disk and what fills or validates it: atomic dataset read/write, ingestion, archives and manifests, history fetchers, universe construction, PIT membership and coverage, the trade tape | Live sockets |
 | `account/` | The single owner that turns an accepted target into a command: contracts, the deterministic kernel, the filesystem route and target inbox, execution ports, leases, liveness, protection price math | Credentials, venue transport, strategy decisions |
+| `rules/` | The registered decision rules production replays, and the target-book contract: the carry-hold rule and its live decision frame, the LONG FC-v11a/v12 profiles with their features and signal, the persisted LONG identities, daily-bar feature math, the engine target-book writer | The historical engines and scorers that grade these rules — that is `research/backtest/` |
 | `venue/` | The credentialed Bybit edge — everything that can place, amend, or cancel a real order, and everything that reads venue truth back: private transport, the order adapter, execution-stream normalization, REST reconciliation, instrument rules, native stops, wedged-command resolution | Anything usable without an API key |
 | `strategy/` | What the fleet decides to hold right now: the three sleeve producers and daemons, plus shared per-cycle machinery — candidate population, public data plane, planning, scheduling replay, cycle health | The historical engine behind a sleeve — that is `research/backtest/` |
 | `research/panels/` | Causal point-in-time math: panel in, score out — feature panel, risk model, residual momentum, idio price paths, cross-sectional evaluator, cross-venue substrate | |
-| `research/backtest/` | Every sleeve's registered rule and historical equity engine, plus chart writers | |
+| `research/backtest/` | Every sleeve's historical equity engine and chart writers, replaying the registered rules from `rules/` | The rules themselves — that is `rules/` |
 | `research/execution/` | Measurement of what actually happened: trade diagnostics, measured cost model, twin calibration, three-way reconciliation, venue accounting | |
-| `policy/` | The dials: operational sizing profile, execution config, equity-anchored envelope, the account loss halt, real-money profile and arming, systemd environment reading | |
+| `policy/` | The dials: operational sizing profile, execution config, real-money profile and arming, systemd environment reading. The equity-anchored envelope and the account loss halt moved to the engine (`engine/engine-risk/`) with the 2026-08-14 order-path deletion | |
 | `ops/` | The operator surface in both directions: Telegram and notifications, the destructive reset path and its archive, epoch reset, maintenance lock | |
 | `cli/` | `python -m liquidity_migration` — `commands.py` and its argparse builders in `parsers.py` | |
-| `runtime/` | What a systemd unit actually executes: the account owner runners and readiness | |
+| `runtime/` | Empty since the account owner runners went with the Python order path (2026-08-14); kept as the import order's named sink | |
 
 `__init__.py` and `__main__.py` are the only modules at the package root.
 
@@ -29,8 +30,12 @@ Measured from the AST, not asserted. Every import points down this list; there
 are no cycles between packages.
 
 ```
-core → marketdata → data → account → research → strategy → venue → policy → ops/cli → runtime
+core → marketdata → data → account → rules → research → strategy → venue → policy → ops/cli → runtime
 ```
+
+`rules/` may import only `core/`, `marketdata/`, `data/`, and `account/`: a
+registered decision rule that live sleeves replay must never pull research
+machinery. `tests/repo/test_import_order.py` holds the whole order.
 
 The two ends are the useful ones. **`core/` knows nothing** — change it and you
 can affect anything. **`runtime/` is a sink** — nothing imports it, so a change
@@ -58,7 +63,7 @@ the code belongs somewhere else.
 
 ## Entry points
 
-`python -m liquidity_migration` is the research and data CLI. Ten modules are
+`python -m liquidity_migration` is the research and data CLI. Seven modules are
 run directly as `python -m liquidity_migration.<pkg>.<module>` from committed
 shell under `scripts/` and `deploy/`; no systemd unit names a Python module, so
 unit files never change when a module moves. See

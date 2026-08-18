@@ -144,7 +144,10 @@ def _aggregate_daily_klines(klines_1h: pl.DataFrame) -> pl.DataFrame:
         .group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                pl.col("ts_ms").min().alias("day_start_ms"),
+                # Snap to the UTC day floor so a missing 00:00 bar (a
+                # listing-day symbol) cannot create an off-grid join key and a
+                # singleton cross-section.
+                ((pl.col("ts_ms").min() // MS_PER_DAY) * MS_PER_DAY).alias("day_start_ms"),
                 pl.col("open").first().alias("open"),
                 pl.col("close").last().alias("close"),
                 pl.col("close").first().alias("first_bar_close"),

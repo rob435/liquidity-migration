@@ -66,11 +66,8 @@ def _run_long(
 ) -> dict[str, Any]:
     # LONG records its own PIT pass/taint label; pit_tol does not apply.
     del pit_tol
-    from liquidity_migration.research.backtest.long_native import (
-        long_v11a_profile,
-        long_v12_profile,
-        run_long_native_research,
-    )
+    from liquidity_migration.research.backtest.long_native import run_long_native_research
+    from liquidity_migration.rules.long_native import long_v11a_profile, long_v12_profile
 
     profile = {"v11a": long_v11a_profile, "v12": long_v12_profile}[long_profile]
     cfg = replace(profile(), start_date=start, end_date=end)

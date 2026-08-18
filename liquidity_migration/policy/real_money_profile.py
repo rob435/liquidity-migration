@@ -94,7 +94,7 @@ def dial_environment_keys() -> tuple[str, ...]:
 def long_worst_case_upscale() -> float:
     """The LONG strategy's own worst-case size upscaling over a nominal entry."""
 
-    from liquidity_migration.research.backtest.long_native import long_v11a_profile  # noqa: PLC0415
+    from liquidity_migration.rules.long_native import long_v11a_profile  # noqa: PLC0415
 
     strategy = long_v11a_profile()
     return float(strategy.vol_target_max_scale) * max(1.0, float(strategy.weekend_size_mult))
@@ -213,7 +213,7 @@ def render_real_money_profile_json(
     # The single-symbol cap must admit each producer's own worst single
     # position, so at high dials it scales with them (never past the account
     # cap; the 0.5 floor keeps the historical bound at modest dials).
-    from liquidity_migration.research.backtest.long_native import long_v11a_profile  # noqa: PLC0415
+    from liquidity_migration.rules.long_native import long_v11a_profile  # noqa: PLC0415
     from liquidity_migration.strategy.carry_demo import load_carry_config  # noqa: PLC0415
 
     long_strategy = long_v11a_profile()

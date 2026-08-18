@@ -26,13 +26,15 @@ pub use market::{
     Feed, FeedError, MarketEvent, MarketFeed, MarketState, OrderFeed, Quote, Subscription, Ticker,
 };
 pub use orders::{
-    Action, AmendSpec, Intent, InstrumentRule, OrderAck, OrderKind, OrderRequest, OrderUpdate,
-    RestingOrder, Side, StopSpec, TimeInForce, VenueError, VenueOrder, WorkPolicy,
+    Action, AmendSpec, Intent, InstrumentRule, OrderAck, OrderFacts, OrderKind, OrderRequest,
+    OrderUpdate, RestingOrder, Side, StopSpec, TimeInForce, VenueError, VenueOrder, WorkPolicy,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{EngineEvent, Strategy, StrategyCtx};
 pub use targets::{BookTarget, TargetBook};
-pub use wal::{Wal, WalError, WalRecord};
+pub use wal::{
+    AnchorState, FilledTotal, IntendedStop, OpenOrderState, SymbolTotal, Wal, WalError, WalRecord,
+};
 
 /// Which venue account a gateway's credentials actually reach, as the venue
 /// itself reports it.

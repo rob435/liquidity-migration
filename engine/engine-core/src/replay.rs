@@ -20,7 +20,9 @@ pub struct ReplayReport {
 }
 
 pub fn read(path: &Path) -> Result<ReplayReport, engine_types::WalError> {
-    let (replayed, torn_tail) = engine_wal::replay_scan(path)?;
+    // The whole family: a rotated log is its segments read in order, and a
+    // log that never rotated is a family of one, read exactly as before.
+    let (replayed, torn_tail) = engine_wal::replay_chain(path)?;
     let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
     Ok(describe(&records, torn_tail))
 }
@@ -77,11 +79,16 @@ pub struct LogNames {
 
 impl LogNames {
     /// Take the tables from a record that carries them, and ignore the rest.
-    /// Ids are only appended, so the newest record is the fullest.
+    /// Ids are only appended, so the newest record is the fullest. A segment
+    /// restatement carries the same tables and counts the same way.
     pub fn learn(&mut self, record: &WalRecord) {
-        if let WalRecord::Names { strategies, symbols } = record {
-            self.strategies = strategies.clone();
-            self.symbols = symbols.clone();
+        match record {
+            WalRecord::Names { strategies, symbols }
+            | WalRecord::SegmentBase { strategies, symbols, .. } => {
+                self.strategies = strategies.clone();
+                self.symbols = symbols.clone();
+            }
+            _ => {}
         }
     }
 
@@ -236,6 +243,18 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             "reconciled {} finding(s), may open: {may_open}{}",
             findings.len(),
             findings.iter().map(|f| format!("\n             {f}")).collect::<String>()
+        ),
+        WalRecord::SegmentBase {
+            wall_ts_ms,
+            symbols,
+            may_open,
+            open_orders,
+            ..
+        } => format!(
+            "rotation   this segment restates the ones before it (at {wall_ts_ms}): \
+             {} symbol(s), {} open order(s), may open: {may_open}",
+            symbols.len(),
+            open_orders.len()
         ),
     }
 }

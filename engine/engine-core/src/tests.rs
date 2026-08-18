@@ -60,6 +60,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::Note { .. } => "note",
         WalRecord::ControlAnchor { .. } => "control_anchor",
         WalRecord::Reconciled { .. } => "reconciled",
+        WalRecord::SegmentBase { .. } => "segment_base",
     }
     .to_string()
 }
@@ -211,6 +212,11 @@ struct MockVenue {
     /// What the venue would say it is working. Seeded by a test that wants
     /// boot to find an order the log does not know about.
     working: Vec<VenueOrder>,
+    /// Positions for each `account_view` call to report, oldest first; an
+    /// exhausted (or never seeded) script reads flat. Boot takes the first
+    /// reading, so a test that wants a mid-run change seeds AFTER build and
+    /// forces a refresh (a stream reset is the cheap way).
+    account_readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
     /// Every leverage the engine actually told the venue about, in order.
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Make set_leverage refuse, so a test can watch the order not go.
@@ -244,6 +250,7 @@ impl MockVenue {
                 caps: bybit_like_caps(),
                 reply: None,
                 working: Vec::new(),
+                account_readings: Rc::new(RefCell::new(VecDeque::new())),
                 leverages: Rc::new(RefCell::new(Vec::new())),
                 leverage_refuses: false,
             },
@@ -333,10 +340,15 @@ impl VenueGateway for MockVenue {
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         self.tape.borrow_mut().push(Step::ReadAccount);
+        let positions = self
+            .account_readings
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_default();
         Ok(AccountView {
             equity_usdt: 10_000.0,
             available_usdt: 9_000.0,
-            positions: Vec::new(),
+            positions,
             observed_ns: clock::now_ns(),
         })
     }
@@ -506,6 +518,16 @@ impl ScriptOrderFeed {
             learned: Rc::new(RefCell::new(Vec::new())),
         }
     }
+
+    /// Delivers these updates in order, then waits forever. Feed them to a
+    /// second `run` call when an update has to name an order id the first
+    /// run minted — the id is not known before the send happens.
+    fn playing(updates: Vec<OrderUpdate>) -> Self {
+        ScriptOrderFeed {
+            updates: updates.into(),
+            learned: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
 }
 
 impl OrderFeed for ScriptOrderFeed {
@@ -668,12 +690,26 @@ fn settings(shadow: bool) -> EngineSection {
         // directly rather than going through assembly.
         venue: engine_venue::BYBIT_DEMO.to_string(),
         group_flush_ms: 250,
+        wal_rotate_mb: 256,
         account_view_max_age_ms: 60_000,
+        // Wide enough that no scripted quote in these tests ever counts as
+        // stale; the staleness tests tighten it themselves.
+        max_quote_age_ms: 60_000,
         shadow,
+        // Shared is the default and what almost every test means; the sole-
+        // authority tests build their settings through `settings_sole`.
+        leverage_authority: crate::config::LeverageAuthority::Shared,
         // A test that wants a book, or a heartbeat, hands the engine one
         // itself.
         target_book_path: None,
         heartbeat_path: None,
+    }
+}
+
+fn settings_sole(shadow: bool) -> EngineSection {
+    EngineSection {
+        leverage_authority: crate::config::LeverageAuthority::Sole,
+        ..settings(shadow)
     }
 }
 
@@ -685,6 +721,9 @@ struct Harness {
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
     risk_saw: Rc<RefCell<Vec<OrderUpdate>>>,
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
+    /// Positions the venue's next account readings will report; see
+    /// `MockVenue::account_readings`.
+    account_readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
 }
 
 /// The same as `build_with`, with a venue that refuses every set_leverage.
@@ -749,6 +788,7 @@ async fn build_inner(
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let leverages = venue.leverages.clone();
+    let account_readings = venue.account_readings.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
     let engine = Engine::boot(
         settings,
@@ -771,8 +811,23 @@ async fn build_inner(
             amends,
             risk_saw,
             leverages,
+            account_readings,
         },
     )
+}
+
+/// The venue's own row for an order this engine's log sent and the venue is
+/// still working — the boot case where a recovered order is genuinely alive.
+/// An in-flight order the venue does NOT confirm is reaped at boot instead.
+fn still_working(id: &str, symbol: &str, qty: f64) -> VenueOrder {
+    VenueOrder {
+        client_order_id: id.into(),
+        symbol: symbol.into(),
+        side: Side::Buy,
+        qty,
+        filled_qty: 0.0,
+        reduce_only: false,
+    }
 }
 
 /// An order the venue is working that this engine's log has no record of
@@ -793,8 +848,11 @@ fn allow_all() -> RiskVerdict {
     RiskVerdict::Allow { qty: f64::NAN }
 }
 
+mod covers;
 mod order_path;
+mod quote_staleness;
 mod resting_orders;
+mod rotation;
 mod target_books;
 mod worked_entries;
 mod reconciliation;

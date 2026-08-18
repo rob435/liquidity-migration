@@ -5,7 +5,7 @@
 //! to [`plan`].
 
 use engine_types::{
-    EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy,
+    Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy,
     StrategyCtx, StrategyId, Subscription, SymbolId, TimeInForce,
 };
 
@@ -180,10 +180,12 @@ impl Strategy for Template {
         vec![Subscription { symbol: self.symbol_name.clone(), feed: Feed::Quote }]
     }
 
-    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
-        // Match only what this strategy acts on. Every other event — order
-        // updates, timers, target books — arrives here too and falls through.
-        let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event else {
+    // Override only the hooks this strategy acts on — quotes, here. Every
+    // other event — order updates, timers, target books, refused intents —
+    // falls through to the trait's do-nothing defaults, so a new kind of
+    // event never needs an edit in a plug that ignores it.
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
+        let MarketEvent::Quote { symbol, .. } = event else {
             return;
         };
         let Some(mine) = self.resolve(&*ctx) else {

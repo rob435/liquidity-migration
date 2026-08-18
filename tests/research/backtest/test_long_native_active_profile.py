@@ -16,19 +16,20 @@ from liquidity_migration.research.backtest.historical_account_replay import (
     HistoricalAccountSession,
     synthetic_historical_rules_for_symbols,
 )
-from liquidity_migration.research.backtest.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
 from liquidity_migration.research.backtest.long_native import (
-    LongNativeConfig,
     _diagnostic_data_end,
     _finalize_trade,
     _methodology_run_label,
     _run_long_pipeline,
     format_long_native_report,
+)
+from liquidity_migration.rules.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
+from liquidity_migration.rules.long_native import (
+    LongNativeConfig,
     long_v11a_profile,
     long_v12_profile,
 )
 from liquidity_migration.research.backtest.run_diagnostics import diagnose
-
 
 def _feature(symbol: str, ts_ms: int, *, day_return: float = 0.20) -> dict[str, object]:
     return {
@@ -123,51 +124,6 @@ def _run(
         kernel_decision_sink=decisions,
     )
     return (*result, decisions, session)
-
-
-def test_active_profile_has_no_legacy_strategy_switches() -> None:
-    field_names = {field.name for field in dataclasses.fields(LongNativeConfig)}
-    assert field_names == {
-        "execution_strategy_id",
-        "execution_leverage",
-        "start_date",
-        "end_date",
-        "universe_size",
-        "universe_volume_window_days",
-        "min_listing_history_days",
-        "exclude_symbols",
-        "regime_symbol",
-        "regime_sma_days",
-        "fc_min_day_return",
-        "fc_top_volume_rank_max",
-        "fc_min_close_location",
-        "fc_max_hold_days",
-        "fc_max_atr_pct",
-        "fc_atr_stop_mult",
-        "fc_atr_tp_mult",
-        "fc_sigma_mult",
-        "fc_sniper_retrace_pct",
-        "fc_sniper_deadline_hours",
-        "weekend_size_mult",
-        "fc_close_loc_multi_day",
-        # v12 stop geometry, consumed by _scan_position_exit
-        "fc_stop_time_decay_hours",
-        "fc_stop_time_decay_atr_mult",
-        "max_concurrent_positions",
-        "cooldown_days",
-        "entry_delay_hours",
-        "gross_exposure",
-        "notional_multiplier",
-        "vol_estimate_window_days",
-        "vol_floor_annual",
-        "max_position_weight",
-        "vol_target_annual",
-        "vol_target_min_scale",
-        "vol_target_max_scale",
-        "cost_multiplier",
-    }
-    with pytest.raises(TypeError):
-        LongNativeConfig(enable_fomo_chase=False)  # type: ignore[call-arg]
 
 
 def test_diagnostic_end_translates_exclusive_boundary_to_last_data_day() -> None:
@@ -378,27 +334,3 @@ def test_v12_widens_the_stop_then_tightens_it_after_two_days(tmp_path: Path) -> 
     assert long_v11a_profile().fc_stop_time_decay_hours == 0
     assert abs(long_v12_profile().fc_stop_time_decay_atr_mult - 1.5) < 1e-12
     assert atr_pct * 3.0 > 0.04 > atr_pct * 1.5
-
-
-def test_resolve_long_strategy_profile_maps_registered_names() -> None:
-    from liquidity_migration.research.backtest.long_native import resolve_long_strategy_profile
-
-    assert resolve_long_strategy_profile("v11a") == long_v11a_profile()
-    assert resolve_long_strategy_profile("v12") == long_v12_profile()
-    # Selector normalization tolerates shell-style noise, nothing more.
-    assert resolve_long_strategy_profile(" V12 ") == long_v12_profile()
-    for invalid in ("", "v13", "wide", None):
-        with pytest.raises(ValueError, match="unknown LONG strategy profile"):
-            resolve_long_strategy_profile(invalid)  # type: ignore[arg-type]
-
-
-def test_long_profile_display_names_stay_pinned_to_identities() -> None:
-    from liquidity_migration.research.backtest.long_identity import (
-        LONG_V12_WIDE_STOP_STRATEGY_ID,
-        long_profile_display_name,
-    )
-
-    assert long_profile_display_name(LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID) == "LongV11aDivWeekendVol"
-    assert long_profile_display_name(LONG_V12_WIDE_STOP_STRATEGY_ID) == "LongV12WideStop"
-    with pytest.raises(ValueError, match="unsupported LONG strategy id"):
-        long_profile_display_name("long_native_v9_retired")

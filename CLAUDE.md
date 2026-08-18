@@ -45,7 +45,7 @@ never copy sleeve status or thresholds here.
 
 | Command | Does |
 | --- | --- |
-| `scripts/dev.sh doctor` | read-only Git, Python, dependency, and skill diagnostic (`--json` for tools) |
+| `scripts/dev.sh doctor` | read-only Git, Python, dependency, skill, and deploy-env-toggle diagnostic (`--json` for tools) |
 | `scripts/dev.sh check` | doctor, then Ruff, mypy, pytest, engine tests |
 | `.venv/bin/python -m pytest -q` | tests |
 | `.venv/bin/python -m ruff check liquidity_migration scripts tests` | lint |

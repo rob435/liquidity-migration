@@ -16,6 +16,352 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-18 22:24 UTC — The expired demo rules receipt renewed in a flat
+  maintenance window; `demo_rules_age` cleared.** The receipt from 08-09
+  passed its 168-hour bound on 08-16 (the alert itself had been made
+  truthful on 08-17: WARNING, not CRITICAL, because nothing in the runtime
+  path refuses on it — what goes stale is the evidence the research and
+  candidate-universe tooling reads). The renewal is the order-placing
+  PostOnly probe, and the probe requires a genuinely flat account — any
+  position it sees, it treats as its own and fails. The window:
+  `ops.sh flatten --execute --environment demo` (its first real use since
+  the 08-18 argument-passing fix) stopped both demo producers and handed
+  the engine zero books; the engine closed BMTUSDT and HOMEUSDT and worked
+  ACEUSDT down to 0.1 — where flatten timed out, and the logs said why in
+  two lines: the LONG follower left ACEUSDT alone as another strategy's
+  name, and carry's own attributed share came to $0.02, under the venue's
+  $5 minimum order value. The remainder was a pre-engine foreign scrap
+  plus sub-minimum dust — unclosable through any minimum-respecting book
+  path. With the demo engine stopped (watchdog timer too, to keep the
+  window quiet) and its lease therefore free, the 0.1 ACEUSDT was closed
+  by hand with the repo's own leased client — reduce-only Market, which
+  the venue exempts from the minimum — and the venue confirmed flat.
+  `deploy staged --stop-first --refresh-demo-rules --profile operational`
+  then re-probed on the flat account and bound
+  `demo-rules-20260818T220119Z` (expires 2026-08-25 ~22:01 UTC; any
+  rollout in the back half re-probes on its own), reinstalling the same
+  commit `54560ea5` the box already ran — verified identical on the box,
+  on GitHub, and locally before the window opened. The fleet came back
+  whole (`verify-ok`, both engines rebuilt, both watchdog timers
+  re-enabled by the deploy), and the next watchdog pass printed
+  `cleared: demo_rules_age`. The demo positions the window flattened are
+  the sleeves' to re-open on their next cycles.
+
+- **2026-08-18 (second entry) — The plug-and-play gaps closed, on the owner's
+  instruction.** The morning's architecture review named four ways the repo
+  fell short of "completely modular plug and play" and ranked four
+  improvements; the owner said build all of them, plus move the
+  production-critical code out of `research/`. Three subagents did the
+  building; every load-bearing claim was re-verified from source afterwards,
+  and every genuinely new test was proven to fail with its mechanism
+  neutered. Nothing here is deployed; the tree is uncommitted.
+
+  **The registered rules moved out of research/ — new package
+  `liquidity_migration/rules/`.** The live sleeves, the policy package (the
+  real-money profile among them), and the CLI were importing their decision
+  rules from `research/backtest/` — production-critical code living under a
+  name that says "safe to break", which had already once nearly cost us
+  research tooling misread as unused. `rules/` now holds the target-book
+  contract (`engine_targets`), the persisted LONG identity strings, the
+  registered LONG profiles and feature builders (`rules/long_native.py`),
+  the registered carry rule (`rules/carry_hold.py`: `prepare_decision`,
+  `carry_hold_weights`, `daily_grid`, `top_n_universe`,
+  `settlement_exact_funding` and helpers), and `momentum_signals`, whose only
+  consumer in the repo was the LONG rule. The historical engines stay in
+  `research/backtest/` and import the rules back — one body of decision code,
+  as before. Every moved def/class was mechanically compared against `git
+  show HEAD:` and is byte-identical (the single exception carries the
+  morning's uncommitted forward-window fix verbatim). The frozen
+  `reproduce_with` recipes in `configs/lane2_*.json` still execute —
+  `CarryHoldConfig` remains reachable through `financed_longs`, and the
+  score functions never moved. Import order gains one rung: `core →
+  marketdata → data → account → rules → research → strategy → venue →
+  policy → ops/cli → runtime`; measured after the move, `rules` imports only
+  `core`. Package README, root README, trading_logic, carry_hold, engine
+  doc, and the repo-map skill all updated; dated receipts left as history.
+
+  **The import order is now a test, not a sentence.**
+  `tests/repo/test_import_order.py` walks every module's imports from the
+  AST and fails on any edge pointing up or sideways in the order — an
+  unranked (new) package is itself a failure, so the order can only grow
+  deliberately. `ops` and `cli` share a rank and, verified from the real
+  edges, do not import each other; that is encoded. Proven to bite on
+  synthetic bad edges and on a real upward import temporarily planted in
+  `core/` (removed byte-exact afterwards).
+
+  **Engine: one new event no longer edits every strategy.**
+  `Strategy::on_event` is now a provided method holding the single
+  exhaustive match over `EngineEvent`, routing to five provided hooks with
+  do-nothing defaults (`on_market`, `on_timer`, `on_order`, `on_targets`,
+  `on_intent_refused`). The follower, the touch sniper, and the authoring
+  template override only what they use; a future event variant is one enum
+  arm plus one defaulted hook, zero strategy edits. The follower's
+  never-emit-from-an-order-wake property now holds by construction — it
+  does not override those hooks at all.
+
+  **Engine: the in-flight cover book moved out of the follower into the
+  engine.** The bridge across the ~2.5 s account-view lag (without which a
+  strategy re-enters after every fill) was ~120 lines of private
+  bookkeeping inside one strategy; a second book-following strategy would
+  have had to reimplement all of it. It is now `engine-core/src/covers.rs`,
+  keyed per strategy and symbol, fed at the engine's own four lifecycle
+  points: booked at the send with the post-quantization size (so the old
+  ack-clamp is unnecessary by construction), released on reject in full and
+  on cancel by the unfilled remainder, dropped for the whole symbol on a
+  refused exit (the account reading is the fact), and absorbed against each
+  new account reading by the same delta rule the follower used. Strategies
+  read one number: `ctx.in_flight(symbol)`, signed; `position`/`my_position`
+  are untouched. The follower now computes held = reading + in-flight and
+  keeps only its policy (foreign-position exclusion, closed-under-us latch,
+  busy gate). Two deliberate deviations from the old follower, both pinned
+  by tests: a refused ENTRY no longer releases anything, because at the
+  send-point registration a refusal never had a cover — releasing the
+  newest would steal a live cover from an earlier send (the exact
+  double-entry window this exists to close); and shadow sends ARE covered,
+  because a shadow order never fills and never produces news, so an
+  uncovered shadow follower would resend the same pretend entry on every
+  quote — today's funded-engine evidence run is exactly this shape. One
+  strict improvement fell out: an intent dropped by the per-wake flood cap
+  used to leak a phantom emit-time cover; with send-point booking it never
+  books. One latent fault was preserved deliberately for parity, and is a
+  named candidate follow-up, not smuggled in: two covers on one symbol each
+  carry their own anchor, so a single reading movement can be eaten twice
+  (needs a second send before the first fill is shown; the busy gate mostly
+  prevents it). Proof battery: eight neuter mutations (register no-op,
+  absorb no-op, release no-op, refuse no-op, refuse-as-drop-newest,
+  follower ignoring in-flight, shadow-guarded registration, registering at
+  the asked rather than quantized size) — each killed by named tests;
+  workspace 718 tests green.
+
+  **Engine: the log now rotates instead of growing forever.** New config
+  `wal_rotate_mb` (default 256, `0` = off; a missing key boots fine), checked
+  only on the group-flush tick so it can never fall between an intent's
+  durability barrier and its send. A rotation opens the next numbered
+  segment beside the configured path and writes one new record kind,
+  `SegmentBase` — a restatement of everything boot replay actually consumes,
+  which an inventory showed includes three sums over unbounded history
+  (per-strategy fill attribution, per-symbol logged exposure including
+  strangers' fills, and the newest intended stop per symbol) that no
+  restating-with-old-kinds design could carry without copying the whole
+  fill history. One record is atomic under the existing frame checksum, so
+  "complete enough to trust" is a single mechanical check: boot replays the
+  highest-numbered segment whose first record reads back whole and falls
+  back to the previous segment otherwise — a crash at any byte of a
+  rotation loses nothing and invents nothing (the ordering argument is a
+  four-step comment at the rotation itself, and a truncation sweep across
+  seven byte offsets tests it; the sweep caught a real hole in the first
+  cut, where a segment torn inside its 8-byte header refused boot instead
+  of being skipped). Old segments are archived in place, never deleted —
+  retention is the owner's call. The `fills` and `replay` tools read the
+  whole segment family; a never-rotated log is a family of one, CLI
+  unchanged. Honest residuals, on the record: a very late fill for an order
+  that ended before a rotation is charged to no strategy after a
+  rotation-plus-restart (diagnostics, not safety; reconcile still sees the
+  exposure), and the mint-id collision check now sees only open orders plus
+  the current segment, so a wall clock stepped back to an earlier boot's
+  exact millisecond could theoretically re-mint an ended pre-rotation id.
+
+  **Engine: a declared bound on trading against a stalled feed.** The only
+  staleness the engine declared was the account view's age; quote age was
+  bounded nowhere — the feed pings and reconnects, but a silent-but-alive
+  socket leaves the last quote standing and nothing refused to open
+  against it. Now `max_quote_age_ms` (default 30 000, serde default so
+  deployed configs boot) refuses to OPEN when the quote the decision was
+  made against is older than the bound, measured on the quote's own
+  receive stamp — never a wall-clock guess. A symbol that has never quoted
+  (or whose stamps a feed reset wiped) is refused the same way: the
+  absence of a price is the stalest price. Exits flow whatever the age,
+  and cancels and amends never pass the gate — same asymmetry as the
+  account-view bound. The refusal is a logged verdict (`StaleQuote`,
+  mirroring `StaleAccountView`) through the normal refusal path, so the
+  strategy hears `IntentRefused` and the cover book stays consistent. Both
+  new keys landed in both engine config templates with comments.
+
+  Engine total after both: 733 workspace tests, 0 failures, release build
+  clean; 15 new tests each proven to fail under a targeted neuter of its
+  mechanism (four neuters for rotation, one for the gate).
+
+  **The leverage round trip left the order path, on the owner's
+  instruction, after live measurement.** Total decision-to-execution
+  latency was measured from the live demo engine's own log (all 67 real
+  orders since 08-14): 179 ms median to "live at the venue", but p90 512 ms
+  and worst 1.01 s — and the tail decomposed cleanly: 27 of 67 entries paid
+  an extra ~169 ms (844 ms worst) BEFORE the wire, re-confirming leverage
+  inline because the cache forgets every flat symbol on every account
+  reading, and every carry hold ends flat before the next one opens. New
+  engine config `leverage_authority`: `"shared"` (the serde default —
+  today's behavior exactly, and the mainnet template's explicit setting,
+  because the owner hand-trades that account) and `"sole"` (the demo
+  template's setting — the engine holds that account's single mutation
+  lease). Under sole: the cache survives flat spells; the book's leverage
+  is armed at book arrival, where nobody is waiting on an order (never in
+  shadow — a shadow engine must not mutate the account it reads); and the
+  venue's own position rows, which now carry the row's `leverage` into the
+  account view, verify every held position — a mismatch alarms, writes a
+  log Note, and evicts the trust so the next entry confirms inline again.
+  In effect the pre-send confirmation became a post-fill verification
+  against a better witness. Five new tests (sole keeps cache across flat,
+  shared still re-confirms, contradiction evicts + is written down, book
+  arrival pre-arms, shadow never arms) plus config and parse pins; four
+  targeted neuters each killed exactly their own test and nothing else.
+  Expected effect on the live numbers: decision-to-venue collapses to the
+  ~172-178 ms geography band for every entry; the remaining tail (two
+  long-idle orders at 277/486 ms) has no proven local cause — the account
+  poll keeps the connection warm, so cold TLS does not explain it — and no
+  warmer was built on an unproven diagnosis.
+
+  **The doctor now proves every deployed toggle has a reader.**
+  `scripts/dev.sh doctor` gained a fourth section: every key set in
+  `deploy/*.env(.template)` (28 today) must appear, whole-name-bounded, in
+  package, scripts, deploy, or engine source — a toggle nothing reads is
+  either a deleted reader (the host file carries a dead switch) or a typo
+  whose real reader silently defaults. `RUST_LOG` is allowlisted with its
+  reason (read by the tracing library inside the engine binary,
+  `engine-core/src/main.rs`), and an allowlist entry whose key disappears is
+  itself flagged, so the exemption list cannot outlive its keys. Proven
+  live: a planted `FAKE_RETIRED_TOGGLE` turned doctor to `overall: error`.
+  Known limit, on the record: the retired sleeve toggle from 2026-08-03
+  lives in the HOST's hand-managed sleeves.env, which no repo check can
+  reach — one-line cleanup owed on the next fleet session.
+
+  **Two stale test pins from yesterday's pagination fix, found by the full
+  suite and fixed.** `tests/venue/test_bybit.py` still pinned the OLD
+  "raise on a mid-range empty page" contract that yesterday's re-ask fix
+  replaced — it escaped yesterday's gate, which should not have been
+  possible and is noted here honestly. Its `open_interest` twin was worse:
+  passing vacuously, its fake keyed to an endTime the exclusive-bound cap
+  never requests, so the fake's KeyError was wrapped into the very error
+  the test expected and the pagination path never ran. Both now pin the
+  real contract — one ask, exactly two re-asks, then the empty page is
+  believed as end-of-history — asserting the full call sequence.
+
+- **2026-08-18 — Three-auditor sweep: nine code fixes with fails-without-fix
+  proofs, and the operator prose caught up with the 08-14 deletion.** A deep
+  audit (three parallel readers: engine, Python package, operational glue),
+  every load-bearing claim re-derived from source before anything was touched.
+  Baseline was green before and after (`dev.sh check`).
+
+  **The emergency close command never worked from the laptop.**
+  `ops.sh flatten` handed `remote_exec` the bare script path as the remote
+  script body, so `flatten_account.sh` ran on the host with zero arguments and
+  refused every call (`--environment` has no default) — args were serialized
+  into `REMOTE_ARGS` and never consumed. Shipped 2026-08-14 in `30b78ae1`; it
+  was the one ops.sh verb without a payload test. Fixed, with the test every
+  neighbouring verb has. Running the script on the host directly always
+  worked, and it fails safe — nothing half-executed.
+
+  **A mis-ordered polars window leaked funding across symbols.**
+  `rolling_sum(h).over("symbol").shift(-h)` shifts the materialized column,
+  handing each symbol's last `h` rows the NEXT symbol's forward funding sums.
+  Four columns across `financed_longs.py` (`settlement_exact_funding`,
+  `paid_by`, `paid_bn`) and `lane2_blend.py` — the correct idiom sat on the
+  adjacent `ret_by` line. Research frames were unaffected today because the
+  `contiguous`/`is_finite` filters drop exactly the contaminated rows (masked,
+  not absent); the live frame `prepare_decision` carries the contamination on
+  the decision bar itself, unread so far. Fixed with two-symbol tail tests.
+
+  **Smaller confirmed defects, each with a test proven to fail without the
+  fix:** the daily panel minted off-grid day keys for symbols missing their
+  00:00 bar (listing days), making singleton cross-sections for `over(ts_ms)`
+  ranks — now floored like the funding/OI/premium aggregators beside it;
+  Bybit backwards pagination aborted a whole threaded backfill when a
+  symbol's history ended exactly on a page boundary (P≈1/200 per mid-window
+  listing) — an empty page after a full one is now re-asked twice before
+  being believed as end-of-history; `engine_held_symbols` crashed a producer
+  pass when the heartbeat was atomically replaced mid-read
+  (`read_stable_file`'s RuntimeError escaped the `(OSError, ValueError)`
+  catch); the strategy host's WS thread inserted into `_price_wake_fired`
+  in place while the cycle thread iterates it without a lock — now rebinds a
+  fresh dict; the engine risk kernel leaked one `pending` reservation per
+  fully-filled order (scanned per assessment, grown per fill, and a lingering
+  entry on a symbol that later lost its price would fail-close entries);
+  the engine's markout anchored `mid_after` at the FILL, so a book that spoke
+  once just after the fill and went quiet recorded that early mid as the
+  1m/5m markout — now anchored at the horizon it measures.
+
+  **Deleted:** `tests/repo/test_project_skill_mirrors.py` compared a
+  symlinked tree to itself (`.claude/skills -> ../.codex/skills`, same
+  inodes) — the one failure it named could never fire; the real check lives
+  in `repo_doctor.skill_mirror_report` + `test_dev_tooling.py`. The
+  watchdog's duplicate `VENUE_SNAPSHOT_AGE_FLOOR_MINUTES` (defined at :558
+  and again at :1302 — defaults bound the first, clamps read the second) is
+  one definition now.
+
+  **Prose caught up with 2026-08-14:** STATE.md lost its pre-pivot engine
+  bullet ("trades a demo account of its own… no unit is deployed") and its
+  "loss halt fires on realised loss only" claim (the guard trips on the
+  equity reading — paper loss counts; `loss_guard.rs`); topology now names
+  the two engines; README.md front page no longer says "not deployed and not
+  trading" / "demo only by construction"; operations.md §Flatten now
+  describes the zero-book mechanism and the real exit codes, and stops
+  attributing `run_safety_flat_once` to `loss_guard.rs`;
+  `engine-risk/PORT_NOTES.md` §Order of evaluation now matches the kernel
+  (exits classify before staleness and the trip, ruled 2026-08-14);
+  docs/engine.md names the real fence test (`venue_fence.rs`) and the
+  horizon-anchored markout rule; the scripts/tests/package READMEs lost a
+  deleted owner entry point, a wrong test filename, stale policy/runtime
+  rows, and counts that no longer counted.
+
+  **The four findings first reported as owner decisions were then fixed the
+  same day, on the owner's instruction ("fix these fully"):**
+
+  **The engine's restart seam, whole.** Symbol ids are interning positions,
+  and boot never re-read the log's own `Names` record — so after a restart,
+  every join against replayed records (whose fills are whose, what exposure
+  the log accounts for, which symbol an in-flight order is in) named the OLD
+  run's numbers against a NEW table. Now the table STARTS from the log:
+  `assembly::symbol_order` puts the previous run's id order first and the
+  config's subscriptions on top, boot interns the same sequence, and the
+  market feed opens with a quote subscription for every carried-over symbol
+  — so a book-admitted name keeps its id, and a position in it stays visible
+  to reconciliation and the stop discipline (the runner now claims and
+  replays the log before anything is given a symbol table). An in-flight
+  order the venue's own working-order listing lacks is reaped at boot — its
+  ending written to the log, its partition claim released, its symbol's
+  one-order gate freed — instead of surviving as a ghost on every future
+  boot. And the follower's sent-ahead cover stops believing in exposure that
+  cannot arrive: the engine tells a strategy when its intent dies inside the
+  engine (a new `IntentRefused` event, sent on every refusal path), terminal
+  order news shrinks cover by exactly the unfilled remainder (via the new
+  `order_facts` ledger lookup), an ack clamps cover down to the quantized
+  size actually sent, and a partial view catch-up now shrinks the record
+  instead of dropping it whole (the old exact-match drop was the measured
+  double-entry window, half-fixed). A refused EXIT drops every cover for the
+  symbol: the reading is the fact, and anything less re-plans the same
+  doomed exit on every quote. Eight new tests across engine-core and the
+  follower; each proven to fail on the pre-fix code (the refused-exit pin
+  passes under full revert — the stuck entry and exit covers cancel
+  numerically there — and guards partial regressions instead).
+
+  **Shadow mode stops poisoning its own verdicts.** A shadow order can never
+  fill or be cancelled, so its kernel reservation could never be released;
+  a long shadow run's verdicts leaned on phantom pending exposure — and the
+  funded engine's evidence run is exactly that. A shadow order is now judged
+  by the same kernel and then not reserved. Book-flip exits still read as
+  denials against the real (empty) account; docs/engine.md now says so.
+
+  **The deploy flat gate reads evidence that exists.**
+  `check_deploy_rollout_readiness.py` read the deleted owner's journal and
+  health file, so strict (`--require-flat`/armed) rollouts could never pass
+  their running-phase proofs. It now proves flat from the venue directly in
+  every phase, plus — for `exact`/`allow_behind`, when the fleet is running —
+  the engine's own heartbeat: recent, demo-realm, and naming an empty
+  holdings list. The stopped phases (`none`/`stopped-maintenance`) skip the
+  heartbeat, because a stopped engine's file is legitimately frozen. The
+  rollout ordering already agrees: the engines stop in the owners phase,
+  after the `exact` proof. `--account-root` is accepted and unused, so the
+  deploy script needed no change. Tests rewritten around the new evidence.
+
+  **Carry stopped publishing into the inbox nothing reads.** LONG was gated
+  when the books shipped; carry still queued exit-first requests every cycle
+  for an owner deleted four days ago. With `CARRY_ENGINE_TARGET_BOOK_PATH`
+  set (every deployed unit), the cycle now writes its book and publishes
+  nothing; the plan and suppression accounting still run, so the cycle
+  receipt records what was decided. The stale "engine trades nothing yet"
+  comment went with it. Existing carry tests cover the cycle; the gate
+  mirrors LONG's shipped pattern and carries no dedicated new test — the
+  seam is a five-line conditional at the single publish site.
+
 - **2026-08-17 — 273 Telegram alerts a day, none of them a live fault.**
   Reported by the owner as "a lot of critical errors". Four causes, and the
   fleet was healthy throughout: `verify-ok`, every unit active, producers

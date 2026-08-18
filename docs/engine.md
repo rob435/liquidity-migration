@@ -33,7 +33,7 @@ both:
   order.
 
 The target book is written by
-[`engine_targets.py`](../liquidity_migration/research/engine_targets.py),
+[`engine_targets.py`](../liquidity_migration/rules/engine_targets.py),
 atomically, so a reader sees a whole book or the previous one. A missing or
 stale book means *no decision*, and the engine holds its position steady; an
 empty book means *hold nothing*, which is a decision and does get acted on.
@@ -49,6 +49,12 @@ the authoring guide: what a strategy may touch, what the engine holds it to,
 and the five steps to register one. It is compiled and tested with the rest so
 it cannot rot, and left out of the `PLUGS` table so no config can run it by
 accident.
+
+A plug overrides only the per-event hooks it acts on — `on_market`,
+`on_timer`, `on_order`, `on_targets`, `on_intent_refused` — and the ones it
+ignores do nothing by default. The one exhaustive match over engine events
+lives in the `Strategy` trait itself, so adding a new kind of event never
+forces an edit in a strategy that ignores it.
 
 Two rules make strategies independent rather than merely separate:
 
@@ -115,6 +121,32 @@ is faster to make durable, so the chain is shorter overall. The comparison
 that matters is against the Python fleet on that same box: 25.7 ms of
 software time per order, median. Same hardware, same venue, ~10× less time.
 
+### Against the real venue
+
+Measured 2026-08-18 from the live demo engine's own log — all 67 real orders
+placed since 2026-08-14, each order's decide, wire, and venue-ack stamps:
+
+| Leg | median | p90 | worst |
+| --- | --- | --- | --- |
+| decision → durable → out the socket | 2.7 ms | — | 185 ms |
+| socket → the venue acknowledges | 172.4 ms | 177.5 ms | 486 ms |
+| decision → order live at the venue | 179 ms | 512 ms | 1.01 s |
+
+Two findings, one fixed and one named. Fixed: 27 of the 67 entries paid an
+extra ~169 ms (844 ms worst) *before* the wire, because every entry from
+flat re-confirmed leverage with the venue inline — that is what the p90 and
+p99 above are made of. Under `leverage_authority = "sole"` (the demo
+config), the confirmation moved off the order path: what the engine set
+stays trusted across flat spells, the book's leverage is armed at book
+arrival, and every held position's leverage is verified against the venue's
+own position rows — a mismatch alarms, is written to the log, and turns the
+inline confirmation back on for that symbol. Under `"shared"` (the default,
+and the mainnet setting) nothing changed: a hand may retune a flat symbol,
+so the engine keeps re-confirming. Named and left alone: two long-idle
+orders acked at 277 ms and 486 ms with no proven local cause (the account
+poll keeps the connection pool warm, so cold TLS does not explain them);
+that residue is the venue's, not ours, until more samples say otherwise.
+
 ## Layout
 
 `engine/` is a Cargo workspace. Contracts live in one crate; every other crate
@@ -124,7 +156,7 @@ parallel and integrate by type-check.
 | Crate | Owns |
 | --- | --- |
 | `engine-types` | every shared type and trait: events, intents, orders, log records, the `Strategy` trait, and the capability traits (`Wal`, `VenueGateway`, `RiskKernel`) |
-| `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation |
+| `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
 | `engine-marketdata` | Bybit public WebSocket: subscribe, sequence-check, parse once into flat per-symbol state, stamp arrival time |
 | `engine-venue` | the venue gateway, demo or funded by realm: HMAC signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and wallet reads, the realm's private WebSocket for order/fill updates |
 | `engine-risk` | the four capital controls, ported: account loss guard, equity-anchored envelope, per-strategy capital partition, stop-attach discipline. Fail-closed |
@@ -164,7 +196,12 @@ parallel and integrate by type-check.
   and is tested; it has not been exercised.
 - **Shadow mode is the default.** The engine computes intents and logs them;
   it only sends orders when started with an explicit live flag, and the risk
-  kernel still gates every send.
+  kernel still gates every send. A shadow order is judged by the same kernel
+  and then released at once rather than reserved — it can never fill, so a
+  held reservation would lean on every later verdict for the length of the
+  run. And a shadow book flip produces exits the kernel refuses, because the
+  real account holds nothing to reduce: a long shadow run's denial lines on
+  flips are that, not a fault.
 - **The four capital controls are ported, not bypassed.** They were ported
   from `account_loss_guard.py`, `equity_anchored_envelope.py`,
   `venue_protection.py` and the partition in `account_kernel.py`, with
@@ -285,10 +322,11 @@ still waiting. Five of those numbers are also in the heartbeat, so an operator
 sees them without the log.
 
 Two rules keep it from measuring nothing and calling it something. A markout
-is only taken against a book that **arrived after the fill** — a halted or
-delisted symbol keeps its last quote for ever, and four horizons marking
-against the identical mid read exactly like a measurement while being a
-measurement of nothing. And a mark that turns up long after its horizon is not
+is only taken against a book that **arrived at or after the horizon it
+measures** — a halted or delisted symbol keeps its last quote for ever, and
+four horizons marking against the identical mid read exactly like a
+measurement while being a measurement of nothing; a book that spoke once just
+after the fill and went quiet is the same trap one step later. And a mark that turns up long after its horizon is not
 that horizon: a stall or a replayed backlog would otherwise be averaged into
 the one-second column at full weight.
 
@@ -312,7 +350,11 @@ order lifecycle is written as it happens: intent → risk verdict → order sent
 (made durable *before* the bytes leave, so a crash can never forget an
 in-flight order) → venue ack or reject → fills. On boot the engine replays
 the log, truncates a torn tail at the crash point, and reconstructs what was
-in flight before touching the venue.
+in flight before touching the venue. The log's own id table (`Names`) is
+re-interned first, ahead of the config's subscriptions: ids are interning
+positions and every replayed record names the old run's numbers, so a symbol
+a book admitted at runtime keeps its id — and a position in it stays visible
+to reconciliation and the stop discipline — across a restart.
 
 Then it asks the venue. The log is a perfect record of what this engine did;
 it is not a record of what happened to the account, because the venue keeps
@@ -322,7 +364,11 @@ Boot is the one moment the two pictures can be compared:
 - An order both agree is working is adopted and keeps being charged to the
   strategy that placed it.
 - An order the log says is working and the venue has never heard of ended
-  while the engine was down. Noted, not re-sent.
+  while the engine was down. Its ending is written into the log and its claim
+  on the strategy's capital share is released — no update for it will ever
+  arrive, and left "in flight" it would charge the partition on every future
+  boot and hold the one-order-per-symbol gate closed against its symbol,
+  exits included. Nothing is re-sent.
 - An order the log never placed is reported. If it is in a symbol a strategy
   here trades, the engine stops opening; if it is in a symbol no strategy can
   even address, it is news — the owner hand-trades this account, and stopping
@@ -342,6 +388,67 @@ Proved against a real account on 2026-08-14: an engine restarted on its own log
 while holding a live position found nothing wrong; the same position under a
 fresh log reported `the venue holds 299 and this log accounts for 0` and
 refused to open anything.
+
+### The log rotates
+
+The log no longer grows without bound. Once the current file passes
+`wal_rotate_mb` (default 256; zero turns it off; a config written before the
+key existed still boots), the engine — on its group-flush tick, never between
+an order's fsync and its send — starts a fresh segment in the same directory:
+`engine.wal` is segment 1, then `engine.wal.000002`, `engine.wal.000003`, and
+so on. Old segments stay in place as archives; nothing in the engine ever
+deletes one — retention is the owner's decision.
+
+Every new segment begins with one restatement record (`SegmentBase`) carrying
+everything boot replay needs from the segments before it: the id tables, the
+may-open latch, the loss guard's anchor, every still-open order with its
+partial fills, whose fills built each position, the per-symbol fill totals
+reconciliation compares the venue against, and the intended stop per symbol.
+So boot replays only the newest segment it can trust, and recovers the same
+engine it would have from the whole history. The restatement is one
+checksummed frame, which makes "complete enough to trust" a single mechanical
+check: if a crash lands anywhere inside a rotation, the half-written segment
+fails that check and boot falls back to the old segment with nothing invented
+and nothing lost. The one flock on the configured path still covers every
+segment, so no second engine can slip in during a rotation.
+
+What a rotation drops: almost nothing, because a restart already dropped it.
+Markout horizons still owed at a restart were never rebuilt from the log, and
+the run's own cost score starts fresh each boot — rotation changes neither.
+The one genuine narrowing: after a rotation and a restart, a fill arriving
+for an order that ENDED before the rotation is charged to no strategy (the
+restatement carries open orders, not every order ever). That is the same
+treatment a hand-placed order's fill gets, it is diagnostics rather than
+safety, and reconciliation still notices the exposure. `engine fills` and
+`engine replay` read the whole segment family in order when given the
+configured path, so the offline history stays complete.
+
+## What a venue stall does
+
+Three layers, from the socket up:
+
+- **The feed reconnects itself.** The market stream pings every 20 seconds,
+  times a missing pong out at 10, and redials with backoff. A reconnect
+  clears every price and delivers a `FeedReset`, so nobody reads a pre-gap
+  quote as current. What the reconnect machinery cannot catch is a socket
+  that stays open and says nothing, or a redial loop that never lands — both
+  leave the engine's last picture standing.
+- **The account reading is bounded** (this existed first). `[risk]
+  max_account_view_age_s` — 120 in the deployed configs — is the age past
+  which the kernel refuses to judge an entry against the reading.
+- **The quote is bounded too** (`max_quote_age_ms`, default 30000): an entry
+  decided against a quote older than the bound is refused before the risk
+  kernel sees it, the refusal is written to the log as a verdict, and the
+  strategy hears it the way it hears every refusal. The age is measured from
+  the quote's own receive stamp on the engine's monotonic clock, never a
+  wall-clock guess, and a symbol that has never quoted — including right
+  after a feed reset wiped the book — is refused the same way: the absence
+  of a price is the stalest price there is.
+
+Both bounds gate ONLY the opening of exposure. Exits flow under a stale
+reading and a stale quote alike, and cancels and amends of protective orders
+are never gated: taking risk off must not wait for the market data to come
+back.
 
 ## Adding a venue
 
@@ -376,7 +483,7 @@ To add one (Hyperliquid, MEXC), four steps in `engine-venue`:
 3. Add the name to `KNOWN_VENUES` and to the `by_name` match. Nothing in
    `engine-core` changes: the loop is generic over the gateway type, and
    `assembly.rs` already asks for a venue by name.
-4. Nothing for the fence. `tests/demo_fence.rs` walks the whole crate, so a
+4. Nothing for the fence. `engine-venue/tests/venue_fence.rs` walks the whole crate, so a
    new module is scanned the moment it exists, and a host that is not a demo
    host turns the suite red wherever it is written. A companion test refuses
    a venue *name* that reads like real money; the scan is the real fence and
@@ -398,7 +505,7 @@ because the deletion order depends on it:
 | The four capital controls | Ported whole, including every load-time proof — the last one, that the account gross cap sits inside what the reference could fund, landed 2026-08-14. `engine-risk/PORT_NOTES.md` has the line-by-line |
 | The fleet's own risk limits | Done. `[risk] operational_profile_path` loads `configs/operational.mainnet.json` itself, so a cap the owner tightens tightens for both halves. Measured: the Python and Rust loaders read that file identically, field for field |
 | Quantizing to tick and step, venue minimums | Done |
-| Following a research target book | Built, tested, and run against the demo account. The plug remembers what it sent until the account reading shows it, so the window between a fill and the next reading cannot become a second entry |
+| Following a research target book | Built, tested, and run against the demo account. The engine remembers what each strategy sent until the account reading shows it, so the window between a fill and the next reading cannot become a second entry — see the in-flight row below |
 | One account, more than one sleeve | Done. Each sleeve names its own book path and that book reaches that sleeve only. Before this a book went to every strategy, and two followers on one account would have fought over the same positions |
 | Stating leverage at the venue | Done. The leverage a decision was sized at travels with it, and an order whose leverage cannot be set is not sent. Entries only |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
@@ -410,6 +517,7 @@ because the deletion order depends on it:
 | Saying what the fills cost | Done, 2026-08-14. `is_maker` kept from the venue, `M0` written on every send, arrival shortfall / effective spread / fee / all-in derived, and the signed markout at 1s/15s/1m/5m written when its horizon comes due. `engine fills --wal PATH` is the read; five of the numbers are in the heartbeat |
 | Saying what its own ids mean | Done, 2026-08-14. Strategy and symbol ids are positions, so the log records both tables — at boot and again whenever a book names a new symbol. Before this, `engine replay` could say an order was strategy 1's for symbol 4 and no more |
 | A strategy reading its own position | Done, 2026-08-14. `my_position` is that strategy's own fills, moving the instant one arrives. The account reading beside it lags seconds and, on a two-sleeve account, is the sum of both |
+| A strategy reading what it has in flight | Done, 2026-08-18. `in_flight` is the engine's own note of what a strategy sent that the account reading has not absorbed yet — booked at the send, at the quantized size that actually went, and released as the reading catches up or a reject, cancel, or refused exit ends it. The follower used to keep these records privately; the mechanism moved into the engine (`engine-core/src/covers.rs`) so every plug gets the one truthful reading |
 | Following a symbol a book names late | Done. A name the engine has never followed is taken on when a book asks for it: interned, subscribed, added to the gateway, taught to the private stream, and given an instrument rule. The four tables that map names to ids are checked against each other and a symbol they disagree about is dropped rather than traded |
 
 ### What that leaves

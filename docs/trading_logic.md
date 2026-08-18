@@ -2,9 +2,10 @@
 
 What each sleeve trades, how it sizes, how it exits, and where its evidence stops. Code is
 the authority: [`long_native_event_demo.py`](../liquidity_migration/strategy/long_native_event_demo.py)
-and [`long_native.py`](../liquidity_migration/research/backtest/long_native.py),
+and [`rules/long_native.py`](../liquidity_migration/rules/long_native.py),
 [`carry_demo.py`](../liquidity_migration/strategy/carry_demo.py) and
-[`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py).
+[`rules/carry_hold.py`](../liquidity_migration/rules/carry_hold.py) (scored by
+[`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py)).
 
 ## On today
 
@@ -116,9 +117,9 @@ historical-universe claim ([`data.md`](data.md)). The scoped run label carries a
 funding-coverage dimension as well as a PIT one, and funding downgrades it independently:
 `pit_required_missing_manifest`, `pit_membership_filtered_current_universe`,
 `full_pit_universe_funding_missing`, `full_pit_universe_funding_coverage_low`,
-`full_pit_universe_funding_partial`, `full_pit_universe` (`long_native.py:1440-1458`), plus a
+`full_pit_universe_funding_partial`, `full_pit_universe` (`long_native.py:1135-1153`), plus a
 methodology label `invalid` / `biased_benchmark` / `exploratory` from taint and manifest state
-(`:1472-1487`). `full_pit_universe_pass=true` beside a
+(`:1156-1171`). `full_pit_universe_pass=true` beside a
 `full_pit_universe_funding_coverage_low` label is not a historical-universe claim.
 
 ## CARRY — `lane2_carry_hold_v4`

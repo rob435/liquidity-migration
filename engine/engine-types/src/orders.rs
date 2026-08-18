@@ -257,6 +257,17 @@ pub struct OrderAck {
     pub ack_ns: u64,
 }
 
+/// The log's answer about one order, for a strategy that holds only its id.
+/// See `StrategyCtx::order_facts`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct OrderFacts {
+    pub symbol: SymbolId,
+    pub side: Side,
+    pub qty: f64,
+    pub filled_qty: f64,
+    pub reduce_only: bool,
+}
+
 /// Order lifecycle news, from the venue reply or the private stream.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum OrderUpdate {

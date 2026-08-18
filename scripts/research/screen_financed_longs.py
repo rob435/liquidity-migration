@@ -26,17 +26,19 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from liquidity_migration.research.backtest.financed_longs import (  # noqa: E402
-    CarryHoldConfig,
     FinancedLeadersConfig,
     btc_gate,
-    carry_hold_weights,
-    daily_grid,
     daily_scores,
     financed_leaders_weights,
     prepare,
     summarize,
-    top_n_universe,
     venue_view,
+)
+from liquidity_migration.rules.carry_hold import (  # noqa: E402
+    CarryHoldConfig,
+    carry_hold_weights,
+    daily_grid,
+    top_n_universe,
 )
 
 #: The deployed benchmark: CONTINUOUS sl35 render over BENCH_START..BENCH_END

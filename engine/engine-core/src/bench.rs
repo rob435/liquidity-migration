@@ -128,8 +128,18 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         // Named but unused: the bench builds its own pretend venue below.
         venue: engine_venue::BYBIT_DEMO.to_string(),
         group_flush_ms: 250,
+        // Never rotates mid-bench: a rotation on the tick would put a
+        // directory fsync into one unlucky sample.
+        wal_rotate_mb: 0,
         account_view_max_age_ms: 60_000,
+        // Wide, so a long low-rate bench never has its later orders refused
+        // against the stamps of its own generated quotes.
+        max_quote_age_ms: 600_000,
         shadow: false,
+        // Shared, the default: the bench's orders carry no leverage, so the
+        // authority mode never comes up — this just keeps the bench honest
+        // about what a default config runs.
+        leverage_authority: crate::config::LeverageAuthority::default(),
         // Shadow off on purpose: the point is to measure a real send. The
         // venue on the other end is the pretend one started just above.
         target_book_path: None,

@@ -301,7 +301,7 @@ def test_run_revalidates_long_route_before_opening_resources(tmp_path: Path) -> 
 def test_daemon_profile_name_and_cycle_kwargs_follow_strategy_config(
     tmp_path: Path,
 ) -> None:
-    from liquidity_migration.research.backtest.long_native import long_v12_profile
+    from liquidity_migration.rules.long_native import long_v12_profile
 
     seen: list[dict] = []
     daemon = LongNativeDemoDaemon(

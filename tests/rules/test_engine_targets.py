@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from liquidity_migration.research.engine_targets import (
+from liquidity_migration.rules.engine_targets import (
     TARGET_BOOK_VERSION,
     EngineTarget,
     render_target_book,

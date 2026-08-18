@@ -155,6 +155,22 @@ fn a_symbol_that_stopped_publishing_is_never_marked_against_its_last_price() {
 }
 
 #[test]
+fn a_mid_from_before_the_horizon_is_not_that_horizon() {
+    // A book that spoke once just after the fill and then went quiet: the 1s
+    // column must wait for a post-horizon book (and give up honestly), not
+    // record the 100ms-old mid as the one-second markout.
+    let mut fills = Fills::default();
+    let mut quiet = market(99.0, 101.0);
+    quiet.quotes[BTC.0 as usize].recv_ns = 1_000 + 100 * MS;
+    fills.on_fill(&fill(Side::Buy, 100.0, 10.0, 100.0), 1_000);
+
+    assert!(fills.due(1_000 + 1_100 * MS, &quiet).is_empty(), "waiting for a post-horizon book");
+    let gave_up = fills.due(1_000 + (1_000 + LATENESS_BOUND_MS) * MS, &quiet);
+    assert_eq!(gave_up.len(), 1);
+    assert_eq!(gave_up[0].mid, None, "a pre-horizon mid is not the 1s markout");
+}
+
+#[test]
 fn a_stream_gap_is_remembered_because_the_fills_in_it_are_not() {
     // Nothing can recover them. All this can do is stop the report claiming to
     // be a complete account of what the trading cost.
@@ -324,7 +340,10 @@ fn each_sleeves_costs_are_its_own() {
 fn a_markout_comes_due_at_its_horizon_and_not_before() {
     let mut fills = Fills::default();
     fills.on_fill(&fill(Side::Buy, 100.0, 10.0, 100.0), 0);
-    let market = market(100.9, 101.1);
+    // A live book keeps pushing, so the mark taken at each horizon is one
+    // that arrived at or after it — the fixture has to say so.
+    let mut market = market(100.9, 101.1);
+    market.quotes[BTC.0 as usize].recv_ns = 1_050 * MS;
 
     assert!(fills.due(500 * MS, &market).is_empty(), "1s has not passed");
     let marks = fills.due(1_100 * MS, &market);
@@ -337,6 +356,7 @@ fn a_markout_comes_due_at_its_horizon_and_not_before() {
 
     // The later horizons are still owed.
     assert_eq!(fills.pending(), 1);
+    market.quotes[BTC.0 as usize].recv_ns = 400_000 * MS;
     let rest = fills.due(400_000 * MS, &market);
     assert_eq!(rest.len(), 3, "15s, 1m and 5m all came due together");
     assert_eq!(fills.pending(), 0, "nothing left to mark");
@@ -365,7 +385,11 @@ fn a_book_that_comes_back_inside_the_bound_is_marked_against_it() {
     let mut fills = Fills::default();
     fills.on_fill(&fill(Side::Buy, 100.0, 10.0, 100.0), 0);
     assert!(fills.due(1_100 * MS, &market(101.0, 99.0)).is_empty());
-    let marks = fills.due(3_000 * MS, &market(100.9, 101.1));
+    // The book that came back is stamped when it came back — two seconds
+    // past the horizon — not at the fixture default of one nanosecond.
+    let mut back = market(100.9, 101.1);
+    back.quotes[BTC.0 as usize].recv_ns = 3_000 * MS;
+    let marks = fills.due(3_000 * MS, &back);
     assert_eq!(marks[0].mid, Some(101.0));
     assert_eq!(marks[0].actual_horizon_ms, 3_000, "late, and honest about it");
 }

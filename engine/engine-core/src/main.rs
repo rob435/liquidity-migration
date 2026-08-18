@@ -111,7 +111,10 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
         "fills" => {
             let path = value(args, "--wal").ok_or("fills needs --wal PATH")?;
-            let (replayed, torn) = engine_wal::replay_scan(Path::new(&path))?;
+            // The whole family, oldest segment first. A log that was never
+            // rotated is a family of one, so a plain file path still means
+            // what it always did.
+            let (replayed, torn) = engine_wal::replay_chain(Path::new(&path))?;
             let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
             print!("{}", execution::report::of_log(&records));
             if torn {

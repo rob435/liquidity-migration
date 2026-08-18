@@ -35,11 +35,11 @@ from liquidity_migration.account.account_route import (
     ensure_account_route,
 )
 from liquidity_migration.core.config import ResearchConfig
-from liquidity_migration.research.backtest.long_identity import (
+from liquidity_migration.rules.long_identity import (
     LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
     LONG_V12_WIDE_STOP_STRATEGY_ID,
 )
-from liquidity_migration.research.backtest.long_native import long_v11a_profile, long_v12_profile
+from liquidity_migration.rules.long_native import long_v11a_profile, long_v12_profile
 from liquidity_migration.strategy.long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _count_long_target_reservations,
@@ -174,7 +174,7 @@ def test_long_cycle_refuses_local_dry_run(tmp_path: Path) -> None:
 
 def test_vol_target_scale_volup125() -> None:
     """volup125: the cap is 1.25 -- mild scale-up in calm regimes, de-risk unchanged."""
-    from liquidity_migration.research.backtest.long_native import _vol_target_scale
+    from liquidity_migration.rules.long_native import _vol_target_scale
 
     cfg = long_v11a_profile()
     assert _vol_target_scale(cfg, 0.30) == pytest.approx(1.25)  # calm -> mild lever-up, capped at 1.25
@@ -607,7 +607,7 @@ def test_long_entry_excludes_incomplete_today_bar() -> None:
     eligible: firing on a not-yet-closed bar is look-ahead against the backtest's
     closed-bar signal.
     """
-    from liquidity_migration.research.backtest.long_native import LongNativeConfig
+    from liquidity_migration.rules.long_native import LongNativeConfig
     from liquidity_migration.strategy.long_native_event_demo import _select_long_entry_candidates
 
     now = 1_700_000_000_000
@@ -712,7 +712,7 @@ def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
     base per-position notional * the de-risk-only vol-target scalar keyed on the
     latest non-null ``btc_rv_30`` after sorting by ts_ms.
     """
-    from liquidity_migration.research.backtest.long_native import _vol_target_scale
+    from liquidity_migration.rules.long_native import _vol_target_scale
     from liquidity_migration.strategy.long_native_event_demo import (
         _compute_long_order_sizing,
         target_long_order_notional_pct_equity,
@@ -735,7 +735,7 @@ def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
 
 
 def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> None:
-    from liquidity_migration.research.backtest.long_native import _vol_target_scale
+    from liquidity_migration.rules.long_native import _vol_target_scale
     from liquidity_migration.strategy.long_native_event_demo import (
         _compute_long_order_sizing,
         target_long_order_notional_pct_equity,
@@ -768,7 +768,7 @@ def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> N
 
 
 def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists() -> None:
-    from liquidity_migration.research.backtest.long_native import _vol_target_scale
+    from liquidity_migration.rules.long_native import _vol_target_scale
     from liquidity_migration.strategy.long_native_event_demo import (
         _compute_long_order_sizing,
         target_long_order_notional_pct_equity,

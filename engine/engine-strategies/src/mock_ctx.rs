@@ -22,9 +22,9 @@
 use std::collections::{HashMap, HashSet};
 
 use engine_types::{
-    Action, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderAck, OrderKind, OrderUpdate,
-    PositionView, Quote, RestingOrder, Side, Strategy, StrategyCtx, SymbolId, TargetBook, Ticker,
-    TimerId,
+    Action, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderAck, OrderKind,
+    OrderUpdate, PositionView, Quote, RestingOrder, Side, Strategy, StrategyCtx, SymbolId,
+    TargetBook, Ticker, TimerId,
 };
 
 /// A timer the strategy asked for, and when it comes due.
@@ -66,6 +66,12 @@ pub struct MockCtx {
     /// test delivers, so a plug that reads its own inventory reads the same
     /// number here that it would live.
     mine: HashMap<SymbolId, f64>,
+    /// What the engine's cover book would say this strategy has sent that
+    /// the account reading has not absorbed yet, signed, positive long. The
+    /// engine books and releases the real one (`engine-core/src/covers.rs`);
+    /// the bench holds whatever a test seeds, because the registering and
+    /// releasing are the engine's behavior and are tested there.
+    in_flight: HashMap<SymbolId, f64>,
     /// What the venue said about tick and step. Empty unless a test seeds it,
     /// and an unseeded symbol reads the way an unknown one does: nothing can
     /// be quantized for it.
@@ -95,6 +101,7 @@ impl MockCtx {
             positions: HashMap::new(),
             foreign: HashSet::new(),
             mine: HashMap::new(),
+            in_flight: HashMap::new(),
             rules: HashMap::new(),
             now_ns: 1_000,
             // An ordinary unix millisecond stamp, so anything that reads like
@@ -149,6 +156,7 @@ impl MockCtx {
                 qty,
                 entry_px,
                 stop_attached: true,
+                leverage: None
             },
         );
     }
@@ -178,6 +186,18 @@ impl MockCtx {
     pub fn set_my_position(&mut self, symbol: &str, signed_qty: f64) {
         let id = self.add_symbol(symbol);
         self.mine.insert(id, signed_qty);
+    }
+
+    /// Seed what the engine's cover book would answer for this symbol: the
+    /// signed quantity sent that the account reading has not shown yet. Zero
+    /// clears it, the way a reading that caught up would.
+    pub fn set_in_flight(&mut self, symbol: &str, signed_qty: f64) {
+        let id = self.add_symbol(symbol);
+        if signed_qty == 0.0 {
+            self.in_flight.remove(&id);
+        } else {
+            self.in_flight.insert(id, signed_qty);
+        }
     }
 
     /// Seed the venue's tick, step and minimums for a symbol.
@@ -217,6 +237,10 @@ impl StrategyCtx for MockCtx {
         self.mine.get(&symbol).copied().unwrap_or(0.0)
     }
 
+    fn in_flight(&self, symbol: SymbolId) -> f64 {
+        self.in_flight.get(&symbol).copied().unwrap_or(0.0)
+    }
+
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
         self.rules.get(&symbol).copied()
     }
@@ -251,6 +275,10 @@ impl StrategyCtx for MockCtx {
             });
         }
     }
+
+    // `order_facts` is left at the trait's default (`None`): this bench keeps
+    // no order ledger, and the cover bookkeeping that used to need the lookup
+    // lives in the engine now.
 }
 
 /// One strategy plus its context, with a verb for every event the engine can

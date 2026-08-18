@@ -136,6 +136,7 @@ pub fn position(
         qty,
         entry_px,
         stop_attached,
+        leverage: None
     }
 }
 

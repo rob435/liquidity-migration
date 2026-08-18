@@ -16,11 +16,11 @@ from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.strategy.event_demo_data import top_turnover_kline_universe
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
-from liquidity_migration.research.backtest.long_identity import (
+from liquidity_migration.rules.long_identity import (
     LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME,
     long_profile_display_name,
 )
-from liquidity_migration.research.backtest.long_native import LongNativeConfig
+from liquidity_migration.rules.long_native import LongNativeConfig
 from liquidity_migration.strategy.long_native_event_demo import (
     LongCycleState,
     LongNativeDemoCycleConfig,

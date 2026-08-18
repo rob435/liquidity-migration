@@ -14,6 +14,19 @@
 //! frame, a frame that runs past the end of the file, or one whose checksum
 //! does not match — is cut off, and appending resumes on that boundary. A bad
 //! header is refused instead: a file that is not ours is not ours to truncate.
+//!
+//! ## Segments
+//!
+//! A log that grows without bound is rotated into numbered segments in the
+//! same directory: the configured path is segment 1, and rotation adds
+//! `<name>.000002`, `<name>.000003`, … Every segment after the first begins
+//! with one [`WalRecord::SegmentBase`] restating everything boot replay
+//! needs, so boot replays only the newest segment it can trust —
+//! [`open_current`] — and the older ones are archives, never deleted by any
+//! code here. Retention is the owner's decision. [`replay_chain`] reads the
+//! whole family in order for the offline tools. The single-writer claim
+//! stays on the configured path ([`lock`]), so one flock covers every
+//! segment and the rotation between them.
 
 use std::ffi::CString;
 use std::fmt;
@@ -41,19 +54,32 @@ pub struct WalWriter {
     /// serialized straight into it, so a warm writer allocates nothing.
     buf: Vec<u8>,
     next_seq: u64,
+    /// The configured log path — segment 1, and the name every later
+    /// segment's number is appended to.
+    family: PathBuf,
+    /// Bytes already in the current segment's file (header included).
+    file_bytes: u64,
 }
 
 impl WalWriter {
     /// Open an existing log or create a new one, replay what is on disk, and
     /// position for appending after the last good frame. Returns the writer
     /// and every record replayed, each with its sequence.
+    ///
+    /// This opens exactly the file named. A log that may have been rotated is
+    /// opened with [`open_current`], which picks the newest segment boot can
+    /// trust.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
+        Self::open_segment(path.as_ref(), path.as_ref())
+    }
+
+    fn open_segment(path: &Path, family: &Path) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(path.as_ref())?;
+            .open(path)?;
         let len = file.metadata()?.len();
 
         let scan = if len == 0 {
@@ -69,8 +95,13 @@ impl WalWriter {
         file.seek(SeekFrom::Start(scan.good_end))?;
 
         let next_seq = scan.records.len() as u64 + 1;
-        let writer =
-            WalWriter { file, buf: Vec::with_capacity(BUFFER_HIGH_WATER), next_seq };
+        let writer = WalWriter {
+            file,
+            buf: Vec::with_capacity(BUFFER_HIGH_WATER),
+            next_seq,
+            family: family.to_path_buf(),
+            file_bytes: scan.good_end,
+        };
         Ok((writer, scan.records))
     }
 
@@ -84,6 +115,7 @@ impl WalWriter {
             return Ok(());
         }
         self.file.write_all(&self.buf)?;
+        self.file_bytes += self.buf.len() as u64;
         self.buf.clear();
         Ok(())
     }
@@ -121,6 +153,81 @@ impl Wal for WalWriter {
 
     fn flush(&mut self) -> Result<(), WalError> {
         self.push_to_os()
+    }
+
+    fn segment_size(&self) -> u64 {
+        self.file_bytes + self.buf.len() as u64
+    }
+
+    /// Start the next segment, first record `base`, and archive the current
+    /// one in place. Nothing is ever deleted here — retention is the owner's.
+    ///
+    /// The crash-ordering argument, step by step. A crash at ANY point must
+    /// leave [`open_current`] recovering the same engine:
+    ///
+    /// 1. The old segment's buffered tail is pushed and fdatasync'd, so the
+    ///    archive is complete before anything new exists. A crash here: the
+    ///    new segment does not exist, boot replays the old one. Nothing lost.
+    /// 2. The new segment is created under a name no segment has used
+    ///    (`create_new`, at one past the highest number in the directory —
+    ///    an abandoned torn segment from an earlier crash is skipped, never
+    ///    reused, because appending a fresh restatement after half an old one
+    ///    would replay both). A crash while its base record is being written
+    ///    leaves a torn first frame: [`open_current`] refuses a numbered
+    ///    segment whose first record does not read back as a complete
+    ///    `SegmentBase` — the frame checksum makes that one mechanical check
+    ///    — and falls back to the old segment. Nothing lost, nothing
+    ///    invented.
+    /// 3. The base frame is fdatasync'd, then the directory entry is
+    ///    fsync'd. A crash after both but before this writer switches: the
+    ///    new segment IS trusted and boot may pick it — which recovers the
+    ///    identical state, because the base restates the old segment in
+    ///    full and nothing has been appended anywhere since it was computed
+    ///    (the caller is the single-threaded engine loop).
+    /// 4. Only then does this writer switch its file handle. From the first
+    ///    append after that, the new segment is the one with unique records,
+    ///    and it is already the one boot picks.
+    fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
+        // 1. Finish the archive.
+        self.push_to_os()?;
+        self.file.sync_data()?;
+
+        // 2. The next unused number, torn leftovers included.
+        let next_index = segments(&self.family)?
+            .last()
+            .map(|(index, _)| index + 1)
+            .unwrap_or(2)
+            .max(2);
+        let path = segment_path(&self.family, next_index);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(&MAGIC)?;
+        let mut frame: Vec<u8> = Vec::with_capacity(BUFFER_HIGH_WATER);
+        frame.extend_from_slice(&[0u8; FRAME_HEADER_LEN]);
+        serde_json::to_writer(&mut frame, base)
+            .map_err(|e| WalError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+        let payload = &frame[FRAME_HEADER_LEN..];
+        let payload_len = payload.len() as u32;
+        let crc = crc32c::crc32c(payload);
+        frame[..4].copy_from_slice(&payload_len.to_le_bytes());
+        frame[4..FRAME_HEADER_LEN].copy_from_slice(&crc.to_le_bytes());
+        file.write_all(&frame)?;
+
+        // 3. The restatement durable, then its name durable.
+        file.sync_data()?;
+        if let Some(dir) = path.parent() {
+            File::open(dir)?.sync_all()?;
+        }
+
+        // 4. Switch. The old file handle closes when it drops; the file
+        //    itself stays where it is, an archive.
+        self.file = file;
+        self.file_bytes = HEADER_LEN + frame.len() as u64;
+        self.next_seq = 2;
+        Ok(true)
     }
 }
 
@@ -268,6 +375,159 @@ pub fn replay_scan(path: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, boo
     let scan = scan_file(&mut file, len)?;
     let damaged_tail = scan.good_end < len;
     Ok((scan.records, damaged_tail))
+}
+
+// ------------------------------------------------------------- segments
+
+/// The name of segment `index` in `family`'s directory. Segment 1 is the
+/// family path itself — every log written before rotation existed is
+/// segment 1 of its own family, unchanged.
+fn segment_path(family: &Path, index: u64) -> PathBuf {
+    if index <= 1 {
+        return family.to_path_buf();
+    }
+    let mut name = family.as_os_str().to_os_string();
+    name.push(format!(".{index:06}"));
+    PathBuf::from(name)
+}
+
+/// Every segment of this family that exists, ascending by number. The family
+/// file itself is index 1 when present.
+pub fn segments(family: &Path) -> Result<Vec<(u64, PathBuf)>, WalError> {
+    let mut found: Vec<(u64, PathBuf)> = Vec::new();
+    if family.exists() {
+        found.push((1, family.to_path_buf()));
+    }
+    let dir = family.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = dir.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let Some(stem) = family.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return Ok(found);
+    };
+    let prefix = format!("{stem}.");
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(suffix) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if suffix.len() == 6 && suffix.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(index) = suffix.parse::<u64>() {
+                if index >= 2 {
+                    found.push((index, entry.path()));
+                }
+            }
+        }
+    }
+    found.sort_by_key(|(index, _)| *index);
+    Ok(found)
+}
+
+/// Whether boot may replay this segment alone.
+///
+/// Segment 1 always: it is the whole history up to the first rotation, so
+/// there is nothing before it to restate. A later segment only if its first
+/// record reads back as a complete [`WalRecord::SegmentBase`] — the frame
+/// checksum makes a torn restatement mechanically detectable, and a torn
+/// restatement means the rotation never finished, so the segment before it
+/// is still the truth.
+fn trusted(index: u64, records: &[(u64, WalRecord)]) -> bool {
+    if index <= 1 {
+        return true;
+    }
+    matches!(records.first(), Some((_, WalRecord::SegmentBase { .. })))
+}
+
+/// Read one candidate segment for the trust decision. A numbered segment
+/// whose own header never finished — the crash landed inside the first eight
+/// bytes of a rotation — reads as empty, exactly like a torn restatement,
+/// rather than as an error. The family file gets no such pass, and
+/// corruption past a good header is refused for both: real records that
+/// cannot be read are not ours to skip.
+fn scan_candidate(index: u64, path: &Path) -> Result<(Vec<(u64, WalRecord)>, bool), WalError> {
+    match replay_scan(path) {
+        Ok(read) => Ok(read),
+        Err(WalError::Corrupt { offset: 0, .. }) if index > 1 => Ok((Vec::new(), false)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Open the newest segment boot can trust, replaying it. This is how the
+/// engine opens its log: a family that was never rotated is just its own
+/// single file, so every log written before segments existed opens the same
+/// way it always did.
+///
+/// Take [`lock`] on the FAMILY path first, exactly as before — one flock
+/// covers every segment and the rotation between them, so there is no window
+/// where a second engine could claim the directory.
+pub fn open_current(family: impl AsRef<Path>) -> Result<(WalWriter, Vec<(u64, WalRecord)>), WalError> {
+    let family = family.as_ref();
+    let mut chain = segments(family)?;
+    while let Some((index, path)) = chain.pop() {
+        // Read-only first: a candidate that fails the trust check must not
+        // be truncated or written to — it is either an archive or the
+        // leftover of a rotation that never finished, and both stay as
+        // evidence.
+        let (records, _) = scan_candidate(index, &path)?;
+        if trusted(index, &records) {
+            return WalWriter::open_segment(&path, family);
+        }
+    }
+    // Nothing exists yet: a fresh log at the family path.
+    WalWriter::open_segment(family, family)
+}
+
+/// Replay a whole family in order, for the offline readers: every good record
+/// of every segment, renumbered consecutively. The flag says whether the
+/// NEWEST trusted segment ends in a torn tail — the crash point a writer
+/// would truncate. Torn leftovers of abandoned rotations (a numbered segment
+/// with no complete restatement) hold no records of their own and are
+/// skipped without raising it.
+///
+/// Restatement records are left in the stream. They are written as "set
+/// state to this", and at their position in the chain that state is exactly
+/// what the records before them already produced, so readers that apply them
+/// see the same history either way.
+pub fn replay_chain(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, bool), WalError> {
+    let family = family.as_ref();
+    let chain = segments(family)?;
+    let newest_trusted = chain
+        .iter()
+        .rev()
+        .find_map(|(index, path)| {
+            let read = scan_candidate(*index, path);
+            match read {
+                Ok((records, damaged)) if trusted(*index, &records) => {
+                    Some(Ok((*index, damaged)))
+                }
+                Ok(_) => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .transpose()?;
+    let mut out: Vec<(u64, WalRecord)> = Vec::new();
+    let mut damaged = false;
+    for (index, path) in &chain {
+        let (records, torn) = scan_candidate(*index, path)?;
+        if !trusted(*index, &records) {
+            // An abandoned rotation: its only content was a restatement that
+            // never finished. Boot never replayed it and neither do we.
+            continue;
+        }
+        if let Some((newest, newest_damaged)) = newest_trusted {
+            if *index == newest {
+                damaged = newest_damaged;
+            } else if torn {
+                // An archive should never be torn — rotation syncs it before
+                // the next segment exists — so damage here is worth a flag.
+                damaged = true;
+            }
+        }
+        for (_, record) in records {
+            let seq = out.len() as u64 + 1;
+            out.push((seq, record));
+        }
+    }
+    Ok((out, damaged))
 }
 
 struct Scan {

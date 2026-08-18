@@ -249,7 +249,7 @@ then tightening back to 1.5× is worth **+0.48 bp/day, t 3.27, n 1927**.
 | LONG profile | trades | total | daily Sharpe | worst dip | MAR | stop / target / time exits |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `LongV11aDivWeekendVol` (deployed) | 292 | +40.7% | 1.28 | −4.11% | 1.72 | 66 / 36 / 190 |
-| [`LongV12WideStop`](../../liquidity_migration/research/backtest/long_native.py) | 293 | **+52.2%** | **1.50** | **−3.32%** | **2.50** | 50 / 39 / 204 |
+| [`LongV12WideStop`](../../liquidity_migration/rules/long_native.py) | 293 | **+52.2%** | **1.50** | **−3.32%** | **2.50** | 50 / 39 / 204 |
 
 Better or equal in all six calendar years (2022 flips −0.9% → +0.8%) and *less* concentrated than v11a
 (best-20 trades carry 62% of P&L against 78%), on flat gross (0.027 → 0.028) so it is not leverage.
@@ -417,7 +417,7 @@ registered v4 bit-identically (1,756 days, 22.1939 bp/day) before any arm ran.
 hour after a settlement it reads 0.9999999999999999, not 1.0 — so the old `age < 1.0` predicate matched two
 bars per 8h/4h/2h settlement and charged every such print **twice**; 1h-interval symbols escaped because the
 next print overwrote the epsilon bar. Now an age-reset test, `(age < 0.5) | (age < age.shift(1).over("symbol"))`,
-in [financed_longs.py](../../liquidity_migration/research/backtest/financed_longs.py) and mirrored in `lane2_blend.py`, with
+in [carry_hold.py](../../liquidity_migration/rules/carry_hold.py) and mirrored in `lane2_blend.py`, with
 regression tests on real age shapes. Weights, entries, exits, price legs and turnover costs are unaffected —
 decisions read funding *levels*. Only funding P&L inflated, ~×1.5–2 blended and worst where funding was deepest.
 

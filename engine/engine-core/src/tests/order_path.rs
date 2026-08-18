@@ -233,7 +233,10 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
-    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let (mut venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    // The venue confirms it is still working the order; a recovered order
+    // the venue does not confirm is reaped at boot instead of registered.
+    venue.working = vec![still_working("eng-1700000000000-4", "BTCUSDT", 0.25)];
     let (risk, _seen) = MockRisk::with(allow_all());
     let registered = risk.registered.clone();
     let engine = Engine::boot(
@@ -252,6 +255,136 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
         *registered.borrow(),
         vec![("eng-1700000000000-4".to_string(), 0.25)]
     );
+}
+
+#[tokio::test]
+async fn symbol_ids_survive_a_restart_in_the_log_order() {
+    // Ids are interning positions, and every join boot makes against the
+    // replayed records — whose fills are whose, what exposure the log
+    // accounts for, which symbol an in-flight order is in — names the OLD
+    // run's numbers. The log's own Names record, not this config's
+    // subscription order, must decide the table.
+    let replayed = vec![WalRecord::Names {
+        strategies: vec!["carry".into()],
+        symbols: vec!["ETHUSDT".into(), "HOMEUSDT".into(), "BTCUSDT".into()],
+    }];
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (engine, _h) = build(
+        false,
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &replayed,
+    )
+    .await;
+    let table = &engine.market().table;
+    assert_eq!(table.get("ETHUSDT"), Some(SymbolId(0)));
+    assert_eq!(
+        table.get("HOMEUSDT"),
+        Some(SymbolId(1)),
+        "a symbol a book admitted last run keeps its position"
+    );
+    assert_eq!(
+        table.get("BTCUSDT"),
+        Some(SymbolId(2)),
+        "the config's own symbol keeps the log's id, not position zero"
+    );
+}
+
+#[tokio::test]
+async fn a_shadow_order_reserves_nothing_with_the_kernel() {
+    // A shadow order can never fill or be cancelled, so a reservation for
+    // it could never be released: a long shadow run would lean on every
+    // later verdict with exposure that does not exist.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let tape = tape();
+    let (wal, _records) = MockWal::new(tape.clone());
+    let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let registered = risk.registered.clone();
+    let mut engine = Engine::boot(
+        &settings(true),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &[],
+    )
+    .await
+    .expect("boot");
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert!(sends.borrow().is_empty(), "shadow sends nothing");
+    assert!(
+        registered.borrow().is_empty(),
+        "and reserves nothing: there is no fill coming to release it"
+    );
+}
+
+#[tokio::test]
+async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
+    // It ended while the engine was down, and no update for it will ever
+    // arrive — the private stream does not replay history. Left "in flight"
+    // it would charge the kernel's partition on every future boot and hold
+    // the one-order-per-symbol gate closed against the symbol, exits
+    // included.
+    let replayed = vec![WalRecord::OrderSent {
+        request: OrderRequest {
+            client_order_id: "eng-1700000000000-4".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.25,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: false,
+        },
+        wire_ns: 3,
+        arrival_mid: 0.0,
+    }];
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let tape = tape();
+    let (wal, records) = MockWal::new(tape.clone());
+    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let registered = risk.registered.clone();
+    let engine = Engine::boot(
+        &settings(true),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &replayed,
+    )
+    .await
+    .expect("boot");
+    assert!(
+        engine.in_flight_ids().is_empty(),
+        "the venue is not working it, so it is not in flight"
+    );
+    assert!(
+        registered.borrow().is_empty(),
+        "a dead order must not charge the partition"
+    );
+    // The ending is durable, so the next boot does not rediscover the ghost.
+    let reaped = records.borrow().iter().any(|record| {
+        matches!(
+            record,
+            WalRecord::OrderUpdate {
+                update: OrderUpdate::Cancelled { client_order_id, .. }
+            } if client_order_id == "eng-1700000000000-4"
+        )
+    });
+    assert!(reaped, "the log records the ending the venue proved");
 }
 
 #[test]
@@ -664,12 +797,13 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
     ];
 
     let (buyer, heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (mut engine, h) = build(
+    let (mut engine, h) = build_with_venue_orders(
         false,
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &replayed,
+        vec![still_working("eng-1700000000000-4", "BTCUSDT", 0.01)],
     )
     .await;
     assert_eq!(

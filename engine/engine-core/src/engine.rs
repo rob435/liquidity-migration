@@ -45,6 +45,7 @@ use engine_types::{
 use crate::attribution::Attribution;
 use crate::clock;
 use crate::config::EngineSection;
+use crate::covers::CoverBook;
 use crate::ctx::{Ctx, Timers};
 use crate::execution::{self, Fills};
 use crate::heartbeat::{self, Heartbeat};
@@ -125,6 +126,11 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// carries no strategy on it, so this is summed from the fills of the
     /// orders each strategy placed, and rebuilt from the log at boot.
     attribution: Attribution,
+    /// What each strategy has sent that the account reading has not yet
+    /// absorbed, per (strategy, symbol). Booked at the send, released by
+    /// rejects, cancels, refused exits, and the reading catching up; read by
+    /// strategies as `ctx.in_flight`. The rules live in `covers.rs`.
+    covers: CoverBook,
     /// The resting entries this engine is advancing. Empty unless a strategy
     /// asked for one to be worked.
     working: WorkingOrders,
@@ -144,7 +150,16 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// account by hand, and a symbol that has been closed and reopened may
     /// have been set to anything in between. The same rule the Python fleet
     /// runs under `--shared-leverage-authority`.
+    ///
+    /// Under SOLE authority (an account this engine exclusively leases and
+    /// nobody hand-trades) the forgetting stops: what this engine set stays
+    /// trusted across flat spells, entries from flat skip the confirmation
+    /// round trip (~172 ms measured on the box), and every held position's
+    /// leverage is instead read back off the venue's own position rows — a
+    /// mismatch alarms and evicts the trust, so the next entry confirms
+    /// inline again.
     leverage_at: std::collections::HashMap<SymbolId, f64>,
+    leverage_authority: crate::config::LeverageAuthority,
     ledger: LatencyLedger,
     /// What the fills cost. The latency ledger beside it measures our own side
     /// of the wire; this one measures the price, which is the half that
@@ -162,9 +177,27 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// add exposure. False latches: it is written into the log and read back
     /// on the next boot, so a restart cannot quietly clear it.
     may_open: bool,
+    /// The newest control anchor per source, mirroring what was written to
+    /// the log, so a rotation can restate it without re-reading the file.
+    control_anchors: std::collections::BTreeMap<String, String>,
+    /// Signed quantity per symbol over every fill this log ever held —
+    /// strangers' included, because it mirrors the log's records, not the
+    /// strategies. It is what reconcile compares the venue's positions
+    /// against, seeded at boot by the same scan reconcile uses and kept
+    /// live by the same arithmetic, so a rotation can restate it exactly.
+    logged_exposure: std::collections::BTreeMap<u16, f64>,
+    /// The stop each symbol's newest opening order asked for, kept live for
+    /// the same reason: a stop the venue drops after a rotation must still
+    /// be repairable at the level the log intended.
+    intended_stops: std::collections::BTreeMap<u16, f64>,
     shadow: bool,
     group_flush: Duration,
     refresh_after_ns: u64,
+    /// Rotate the log once the current segment passes this, checked on the
+    /// group-flush tick. Zero means never.
+    rotate_after_bytes: u64,
+    /// Refuse entries decided against a quote older than this. Exits flow.
+    max_quote_age_ns: u64,
     next_order_n: u64,
     orders_sent: u64,
     /// Counted for the whole run. The ledger's own count clears every minute.
@@ -211,11 +244,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         sleeves: &[String],
         replayed: &[WalRecord],
     ) -> Result<Self, EngineError> {
-        let orders = LedgerOfOrders::from_records(replayed);
+        let mut orders = LedgerOfOrders::from_records(replayed);
         // Same records, same join: a restart must not forget whose
         // position is whose, or the other sleeve trades straight into it.
         let attribution = Attribution::from_records(replayed);
-        let recovered = orders.in_flight().len();
+        // Seeded by the same scans reconcile trusts and kept live from here
+        // on, because a rotation restates them into the new segment's first
+        // record and must say exactly what a replay would have said.
+        let logged_exposure = crate::reconcile::logged_exposure(replayed);
+        let intended_stops = crate::reconcile::intended_stops(replayed);
 
         let boot_ms = clock::wall_ms();
         wal.append(&WalRecord::Boot {
@@ -235,6 +272,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         })?;
 
         let mut market = MarketState::default();
+        // Ids are interning positions, so the previous run's table is
+        // re-interned first, in its own order: every id the replayed records
+        // name then means the same symbol in this run. Attribution, the
+        // reconcile's exposure accounting, and in-flight recovery all join
+        // the OLD run's numbers against this table — a symbol a book
+        // admitted at runtime last run would otherwise come back at a
+        // different position, or not at all. `assembly::symbol_order` seeds
+        // the gateway and the private stream with this same order.
+        for name in crate::replay::LogNames::of_log(replayed).symbols {
+            market.add_symbol(&name);
+        }
         let mut routing = Routing::default();
         let mut names = Vec::with_capacity(strategies.len());
         let mut subscriptions = Vec::new();
@@ -277,13 +325,27 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             tracing::warn!(symbols = ?missing, "no instrument rules; these symbols cannot trade");
         }
 
-        // The newest control anchor in the log is the loss guard's memory:
+        // The newest control anchor per source is the loss guard's memory:
         // restored before anything is judged, so a restart can neither
-        // refresh the day's loss budget nor clear a latched trip.
-        if let Some(state) = replayed.iter().rev().find_map(|record| match record {
-            WalRecord::ControlAnchor { state, .. } => Some(state.as_str()),
-            _ => None,
-        }) {
+        // refresh the day's loss budget nor clear a latched trip. A segment
+        // restatement carries the same anchors and counts the same way —
+        // set, then overridden by anything written after it.
+        let mut control_anchors: std::collections::BTreeMap<String, String> = Default::default();
+        for record in replayed {
+            match record {
+                WalRecord::ControlAnchor { source, state } => {
+                    control_anchors.insert(source.clone(), state.clone());
+                }
+                WalRecord::SegmentBase { control_anchors: anchors, .. } => {
+                    control_anchors = anchors
+                        .iter()
+                        .map(|anchor| (anchor.source.clone(), anchor.state.clone()))
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+        for state in control_anchors.values() {
             risk.restore_control_anchor(state);
         }
 
@@ -295,7 +357,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // What the log believes against what the venue says. Boot is the one
         // moment the two can be compared: from here on the engine only ever
         // learns about its own orders.
-        let may_open = Self::reconcile_with_venue(
+        let (may_open, vanished) = Self::reconcile_with_venue(
             &mut wal,
             &mut venue,
             &orders,
@@ -306,6 +368,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             settings.shadow,
         )
         .await?;
+
+        // An order the log shows in flight that the venue is not working
+        // ended while the engine was down, and no update for it will ever
+        // arrive. Left "in flight" it would charge the kernel's partition on
+        // every future boot and hold the one-order-per-symbol gate closed
+        // against that symbol — exits included — until somebody hand-fixed
+        // the venue. The venue's own working-order listing is evidence, not
+        // a guess, so the ending is written down as what it was.
+        for client_order_id in vanished {
+            tracing::warn!(
+                id = %client_order_id,
+                "this order ended while the engine was down; recording the ending"
+            );
+            let ended = WalRecord::OrderUpdate {
+                update: OrderUpdate::Cancelled {
+                    client_order_id,
+                    recv_ns: clock::now_ns(),
+                },
+            };
+            wal.append(&ended)?;
+            orders.apply(&ended);
+        }
+        let recovered = orders.in_flight().len();
 
         let mut registry = OrderRegistry::new(format!("eng-{boot_ms}-"));
         for order in orders.in_flight() {
@@ -358,6 +443,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             registry,
             orders,
             attribution,
+            // Empty on purpose, like the follower's own records were across a
+            // restart: boot compares the log against the venue directly,
+            // which is a better answer than a memory of what was in flight.
+            covers: CoverBook::default(),
             // Deliberately not restored from the log. The window is measured
             // from a monotonic clock that does not survive a restart, and the
             // venue's own creation time is not something this engine can ask
@@ -367,6 +456,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             wanted_symbols: Vec::new(),
             leverage_at: std::collections::HashMap::new(),
             may_open,
+            control_anchors,
+            logged_exposure,
+            intended_stops,
             ledger: LatencyLedger::new(now),
             // Deliberately not rebuilt from the log at boot, unlike
             // attribution: this is a running score for the run in front of
@@ -375,8 +467,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             targets: TargetBooks::new(Vec::new()),
             heartbeat: None,
             shadow: settings.shadow,
+            leverage_authority: settings.leverage_authority,
             group_flush: Duration::from_millis(settings.group_flush_ms.max(1)),
             refresh_after_ns: settings.account_view_max_age_ms.saturating_mul(1_000_000) / 2,
+            rotate_after_bytes: settings.wal_rotate_mb.saturating_mul(1024 * 1024),
+            max_quote_age_ns: settings.max_quote_age_ms.saturating_mul(1_000_000),
             next_order_n: 0,
             orders_sent: 0,
             events_seen: 0,
@@ -407,9 +502,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         table: &SymbolTable,
         rules: &[Option<InstrumentRule>],
         shadow: bool,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<(bool, Vec<String>), EngineError> {
         let latched = replayed.iter().rev().find_map(|record| match record {
             WalRecord::Reconciled { may_open, .. } => Some(*may_open),
+            // A rotation restated the latch; nothing between it and the end
+            // of the log has said otherwise or the scan would have stopped
+            // there first.
+            WalRecord::SegmentBase { may_open, .. } => Some(*may_open),
             _ => None,
         });
 
@@ -489,7 +588,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // Durable before trading starts: a crash between here and the first
         // order must not lose a latch that was just set.
         wal.barrier()?;
-        Ok(may_open)
+        Ok((may_open, found.vanished()))
     }
 
     pub fn subscriptions(&self) -> &[Subscription] {
@@ -658,6 +757,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 orders,
                 registry,
                 attribution,
+                covers,
                 account,
                 rules,
                 ..
@@ -674,6 +774,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     orders,
                     registry,
                     attribution,
+                    covers,
                     sid,
                     &engine_event,
                     now,
@@ -712,13 +813,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 orders,
                 registry,
                 attribution,
+                covers,
                 account,
                 rules,
                 ..
             } = self;
             feed_strategy(
-                strategies, market, account, rules, timers, pending, orders, registry, attribution, sid, &event,
-                now,
+                strategies, market, account, rules, timers, pending, orders, registry, attribution,
+                covers, sid, &event, now,
             );
         }
         self.drain(now).await
@@ -809,12 +911,61 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// The one place a reading is adopted, so what has to happen with it
     /// cannot be done in one path and forgotten in the other.
     fn adopt_view(&mut self, view: AccountView) {
-        forget_leverage_where_flat(&mut self.leverage_at, &view.positions);
+        match self.leverage_authority {
+            crate::config::LeverageAuthority::Shared => {
+                forget_leverage_where_flat(&mut self.leverage_at, &view.positions)
+            }
+            // Sole authority keeps the cache across flat spells and verifies
+            // the held positions instead: the venue's own row says what
+            // leverage a position actually runs at, and that answer beats a
+            // pre-send confirmation — it is measured on the position itself,
+            // after every race a confirm could lose.
+            crate::config::LeverageAuthority::Sole => {
+                self.verify_leverage_against_view(&view.positions)
+            }
+        }
         self.account = view;
+        // A cover the fresh reading has caught up with is released, so the
+        // strategies woken after this read one truthful in-flight number.
+        self.covers.absorb(&self.account);
         // The loss guard's daily anchor rolls on the READING's UTC day, so
         // hand it the reading's wall time.
         self.risk
             .observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
+    }
+
+    /// Under sole leverage authority: hold what we set against what the venue
+    /// says each held position actually runs at. A mismatch means somebody
+    /// else wrote leverage on an account we believed only we write — say so
+    /// loudly and evict the trust, which makes the next entry in that symbol
+    /// confirm with the venue inline, exactly as shared authority always does.
+    fn verify_leverage_against_view(&mut self, positions: &[engine_types::risk::PositionView]) {
+        for position in positions {
+            let (Some(venue_says), Some(we_set)) =
+                (position.leverage, self.leverage_at.get(&position.symbol).copied())
+            else {
+                continue;
+            };
+            if (venue_says - we_set).abs() > 1e-9 {
+                tracing::error!(
+                    symbol = self.market.table.name(position.symbol),
+                    we_set,
+                    venue_says,
+                    "a held position's leverage is not what this engine set — \
+                     sole leverage authority looks wrong on this account; \
+                     re-confirming before the next entry"
+                );
+                let _ = self.wal.append(&WalRecord::Note {
+                    source: "leverage-authority".to_string(),
+                    text: format!(
+                        "position {} runs at {venue_says}x, engine set {we_set}x; \
+                         trust evicted, next entry re-confirms",
+                        self.market.table.name(position.symbol)
+                    ),
+                });
+                self.leverage_at.remove(&position.symbol);
+            }
+        }
     }
 
     /// Make the venue agree that this symbol sits at this leverage, before an
@@ -871,6 +1022,38 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
 
+        // Pre-arm leverage at book arrival, where nobody is waiting on an
+        // order — measured live, the inline confirmation cost entries from
+        // flat a ~172 ms round trip (844 ms worst), which was most of the
+        // order path's p99. Sole authority only: under shared authority the
+        // cache is wiped for flat symbols on every account reading, so an
+        // arm here would be forgotten before it could ever be used and
+        // re-sent on every book. Shadow never mutates the real account. A
+        // failed arm is a warning, not a refusal — the order path still
+        // confirms inline before anything is sent.
+        if self.leverage_authority == crate::config::LeverageAuthority::Sole && !self.shadow {
+            for target in &book.targets {
+                let Some(id) = self.market.table.get(&target.symbol) else {
+                    continue;
+                };
+                let want = target.leverage;
+                if target.notional_usdt == 0.0 || !want.is_finite() || want <= 0.0 {
+                    continue;
+                }
+                if self.leverage_at.get(&id).is_some_and(|at| *at == want) {
+                    continue;
+                }
+                if let Err(reason) = self.ensure_leverage(id, want).await {
+                    tracing::warn!(
+                        symbol = %target.symbol,
+                        want,
+                        reason,
+                        "could not pre-arm leverage; the entry will confirm inline instead"
+                    );
+                }
+            }
+        }
+
         let event = EngineEvent::Targets(book);
         {
             let Engine {
@@ -881,6 +1064,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 orders,
                 registry,
                 attribution,
+                covers,
                 account,
                 rules,
                 ..
@@ -895,6 +1079,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 orders,
                 registry,
                 attribution,
+                covers,
                 strategy,
                 &event,
                 now,
@@ -905,6 +1090,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     async fn on_tick(&mut self) -> Result<(), EngineError> {
         self.wal.flush()?;
+        // Rotation is decided here, on the group-flush tick, and nowhere
+        // else. The loop is one thread and one task, so this can never fall
+        // between an intent's durability barrier and its send — that whole
+        // stretch is inside `process_intent`, which has returned before the
+        // tick can fire. The restatement is built from live state that the
+        // same code as boot's replay maintains, no append can interleave
+        // between building it and writing it, and `WalWriter::rotate`
+        // carries the byte-level crash-ordering argument: the restatement
+        // is durable in the new segment before that segment can be the one
+        // boot picks, and a crash anywhere leaves boot on the old segment
+        // with nothing invented and nothing lost.
+        if self.rotate_after_bytes > 0 && self.wal.segment_size() >= self.rotate_after_bytes {
+            let base = self.rotation_base(clock::wall_ms());
+            if self.wal.rotate(&base)? {
+                tracing::info!(
+                    "log rotated: a fresh segment restates the engine's state; the old \
+                     segment stays in place as an archive"
+                );
+            }
+        }
         let now = clock::now_ns();
         // First, and on this tick rather than on a market message: it is the
         // cheapest point in the tick, and it is in front of the account
@@ -1089,6 +1294,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// crash-loop can forget.
     fn persist_control_anchor(&mut self) -> Result<(), EngineError> {
         if let Some(state) = self.risk.take_control_anchor() {
+            // Mirrored so a rotation can restate the newest anchor without
+            // re-reading the log.
+            self.control_anchors.insert("risk".into(), state.clone());
             self.wal.append(&WalRecord::ControlAnchor {
                 source: "risk".into(),
                 state,
@@ -1116,6 +1324,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 text: format!("intent {} refused: {what} is not a finite number", intent.tag),
             })?;
             tracing::error!(tag = %intent.tag, what, "intent carries an unreal number");
+            self.tell_refused(&intent);
             return Ok(());
         }
 
@@ -1144,7 +1353,52 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tag = %intent.tag,
                 "refused: this engine is not opening new positions after what boot found"
             );
+            self.tell_refused(&intent);
             return Ok(());
+        }
+
+        // The quote this decision was priced against, bounded the way the
+        // account reading already is: a price older than the bound is not
+        // evidence about the market now. The feed pings and reconnects on
+        // its own, but a silent-but-alive socket, or a reconnect that never
+        // lands, leaves the last quote standing — and this is the one place
+        // that refuses to OPEN against it. The stamp is the quote's own
+        // receive time on the engine's monotonic clock, never a wall-clock
+        // guess; a symbol that has never quoted has no stamp at all, and
+        // the absence of a price is the stalest price there is (a feed
+        // reset clears every stamp for the same reason). Exits flow
+        // whatever the age — taking risk off must never wait on a fresh
+        // price — and cancels and amends of protective orders never come
+        // through here at all.
+        if !intent.reduce_only {
+            let quote_ns = self
+                .market
+                .quotes
+                .get(intent.symbol.0 as usize)
+                .map(|quote| quote.recv_ns)
+                .unwrap_or(0);
+            let age_ns = decided_ns.saturating_sub(quote_ns);
+            if quote_ns == 0 || age_ns > self.max_quote_age_ns {
+                let verdict = RiskVerdict::Deny {
+                    reason: DenyReason::StaleQuote {
+                        age_ns,
+                        max_age_ns: self.max_quote_age_ns,
+                    },
+                };
+                self.wal.append(&WalRecord::Verdict {
+                    client_order_id: None,
+                    verdict,
+                })?;
+                tracing::warn!(
+                    tag = %intent.tag,
+                    symbol = self.market.table.name(intent.symbol),
+                    age_ms = age_ns / 1_000_000,
+                    never_quoted = quote_ns == 0,
+                    "refused: the quote this entry was decided against is too old to open on"
+                );
+                self.tell_refused(&intent);
+                return Ok(());
+            }
         }
 
         // An entry the strategy asked to have worked starts as a resting
@@ -1168,6 +1422,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     verdict,
                 })?;
                 tracing::info!(tag = %intent.tag, reason, "risk refused the order");
+                self.tell_refused(&intent);
                 return Ok(());
             }
         };
@@ -1289,8 +1544,35 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.ledger
             .record(Segment::Durable, clock::now_ns().saturating_sub(decided_ns));
         self.orders.apply(&sent_record);
+        // The live copy of what reconcile's boot scan would read off this
+        // record, so a rotation can restate it.
+        reconcile::note_intended_stop(&mut self.intended_stops, &request);
         self.registry.own(&client_order_id, intent.strategy);
-        self.risk.register_order(&client_order_id, &intent, qty);
+        // The engine's own note of what just went out, at the size that
+        // actually went — strategies read it back as `ctx.in_flight`, so the
+        // window between a fill and the next account reading cannot look
+        // flat. Booked in shadow too, on purpose: a shadow order never fills
+        // and never sends news, so without a cover a follower would re-send
+        // the same pretend entry on every quote. A shadow cover is released
+        // the same ways a live one is — a refused exit, or the reading
+        // moving — just never by fill news.
+        self.covers.register(
+            intent.strategy,
+            request.symbol,
+            request.side,
+            qty,
+            &self.account,
+        );
+        // A shadow order can never fill or be cancelled, so a reservation
+        // booked for it could never be released: it would sit in the
+        // kernel's pending book for the run's life and lean on every later
+        // verdict — the drift the funded shadow run showed. The verdict
+        // above was already judged by the same code a live run uses;
+        // registration only shapes the NEXT assessment, and for that the
+        // truthful picture of a shadow run is that nothing is in flight.
+        if !self.shadow {
+            self.risk.register_order(&client_order_id, &intent, qty);
+        }
         self.orders_sent += 1;
 
         // Start working it from the price that is actually resting — the
@@ -1547,6 +1829,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         })?;
         self.risk.on_update(&update);
         self.orders.apply_update(&update);
+        // Every fill record in the log is in this total — strangers'
+        // included, exactly as reconcile's boot scan reads it — kept live so
+        // a rotation can restate it.
+        if let OrderUpdate::Fill { symbol, side, qty, .. } = &update {
+            reconcile::note_fill(&mut self.logged_exposure, *symbol, *side, *qty);
+        }
         // Whose fill it was, before any strategy is woken, so the one that
         // placed the order sees its own position already changed. The ledger
         // is asked rather than the registry: the registry knows only this
@@ -1557,6 +1845,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 Some(sid) => {
                     self.attribution.on_update(sid, &update);
                     self.price_fill(sid, &update);
+                    // Terminal news that ends size without a fill releases
+                    // that much cover: the whole send on a reject, the
+                    // unfilled remainder on a cancel. A fill releases nothing
+                    // here — it stays covered until the account reading
+                    // shows it, which is the whole point of the cover.
+                    let released = self.orders.orders.get(id).and_then(|order| match &update {
+                        OrderUpdate::Reject { .. } => {
+                            Some((order.request.symbol, order.request.qty))
+                        }
+                        OrderUpdate::Cancelled { .. } => Some((
+                            order.request.symbol,
+                            (order.request.qty - order.filled_qty).max(0.0),
+                        )),
+                        _ => None,
+                    });
+                    if let Some((symbol, qty)) = released {
+                        self.covers.release_newest(sid, symbol, qty);
+                    }
                 }
                 // Charged to nobody on purpose. `reconcile` is what notices
                 // the account holds more than the log accounts for, and it
@@ -1598,13 +1904,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         orders,
                         registry,
                         attribution,
+                        covers,
                         account,
                         rules,
                         ..
                     } = self;
                     feed_strategy(
-                        strategies, market, account, rules, timers, pending, orders, registry, attribution, sid,
-                        &event, now,
+                        strategies, market, account, rules, timers, pending, orders, registry,
+                        attribution, covers, sid, &event, now,
                     );
                 }
                 None => {
@@ -1625,14 +1932,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         orders,
                         registry,
                         attribution,
+                        covers,
                         account,
                         rules,
                         ..
                     } = self;
                     for sid in routing.all_listeners(symbol) {
                         feed_strategy(
-                            strategies, market, account, rules, timers, pending, orders, registry, attribution,
-                            sid, &event, now,
+                            strategies, market, account, rules, timers, pending, orders, registry,
+                            attribution, covers, sid, &event, now,
                         );
                     }
                 }
@@ -1652,7 +1960,54 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             source: "engine".into(),
             text: format!("{client_order_id} not sent ({}): {why}", intent.tag),
         })?;
+        self.tell_refused(intent);
         Ok(())
+    }
+
+    /// Settle the in-flight accounting for an intent that died inside the
+    /// engine, then tell the strategy. A refused exit means the covers
+    /// describe exposure the account reading says is not there, and left
+    /// standing they would re-plan the same doomed exit on every quote.
+    fn tell_refused(&mut self, intent: &Intent) {
+        // Bookkeeping first, so the strategy woken below already reads the
+        // truthful in-flight number. A refused exit drops every cover on the
+        // symbol; a refused entry has none to drop, because covers are booked
+        // at the send and a refusal never reaches it.
+        self.covers
+            .intent_refused(intent.strategy, intent.symbol, intent.reduce_only);
+        let event = EngineEvent::IntentRefused {
+            symbol: intent.symbol,
+            reduce_only: intent.reduce_only,
+        };
+        let now = clock::now_ns();
+        let Engine {
+            strategies,
+            market,
+            timers,
+            pending,
+            orders,
+            registry,
+            attribution,
+            covers,
+            account,
+            rules,
+            ..
+        } = self;
+        feed_strategy(
+            strategies,
+            market,
+            account,
+            rules,
+            timers,
+            pending,
+            orders,
+            registry,
+            attribution,
+            covers,
+            intent.strategy,
+            &event,
+            now,
+        );
     }
 
     /// Turn an entry the strategy asked to have worked into the resting limit
@@ -1770,6 +2125,79 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub fn fills(&self) -> &Fills {
         &self.fills
     }
+
+    /// Everything a fresh log segment must restate: the state boot rebuilds
+    /// from the log, as this engine holds it right now.
+    ///
+    /// Each field is maintained by the same arithmetic the boot-time scan
+    /// for it uses — the order ledger and attribution apply every record as
+    /// it is written, the exposure and stop maps go through `reconcile`'s
+    /// own helpers, the anchor map mirrors every anchor written — so
+    /// replaying the old segments and replaying this record recover the
+    /// same engine. The equivalence test in `tests/rotation.rs` holds the
+    /// two sides together.
+    ///
+    /// Deliberately NOT restated, because boot does not rebuild them either:
+    /// covers and working-order supervision (boot starts them empty and
+    /// trusts the venue comparison instead), the run's own latency ledger
+    /// and cost score, and markout horizons still owed (a restart already
+    /// ends those; the marks written so far are in the archived segments).
+    pub(crate) fn rotation_base(&self, wall_ts_ms: i64) -> WalRecord {
+        WalRecord::SegmentBase {
+            wall_ts_ms,
+            strategies: self.names.clone(),
+            symbols: (0..self.market.table.len())
+                .map(|i| self.market.table.name(SymbolId(i as u16)).to_string())
+                .collect(),
+            may_open: self.may_open,
+            control_anchors: self
+                .control_anchors
+                .iter()
+                .map(|(source, state)| engine_types::AnchorState {
+                    source: source.clone(),
+                    state: state.clone(),
+                })
+                .collect(),
+            attribution: self
+                .attribution
+                .rows()
+                .into_iter()
+                .map(|(strategy, symbol, signed_qty)| engine_types::FilledTotal {
+                    strategy,
+                    symbol,
+                    signed_qty,
+                })
+                .collect(),
+            logged_exposure: self
+                .logged_exposure
+                .iter()
+                .map(|(symbol, signed_qty)| engine_types::SymbolTotal {
+                    symbol: SymbolId(*symbol),
+                    signed_qty: *signed_qty,
+                })
+                .collect(),
+            intended_stops: self
+                .intended_stops
+                .iter()
+                .map(|(symbol, trigger_px)| engine_types::IntendedStop {
+                    symbol: SymbolId(*symbol),
+                    trigger_px: *trigger_px,
+                })
+                .collect(),
+            open_orders: self
+                .orders
+                .in_flight()
+                .into_iter()
+                .map(|order| engine_types::OpenOrderState {
+                    request: order.request.clone(),
+                    wire_ns: order.wire_ns,
+                    arrival_mid: order.arrival_mid,
+                    acked: order.acked,
+                    filled_qty: order.filled_qty,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1783,6 +2211,7 @@ fn feed_strategy(
     orders: &LedgerOfOrders,
     registry: &OrderRegistry,
     attribution: &Attribution,
+    covers: &CoverBook,
     sid: StrategyId,
     event: &EngineEvent,
     now_ns: u64,
@@ -1801,6 +2230,7 @@ fn feed_strategy(
         orders,
         registry,
         attribution,
+        covers,
     };
     strategy.on_event(event, &mut ctx);
 }

@@ -4,8 +4,8 @@ Computes the daily target book for the deployed carry sleeve by replaying
 the registered rule (``resolve_carry_strategy_profile``; v4 by default) over
 a rolling window of Bybit hourly data. The strategy logic is NOT reimplemented here: the
 engine calls the exact registered-scorer functions
-(:func:`liquidity_migration.research.backtest.financed_longs.carry_hold_weights` and friends)
-on the live frame (:func:`~liquidity_migration.research.backtest.financed_longs.prepare_decision`),
+(:func:`liquidity_migration.rules.carry_hold.carry_hold_weights` and friends)
+on the live frame (:func:`~liquidity_migration.rules.carry_hold.prepare_decision`),
 so deployed decisions and the Lane-2 forward scorer can only diverge where
 the registered frame caveat says they must: the decision bar itself, which
 the research frame drops because it requires a forward 24h return no live
@@ -43,7 +43,7 @@ from typing import Any
 import polars as pl
 
 from liquidity_migration.core._common import coerce_int
-from liquidity_migration.research.engine_targets import (
+from liquidity_migration.rules.engine_targets import (
     EngineTarget,
     render_target_book,
     write_target_book,
@@ -78,7 +78,7 @@ from liquidity_migration.account.execution_environment import (
     candidate_universe_realm,
     execution_environment,
 )
-from liquidity_migration.research.backtest.financed_longs import (
+from liquidity_migration.rules.carry_hold import (
     CarryHoldConfig,
     carry_hold_weights,
     daily_grid,
@@ -325,10 +325,11 @@ SIGNAL_VALIDITY_MS = 6 * HOUR_MS
 #: service an entry it can only expire.
 ENTRY_PUBLISH_GUARD_MS = 15 * 60 * 1000
 #: Where to write the decided book for the Rust execution engine to follow.
-#: Unset means do not write one, which is the default and what the fleet runs
-#: with today: the engine trades nothing yet. Writing it changes no decision
-#: and places no order — it only records what was decided, so the engine can
-#: be run against the same book and compared.
+#: Set on the fleet's units since 2026-08-14: the engine owns the account and
+#: this book is how a carry decision reaches it. Setting it also stops the
+#: cycle publishing intents to the inbox — the Python owner that drained the
+#: inbox is deleted, so those requests would sit unclaimed forever. Unset
+#: means write no book and publish the old way, which no deployed unit does.
 ENGINE_TARGET_BOOK_PATH_ENV = "CARRY_ENGINE_TARGET_BOOK_PATH"
 #: A sleeve whose newest successful decision is older than this is loudly
 #: stale: today's decision still failing past 06:00 the next day.
@@ -1874,15 +1875,28 @@ def run_carry_demo_cycle(
         ]
         if len(set(target_keys)) != len(target_keys):
             raise RuntimeError("carry planner proposed duplicate component target keys")
-        publication: ExitFirstPublication = publish_exit_first_target_requests(
-            planning.publisher,
-            batch_prefix=f"carry/{cycle_id}",
-            exit_intents=kept_exits,
-            # One grouped request, entries before resizes: the cycle's whole
-            # risk-increasing side reaches the owner in a single request.
-            entry_intents=[*kept_entries, *kept_resizes],
-            created_ts_ns=cycle_now_ms * 1_000_000,
-        )
+        if os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip():
+            # The engine follows the absolute book this cycle already wrote,
+            # and nothing reads the inbox any more — the Python owner that
+            # drained it was deleted 2026-08-14. Publishing would only grow a
+            # queue of never-claimed requests (and past the queued-cache
+            # limit, re-parse the lot every pass). The same gate LONG runs
+            # under; the plan and its suppression accounting still run, so
+            # the cycle receipt says what was decided.
+            publication = ExitFirstPublication(
+                exit_requests=(), entry_requests=(), errors=()
+            )
+        else:
+            publication = publish_exit_first_target_requests(
+                planning.publisher,
+                batch_prefix=f"carry/{cycle_id}",
+                exit_intents=kept_exits,
+                # One grouped request, entries before resizes: the cycle's
+                # whole risk-increasing side reaches the owner in a single
+                # request.
+                entry_intents=[*kept_entries, *kept_resizes],
+                created_ts_ns=cycle_now_ms * 1_000_000,
+            )
         # Exits normally arrive as ONE grouped all-flat request, so queued
         # exits are counted as intents, not requests; the count is identical
         # under the per-exit fallback, where each request carries one intent.

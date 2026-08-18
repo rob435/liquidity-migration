@@ -23,25 +23,54 @@ use crate::config::{EngineSection, StrategyConfig};
 use crate::heartbeat::Heartbeat;
 use crate::targets::{TargetBookWatcher, TargetBooks};
 
-/// Open the log and replay what an earlier run left. The writer truncates a
-/// torn tail at the crash point before appending continues.
+/// Open the log and replay what an earlier run left. The log may have been
+/// rotated into segments: this opens the newest one boot can trust, whose
+/// restatement carries everything the older ones said. The writer truncates
+/// a torn tail at the crash point before appending continues; a rotation
+/// that crashed half-written fails the trust check instead, and boot falls
+/// back to the segment before it.
 pub fn wal(path: &Path) -> Result<(WalWriter, Vec<WalRecord>), WalError> {
-    let (writer, replayed) = WalWriter::open(path)?;
+    let (writer, replayed) = engine_wal::open_current(path)?;
     Ok((writer, replayed.into_iter().map(|(_, r)| r).collect()))
 }
 
-/// The symbols the engine trades, in the one order every table uses: first
-/// appearance across the strategies' subscriptions. The market feed, the
-/// venue gateway, the private stream, and the core's own table all intern
-/// this same sequence, so a `SymbolId` means the same symbol everywhere.
-pub fn symbol_order(wanted: &[Subscription]) -> Vec<Symbol> {
-    let mut names: Vec<Symbol> = Vec::new();
+/// The symbols the engine trades, in the one order every table uses: the
+/// previous run's own table first (the newest `Names` record the log
+/// replayed, in its id order), then first appearance across the strategies'
+/// subscriptions. The market feed, the venue gateway, the private stream,
+/// and the core's own table all intern this same sequence, so a `SymbolId`
+/// means the same symbol everywhere.
+///
+/// Starting from the log's table is what keeps an id meaning the same
+/// symbol across a restart. Ids are interning positions, and every join the
+/// boot makes against replayed records — whose fills are whose, what
+/// exposure the log accounts for, which symbol an in-flight order is in —
+/// names the OLD run's numbers. A symbol a book admitted at runtime last
+/// run would otherwise come back at a different position (or not at all,
+/// leaving its position invisible to reconcile and the stop discipline).
+pub fn symbol_order(replayed: &[WalRecord], wanted: &[Subscription]) -> Vec<Symbol> {
+    let mut names: Vec<Symbol> = crate::replay::LogNames::of_log(replayed).symbols;
     for sub in wanted {
         if !names.iter().any(|n| n == &sub.symbol) {
             names.push(sub.symbol.clone());
         }
     }
     names
+}
+
+/// What the market feed opens with: every strategy subscription, plus a
+/// quote subscription for each symbol carried over from the previous run's
+/// table — exactly what `admit_wanted` subscribed when it took the name on.
+/// Without this a carried-over symbol has no price at boot, and a position
+/// recovered in it could not even be exited until a book re-named it.
+pub fn boot_subscriptions(symbols: &[Symbol], wanted: &[Subscription]) -> Vec<Subscription> {
+    let mut subs: Vec<Subscription> = wanted.to_vec();
+    for name in symbols {
+        if !subs.iter().any(|s| &s.symbol == name) {
+            subs.push(Subscription { symbol: name.clone(), feed: engine_types::Feed::Quote });
+        }
+    }
+    subs
 }
 
 /// Bybit's public market stream, subscribed to exactly what was asked.
@@ -735,8 +764,11 @@ disaster_stop_fraction = 0.35
             wal_path: PathBuf::from("engine.wal"),
             venue: "bybit_demo".into(),
             group_flush_ms: 250,
+            wal_rotate_mb: 256,
             account_view_max_age_ms: 5_000,
+            max_quote_age_ms: 30_000,
             shadow: true,
+            leverage_authority: crate::config::LeverageAuthority::default(),
             target_book_path: engine_level_book.map(PathBuf::from),
             heartbeat_path: None,
         }

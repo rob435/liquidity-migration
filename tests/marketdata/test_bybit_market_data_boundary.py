@@ -24,7 +24,7 @@ ACTIVE_MARKET_DATA_PRODUCERS = (
 PUBLIC_PROCESS_MODULES = (
     "liquidity_migration.marketdata.bybit_market_data",
     "liquidity_migration.account.execution_adapters",
-    "liquidity_migration.research.backtest.long_native",
+    "liquidity_migration.rules.long_native",
     "liquidity_migration.strategy.long_native_event_demo",
     "liquidity_migration.strategy.long_native_event_demo_daemon",
 )

@@ -6,19 +6,22 @@ Bybit.
 ## The execution engine
 
 [`engine/`](engine) is a Rust workspace that trades: one process, one thread,
-one loop from market message to signed order. It is merged but **not deployed
-and not trading** — the Python fleet still runs everything live, and the
-engine's first shadow run against the demo account is still owed.
+one loop from market message to signed order. Since 2026-08-14 it **is the
+account owner, deployed and live on the demo account** — it holds that
+account's single-writer lease, both producers size from its heartbeat, and
+the Python order path is deleted. A second engine unit runs against the
+funded account in shadow and has never sent an order.
 
 Measured on-box by `cd engine && cargo run --release -- bench`, with real
 signing and a real disk flush in the chain: the decision itself takes ~83 ns;
 decision → order durable on disk → out the socket takes 3.9 ms median, ~5 ms
 p99. The venue round trip on top is ~175 ms — geography, not software.
 
-Demo only by construction — the venue crate holds the demo hostname and no
-other — and shadow by default: it logs intents and sends nothing without an
-explicit live flag. Design, crates and safety posture:
-[docs/engine.md](docs/engine.md).
+The four venue hostnames may be written in exactly one file (`realm.rs`), the
+funded one refuses to build unless `REAL_MONEY` is armed in the host
+credential file, and shadow is the default: a shadow engine logs intents and
+sends nothing. Design, crates and safety posture:
+[docs/engine.md](docs/engine.md). Live truth: [STATE.md](STATE.md).
 
 ## Sleeves
 
@@ -40,7 +43,7 @@ its journals. What each sleeve trades is in
 
 | Path | Contents |
 | --- | --- |
-| [`liquidity_migration/`](liquidity_migration/README.md) | the package, in eleven subpackages — `core`, `marketdata`, `data`, `account`, `venue`, `strategy`, `research`, `policy`, `ops`, `cli`, `runtime` |
+| [`liquidity_migration/`](liquidity_migration/README.md) | the package, in twelve subpackages — `core`, `marketdata`, `data`, `account`, `rules`, `venue`, `strategy`, `research`, `policy`, `ops`, `cli`, `runtime` |
 | [`engine/`](engine) | the Rust execution engine workspace — seven crates, from the shared types to the loop |
 | [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
 | [`deploy/`](deploy) | `sleeves.env`, systemd units, environment handling |

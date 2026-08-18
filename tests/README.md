@@ -30,6 +30,6 @@ no package counterpart:
 .venv/bin/python -m pytest -q
 ```
 
-One group: `pytest -q tests/venue`. One file: `pytest -q tests/venue/test_account_reconcile.py`.
+One group: `pytest -q tests/venue`. One file: `pytest -q tests/venue/test_account_reconcile_wedges.py`.
 `scripts/dev.sh check` runs the full gate — ruff, mypy, the suite, and the
 engine's Rust tests — and is what the tracked `pre-push` hook calls.

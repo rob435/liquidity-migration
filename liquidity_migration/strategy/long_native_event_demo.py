@@ -84,7 +84,7 @@ from liquidity_migration.account.execution_environment import (
     candidate_universe_realm,
     execution_environment,
 )
-from liquidity_migration.research.backtest.long_native import (
+from liquidity_migration.rules.long_native import (
     LongNativeConfig,
     _classify_entry,
     _safe_float,
@@ -94,7 +94,7 @@ from liquidity_migration.research.backtest.long_native import (
     long_v11a_profile,
 )
 from liquidity_migration.data.storage import exclusive_file_lock, write_dataset
-from liquidity_migration.research.backtest.long_identity import (
+from liquidity_migration.rules.long_identity import (
     SUPPORTED_LONG_STRATEGY_IDS,
     long_profile_display_name,
     long_trade_id,
@@ -114,7 +114,7 @@ from liquidity_migration.account.strategy_funnel import (
     observe_funnel_rows_safely,
 )
 from liquidity_migration.account.strategy_targets import component_target_intent, exit_target_intents
-from liquidity_migration.research.engine_targets import (
+from liquidity_migration.rules.engine_targets import (
     EngineTarget,
     render_target_book,
     write_target_book,

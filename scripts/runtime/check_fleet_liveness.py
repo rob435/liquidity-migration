@@ -1295,11 +1295,10 @@ def gather_carry_alerts(
     return alerts
 
 
-# Sub-minute proof that the account is still being read from the venue. The
-# journal records venue-fact changes on a ten-minute floor, so this bound only
-# has to catch a journal that stopped receiving venue facts at all: two missed
-# checkpoints plus one 3-minute watchdog interval, rounded up.
-VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 25.0
+# The 25-minute venue-snapshot bound is VENUE_SNAPSHOT_AGE_FLOOR_MINUTES,
+# defined once, above. A second definition here once shadowed it: function
+# defaults bound the first value at def time while the runtime clamps read the
+# module attribute, so editing one silently diverged the two.
 
 # The freshness check needs the newest venue snapshot, not a genesis replay:
 # a full verified read cost ~20s CPU and ~250MB peak at 28.5k segments, every

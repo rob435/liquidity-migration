@@ -26,10 +26,10 @@ A strategy plugs in as a small subclass. The whole contract:
   (``event_driven_cycle``, ``min_cycle_interval_seconds``).
 
 The sleeves in ``long_native_event_demo_daemon.py`` (which also carries the
-LONG plug's defaults), ``carry_demo_daemon.py``, and
-``continuous_demo_daemon.py`` are the reference plugs. Startup is
-target-only for every plug: producers publish desired targets to the
-account owner and never construct a sleeve-private execution stream.
+LONG plug's defaults) and ``carry_demo_daemon.py`` are the reference plugs
+(the CONTINUOUS plug was retired with its sleeve). Startup is
+target-only for every plug: producers publish desired targets and never
+construct a sleeve-private execution stream.
 """
 
 from __future__ import annotations
@@ -330,10 +330,13 @@ class StrategyHostDaemon:
         if now - self._last_price_wake_monotonic < self._price_wake_min_interval_seconds:
             return
         self._last_price_wake_monotonic = now
-        self._price_wake_fired[touched_symbol] = (
-            floors.get(touched_symbol),
-            ceilings.get(touched_symbol),
-        )
+        # Rebind, never mutate: the cycle thread iterates this dict without a
+        # lock, and an in-place insert from this WS thread can kill its pass
+        # mid-comprehension ("dictionary changed size during iteration").
+        self._price_wake_fired = {
+            **self._price_wake_fired,
+            touched_symbol: (floors.get(touched_symbol), ceilings.get(touched_symbol)),
+        }
         # Flag before event, as the journal watch does: the wait reads the
         # flag only after the event woke it.
         self._price_wake_pending = True
@@ -446,9 +449,9 @@ class StrategyHostDaemon:
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
         """Extra kwargs a plug injects into the cycle runner. The host provides the resumable
-        journal cursor; the LONG plug adds its strategy config, the continuous plug adds its Tier-2
-        ``panel_cache``, and the carry plug replaces the lot with a ``cycle_state`` that already owns
-        a cursor. Keeping it a hook means a plug need not duplicate the whole telemetry-laden
+        journal cursor; the LONG plug adds its strategy config, and the carry plug replaces the
+        lot with a ``cycle_state`` that already owns a cursor. Keeping it a hook means a plug
+        need not duplicate the whole telemetry-laden
         ``_run_one_cycle`` to add one kwarg."""
         return {"journal_cursor": self._journal_cursor}
 

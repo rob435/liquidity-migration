@@ -16,6 +16,7 @@ use engine_types::{
 };
 
 use crate::attribution::Attribution;
+use crate::covers::CoverBook;
 use crate::inflight::{LedgerOfOrders, OrderRegistry};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -97,6 +98,10 @@ pub struct Ctx<'a> {
     /// strategy placed. The account reading above is per symbol and says
     /// nothing about whose a position is.
     pub attribution: &'a Attribution,
+    /// What each strategy has sent that the account reading has not yet
+    /// absorbed. The engine books and releases these; a strategy reads its
+    /// own sum through `in_flight`.
+    pub covers: &'a CoverBook,
 }
 
 impl StrategyCtx for Ctx<'_> {
@@ -132,6 +137,10 @@ impl StrategyCtx for Ctx<'_> {
 
     fn my_position(&self, symbol: SymbolId) -> f64 {
         self.attribution.signed(self.strategy, symbol)
+    }
+
+    fn in_flight(&self, symbol: SymbolId) -> f64 {
+        self.covers.in_flight(self.strategy, symbol)
     }
 
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
@@ -185,6 +194,24 @@ impl StrategyCtx for Ctx<'_> {
                 acked: order.acked,
             });
         }
+    }
+
+    fn order_facts(&self, client_order_id: &str) -> Option<engine_types::OrderFacts> {
+        // The ledger rather than the registry, for the same reason
+        // `owner_of` prefers it: terminal news can arrive for an order an
+        // earlier boot sent. Another strategy's order stays none of this
+        // one's business.
+        let order = self.orders.orders.get(client_order_id)?;
+        if order.request.strategy != self.strategy {
+            return None;
+        }
+        Some(engine_types::OrderFacts {
+            symbol: order.request.symbol,
+            side: order.request.side,
+            qty: order.request.qty,
+            filled_qty: order.filled_qty,
+            reduce_only: order.request.reduce_only,
+        })
     }
 }
 
@@ -240,6 +267,8 @@ mod tests {
     /// what every test that is not about attribution means.
     static NOBODY: OnceLock<Attribution> = OnceLock::new();
     static FLAT: OnceLock<AccountView> = OnceLock::new();
+    /// An empty cover book: nothing sent ahead of the reading.
+    static NO_COVERS: OnceLock<CoverBook> = OnceLock::new();
         Ctx {
             market,
             account: FLAT.get_or_init(flat_account),
@@ -251,6 +280,7 @@ mod tests {
             orders,
             registry,
             attribution: NOBODY.get_or_init(Attribution::default),
+            covers: NO_COVERS.get_or_init(CoverBook::default),
         }
     }
 
@@ -414,6 +444,7 @@ mod tests {
             qty,
             entry_px: 100.0,
             stop_attached: true,
+            leverage: None
         }
     }
 
@@ -430,6 +461,7 @@ mod tests {
         };
         let rules = [None, Some(RULE)];
         let attribution = Attribution::default();
+        let covers = CoverBook::default();
         let ctx = Ctx {
             market: &market,
             account: &account,
@@ -441,6 +473,7 @@ mod tests {
             orders: &orders,
             registry: &registry,
             attribution: &attribution,
+            covers: &covers,
         };
 
         assert_eq!(ctx.position(SymbolId(1)), Some(holding(SymbolId(1), Side::Sell, 3.0)));
@@ -472,6 +505,7 @@ mod tests {
             ..flat_account()
         };
         let attribution = Attribution::default();
+        let covers = CoverBook::default();
         let ctx = Ctx {
             market: &market,
             account: &account,
@@ -483,6 +517,7 @@ mod tests {
             orders: &orders,
             registry: &registry,
             attribution: &attribution,
+            covers: &covers,
         };
         assert_eq!(ctx.position(SymbolId(0)), None);
     }

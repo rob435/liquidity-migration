@@ -490,11 +490,14 @@ def test_guarded_rollout_proves_flatness_around_ordered_shutdown() -> None:
         assert f"rollout_flat_phase {proof}" in rollout
 
     readiness = _read("scripts/vps/check_deploy_rollout_readiness.py")
-    assert "read_account_journal(root, verify=True)" in readiness
-    assert "canonical aggregate targets are non-flat" in readiness
-    assert "canonical working orders remain" in readiness
-    assert "require_recent_account_owner_health" in readiness
-    assert "head_binding=head_binding" in readiness
+    # The gate reads the venue directly and, for the running phases, the
+    # engine's own heartbeat. It must never again read the deleted Python
+    # owner's journal or health file: both froze on 2026-08-14, and a gate on
+    # a frozen file can never clear.
+    assert "require_recent_engine_account" in readiness
+    assert "read_account_journal" not in readiness
+    assert "require_recent_account_owner_health" not in readiness
+    assert "authenticated Bybit positions are non-flat" in readiness
     assert "BybitPrivateClient(" in readiness
     assert "demo=True" in readiness
     assert 'client.get_positions(settle_coin="USDT")' in readiness

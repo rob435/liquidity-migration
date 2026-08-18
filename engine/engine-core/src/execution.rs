@@ -411,7 +411,13 @@ impl Fills {
                 if owed.owed & bit == 0 || age_ms < *horizon_ms {
                     continue;
                 }
-                let mid = mid_after(market, owed.symbol, owed.filled_ns);
+                // "The first healthy midpoint at or after h" — anchored at
+                // the horizon, not the fill. A book that spoke once just
+                // after the fill and then went quiet would otherwise hand
+                // that early mid to the 1m/5m columns.
+                let horizon_ns =
+                    owed.filled_ns.saturating_add((*horizon_ms).saturating_mul(1_000_000));
+                let mid = mid_after(market, owed.symbol, horizon_ns);
                 let gave_up = age_ms >= horizon_ms.saturating_add(LATENESS_BOUND_MS);
                 if mid.is_none() && !gave_up {
                     // "The first healthy midpoint at or after h" — so wait for
@@ -589,6 +595,20 @@ impl Fills {
                 WalRecord::OrderUpdate {
                     update: OrderUpdate::StreamReset { .. },
                 } => me.stream_gap(),
+                // A rotation restated every still-open order, so a fill that
+                // lands after the rotation can still be priced against the
+                // midpoint its order left at. The cost totals themselves are
+                // NOT restated: a report over one segment covers that
+                // segment's fills, and the whole history is a chain read
+                // away.
+                WalRecord::SegmentBase { open_orders, .. } => {
+                    for open in open_orders {
+                        sent.insert(
+                            open.request.client_order_id.as_str(),
+                            (open.request.strategy, open.arrival_mid),
+                        );
+                    }
+                }
                 _ => {}
             }
         }

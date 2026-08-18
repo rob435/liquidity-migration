@@ -78,6 +78,12 @@ impl Book {
                 } else {
                     0.0
                 };
+                // A used-up reservation is finished business. Kept, it grows
+                // this map — and every per-assessment scan of it — by one
+                // entry for each order the process ever fills.
+                if pending.signed_qty == 0.0 {
+                    self.pending.remove(client_order_id);
+                }
                 *self.filled.entry((strategy, symbol.0)).or_insert(0.0) += signed_qty;
             }
             None => {
@@ -177,5 +183,32 @@ impl Book {
             }
         }
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(strategy: u16, symbol: u16, qty: f64) -> Pending {
+        Pending {
+            strategy: StrategyId(strategy),
+            symbol: SymbolId(symbol),
+            signed_qty: qty,
+            reduce_only: false,
+            px: 10.0,
+        }
+    }
+
+    #[test]
+    fn a_used_up_reservation_leaves_the_pending_map() {
+        let mut book = Book::default();
+        book.register("a-1", entry(0, 4, 3.0));
+        book.on_fill("a-1", SymbolId(4), 2.0, 1);
+        assert_eq!(book.pending.len(), 1, "a partial fill keeps the reservation");
+        book.on_fill("a-1", SymbolId(4), 1.0, 2);
+        assert!(book.pending.is_empty(), "a fully filled order must not stay reserved");
+        // The fill accounting survives the reservation's removal.
+        assert_eq!(book.filled.get(&(0, 4)).copied(), Some(3.0));
     }
 }

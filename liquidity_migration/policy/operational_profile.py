@@ -420,7 +420,7 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
 
     # Imported lazily to keep the shared account-policy loader out of strategy
     # import cycles; these are the real sizing constants, not copies of them.
-    from liquidity_migration.research.backtest.long_native import long_v11a_profile  # noqa: PLC0415
+    from liquidity_migration.rules.long_native import long_v11a_profile  # noqa: PLC0415
     from liquidity_migration.strategy.long_native_event_demo import (  # noqa: PLC0415
         LongNativeDemoCycleConfig,
         projected_long_initial_margin_pct_equity,

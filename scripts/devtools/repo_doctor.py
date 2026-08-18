@@ -2,7 +2,8 @@
 """Read-only repository and developer-environment diagnostics.
 
 Reports the local facts that commonly make repository work misleading: a dirty
-tree, dependency drift, and a broken skill-tree link.
+tree, dependency drift, a broken skill-tree link, and a deployed toggle that
+no code reads.
 """
 
 from __future__ import annotations
@@ -129,6 +130,97 @@ def skill_mirror_report(repository: Path) -> dict[str, Any]:
     }
 
 
+_ENV_KEY_PATTERN = re.compile(r"^([A-Z][A-Z0-9_]*)=", re.MULTILINE)
+
+# Keys a deployed env file sets for a reader that is not repository source.
+# Each entry needs the reason spelled out; an entry whose key has left the
+# env files is reported stale so the list cannot quietly outlive its keys.
+_DEPLOY_ENV_KEYS_READ_ELSEWHERE = {
+    "RUST_LOG": (
+        "read inside the engine binary by the tracing library "
+        "(engine-core/src/main.rs), never as a literal in our source"
+    ),
+}
+
+_DEPLOY_ENV_CONSUMER_SUFFIXES = {".py", ".sh", ".rs", ".service", ".timer", ".toml"}
+
+
+def read_deploy_env_keys(deploy_root: Path) -> dict[str, list[str]]:
+    """Every KEY a deploy env file or template sets, with the files that set it."""
+
+    keys: dict[str, list[str]] = {}
+    env_files = sorted(list(deploy_root.glob("*.env")) + list(deploy_root.glob("*.env.template")))
+    for path in env_files:
+        for key in _ENV_KEY_PATTERN.findall(path.read_text(encoding="utf-8")):
+            keys.setdefault(key, []).append(path.name)
+    return keys
+
+
+def _deploy_env_consumer_corpus(repository: Path) -> str:
+    """The text of every file that could legitimately read a deployed toggle.
+
+    Docs and tests are deliberately absent: a doc mentioning a key does not
+    read it, and a key read only by a test is exactly the drift this check
+    exists to catch.
+    """
+
+    roots = [
+        repository / "liquidity_migration",
+        repository / "scripts",
+        repository / "deploy",
+        *sorted(repository.glob("engine/*/src")),
+    ]
+    pieces: list[str] = []
+    for root in roots:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix not in _DEPLOY_ENV_CONSUMER_SUFFIXES:
+                continue
+            if "__pycache__" in path.parts:
+                continue
+            pieces.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(pieces)
+
+
+def deploy_env_report(
+    repository: Path,
+    *,
+    read_elsewhere: Mapping[str, str] = _DEPLOY_ENV_KEYS_READ_ELSEWHERE,
+) -> dict[str, Any]:
+    """Flag deployed env keys that nothing in the repository reads.
+
+    A toggle nothing reads is drift: either its reader was deleted (the host
+    file goes on carrying a dead switch) or the key is a typo and the real
+    reader silently falls back to its default.
+    """
+
+    deploy_root = repository / "deploy"
+    keys = read_deploy_env_keys(deploy_root)
+    if not keys:
+        return {
+            "status": "error",
+            "error": f"no env keys found under {deploy_root}",
+            "key_count": 0,
+            "orphans": [],
+            "stale_allowlist": sorted(read_elsewhere),
+        }
+    corpus = _deploy_env_consumer_corpus(repository)
+    orphans = [
+        {"key": key, "defined_in": defined_in}
+        for key, defined_in in sorted(keys.items())
+        if key not in read_elsewhere
+        # Word-bounded so ENGINE_LIVE inside LIVENESS_ENGINE_... never counts.
+        and re.search(rf"\b{re.escape(key)}\b", corpus) is None
+    ]
+    stale_allowlist = sorted(key for key in read_elsewhere if key not in keys)
+    return {
+        "status": "error" if orphans else "matched",
+        "key_count": len(keys),
+        "orphans": orphans,
+        "read_elsewhere": {key: read_elsewhere[key] for key in sorted(read_elsewhere) if key in keys},
+        "stale_allowlist": stale_allowlist,
+    }
+
+
 def _git_output(repository: Path, *arguments: str, allow_failure: bool = False) -> str:
     command = [
         "git",
@@ -207,9 +299,20 @@ def build_report(repository: Path, *, strict_lock: bool = False) -> dict[str, An
     lock = dependency_lock_report(repository)
     skills = skill_mirror_report(repository)
     git = git_report(repository)
+    deploy_env = deploy_env_report(repository)
 
     errors: list[str] = []
     warnings: list[str] = []
+    if deploy_env["status"] == "error":
+        detail = deploy_env.get("error") or ", ".join(
+            orphan["key"] for orphan in deploy_env["orphans"]
+        )
+        errors.append(f"Deployed env toggle(s) nothing reads: {detail}")
+    if deploy_env["stale_allowlist"]:
+        warnings.append(
+            "deploy-env allowlist names keys no env file sets: "
+            + ", ".join(deploy_env["stale_allowlist"])
+        )
     if not python_supported:
         errors.append(f"Python {MINIMUM_PYTHON[0]}.{MINIMUM_PYTHON[1]} or newer is required")
     if git["status"] == "error":
@@ -238,6 +341,7 @@ def build_report(repository: Path, *, strict_lock: bool = False) -> dict[str, An
         "git": git,
         "dependency_lock": lock,
         "skill_mirrors": skills,
+        "deploy_env": deploy_env,
         "diagnostics": {"errors": errors, "warnings": warnings},
     }
 
@@ -282,6 +386,17 @@ def format_human(report: Mapping[str, Any]) -> str:
         lines.append(
             "[error] .claude/skills must be a symlink to .codex/skills; inspect --json output"
         )
+    deploy_env = report["deploy_env"]
+    if deploy_env["status"] == "matched":
+        lines.append(f"[ok] deploy env: {deploy_env['key_count']} key(s), every one read by code")
+    else:
+        lines.append(
+            f"[error] deploy env: {deploy_env.get('error') or 'toggle(s) nothing reads'}"
+        )
+        for orphan in deploy_env["orphans"]:
+            lines.append(f"  {orphan['key']} (set in {', '.join(orphan['defined_in'])})")
+    for stale in deploy_env["stale_allowlist"]:
+        lines.append(f"[warn] deploy-env allowlist entry {stale} matches no env file key")
     lines.append(f"overall: {report['overall']}")
     return "\n".join(lines)
 

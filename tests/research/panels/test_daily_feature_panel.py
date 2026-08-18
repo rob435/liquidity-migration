@@ -594,6 +594,20 @@ def _gap_edge_intraday(value_col: str, *, extra: dict[str, list] | None = None) 
     return pl.DataFrame(data)
 
 
+def test_klines_day_key_snapped_to_day_floor() -> None:
+    """A listing-day symbol with no 00:00 bar must not mint an off-grid day key:
+    off the grid, every over("ts_ms") rank treats it as a singleton cross-section
+    and the funding/OI/premium joins miss."""
+    day_floor = _date_ms("2025-03-02")
+    klines = _make_hourly_klines(["S00"], "2025-03-02", 1)
+    late_listing = klines.filter(pl.col("ts_ms") >= day_floor + 7 * MS_PER_HOUR)
+    out = _aggregate_daily_klines(late_listing)
+    assert out["ts_ms"].to_list() == [day_floor]
+    # aggregation content unaffected by the key snap
+    assert out["first_bar_close"][0] == late_listing["close"][0]
+    assert out["close"][0] == late_listing["close"][-1]
+
+
 def test_funding_day_key_snapped_to_day_floor() -> None:
     funding = _gap_edge_intraday("funding_rate")
     out = _aggregate_daily_funding(funding)

@@ -69,6 +69,62 @@ def test_skill_report_requires_one_linked_tree(tmp_path: Path) -> None:
     assert report["resolved_equal"] is False
 
 
+def test_deploy_env_report_flags_a_toggle_nothing_reads(tmp_path: Path) -> None:
+    """A deployed toggle whose reader was deleted must fail the doctor: the
+    host file goes on carrying a dead switch, and flipping it does nothing."""
+
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    (deploy / "sleeves.env").write_text("LIVE_KEY=on\nDEAD_KEY=on\n", encoding="utf-8")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "reader.sh").write_text('echo "$LIVE_KEY"\n', encoding="utf-8")
+    (tmp_path / "liquidity_migration").mkdir()
+
+    report = repo_doctor.deploy_env_report(tmp_path, read_elsewhere={})
+    assert report["status"] == "error"
+    assert report["orphans"] == [{"key": "DEAD_KEY", "defined_in": ["sleeves.env"]}]
+
+    # Giving the dead key a reader clears the check.
+    (scripts / "reader.sh").write_text('echo "$LIVE_KEY" "$DEAD_KEY"\n', encoding="utf-8")
+    report = repo_doctor.deploy_env_report(tmp_path, read_elsewhere={})
+    assert report["status"] == "matched"
+    assert report["orphans"] == []
+
+
+def test_deploy_env_report_matches_whole_names_only(tmp_path: Path) -> None:
+    """ENGINE_LIVE inside LIVENESS_ENGINE_LIVE_FILE must not count as a read:
+    a substring hit would hide exactly the drift the check exists to catch."""
+
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    (deploy / "engine.env").write_text("ENGINE_LIVE=false\n", encoding="utf-8")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "reader.sh").write_text('echo "$LIVENESS_ENGINE_LIVE_FILE"\n', encoding="utf-8")
+    (tmp_path / "liquidity_migration").mkdir()
+
+    report = repo_doctor.deploy_env_report(tmp_path, read_elsewhere={})
+    assert report["status"] == "error"
+    assert [orphan["key"] for orphan in report["orphans"]] == ["ENGINE_LIVE"]
+
+
+def test_deploy_env_allowlist_cannot_outlive_its_key(tmp_path: Path) -> None:
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    (deploy / "sleeves.env").write_text("LIVE_KEY=on\n", encoding="utf-8")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "reader.sh").write_text('echo "$LIVE_KEY"\n', encoding="utf-8")
+    (tmp_path / "liquidity_migration").mkdir()
+
+    report = repo_doctor.deploy_env_report(
+        tmp_path, read_elsewhere={"GONE_KEY": "was read by a binary"}
+    )
+    assert report["status"] == "matched"
+    assert report["stale_allowlist"] == ["GONE_KEY"]
+
+
 def test_repository_doctor_emits_machine_readable_state() -> None:
     completed = subprocess.run(
         [sys.executable, str(DOCTOR), "--repo", str(ROOT), "--json"],
@@ -84,6 +140,8 @@ def test_repository_doctor_emits_machine_readable_state() -> None:
     assert report["git"]["status"] in {"clean", "dirty"}
     assert report["dependency_lock"]["status"] in {"matched", "drift"}
     assert report["skill_mirrors"]["status"] == "matched"
+    assert report["deploy_env"]["status"] == "matched"
+    assert report["deploy_env"]["stale_allowlist"] == []
     assert "graphify" not in report
 
 

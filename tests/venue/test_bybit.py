@@ -2326,27 +2326,29 @@ def _funding_row(ts: int) -> dict[str, str]:
     return {"fundingRateTimestamp": str(ts), "fundingRate": "0.0001"}
 
 
-def test_mid_range_empty_page_raises_instead_of_truncating(monkeypatch) -> None:
-    """A full page followed by an empty page mid-range must raise, not truncate.
+def test_mid_range_empty_page_is_reasked_then_believed(monkeypatch) -> None:
+    """A full page followed by an empty page mid-range is re-asked, then believed.
 
     limit=2, range [0, 10]. The first request (endTime=10) returns a FULL page
     (ts 9, 8) so pagination continues with endTime = 8 - 1 = 7; the second
-    (endTime=7) returns [] -- a transient hole. Raising makes the downloader retry
-    instead of writing a full-range marker over a short read.
+    (endTime=7) returns []. That is ambiguous: a transient hole, or a symbol
+    whose history ends exactly on a page boundary (ordinary for anything
+    listed mid-window). Raising here aborted whole threaded backfills on the
+    boundary case, so the page is re-asked twice and, still empty, believed
+    as end-of-history. The transient-recovery side (a re-ask that returns
+    rows) is pinned in tests/marketdata/test_bybit_paged_time_range.py.
     """
     responses = {
         10: [_funding_row(9), _funding_row(8)],  # full page -> keep paginating
-        7: [],  # transient empty mid-range -> must NOT silently truncate
+        7: [],  # empty after a full page -> re-asked before it is believed
     }
     client = _make_market_data(monkeypatch, responses)
 
-    with pytest.raises(bybit.BybitDataError) as excinfo:
-        client.get_funding_history("BTCUSDT", start=0, end=11, limit=2)
+    rows = client.get_funding_history("BTCUSDT", start=0, end=11, limit=2)
 
-    assert "mid-range" in str(excinfo.value)
-    # Both pages were actually requested before the guard fired.
-    assert len(client._client.calls) == 2
-    assert int(client._client.calls[1]["endTime"]) == 7
+    assert [int(r["fundingRateTimestamp"]) for r in rows] == [8, 9]
+    # One initial ask plus exactly two re-asks of the empty page, no more.
+    assert [int(c["endTime"]) for c in client._client.calls] == [10, 7, 7, 7]
 
 
 def test_first_page_empty_returns_cleanly_no_data_in_range(monkeypatch) -> None:
@@ -2376,8 +2378,16 @@ def test_full_then_short_page_completes_normally(monkeypatch) -> None:
     assert len(client._client.calls) == 2
 
 
-def test_open_interest_mid_range_empty_also_guarded(monkeypatch) -> None:
-    """``open_interest`` shares ``_paged_time_range``, so the same guard applies; its timestamp key is "timestamp"."""
+def test_open_interest_mid_range_empty_also_reasked(monkeypatch) -> None:
+    """``open_interest`` shares ``_paged_time_range``, so the same
+    re-ask-then-believe applies; its timestamp key is "timestamp".
+
+    The old version of this test passed for the wrong reason: it asked for
+    ``end=10`` while keying its fake on endTime 10, but the exclusive bound
+    caps the first request at 9 — the fake's KeyError was wrapped into the
+    very error the test expected, and the pagination path never ran. ``end=11``
+    lines the fake up with what is actually requested.
+    """
 
     class FakeHTTP:
         def __init__(self, *, testnet: bool):
@@ -2392,15 +2402,17 @@ def test_open_interest_mid_range_empty_also_guarded(monkeypatch) -> None:
                     {"timestamp": "9", "openInterest": "1"},
                     {"timestamp": "8", "openInterest": "2"},
                 ],
-                7: [],  # transient mid-range empty
+                7: [],  # empty after a full page -> re-asked, then believed
             }
             return {"retCode": 0, "result": {"list": pages[end_time]}}
 
     monkeypatch.setattr(bybit_market_data, "HTTP", FakeHTTP)
     client = bybit_market_data.BybitMarketData(testnet=True, retries=1, retry_sleep_seconds=0.0)
 
-    with pytest.raises(bybit.BybitDataError):
-        client.get_open_interest("BTCUSDT", "5min", start=0, end=10, limit=2)
+    rows = client.get_open_interest("BTCUSDT", "5min", start=0, end=11, limit=2)
+
+    assert [int(r["timestamp"]) for r in rows] == [8, 9]
+    assert [int(c["endTime"]) for c in client._client.calls] == [10, 7, 7, 7]
 
 
 def test_demo_mutation_guard_requires_live_credential_bound_lease(

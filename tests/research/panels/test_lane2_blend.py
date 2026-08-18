@@ -133,6 +133,26 @@ class TestFundingCausality:
         # Settlements land at h=8,16,24 inside the 24h window: 3 prints, not 6.
         assert out["paid"][0] == pytest.approx(3 * rate, abs=1e-15)
 
+    def test_forward_window_stays_inside_its_symbol(self) -> None:
+        """The forward shift must sit inside the per-symbol window: a global
+        shift hands the first symbol's tail rows the next symbol's sums (100x
+        larger here) instead of null."""
+        from liquidity_migration.research.panels.lane2_blend import settlement_exact_funding
+
+        rows, hold = 6, 2
+        frame = pl.DataFrame(
+            {
+                "symbol": ["AUSDT"] * rows + ["BUSDT"] * rows,
+                "bar_ts_ms": [h * 3_600_000 for h in range(rows)] * 2,
+                "by_funding": [1.0] * rows + [100.0] * rows,
+                "by_funding_age_h": [0.0] * (2 * rows),
+            }
+        ).sort(["symbol", "bar_ts_ms"])
+        out = frame.with_columns(settlement_exact_funding(hold).alias("paid"))
+        first = out.filter(pl.col("symbol") == "AUSDT")["paid"]
+        assert first[rows - hold :].null_count() == hold
+        assert set(first[: rows - hold].to_list()) == {2.0}
+
     def test_funding_charged_only_at_settlements(self, cfg: BlendConfig) -> None:
         """A stale rate carried forward must not be charged again."""
         out = prepare(_panel(), cfg)

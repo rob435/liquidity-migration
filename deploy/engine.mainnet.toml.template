@@ -33,9 +33,27 @@ heartbeat_path = "/var/lib/liquidity-migration-engine-mainnet/heartbeat.json"
 # for this — they are forced to disk before the order goes out.
 group_flush_ms = 250
 
+# Rotate the log into a fresh segment once the current one passes this many
+# megabytes; old segments stay in place as archives, and deleting them is an
+# operator decision, never the engine's.
+wal_rotate_mb = 256
+
 # How often the engine refreshes its account reading (it refreshes at half
 # this). The risk kernel's own staleness bound is [risk] max_account_view_age_s.
 account_view_max_age_ms = 5000
+
+# How old the quote an entry was decided against may be before the engine
+# refuses to open on it (a symbol with no quote at all is refused the same
+# way). Exits always flow, whatever the age.
+max_quote_age_ms = 30000
+
+# The owner hand-trades this account, so leverage authority is SHARED: the
+# engine forgets what it set the moment a symbol goes flat and re-confirms
+# with the venue before the next entry. That round trip is the price of a
+# second pair of hands on the account — do not set "sole" here while
+# hand-trading happens at all. (This is also the default when the key is
+# absent.)
+leverage_authority = "shared"
 
 # ---------------------------------------------------------------------------
 # Capital limits: the fleet's own document, not a copy of its numbers

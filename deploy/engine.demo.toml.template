@@ -35,9 +35,28 @@ heartbeat_path = "/var/lib/liquidity-migration-engine/heartbeat.json"
 
 group_flush_ms = 250
 
+# Rotate the log into a fresh segment once the current one passes this many
+# megabytes; old segments stay in place as archives, and deleting them is an
+# operator decision, never the engine's.
+wal_rotate_mb = 256
+
 # How often the engine refreshes its account reading (it refreshes at half
 # this). The risk kernel's own staleness bound is [risk] max_account_view_age_s.
 account_view_max_age_ms = 5000
+
+# How old the quote an entry was decided against may be before the engine
+# refuses to open on it (a symbol with no quote at all is refused the same
+# way). Exits always flow, whatever the age.
+max_quote_age_ms = 30000
+
+# Who else writes leverage on this account. This engine holds the demo
+# account's single mutation lease and nothing else trades it, so what the
+# engine set stays trusted across flat spells (entries skip a ~172 ms
+# confirmation round trip, measured live 2026-08-18) and every held
+# position's leverage is verified against the venue's own position rows
+# instead — a mismatch alarms and turns the confirmation back on for that
+# symbol. If a hand ever starts trading this account, set "shared".
+leverage_authority = "sole"
 
 # ---------------------------------------------------------------------------
 # Capital limits

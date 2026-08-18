@@ -103,6 +103,19 @@ impl Reconciliation {
     }
 
     /// Stops the log says belong to symbols that have none at the venue.
+    /// Orders the log still shows working that the venue is not. They ended
+    /// while the engine was down, and no update for them will ever arrive —
+    /// the private stream does not replay history.
+    pub fn vanished(&self) -> Vec<String> {
+        self.findings
+            .iter()
+            .filter_map(|finding| match finding {
+                Finding::OrderVanished { client_order_id } => Some(client_order_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn stop_repairs(&self) -> Vec<(SymbolId, f64)> {
         self.findings
             .iter()
@@ -219,17 +232,50 @@ pub fn reconcile(
     Reconciliation { findings }
 }
 
+/// Fold one fill into a per-symbol running total — the one arithmetic behind
+/// [`logged_exposure`], used by the boot scan and by the engine's own live
+/// copy, so a segment restated at rotation cannot drift from a replay.
+pub(crate) fn note_fill(out: &mut BTreeMap<u16, f64>, symbol: SymbolId, side: Side, qty: f64) {
+    if !qty.is_finite() {
+        return;
+    }
+    let total = out.entry(symbol.0).or_insert(0.0);
+    *total += signed(side, qty);
+    if total.abs() <= QTY_EPS {
+        out.remove(&symbol.0);
+    }
+}
+
+/// Remember the stop an opening order asked for, per symbol. The other half
+/// of [`intended_stops`], shared with the engine's live copy for the same
+/// reason as [`note_fill`].
+pub(crate) fn note_intended_stop(out: &mut BTreeMap<u16, f64>, request: &OrderRequest) {
+    let OrderRequest { symbol, stop: Some(stop), reduce_only: false, .. } = request else {
+        return;
+    };
+    out.insert(symbol.0, stop.trigger_px);
+}
+
 /// Signed quantity per symbol from every fill in the log, across every boot it
 /// covers. This is what the engine's own trading accounts for; anything the
-/// venue holds beyond it came from somewhere else.
-fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
+/// venue holds beyond it came from somewhere else. A segment restatement is
+/// "set", not "add": at its place in the stream it is exactly what the
+/// records before it added up to.
+pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
     let mut out: BTreeMap<u16, f64> = BTreeMap::new();
     for record in replayed {
-        let WalRecord::OrderUpdate { update: OrderUpdate::Fill { symbol, side, qty, .. } } = record
-        else {
-            continue;
-        };
-        *out.entry(symbol.0).or_insert(0.0) += signed(*side, *qty);
+        match record {
+            WalRecord::OrderUpdate { update: OrderUpdate::Fill { symbol, side, qty, .. } } => {
+                note_fill(&mut out, *symbol, *side, *qty);
+            }
+            WalRecord::SegmentBase { logged_exposure, .. } => {
+                out = logged_exposure
+                    .iter()
+                    .map(|row| (row.symbol.0, row.signed_qty))
+                    .collect();
+            }
+            _ => {}
+        }
     }
     out.retain(|_, qty| qty.abs() > QTY_EPS);
     out
@@ -239,16 +285,19 @@ fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
 /// the strategy's own memory of where a stop belongs, but the log kept it, so
 /// a stop that the venue dropped can be put back exactly where it was meant to
 /// be rather than at a level the engine invented.
-fn intended_stops(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
+pub(crate) fn intended_stops(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
     let mut out: BTreeMap<u16, f64> = BTreeMap::new();
     for record in replayed {
-        let WalRecord::OrderSent { request, .. } = record else {
-            continue;
-        };
-        let OrderRequest { symbol, stop: Some(stop), reduce_only: false, .. } = request else {
-            continue;
-        };
-        out.insert(symbol.0, stop.trigger_px);
+        match record {
+            WalRecord::OrderSent { request, .. } => note_intended_stop(&mut out, request),
+            WalRecord::SegmentBase { intended_stops, .. } => {
+                out = intended_stops
+                    .iter()
+                    .map(|row| (row.symbol.0, row.trigger_px))
+                    .collect();
+            }
+            _ => {}
+        }
     }
     out
 }
@@ -318,7 +367,7 @@ mod tests {
     }
 
     fn held(symbol: u16, side: Side, qty: f64, stop_attached: bool) -> PositionView {
-        PositionView { symbol: SymbolId(symbol), side, qty, entry_px: 100.0, stop_attached }
+        PositionView { symbol: SymbolId(symbol), side, qty, entry_px: 100.0, stop_attached, leverage: None }
     }
 
     /// Stands in for the engine's symbol table: BTCUSDT is subscribed, and

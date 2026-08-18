@@ -596,12 +596,18 @@ async fn each_strategy_reads_only_its_own_working_orders() {
 
     let (one, seen_one) = Watcher::new("BTCUSDT");
     let (two, seen_two) = Watcher::new("BTCUSDT");
-    let (mut engine, _h) = build(
+    let (mut engine, _h) = build_with_venue_orders(
         false,
         allow_all(),
         vec![Box::new(one), Box::new(two)],
         &["BTCUSDT"],
         &replayed,
+        // The venue confirms both are still working; unconfirmed recovered
+        // orders are reaped at boot rather than shown to anybody.
+        vec![
+            still_working("eng-1700000000000-1", "BTCUSDT", 0.25),
+            still_working("eng-1700000000000-2", "BTCUSDT", 0.25),
+        ],
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();

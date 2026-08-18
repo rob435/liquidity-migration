@@ -105,7 +105,8 @@ def settlement_exact_funding(hold_hours: int) -> pl.Expr:
         age < age.shift(1).over("symbol")
     ).fill_null(False)
     fresh = pl.when(is_settlement).then(pl.col("by_funding")).otherwise(0.0)
-    return fresh.rolling_sum(hold_hours).over("symbol").shift(-hold_hours)
+    # Shift inside the window, or each symbol's tail reads the next symbol's sums.
+    return fresh.rolling_sum(hold_hours).shift(-hold_hours).over("symbol")
 
 
 def prepare(panel: pl.DataFrame, cfg: BlendConfig) -> pl.DataFrame:

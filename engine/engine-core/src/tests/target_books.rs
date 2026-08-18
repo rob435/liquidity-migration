@@ -191,6 +191,7 @@ fn a_symbol_that_goes_flat_forgets_its_leverage() {
         qty: 1.0,
         entry_px: 100.0,
         stop_attached: true,
+        leverage: None
     }];
     crate::engine::forget_leverage_where_flat(&mut at, &still_open);
 
@@ -428,4 +429,220 @@ async fn with_no_watcher_the_loop_runs_as_it_always_did() {
         .unwrap();
     assert!(heard.borrow().is_empty());
     assert!(h.sends.borrow().is_empty());
+}
+
+// ---------------------------------------------------------------- authority
+
+/// Wait until the venue's scripted account reading has been consumed, so the
+/// next phase runs against the view the test just fed in.
+async fn until_reading_consumed(
+    readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !readings.borrow().is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// One entry, then a flat account reading, then another entry — the measured
+/// live shape (every carry hold ends flat before the next one opens), which
+/// cost 27 of 67 real orders a ~172 ms confirmation round trip.
+async fn flat_spell_leverage_calls(section: EngineSection) -> usize {
+    let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
+    let (mut engine, h) =
+        build_with(&section, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[], Vec::new())
+            .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+
+    // First entry: pays the confirmation either way.
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    // The account reads back flat — the moment shared authority forgets.
+    h.account_readings.borrow_mut().push_back(Vec::new());
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            until_reading_consumed(h.account_readings.clone()),
+        )
+        .await
+        .unwrap();
+
+    // Second entry, from flat.
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(h.sends.borrow().len(), 2, "both entries went");
+    let count = h.leverages.borrow().len();
+    count
+}
+
+#[tokio::test]
+async fn sole_authority_does_not_repay_leverage_after_a_flat_spell() {
+    let mut section = settings_sole(false);
+    section.shadow = false;
+    assert_eq!(
+        flat_spell_leverage_calls(section).await,
+        1,
+        "under sole authority what this engine set stays set across a flat spell"
+    );
+}
+
+#[tokio::test]
+async fn shared_authority_still_reconfirms_after_a_flat_spell() {
+    // The default is untouched: a hand may have retuned the symbol while it
+    // sat flat, so the entry from flat confirms with the venue again.
+    let mut section = settings(false);
+    section.shadow = false;
+    assert_eq!(flat_spell_leverage_calls(section).await, 2);
+}
+
+#[tokio::test]
+async fn a_venue_row_contradicting_the_cache_evicts_the_trust() {
+    // Sole authority is a claim about the world, and the venue's own position
+    // row is the check: a held position running at a leverage this engine
+    // never set means somebody else writes here — say so, drop the trust,
+    // and confirm inline again on the next entry.
+    let mut section = settings_sole(false);
+    section.shadow = false;
+    let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
+    let (mut engine, h) =
+        build_with(&section, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[], Vec::new())
+            .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(h.leverages.borrow().len(), 1);
+
+    // The venue says the held position runs at 5x. This engine set 2x.
+    h.account_readings.borrow_mut().push_back(vec![engine_types::PositionView {
+        symbol,
+        side: Side::Buy,
+        qty: 0.01,
+        entry_px: 30_000.0,
+        stop_attached: true,
+        leverage: Some(5.0),
+    }]);
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            until_reading_consumed(h.account_readings.clone()),
+        )
+        .await
+        .unwrap();
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        h.leverages.borrow().len(),
+        2,
+        "the contradicted trust was evicted, so the next entry confirmed inline"
+    );
+    assert!(
+        h.records.borrow().iter().any(|record| matches!(
+            record,
+            WalRecord::Note { source, .. } if source == "leverage-authority"
+        )),
+        "the contradiction was written down, not just acted on"
+    );
+}
+
+#[tokio::test]
+async fn a_book_arrival_pre_arms_leverage_before_any_entry() {
+    // The round trip happens where nobody is waiting on an order: at book
+    // arrival. The entry that follows finds the cache warm and goes straight
+    // to the wire.
+    let path = temp_path("book-pre-arm");
+    std::fs::write(&path, BOOK_JSON).expect("writes the book");
+    let (listener, heard) = BookListener::new("BTCUSDT");
+    let mut section = settings_sole(false);
+    section.shadow = false;
+    let (mut engine, h) =
+        build_with(&section, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[], Vec::new())
+            .await;
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![(
+        StrategyId(0),
+        crate::targets::TargetBookWatcher::with_poll(
+            path.path().to_path_buf(),
+            Duration::from_millis(5),
+        ),
+    )]));
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            until_heard(heard.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        h.leverages.borrow().as_slice(),
+        [(SymbolId(0), 2.0)],
+        "the book's leverage was armed at arrival, before any entry existed"
+    );
+    assert!(h.sends.borrow().is_empty(), "no order went; only the arm");
+}
+
+#[tokio::test]
+async fn a_shadow_engine_never_pre_arms_the_real_account() {
+    // Shadow computes and logs; it must not mutate the account it reads.
+    let path = temp_path("book-pre-arm-shadow");
+    std::fs::write(&path, BOOK_JSON).expect("writes the book");
+    let (listener, heard) = BookListener::new("BTCUSDT");
+    let section = settings_sole(true);
+    let (mut engine, h) =
+        build_with(&section, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[], Vec::new())
+            .await;
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![(
+        StrategyId(0),
+        crate::targets::TargetBookWatcher::with_poll(
+            path.path().to_path_buf(),
+            Duration::from_millis(5),
+        ),
+    )]));
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            until_heard(heard.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        h.leverages.borrow().is_empty(),
+        "a shadow engine armed leverage on the real account: {:?}",
+        h.leverages.borrow()
+    );
 }

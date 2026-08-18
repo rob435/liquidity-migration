@@ -169,7 +169,7 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     satisfy the projected initial-margin cap. Desired targets go to the account
     owner through the configured inbox.
     """
-    from liquidity_migration.research.backtest.long_native import LONG_STRATEGY_PROFILE_CHOICES
+    from liquidity_migration.rules.long_native import LONG_STRATEGY_PROFILE_CHOICES
     from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 
     long_demo = subparsers.add_parser(

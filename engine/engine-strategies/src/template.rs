@@ -43,15 +43,21 @@
 //!
 //! - **An opening order carries a stop.** The risk kernel refuses one that
 //!   does not. Reducing orders do not need one.
-//! - **`on_event` runs on the engine loop.** It must return quickly and must
+//! - **Override only the events you act on.** The `Strategy` trait has one
+//!   hook per event kind (`on_market`, `on_timer`, `on_order`, `on_targets`,
+//!   `on_intent_refused`), each doing nothing by default. The one exhaustive
+//!   match over events lives in the trait, so a new event kind never forces
+//!   an edit here.
+//! - **Hooks run on the engine loop.** They must return quickly and must
 //!   never block. Allocate in the constructor, keep scratch buffers on `self`.
 //! - **The engine mints order ids.** You cannot choose one. To find an order
 //!   you placed, read [`StrategyCtx::resting`].
 //! - **The account reading lags.** It is the venue's picture on the engine's
 //!   refresh schedule, not a running total of your fills — a fill can be gone
-//!   from `resting` seconds before it appears in `position`. If acting twice
-//!   in that window would be wrong, remember what you sent; `target_book`'s
-//!   follower shows one way.
+//!   from `resting` seconds before it appears in `position`. The engine keeps
+//!   the bridge itself: `StrategyCtx::in_flight` is what you have sent that
+//!   the reading has not shown yet, and reading plus in-flight is what you
+//!   hold. `target_book`'s follower shows the read.
 //! - **Quantize before you believe a size.** [`StrategyCtx::instrument`] gives
 //!   tick, step and minimums, and `None` means nothing can be sent for that
 //!   symbol at all. The engine quantizes again before the wire, so this is

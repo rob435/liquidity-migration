@@ -26,20 +26,25 @@ Two words used throughout:
 
 Fixed, and the first refusal wins:
 
-1. **account view freshness** — older than `max_account_view_age_ns` is
-   `StaleAccountView`; a view stamped after the decision it is judging is
-   `UnknownState`;
-2. **readability** of the view and the intent — `UnknownState`;
-3. **account loss guard** — `LossGuardTripped`;
-4. **exit or entry** — an exit is clamped to the position and stops here;
-5. **stop discipline** — `MissingStop`;
-6. **equity-anchored envelope** — `EnvelopeBreached`;
-7. **account-wide capital caps**, smallest scope first: one symbol's gross
+1. **a future-dated view** — a view stamped after the decision it is judging
+   is `UnknownState`, for exits and entries alike;
+2. **readability** of the view and the intent — `UnknownState`; exits need
+   this too, because the clamp sizes against the position rows;
+3. **exit or entry** — a genuine exit is clamped to the uncovered position and
+   stops here, *passing* the staleness and trip refusals below (ruled at
+   integration, 2026-08-14: a trip's remedy IS exits — the row in the table
+   below);
+4. **account view freshness**, entries only — older than
+   `max_account_view_age_ns` is `StaleAccountView`;
+5. **account loss guard** — `LossGuardTripped`;
+6. **stop discipline** — `MissingStop`;
+7. **equity-anchored envelope** — `EnvelopeBreached`;
+8. **account-wide capital caps**, smallest scope first: one symbol's gross
    (`SymbolNotionalBreached`), the whole book's gross
    (`ComponentGrossBreached`), the whole book's margin
    (`InitialMarginBreached`), then whether the account's spare margin funds the
    increase (`AvailableMarginExhausted`);
-8. **per-strategy partition** — clamps, then `PartitionExhausted`.
+9. **per-strategy partition** — clamps, then `PartitionExhausted`.
 
 The account caps sit after the envelope because the envelope is the stricter
 form of the same idea — it charges a wide stop more than its notional — and
@@ -51,7 +56,7 @@ what the Python kernel does to a batch that breaches one.
 
 | Python rule | Rust rule | Simplified | Why the outcome holds |
 | --- | --- | --- | --- |
-| Loss guard `BLOCKED` when equity is missing, non-positive, or older than `max_equity_staleness_ns` | Step 1/2: `StaleAccountView` on age, `UnknownState` on an unreadable equity | One age bound (`max_account_view_age_ns`) covers what Python splits between the loss guard's equity staleness and the protection health chain | Both refuse new risk. Rust also refuses exits while blind, which Python does not — stricter, see below |
+| Loss guard `BLOCKED` when equity is missing, non-positive, or older than `max_equity_staleness_ns` | Step 1/2: `StaleAccountView` on age, `UnknownState` on an unreadable equity | One age bound (`max_account_view_age_ns`) covers what Python splits between the loss guard's equity staleness and the protection health chain | Both refuse new risk, and both let a genuine exit flow while blind (ruled 2026-08-14 — the `TRIPPED` row below) |
 | Loss guard `now - equity_ts_ns` | `intent.decided_ns - account.observed_ns` | The engine has no wall clock on the hot path; both stamps are engine monotonic nanoseconds | Same quantity. An intent that sat around makes its own view look older, which only refuses more |
 | Loss guard "timestamp is in the future" `BLOCKED` | `UnknownState` | — | Same refusal; the Rust reason carries the detail string instead of a `BLOCKED` label |
 | Loss guard `TRIPPED` when `opening - equity >= max_daily_loss_usdt` | `LossGuardTripped { equity_usdt, floor_usdt }`, `floor = opening - ceiling`, latched | Reported as a floor rather than a loss | `loss >= ceiling` and `equity <= opening - ceiling` are the same test |

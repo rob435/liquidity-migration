@@ -82,49 +82,18 @@ match; never append history to this file.
   grouped, `err=none`) — receipts in CHANGELOG 2026-08-14. The one-line
   rollback floor `31ee68d` remains: rolling back past it requires archiving
   each producer's event tape.
-- **The Rust execution engine trades a demo account of its own, and nothing
-  the fleet owns.** `engine/` ([docs/engine.md](docs/engine.md)) is built in an
-  isolated clone at `/opt/engine-build` — never the deployed checkout the
-  fleet runs from — with its own toolchain under `/opt/rust`. Measured there
-  2026-08-14: whole chain **2.60 ms median**, against the Python order path's
-  25.7 ms on the same box.
-
-  It has a **single-writer lease**, and it is the fleet's own: one kernel
-  `flock` per venue account at
+- **The engine binary is built in an isolated clone at `/opt/engine-build`** —
+  never the deployed checkout the fleet runs from — with its own toolchain
+  under `/opt/rust`. Its measured latency on the box, the single-writer lease
+  it takes (one kernel `flock` per venue account at
   `/run/lock/liquidity-migration/bybit-{realm}-user-{userID}.lock`, named by
-  the account number the venue itself reports. A live engine takes it before
-  it boots and refuses to start if anything holds it; a shadow engine only
-  looks. That closes the wedge of 2026-08-14 01:56, when a live engine run
-  blocked the demo owner for ~100 s.
-
-  There are **two demo accounts on the box**. The fleet owns 555899665; the
-  engine runs against **579580669**, whose lease nothing else holds
-  (credentials in `bybit-quote-lab.env`, so the quote lab and the engine
-  cannot run at once — which the lease now enforces rather than leaving to
-  memory). On 2026-08-14 the engine took that account live end to end: lease
-  held and a second engine refused, a market entry rewritten into a resting
-  limit and filled 299 BEATUSDT at 0.666 with its stop at 0.434, a restart on
-  its own log finding nothing wrong, a fresh log correctly refusing to open
-  against a position it could not account for, and an empty book flattening
-  it. The fleet's two leases were held throughout.
-
-  Since 2026-08-14 the engine **can** be pointed at the funded account, and
-  only with the owner's own switch: `bybit_mainnet` refuses to build unless
-  `REAL_MONEY` is armed in the host credential file, and an armed host refuses
-  to run the demo realm in turn. It also reads
-  `configs/operational.mainnet.json` directly, so the caps it enforces are the
-  fleet's caps rather than a copy, and it states each position's leverage at
-  the venue before the order goes. **Nothing has been sent to the funded
-  account, and no unit is deployed.**
-
-  It also takes on a symbol a book names for the first time while it is
-  running — interned, subscribed, added to the gateway and the private stream,
-  and given an instrument rule, with the four name-to-id tables checked against
-  each other. That was the last capability it lacked.
-
-  The Python fleet owns everything live and stays. What is missing is now
-  evidence rather than capability: nothing has ever run against the funded
-  account ([docs/engine.md](docs/engine.md) §What the engine cannot do yet).
+  the account number the venue itself reports), and the mainnet fence are
+  [docs/engine.md](docs/engine.md). There are **two demo accounts on the
+  box**: the fleet's 555899665, whose lease the live engine holds, and
+  579580669 (credentials in `bybit-quote-lab.env`), where the engine ran its
+  first live end-to-end day on 2026-08-14 and whose lease nothing holds now —
+  the lease is what keeps the quote lab and an engine from ever writing to one
+  account at once.
 
 ### The funded account
 
@@ -175,21 +144,21 @@ match; never append history to this file.
 
 ### Trading-rule receipts
 
-- **The funded pair is fresh.** `candidate-universe-20260813T182505Z` /
-  `venue-rules-20260813T182505Z`, frozen as one pair from the live venue on
-  2026-08-13 18:25 UTC, 512 symbols; expires **2026-08-20 ~18:25 UTC**, and every
-  deploy renews it (a failed renewal keeps the installed pair and the deploy
+- **The funded pair is fresh.** `candidate-universe-20260817T205337Z` /
+  `venue-rules-20260817T205337Z`, frozen as one pair from the live venue on
+  2026-08-17 20:53 UTC; expires **2026-08-24 ~20:53 UTC**, and every deploy
+  renews it (a failed renewal keeps the installed pair and the deploy
   finishes). The rules also cover any symbol the account still has exposure on,
   so a retiring symbol that is still held no longer wedges the LONG cycle —
   entries stop, exits keep publishing until flat.
-- **The demo receipt is the one with a deadline.**
-  `demo-rules-20260809T191337Z` (510 symbols, order-placing probe) expires
-  **2026-08-16 ~19:13 UTC** and did not refresh at the deploy: the refresh is
-  flag-gated (`ROLLOUT_REFRESH_STALE_DEMO_RULES=1`) and at this age routes to the
-  probe, which needs a flat demo account while demo holds carry's KAITOUSDT +
-  COTIUSDT. **Owner decision before then**: refresh in a flat window, flatten
-  first, or accept that a demo-owner restart after expiry refuses until refreshed
-  (a running owner keeps running; the watchdog warns from ~08-15 19:13).
+- **The demo receipt is fresh again.** `demo-rules-20260818T220119Z`,
+  probed 2026-08-18 22:01 UTC inside a flat maintenance window (flatten
+  through the engine; the last 0.1 ACEUSDT was sub-minimum dust plus a
+  pre-engine foreign remainder, closed reduce-only with the leased client
+  while the engine was stopped), bound by the same staged deploy that
+  reinstalled `54560ea5`. Expires **2026-08-25 ~22:01 UTC**; any rollout in
+  the back half re-probes on its own. The watchdog confirmed
+  `demo_rules_age` cleared at 22:24 UTC.
 
 ### Execution and market data
 
@@ -261,9 +230,10 @@ match; never append history to this file.
 
 ## Topology
 
-Nine units on and active: the demo owner, demo LONG and CARRY producers, the
-mainnet owner, mainnet LONG and CARRY producers, the Telegram controls daemon,
-and the demo and mainnet liveness timers. Checked 2026-08-14: the host carries
+Nine units on and active: the demo engine (the account owner, LIVE), the
+mainnet engine (shadow), demo LONG and CARRY producers, mainnet LONG and CARRY
+producers, the Telegram controls daemon, and the demo and mainnet liveness
+timers. Checked 2026-08-14: the host carries
 exactly the eleven unit files in `deploy/systemd/` and nothing else — the
 retired CONTINUOUS producer and the hedge and residual-momentum timers are
 gone from the box, so the warning that used to stand here about a re-enabled
@@ -272,7 +242,7 @@ demo is the only practice book.
 
 | Kind | Units |
 | --- | --- |
-| Account owners | demo, mainnet |
+| Account owners (engines) | demo (LIVE), mainnet (shadow) |
 | Target producers | demo × LONG/CARRY, mainnet × LONG/CARRY |
 | Always-on daemon | Telegram controls |
 | Timers | demo liveness, mainnet liveness (both active) |
@@ -300,9 +270,11 @@ LONG entry ≈ its dial / 18.75 (≈ $10), and the two dials may total 9.9.
 the protections. Everything else the old surface exposed is derived and still
 proved at render; a retired `RM_*` line in an env file is refused by name. Derived
 venue margin leverage ≈ 3.9× at these dials — on a fixed wallet a bigger book is
-more leverage; the two cannot move independently. Honest protection note: the loss
-halt fires on realised loss only, so a dialled-up open book meets the venue's
-liquidation engine before the halt.
+more leverage; the two cannot move independently. Honest protection note: the halt
+trips on the day's equity reading falling to the floor — paper loss counts,
+because equity marks the open book — but it only sees the account as often as
+the engine reads it, so a move faster than that reading, or the venue's own
+liquidation engine, can still outrun it at high leverage.
 
 ## Standing operational constraints
 
@@ -426,13 +398,12 @@ green, treat the checks as the suspect.
 | No startup check pins margin/position mode | Cross + one-way are load-bearing (see Now); a venue-side flip is only caught at order rejection. Proposed, owner to decide |
 | Nothing bounds convergence toward a stale accepted target while producers are down | Deliberately not built — a liveness-coupled trading halt needing owner design (2026-08-03) |
 | Kline bootstrap logs `failed=N` on restart with an intact store | It re-fetches a window it already holds and counts zero new inserts as failure; bounded ~40–50 s per restart. Tracked follow-up |
-| The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 180 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |
+| The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 90 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7.5 states it rather than treating it as settled |
 | Nothing watches the venue and our records disagreeing | Since 2026-08-14. `account_health_unhealthy` had one writer, the deleted Python owner; the engine reconciles but publishes no mismatch. Freshness was retargeted at the engine's heartbeat on 08-17, agreement was not. `gather_account_health_alerts()` is kept uncalled as the specification. Needs the engine to publish a mismatch — a design question, owner to decide ([`docs/notifications.md`](docs/notifications.md) §What stopped being watched) |
 | No positive liveness signal reaches the chat | The hourly digest was retired with the Python owner and the dead-man's switch URL is unprovisioned, so silence means either a healthy fleet or a dead box. The engine's heartbeat is checked on-box only, and an on-box watchdog cannot report that the box died |
-| The demo instrument-rule receipt is expired | Last probed 2026-08-09; the 168-hour bound passed on 08-16. Nothing in the runtime path reads it, so nothing refuses to start, but the research and candidate-universe tooling reads stale evidence. Refresh with a deploy carrying `--refresh-demo-rules` (live PostOnly orders, ≤200 USDT per symbol) |
 
 Audit reports are not kept as standing files. Their findings live in the topic
 docs — `docs/research/research_findings.md`, `docs/architecture.md`,

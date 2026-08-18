@@ -145,12 +145,16 @@ pub(crate) fn parse_positions(
         };
         // Bybit writes "" or "0" when no stop is set on the position.
         let stop_attached = opt_num_field(row, "stopLoss")?.is_some_and(|v| v > 0.0);
+        // The leverage the venue says this position runs at. Zero or absent
+        // reads as unknown (cross-margin rows can blank it), never as a fact.
+        let leverage = opt_num_field(row, "leverage")?.filter(|v| *v > 0.0);
         out.push(PositionView {
             symbol: id,
             side,
             qty,
             entry_px: num_field(row, "avgPrice")?,
             stop_attached,
+            leverage,
         });
     }
     Ok((out, next_cursor(result)))
@@ -421,9 +425,9 @@ mod tests {
     fn positions_parse_and_flat_rows_are_dropped() {
         let result = json!({"list": [
             {"symbol": "BTCUSDT", "side": "Buy", "size": "0.01", "avgPrice": "95000.5",
-             "stopLoss": "93000", "positionIdx": 0},
+             "stopLoss": "93000", "leverage": "3", "positionIdx": 0},
             {"symbol": "ETHUSDT", "side": "Sell", "size": "1.5", "avgPrice": "3000",
-             "stopLoss": "0", "positionIdx": 0},
+             "stopLoss": "0", "leverage": "", "positionIdx": 0},
             {"symbol": "ETHUSDT", "side": "", "size": "0", "avgPrice": "0",
              "stopLoss": "", "positionIdx": 0}
         ], "nextPageCursor": ""});
@@ -437,6 +441,15 @@ mod tests {
         assert_eq!(positions[0].qty, 0.01);
         assert_eq!(positions[0].entry_px, 95000.5);
         assert!(positions[0].stop_attached);
+        assert_eq!(
+            positions[0].leverage,
+            Some(3.0),
+            "the venue's own leverage answer rides along on the row"
+        );
+        assert_eq!(
+            positions[1].leverage, None,
+            "a blank leverage reads as unknown, never as a number"
+        );
 
         // "0" is Bybit for "no stop", not for "a stop at zero".
         assert!(!positions[1].stop_attached);

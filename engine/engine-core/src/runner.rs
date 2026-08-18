@@ -58,26 +58,30 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
         .iter()
         .flat_map(|s| s.subscriptions())
         .collect::<Vec<_>>();
-    let symbols = assembly::symbol_order(&wanted);
     let risk = assembly::risk(&loaded.config.risk, &loaded.config.strategies)?;
     // Checked here, while the strategies are still in hand and before the
     // account lease is taken: a config that wires a book to the wrong plug is
     // a mistake to make at the door, not after claiming an account.
     let books = assembly::target_books(&settings, &loaded.config.strategies, &strategies)?;
+
+    // The log is claimed and replayed before anything is given a symbol
+    // table, because the table STARTS from the log: the previous run's own
+    // id order, then this config's subscriptions on top. Claim before open,
+    // because opening truncates a torn tail — doing that to a log another
+    // engine is appending to is the damage the claim prevents. Shadow runs
+    // take it too: they write the same log.
+    let _log_claim = engine_wal::lock(&settings.wal_path)?;
+    let (wal, replayed) = assembly::wal(&settings.wal_path)?;
+    let symbols = assembly::symbol_order(&replayed, &wanted);
+
     let mut venue = assembly::venue(&settings.venue, symbols.clone())?;
 
     // Held for the whole run. Dropped at the end of this function, and by the
     // kernel if the process dies first.
     let claimed = single_writer(&mut venue, settings.shadow).await?;
-    // Before the log is opened, because opening it truncates a torn tail —
-    // doing that to a log another engine is appending to is the damage this
-    // is here to prevent. Shadow runs take it too: they write the same log.
-    let _log_claim = engine_wal::lock(&settings.wal_path)?;
 
-    let mut market_feed = assembly::market_feed(&wanted);
+    let mut market_feed = assembly::market_feed(&assembly::boot_subscriptions(&symbols, &wanted));
     let mut order_feed = assembly::order_feed(venue.realm(), symbols)?;
-
-    let (wal, replayed) = assembly::wal(&settings.wal_path)?;
 
     let mut engine = Engine::boot_as(
         &settings,

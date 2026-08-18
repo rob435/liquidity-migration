@@ -7,7 +7,7 @@
 //! is the part that must happen in microseconds: see the touch, send once.
 
 use engine_types::{
-    EngineEvent, Feed, Intent, MarketEvent, OrderKind, OrderUpdate, Quote, Side, StopSpec, Strategy,
+    Feed, Intent, MarketEvent, OrderKind, OrderUpdate, Quote, Side, StopSpec, Strategy,
     StrategyCtx, StrategyId, Subscription, SymbolId, TimerId,
 };
 
@@ -196,7 +196,7 @@ impl TouchSniper {
         }
     }
 
-    fn on_order(&mut self, update: &OrderUpdate, ctx: &mut dyn StrategyCtx) {
+    fn order_news(&mut self, update: &OrderUpdate, ctx: &mut dyn StrategyCtx) {
         match self.state {
             State::EntrySent => match update {
                 OrderUpdate::Ack(ack) if is_ours(&self.entry_order, &ack.client_order_id) => {
@@ -268,34 +268,52 @@ impl Strategy for TouchSniper {
         vec![Subscription { symbol: self.symbol_name.clone(), feed: Feed::Quote }]
     }
 
-    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+    // Only what this plug acts on is overridden: quotes, its own timer, and
+    // news about its own orders. A target book is research changing what
+    // carry holds, which says nothing about a level someone asked this one
+    // to watch; a refused intent needs nothing unwound here, because this
+    // plug keeps no sent-ahead cover and its own state advances on order
+    // news. Both fall through to the trait's do-nothing defaults.
+
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
         if self.state == State::Done {
             return;
         }
-        let Some(symbol) = self.resolve(ctx) else {
+        let Some(symbol) = self.resolve(&*ctx) else {
             return;
         };
         match event {
-            EngineEvent::Market(MarketEvent::Quote { symbol: from, quote }) if *from == symbol => {
+            MarketEvent::Quote { symbol: from, quote } if *from == symbol => {
                 self.on_quote(symbol, quote, ctx)
             }
             // Another symbol, a ticker, or a feed reset. A reset in particular
             // changes nothing: the levels are absolute prices, not something
             // derived from the stream that just dropped, and news about our
             // orders comes from the order feed, not this one.
-            EngineEvent::Market(_) => {}
-            EngineEvent::Timer { id, .. } if *id == TTL_TIMER => {
-                if self.state == State::Holding {
-                    self.send_exit(symbol, ctx);
-                }
-            }
-            EngineEvent::Timer { .. } => {}
-            EngineEvent::Order(update) => self.on_order(update, ctx),
-            // This plug's decision is its config, not a book. Research
-            // changing what carry holds says nothing about a level someone
-            // asked this one to watch.
-            EngineEvent::Targets(_) => {}
+            _ => {}
         }
+    }
+
+    fn on_timer(&mut self, id: TimerId, _now_ns: u64, ctx: &mut dyn StrategyCtx) {
+        if self.state == State::Done {
+            return;
+        }
+        let Some(symbol) = self.resolve(&*ctx) else {
+            return;
+        };
+        if id == TTL_TIMER && self.state == State::Holding {
+            self.send_exit(symbol, ctx);
+        }
+    }
+
+    fn on_order(&mut self, update: &OrderUpdate, ctx: &mut dyn StrategyCtx) {
+        if self.state == State::Done {
+            return;
+        }
+        if self.resolve(&*ctx).is_none() {
+            return;
+        }
+        self.order_news(update, ctx);
     }
 }
 

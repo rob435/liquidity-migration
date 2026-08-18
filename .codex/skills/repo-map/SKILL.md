@@ -5,7 +5,7 @@ description: Orient in the liquidity-migration codebase, locate ownership, and t
 
 # Navigate the repository
 
-Read `liquidity_migration/README.md` first: it names all eleven subpackages,
+Read `liquidity_migration/README.md` first: it names all twelve subpackages,
 what belongs in each, and the measured import order (`core` knows nothing,
 `runtime` is a sink). `scripts/README.md` does the same for the script tree.
 Then `docs/architecture.md` (Subsystem map) for subsystem ownership and entry

@@ -238,7 +238,11 @@ exec .venv/bin/python scripts/maintain/reconcile_bybit_demo_accounting.py \
     if (( has_execute == 0 )); then
       flatten_args=(--dry-run ${flatten_args[@]+"${flatten_args[@]}"})
     fi
-    remote_exec "$REPO_DIR/scripts/vps/flatten_account.sh" ${flatten_args[@]+"${flatten_args[@]}"}
+    # The script body must consume REMOTE_ARGS itself: remote_exec serializes
+    # the arguments into a remote shell array, and a bare path here runs the
+    # script with no argv at all — which flatten_account.sh refuses.
+    remote_exec 'exec bash "$REPO_DIR/scripts/vps/flatten_account.sh" "${REMOTE_ARGS[@]}"' \
+      ${flatten_args[@]+"${flatten_args[@]}"}
     ;;
   wedged-command)
     # `report` and `probe` read only. `resolve` writes one journal transition

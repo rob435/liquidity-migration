@@ -5,7 +5,8 @@ The owner-selected lead strategy from the 2026-07-26 financed-longs program
 reference for what carry-hold is, why it works, what it has been tested
 against, how it should be run, and what would kill it. Registered config:
 `configs/lane2_carry_hold_v1.json` (commit `6584b00` + correction `7f2e0a7`);
-executable: `liquidity_migration/research/backtest/financed_longs.py`.
+executable: the rule in `liquidity_migration/rules/carry_hold.py`, scored by
+`liquidity_migration/research/backtest/financed_longs.py`.
 
 Status: **Lane-2 registered, accruing a forward record since the registration
 commit.**
@@ -312,8 +313,8 @@ and deploy this strategy in its place. The runtime now exists:
    2026-08-03 paper retirement), publishing absolute
    component targets through the normal account-kernel inbox. The deployed
    decision logic is NOT a reimplementation: the producer calls the exact
-   registered-scorer functions (`financed_longs.carry_hold_weights`) on the
-   live frame (`financed_longs.prepare_decision`) over a stateless 90-day
+   registered-scorer functions (`rules/carry_hold.py:carry_hold_weights`) on the
+   live frame (`rules/carry_hold.py:prepare_decision`) over a stateless 90-day
    replay window (longest-ever state spell: 19 days).
 2. **Decision cadence**: once per UTC day at 00:00 close, computed from
    ~00:20 (kline availability lag, same offset as the rmom timer). Diff-based

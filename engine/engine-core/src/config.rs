@@ -53,13 +53,39 @@ pub struct EngineSection {
     /// How often buffered log bytes are pushed to the OS.
     #[serde(default = "default_group_flush_ms")]
     pub group_flush_ms: u64,
+    /// Rotate the log into a fresh segment once the current one passes this
+    /// many megabytes, checked on the group-flush tick. Old segments are
+    /// archived in place, never deleted — retention is the owner's decision.
+    /// Left out means 256, so a config written before rotation existed still
+    /// boots and still rotates. Zero turns rotation off.
+    #[serde(default = "default_wal_rotate_mb")]
+    pub wal_rotate_mb: u64,
     /// How old an account reading may be before the risk kernel should treat
     /// it as unknown. The engine refreshes at half this age.
     #[serde(default = "default_account_view_max_age_ms")]
     pub account_view_max_age_ms: u64,
+    /// How old the quote a decision was priced against may be before an
+    /// entry is refused. Exits always flow. Left out means 30 seconds; a
+    /// symbol that has never quoted at all is refused for entries the same
+    /// way, because the absence of a price is the stalest price there is.
+    #[serde(default = "default_max_quote_age_ms")]
+    pub max_quote_age_ms: u64,
     /// True: compute and log orders, send nothing.
     #[serde(default = "default_shadow")]
     pub shadow: bool,
+    /// Who else can change leverage on this account.
+    ///
+    /// `"shared"` (the default, and the behavior every config before this key
+    /// meant): a hand may retune a symbol while it sits flat, so the engine
+    /// forgets what it set the moment a symbol goes flat and re-confirms with
+    /// the venue before the next entry — one round trip (~172 ms measured)
+    /// per entry from flat. `"sole"`: this engine holds the account's single
+    /// mutation lease and is the only leverage writer, so what it set stays
+    /// trusted across flat spells, entries skip the round trip, and instead
+    /// every HELD position's leverage is read back off the venue's own
+    /// position rows and any mismatch alarms and evicts the trust.
+    #[serde(default)]
+    pub leverage_authority: LeverageAuthority,
     /// Where the research system writes its target book. Left out means no
     /// watcher is started at all — which is *no decision*, not an empty book:
     /// a follower plug holds whatever it holds.
@@ -71,6 +97,15 @@ pub struct EngineSection {
     /// on itself is not a fault.
     #[serde(default)]
     pub heartbeat_path: Option<PathBuf>,
+}
+
+/// See [`EngineSection::leverage_authority`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LeverageAuthority {
+    #[default]
+    Shared,
+    Sole,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -120,8 +155,16 @@ fn default_group_flush_ms() -> u64 {
     250
 }
 
+fn default_wal_rotate_mb() -> u64 {
+    256
+}
+
 fn default_account_view_max_age_ms() -> u64 {
     5_000
+}
+
+fn default_max_quote_age_ms() -> u64 {
+    30_000
 }
 
 fn default_shadow() -> bool {
@@ -184,7 +227,24 @@ symbols = ["BTCUSDT"]
     fn defaults_apply_and_extras_reach_the_strategy() {
         let cfg: Config = toml::from_str(SAMPLE).unwrap();
         assert_eq!(cfg.engine.group_flush_ms, 250);
+        assert_eq!(
+            cfg.engine.wal_rotate_mb, 256,
+            "a config written before rotation existed must still boot, and still rotate"
+        );
+        assert_eq!(
+            cfg.engine.max_quote_age_ms, 30_000,
+            "a config written before the quote bound existed must still boot, bounded"
+        );
         assert!(cfg.engine.shadow, "shadow is the default");
+        assert_eq!(
+            cfg.engine.leverage_authority,
+            LeverageAuthority::Shared,
+            "a config written before the key existed still means a hand may retune leverage"
+        );
+        let sole: Config =
+            toml::from_str(&SAMPLE.replace("[risk]", "leverage_authority = \"sole\"\n\n[risk]"))
+                .unwrap();
+        assert_eq!(sole.engine.leverage_authority, LeverageAuthority::Sole);
         assert_eq!(
             cfg.engine.venue, engine_venue::BYBIT_DEMO,
             "a config written before the key existed still means the demo venue"

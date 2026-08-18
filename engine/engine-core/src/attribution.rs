@@ -70,10 +70,35 @@ impl Attribution {
                     };
                     me.on_update(strategy, update);
                 }
+                // A rotation restated the whole table. Set, not add: at its
+                // place in a chain read these rows are exactly what the fills
+                // before it summed to, and in a fresh segment they are all
+                // there is. Still-open orders arrive through the same record,
+                // so `sender` keeps resolving their later fills.
+                WalRecord::SegmentBase { attribution, open_orders, .. } => {
+                    me.filled = attribution
+                        .iter()
+                        .map(|row| ((row.strategy.0, row.symbol.0), row.signed_qty))
+                        .collect();
+                    for open in open_orders {
+                        sender.insert(open.request.client_order_id.as_str(), open.request.strategy);
+                    }
+                }
                 _ => {}
             }
         }
         me
+    }
+
+    /// Every non-flat row, sorted, for a rotation to restate.
+    pub fn rows(&self) -> Vec<(StrategyId, SymbolId, f64)> {
+        let mut rows: Vec<(StrategyId, SymbolId, f64)> = self
+            .filled
+            .iter()
+            .map(|((strategy, symbol), qty)| (StrategyId(*strategy), SymbolId(*symbol), *qty))
+            .collect();
+        rows.sort_by_key(|(strategy, symbol, _)| (strategy.0, symbol.0));
+        rows
     }
 
     /// Charge one fill to the strategy whose order produced it. The caller

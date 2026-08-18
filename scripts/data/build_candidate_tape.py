@@ -52,7 +52,7 @@ def _install_import_only_windows_fcntl_guard() -> None:
 _install_import_only_windows_fcntl_guard()
 
 from liquidity_migration.core._common import MS_PER_HOUR, exact_duration_ms  # noqa: E402
-from liquidity_migration.research.backtest.long_native import (  # noqa: E402
+from liquidity_migration.rules.long_native import (  # noqa: E402
     _classify_entry,
     build_long_features,
     long_pump_family,

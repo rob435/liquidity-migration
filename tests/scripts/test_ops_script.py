@@ -169,6 +169,27 @@ def test_wedged_command_passes_its_subcommand_through_untouched(tmp_path: Path) 
     assert "REMOTE_ARGS=( report )" in capture.read_text(encoding="utf-8")
 
 
+def test_flatten_payload_hands_its_arguments_to_the_remote_script(tmp_path: Path) -> None:
+    """The bug this pins: the flatten script body was the bare script path, so the
+    remote host ran flatten_account.sh with zero argv and it refused every call —
+    the args were serialized into REMOTE_ARGS and then never consumed.
+    """
+
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("flatten", "--environment", "demo", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( --dry-run --environment demo )" in payload
+    # The script body must pass the array on, not just name the script.
+    assert 'flatten_account.sh" "${REMOTE_ARGS[@]}"' in payload
+
+    execute = _run("flatten", "--environment", "demo", "--execute", env=environment)
+    assert execute.returncode == 0, execute.stderr
+    executed = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( --environment demo --execute )" in executed
+    assert "--dry-run" not in executed
+
+
 def test_venue_accounting_runs_on_the_host_where_the_evidence_is(tmp_path: Path) -> None:
     """Locally there is neither an account journal nor a credential, so the local exec
     could only ever fail. LOCAL=1 keeps the old behavior for a checkout that has both.

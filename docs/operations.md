@@ -94,11 +94,12 @@ scripts/ops.sh deploy rollout --profile operational
 
 `--profile operational` is required and lands in the profile marker just before activation. Phases,
 each printing start/ok/failed with elapsed seconds: prefetch the target and confirm it is on
-`$REMOTE/$BRANCH`; verify the current topology; flat-account check (no venue position, no working
-order, zero aggregate target, read from the journal and from Bybit directly); stop producers, timers
-and watchdogs, recheck flatness against the exact post-producer journal head, stop owners, recheck
-stopped; stopped install; record the profile; activate and verify. Failure before the install phase
-restores the previous topology; from the install phase on, every managed unit is left stopped.
+`$REMOTE/$BRANCH`; verify the current topology; flat-account check (no venue position and no venue
+order, read from Bybit directly, plus — while the fleet runs — the engine's heartbeat recent and
+naming an empty holdings list); stop producers, timers and watchdogs, recheck flatness with the
+engine still beating, stop the engines, recheck stopped on the venue alone; stopped install; record
+the profile; activate and verify. Failure before the install phase restores the previous topology;
+from the install phase on, every managed unit is left stopped.
 
 **The flat-account proof is advisory on a fleet with no mainnet sleeve on.** Residual demo exposure
 prints `rollout-flat-warn ...` and the rollout continues, which is what makes rollout and its rollback
@@ -219,8 +220,11 @@ Absolute pre-trade caps (component gross, account gross, initial margin, availab
 rejected atomically inside the journal transaction, and the per-sleeve partition:
 [`account_kernel.py`](../liquidity_migration/account/account_kernel.py). Caps rescale with observed
 equity: [`envelope.rs`](../engine/engine-risk/src/envelope.rs).
-Daily loss halt → `run_safety_flat_once`:
-[`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs). Venue-native stop armed
+Daily loss halt, tripping on the day's equity floor and refusing new risk:
+[`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs) — the Python
+owner's automatic safety-flat (`run_safety_flat_once`) went with that owner;
+the kernel gates orders and does not plan flattens, so closing a tripped book
+is `ops.sh flatten`, an operator's act. Venue-native stop armed
 in the same `place_order` call and read back after create:
 [`working.rs`](../engine/engine-core/src/working.rs). One owner process per
 account and journal ↔ venue reconciliation:
@@ -282,42 +286,42 @@ Any breach drops to 0, not one tier down.
 ## Flatten
 
 ```bash
-scripts/ops.sh flatten --environment demo --reason "why"            # reads only
-scripts/ops.sh flatten --execute --environment demo --reason "why"  # publishes
+scripts/ops.sh flatten --environment demo --reason "why"            # dry run: reads and reports only
+scripts/ops.sh flatten --environment demo --reason "why" --execute  # stops producers, writes zero books
 ```
 
-Flatten takes one account to zero exposure through its own owner. It publishes a zero replacement
-target for every component that still holds exposure, then watches the journal until the owner has
-converged. It places no order itself: every close is an ordinary owner-side reduce-only command, so
-risk accounting, protection cleanup and the journal read exactly as they do for a strategy exit.
+Flatten takes one account to zero exposure on the engine's own path. It stops that realm's
+producers (left running they would rewrite their books within a minute), then writes each sleeve's
+target book as explicit zero rows naming everything the engine's heartbeat says is held — an
+absolute book that names a symbol at zero is a decision to hold none of it, and the engine does the
+closing. Explicit rows rather than an empty book, because an empty book only reaches the names the
+plug already has in hand. It then watches the heartbeat until nothing is held or `--wait-seconds`
+(default 300) runs out.
 
-Zero targets are strictly risk-reducing, which is why this works when nothing else does — the kernel
-exempts a reducing batch from the capital, leverage, freshness and partition checks, and retries a
-reduction without limit. A tripped loss guard does not block an exit.
+The exits it produces are reduce-only, and reduce-only orders pass every gate the engine has: the
+boot latch exempts them, the risk kernel returns before its staleness and loss checks, and a book's
+expiry stops entries but never exits. A tripped loss guard does not block a flatten.
 
-`--environment` is named explicitly and has no default; it accepts `demo` or `mainnet`. `--symbol` and
-`--sleeve` narrow the plan, but a narrowed flatten will not satisfy a rollout, which wants the whole
-account flat.
+`--environment` is named explicitly and has no default; it accepts `demo` or `mainnet`. There is no
+`--symbol` or `--sleeve`: the zero book reaches the whole account, and a narrower close is an
+ordinary target-book decision, not this command.
 
-**Stop the producing sleeve first.** Flatten manages no units, so a producer left running can publish a
-new nonzero target while it is converging. It detects that and says so rather than fighting it.
+The producers come back stopped, not disabled — a deploy's activate starts them again. To make the
+close stick, set the sleeve off in `/etc/liquidity-migration/sleeves.env`.
 
-The same close is available from your phone: the Telegram control buttons (`/controls` in the main
-chat) pause the producers first and then run exactly this flatten path, with a two-tap confirmation
-([`notifications.md`](notifications.md) §Owner control buttons). Pause/resume from the buttons uses the
-host sleeve override, so it survives reboots and deploys until resumed.
+There is no close from the phone: the Telegram buttons pause and resume the producers (the pause
+survives reboots and deploys until resumed), and the close itself is this command
+([`notifications.md`](notifications.md)).
 
 Terminal states, which are also the exit codes:
 
 | Status | Exit | Means |
 | --- | --- | --- |
-| `already_flat`, `flat`, `planned` | 0 | Nothing to do, converged, or a dry run |
-| `dust_limited` | 4 | Residual is below the venue's minimum order size, so no admissible order can express it. As flat as the venue allows; read from the kernel's own `below_min_qty` rejection |
-| `timed_out` | 5 | Did not converge in `--wait-seconds`. The detail names what is still standing, including any target a producer republished |
-| `publication_failed` | 6 | One or more zero targets did not reach the inbox |
-
-Exposure with no component owner needs no target: owner convergence drives an orphan to flat on its
-own. Flatten reports them and waits.
+| `already_flat`, `planned`, `flat` | 0 | Nothing held, a dry run, or converged |
+| usage | 2 | Bad or missing arguments; `--environment` has no default |
+| refused: no heartbeat | 3 | No engine heartbeat where this realm's engine writes one |
+| refused: holdings unknown | 4 | The engine does not publish what it holds; refusing is the only honest answer, because this command's whole job is to close what is there |
+| refused: engine not running, or `timed_out` | 5 | Nothing would read the book — or the wait ran out with symbols still held (stderr names them) |
 
 ## Profiles and sleeves
 

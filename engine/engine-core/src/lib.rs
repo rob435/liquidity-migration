@@ -11,6 +11,7 @@ pub mod attribution;
 pub mod bench;
 pub mod clock;
 pub mod config;
+pub mod covers;
 pub mod ctx;
 pub mod engine;
 pub mod execution;

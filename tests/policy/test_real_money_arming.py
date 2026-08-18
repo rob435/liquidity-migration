@@ -131,7 +131,7 @@ def test_a_dial_in_the_env_file_reaches_the_rendered_profile() -> None:
 def test_the_leverage_dials_speak_in_entry_sizes() -> None:
     """The template promises entry ~= dial / 18.75 of equity; hold it to that."""
 
-    from liquidity_migration.research.backtest.long_native import long_v11a_profile
+    from liquidity_migration.rules.long_native import long_v11a_profile
     from liquidity_migration.strategy.long_native_event_demo import (
         LongNativeDemoCycleConfig,
         target_long_order_notional_pct_equity,

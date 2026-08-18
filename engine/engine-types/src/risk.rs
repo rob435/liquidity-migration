@@ -11,6 +11,12 @@ pub struct PositionView {
     pub qty: f64,
     pub entry_px: f64,
     pub stop_attached: bool,
+    /// The leverage the venue itself reports on this position, when the row
+    /// carries one. This is the venue's own answer, not our cache — it is
+    /// what lets an engine with sole leverage authority VERIFY instead of
+    /// re-asking before every entry.
+    #[serde(default)]
+    pub leverage: Option<f64>,
 }
 
 /// Account state the risk kernel judges against. `observed_ns` is the engine
@@ -50,6 +56,11 @@ pub enum DenyReason {
     MissingStop,
     /// The account view is too old to judge against.
     StaleAccountView { age_ns: u64, max_age_ns: u64 },
+    /// The quote the decision was priced against is too old to open on — or
+    /// the symbol has never quoted at all, in which case `age_ns` is the age
+    /// of everything this engine has ever seen. Exits are never refused for
+    /// this: taking risk off must not wait on a fresh price.
+    StaleQuote { age_ns: u64, max_age_ns: u64 },
     /// Anything the kernel cannot positively classify. Fail closed.
     UnknownState { detail: String },
 }

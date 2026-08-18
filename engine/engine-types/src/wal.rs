@@ -145,6 +145,96 @@ pub enum WalRecord {
         findings: Vec<String>,
         may_open: bool,
     },
+    /// The first record of every log segment after the first: everything boot
+    /// replay needs from the segments before this one, restated, so replaying
+    /// this one segment recovers the same engine as replaying them all.
+    ///
+    /// One record on purpose. The frame checksum makes it all-or-nothing, so
+    /// "this segment is complete enough to trust" is a single mechanical
+    /// check: its first record reads back as one of these. A restatement
+    /// spread over several records would need its own end-marker protocol,
+    /// and a crash between two of them would leave a segment that replays
+    /// half a state without saying so.
+    ///
+    /// Why not restate with the existing kinds: three of the things boot
+    /// needs are sums over the whole history — whose fills built each
+    /// position (`attribution`), what every fill in the log adds up to per
+    /// symbol (`logged_exposure`), and the newest intended stop per symbol —
+    /// and no copy of "the still-open orders' records" carries them. Copying
+    /// every contributing fill forward would grow without bound, and writing
+    /// invented fills that sum right would make the log lie.
+    ///
+    /// Every field is a **restatement of state at the moment of rotation**,
+    /// so a reader of the whole segment chain treats it as "set", not "add":
+    /// at that point in the stream it is exactly what the records before it
+    /// already produced, which is what makes chain reads and single-segment
+    /// reads agree.
+    SegmentBase {
+        wall_ts_ms: i64,
+        /// The id tables, same meaning as [`WalRecord::Names`].
+        strategies: Vec<String>,
+        symbols: Vec<String>,
+        /// The reconciliation latch, same meaning as
+        /// [`WalRecord::Reconciled`]'s `may_open`.
+        may_open: bool,
+        /// The newest control anchor per source, same meaning as
+        /// [`WalRecord::ControlAnchor`].
+        control_anchors: Vec<AnchorState>,
+        /// Signed filled quantity per (strategy, symbol): whose fills built
+        /// each position. Flat rows are absent.
+        attribution: Vec<FilledTotal>,
+        /// Signed quantity per symbol summed over every fill the log ever
+        /// held, strangers' included — what reconcile compares the venue's
+        /// positions against.
+        logged_exposure: Vec<SymbolTotal>,
+        /// The stop each symbol's newest opening order asked for, so a stop
+        /// the venue drops can still be put back after a rotation.
+        intended_stops: Vec<IntendedStop>,
+        /// Every order still in flight, with the fields its own records
+        /// carried.
+        open_orders: Vec<OpenOrderState>,
+    },
+}
+
+/// One control-state line inside [`WalRecord::SegmentBase`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnchorState {
+    pub source: String,
+    pub state: String,
+}
+
+/// One attribution row inside [`WalRecord::SegmentBase`]. Positive is long.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FilledTotal {
+    pub strategy: StrategyId,
+    pub symbol: SymbolId,
+    pub signed_qty: f64,
+}
+
+/// One per-symbol fill total inside [`WalRecord::SegmentBase`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SymbolTotal {
+    pub symbol: SymbolId,
+    pub signed_qty: f64,
+}
+
+/// One intended-stop row inside [`WalRecord::SegmentBase`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IntendedStop {
+    pub symbol: SymbolId,
+    pub trigger_px: f64,
+}
+
+/// One still-open order inside [`WalRecord::SegmentBase`]: what its own
+/// `OrderSent` record and the updates so far said about it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OpenOrderState {
+    pub request: OrderRequest,
+    pub wire_ns: u64,
+    #[serde(default)]
+    pub arrival_mid: f64,
+    pub acked: bool,
+    pub filled_qty: f64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -165,4 +255,17 @@ pub trait Wal {
     fn barrier(&mut self) -> Result<(), WalError>;
     /// Push buffered bytes to the OS without forcing disk durability.
     fn flush(&mut self) -> Result<(), WalError>;
+    /// Bytes in the current segment, buffered ones included. Zero for a log
+    /// that does not live in a file, which also means it is never rotated.
+    fn segment_size(&self) -> u64 {
+        0
+    }
+    /// Start a fresh segment whose first record is `base` (a
+    /// [`WalRecord::SegmentBase`]), archiving the current one in place.
+    /// Returns false for a log that does not rotate — the in-memory test
+    /// doubles — which is not an error, just a log with nothing to archive.
+    fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
+        let _ = base;
+        Ok(false)
+    }
 }

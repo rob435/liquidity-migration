@@ -9,7 +9,7 @@ import polars as pl
 import pytest
 
 from liquidity_migration.core._common import MS_PER_HOUR
-from liquidity_migration.research.backtest.long_native import long_v11a_profile
+from liquidity_migration.rules.long_native import long_v11a_profile
 from liquidity_migration.strategy.long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _long_entry_target_intents,

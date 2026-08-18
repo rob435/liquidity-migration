@@ -93,6 +93,27 @@ impl LedgerOfOrders {
                     }
                 }
             }
+            // A rotation restated every order still in flight. Set, not add:
+            // in a chain read each row equals what this ledger already says
+            // at that point, and in a fresh segment it is all there is.
+            // Orders that ENDED before the rotation are not restated, so a
+            // very late fill for one of them reads as a stranger's after the
+            // next restart — charged to nobody, reconcile's to notice.
+            WalRecord::SegmentBase { open_orders, .. } => {
+                for open in open_orders {
+                    self.orders.insert(
+                        open.request.client_order_id.clone(),
+                        OrderRec {
+                            request: open.request.clone(),
+                            wire_ns: open.wire_ns,
+                            acked: open.acked,
+                            filled_qty: open.filled_qty,
+                            ending: None,
+                            arrival_mid: open.arrival_mid,
+                        },
+                    );
+                }
+            }
             _ => {}
         }
     }

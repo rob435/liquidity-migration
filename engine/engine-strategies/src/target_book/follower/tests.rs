@@ -192,11 +192,15 @@ fn a_second_identical_book_does_not_resend_an_order_that_is_already_resting() {
 fn what_was_sent_is_remembered_until_the_reading_shows_it() {
     // The dangerous shape: the order has left the resting set (a filled one
     // is ended the moment the fill lands) and the account reading has not
-    // caught up, so both places a plug can look say flat. Without a memory
-    // of what it sent, it buys the same target a second time.
+    // caught up, so both places a plug can look say flat. The memory of what
+    // was sent is the ENGINE's now — its cover book, read back as
+    // `ctx.in_flight` — and what this pins is that the plug counts that
+    // reading as held instead of buying the same target a second time.
     let mut h = bench(&["KAITOUSDT"], 10.0);
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));
     assert_eq!(h.drain().len(), 1, "the entry goes out once");
+    // What the engine's cover book would answer after that send.
+    h.ctx.set_in_flight("KAITOUSDT", 10.0);
     h.quote("KAITOUSDT", 9.5, 10.5);
     assert!(
         h.drain().is_empty(),
@@ -510,20 +514,23 @@ fn a_latched_name_is_not_exited_either() {
 #[test]
 fn an_entry_still_on_its_way_does_not_latch_its_own_symbol() {
     // Nothing was ever held, so nothing went flat. Without the was-held check
-    // an entry would latch its own symbol the moment `sent_ahead` lapsed, and
-    // the plug would open that name once and never again.
+    // an entry would latch its own symbol the moment its in-flight cover
+    // lapsed, and the plug would open that name once and never again.
     let mut h = bench(&["KAITOUSDT"], 10.0);
     h.ctx.set_wall_ms(NOW_MS);
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));
     assert_eq!(h.drain().len(), 1, "the entry goes out");
 
-    // Sent but not yet in the reading: the plug counts it as held and does
-    // not send it twice.
+    // Sent but not yet in the reading — the engine's cover book bridges it —
+    // and the plug counts it as held rather than sending it twice.
+    h.ctx.set_in_flight("KAITOUSDT", 10.0);
     h.quote("KAITOUSDT", 9.5, 10.5);
     assert!(h.drain().is_empty(), "one decision is one order");
 
-    // The reading catches up, and the name is still perfectly tradable: a
-    // bigger book resizes it up rather than finding it latched.
+    // The reading catches up (which is also the engine releasing the cover),
+    // and the name is still perfectly tradable: a bigger book resizes it up
+    // rather than finding it latched.
+    h.ctx.set_in_flight("KAITOUSDT", 0.0);
     h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
     h.targets(book(vec![target("KAITOUSDT", 200.0)]));
 
@@ -531,6 +538,34 @@ fn an_entry_still_on_its_way_does_not_latch_its_own_symbol() {
     assert_eq!(intent.tag, "book-resize");
     assert!(!intent.reduce_only, "it grew");
 }
+
+#[test]
+fn a_partial_catch_up_keeps_the_rest_of_the_send_covered() {
+    // The reading absorbed half the fill, so the engine's cover book holds
+    // the other half. The plug must read half seen plus half covered as the
+    // whole target — the shrink arithmetic itself is the engine's and is
+    // pinned in engine-core (`covers.rs` and `tests/covers.rs`).
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert_eq!(h.drain().len(), 1, "the entry goes out");
+
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 5.0, 10.0);
+    h.ctx.set_in_flight("KAITOUSDT", 5.0);
+    h.quote("KAITOUSDT", 9.5, 10.5);
+
+    assert!(
+        h.drain().is_empty(),
+        "half seen plus half covered is the whole target; nothing more to send"
+    );
+}
+
+// Three scenarios that used to live here — a refused entry freeing its cover
+// for a retry, a refused exit dropping every cover, a cancel releasing only
+// the unfilled remainder — moved down with the cover mechanism itself. They
+// are pinned against the real engine in
+// `engine-core/src/tests/covers.rs`, driven by real order flow instead of a
+// mock-fed follower.
 
 #[test]
 fn a_name_we_exited_ourselves_can_be_entered_again() {

@@ -52,8 +52,7 @@
 //! it has a price and an instrument rule.
 
 use engine_types::{
-    EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec,
-    Strategy,
+    Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy,
     StrategyCtx, StrategyId, Subscription, SymbolId, TargetBook,
 };
 
@@ -95,27 +94,13 @@ pub struct TargetBookFollower {
     /// it must not latch — otherwise every ordinary exit would block the name
     /// the next time the book wanted it.
     we_reduced: Vec<String>,
-    /// Signed quantity this plug has sent that the account reading has not
-    /// caught up with yet, per symbol.
-    ///
-    /// A resting order covers the gap between sending and filling, but not
-    /// the gap between filling and *seeing* the fill: the log ends a fully
-    /// filled order at once, while the account reading is up to half its
-    /// staleness bound behind. In that window the position exists at the
-    /// venue and shows nowhere the plug can look, and a plug that decides
-    /// from "target minus position" would buy it a second time.
-    sent_ahead: Vec<SentAhead>,
 }
 
-/// One symbol's sent-but-not-yet-visible quantity, with the reading it was
-/// sent against. When the reading moves off `view_at_send` it has taken the
-/// fill into account and the record is dropped — no timer, no guess.
-#[derive(Copy, Clone, Debug)]
-struct SentAhead {
-    symbol: SymbolId,
-    view_at_send: f64,
-    sent: f64,
-}
+// The sent-ahead cover records that used to live here — the memory of what
+// was sent that the account reading has not shown yet — moved down into the
+// engine (`engine-core/src/covers.rs`). The plug reads the engine's own
+// answer back as `ctx.in_flight` and adds it to the reading; it keeps no
+// in-flight bookkeeping of its own any more.
 
 /// Whether the book in hand asks for any of this name. Exactly zero is an
 /// instruction to hold none, so it does not count as wanting it.
@@ -123,15 +108,6 @@ fn wants(targets: &[Target], symbol: &str) -> bool {
     targets
         .iter()
         .any(|target| target.symbol == symbol && target.notional_usdt != 0.0)
-}
-
-/// What the account reading says is held, signed. Positive is long.
-fn view_signed(ctx: &dyn StrategyCtx, id: SymbolId) -> f64 {
-    match ctx.position(id) {
-        Some(p) if p.side == Side::Buy => p.qty,
-        Some(p) => -p.qty,
-        None => 0.0,
-    }
 }
 
 impl TargetBookFollower {
@@ -162,7 +138,6 @@ impl TargetBookFollower {
             closed_under_us: Vec::new(),
             was_held: Vec::new(),
             we_reduced: Vec::new(),
-            sent_ahead: Vec::new(),
         })
     }
 
@@ -182,12 +157,6 @@ impl TargetBookFollower {
         ctx.resting(&mut working);
         let busy: Vec<SymbolId> = working.iter().map(|order| order.symbol).collect();
         drop(working);
-
-        // A reading that has moved since a send has taken that fill into
-        // account, so the record is no longer needed. Anything still here is
-        // exposure the reading cannot see yet.
-        self.sent_ahead
-            .retain(|record| view_signed(&*ctx, record.symbol) == record.view_at_send);
 
         let now_ms = ctx.wall_ms();
         let valid_until_ms = book.valid_until_ms;
@@ -222,7 +191,7 @@ impl TargetBookFollower {
             }
         }
         let mut held: Vec<String> = {
-            let facts = CtxFacts { ctx: &*ctx, sent_ahead: &self.sent_ahead };
+            let facts = CtxFacts { ctx: &*ctx };
             candidates
                 .into_iter()
                 .filter(|symbol| facts.held(symbol).is_some())
@@ -295,7 +264,7 @@ impl TargetBookFollower {
         held.retain(|symbol| !self.closed_under_us.contains(symbol));
 
         let (steps, skipped) = {
-            let facts = CtxFacts { ctx: &*ctx, sent_ahead: &self.sent_ahead };
+            let facts = CtxFacts { ctx: &*ctx };
             let plan = plan(&targets, &held, &facts, now_ms, valid_until_ms, self.rules);
             (plan.steps, plan.skipped)
         };
@@ -418,17 +387,10 @@ impl TargetBookFollower {
                     leverage: if reduce_only { None } else { want_leverage },
                 },
             };
-            // Remember it against the reading it was decided from, so the
+            // The engine books its own cover for this send the moment it
+            // goes to the venue, at the quantized size that actually went,
+            // and `held` above reads it back as `ctx.in_flight` — so the
             // window between the fill and the next reading cannot look flat.
-            let signed = match intent.side {
-                Side::Buy => intent.qty,
-                Side::Sell => -intent.qty,
-            };
-            self.sent_ahead.push(SentAhead {
-                symbol,
-                view_at_send: view_signed(&*ctx, symbol),
-                sent: signed,
-            });
             ctx.place(intent);
         }
         self.complained.append(&mut unreachable);
@@ -458,23 +420,30 @@ impl Strategy for TargetBookFollower {
             .collect()
     }
 
-    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
-        match event {
-            EngineEvent::Targets(book) => {
-                self.book = Some(book.clone());
-                // A new book earns a fresh hearing, including for the names
-                // it could not reach last time.
-                self.complained.clear();
-                self.act(ctx);
-            }
-            // A price is what sizing needs, so a book that arrived before the
-            // first quote is acted on here instead.
-            EngineEvent::Market(MarketEvent::Quote { .. }) => self.act(ctx),
-            // A feed reset clears every price, so there is nothing to size
-            // against until the next quote — which will call `act` anyway.
-            // Order news changes the account reading, and that arrives on the
-            // engine's own refresh, not from here.
-            EngineEvent::Market(_) | EngineEvent::Timer { .. } | EngineEvent::Order(_) => {}
+    // Only books and quotes are acted on. Order news and refused intents
+    // used to be handled here too, purely to keep the plug's own cover
+    // records straight; that bookkeeping is the engine's now (`covers.rs`),
+    // settled before this plug is even woken, so both fall through to the
+    // trait's do-nothing defaults. That also keeps an old property by
+    // construction: nothing is ever emitted from inside an order or refusal
+    // wake, which would re-emit into the queue being drained — the next
+    // quote re-plans instead.
+
+    fn on_targets(&mut self, book: &TargetBook, ctx: &mut dyn StrategyCtx) {
+        self.book = Some(book.clone());
+        // A new book earns a fresh hearing, including for the names it could
+        // not reach last time.
+        self.complained.clear();
+        self.act(ctx);
+    }
+
+    // A price is what sizing needs, so a book that arrived before the first
+    // quote is acted on at the next one. A ticker or a feed reset changes
+    // nothing here: a reset clears every price, so there is nothing to size
+    // against until the next quote — which will call `act` anyway.
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
+        if let MarketEvent::Quote { .. } = event {
+            self.act(ctx);
         }
     }
 }
@@ -482,19 +451,6 @@ impl Strategy for TargetBookFollower {
 /// The planner's view of one symbol, answered from the engine's context.
 struct CtxFacts<'a> {
     ctx: &'a dyn StrategyCtx,
-    sent_ahead: &'a [SentAhead],
-}
-
-impl CtxFacts<'_> {
-    /// Signed quantity sent for this symbol that the reading has not shown
-    /// yet. Positive is long.
-    fn ahead(&self, id: SymbolId) -> f64 {
-        self.sent_ahead
-            .iter()
-            .filter(|record| record.symbol == id)
-            .map(|record| record.sent)
-            .sum()
-    }
 }
 
 impl SymbolFacts for CtxFacts<'_> {
@@ -504,14 +460,14 @@ impl SymbolFacts for CtxFacts<'_> {
         };
         let position = self.ctx.position(id);
         let entry_px = position.as_ref().map(|p| p.entry_px).unwrap_or(0.0);
-        let ahead = self.ahead(id);
-        // What the reading shows, plus what was sent and has not appeared in
-        // it yet. Without the second part the window between a fill and the
-        // next reading looks flat, and the plug buys the same target twice.
+        // What the reading shows, plus what the engine says was sent and has
+        // not appeared in it yet. Without the second part the window between
+        // a fill and the next reading looks flat, and the plug buys the same
+        // target twice.
         let signed = position
             .map(|p| if p.side == Side::Buy { p.qty } else { -p.qty })
             .unwrap_or(0.0)
-            + ahead;
+            + self.ctx.in_flight(id);
         if signed.abs() <= f64::EPSILON {
             return None;
         }

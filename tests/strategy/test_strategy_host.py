@@ -286,6 +286,26 @@ def test_a_touched_price_level_ends_the_wait_instead_of_the_idle_floor(tmp_path:
     assert elapsed < 5.0, f"price wake took {elapsed:.2f}s against a 30s idle floor"
 
 
+def test_price_touch_rebinds_the_fired_map_instead_of_mutating_it(tmp_path: Path) -> None:
+    """The cycle thread iterates `_price_wake_fired` without a lock, so the WS
+    thread must rebind a fresh dict on insert: an in-place insert can kill a
+    cycle pass mid-comprehension ("dictionary changed size during iteration").
+    """
+
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    before = daemon._price_wake_fired
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.5))
+    assert daemon._bar_event.is_set() is True
+    assert daemon._price_wake_fired is not before
+    # The object a mid-iteration reader may still hold is untouched.
+    assert before == {}
+    assert daemon._price_wake_fired == {"AAAUSDT": (100.0, None)}
+
+
 def test_an_unwatched_symbol_never_wakes_the_loop(tmp_path: Path) -> None:
     daemon, reported = _price_wake_host(tmp_path)
     reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]

@@ -229,5 +229,8 @@ def engine_held_symbols(
         return require_recent_engine_account(
             environment, max_age_ns=max_age_ns, path=path
         ).held_symbols
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
+        # RuntimeError is read_stable_file's "changed while it was read" — the
+        # engine rewrites the heartbeat every few seconds, so a mid-read
+        # replacement is ordinary not-knowing, not a crash.
         return None
