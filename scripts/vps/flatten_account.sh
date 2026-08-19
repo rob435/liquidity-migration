@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Take an account to zero exposure through the engine.
 #
-# Flatten used to publish zero targets into the Python owner's intent inbox.
-# That owner is gone. The engine reads one absolute target book per sleeve, and
+# The engine reads one absolute target book per sleeve, and
 # an absolute book that names nothing is a decision to hold nothing -- so this
 # writes that book, for every sleeve, and lets the engine do the closing. The
 # exits it produces are reduce-only, and reduce-only orders pass every gate the

@@ -34,6 +34,14 @@ controls live did.
   name in parentheses when precision needs it — the crowd fee (funding), the
   smoothness score (Sharpe), the worst dip (max drawdown). This applies to
   every reply, doc, and commit message, whoever the audience is.
+- Comments follow the same rule, and fewer is better. A comment earns its
+  place only by saying what the code cannot — a constraint, a unit, a frozen
+  contract, a venue quirk, who reads this file. Never narrate the line below
+  it, never argue that a change is correct, never keep history in code: git
+  and CHANGELOG own history. A comment that repeats the code in English is
+  deleted on sight. The same goes for docstrings that restate the function
+  name — except module docstrings that docs or tests cite as records, which
+  are contracts, not comments.
 
 ## Ask Once, Then Decide
 

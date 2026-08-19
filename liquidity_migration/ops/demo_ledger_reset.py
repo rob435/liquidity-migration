@@ -1080,10 +1080,6 @@ def run_reset(argv: Sequence[str], *, repository: Path | None = None) -> int:
                 f"{env_file}); refusing before stopping services"
             ),
         )
-    # There is no longer a unit to check here. This verified that the account
-    # owner loaded exactly --env-file, so the reset archived the same roots the
-    # owner would reopen. The owner is deleted and the engine does not read
-    # that file, so the check has no subject.
 
     for unit in NON_RESTARTABLE_ONESHOTS:
         if execution.was_active(unit):

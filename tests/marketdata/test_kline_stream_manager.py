@@ -181,9 +181,7 @@ def test_bootstrap_fills_store_with_history(tmp_path: Path) -> None:
         assert sorted(market.kline_calls) == ["BTCUSDT", "ETHUSDT"]
         # Pool was subscribed before bootstrap so live bars start flowing.
         assert pool.subscribed == [["BTCUSDT", "ETHUSDT"]]
-        # Store has the bars.
         assert manager.store().row_count() == 240  # 2 × 120
-        # Universe size matches.
         assert stats["universe_size"] == 2
         assert stats["bootstrap"]["symbols_succeeded"] == 2
         assert stats["bootstrap"]["symbols_failed"] == 0
@@ -344,7 +342,6 @@ def test_universe_refresh_subscribes_new_listings_and_unsubscribes_delistings(tm
         assert result_remove["removed"] == 1
         # ETHUSDT must be removed from the pool's most recent universe.
         assert "ETHUSDT" not in pool.updates[-1]
-        # Universe size reflects the final state.
         assert manager.stats()["universe_size"] == 2
         # First call's klines are unchanged for already-bootstrapped symbols.
         assert market.kline_calls[:2] == first_kline_calls[:2]

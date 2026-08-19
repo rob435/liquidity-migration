@@ -123,7 +123,6 @@ def test_subscribe_partitions_across_connections() -> None:
     try:
         # 8 symbols / 3 per connection → ceil = 3 connections
         assert len(factory.built) == 3
-        # Total symbols matches.
         all_subscribed = sum(len(ws.subscribed_symbols) for ws in factory.built)
         assert all_subscribed == 8
         # Stats reflect 3 connections with the right topic count.
