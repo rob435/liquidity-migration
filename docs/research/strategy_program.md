@@ -336,7 +336,34 @@ this same lever already in the profile, and both *cost* Sharpe when widened.
 
 ---
 
-### 5. Open, unmeasured
+### 5. Pre-settlement (23:00) entry — capture the entry print the engine forfeits
+
+**What it is.** The registered engine decides at the midnight bar, so a
+position opens one hour AFTER the 00:00 settlement and never collects the
+entry print itself. Bybit's ticker publishes the RUNNING funding rate for the
+upcoming settlement continuously; entering at 23:00 when that rate already
+qualifies (and the daily filters pass) collects the deep entry print plus the
+tail of the pre-settlement squeeze drift. Only the fresh-print entries are
+affected; stale-survival entries have no print to capture.
+
+**Measured (2026-08-19).** On the v6 book, 291 of 1,833 entries are
+fresh-print entries; the forfeited print is mean +41.8 bp per entry, +12,161
+bp raw over 4.9 years — roughly **+0.3–0.5 bp/day** at entry weights, ~98% of
+it 2025–26 (the 4h/1h interval-mix eras). On 44 tardis first-of-month days
+(1,313 deep episodes, 2023–2026): the S−1h hour (price + print) has a
+**positive median in all four eras** (+17 to +39 bp per qualified entry);
+means are fat-tailed (2024 mean −21 on n 58 against a +39 median). The
+running rate is below the entry line for essentially the whole interval, so
+the 23:00 read exists whenever the print will qualify.
+
+**Why it is not done.** The panel cannot backtest it — there is no historical
+running-rate series outside the 44 free tardis days — so it cannot clear the
+normal registration bar. Its future is (a) the research box (Mac mini)
+capturing the running rate forward until a proper backtest exists, or (b) an
+owner-decided live A/B on the demo sleeve, graded forward. Small, real,
+mechanically grounded; not worth a strategy change without one of those two.
+
+### 6. Open, unmeasured
 
 - **Three-book portfolio**: carry + LONG v12 + the premium/momentum blend. The
   pairs are measured (carry+blend 1.52, LONG+blend 1.73) but never all three.

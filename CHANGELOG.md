@@ -16,6 +16,29 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~18:40 UTC — entry/exit timing program closed with mechanism;
+  one designed-not-built candidate (pre-settlement entry).** Owner: "we don't
+  have to enter at a specific time every day, we don't have to exit after
+  funding is confirmed." Third hunt of the day, documented in
+  `research_findings.md` (three new ledger rows) and `strategy_program.md`
+  (new thesis §5). Headlines: an hourly engine on the full panel re-ran the
+  parked print-clock entry behind the modern filter stack — still loses
+  (17.0 vs 25.9 bp/day same-frame), and no fixed survival delay or
+  second-print rule interpolates back; decomposition shows "midnight" =
+  instant entry at the 00:00 settlement (28.8 bp/d, Sharpe 2.24 alone) plus a
+  survived-to-the-bar filter on off-hour prints. 44 free tardis days (32
+  downloaded today, 2023-01..2025-08, ~6.4 GB total) explain both closed
+  clocks mechanically: price rises +93 bp INTO a deep settlement and falls
+  after; rises after a recovery print — the daily lag is load-bearing on
+  both sides. Intraday Binance positioning (33,443 deep prints, 5-min data
+  fetched for the gap) and Bybit liquidation mix separate outcomes at pool
+  level but COLLAPSE on the book's own entries — the stack already removes
+  what they see. The opening: the engine forfeits the entry print on every
+  fresh entry (291 entries, mean +41.8 bp, ≈ +0.3–0.5 bp/day); a 23:00 entry
+  on the venue's live running rate would capture it — positive median in all
+  four eras on tardis, unbacktestable on the panel, so it waits for the
+  research box's forward capture or an owner-decided demo A/B. No code or
+  config changed; docs only.
 - **2026-08-19 ~16:40 UTC — `lane2_carry_hold_v6` registered (research-only):
   the depth ladder bends.** Second hunt of the day, owner directive "the
   causes are right, the implementation is crude — more sophisticated,
