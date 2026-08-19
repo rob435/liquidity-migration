@@ -16,6 +16,17 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~19:10 UTC — the three-book portfolio question is answered:
+  two books.** The last big open item in `strategy_program.md` §Theses:
+  carry↔LONG correlate +0.002 (stable ~0 in every era, 1,747 shared days);
+  **carry_v6+LONG at equal risk is Sharpe 2.15 with a 3.6% worst dip**, and
+  adding the premium/momentum blend LOWERS it to 1.99 (drop-one −0.17; the
+  blend's 0.69 Sharpe correlates +0.21 with carry — same funding family —
+  and earns no slot). The equal-risk pair is 89% LONG by capital (LONG runs
+  ~27 bp/day vol vs carry's ~225), so converting the Sharpe into money is
+  the previously-declined envelope decision, not research. LONG leg = the
+  2026-07-24 on-disk mark-to-market build (ends 2026-07-17); weights
+  in-sample. Recorded in `strategy_program.md` §Theses item 6; docs only.
 - **2026-08-19 ~18:40 UTC — entry/exit timing program closed with mechanism;
   one designed-not-built candidate (pre-settlement entry).** Owner: "we don't
   have to enter at a specific time every day, we don't have to exit after

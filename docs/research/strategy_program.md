@@ -365,8 +365,20 @@ mechanically grounded; not worth a strategy change without one of those two.
 
 ### 6. Open, unmeasured
 
-- **Three-book portfolio**: carry + LONG v12 + the premium/momentum blend. The
-  pairs are measured (carry+blend 1.52, LONG+blend 1.73) but never all three.
+- **Three-book portfolio: MEASURED 2026-08-19 — the answer is two books.**
+  On the 1,747 shared days (2021-10-05..2026-07-17; LONG leg = the on-disk
+  2026-07-24 mark-to-market build, a month stale — structure, not levels;
+  equal-risk = inverse full-window vol, in-sample): carry↔LONG correlation
+  is **+0.002** and ~0 in every era; **carry_v6+LONG at equal risk is
+  Sharpe 2.15, worst dip 3.6%** — and adding the blend LOWERS it to 1.99
+  (drop-one marginal **−0.17**; the blend's own Sharpe 0.69 with +0.21
+  correlation to carry, same funding family, does not earn a slot).
+  carry_v6 also beats carry_v4 as the portfolio's carry leg (triple 1.99 vs
+  1.88). The equal-risk pair is 89% LONG by capital because LONG runs ~27
+  bp/day vol against carry's ~225 — converting Sharpe 2.15 into money is
+  the envelope/leverage decision the owner declined on 2026-07-28
+  (notional_multiplier 1.0 needed ~4× the envelope), not a research output.
+  Scratch: session artifact `three_book_portfolio.py`.
 - **Premium divergence as a LONG entry filter.** `premium_diff_bp` is a free
   public ranking signal that needs no Binance account to *trade*, only to read.
   The blend's diversification comes from this leg rather than the momentum leg,
