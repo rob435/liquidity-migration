@@ -32,7 +32,12 @@ fail() {
 }
 
 echo "=== daily evidence run $(date -u +%FT%TZ) ==="
-"$PYTHON" "$ROOT/scripts/research/research_refresh.py" run || fail refresh
+# --force-rmom-full-rewrite: live roots are rolling stores, so recent
+# residual-momentum rows legitimately move as trailing windows fill in;
+# the append-overlap guard is for hand runs and definition changes, and
+# its own error text prescribes full-rewrite for a deployed daily refresh.
+"$PYTHON" "$ROOT/scripts/research/research_refresh.py" run \
+  --force-rmom-full-rewrite || fail refresh
 
 # --end is EXCLUSIVE: today's date covers through yesterday, the last
 # complete UTC day.
