@@ -678,7 +678,13 @@ evidence trail.
       ledger's last scored day at 2026-07-26 until the 2026-08-19 backfill.
       The promoted v4 accrued zero scored forward days in that gap. If this
       is to be believed as a forward record it cannot be a hand ritual —
-      automating it is proposed in CHANGELOG 2026-08-19, owner's call.
+      the owner ordered automation on 2026-08-19 and it now runs daily:
+      launchd job `com.liquidity-migration.daily-evidence` (14:30 local on
+      the research box) runs `scripts/research/daily_evidence_run.sh` —
+      refresh → panel rebuild → ledger append — writing
+      `daily_run_status.json` beside the ledger. It refuses a dirty
+      checkout (the provenance rule) and fails closed with the failing
+      step named.
 - [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
       the `lane2_premium_momentum_blend_v1` table, the anomaly-research
       funding-leg numbers (leg-attribution reversal, dispersion-gate

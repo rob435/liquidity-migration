@@ -547,7 +547,9 @@ that this research was replacing a broken deployed book was wrong.
   `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`. Live-runtime parity — order
   lifecycle, venue stops, partial fills — is modelled nowhere. **The daily sequence stopped 2026-07-28 and sat
   idle for three weeks** (backfilled 2026-08-19); a forward record that stops accruing the moment nobody runs
-  it by hand is the standing argument for automating it, proposed and awaiting the owner.
+  it by hand was the standing argument for automating it — done 2026-08-19 by owner order:
+  `scripts/research/daily_evidence_run.sh` under launchd (`com.liquidity-migration.daily-evidence`,
+  14:30 local), status in `daily_run_status.json` beside the ledger, dirty-checkout refusal kept.
 - **Score the venue-scoped CONTINUOUS admission variant — RETIRED 2026-08-19, owner decision.** Its tooling
   (`render_continuous_admission_variants.py`, `ContinuousEventConfig`) left the tree with the CONTINUOUS
   sleeve on 2026-08-14; the owner chose retirement over restoration. Design constraints for anyone who ever

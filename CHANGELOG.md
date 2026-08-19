@@ -16,6 +16,20 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~11:30 UTC — The daily evidence run is automated, by owner
+  order.** `scripts/research/daily_evidence_run.sh` chains the documented
+  sequence — data refresh → full panel rebuild → forward-ledger append —
+  under a launchd job on the research box
+  (`com.liquidity-migration.daily-evidence`, 14:30 local: after Binance
+  publishes yesterday's daily archive, whose late arrival failed the
+  too-early 04:40 UTC run). One run at a time (directory lock); one-line
+  JSON status (`daily_run_status.json` beside the ledger) naming the
+  failing step on failure; the refresh's dirty-checkout refusal is kept
+  deliberately — evidence runs stamp git hashes, so a dirty tree fails
+  closed rather than scoring unprovenance'd days. The failure path is
+  live-tested (first test run failed on exactly that refusal and wrote
+  the status correctly); the happy path re-tested on the clean tree.
+
 - **2026-08-19 ~06:10 UTC — The evidence machine is caught up, and the
   promoted carry config has its first forward record.** The 22-day
   backfill ran end to end: append-first data refresh on both venues (the
