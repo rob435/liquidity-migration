@@ -76,8 +76,9 @@ fill price, fee, close and P&L come from acknowledgement/fill/P&L events — nev
 timestamp below, never from file-write time.
 
 Those top-level clocks cannot supply an execution-latency measurement. Every venue-sourced event is
-stamped `wall_ts_ns = max(local_receive_ts_ns, 1)` (`account_kernel.py:2687, 2717, 2787, 2836, 2869,
-2912, 3039, 3121, 3584, 3624, 3675, 3717, 3758`), so the top-level wall clock *is* the local-receive
+stamped `wall_ts_ns = max(local_receive_ts_ns, 1)` (the clamp sites in `account_kernel.py`; today
+only the one in `record_fill` survives — the rest went with the Python order path), so the top-level
+wall clock *is* the local-receive
 clock. Fill, acknowledgement, P&L, protection, order-status and venue-snapshot payloads carry their own
 clocks **inside the payload** — `exchange_ts_ns` plus `local_receive_ts_ns` (fill / pnl / protection /
 order_status / venue_snapshot) or `local_ack_ts_ns` (ack, ack_observation) — and latency and TCA are
@@ -89,7 +90,7 @@ null-before-fill and `entry_target_*` sits beside `entry_fill_*` (`account_strat
 
 | Strategy projection | Meaning |
 | --- | --- |
-| `signal_ts_ms` | Closed kline boundary that caused the decision. Part of component identity and republished on the target (`account_strategy_state.py:1994`, `:1773`); hourly paths align to the hour. No execution meaning. |
+| `signal_ts_ms` | Closed kline boundary that caused the decision. Part of component identity and republished on the target (`canonical_entry_attempts` and `canonical_strategy_trade_rows` in `account_strategy_state.py`); hourly paths align to the hour. No execution meaning. |
 | `entry_ready_ts_ms` | Earliest time the signal may be acted on: fixed-delay entries use `signal_ts_ms + entry_delay`, sniper/retrace entries their first qualifying boundary or deadline. Eligibility, not a fill. Does not reach the read model. |
 | `entry_target_ts_ms` | Wall time of the first accepted non-zero component target (`entry_event.wall_ts_ns // 1_000_000`, `:1663`). Planning clock; does not start protection or max hold. May precede a fill. |
 | `entry_ts_ms` | On `canonical_strategy_trade_rows`: local receive time of the first journal-confirmed fill for the component — `max(payload.local_receive_ts_ns, event.wall_ts_ns) // 1_000_000` (`:1649-1655`). Null before a fill, and when an aggregate same-symbol fill cannot be attributed. |
@@ -107,18 +108,21 @@ splat under "Never let target metadata overwrite fill-derived lifecycle fields."
 beside a populated `entry_target_ts_ms` is not licence to use the target time.
 
 Passing `max_hold_deadline_ts_ms` makes the sleeve publish a replacement zero target
-(`long_native_event_demo.py:1086-1128`); it asserts nothing about when the
+(`_plan_time_stop_exits` in `long_native_event_demo.py`); it asserts nothing about when the
 account owner fills the resulting aggregate order. The actual close is a later journal fill event,
 surfaced as `exit_ts_ms` / `closed_at_ms` (`account_strategy_state.py:1725-1726`).
 
 Two ordering invariants, unenforced by code but load-bearing when auditing a projection or a replay:
 `signal_ts_ms` must not be later than the strategy decision that cites it (it holds by construction), and
 `entry_target_ts_ms` must not precede the signal decision that produced it. `entry_target_ts_ms` comes
-from an independent journal clock on a locally-originated target event (`account_kernel.py:2053`), so a
+from an independent journal clock on a locally-originated target event (`submit_targets` in
+`account_kernel.py`), so a
 row violating the second is a genuine defect.
 
 *Component* stop and take-profit prices derive from confirmed fill VWAP, never a decision reference price
-(`protection_engine.py:123-151`);
+(the deleted Python protection engine's rule; the live venue-native stop discipline is the engine's —
+[`working.rs`](../engine/engine-core/src/working.rs) and
+[`reconcile.rs`](../engine/engine-core/src/reconcile.rs));
 [`tests/strategy/test_account_strategy_state.py`](../tests/strategy/test_account_strategy_state.py) pins
 this. The account owner's venue-native entry stop is the other plane, anchored to the decision reference
 price ([`architecture.md`](architecture.md), *Venue-native protection*).
@@ -254,7 +258,8 @@ and freezes `{"path": ..., "sha256": ...}` into the manifest's configuration —
 `--run-id` must match exactly.
 
 A partial sleeve makes `scripts/research/equity_curves.sh` return nonzero: the runner keeps going across
-sleeves but exits 1 if any sleeve errored (`scripts/research/equity_curves.py:512-514`), so a driver
+sleeves but exits 1 if any sleeve errored (the nonzero return at the end of `main` in
+`scripts/research/equity_curves.py`), so a driver
 cannot accept an incomplete benchmark as complete. A failed step leaves its record in `events.jsonl` and
 its output in `logs/`; a retry clears only that run's partial derived sleeve directory under
 `reports/research-refresh/<run-id>/backtests/<venue>/equity_curves/<sleeve>` (`equity_curves.sh` runs with
@@ -284,7 +289,7 @@ capture); account roots are absolute, **real**, **owner-controlled**, pairwise-d
 Real and owner-controlled are code-enforced: `reset_path_safety.py` ("private runtime root must be a real
 directory", the private lock namespace, "private runtime tree contains a symlink") and the demo
 root/leaf/lock-namespace checks, plus the uid/gid/mode rebinding. A symlinked account root or a
-convenience bind mount is not a legal layout. The demo account owner alone mutates Bybit. Its journal
+convenience bind mount is not a legal layout. The engine alone mutates the demo account. The canonical journal
 owns lifecycle and accounting state, and Parquet views are rebuildable projections. Strategy `DATA_ROOT`
 directories hold signal inputs, caches and cycle telemetry — not position or P&L authority. (The retired
 paper route's roots and journals remain on disk; nothing routes to them.)

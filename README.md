@@ -71,8 +71,8 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | [STATE.md](STATE.md) | the operational snapshot: what runs now and what constrains it |
 | [CHANGELOG.md](CHANGELOG.md) | the dated operational log: deploys, incidents, repairs, change points |
 | [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology |
-| [docs/notifications.md](docs/notifications.md) | the two Telegram channels, the hourly digest, watchdog alert cadence and escalation, the heartbeat dead-man's switch |
-| [docs/architecture.md](docs/architecture.md) | producers, account owner, journals, how a target becomes an order |
+| [docs/notifications.md](docs/notifications.md) | the two Telegram channels, the pause/resume controls, watchdog alert cadence and escalation, the heartbeat dead-man's switch |
+| [docs/architecture.md](docs/architecture.md) | producers, journals, the engine seam — how a target becomes an order (plus the historical owner spec) |
 | [docs/engine.md](docs/engine.md) | the Rust execution engine: crate contracts, latency budget, crash safety, safety posture |
 | [docs/trading_logic.md](docs/trading_logic.md) | what each sleeve trades and why |
 | [docs/research/carry_hold.md](docs/research/carry_hold.md) | the lead strategy in full: mechanism, tests, run rules, kill conditions |

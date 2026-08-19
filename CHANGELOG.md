@@ -16,6 +16,50 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~04:30 UTC — The brutal cleanup, by owner order ("delete and
+  don't look back"), executed with receipts.** Three read-only scouts
+  inventoried; every candidate was re-verified from source before a single
+  cut; nothing was deleted by a subagent's hand. **Deleted from the tree
+  (git history holds all of it):** the dead top of the old Python order
+  path — `venue/account_reconcile.py` and `venue/account_execution_stream.py`
+  (~2,400 lines reached by nothing but their own tests, which went with
+  them, `test_account_funding_reconcile.py` included) — plus four
+  receipt-less research leftovers: `tune_phase5.py` (archive-mention only),
+  `diagnose_idio_panel.py` (closed program's diagnostic), 
+  `build_execution_cost_report.py` (the engine's `fills` subcommand is the
+  cost reading now), and `quote_lab/tape.py` (zero callers even inside the
+  kept package). `bybit_execution_adapter.py` and `entry_quote_manager.py`
+  stay deliberately: they are fixtures for the kernel's own tests, the
+  adapter carries the never-rename identity string, and the engine's
+  working-order port names the quote manager as its reference. **Deleted
+  from disk (untracked):** ~12.5 GB — the cargo build cache, 187 MB of
+  superseded refresh runs, seven dead local event-store roots (all
+  CONTINUOUS/paper era), the closed idio program's 228 MB regenerable
+  panel, orphan reconcile outputs, tool caches, a stale bench log. **Host:**
+  two orphaned July-13 files in the demo config dir (superseded by the
+  receipt system) and a five-week-old credential backup removed; the
+  "retired sleeves.env toggle" long flagged as pending turned out already
+  clean. **The doc lie hunt that rode along:** a second sweep found and
+  fixed operator-facing falsehoods in eleven more files — worst three: 
+  `deploy/engine.env.template` claimed the engine runs a sandbox account
+  (579580669) when it owns the live demo book (555899665);
+  `deploy/systemd/README.md` and `docs/architecture.md` both named a
+  deleted unit as the sole venue mutator; `docs/notifications.md` described
+  an emergency close button that does not exist (the panel is pause/resume
+  only — closing the book is `ops.sh flatten --execute`). Also fixed:
+  activate's start order (producers first, engine last — the doc had it
+  inverted), the wedged-command section that promised an auto-clearing
+  reconciler nobody runs, the repo-map skill that never mentioned the
+  engine, and the equity-curve skill citing the superseded carry config.
+  Kept, each with its reason on file: the quote-lab package (owner
+  keep-decision, twice recorded), `screen_idio_directional.py`
+  (result-bearing and test-pinned), `research/engine_config.py` (the
+  research→engine plug seam this architecture is for), the six `account/`
+  modules (import-graph-proven producers' library), and the registered
+  blend/funding-spread configs (the active forward-scoring program). Gate
+  after the cut: doctor, ruff, mypy (130 files) clean; 2,438 Python tests;
+  29 engine suites; docs-links green.
+
 - **2026-08-19 ~02:00 UTC — The owner's skepticism audited: 24 stale doc
   claims fixed, the queue consolidated, and the "short system" question
   answered with receipts.** Two independent read-only sweeps plus source

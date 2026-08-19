@@ -21,8 +21,6 @@ venv/
 # also swallowed liquidity_migration/data/ and scripts/data/.
 /data/
 reports/*
-!reports/autonomous-improvement/
-!reports/autonomous-improvement/**
 backtest-runs/
 
 # Runtime scratch files

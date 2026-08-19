@@ -453,10 +453,11 @@ back.
 ## Adding a venue
 
 Venues differ in kind, not just in address, so a venue states what it can do
-rather than the engine assuming. `VenueCaps` declares four things — whether
+rather than the engine assuming. `VenueCaps` declares five things — whether
 the venue holds a position-level stop the engine can set, whether a resting
 order can be amended in place, whether post-only is honoured, whether orders
-batch — and the engine refuses an action a venue cannot honour instead of
+batch, whether the engine may set a symbol's margin leverage — and the
+engine refuses an action a venue cannot honour instead of
 quietly substituting a different one. Cancel-and-replace is not an amend: it
 is a new order at the back of the queue at a fresh price, and a strategy that
 asked to move a quote would never learn it had been given something else.
@@ -470,13 +471,15 @@ listing what the binary knows — never defaulted to a venue nobody chose.
 To add one (Hyperliquid, MEXC), four steps in `engine-venue`:
 
 1. Write the adapter as a module in the crate and implement `VenueGateway` —
-   `caps`, `send_order`, `cancel_order`, `amend_order`, `set_stop`,
-   `account_view`, `instrument_rules` — stating the capabilities honestly. A
+   nine required methods: `caps`, `account_identity`, `send_order`,
+   `cancel_order`, `amend_order`, `set_stop`, `account_view`,
+   `instrument_rules`, `working_orders` (`add_symbol` and `set_leverage`
+   carry defaults, eleven in all) — stating the capabilities honestly. A
    venue with no native position stop is not a broken venue; it is a venue
    where an entry carrying a stop is refused, because the risk kernel's
    every-entry-carries-a-stop rule would otherwise be silently unenforced.
-2. Add a variant to the `Venue` enum in `registry.rs` and delegate all seven
-   methods to it. Dispatch is an enum, not `Box<dyn VenueGateway>`: the trait
+2. Add a variant to the `Venue` enum in `registry.rs` and delegate all
+   eleven methods to it. Dispatch is an enum, not `Box<dyn VenueGateway>`: the trait
    uses `async fn`, which cannot be a trait object at all, and a closed enum
    keeps the whole set of venues visible in one place — which is what the
    fence below depends on.

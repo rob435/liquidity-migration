@@ -11,53 +11,58 @@ unit shapes.
 
 ## Services
 
+Eleven unit files: nine services and the two liveness timers.
+
 | Unit | Role |
 | --- | --- |
-| `liquidity-migration-account-execution.service` | Sole Bybit demo order, fill, position, funding, protection, journal, and health owner |
+| `liquidity-migration-engine.service` | The Rust execution engine — sole Bybit **demo** mutator, on the fleet's demo account (555899665, `bybit-demo.env`); holds that account's single-writer lease — see below |
+| `liquidity-migration-engine-mainnet.service` | The Rust engine on the **funded** account — runs in shadow and sends nothing until the owner turns it live |
 | `liquidity-migration-bybit-long-demo.service` | LONG target producer |
 | `liquidity-migration-bybit-carry-demo.service` | CARRY target producer |
-| `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
-| `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume/market-close) — the sole `getUpdates` consumer |
-| `liquidity-migration-account-execution-mainnet.service` | Bybit **mainnet** real-money order/fill/position/protection/journal owner |
 | `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers; both start when `REAL_MONEY` is armed, sized by the installed risk profile |
+| `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
-| `liquidity-migration-engine.service` | The Rust execution engine, on a demo account of its own — see below |
+| `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume — there is no close button) — the sole `getUpdates` consumer |
 
-The liveness services are invoked by their matching timers.
+The liveness services are invoked by their matching timers. The two
+`account-execution` owner units that used to head this table were deleted with
+the Python order path on 2026-08-14; the engines own the accounts now.
 Target producers and auxiliary services have private API, mainnet, `REAL_MONEY`,
 and unnecessary Telegram variables explicitly removed.
 
 ## Dependency edges
 
-No unit can take the fleet down with it.
+No unit can take the fleet down with it. Every unit's only lifecycle edges
+are `Wants=`/`After=` on `network-online.target` — nothing `Requires=`
+anything else in the fleet.
 
-- **Demo producers** carry `Wants=` (not `Requires=`) on
-  `liquidity-migration-account-execution.service`, plus `After=` for ordering.
-  A dead owner leaves them running: they re-check owner health each cycle and
-  plan entries as blocked while still publishing exits, so a degraded fleet
-  keeps draining risk.
-- **Mainnet producers** keep `Requires=` on the mainnet owner.
+- **Producers** (demo and mainnet alike) publish target books to disk; the
+  engine reads the books and owns the account. The `Requires=` the mainnet
+  producers once carried on an account owner went with the Python order path
+  on 2026-08-14 — with no owner unit there is nothing to bind to. A dead
+  engine leaves the producers running and publishing.
 - **Neither liveness unit** has an ordering, requirement, binding, part-of,
-  requisite, uphold, or wants edge to the owner it watches — a stopped or
-  failed owner is what it alerts on. Their only lifecycle edges are
-  `Wants`/`After` for network readiness. The mainnet observer loads
+  requisite, uphold, or wants edge to the units it watches — a stopped or
+  failed unit is what it alerts on. The mainnet observer loads
   `bybit-mainnet.env` for the Telegram credentials only and unsets both
   API-key pairs and `REAL_MONEY`.
 - **The control panel** (`telegram-controls`) likewise has no edge to the
-  fleet it controls: it must keep serving buttons while the units it pauses,
-  resumes, or flattens are stopped. It holds Telegram credentials only — the
-  API-key pairs and `REAL_MONEY` are unset — and acts through `systemctl`, the
-  sleeve override + resolve library, and the flatten path.
+  fleet it controls: it must keep serving buttons while the units it pauses
+  or resumes are stopped. It holds Telegram credentials only — the API-key
+  pairs and `REAL_MONEY` are unset — and acts through `systemctl` and the
+  sleeve override + resolve library.
 
-## The engine unit
+## The engine units
 
 `liquidity-migration-engine.service` is the odd one, in three ways.
 
-- **It runs a different venue account.** The fleet owns demo account
-  555899665 (`bybit-demo.env`); the engine runs 579580669
-  (`bybit-quote-lab.env`). Two writers on one account wedge each other, and
-  the engine's per-account lock would make that failure silent rather than
-  loud.
+- **It owns the fleet's demo account.** It loads `bybit-demo.env` — demo
+  account 555899665, the live demo book — and holds that account's
+  single-writer kernel lease. (Until 2026-08-14 it ran a second demo account,
+  579580669 in `bybit-quote-lab.env`, so it could not fight the Python owner
+  of 555899665; that owner is deleted and nothing else writes to the account.
+  The lease still means anything else taking the account stops the engine
+  from starting rather than letting two writers wedge each other.)
 - **The host opts in.** The manifest installs the unit file everywhere, but
   the deploy starts and verifies it only where `/etc/liquidity-migration/engine.env`
   and the built binary both exist (`engine_installed` in
@@ -69,34 +74,25 @@ No unit can take the fleet down with it.
   has disarmed its rollback trap. A missing toolchain or a build that will not
   compile prints a line and leaves the previously installed binary running.
 
-It is not in `LM_AUTHORIZED_UNITS`. That list demands each unit's fragment be
-installed and strip the demo credential pair — and this unit needs that pair,
-for a different account, on hosts that may not have installed it.
+`liquidity-migration-engine-mainnet.service` has the same shape on the funded
+account: gated by `/etc/liquidity-migration/engine-mainnet.env` plus the
+binary, started through `start_mainnet_fleet` when `REAL_MONEY=true` in
+`/etc/liquidity-migration/bybit-mainnet.env` — the single arming switch — and
+in shadow until the owner's own config says otherwise. See the Real-money
+section of [`../../docs/operations.md`](../../docs/operations.md).
 
-## Owner unit shapes
+Neither engine unit is in `LM_AUTHORIZED_UNITS`
+([`../lib_sleeves.sh`](../lib_sleeves.sh)). Every unit on that list must be
+installed byte-identical on every host and runs with the credential pairs
+stripped; the engines are opt-in per host and need their account's key pair —
+they are what trades.
 
-The two owners are deliberately different.
+## Owner unit shapes (historical)
 
-| | demo (`account-execution`) | mainnet (`account-execution-mainnet`) |
-| --- | --- | --- |
-| `ExecStartPost` readiness gate | none | `run_authorized_runtime.sh ... readiness` |
-| Memory | `MemoryMax=1024M`, no `MemoryHigh` | `MemoryHigh=384M`, `MemoryMax=512M` |
-| `RestartSec` | 5 | 2 |
-
-The demo owner has **no** `ExecStartPost` readiness gate — a failing gate kills
-an owner that may still be draining exits. Every invariant it would assert is
-enforced at the point of use instead: producers re-check owner health per
-cycle, queued entries self-expire, exits never expire, submission is gated
-inside the owner, and the watchdog re-reads the same artifacts every 3 minutes.
-The readiness module stays for manual and `verify` use. `MemoryHigh` is
-likewise absent on demo: reclaim throttling on the latency-critical owner
-stretches venue round trips, and `MemoryMax` already bounds it.
-
-Mainnet units are installed by the manifest and started only when the single
-arming switch — `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env`
-— is set; a plain `activate` or `rollout` then routes through
-`start_mainnet_fleet`. See the Real-money section of
-[`../../docs/operations.md`](../../docs/operations.md).
+The section that compared the two `account-execution` owner units — demo with
+no readiness gate, mainnet with one — described units deleted with the Python
+order path on 2026-08-14. It is preserved in git history; the ported behavior
+lives in the engine ([`../../docs/engine.md`](../../docs/engine.md)).
 
 ## Watchdog timers
 

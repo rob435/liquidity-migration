@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration Telegram owner controls (pause/resume/market-close buttons)
+Description=liquidity-migration Telegram owner controls (pause/resume buttons)
 Wants=network-online.target
 # No Requires= on the owner or producers: the control panel must keep working
 # when the fleet it controls is stopped — that is exactly when it is needed.

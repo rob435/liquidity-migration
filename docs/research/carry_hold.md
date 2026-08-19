@@ -311,7 +311,10 @@ and deploy this strategy in its place. The runtime now exists:
 1. **Sleeve**: `carry` — target producer `liquidity_migration/strategy/carry_demo.py`
    (+ `carry_demo_daemon.py`), demo unit (a paper twin existed until the
    2026-08-03 paper retirement), publishing absolute
-   component targets through the normal account-kernel inbox. The deployed
+   component targets as a target book the engine reads
+   ([`rules/engine_targets.py`](../../liquidity_migration/rules/engine_targets.py);
+   at deploy time this was the account-kernel inbox, which went with the
+   Python order path on 2026-08-14). The deployed
    decision logic is NOT a reimplementation: the producer calls the exact
    registered-scorer functions (`rules/carry_hold.py:carry_hold_weights`) on the
    live frame (`rules/carry_hold.py:prepare_decision`) over a stateless 90-day
@@ -355,8 +358,8 @@ and deploy this strategy in its place. The runtime now exists:
    series is monotone, converging to the baseline from below. Ledger row and method:
    `docs/research/research_findings.md` §2; report in
    `~/SHARED_DATA/bybit_full_pit/reports/carry_hold_exit_grid_2026-08-07/`. Sizing: weight × owner equity × profile multiplier
-   (1.0), per-name 0.10, gross cap 1.0, entry leverage 2 under the account
-   owner's unchanged risk caps. **The equity in that product is the equity as
+   (1.0), per-name 0.10, gross cap 1.0, entry leverage 2 under the engine
+   risk kernel's unchanged caps. **The equity in that product is the equity as
    of the decision, not the live mark** (2026-07-30 change point): sizing off
    the live mark made the day's targets a function of the book's own
    unrealized P&L and rebalanced the whole book every few minutes. Targets are

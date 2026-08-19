@@ -17,7 +17,7 @@ runbook, and what is still unproven — is *Real money* below. Deployed state:
 | `equity [ARGS]` | Descriptive equity curves. `--sleeves long,carry` (`carry` renders the deployed rule `configs/lane2_carry_hold_v4.json` from the cross-venue panel, not a daemon replay), `--years N`. |
 | `research-refresh {plan,run}` | Append-first data/features/backtest workflow. `plan` mutates nothing. |
 | `reset [ARGS]` | Demo ledger reset. Preview unless `--execute`. |
-| `flatten --environment ENV [ARGS]` | Take one account to zero exposure through its own owner. Reads only unless `--execute`. |
+| `flatten --environment ENV [ARGS]` | Take one account to zero exposure on the engine's own path. Reads only unless `--execute`. |
 | `venue-accounting [ARGS]` | Reconcile the demo journal against Bybit executions, fees, closed P&L, funding, positions, open orders. Runs on the host with the host's credentials; `LOCAL=1` runs it against this checkout. Read-only. |
 | `wedged-command [--environment demo\|mainnet] {report,probe,resolve}` | Read venue truth for an order command that can no longer progress; `resolve` writes one journal transition, never resends an order, and refuses while the venue still holds it. The wrapper owns the account root/id/realm and loads that owner's credentials on the host. Defaults to demo. |
 | `real-money {preflight,render-profile,create-state-roots}` | Read-only arming report; profile render (`--execute --output PATH` writes one non-secret file); mainnet journal directories (dry-run unless `--execute`). Starts nothing. |
@@ -63,8 +63,10 @@ disables every project unit, removes unknown `liquidity-migration-*` units, writ
 test gate, not the stopped window on the host.
 
 **activate** reads `/etc/liquidity-migration/profile` (defaulting to `operational` when absent), checks
-demo-key order permission, starts owners before producers, enables the liveness timer, then verifies.
-It auto-stops on the same terms as `install`.
+demo-key order permission, starts the producers first, enables the liveness timer and the Telegram
+control panel, and starts the engine last, then verifies. The engine is last on purpose: an engine
+start that will not take is reported by the verification, not by aborting a fleet-up that has already
+brought everything else up. It auto-stops on the same terms as `install`.
 
 **staged** is `install`, the profile marker, and `activate` in one command, so it needs `--profile
 operational`. `install` alone does not write the marker.
@@ -81,7 +83,7 @@ prints a `verify-units unit|expected|active|enabled` table, then the `verify-mis
 order-permission probe is reported here and gates nothing (`verify-warn ...`); it is still fatal in
 `activate`. With no explicit `EXPECTED_COMMIT`, a host on a different commit is reported as
 `verify-drift installed=... expected=...` rather than failed. The mainnet half is conditional on the
-resolved toggles: with both mainnet sleeves off, the mainnet owner, both mainnet producers and the
+resolved toggles: with both mainnet sleeves off, the mainnet engine unit, both mainnet producers and the
 mainnet liveness timer must all be inactive and disabled; with either on, the funded fleet is asserted
 up exactly like the others. A clean run prints `verify-ok` with commit, profile and both mainnet
 toggles.
@@ -113,8 +115,10 @@ after the stopped flat checks pass (why it exists: [`architecture.md`](architect
 credentials*).
 
 The GitHub Actions workflow dispatches four of the modes — `rollout`, `install`, `activate`, `verify` —
-and passes `--profile` on rollout. A push runs CI only. The two mainnet modes are deliberately absent:
-arming a funded account is the owner's own act at a shell, not a button in CI. All dispatches share one
+and passes `--profile` on rollout. A push runs CI only. The two absent modes are `staged` and
+`stop-mainnet`; only the second is a mainnet mode, and it is absent deliberately — arming or stopping a
+funded account is the owner's own act at a shell, not a button in CI. `staged` is simply not exposed;
+`install` then `activate` covers it from CI. All dispatches share one
 repository-wide VPS concurrency group whatever Git ref they select.
 
 Deploy Git commands inherit no caller `GIT_*` variables, user or system Git configuration, replacement
@@ -131,11 +135,11 @@ observed wallet equity.
 same root-owned `0600` file the live API key goes into, edited on the VPS by the owner's own hand.
 There is no repo toggle, so a git commit can never arm. When the switch is armed, a plain `activate` or
 `rollout` creates the mainnet state roots, requires `real-money preflight` to pass, then starts the
-mainnet owner, both producers, and the liveness timer. Which sleeves trade, and at what share, is the
+mainnet engine (`liquidity-migration-engine-mainnet.service`), both producers, and the liveness timer. Which sleeves trade, and at what share, is the
 installed risk profile's decision.
 
 **stop-mainnet** (`scripts/ops.sh deploy stop-mainnet`) disables and stops the mainnet timer, watchdog,
-both producers and the owner, and fails if any survives. It stops publication only — exposure is
+both producers and the mainnet engine unit, and fails if any survives. It stops publication only — exposure is
 unchanged, so flatten. While `REAL_MONEY` stays armed, `verify` fails and the next `activate` or
 `rollout` restarts the fleet; set `REAL_MONEY=false` to make a stop stick, then `scripts/ops.sh flatten
 --execute --environment mainnet --reason ...` to close the book.
@@ -217,8 +221,8 @@ the envelope and the watchdog thresholds are unexercised on a funded account unt
 ### Capital controls in force
 
 Absolute pre-trade caps (component gross, account gross, initial margin, available margin, leverage)
-rejected atomically inside the journal transaction, and the per-sleeve partition:
-[`account_kernel.py`](../liquidity_migration/account/account_kernel.py). Caps rescale with observed
+and the per-sleeve partition, enforced in the engine's risk kernel before any order leaves:
+[`kernel.rs`](../engine/engine-risk/src/kernel.rs). Caps rescale with observed
 equity: [`envelope.rs`](../engine/engine-risk/src/envelope.rs).
 Daily loss halt, tripping on the day's equity floor and refusing new risk:
 [`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs) — the Python
@@ -226,13 +230,15 @@ owner's automatic safety-flat (`run_safety_flat_once`) went with that owner;
 the kernel gates orders and does not plan flattens, so closing a tripped book
 is `ops.sh flatten`, an operator's act. Venue-native stop armed
 in the same `place_order` call and read back after create:
-[`working.rs`](../engine/engine-core/src/working.rs). One owner process per
-account and journal ↔ venue reconciliation:
-[`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py),
-[`account_reconcile.py`](../liquidity_migration/venue/account_reconcile.py). An independent watchdog
+[`working.rs`](../engine/engine-core/src/working.rs). One writer process per
+account — the engine holds the account lease
+([`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py) defines the
+protocol) — and journal ↔ venue reconciliation is the engine's own boot pass
+([`reconcile.rs`](../engine/engine-core/src/reconcile.rs); the Python
+`venue/account_reconcile.py` was deleted 2026-08-19). An independent watchdog
 (`liquidity-migration-mainnet-liveness.timer`) pages every 3 minutes holding no credential and no
 ordering edge. The mainnet client refuses to construct while `REAL_MONEY` is unset, and producers get
-no credentials and no arming switch in any realm — order authority is the account owner's alone.
+no credentials and no arming switch in any realm — order authority is the engine's alone.
 
 ### Still unproven
 
@@ -327,7 +333,7 @@ Terminal states, which are also the exit codes:
 
 | Profile | Runs |
 | --- | --- |
-| `operational` | The demo owner, the demo producers its toggles allow, liveness. The only profile; `demo-operational` is rejected with a message naming its retirement, and a host marker still reading it self-heals on the next rollout. |
+| `operational` | The demo engine (`liquidity-migration-engine.service`), the demo producers its toggles allow, the Telegram control panel, liveness. The only profile; `demo-operational` is rejected with a message naming its retirement, and a host marker still reading it self-heals on the next rollout. |
 
 [`deploy/sleeves.env`](../deploy/sleeves.env) is the repository ceiling; the host file
 `/etc/liquidity-migration/sleeves.env` may only narrow `on` to `off`.
@@ -339,7 +345,7 @@ Terminal states, which are also the exit codes:
 
 Which are on right now is in the file itself, not here. The mainnet units have no sleeve toggle:
 `REAL_MONEY=true` in the host's `bybit-mainnet.env` is the single arming switch (see *Real money*
-above), and it brings up the mainnet owner, both producers, and the liveness timer together.
+above), and it brings up the mainnet engine, both producers, and the liveness timer together.
 
 Retired toggles (`CONTINUOUS_SLEEVE`, `CONTINUOUS_HEDGE_TIMER`, `CONTINUOUS_PAPER_SLEEVE`,
 `CARRY_PAPER_SLEEVE`, `PAPER_TARGET_MIRROR`) are ignored with a warning if a stale host override still
@@ -369,7 +375,8 @@ Also `--sleeves long|carry|all`, `--archive-dir DIR` (default `data/_archive`), 
 free, mainnet configuration is absent, every managed unit reports `inactive`, and every submit-armed
 unit loads the same credential file. It never cancels an order or closes a position.
 [`reset_path_safety.py`](../liquidity_migration/ops/reset_path_safety.py) validates every target path
-before anything is deleted, and both account-owner leases are held across the destructive boundary.
+before anything is deleted, and the demo account-owner lease — the one the engine holds while it
+runs — is held across the destructive boundary.
 Journals, inboxes and captures are archived with a SHA-256 sidecar re-checked immediately before
 deletion; configs, lock inodes, `residual_momentum.parquet` and root-level market data survive. After
 the first removal there is no rollback — a failure leaves the units stopped and the archive as the only
@@ -383,13 +390,13 @@ result. Do not cancel or close by hand on the venue while an owner is running �
 thing that disagrees with the account; use `ops.sh flatten` instead. `phase-failed name=<phase> ...
 status=N` names a failing deploy step.
 
-**A command is wedged.** Normally nothing to do, in either realm. The owner's reconciler probes any
-command stuck past the wedge bound (300 s) on its own ~2 s pass and terminalizes it on venue evidence,
-so it clears within seconds; a live order, an unreadable venue, or a reduction the book has not booked
-yet always refuse that transition. A wedge that survives the automatic pass appears in account health as
-a `wedged_command:...` mismatch and pages through the ordinary health alerting; until it clears it
-blocks new entries while same-symbol exits keep flowing. To inspect, or to resolve one the ladder
-deliberately refused:
+**A command is wedged.** The engine reconciles its own orders: while it runs, its in-flight ledger
+tracks every order it sent, and at boot it compares its log against what the venue actually holds
+([`reconcile.rs`](../engine/engine-core/src/reconcile.rs)), repairs what it can — a missing stop is
+put back — and refuses to open on exposure the log cannot account for. What nothing clears
+automatically any more is a journal command from the deleted Python order path, or an order placed
+outside the engine: the Python owner's ~2 s reconciler pass went with that owner on 2026-08-14. For
+those, the operator reads venue truth and terminalizes the command by hand:
 
 ```bash
 scripts/ops.sh wedged-command report
@@ -411,12 +418,15 @@ scripts/ops.sh logs bybit-carry-demo 200   # why it stopped
 scripts/ops.sh restart bybit-carry-demo
 ```
 
-One unit failing does not take the fleet with it. Producers only *want* the owner, so a dead owner
-leaves them up: they plan exits and block entries each cycle until it returns.
+One unit failing does not take the fleet with it. No unit depends on another — each wants only
+`network-online.target` — so a dead engine leaves the producers up, still writing their target books,
+and the engine acts on the standing books when it comes back.
 
-**A request is sitting in the inbox.** A request that fails continuously for ten minutes retires to
-`failed/` carrying the error that retired it, and the producing sleeve's next cycle publishes a fresh
-one. Files in `failed/` are evidence to read, not a queue to drain by hand.
+**A request is sitting in the inbox** — historical. The intent inbox went with the Python order path
+(2026-08-14). Producers write target books now
+([`rules/engine_targets.py`](../liquidity_migration/rules/engine_targets.py)) and the engine reads
+them directly; there is no `failed/` queue to drain. A book that stops refreshing is a producer
+fault, and the watchdog's cycle-age check pages it.
 
 **The fleet is wrong after a bad deploy.** Re-deploy the good commit — `scripts/ops.sh deploy staged
 --profile operational`, with `EXPECTED_COMMIT` set to that commit. Quiescing is not your job: `staged`

@@ -6,16 +6,16 @@ generated artifacts define behavior when this file drifts; deployed state is
 
 The program has two parts: the research system, in Python, and the execution engine, in Rust
 ([`engine.md`](engine.md)). The engine is the order path now: the Python one was deleted on
-2026-08-14 (CHANGELOG that date), though the host still runs its installed copy until the next
-deploy.
+2026-08-14 (CHANGELOG that date), from the repository and from the host — no `account-execution`
+unit exists anywhere any more.
 
 **Scope warning.** Much of what follows describes that deleted Python order path — the account
 owner, its inbox, its protection modules, its journal transitions — in the present tense, and cites
-line numbers in files that no longer exist. It is kept because it is the most precise description
-of the behaviour the engine had to reproduce, and because the host still runs it today. Read it as
-the specification it became, not as a map of the current tree; `engine.md` is the current tree. The
-producer half of this document — universes, target books, sleeve planning — is unaffected and
-current.
+line numbers in files that no longer exist. It is kept because it is the specification the engine
+was ported and parity-tested against, the most precise description of the behaviour the engine had
+to reproduce. Read the owner-era sections as historical reference, not as a map of the current
+tree; `engine.md` is the current tree. The producer half of this document — universes, target
+books, sleeve planning — is unaffected and current.
 
 ## Producer / owner split
 
@@ -25,12 +25,15 @@ never call a venue client, mutate a ledger or reserve margin;
 [`strategy_runtime.py`](../liquidity_migration/account/strategy_runtime.py) converts all sleeve intents
 together into one atomic kernel batch.
 
+Eleven unit files in `deploy/systemd/` — nine services and the two liveness timers:
+
 | Role | Units | Mutates a venue |
 | --- | --- | --- |
-| Account owner, demo | `account-execution` | Yes — sole Bybit demo mutator |
-| Account owner, mainnet | `account-execution-mainnet` | Yes, once the owner arms it |
+| Execution engine, demo | `engine` | Yes — the Rust engine is the sole Bybit demo mutator and holds the account's single-writer lease |
+| Execution engine, mainnet | `engine-mainnet` | Not while shadow — it sends nothing until the owner turns it live |
 | Target producers | `bybit-{long,carry}-{demo,mainnet}` | No |
-| Liveness | `demo-liveness`, `mainnet-liveness` (+ timers) | No credential, no ordering dependency on the owner it watches |
+| Liveness | `demo-liveness`, `mainnet-liveness` (each with a `.timer`) | No credential, no ordering dependency on what it watches |
+| Owner controls | `telegram-controls` | No — pause/resume buttons, acting through `systemctl` and the sleeve toggles |
 
 ```text
 market data -> strategy target -> durable inbox -> account kernel
@@ -136,7 +139,8 @@ account/sleeve/symbol, wall and monotonic time, payload, `prev_event_hash`, redu
 `event_hash`. The event ID is deterministic from account ID plus the caller's idempotency key:
 redelivery with identical content is a no-op, reuse with changed content is an integrity error.
 Verification rejects sequence gaps, duplicate IDs, mixed account IDs, hash-chain breaks, per-event hash
-mismatch (`event.event_hash != _event_hash(event.to_dict())`, `account_kernel.py:654`), illegal
+mismatch (`event.event_hash != _event_hash(event.to_dict())` — recomputed in `account_kernel.py`'s
+`_verify_account_events`, the cursor's `_fold`, and `_verify_recent_transaction_window`), illegal
 transitions and state-hash disagreement. Shape, sequence, duplicate-ID and single-account checks always
 run; the two hash-chain checks, the per-event hash and the state hash run only under `verify=True`.
 
@@ -168,8 +172,10 @@ Three read paths, not interchangeable.
    Sanctioned callers: `account_strategy_state.py`, `account_candidate_universe.py` (offline only;
    per-cycle callers pass their cursor), owner startup (`AccountJournal._events_ref`, which is what
    makes the head and tail reads valid), and the report tools
-   `scripts/vps/check_deploy_rollout_readiness.py`, `scripts/research/build_trade_diagnostics.py`,
-   `scripts/research/build_execution_cost_report.py`. `account_venue_accounting.py` verifies the same
+   `scripts/vps/check_deploy_rollout_readiness.py`, and
+   `scripts/research/build_trade_diagnostics.py` (`build_execution_cost_report.py` was deleted in the
+   2026-08-19 cleanup; the engine's `fills` subcommand is the execution-cost reading now).
+   `account_venue_accounting.py` verifies the same
    way over a captured byte snapshot via `read_account_journal_bytes`.
 2. **Resumable cursor** — `AccountJournalCursor` for per-cycle producers: re-reads only segments added
    since the last call, cold-reads on any prefix mismatch. Never put a bare `read_account_journal` in a
@@ -234,15 +240,23 @@ demo command durably carries a Full-position MarkPrice stop before any provider 
 a durable active stop cannot be scaled up; an existing stop never moves inward. Order creation is
 asynchronous, so the private stream and REST position truth still confirm it.
 
-*Stop price at entry.* The kernel takes the outermost price across all same-direction component stop
+*The two blocks below are historical* — the deleted Python owner's protection spec, kept as
+written before 2026-08-14. `venue_protection.py` and `protection_engine.py`, which they cite, were
+deleted with the Python order path; the live behaviour is the engine's: the stop attached at
+create and verified at fill in [`working.rs`](../engine/engine-core/src/working.rs), the repair
+and breach latch in [`reconcile.rs`](../engine/engine-core/src/reconcile.rs). The stop-price math
+itself still lives in `account_kernel.py` and is cited by name.
+
+*Stop price at entry (historical spec).* The kernel takes the outermost price across all same-direction component stop
 contracts, anchored to each component's durable **decision reference** price
 (`payload["reference_price"]`), never to a fill. Component metadata key is `stop_loss_pct`, required
 finite in (0,1); source label `decision_reference_outermost_component_fraction`
-(`account_kernel.py:1532`). With no component declaring a stop it falls back to the explicit account
-fraction under `decision_reference_account_fallback_fraction` (`:1534`). The stop is rounded outward to
-the verified tick (`round_native_stop`). The account fraction is `DISASTER_STOP_FRACTION` →
-`--disaster-stop-fraction` → `fallback_stop_fraction`, required in (0,1) with no default:
-`scripts/runtime/run_account_execution_service.sh:79-80` refuses to start the owner without it.
+(`_native_entry_stop_spec` in `account_kernel.py`). With no component declaring a stop it falls back to
+the explicit account fraction under `decision_reference_account_fallback_fraction` (same function). The
+stop is rounded outward to the verified tick (`round_native_stop`). The account fraction was
+`DISASTER_STOP_FRACTION` → `--disaster-stop-fraction` → `fallback_stop_fraction`, required in (0,1)
+with no default; the launcher that refused to start the owner without it
+(`scripts/runtime/run_account_execution_service.sh`) went with the Python order path on 2026-08-14.
 Reduce-only commands carry no entry TP/SL fields. Confirmed fills then re-anchor the Full-position stop
 to exact component fill evidence — a separate later stage labelled
 `fill_anchored_outermost_component_stop` (`venue_protection.py:310`); the two labels must not be merged.
@@ -250,7 +264,7 @@ A coalesced entry fill plus stop execution is processed entry-first even when By
 first (`account_execution_stream.py:309`) — processing the stop first would reconstruct a position that
 never opened.
 
-*Repair and the breach latch.* Repair begins from authenticated venue position truth. An exact matching
+*Repair and the breach latch (historical spec).* Repair begins from authenticated venue position truth. An exact matching
 Full-position `stopLoss` is adopted without mutation (`_adopt_verified_venue_stop`). A missing or
 mismatched stop is repaired via `set_trading_stop` (`:746-760`) from a positive authenticated MarkPrice
 — absent one, repair raises rather than guessing — and is **never** latched. Only three things latch
@@ -297,21 +311,22 @@ probed at most once a minute and at most five per pass (`WEDGE_PROBE_INTERVAL_NS
 `WEDGE_PROBES_PER_PASS`, `:53-54`).
 
 **Private stream.** Readiness is probed every owner-loop iteration and again at exposure-increasing
-admission. After `ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS` (default 180; `.env.example:87`,
-`scripts/runtime/run_account_execution_service.sh:19` → `--private-ws-reconnect-seconds`) continuously
+admission. After `ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS` (default 180; still in `.env.example` — the deleted
+launcher passed it as `--private-ws-reconnect-seconds`) continuously
 not-ready, the owner builds and subscribes one replacement in a background thread, reusing that value as
 an attempt cooldown against authentication storms. Every authentication generation must obtain fresh
 subscription ACKs — old ACKs do not survive an internal reconnect. The candidate gets 10 s to prove
-readiness (`candidate_ready_timeout_seconds = 10.0`, `account_execution_stream.py:560`) while the prior
+readiness (`candidate_ready_timeout_seconds = 10.0` in `account_execution_stream.py`, deleted
+2026-08-19) while the prior
 stream stays published; a recovered prior stream wins. REST reconciliation and strict risk-reducing
 requests remain available during the handshake. An unavailable or ambiguous socket probe fails health
 closed but is not enough evidence to destroy a possibly live authenticated connection.
 
 **Public L2 watchdog.** Three distinct states: a connection attempt, an open transport, and a
 subscription's first frame. A connection generation that does not open or deliver its first orderbook
-frame within 30 s is retired (`DEFAULT_ORDERBOOK_FIRST_FRAME_RECONNECT_SECONDS = 30.0`,
-`market_capture.py:59`); a previously active orderbook silent for 120 s is retired
-(`DEFAULT_ORDERBOOK_STALE_RECONNECT_SECONDS = 120.0`, `:54`). Every callback carries its connection
+frame within 30 s is retired (`DEFAULT_ORDERBOOK_FIRST_FRAME_RECONNECT_SECONDS = 30.0` in
+`market_capture.py`); a previously active orderbook silent for 120 s is retired
+(`DEFAULT_ORDERBOOK_STALE_RECONNECT_SECONDS = 120.0`, same module). Every callback carries its connection
 generation; a retired generation can neither send a new subscription nor restore readiness. Socket
 subscription writes and recorder I/O run outside the watchdog state lock, and their deadlines begin
 before the potentially blocking operation. Public-stream failure blocks market readiness and new
@@ -331,8 +346,9 @@ retried forever — do not hand-close dust on the venue.
 **Submission freshness and ambiguity.** An exposure-increasing command with zero prior submission
 attempts is refused as `StaleUnsubmittedExposureCommand` when `command.created_ts_ns <= 0`, `now_ns <
 command.created_ts_ns`, or `now_ns − command.created_ts_ns > max_unsubmitted_exposure_age_ns` (default
-`120_000_000_000` — 120 s — `bybit_execution_adapter.py:97`, set by the owner's
-`--max-unsubmitted-exposure-age-seconds`, `account_service_runner.py:589`). The budget must cover
+`120_000_000_000` — 120 s — `bybit_execution_adapter.py`, kept only as a test fixture now; the owner
+flag that set it, `--max-unsubmitted-exposure-age-seconds`, went with the deleted
+`account_service_runner.py`). The budget must cover
 whole-batch venue latency rather than one round trip, because command age is anchored to the shared
 batch journal instant. It is checked twice — before `prepare_submission` / leverage negotiation
 (`execution_adapters.py:747-764`) and again at the order-create boundary (`:787-800`). Exactly one
@@ -358,8 +374,8 @@ fills, never venue-final. Component bookkeeping detail goes to the service journ
 digest once carried a CONTINUOUS BTC gate and entry-funnel line, read from a separate receipt-bound
 projection. That projection, the `CONTINUOUS_CYCLE_ROOT` switch that enabled it, and the owner flags
 behind it were deleted with the sleeve on 2026-08-14. The root was already unset on the owner unit, so
-the digest is unchanged; `tests/runtime/test_account_service_runner_readiness.py` now pins that the
-launcher names no cycle root at all.
+the digest was unchanged. (The launcher and the readiness test that pinned it naming no cycle root
+were themselves deleted with the Python order path on 2026-08-14.)
 
 ## Epoch reset
 
@@ -436,12 +452,16 @@ A unit names only `UNIT:ENTRYPOINT`;
 [`scripts/run_authorized_runtime.sh`](../scripts/run_authorized_runtime.sh) maps that pair to one
 complete command line and `exec`s it. Callers cannot append argv. The installed profile is a plain marker
 at `/etc/liquidity-migration/profile`, written at rollout and read back by verify. One profile exists —
-`operational`: the demo owner, every demo producer its toggles allow, demo liveness. `demo-operational`
+`operational`: every demo producer its toggles allow, demo liveness, the Telegram controls, and the
+engines — there is no owner unit any more; the engine is what trades. `demo-operational`
 is rejected by name; an old marker self-heals on the next rollout. Liveness scope is hardcoded in the
 committed argv: `check_fleet_liveness.py --account-scope demo` for the demo watchdog,
 `--account-scope mainnet` for the mainnet one, choices `_ACCOUNT_SCOPES = ("demo", "mainnet")`. Deploy
-modes: `install | activate | verify | rollout | stop-mainnet`. Activation starts owners before
-producers; shutdown stops producers before owners.
+modes: `install | activate | verify | staged | rollout | stop-mainnet` (the mode dispatch at the end of
+`scripts/deploy_vps_live.sh`; `ops.sh deploy` takes all but `verify`, which `ops.sh status` runs).
+Activation starts the producers, the liveness timers, and the Telegram controls first and the engine
+last, never fatally — an engine start that will not take is reported by the verification step, not by
+aborting an activation that already brought the fleet up. Shutdown stops producers before the engine.
 
 When `REAL_MONEY=true` is set in the host's `bybit-mainnet.env` — the single arming switch — a plain
 `activate` or `rollout` reaches the funded fleet through `start_mainnet_fleet`, which creates the mainnet
@@ -457,12 +477,13 @@ publishing zero targets through the owner and waiting for fills.
 Operator routes all run through [`scripts/ops.sh`](../scripts/ops.sh); the verb set and every deploy mode
 are tabulated in [`operations.md`](operations.md).
 
-**Host layout the install asserts.** The deploy requires `ACCOUNT_RAW_MARKET_PERSISTENCE=0`; owners still
-maintain live sequence-aware L2, bounded readiness, exact decision books, journals, reconciliation and
-protection, they simply do not append every public frame. The runner refuses to start unless the variable
-is explicitly `0` or `1` — "ACCOUNT_RAW_MARKET_PERSISTENCE must be explicitly set to 0 or 1"
-(`scripts/runtime/run_account_execution_service.sh`); `.env.example` ships it empty and the deploy sets
-`"0"`.
+**`ACCOUNT_RAW_MARKET_PERSISTENCE` is a leftover name, no longer set or asserted anywhere.** The
+runner that refused to start unless it was explicitly `0` or `1`
+(`scripts/runtime/run_account_execution_service.sh`) went with the Python order path on 2026-08-14, and
+no deploy step touches the variable now. It survives in three places: the historical
+`deploy/account-execution-mainnet.env.template` still pins `0`, `.env.example` ships it empty, and the
+mainnet arming preflight (`liquidity_migration/policy/real_money_arming.py`) still lists it among the
+owner-env keys it requires non-empty. Nothing reads its value at runtime.
 
 Deployment derives one authorization-bound scheduling-capture tape:
 `<ACCOUNT_CAPTURE_ROOT>/strategy-targets.jsonl`. Every producer shares it through a locked,
@@ -493,8 +514,9 @@ Moving a module physically is a separate refactor: a file move breaks the system
 (`deploy/systemd/*.service` → `run_authorized_runtime.sh UNIT:ENTRYPOINT` → per-service launcher),
 `deploy/sleeves.env` wiring, and on-disk journal/projection paths.
 
-`requirements.lock` is the exact CI (`.github/workflows/vps-deploy.yml:51`) and deploy
-(`scripts/deploy_vps_live.sh:1009`) dependency contract. `scripts/dev.sh doctor --strict-lock` turns a
+`requirements.lock` is the exact CI and deploy dependency contract — the
+`pip install --no-deps --only-binary=:all: -r requirements.lock` steps in
+`.github/workflows/vps-deploy.yml` and `scripts/deploy_vps_live.sh`. `scripts/dev.sh doctor --strict-lock` turns a
 difference from it into a failing diagnostic — the way to reproduce a deploy-only dependency failure
 locally.
 
@@ -556,10 +578,11 @@ a claim-validity threshold. Coverage is quantity-weighted (`observed_qty / total
 fills cannot be silently dropped.**
 
 Markout capacity is bounded on this route, so coverage can be incomplete on a busy batch: 8,192 pending
-horizon tasks (`MAX_PENDING_POST_FILL_MARKOUTS`, `market_capture.py:67`) and 128 marks per public book
-update (`MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE`, `market_capture.py:69`, at `:1072`). Task symbols stay
-subscribed only until their tasks clear. Over-capacity schedules come back `rejected_capacity`
-(`market_capture.py:774`); never-registered fills surface as `not_registered`
+horizon tasks (`MAX_PENDING_POST_FILL_MARKOUTS` in `market_capture.py`) and 128 marks per public book
+update (`MAX_POST_FILL_MARKOUTS_PER_BOOK_UPDATE`, applied where the due tasks are drained per book
+update). Task symbols stay subscribed only until their tasks clear. Over-capacity schedules come back
+`rejected_capacity` (the `schedule_status` field in `market_capture.py`); never-registered fills
+surface as `not_registered`
 (`trade_diagnostics.py:460`) and leave no schedule record behind.
 
 **Nothing feeds this route any more, and the reader survived the writer.** The bridge that registered
@@ -607,7 +630,8 @@ alongside them; that half went with the sleeve on 2026-08-14, and the tape is no
 **Artifact budget.** At most four claim-bearing payloads per run: `manifest.json` (identities, schema,
 counts, nulls, hashes, deviations), `execution_tca.parquet` (one row per canonical command),
 `decision_funnel.parquet` (one row per pre-gate decision unit) and `path_labels.parquet` (future labels
-only) — the last two written by `scripts/data/build_candidate_tape.py:909-910`. The separate labels file
+only) — the last two written by `scripts/data/build_candidate_tape.py` (its staging writes of
+`decision_funnel.parquet` and `path_labels.parquet`). The separate labels file
 is what keeps lookahead out of the funnel. The verified journal and capture root stay sources and are not
 copied into the run; intermediate partitions are resumable working state; charts and Markdown are
 regenerated from the tables. Adding an artifact requires a named claim, a consumer and a retention rule.
@@ -621,7 +645,7 @@ boundary around the whole capture root.
 implement: MAE/MFE with time-to-MAE/MFE and threshold crossing; exit reason and holding time;
 realized/funding/fee decomposition with a counterfactual fixed-horizon return; signal-to-order delay and
 opportunity cost for rejected, expired, cancelled or partially unfilled intent. The only implementation
-anywhere is `mae_72h`/`mfe_72h` in the candidate tape (`scripts/data/build_candidate_tape.py:625-671`).
+anywhere is the `mae_72h`/`mfe_72h` columns in the candidate tape (`scripts/data/build_candidate_tape.py`).
 
 **Analysis standard.** Report median, robust spread, tails, missingness and effect sizes — not only means
 — plus calibration residuals between the modeled book walk/cost and observed execution (the declared

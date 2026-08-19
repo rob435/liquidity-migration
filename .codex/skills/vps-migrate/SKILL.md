@@ -10,7 +10,7 @@ services. Derive current values from:
 
 - `.github/workflows/vps-deploy.yml`;
 - `scripts/deploy_vps_live.sh` with
-  `install|activate|verify|rollout|stop-mainnet`;
+  `install|activate|staged|verify|rollout|stop-mainnet`;
 - `scripts/vps/print_vps_recovery_command.sh` and the current SSH restore scripts;
 - `deploy/systemd/README.md`, unit files, and `deploy/sleeves.env`;
 - GitHub variables/secrets and the provider console.
@@ -93,13 +93,14 @@ edit. Verify never repairs drift: it compares installed unit files against the
 checkout's manifest and asserts topology, not the installed HEAD.
 
 Confirm the success marker, exact commit, resolved sleeves, installed profile,
-credential mode, service/timer state, owner-before-producer readiness, liveness,
+credential mode, service/timer state, start order (producers first, the engine last), liveness,
 and journal/venue agreement appropriate to the task.
 
 ## GitHub Actions
 
 The manual workflow exposes `rollout`, `install`, `activate`, and `verify` — four
-of the six deploy modes; the two mainnet modes are deliberately shell-only. It
+of the six deploy modes; the two absent, `staged` and `stop-mainnet`, are
+shell-only, and only `stop-mainnet` is a mainnet mode. It
 runs CI first, configures the pinned SSH identity, and passes the workflow commit
 to the selected mode. A verify workflow cannot update a stale checkout; run
 install while stopped, then activate.
@@ -116,8 +117,8 @@ focused runtime/deploy tests and lint before proposing a push.
 - Permission denied: verify user, authorized keys, modes, and provider state.
 - Expected-commit mismatch: run stopped install; verify is not deploy.
 - Wrong or missing profile marker: keep the fleet stopped, correct the reviewed
-  inputs, and re-run install (only `rollout` writes the marker); never hand-edit
-  it.
+  inputs, and re-run `staged` or `rollout` with `--profile` — both write the
+  marker; `install` alone does not. Never hand-edit it.
 - Dirty checkout: inspect and archive; request cleanup authority.
 - CI-only failure: compare workflow variables/secrets and environment with the
   successful local command without exposing secrets.
