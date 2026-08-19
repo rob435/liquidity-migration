@@ -17,11 +17,11 @@ same tradable target", where ``rawlag`` is the raw close carrying the identical
 three-day information lag the idio path cannot avoid. A cell that beats ``raw``
 but not ``rawlag`` has found staleness, not idiosyncrasy.
 
-Two cost conventions are printed side by side, following
-``scripts/research/screen_phase1.py``: ``repo_1x`` charges one round trip per rebalance
-and reproduces the historical convention; ``honest_2x`` charges two, because
-``cross_section.long_short`` returns a book that is one unit long AND one unit
-short on one unit of capital. ``honest_2x`` is the one that means something.
+Two cost conventions are printed side by side: ``repo_1x`` charges one round
+trip per rebalance and reproduces the historical convention; ``honest_2x``
+charges two, because ``cross_section.long_short`` returns a book that is one
+unit long AND one unit short on one unit of capital. ``honest_2x`` is the one
+that means something.
 
 Dispatch:
     .venv/bin/python -u scripts/research/screen_idio_charts.py \\
@@ -49,8 +49,9 @@ from liquidity_migration.research.panels.cross_section import (  # noqa: E402
 from liquidity_migration.research.panels.idio_features import CHART_FEATURES  # noqa: E402
 
 DAYS_PER_YEAR = 365
-#: Mechanisms tested before this screen (``scripts/research/screen_phase1.py``). The idio
-#: grid adds to that family rather than getting its own alpha.
+#: Mechanisms tested before this screen (the phase-1 re-screen, deleted with
+#: the blend 2026-08-19). The idio grid adds to that family rather than
+#: getting its own alpha.
 PRIOR_MECHANISMS = 44
 PRIMARY_SOURCES = ("rawlag", "idio")
 ALL_SOURCES = ("raw", "rawlag", "idio", "iz")

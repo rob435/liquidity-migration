@@ -64,8 +64,10 @@ liquidation risk with a named counterparty, which is why the easy construction w
 **Momentum.** `momentum_1w` is **continuation** (long recent winners), not reversal — the sign was backwards in
 earlier drafts: continuation +39.55 bp/day (Sharpe 1.20) vs reversal −40.73 (−1.23). Best-behaved real signal
 found, never cleared: +30.48 bp/day t 2.10 Bybit vs +13.64 t 0.99 Binance (ratio 0.45, outside the [0.5, 2.0]
-kill band); best-tuned cell t 2.78 against t ≥ 3.25. Still the momentum leg of
-[lane2_premium_momentum_blend_v1](../../configs/lane2_premium_momentum_blend_v1.json), whose premium leg is dead.
+kill band); best-tuned cell t 2.78 against t ≥ 3.25. It was the momentum leg of the
+premium/momentum blend, **deleted 2026-08-19 by operator override** after the blend
+lost the portfolio test (carry+LONG Sharpe 2.15 alone, 1.99 with the blend added);
+the premium leg was already dead. Do not rebuild either leg as a book.
 
 **CONTINUOUS** was retired from the forward routes by owner override 2026-07-29 (`CONTINUOUS_SLEEVE=off`);
 no kill criterion tripped, so the frozen journal is a retirement artifact, not
@@ -286,7 +288,7 @@ Rows marked *(stale)* have a superseded magnitude but a surviving direction (§3
 | mechanism | measured | verdict |
 | --- | --- | --- |
 | premium_diff cross-venue divergence | −7.31 bp/day t −0.69 Bybit, −17.87 t −1.76 Binance at its own 3.23-unit turnover; eras −57.9, +6.9, +0.0, −14.3, +7.4, −2.8 | dead across its whole parameter space — a 24-setting sweep returns no positive cell and worsens monotonically as the cut loosens (t −3.02 at cut 0.45) |
-| 50/50 premium+momentum blend | +16.00 t 1.80 Bybit, +2.33 t 0.28 Binance | sub-bar |
+| 50/50 premium+momentum blend | +16.00 t 1.80 Bybit, +2.33 t 0.28 Binance; registered anyway 2026-07-24, then measured in the 2026-08-19 portfolio test: adding it to carry+LONG LOWERS equal-risk Sharpe 2.15 → 1.99 (its own Sharpe 0.69, correlation +0.21 to carry) | **sub-bar, and DELETED 2026-08-19 by operator override** — config `lane2_premium_momentum_blend_v1.json`, module `lane2_blend.py`, tests, and `screen_phase1.py` all removed. Do not rebuild; the dated dossiers in `archive/` keep the full tables |
 | premium momentum (the change, not the level) | 3.70 bp/day t 0.35 | the effect is a convergence force, not a trend |
 | mark/index dislocation | looked like 29.96 bp/day t 2.61; flips sign incoherently under lag (+29.96 → −17.91 at +1h → +23.80 at +4h), decays 76.2 → 0.4 by era | arbitraged out |
 | `funding_chg24` | 2.59 (t 1.6) → 0.59 → −2.18 at lag 0/+1h/+4h | stale-price artifact |
@@ -420,8 +422,8 @@ registered v4 bit-identically (1,756 days, 22.1939 bp/day) before any arm ran.
 hour after a settlement it reads 0.9999999999999999, not 1.0 — so the old `age < 1.0` predicate matched two
 bars per 8h/4h/2h settlement and charged every such print **twice**; 1h-interval symbols escaped because the
 next print overwrote the epsilon bar. Now an age-reset test, `(age < 0.5) | (age < age.shift(1).over("symbol"))`,
-in [carry_hold.py](../../liquidity_migration/rules/carry_hold.py) and mirrored in `lane2_blend.py`, with
-regression tests on real age shapes. Weights, entries, exits, price legs and turnover costs are unaffected —
+in [carry_hold.py](../../liquidity_migration/rules/carry_hold.py) (and mirrored in the since-deleted
+`lane2_blend.py`), with regression tests on real age shapes. Weights, entries, exits, price legs and turnover costs are unaffected —
 decisions read funding *levels*. Only funding P&L inflated, ~×1.5–2 blended and worst where funding was deepest.
 
 | withdrawn | replacement |

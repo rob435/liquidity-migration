@@ -505,7 +505,7 @@ process environment, runs `scripts/maintain/check_bybit_order_permissions.py` an
 
 Subpackage ownership, what may import what, and the import order:
 [`liquidity_migration/README.md`](../liquidity_migration/README.md). Producer-side strategy modules
-(`long_native*`, `carry_demo*`, `financed_longs.py`, `lane2_blend.py`) are documented
+(`long_native*`, `carry_demo*`, `financed_longs.py`) are documented
 with the research they implement: [`trading_logic.md`](trading_logic.md),
 [`strategy_program.md`](research/strategy_program.md). Data roots, PIT rules and clock domains:
 [`data.md`](data.md).

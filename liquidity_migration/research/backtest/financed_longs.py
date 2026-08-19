@@ -19,7 +19,7 @@ Accounting conventions shared with the rest of the research surface:
   free at v1 registration but are not on v4 — every fill-delay arm measured
   2026-08-03 is flat-to-negative (research_findings §2, settlement-instant
   timing).
-* Funding accrues settlement-exact (``lane2_blend.settlement_exact_funding``).
+* Funding accrues settlement-exact (``carry_hold.settlement_exact_funding``).
 * Costs are measured one-way turnover x the measured per-side fee, not a flat
   round trip per period.
 * Per-name weight cap plus a total gross cap; uncapped, gross trebles during

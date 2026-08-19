@@ -221,52 +221,7 @@ context attached. Confirmed dead ends belong in the do-not-retest ledger in
 are not run. Nothing here has a forward record: every number is Lane-1
 simulation on data that also shaped the idea, under `governance.md`.
 
-### 1. `momentum_1w` — the cross-sectional 1-week momentum leg
-
-**What it is.** Rank the top-100 Bybit names by 168-hour return each day, buy the
-top decile, short the bottom decile, equal-weight, hold 24h, rebalance. Market
-neutral by construction. It is one leg of the registered
-[`lane2_premium_momentum_blend_v1`](../../configs/lane2_premium_momentum_blend_v1.json)
-and has **never been registered on its own**.
-
-**Measured**, 2021-05 → 2026-07, costs charged at the blend's committed basis:
-
-| framing | total | annualised | daily Sharpe | worst dip | MAR |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| all 24 decision clocks, equal weight | +3934.6% | +103.9% | 1.23 | −78.3% | 1.33 |
-| one clock (Sharpe per phase, then averaged) | — | — | **0.94** | −81.5% | — |
-
-**Judge it at 0.94, not 1.23.** The two differ because averaging 24 imperfectly
-correlated phase series before computing Sharpe removes variance that a single
-deployed clock still carries. 1.23 is the equity of running 24 staggered books;
-0.94 is what one book gets. The gap is diversification across decision *times*,
-not alpha.
-
-**Why it is not run.** The shape, not the total. The curve is flat for its first
-two and a half years and essentially all of the 40× arrives after 2023-11, most
-of it in the last 18 months. Monthly returns include +212.5% (2025-04), +141.8%
-(2023-12), +101.4% (2026-05) against −49.8% (2026-06), −31.3% (2025-05) and
-−29.3% (2024-10). It ran to 114× in mid-2026 and ended the sample near 40× —
-**the −78% max drawdown is at the end of the record, not buried in its history.**
-Annualised volatility is roughly 90%. A five-year record whose first half is flat
-and whose second half is one regime, currently mid-drawdown, is not a book to
-size into.
-
-**What it is genuinely good at.** Being uncorrelated. It runs **+0.070** against
-LONG v12 and **+0.277** against carry_hold v4. Side by side with LONG at equal
-risk it takes the pair from Sharpe 1.48 to 1.65; the full blend takes it to 1.73.
-That gain is real and it is the entire argument for the thing.
-
-**Not measured:** the three-book portfolio (carry + LONG v12 + blend). Whether
-the daily rebalance of ~20 long and ~20 short names survives a turnover-honest
-cost model rather than the blend's flat per-day basis.
-
-Chart and series: `~/SHARED_DATA/bybit_full_pit/reports/exploratory_momentum_1w/`,
-rendered through the standard chart function and labelled EXPLORATORY.
-
----
-
-### 2. `lane2_financed_leaders_v1` — momentum crossed with the financing condition
+### 1. `lane2_financed_leaders_v1` — momentum crossed with the financing condition
 
 **What it is.** Registered
 ([config](../../configs/lane2_financed_leaders_v1.json)), long-only: the top decile
@@ -280,17 +235,12 @@ carry_hold v4 standalone (14.46 / 1.13 / −45.6%).
 **Why it is not run: it is substantially carry wearing a costume.** It correlates
 **+0.544** with carry_hold v4. The funding condition dominates the momentum
 condition, so combining the two does not produce a third bet — it recovers the
-first one at extra complexity. Added to a book that already holds carry and the
-blend it lifts Sharpe 1.52 → 1.56 while *cutting* return 17.89 → 16.53 bp/day.
-Its only real contribution is drawdown, −43.3% → −33.3%.
-
-Note the contrast with `momentum_1w`, which shares the momentum idea but not the
-funding condition and correlates only +0.040 with the blend and +0.277 with
-carry. **The funding condition is what creates the redundancy, not the momentum.**
+first one at extra complexity. **The funding condition is what creates the
+redundancy, not the momentum.**
 
 ---
 
-### 3. The liquidity screen inside carry-hold
+### 2. The liquidity screen inside carry-hold
 
 **What it is.** Restrict carry-hold's candidates to the most liquid quartile
 (`pct < 0.25` by trailing turnover).
@@ -315,7 +265,7 @@ to bp/day.
 
 ---
 
-### 4. Capital efficiency — the largest unexploited lever, and it is not alpha
+### 3. Capital efficiency — the largest unexploited lever, and it is not alpha
 
 Both deployed-shape sleeves are tiny. LONG deploys **2.7%** of account equity
 averaged across all calendar days; carry_hold uses **9.4%**. Together the
@@ -336,7 +286,7 @@ this same lever already in the profile, and both *cost* Sharpe when widened.
 
 ---
 
-### 5. Pre-settlement (23:00) entry — capture the entry print the engine forfeits
+### 4. Pre-settlement (23:00) entry — capture the entry print the engine forfeits
 
 **What it is.** The registered engine decides at the midnight bar, so a
 position opens one hour AFTER the 00:00 settlement and never collects the
@@ -363,20 +313,20 @@ capturing the running rate forward until a proper backtest exists, or (b) an
 owner-decided live A/B on the demo sleeve, graded forward. Small, real,
 mechanically grounded; not worth a strategy change without one of those two.
 
-### 6. Open, unmeasured
+### 5. Open, unmeasured
 
-- **Three-book portfolio: MEASURED 2026-08-19 — the answer is two books.**
-  On the 1,747 shared days (2021-10-05..2026-07-17; LONG leg = the on-disk
-  2026-07-24 mark-to-market build, a month stale — structure, not levels;
-  equal-risk = inverse full-window vol, in-sample): carry↔LONG correlation
-  is **+0.002** and ~0 in every era; **carry_v6+LONG at equal risk is
-  Sharpe 2.15, worst dip 3.6%** — and adding the blend LOWERS it to 1.99
-  (drop-one marginal **−0.17**; the blend's own Sharpe 0.69 with +0.21
-  correlation to carry, same funding family, does not earn a slot).
-  carry_v6 also beats carry_v4 as the portfolio's carry leg (triple 1.99 vs
-  1.88). The equal-risk pair is 89% LONG by capital because LONG runs ~27
-  bp/day vol against carry's ~225 — converting Sharpe 2.15 into money is
-  the envelope/leverage decision the owner declined on 2026-07-28
+- **Two-book portfolio: MEASURED 2026-08-19.** On the 1,747 shared days
+  (2021-10-05..2026-07-17; LONG leg = the on-disk 2026-07-24 mark-to-market
+  build; equal-risk = inverse full-window vol, in-sample): carry↔LONG
+  correlation is **+0.002** and ~0 in every era; **carry_v6+LONG at equal
+  risk is Sharpe 2.15, worst dip 3.6%**. A third book (a premium/momentum
+  blend, research-only) was tested the same day, LOWERED the portfolio
+  (1.99 vs 2.15 without it), and was **DELETED by operator override
+  2026-08-19** — config, module, tests, and its screen harness; do not
+  rebuild it (the do-not-retest ledger in `research_findings.md` §2 keeps
+  the receipt). The equal-risk pair is 89% LONG by capital because LONG
+  runs ~27 bp/day vol against carry's ~225 — converting Sharpe 2.15 into
+  money is the envelope/leverage decision the owner declined on 2026-07-28
   (notional_multiplier 1.0 needed ~4× the envelope), not a research output.
   Scratch: session artifact `three_book_portfolio.py`.
 - **Premium divergence as a LONG entry filter: MEASURED 2026-08-19, null at
@@ -721,12 +671,14 @@ evidence trail.
       effect is Bybit-local, so **true cross-venue execution is not worth building
       for this signal**. Caveat: the premium leg is marginal and clears t = 2 only
       at 24h.
-- [x] **Lane-2 registration**: `configs/lane2_premium_momentum_blend_v1.json`,
-      executable as `liquidity_migration/research/panels/lane2_blend.py`. Daily, top-100 Bybit,
-      50/50 premium + 1-week momentum continuation, settlement-exact funding, 15% vol
-      target; no dispersion gate, no Binance leg, no maturity filter. Per
-      `docs/research/governance.md` the commit is the registration; it grades forward from
-      that commit on days it never saw.
+- [x] **Lane-2 registration**: the premium/momentum blend
+      (`lane2_premium_momentum_blend_v1`). Daily, top-100 Bybit, 50/50
+      premium + 1-week momentum continuation, settlement-exact funding.
+      **DELETED 2026-08-19 by operator override** after losing the
+      portfolio test (it lowered carry+LONG from Sharpe 2.15 to 1.99):
+      config, module, tests, and the phase-1 screen harness all removed.
+      Do not rebuild; the receipt lives in `research_findings.md` §2 and
+      the dated archive dossiers.
 - [x] **2026-07-26 financed-longs program**: three Lane-2 registrations
       (`lane2_carry_hold_v1`, `lane2_financed_leaders_v1`,
       `lane2_financed_leaders_binance_v1`) against the regenerated CONTINUOUS
@@ -768,10 +720,11 @@ evidence trail.
       checkout (the provenance rule) and fails closed with the failing
       step named.
 - [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
-      the `lane2_premium_momentum_blend_v1` table, the anomaly-research
-      funding-leg numbers (leg-attribution reversal, dispersion-gate
-      withdrawal), and financed-longs negative-ledger rows 1/2/13–17/20
-      (2026-07-28 double-count correction).
+      the anomaly-research funding-leg numbers (leg-attribution reversal,
+      dispersion-gate withdrawal) and financed-longs negative-ledger rows
+      1/2/13–17/20 (2026-07-28 double-count correction). The blend's table
+      left this item when the blend was deleted (2026-08-19, operator
+      override).
 - [x] Score the venue-scoped CONTINUOUS admission variant — **RETIRED
       2026-08-19, owner decision.** Its tooling left the tree with the
       CONTINUOUS sleeve on 2026-08-14; the owner chose retirement over

@@ -47,8 +47,8 @@ evidence.
 ### The significance bar is **t ≥ 2.5**, set 2026-07-31
 
 This is the single number a screen or a registration is measured against, and
-this document is its authority. Code constants
-(`scripts/research/screen_phase1.py`, `screen_idio_charts.py`) derive from here,
+this document is its authority. Code constants in the screens
+(`scripts/research/screen_idio_charts.py` and its siblings) derive from here,
 not the other way round.
 
 **What changed.** The program previously used a family-wise Bonferroni threshold

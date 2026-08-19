@@ -16,6 +16,21 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~19:45 UTC — the premium/momentum blend is DELETED, operator
+  override ("brutal deletion, exterminate old research stuff so it doesn't
+  contaminate").** Removed: `configs/lane2_premium_momentum_blend_v1.json`,
+  `liquidity_migration/research/panels/lane2_blend.py`, its test file,
+  `scripts/research/screen_phase1.py` (the blend-family re-screen harness)
+  and its test. The blend never scored in the forward ledger and nothing in
+  the order path imported it; `financed_longs.py` only cited it in a
+  docstring (now points at `carry_hold.settlement_exact_funding`, which is
+  what actually runs). Reason on the record: registered 2026-07-24 below
+  the bar (Sharpe 0.69 at measured costs), and the 2026-08-19 portfolio
+  test showed it LOWERS carry+LONG from Sharpe 2.15 to 1.99. Active docs
+  carry tombstones (research_findings §2 row, strategy_program §Theses;
+  the momentum_1w thesis section deleted with it); dated archive dossiers
+  and old CHANGELOG entries stay as history, per the reading rule at the
+  top of this file. `cross_section.py` stays — the idio screens use it.
 - **2026-08-19 ~19:10 UTC — the three-book portfolio question is answered:
   two books.** The last big open item in `strategy_program.md` §Theses:
   carry↔LONG correlate +0.002 (stable ~0 in every era, 1,747 shared days);
