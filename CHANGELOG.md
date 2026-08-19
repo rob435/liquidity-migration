@@ -16,6 +16,20 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~12:10 UTC — The daily automation came off the owner's Mac
+  the same day, by owner order.** The owner is buying a dedicated machine
+  (a Mac mini) for data work and wants no background load on this one. The
+  launchd job is removed and its plist deleted; launchctl, LaunchAgents,
+  and crontab were checked — no project-scheduled work remains on the Mac.
+  The runner script stays in the repo and is run by hand until the new box
+  arrives. Stated plainly: the runner has never finished an end-to-end
+  green run. Test 1 failed on the dirty-tree refusal (correct behavior),
+  test 2 on the residual-momentum overlap guard (fixed by the full-rewrite
+  flag, `bf16b124`), and test 3 was stopped mid-refresh when the owner
+  pulled the schedule — at a safe point, during factor-panel compute and
+  before any feature-store write, with the lock released and the data
+  roots whole. First task on the new box: one end-to-end run.
+
 - **2026-08-19 ~11:30 UTC — The daily evidence run is automated, by owner
   order.** `scripts/research/daily_evidence_run.sh` chains the documented
   sequence — data refresh → full panel rebuild → forward-ledger append —

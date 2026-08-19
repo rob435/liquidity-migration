@@ -18,7 +18,7 @@ a group below, so moving a grouped script never edits a unit file.
 | `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, rollout readiness, flatten |
 | `maintain/` | you, one-shot | ledger reset, universe and instrument-rule freezes, the candidate-universe schema-4 to schema-5 converter, demo-rule probe and its projection, order-permission check, venue-accounting reconcile |
 | `data/` | you or the refresh timer | point-in-time data-root and panel builders, residual-momentum precompute |
-| `research/` | you, offline — except `daily_evidence_run.sh`, which launchd runs daily at 14:30 local (`com.liquidity-migration.daily-evidence`) | screens, scorers, equity curves, cost and diagnostic reports, the research-refresh workflow, and the scheduled daily evidence run (refresh → panel → forward ledger; status in `daily_run_status.json` beside the ledger; refuses a dirty checkout by the provenance rule) |
+| `research/` | you, offline | screens, scorers, equity curves, cost and diagnostic reports, the research-refresh workflow, and `daily_evidence_run.sh` (refresh → panel → forward ledger; status in `daily_run_status.json` beside the ledger; refuses a dirty checkout by the provenance rule) — run by hand until the dedicated research box arrives (owner decision 2026-08-19; no scheduler on the owner's Mac) |
 | `devtools/` | `dev.sh` | `repo_doctor.py`, `run_with_stub.py` |
 | `git-hooks/` | git, on push | the tracked `pre-push` gate, which runs `dev.sh check` before anything leaves |
 

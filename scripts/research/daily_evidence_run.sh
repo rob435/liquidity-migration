@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The daily evidence run: data refresh -> panel rebuild -> forward-ledger
-# append. Scheduled by launchd on the research box (com.liquidity-migration
-# .daily-evidence, ~14:30 local); runs after Binance publishes its daily
-# archive, which lands late morning UTC — a run before that fails the
-# refresh's final validation on yesterday's Binance dailies.
+# append. Run by hand for now; scheduling belongs on the dedicated research
+# box when it arrives (owner decision 2026-08-19), never on the owner's Mac.
+# Run after Binance publishes its daily archive, which lands late morning
+# UTC — a run before that fails the refresh's final validation on
+# yesterday's Binance dailies.
 # Status goes to $STATUS_FILE, one JSON line, read by a human.
 set -euo pipefail
 
