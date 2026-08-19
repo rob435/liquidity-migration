@@ -16,6 +16,25 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~21:55 UTC — the early exit is DEPLOYED to both carry
+  producers (owner: "sell after 1 dead hour is the most interesting, I do
+  believe it is the right approach").** Commit `f38f38d7`, staged deploy
+  with `--stop-first`: `staged-ok commit=f38f38d7`, both engines verified
+  on it, both producers boot `strategy_profile=v6 early_exit=1`. The
+  shipped rule is parameter-free: a held name whose LATEST settled print
+  reaches the registered −3 bp exit threshold is sold at the first cycle
+  after the print sweeps in (~1–2 min after its settlement) and masked out
+  of the desired book until the next decision bar (mask persisted at
+  `carry_early_exits.json` beside each producer root; a deep-again
+  midnight re-enters normally). Kill switch: `CARRY_EARLY_EXIT=0`. The
+  evidence and its stated gap — fires are 100% fresh-settlement events,
+  medians +49…+150 bp/fire 2023–26 and ~59% of fires positive, but
+  tail-exposed both ways with the pooled mean at t 2.3 (2026 t 1.5), 2024
+  mean negative, 2022 flat — are in `research_findings.md` §Settlement-
+  instant timing; the owner chose with the gap on the table. Forward
+  grade: the engine's realized exit fills vs the same-day 00:20
+  counterfactual. Six new tests pin fire/boundary/mask/persist/expiry and
+  the same-cycle published sell; gate 2,359 tests green.
 - **2026-08-19 ~21:30 UTC — the evening exit: tonight's exit is knowable at
   23:00, and it is the largest execution number this book has produced
   (owner: "more exits, intraday, be creative").** The modern book is ~100%
