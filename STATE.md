@@ -13,11 +13,17 @@ match; never append history to this file.
 
 ### The fleet
 
-- **The engine owns the demo account, and both sleeves feed it.** Deployed
-  2026-08-14 20:34 UTC from main (`staged-ok commit=4c914435
-  profile=operational`, `verify-ok … mainnet=armed`). The Python order path is
-  gone from the repository and from the host: the account owner, its two
-  units, its launcher scripts and its risk layer, about 25,000 lines.
+- **The engine owns the demo account, and both sleeves feed it.** First
+  deployed 2026-08-14 20:34 UTC; currently at `ee8b72a6` (staged deploy
+  2026-08-18 ~23:53 UTC, `staged-ok commit=ee8b72a6 profile=operational`,
+  `verify-ok … mainnet=armed`), which brought the in-flight cover book, WAL
+  segment rotation, the quote-age bound, and leverage pre-arm. The demo
+  engine runs `leverage_authority = "sole"` (set in the host's
+  `/etc/liquidity-migration/engine.toml`, which staged deploys deliberately
+  never rewrite; backup beside it). Mainnet stays `"shared"` — the owner
+  hand-trades there. The Python order path is gone from the repository and
+  from the host: the account owner, its two units, its launcher scripts and
+  its risk layer, about 25,000 lines.
 
   The chain runs end to end and was watched doing it:
 

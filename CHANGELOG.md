@@ -16,6 +16,48 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-18 23:53 UTC — The whole 08-17/08-18 wave shipped: committed as
+  `ee8b72a6`, pushed, and staged-deployed to the fleet.** Gate before the
+  push: doctor, ruff, mypy clean; 2,483 Python tests and 29 engine suites
+  green, exit code captured off the gate itself. One commit, 104 files:
+  the live rules out of `research/` into `liquidity_migration/rules/` with
+  the import-order AST test; the engine's in-flight cover book, WAL segment
+  rotation, quote-age bound, and leverage pre-arm under per-realm
+  `leverage_authority`; the deploy-env doctor check; the two rewritten
+  pagination test pins. Deploy: `staged-ok commit=ee8b72a6
+  profile=operational`, both engine binaries rebuilt at that commit,
+  `verify-ok … mainnet=armed` (pre-existing owner state, untouched).
+  **One completing hand-edit:** the staged deploy deliberately never
+  rewrites `/etc/liquidity-migration/engine.toml` (it is a filled-in
+  template, hand-rendered 08-14), so the new `leverage_authority = "sole"`
+  line was added there by hand inside `[engine]` (backup
+  `engine.toml.bak-20260818-preleverage` beside it) and the demo engine
+  restarted — clean boot, lease retaken, both books read, heartbeat live.
+  Absent keys fall to code defaults, so rotation (256 MB) and the quote
+  bound (30 s) were already active from the binary alone; mainnet's config
+  stays without the key, which *is* `"shared"`, the right authority while
+  the owner hand-trades. `[engine]` does not refuse unknown keys, so a
+  clean boot alone proves nothing about the new line — the positive proof
+  had to come from the first post-deploy carry entry window, read off the
+  WAL. **Read 2026-08-19 ~00:20 UTC: it works.** The first entry of the
+  night (ACEUSDT — leverage freshly needed, flat account) went
+  decided→wire in **8.7 ms** where yesterday's leverage-needing entries
+  paid a 168.7 ms median. Two sibling entries decided in the same pass
+  show 199/369 ms, but that is head-of-line queueing — the engine sends
+  grouped entries serially, each awaiting the previous order's ~190 ms
+  venue acknowledgment — not leverage. And EDENUSDT (169 ms) was a name
+  the engine had never followed until seconds before the entry: pre-arm
+  at book arrival silently skips a symbol not yet in the market table,
+  and the inline confirmation on the order path carried it, exactly the
+  designed fallback. Reading those stamps honestly has two traps, now
+  written down: grouped entries share one `decided_ns`, so a naive
+  decided→wire join reads queueing as per-order latency; and WAL records
+  are internally tagged (`"kind": "order_sent"`, snake_case). One
+  follow-up candidate observed, not built (per the no-unrequested-
+  machinery rule): sibling entries serializing behind each other's acks
+  is now the dominant tail on grouped books — concurrent sends are the
+  next real p99 lever if the owner wants one.
+
 - **2026-08-18 22:24 UTC — The expired demo rules receipt renewed in a flat
   maintenance window; `demo_rules_age` cleared.** The receipt from 08-09
   passed its 168-hour bound on 08-16 (the alert itself had been made
