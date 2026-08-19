@@ -16,6 +16,29 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~22:49 UTC — v7 is DEPLOYED to both carry producers: the
+  early exit now fires BEFORE the fee pays (owner: "10 min before, let's
+  call this v7 … keep improving").** Commit `68b6a29e`, staged deploy with
+  `--stop-first`: `staged-ok commit=68b6a29e`, both engines verified on it,
+  both producers boot `strategy_profile=v7 early_exit=1` and ran their
+  first cycles clean at 22:50–22:51 UTC (a running v7 producer is itself a
+  new-code field — old code rejects the profile name at startup). v7 is an
+  execution-clock version: profile `carry_hold_v7_live_v1` trades
+  `lane2_carry_hold_v6` byte-identical (one config id, its forward grade
+  unbroken) and fires the registered −3 bp exit test on the venue's
+  running rate whenever a held name's next settlement is at most 15
+  minutes away — one public tickers batch inside the window, the existing
+  mask path, the settled-print clock kept as fallback. The shipped window
+  came from a 13-cell sweep (safety margins LOSE — the edge curve is
+  steeper than the premature drag; 30-minute windows churn): every-minute
+  15-window nets +19.0 bp/fire all-era, +28.3 in 2025/26, ≈ +2.4–3.1
+  bp/day book-level in the modern eras. Rollback dials:
+  `CARRY_STRATEGY_PROFILE=v6` (settled-print clock) or `CARRY_EARLY_EXIT=0`
+  (registered midnight clock). Evidence rows in `research_findings.md`
+  §Settlement-instant timing; promotion note in `strategy_program.md` §5.
+  Nine new tests pin the fire/boundary/window/mask/fallback/gate and the
+  same-cycle published sell; gate green with the exit code read directly
+  (the check-pipe trap struck once again and was caught).
 - **2026-08-19 ~22:30 UTC — measured: the early exit can fire BEFORE the
   print settles; proposed, not built (owner: "why not exit before funding
   is paid — front-run the farmers").** The deployed exit sells ~1 min

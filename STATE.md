@@ -14,11 +14,15 @@ match; never append history to this file.
 ### The fleet
 
 - **The engine owns the demo account, and both sleeves feed it.** First
-  deployed 2026-08-14 20:34 UTC; currently at `8074942d` (staged deploy
-  2026-08-19 ~19:20 UTC, `staged-ok commit=8074942d profile=operational`,
-  `verify-ok … mainnet=armed`), which promoted carry_hold v6 to both CARRY
-  producers (`strategy_profile=v6`, the Binance whale-EOD cache beside each
-  producer root — CHANGELOG 2026-08-19). The prior `ee8b72a6` (2026-08-18)
+  deployed 2026-08-14 20:34 UTC; currently at `68b6a29e` (staged deploy
+  2026-08-19 ~22:49 UTC, `staged-ok commit=68b6a29e profile=operational`,
+  `verify-ok … mainnet=armed`), which put carry_hold **v7** on both CARRY
+  producers: v6's registered rule byte-identical plus the pre-settlement
+  exit read (`strategy_profile=v7 early_exit=1` — the early exit now fires
+  on the venue's running rate up to 15 minutes before a dying print pays;
+  settled-print fallback kept — CHANGELOG 2026-08-19). Earlier the same
+  day: `8074942d` (~19:20 UTC) promoted v6 + the Binance whale-EOD cache,
+  and `f38f38d7` (~21:55 UTC) shipped the settled-print early exit. The prior `ee8b72a6` (2026-08-18)
   brought the in-flight cover book, WAL
   segment rotation, the quote-age bound, and leverage pre-arm. The demo
   engine runs `leverage_authority = "sole"` (set in the host's
