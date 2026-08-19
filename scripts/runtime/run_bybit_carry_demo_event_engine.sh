@@ -10,7 +10,8 @@
 #
 # EXECUTION_ENVIRONMENT is explicit and requires its account-owner route. Sizing
 # comes from the shared operational profile (ACCOUNT_RISK_POLICY_FILE); the rule
-# file follows CARRY_STRATEGY_PROFILE (v6 → configs/lane2_carry_hold_v6.json).
+# file follows CARRY_STRATEGY_PROFILE (v7 trades v6's registered file with
+# the pre-settlement exit read on top).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -69,11 +70,11 @@ WORKERS="${WORKERS:-4}"
 # CARRY_STRATEGY_PROFILE selects the registered deployment, exactly like
 # LONG_STRATEGY_PROFILE on the LONG units. Switching versions is this env
 # line plus a registered config file — never a code edit.
-CARRY_STRATEGY_PROFILE="${CARRY_STRATEGY_PROFILE:-v6}"
+CARRY_STRATEGY_PROFILE="${CARRY_STRATEGY_PROFILE:-v7}"
 case "$CARRY_STRATEGY_PROFILE" in
-    v3|v4|v6) ;;
+    v3|v4|v6|v7) ;;
     *)
-        echo "CARRY_STRATEGY_PROFILE must be v3, v4 or v6, got: $CARRY_STRATEGY_PROFILE" >&2
+        echo "CARRY_STRATEGY_PROFILE must be v3, v4, v6 or v7, got: $CARRY_STRATEGY_PROFILE" >&2
         exit 2
         ;;
 esac

@@ -28,6 +28,12 @@ profile `carry_hold_v6_live_v1`, 0 scored forward days at promotion, v4/v5
 keep scoring as comparators. The whale leg makes the deployed book read one
 non-Bybit input (Binance top-trader EODs, fail-open). Promotion note in
 `docs/research/strategy_program.md`, deploy receipt in `CHANGELOG.md`.)*
+*(2026-08-19 later that night: **v7 is DEPLOYED** — an execution-clock
+version, NOT a new registered config: profile `carry_hold_v7_live_v1` trades
+this file's v6 membership byte-identical and fires the early exit on the
+venue's pre-settlement running rate inside the last 15 minutes. This
+document's numbers are unaffected; the clock evidence lives in
+`research_findings.md` §Settlement-instant timing.)*
 
 ## 0. Corrections and registrations — read this before any number below
 

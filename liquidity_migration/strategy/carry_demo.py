@@ -1,7 +1,7 @@
 """CARRY sleeve decision engine: the crowd-fee collector.
 
 Computes the daily target book for the deployed carry sleeve by replaying
-the registered rule (``resolve_carry_strategy_profile``; v6 by default) over
+the registered rule (``resolve_carry_strategy_profile``; v7 by default) over
 a rolling window of Bybit hourly data. The strategy logic is NOT reimplemented here: the
 engine calls the exact registered-scorer functions
 (:func:`liquidity_migration.rules.carry_hold.carry_hold_weights` and friends)
@@ -25,7 +25,19 @@ byte-identical to the registered ones. Version selection is the
 size multiplier zeroes names whose recent settlements were rarely deep; v4 →
 v6 promoted 2026-08-19: the flow and whale size halvings from v5 plus the
 bent depth ladder, all in the shared registered scorer, so a version is a
-config file plus a profile name — never a code edit).
+config file plus a profile name — never a code edit. Exception again for
+v7, promoted later the same day: it trades v6's registered membership file
+unchanged and its first deploy carried the pre-settlement exit read below,
+an execution-clock change, not a rule change).
+
+v7's pre-settlement exit: the venue locks the upcoming crowd-fee rate just
+under a minute before it pays, so inside the final minutes the public
+ticker's running rate is the settled print, visible early. When a held
+name's next settlement is at most 15 minutes away and that running rate is
+at or above the registered −3 bp exit line, the name is sold immediately —
+before the payment and the crowd's exit — instead of one minute after the
+print sweeps in. The settled-print path remains as the fallback, so a
+failed or missed read degrades v7 to exactly the v6 exit clock.
 
 v5/v6's whale halving reads a SECOND venue: Binance's top-trader position
 long/short ratio, the one non-Bybit input in the book. The producer keeps a
@@ -138,22 +150,34 @@ CARRY_CONFIG_PATH = _CONFIGS_DIR / "lane2_carry_hold_v6.json"
 #: versions is an env change plus a registered config file — never a code
 #: edit. Exception: v6 was the first profile whose rule reads a second venue
 #: (the Binance whale ratio), so ITS first deploy carried the feed code too.
-CARRY_STRATEGY_PROFILE_CHOICES: tuple[str, ...] = ("v3", "v4", "v6")
-DEFAULT_CARRY_STRATEGY_PROFILE = "v6"
+CARRY_STRATEGY_PROFILE_CHOICES: tuple[str, ...] = ("v3", "v4", "v6", "v7")
+DEFAULT_CARRY_STRATEGY_PROFILE = "v7"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class CarryStrategyProfile:
-    """One registered CARRY deployment: journaled profile name + rule file."""
+    """One registered CARRY deployment: journaled profile name + rule file.
+
+    ``presettle_exit`` is an EXECUTION-CLOCK switch, not a rule change: v7
+    trades v6's registered membership file unchanged (its forward grading
+    continues unbroken) and only moves the early-exit sell from the settled
+    print to the venue's pre-settlement running rate.
+    """
 
     profile_name: str
     config_path: Path
+    presettle_exit: bool = False
 
 
 _CARRY_STRATEGY_PROFILES: dict[str, CarryStrategyProfile] = {
     "v3": CarryStrategyProfile("carry_hold_v3_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v3.json"),
     "v4": CarryStrategyProfile("carry_hold_v4_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v4.json"),
     "v6": CarryStrategyProfile("carry_hold_v6_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v6.json"),
+    "v7": CarryStrategyProfile(
+        "carry_hold_v7_live_v1",
+        _CONFIGS_DIR / "lane2_carry_hold_v6.json",
+        presettle_exit=True,
+    ),
 }
 
 
@@ -946,6 +970,101 @@ def _apply_early_exits(
         dataclasses.replace(
             decision, weights=masked, gross=sum(masked.values())
         ),
+        new_fires,
+    )
+
+
+# --- the v7 pre-settlement exit read ---------------------------------------
+# Bybit locks the upcoming crowd-fee rate just under a minute before it pays
+# (tardis tick evidence, 2026-08-19), so inside the last minutes the ticker's
+# running rate IS the print, visible early. v7 fires the same registered exit
+# test on that read up to 15 minutes ahead and sells before the post-payment
+# dump instead of one minute into it. Window and margin (15 min, none) are the
+# measured optimum; the settled-print path stays as the fallback, so a missed
+# or failed read costs nothing against the v6 clock.
+
+_PRESETTLE_WINDOW_MS = 15 * 60_000
+#: Fetch gate slack: every Bybit settlement sits on an hour boundary, so the
+#: batch read only runs when one is at most window+slack away.
+_PRESETTLE_FETCH_SLACK_MS = 90_000
+
+
+def _presettle_ticker_factory() -> BybitMarketData:
+    # Public mainnet tickers; demo trading runs on mainnet market data.
+    return BybitMarketData(category="linear", retries=2, retry_sleep_seconds=0.25)
+
+
+def _fetch_presettle_tickers(
+    symbols: list[str],
+    client_factory: Any = None,
+) -> tuple[dict[str, tuple[float, int]], str]:
+    """One batch ticker read: symbol -> (running rate, next pay time ms).
+
+    Never raises; a failed read returns an empty map plus the error text and
+    the cycle falls back to the settled-print clock.
+    """
+
+    try:
+        rows = (client_factory or _presettle_ticker_factory)().get_tickers()
+    except Exception as exc:  # noqa: BLE001 - fail open to the settled-print clock
+        return {}, str(exc)[:200]
+    want = set(symbols)
+    out: dict[str, tuple[float, int]] = {}
+    for row in rows:
+        sym = str(row.get("symbol", ""))
+        if sym not in want:
+            continue
+        try:
+            out[sym] = (float(row["fundingRate"]), int(row["nextFundingTime"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out, ""
+
+
+def _apply_presettle_exits(
+    *,
+    decision: CarryDecision,
+    rule: CarryHoldConfig,
+    state: CarryCycleState,
+    root: Path,
+    now_ms: int,
+    tickers: Mapping[str, tuple[float, int]],
+) -> tuple[CarryDecision, list[str]]:
+    """Fire the registered exit test on the pre-settlement running rate.
+
+    Runs after :func:`_apply_early_exits` (which loads and day-filters the
+    shared mask). A name fires when its next settlement is inside the window
+    and the running rate is at or above ``-exit_bp`` — the identical boundary
+    the settled-print path uses, read minutes before the print exists.
+    """
+
+    fired = dict(state.early_exits or {})
+    new_fires: list[str] = []
+    exit_thr = -(rule.exit_bp / 1e4)
+    for sym in sorted(decision.weights):
+        if sym in fired:
+            continue
+        info = tickers.get(sym)
+        if info is None:
+            continue
+        rate, next_pay_ms = info
+        lead_ms = int(next_pay_ms) - int(now_ms)
+        if not (0 < lead_ms <= _PRESETTLE_WINDOW_MS):
+            continue
+        if not (float(rate) < exit_thr):
+            fired[sym] = decision.decision_ts_ms
+            new_fires.append(sym)
+    if new_fires:
+        state.early_exits = fired
+        try:
+            _save_early_exits(root, fired)
+        except Exception:  # noqa: BLE001 - a lost mask re-buys once at worst
+            _logger.warning("early-exit state not persisted; mask is memory-only")
+    if not fired:
+        return decision, new_fires
+    masked = {s: w for s, w in decision.weights.items() if s not in fired}
+    return (
+        dataclasses.replace(decision, weights=masked, gross=sum(masked.values())),
         new_fires,
     )
 
@@ -2243,6 +2362,44 @@ def run_carry_demo_cycle(
                     -rule.exit_bp,
                 )
 
+        presettle_fires: list[str] = []
+        presettle_error = ""
+        if (
+            decision is not None
+            and demo.early_exit_enabled
+            and strategy_profile.presettle_exit
+            and decision.weights
+        ):
+            # Every settlement sits on an hour boundary; fetch only when one
+            # is close enough for a fire to be possible.
+            to_boundary_ms = HOUR_MS - (cycle_now_ms % HOUR_MS)
+            if to_boundary_ms <= _PRESETTLE_WINDOW_MS + _PRESETTLE_FETCH_SLACK_MS:
+                tickers, presettle_error = _fetch_presettle_tickers(
+                    sorted(decision.weights)
+                )
+                if tickers:
+                    decision, presettle_fires = _apply_presettle_exits(
+                        decision=decision,
+                        rule=rule,
+                        state=state,
+                        root=root,
+                        now_ms=cycle_now_ms,
+                        tickers=tickers,
+                    )
+                if presettle_fires:
+                    _logger.info(
+                        "pre-settle exit fired: %s (running rate at/above %.1f bp "
+                        "before the print pays)",
+                        ",".join(presettle_fires),
+                        -rule.exit_bp,
+                    )
+                if presettle_error:
+                    _logger.warning(
+                        "pre-settle ticker read failed; settled-print clock "
+                        "stands: %s",
+                        presettle_error,
+                    )
+
         plan = _carry_target_plan(
             decision=decision,
             rule=rule,
@@ -2395,6 +2552,11 @@ def run_carry_demo_cycle(
             "early_exit_enabled": demo.early_exit_enabled,
             "early_exit_fired": early_exit_fires,
             "early_exit_masked": len(state.early_exits or {}),
+            "presettle_exit_enabled": bool(
+                demo.early_exit_enabled and strategy_profile.presettle_exit
+            ),
+            "presettle_fired": presettle_fires,
+            "presettle_error": presettle_error,
             "open_positions": open_trades.height,
             "target_reservations": reservations.height,
             "standing_symbols": len(standing_symbols),

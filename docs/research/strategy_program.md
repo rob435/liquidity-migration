@@ -378,27 +378,33 @@ measured.**
   name-days in 5.5 years; the per-sleeve capital partition in `account_kernel.py`
   budgets each sleeve separately and does not see combined per-symbol exposure.
   Small, but it is the only genuine coupling between them.
-- **PROPOSED — fire the early exit before the print settles (2026-08-19
-  night, owner: "why not exit before funding is paid — front-run the
-  farmers").** The deployed exit below sells ~1 minute AFTER the dying
-  print pays, into the farmer exodus. The venue locks the upcoming rate
-  ~55 s before settlement (tardis tick evidence; the S−1 read matched the
-  final print 230/230 walk-forward days), so the same fire decision is
-  knowable minutes early with a public ticker read. On the deployed
-  cascade's own 1,112 fires: all-in **+6.6/+12.8/+21.3 bp per fire selling
-  at S−1/S−5/S−10** (medians +1.9/+3.6/+11.3; forfeited final print ≈ 0);
-  book-level +1.6–2.0 (S−5) to +2.4–3.1 (S−10) bp/day in 2025/26, ~0
-  before — the modern farmer-dump signature again. Premature-fire drag is
-  small and tail-driven (~1.5 bp/fire-day at S−5; zero at S−1). Dials:
-  S−1 free, S−5 recommended, S−10 aggressive. Build: one public tickers
-  batch (fundingRate, nextFundingTime) for held names in the final minutes
-  before their next settlement, firing the existing mask path early;
-  settled-print path stays as fallback; same `CARRY_EARLY_EXIT` switch.
-  Full numbers and caveats:
+- **v7 IS DEPLOYED — the early exit fires before the print settles
+  (2026-08-19 night; owner: "why not exit before funding is paid — front-run
+  the farmers", then "10 min before, let's call this v7 … keep improving").**
+  What changed: an execution clock only. v7 trades `lane2_carry_hold_v6`
+  byte-identical (one config id, its forward grade unbroken) and moves the
+  early-exit fire from the settled print (sell ~S+1 min) to the venue's
+  running rate read inside the last 15 minutes before a held name's next
+  settlement — the venue locks that rate ~55 s before it pays (tardis
+  ticks; the S−1 read matched the final print 230/230 walk-forward days),
+  so this is the same registered −3 bp test on the same number, read
+  early. Evidence: on the cascade's own 1,112 fires, the sell-minute curve
+  is monotone — the owner's S−10 is +21.3 bp/fire all-in (median +11.3,
+  t 4.9); the deployed continuous 15-minute window nets **+19.0 all-era /
+  +28.3 bp per fire in 2025/26** after the measured premature drag
+  (~4 bp/fire-day; every-minute walk-forward, 230 held→fire days), which
+  beat flat S−10 (+16.6/+23.5) and the shrinking-margin variant (+9.2) in
+  a 13-cell sweep; the S−30 first read was the runner-up (+20.2/+31.7)
+  and was rejected for doubled premature days on half-formed hourly
+  averages. Book-level ≈ +2.4–3.1 bp/day in 2025/26, ~0 before.
+  Change point: the v7 deploy receipt in `CHANGELOG.md`. Forward grade:
+  realized engine exit fills vs the same-day settled-print counterfactual.
+  Rollback: `CARRY_STRATEGY_PROFILE=v6` (settled-print clock only) or
+  `CARRY_EARLY_EXIT=0` (registered midnight clock). Full numbers:
   [research_findings.md §Settlement-instant timing](research_findings.md).
   The side discovery — universe-drop exits leak +74/+43 bp over the last
-  25 minutes before the 00:20 fill — is NOT proposed (2026 weak at
-  +18/+15, t 0.8, and it needs a 23:55 shadow decision).
+  25 minutes before the 00:20 fill — is NOT built (2026 weak at +18/+15,
+  t 0.8, and it needs a 23:55 shadow decision).
 - **The early exit is DEPLOYED (2026-08-19 late evening, owner: "sell
   after 1 dead hour is the right approach").** The shipped form is the
   parameter-free version of leg A below, generalized all-day: sell a held

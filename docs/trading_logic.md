@@ -188,6 +188,20 @@ Setting the env to 0 restores the registered midnight exit clock. Evidence and t
 caveats (positive-median, tail-exposed, mean below the t-bar):
 [`research_findings.md`](research/research_findings.md) §Settlement-instant timing.
 
+**v7 pre-settlement exit (owner-directed 2026-08-19, `CARRY_STRATEGY_PROFILE=v7` on both
+carry units).** The venue locks the upcoming crowd-fee rate just under a minute before it
+pays, so inside the final minutes the public ticker's running rate is tomorrow's print,
+visible early. Under the v7 profile the producer batch-reads that rate for its held names
+whenever one of their settlements is at most 15 minutes away, and fires the SAME registered
+exit test on it — selling before the payment and the farmer exodus instead of one minute
+into it. v7 changes only this execution clock: its membership rule is `lane2_carry_hold_v6`
+byte-identical (the config's forward grade continues under one id), and the settled-print
+path above stays as the fallback, so a failed or missed read degrades v7 to exactly the v6
+clock. Measured: +21.3 bp per fire all-in over the settled-print sell (median +11.3, t 4.9;
+2025/26 ≈ +29 bp per fire, +2.4–3.1 bp/day book-level), premature fires ~4% of fire-days
+costing ~2.3 bp/fire-day, charged in the research row. `CARRY_EARLY_EXIT=0` kills both exit
+clocks; `CARRY_STRATEGY_PROFILE=v6` keeps the settled-print clock only.
+
 **Limits.** Concentrated (~2–3 names when active — v4 holds 22% fewer name-days than v3 and
 is flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity ~$1M at
 1% participation. The registered daily frame exits every name 24h before its final panel

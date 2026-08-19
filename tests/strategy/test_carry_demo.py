@@ -1314,11 +1314,16 @@ class TestCarryStrategyProfileDial:
         assert v4.profile_name == "carry_hold_v4_live_v1"
         assert v4.config_path.name == "lane2_carry_hold_v4.json"
         assert v6.profile_name == "carry_hold_v6_live_v1"
-        # v6 is the promoted default (2026-08-19): envelope proofs and charts
-        # that name no profile must read the deployed rule.
         assert v6.config_path == module.CARRY_CONFIG_PATH
-        assert module.DEFAULT_CARRY_STRATEGY_PROFILE == "v6"
-        assert module.CARRY_STRATEGY_PROFILE_CHOICES == ("v3", "v4", "v6")
+        # v7 (promoted 2026-08-19, later the same day as v6) is an
+        # execution-clock version: it trades v6's registered membership file
+        # UNCHANGED, so the config forward grade continues under one id.
+        v7 = module.resolve_carry_strategy_profile("v7")
+        assert v7.profile_name == "carry_hold_v7_live_v1"
+        assert v7.config_path == v6.config_path
+        assert v7.presettle_exit and not v6.presettle_exit
+        assert module.DEFAULT_CARRY_STRATEGY_PROFILE == "v7"
+        assert module.CARRY_STRATEGY_PROFILE_CHOICES == ("v3", "v4", "v6", "v7")
         # All files load through the registered rule loader; the hysteresis
         # thresholds never moved across the family.
         assert load_carry_config(v3.config_path).enter_bp == pytest.approx(
@@ -2708,3 +2713,227 @@ class TestEarlyExit:
         assert payload["early_exit_enabled"] is False
         assert payload["early_exit_fired"] == []
         assert payload["desired_book_size"] == 3
+
+
+# --- v7 pre-settlement exit (owner-directed 2026-08-19): sell before it pays ---
+
+
+class _FakeTickerClient:
+    """Canned public tickers batch. Venue fields arrive as strings."""
+
+    def __init__(self, rows: list[dict[str, str]]) -> None:
+        self._rows = rows
+        self.calls = 0
+
+    def get_tickers(self) -> list[dict[str, str]]:
+        self.calls += 1
+        return self._rows
+
+
+class TestPresettleExit:
+    def _decision(self) -> CarryDecision:
+        return CarryDecision(
+            decision_ts_ms=D0,
+            weights={DEEP_A: 0.0125, DEEP_B: 0.0247, RESIZED: 0.0125},
+            universe_size=56,
+            replay_days=60,
+            gross=0.0497,
+        )
+
+    def _state(self) -> CarryCycleState:
+        state = CarryCycleState()
+        state.early_exits = {}
+        return state
+
+    def test_fires_inside_the_window_and_masks(self, tmp_path: Path) -> None:
+        rule = load_carry_config()
+        state = self._state()
+        now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
+        tickers = {
+            DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR),  # -1 bp, pays in 10 min
+            DEEP_B: (-0.0025, D0 + 9 * MS_PER_HOUR),  # still -25 bp deep
+        }
+        masked, fires = module._apply_presettle_exits(
+            decision=self._decision(), rule=rule, state=state,
+            root=tmp_path, now_ms=now, tickers=tickers,
+        )
+        assert fires == [DEEP_A]
+        assert set(masked.weights) == {DEEP_B, RESIZED}
+        assert masked.gross == pytest.approx(0.0247 + 0.0125)
+        # The mask persists in the SAME file the settled-print path owns.
+        assert module._early_exit_state_path(tmp_path).exists()
+        reloaded = module._load_early_exits(tmp_path)
+        assert reloaded == {DEEP_A: D0}
+
+    def test_boundary_matches_the_registered_state_machine(self, tmp_path: Path) -> None:
+        # Identical boundary to the settled-print path: a running rate
+        # EXACTLY at -3 bp fires, one strictly below holds.
+        rule = load_carry_config()
+        pay = D0 + 9 * MS_PER_HOUR
+        now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
+        _, fires = module._apply_presettle_exits(
+            decision=self._decision(), rule=rule, state=self._state(),
+            root=tmp_path / "a", now_ms=now,
+            tickers={DEEP_A: (-rule.exit_bp / 1e4, pay)},
+        )
+        assert fires == [DEEP_A]
+        _, fires = module._apply_presettle_exits(
+            decision=self._decision(), rule=rule, state=self._state(),
+            root=tmp_path / "b", now_ms=now,
+            tickers={DEEP_A: (-rule.exit_bp / 1e4 - 1e-6, pay)},
+        )
+        assert fires == []
+
+    def test_only_fires_with_a_settlement_genuinely_ahead(self, tmp_path: Path) -> None:
+        rule = load_carry_config()
+        pay = D0 + 9 * MS_PER_HOUR
+        # 20 minutes ahead: outside the measured 15-minute window.
+        _, fires = module._apply_presettle_exits(
+            decision=self._decision(), rule=rule, state=self._state(),
+            root=tmp_path / "a", now_ms=pay - 20 * 60_000,
+            tickers={DEEP_A: (0.0001, pay)},
+        )
+        assert fires == []
+        # Already paid (the ticker not yet rolled): never fire on lead <= 0.
+        _, fires = module._apply_presettle_exits(
+            decision=self._decision(), rule=rule, state=self._state(),
+            root=tmp_path / "b", now_ms=pay,
+            tickers={DEEP_A: (0.0001, pay)},
+        )
+        assert fires == []
+
+    def test_respects_the_standing_mask(self, tmp_path: Path) -> None:
+        rule = load_carry_config()
+        state = self._state()
+        state.early_exits = {DEEP_A: D0}
+        masked, fires = module._apply_presettle_exits(
+            decision=self._decision(), rule=rule, state=state,
+            root=tmp_path, now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
+            tickers={DEEP_A: (0.0001, D0 + 9 * MS_PER_HOUR)},
+        )
+        assert fires == []
+        assert DEEP_A not in masked.weights
+
+    def test_fetch_fails_open_and_coerces_venue_strings(self) -> None:
+        def _broken() -> _FakeTickerClient:
+            raise OSError("edge reset")
+
+        tickers, error = module._fetch_presettle_tickers([DEEP_A], _broken)
+        assert tickers == {} and "edge reset" in error
+
+        fake = _FakeTickerClient(
+            [
+                {"symbol": DEEP_A, "fundingRate": "-0.0001",
+                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
+                {"symbol": DEEP_B, "fundingRate": "", "nextFundingTime": "x"},
+                {"symbol": "UNHELDUSDT", "fundingRate": "0.0001",
+                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
+            ]
+        )
+        tickers, error = module._fetch_presettle_tickers([DEEP_A, DEEP_B], lambda: fake)
+        assert error == ""
+        # Unparseable rows and unheld names drop; held good rows coerce.
+        assert tickers == {DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR)}
+
+    def test_run_cycle_sells_before_the_print_pays_under_v7(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        demo_config = _routed_config(
+            tmp_path / "route", strategy_profile="v7", early_exit_enabled=True
+        )
+        _patch_demo_market_data(monkeypatch)
+        ends = _whale_day_ends(D0 + 8 * MS_PER_HOUR + 50 * 60_000)
+        monkeypatch.setattr(
+            module, "_whale_client_factory",
+            lambda: _FakeWhaleClient(_flat_series([DEEP_A], ends)),
+        )
+        standing = pl.DataFrame(
+            [
+                {
+                    "trade_id": CARRY_COMPONENT_ID,
+                    "target_key": f"carry/{CARRY_STRATEGY_ID}/{CARRY_COMPONENT_ID}/{DEEP_A}",
+                    "strategy_id": CARRY_STRATEGY_ID,
+                    "symbol": DEEP_A,
+                    "status": "open",
+                    "signed_qty": 2.0,
+                    "target_reference_price": 100.0,
+                }
+            ]
+        )
+        _patch_planning(monkeypatch, standing=standing)
+        # 08:50: the 09:00 settlement is 10 min out (inside window AND the
+        # hour-boundary fetch gate); DEEP_A's running rate says the fee died.
+        now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
+        fake = _FakeTickerClient(
+            [
+                {"symbol": DEEP_A, "fundingRate": "-0.0001",
+                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
+                {"symbol": DEEP_B, "fundingRate": "-0.0025",
+                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
+            ]
+        )
+        monkeypatch.setattr(module, "_presettle_ticker_factory", lambda: fake)
+
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=_FakeCarryMarket(),
+            now_ms=now,
+        )
+
+        assert payload["decision_error"] is None
+        assert payload["strategy_profile"] == "carry_hold_v7_live_v1"
+        assert payload["presettle_exit_enabled"] is True
+        assert payload["presettle_error"] == ""
+        assert payload["presettle_fired"] == [DEEP_A]
+        # The settled-print path saw only deep prints: the sniper alone fired.
+        assert payload["early_exit_fired"] == []
+        assert payload["early_exit_masked"] == 1
+        assert payload["desired_book_size"] == 2
+        assert payload["exit_targets_queued"] == 1
+        exit_intent = payload.publication.exit_requests[0].request.intents[0].intent
+        assert exit_intent.symbol == DEEP_A
+        assert exit_intent.signed_notional_usdt == 0.0
+        assert fake.calls == 1
+
+    def test_fetch_gate_skips_mid_hour_and_v6_keeps_the_sniper_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _explode() -> None:
+            raise AssertionError("ticker read must not run here")
+
+        monkeypatch.setattr(module, "_presettle_ticker_factory", _explode)
+        _route(tmp_path / "route")
+        _patch_demo_market_data(monkeypatch)
+        _patch_planning(monkeypatch, standing=None)
+        # v7 at 00:25: mid-hour, no settlement within window+slack -> no read.
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=_routed_config(
+                tmp_path / "route", strategy_profile="v7", early_exit_enabled=True
+            ),
+            market_client=_FakeCarryMarket(),
+            now_ms=NOW_MS,
+        )
+        assert payload["presettle_exit_enabled"] is True
+        assert payload["presettle_fired"] == []
+        # v6 at 08:50 (inside the gate): the profile keeps the sniper off.
+        ends = _whale_day_ends(D0 + 8 * MS_PER_HOUR + 50 * 60_000)
+        monkeypatch.setattr(
+            module, "_whale_client_factory",
+            lambda: _FakeWhaleClient(_flat_series([DEEP_A], ends)),
+        )
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer2",
+            config=ResearchConfig(),
+            demo_config=_routed_config(
+                tmp_path / "route", strategy_profile="v6", early_exit_enabled=True
+            ),
+            market_client=_FakeCarryMarket(),
+            now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
+        )
+        assert payload["presettle_exit_enabled"] is False
+        assert payload["presettle_fired"] == []
