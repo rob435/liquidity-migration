@@ -185,6 +185,12 @@ def _prepare_sleeve_output(out: Path, *, fresh: bool) -> None:
             raise RuntimeError(f"refusing to replace non-directory sleeve output: {out}")
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
+    # A kernel replay tape binds to the window that wrote it; a rerun with a
+    # different window resumed onto it dies with "strategy event clock cannot
+    # move backward". The replay state is derived scratch — always rebuilt.
+    replay_state = out / "common_kernel_execution"
+    if replay_state.is_dir():
+        shutil.rmtree(replay_state)
 
 
 def _label(payload: dict[str, Any]) -> str:

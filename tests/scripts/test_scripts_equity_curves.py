@@ -55,3 +55,22 @@ def test_main_start_computation_does_not_raise_on_feb29(monkeypatch):
     today = equity_curves._today()
     start = equity_curves._shift_years(today, 3).isoformat()
     assert start == "2021-02-28"
+
+
+# ---- stale replay state is always rebuilt -----------------------------------
+
+def test_prepare_sleeve_output_clears_stale_replay_state(tmp_path: Path):
+    # A kernel replay tape binds to the window that wrote it; a rerun with a
+    # different window resumed onto it dies with "strategy event clock cannot
+    # move backward" (hit 2026-08-19 against the 2026-07-24 tape). The prep
+    # must rebuild the replay state even without --fresh-output, while other
+    # artifacts stay for comparison until overwritten.
+    out = tmp_path / "long"
+    replay = out / "common_kernel_execution"
+    replay.mkdir(parents=True)
+    (replay / "strategy_event_tape.jsonl").write_text("{}\n")
+    keep = out / "long_native_equity.csv"
+    keep.write_text("date\n")
+    equity_curves._prepare_sleeve_output(out, fresh=False)
+    assert not replay.exists()
+    assert keep.exists()
