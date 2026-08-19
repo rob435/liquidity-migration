@@ -411,6 +411,7 @@ class CarryCycleState:
         "sizing_equity_by_decision",
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
+        "early_exits",
         "whale_last_attempt_ms",
         "whale_store",
     )
@@ -441,6 +442,9 @@ class CarryCycleState:
         # Binance outage retries on a cooldown instead of every 60s cycle.
         self.whale_store: pl.DataFrame | None = None
         self.whale_last_attempt_ms: int | None = None
+        # Early-exit mask: symbol -> the decision bar it fired under. None
+        # until first use, then mirrors the on-disk state file.
+        self.early_exits: dict[str, int] | None = None
 
     def frozen_decision(
         self, decision_ts_ms: int
@@ -536,6 +540,10 @@ class CarryDemoCycleConfig:
     candidate_universe_file: str = ""
     #: Registered deployment version (``resolve_carry_strategy_profile``).
     strategy_profile: str = DEFAULT_CARRY_STRATEGY_PROFILE
+    #: Sell an exiting name at the settled print that ends it instead of the
+    #: next midnight (owner-directed 2026-08-19; ``CARRY_EARLY_EXIT`` on the
+    #: units). Off by default so ad-hoc runs replay the registered clock.
+    early_exit_enabled: bool = False
     # --- sizing (operational profile carry block) ---
     notional_multiplier: float = 1.0
     entry_leverage: float = 2.0
@@ -840,6 +848,106 @@ def _refresh_carry_whale_cache(
     )
     stats["whale_event_rows"] = events.height
     return events, stats
+
+
+# ---------------------------------------------------------------------------
+# Early exit (owner-directed 2026-08-19): sell an exiting name at the print
+# that ends it, not at the next midnight. A held name's exit condition is the
+# registered one — the latest settled print at or above -exit_bp — and every
+# print that can fire it settles intraday on the modern (sub-8h) book, so the
+# fire needs no new threshold and no new data: the hourly funding sweep
+# already carries the print. Fired names are masked out of the desired book
+# until the next decision bar so the frozen day cannot re-buy them; if the
+# next midnight print is deep again, the next decision re-enters normally
+# (the measured misfire cost, charged in the research note).
+# ---------------------------------------------------------------------------
+
+_EARLY_EXIT_STATE_NAME = "carry_early_exits.json"
+
+
+def _early_exit_state_path(root: Path) -> Path:
+    return root / _EARLY_EXIT_STATE_NAME
+
+
+def _load_early_exits(root: Path) -> dict[str, int]:
+    path = _early_exit_state_path(root)
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return {str(s): int(ts) for s, ts in raw.get("fired", {}).items()}
+        except Exception:  # noqa: BLE001 - a torn mask file re-fires at worst
+            _logger.warning("early-exit state unreadable, starting empty: %s", path)
+    return {}
+
+
+def _save_early_exits(root: Path, fired: dict[str, int]) -> None:
+    path = _early_exit_state_path(root)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"fired": fired}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _apply_early_exits(
+    *,
+    decision: CarryDecision,
+    rule: CarryHoldConfig,
+    funding: pl.DataFrame | None,
+    state: CarryCycleState,
+    root: Path,
+    now_ms: int,
+) -> tuple[CarryDecision, list[str]]:
+    """Mask early-exited names out of the desired book; detect new fires.
+
+    Detection is the registered exit test verbatim: the latest settled print
+    for a desired name, newer than the decision bar, at or above
+    ``-exit_bp`` (``not (fv < -exit_)`` in the state machine). Held names
+    always carry a below-threshold print at the decision bar, so any firing
+    print is by construction a post-decision settlement. ``funding`` is this
+    cycle's swept cache; ``None`` (build-skipping wakes) masks only.
+    """
+
+    if state.early_exits is None:
+        state.early_exits = _load_early_exits(root)
+    # Masks from older decision bars expire with their day.
+    fired = {
+        s: ts for s, ts in state.early_exits.items() if ts == decision.decision_ts_ms
+    }
+    new_fires: list[str] = []
+    if funding is not None and not funding.is_empty() and decision.weights:
+        exit_thr = -(rule.exit_bp / 1e4)
+        latest = (
+            funding.filter(
+                pl.col("symbol").is_in(sorted(decision.weights))
+                & (pl.col("funding_ts_ms") > decision.decision_ts_ms)
+                & (pl.col("funding_ts_ms") <= int(now_ms))
+            )
+            .sort("funding_ts_ms")
+            .group_by("symbol")
+            .agg(pl.col("funding_rate").last().alias("rate"))
+        )
+        for row in latest.iter_rows(named=True):
+            sym = str(row["symbol"])
+            rate = row["rate"]
+            if sym in fired or rate is None:
+                continue
+            if not (float(rate) < exit_thr):
+                fired[sym] = decision.decision_ts_ms
+                new_fires.append(sym)
+    if fired != state.early_exits:
+        state.early_exits = fired
+        try:
+            _save_early_exits(root, fired)
+        except Exception:  # noqa: BLE001 - a lost mask re-buys once at worst
+            _logger.warning("early-exit state not persisted; mask is memory-only")
+    if not fired:
+        return decision, new_fires
+    masked = {s: w for s, w in decision.weights.items() if s not in fired}
+    return (
+        dataclasses.replace(
+            decision, weights=masked, gross=sum(masked.values())
+        ),
+        new_fires,
+    )
 
 
 def _attach_whale_columns(
@@ -2116,6 +2224,25 @@ def run_carry_demo_cycle(
                     cycle_now_ms,
                 )
 
+        early_exit_fires: list[str] = []
+        if decision is not None and demo.early_exit_enabled:
+            # Mask AFTER freezing: the frozen tuple keeps the registered
+            # decision; the mask is re-applied every cycle from its own state.
+            decision, early_exit_fires = _apply_early_exits(
+                decision=decision,
+                rule=rule,
+                funding=built_funding,
+                state=state,
+                root=root,
+                now_ms=cycle_now_ms,
+            )
+            if early_exit_fires:
+                _logger.info(
+                    "early exit fired: %s (settled print at/above %.1f bp)",
+                    ",".join(early_exit_fires),
+                    -rule.exit_bp,
+                )
+
         plan = _carry_target_plan(
             decision=decision,
             rule=rule,
@@ -2263,6 +2390,11 @@ def run_carry_demo_cycle(
             "whale_pairs_missing": build_stats.get("whale_pairs_missing"),
             "whale_event_rows": build_stats.get("whale_event_rows"),
             "whale_error": build_stats.get("whale_error"),
+            # Early-exit receipt: names fired THIS cycle, and the standing
+            # mask for the current decision day.
+            "early_exit_enabled": demo.early_exit_enabled,
+            "early_exit_fired": early_exit_fires,
+            "early_exit_masked": len(state.early_exits or {}),
             "open_positions": open_trades.height,
             "target_reservations": reservations.height,
             "standing_symbols": len(standing_symbols),

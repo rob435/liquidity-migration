@@ -391,6 +391,7 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         account_execution_root=getattr(args, "account_execution_root", None),
         candidate_universe_file=getattr(args, "candidate_universe_file", ""),
         strategy_profile=args.strategy_profile,
+        early_exit_enabled=getattr(args, "early_exit_enabled", False),
         notional_multiplier=carry_settings.notional_multiplier,
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,

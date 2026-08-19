@@ -356,7 +356,11 @@ reset belong to the archived epoch.
 Change points currently accruing forward days: CARRY `lane2_carry_hold_v6`
 (promoted 2026-08-19 with zero forward days at promotion — registered the same
 morning; v4 and v5 keep scoring, and the v6−v5 capital-normalised differential
-is the registered forward experiment; v4 held the sleeve from 2026-08-03), LONG
+is the registered forward experiment; v4 held the sleeve from 2026-08-03), the
+CARRY early exit (2026-08-19 late evening: an exiting name is sold at the
+settled print that ends it, not at the next midnight — the registered exit
+test at print time, `CARRY_EARLY_EXIT=1` on both carry units, kill switch is
+setting it to 0; graded from the engine's realized exit fills), LONG
 v12 wide-stop (2026-08-03), and the entry execution recipes
 (quote-first entries, touch-sized windows, and the replay-selected resting recipe,
 all 2026-08-04 — deployed with `f85371e`). The v6 whale halving makes the carry

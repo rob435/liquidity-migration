@@ -343,6 +343,24 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         default=d.replay_days,
         help="Stateless hysteresis replay window; the engine floor is 45 days.",
     )
+    early = p.add_mutually_exclusive_group()
+    early.add_argument(
+        "--early-exit",
+        dest="early_exit_enabled",
+        action="store_true",
+        default=d.early_exit_enabled,
+        help=(
+            "Sell an exiting name at the settled print that ends it instead "
+            "of the next midnight (the registered exit test, applied at print "
+            "time; owner-directed 2026-08-19)."
+        ),
+    )
+    early.add_argument(
+        "--no-early-exit",
+        dest="early_exit_enabled",
+        action="store_false",
+        help="Exits keep the registered midnight clock.",
+    )
     p.add_argument(
         "--workers",
         type=int,

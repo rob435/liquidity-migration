@@ -26,6 +26,9 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # dial shape as LONG_STRATEGY_PROFILE on the LONG units. v6's whale halving
 # additionally reads Binance's public ratio endpoint (no key, fails open).
 Environment=CARRY_STRATEGY_PROFILE=v6
+# Sell an exiting name at the settled print that ends it, not at the next
+# midnight (owner-directed 2026-08-19; the kill switch is setting this to 0).
+Environment=CARRY_EARLY_EXIT=1
 # Where this producer writes the book the engine follows. It must be the same
 # path as the carry sleeve's `book_path` in /etc/liquidity-migration/engine.toml,
 # and nothing checks that agreement for you: two different paths means this

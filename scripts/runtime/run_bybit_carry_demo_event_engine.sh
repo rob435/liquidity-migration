@@ -77,6 +77,17 @@ case "$CARRY_STRATEGY_PROFILE" in
         exit 2
         ;;
 esac
+# CARRY_EARLY_EXIT=1 sells an exiting name at the settled print that ends it
+# instead of the next midnight (owner-directed 2026-08-19). Unset means off:
+# the registered midnight exit clock.
+CARRY_EARLY_EXIT="${CARRY_EARLY_EXIT:-0}"
+case "$CARRY_EARLY_EXIT" in
+    0|1) ;;
+    *)
+        echo "CARRY_EARLY_EXIT must be 0 or 1, got: $CARRY_EARLY_EXIT" >&2
+        exit 2
+        ;;
+esac
 # WS klines are the primary bar source; REST covers gaps. 0 disables the
 # stream and returns to REST-on-cycle.
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
@@ -105,7 +116,12 @@ if [[ "$WS_KLINES_ENABLED" == "1" ]]; then
 else
     target_route_args+=(--no-ws-klines)
 fi
-echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE strategy_profile=$CARRY_STRATEGY_PROFILE"
+if [[ "$CARRY_EARLY_EXIT" == "1" ]]; then
+    target_route_args+=(--early-exit)
+else
+    target_route_args+=(--no-early-exit)
+fi
+echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE strategy_profile=$CARRY_STRATEGY_PROFILE early_exit=$CARRY_EARLY_EXIT"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \

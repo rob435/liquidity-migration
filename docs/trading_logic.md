@@ -176,6 +176,18 @@ published exit-first. Entry intents expire 6h after the decision bar and are not
 inside the last 15 minutes of that window. A declared 35% stop backstops each position at
 the venue. No time stop.
 
+**Early exit (owner-directed 2026-08-19, `CARRY_EARLY_EXIT=1` on both carry units).** A held
+name whose LATEST settled print has recovered to −3 bp or above — the registered exit test,
+applied at print time instead of the next midnight — is sold at the first cycle after that
+print sweeps in (~1–2 min after the settlement), and masked out of the desired book until
+the next decision bar so the frozen day cannot re-buy it. If the next midnight print is deep
+again the next decision re-enters normally (measured misfire rate ~17% all-day; the
+research note charges it). No new threshold, no new data: the fire condition is
+`lane2_carry_hold_v6`'s own `exit_above_funding_bp` read from the hourly funding sweep.
+Setting the env to 0 restores the registered midnight exit clock. Evidence and the honest
+caveats (positive-median, tail-exposed, mean below the t-bar):
+[`research_findings.md`](research/research_findings.md) §Settlement-instant timing.
+
 **Limits.** Concentrated (~2–3 names when active — v4 holds 22% fewer name-days than v3 and
 is flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity ~$1M at
 1% participation. The registered daily frame exits every name 24h before its final panel

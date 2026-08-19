@@ -378,8 +378,22 @@ measured.**
   name-days in 5.5 years; the per-sleeve capital partition in `account_kernel.py`
   budgets each sleeve separately and does not see combined per-symbol exposure.
   Small, but it is the only genuine coupling between them.
-- **The two-leg exit clock — MEASURED 2026-08-19, PROPOSED, owner to
-  decide.** The book's names drift down after the 00:00 settlement, and on
+- **The early exit is DEPLOYED (2026-08-19 late evening, owner: "sell
+  after 1 dead hour is the right approach").** The shipped form is the
+  parameter-free version of leg A below, generalized all-day: sell a held
+  name at the first settled print at/above the registered −3 bp exit
+  threshold (the K=1 cascade; no new numbers, the registered exit test at
+  print time). Full-day evidence: fires are 100% fresh-settlement events;
+  central tendency positive 2023–26 (medians +49…+150 per fire, ~59%
+  of fires positive, trimmed ~+2.5–5 bp/day book-level) but TAIL-EXPOSED
+  both ways — 2024's mean went negative on adverse tails, 2022 flat, and
+  the mean never clears the t≥2.5 bar (pooled t 2.3, 2026 t 1.5). The
+  owner chose it with that gap stated. Kill switch: `CARRY_EARLY_EXIT=0`.
+  Change point = the deploy receipt in `CHANGELOG.md`; the forward grade
+  is the engine's realized exit fills vs the same-day 00:20 counterfactual.
+- **The two-leg exit clock — MEASURED 2026-08-19, superseded by the
+  deployed all-day early exit above (the 23:00/00:02 legs remain the
+  provable floor of the same mechanism).** The book's names drift down after the 00:00 settlement, and on
   exit days they leak price all evening; the deployed 00:20 sell is at the
   bottom of both. Two causal legs, measured on every held name-day
   2021–2026 with all-in accounting:

@@ -2518,3 +2518,193 @@ class TestV6DecidesLive:
         # The cycle's own receipt shows the feed ran and the store persisted.
         assert payload["whale_pairs_fetched"] > 0
         assert module._whale_store_path(tmp_path / "producer").exists()
+
+
+# --- early exit (owner-directed 2026-08-19): sell at the print that ends it ---
+
+
+class TestEarlyExit:
+    def _decision(self) -> CarryDecision:
+        return CarryDecision(
+            decision_ts_ms=D0,
+            weights={DEEP_A: 0.0125, DEEP_B: 0.0247, RESIZED: 0.0125},
+            universe_size=56,
+            replay_days=60,
+            gross=0.0497,
+        )
+
+    def _funding(self, rows: list[tuple[str, int, float]]) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "symbol": [r[0] for r in rows],
+                "funding_ts_ms": [r[1] for r in rows],
+                "funding_rate": [r[2] for r in rows],
+            }
+        )
+
+    def test_fires_on_recovered_post_decision_print_and_masks(self, tmp_path: Path) -> None:
+        state = CarryCycleState()
+        rule = load_carry_config()
+        # DEEP_A's 08:00 print recovered to +1 bp; DEEP_B still deep at -25 bp.
+        funding = self._funding(
+            [
+                (DEEP_A, D0 + 8 * MS_PER_HOUR, 0.0001),
+                (DEEP_B, D0 + 8 * MS_PER_HOUR, -0.0025),
+            ]
+        )
+        masked, fires = module._apply_early_exits(
+            decision=self._decision(), rule=rule, funding=funding,
+            state=state, root=tmp_path, now_ms=D0 + 9 * MS_PER_HOUR,
+        )
+        assert fires == [DEEP_A]
+        assert DEEP_A not in masked.weights
+        assert set(masked.weights) == {DEEP_B, RESIZED}
+        assert masked.gross == pytest.approx(0.0247 + 0.0125)
+        assert module._early_exit_state_path(tmp_path).exists()
+
+        # Next cycle: no new fire, the mask still applies (funding unchanged).
+        masked2, fires2 = module._apply_early_exits(
+            decision=self._decision(), rule=rule, funding=funding,
+            state=state, root=tmp_path, now_ms=D0 + 10 * MS_PER_HOUR,
+        )
+        assert fires2 == []
+        assert DEEP_A not in masked2.weights
+
+    def test_exit_boundary_matches_the_registered_state_machine(self, tmp_path: Path) -> None:
+        # The registered test is `not (fv < -exit_)`: a print EXACTLY at
+        # -3 bp exits, one strictly below it holds.
+        rule = load_carry_config()
+        at_boundary = self._funding([(DEEP_A, D0 + MS_PER_HOUR, -rule.exit_bp / 1e4)])
+        _, fires = module._apply_early_exits(
+            decision=self._decision(), rule=rule, funding=at_boundary,
+            state=CarryCycleState(), root=tmp_path / "a", now_ms=D0 + 2 * MS_PER_HOUR,
+        )
+        assert fires == [DEEP_A]
+        below = self._funding([(DEEP_A, D0 + MS_PER_HOUR, -rule.exit_bp / 1e4 - 1e-6)])
+        _, fires = module._apply_early_exits(
+            decision=self._decision(), rule=rule, funding=below,
+            state=CarryCycleState(), root=tmp_path / "b", now_ms=D0 + 2 * MS_PER_HOUR,
+        )
+        assert fires == []
+
+    def test_ignores_prints_at_or_before_the_decision_bar(self, tmp_path: Path) -> None:
+        # The decision-bar print itself (or older) must never fire: held
+        # names always carry a below-threshold print at the bar, and stale
+        # recovered prints belong to a previous day's decision.
+        funding = self._funding([(DEEP_A, D0, 0.0001), (DEEP_A, D0 - MS_PER_HOUR, 0.0001)])
+        _, fires = module._apply_early_exits(
+            decision=self._decision(), rule=load_carry_config(), funding=funding,
+            state=CarryCycleState(), root=tmp_path, now_ms=D0 + MS_PER_HOUR,
+        )
+        assert fires == []
+
+    def test_mask_survives_restart_and_expires_with_the_decision_day(self, tmp_path: Path) -> None:
+        rule = load_carry_config()
+        funding = self._funding([(DEEP_A, D0 + 8 * MS_PER_HOUR, 0.0001)])
+        module._apply_early_exits(
+            decision=self._decision(), rule=rule, funding=funding,
+            state=CarryCycleState(), root=tmp_path, now_ms=D0 + 9 * MS_PER_HOUR,
+        )
+        # Fresh state (a producer restart): the on-disk mask still applies.
+        masked, fires = module._apply_early_exits(
+            decision=self._decision(), rule=rule, funding=None,
+            state=CarryCycleState(), root=tmp_path, now_ms=D0 + 10 * MS_PER_HOUR,
+        )
+        assert fires == []
+        assert DEEP_A not in masked.weights
+        # A new decision day drops yesterday's mask entirely.
+        tomorrow = dataclasses.replace(self._decision(), decision_ts_ms=D0 + MS_PER_DAY)
+        fresh_state = CarryCycleState()
+        unmasked, fires = module._apply_early_exits(
+            decision=tomorrow, rule=rule, funding=None,
+            state=fresh_state, root=tmp_path, now_ms=D0 + MS_PER_DAY + MS_PER_HOUR,
+        )
+        assert fires == []
+        assert set(unmasked.weights) == {DEEP_A, DEEP_B, RESIZED}
+        assert fresh_state.early_exits == {}
+
+    def test_run_cycle_sells_the_recovered_name_intraday(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _RecoveringMarket(_FakeCarryMarket):
+            """DEEP_A's prints recover after the decision bar."""
+
+            def get_funding_history(self, symbol: str, start: int, end: int):
+                rows = super().get_funding_history(symbol, start, end)
+                if symbol == DEEP_A:
+                    for row in rows:
+                        if int(row["fundingRateTimestamp"]) > D0:
+                            row["fundingRate"] = "0.0001"
+                return rows
+
+        _route(tmp_path / "route")
+        demo_config = _routed_config(tmp_path / "route", early_exit_enabled=True)
+        _patch_demo_market_data(monkeypatch)
+        standing = pl.DataFrame(
+            [
+                {
+                    "trade_id": CARRY_COMPONENT_ID,
+                    "target_key": f"carry/{CARRY_STRATEGY_ID}/{CARRY_COMPONENT_ID}/{DEEP_A}",
+                    "strategy_id": CARRY_STRATEGY_ID,
+                    "symbol": DEEP_A,
+                    "status": "open",
+                    "signed_qty": 2.0,
+                    "target_reference_price": 100.0,
+                }
+            ]
+        )
+        _patch_planning(monkeypatch, standing=standing)
+        now = D0 + 8 * MS_PER_HOUR + 25 * 60_000  # past DEEP_A's 08:00 recovery
+
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=_RecoveringMarket(),
+            now_ms=now,
+        )
+
+        assert payload["decision_error"] is None
+        assert payload["early_exit_enabled"] is True
+        assert payload["early_exit_fired"] == [DEEP_A]
+        assert payload["early_exit_masked"] == 1
+        # The desired book no longer carries the recovered name, and the
+        # standing position gets its zero-target sell THIS cycle.
+        assert payload["desired_book_size"] == 2
+        assert payload["exit_targets_queued"] == 1
+        exit_intent = payload.publication.exit_requests[0].request.intents[0].intent
+        assert exit_intent.symbol == DEEP_A
+        assert exit_intent.signed_notional_usdt == 0.0
+
+        # Second cycle: mask holds, nothing re-fires, book unchanged.
+        payload2 = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=_RecoveringMarket(),
+            now_ms=now + 60_000,
+        )
+        assert payload2["early_exit_fired"] == []
+        assert payload2["early_exit_masked"] == 1
+        assert payload2["desired_book_size"] == 2
+        # The standing snapshot in this harness never drains, so the same
+        # exit re-proposes rather than re-entering: the mask held.
+        assert payload2["entry_targets_queued"] == 0
+
+    def test_off_by_default_keeps_the_registered_clock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        demo_config = _routed_config(tmp_path / "route")
+        _patch_demo_market_data(monkeypatch)
+        _patch_planning(monkeypatch, standing=None)
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=_FakeCarryMarket(),
+            now_ms=NOW_MS,
+        )
+        assert payload["early_exit_enabled"] is False
+        assert payload["early_exit_fired"] == []
+        assert payload["desired_book_size"] == 3
