@@ -28,7 +28,7 @@ sends nothing. Design, crates and safety posture:
 | Sleeve | Profile | Toggle |
 | --- | --- | --- |
 | LONG | `LongV12WideStop` | `LONG_SLEEVE` |
-| CARRY | `lane2_carry_hold_v4` | `CARRY_SLEEVE` |
+| CARRY | `lane2_carry_hold_v6` | `CARRY_SLEEVE` |
 | LONG / CARRY, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
 
 Which demo toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not

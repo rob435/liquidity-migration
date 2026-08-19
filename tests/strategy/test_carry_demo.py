@@ -158,6 +158,11 @@ def _routed_config(tmp_path: Path, *, environment: str = "demo", **overrides: An
         "execution_environment": environment,
         "account_execution_root": str(tmp_path / "account"),
         "account_intent_inbox_root": str(tmp_path / "inbox"),
+        # These integration fixtures hand-compute expected weights under the
+        # v4 rule (straight depth ladder, no flow/whale halvings); they test
+        # the cycle machinery, not the deployed default. v6-specific behavior
+        # has its own tests (TestWhaleFeed / TestV6DecidesLive below).
+        "strategy_profile": "v4",
     }
     values.update(overrides)
     return CarryDemoCycleConfig(**values)
@@ -1300,17 +1305,28 @@ class TestLegacyFilingIdDrain:
 
 
 class TestCarryStrategyProfileDial:
-    def test_v3_and_v4_resolve_to_their_registered_files(self) -> None:
+    def test_registered_profiles_resolve_to_their_files(self) -> None:
         v3 = module.resolve_carry_strategy_profile("v3")
         v4 = module.resolve_carry_strategy_profile("v4")
+        v6 = module.resolve_carry_strategy_profile("v6")
         assert v3.profile_name == "carry_hold_v3_live_v1"
         assert v3.config_path.name == "lane2_carry_hold_v3.json"
         assert v4.profile_name == "carry_hold_v4_live_v1"
-        assert v4.config_path == module.CARRY_CONFIG_PATH
-        # Both files load through the registered rule loader.
+        assert v4.config_path.name == "lane2_carry_hold_v4.json"
+        assert v6.profile_name == "carry_hold_v6_live_v1"
+        # v6 is the promoted default (2026-08-19): envelope proofs and charts
+        # that name no profile must read the deployed rule.
+        assert v6.config_path == module.CARRY_CONFIG_PATH
+        assert module.DEFAULT_CARRY_STRATEGY_PROFILE == "v6"
+        assert module.CARRY_STRATEGY_PROFILE_CHOICES == ("v3", "v4", "v6")
+        # All files load through the registered rule loader; the hysteresis
+        # thresholds never moved across the family.
         assert load_carry_config(v3.config_path).enter_bp == pytest.approx(
-            load_carry_config(v4.config_path).enter_bp
+            load_carry_config(v6.config_path).enter_bp
         )
+        # The whale halving is what makes v6 need the Binance feed.
+        assert load_carry_config(v6.config_path).whale_cut is not None
+        assert load_carry_config(v4.config_path).whale_cut is None
 
     def test_unknown_profile_fails_startup_validation(self) -> None:
         config = CarryDemoCycleConfig(
@@ -2212,3 +2228,293 @@ def test_a_book_that_cannot_be_written_never_stops_the_sleeve(tmp_path, monkeypa
         entry_leverage=2.0,
         strategy_profile="carry_hold_v4_live_v1",
     )
+
+
+# --- v6 (promoted 2026-08-19): the Binance whale feed and the live decision ---
+
+
+from liquidity_migration.marketdata.binance import BinanceDataError  # noqa: E402
+
+
+def _whale_day_ends(now_ms: int) -> list[int]:
+    newest = (now_ms // MS_PER_DAY) * MS_PER_DAY
+    return [newest - k * MS_PER_DAY for k in range(module.WHALE_FEED_DAYS)]
+
+
+class _FakeWhaleClient:
+    """Canned ratio endpoint. ``series[symbol]`` = list of (ts_ms, ratio);
+    ``end`` is exclusive, matching the real client's paged contract."""
+
+    calls: list[tuple[str, int, int]] = []
+
+    def __init__(
+        self,
+        series: dict[str, list[tuple[int, float]]],
+        *,
+        transient: set[str] | None = None,
+        permanent: set[str] | None = None,
+    ) -> None:
+        self.series = series
+        self.transient = transient or set()
+        self.permanent = permanent or set()
+
+    def get_top_trader_ls_position_ratio(
+        self, symbol: str, period: str, start: int, end: int, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        assert period == "5m"
+        type(self).calls.append((symbol, start, end))
+        if symbol in self.transient:
+            raise BinanceDataError("synthetic transport failure")
+        if symbol in self.permanent:
+            err = BinanceDataError("Binance rejected: HTTP 400 Invalid symbol")
+            err.permanent = True
+            raise err
+        return [
+            {"timestamp": ts, "longShortRatio": str(value)}
+            for ts, value in self.series.get(symbol, [])
+            if start <= ts < end
+        ]
+
+
+def _flat_series(symbols: list[str], day_ends: list[int], value: float = 1.3) -> dict:
+    return {
+        sym: [(end - 5 * 60_000, value) for end in day_ends] for sym in symbols
+    }
+
+
+class TestWhaleFeed:
+    def test_refresh_fetches_eods_and_serves_events(self, tmp_path: Path) -> None:
+        state = CarryCycleState()
+        ends = _whale_day_ends(NOW_MS)
+        series = _flat_series(["AUSDT"], ends)
+        # BUSDT's newest day drops 1.3 -> 1.0; GONEUSDT is not on Binance.
+        series["BUSDT"] = [(end - 5 * 60_000, 1.0 if end == ends[0] else 1.3) for end in ends]
+        fake = _FakeWhaleClient(series, permanent={"GONEUSDT"})
+        _FakeWhaleClient.calls = []
+
+        events, stats = module._refresh_carry_whale_cache(
+            tmp_path, ["AUSDT", "BUSDT", "GONEUSDT"], now_ms=NOW_MS, state=state,
+            client_factory=lambda: fake,
+        )
+
+        assert stats["whale_pairs_fetched"] == 3 * module.WHALE_FEED_DAYS
+        assert stats["whale_pairs_missing"] == 0
+        # Events carry only known values; the venue-absent name is held as
+        # nulls in the store (so it is never refetched) and excluded here.
+        assert events.height == 2 * module.WHALE_FEED_DAYS
+        assert set(events.get_column("symbol").to_list()) == {"AUSDT", "BUSDT"}
+        newest_b = events.filter(
+            (pl.col("symbol") == "BUSDT") & (pl.col("_tt_ls_ts_ms") == ends[0])
+        )
+        assert newest_b.get_column("bn_tt_ls").to_list() == [1.0]
+        assert module._whale_store_path(tmp_path).exists()
+
+        # Nothing missing now: a second pass makes zero network calls even
+        # though the cooldown has notionally expired.
+        _FakeWhaleClient.calls = []
+        state.whale_last_attempt_ms = None
+        events_again, stats_again = module._refresh_carry_whale_cache(
+            tmp_path, ["AUSDT", "BUSDT", "GONEUSDT"], now_ms=NOW_MS, state=state,
+            client_factory=lambda: fake,
+        )
+        assert _FakeWhaleClient.calls == []
+        assert events_again.height == events.height
+        assert stats_again["whale_pairs_fetched"] == 0
+
+    def test_restart_reloads_the_disk_store(self, tmp_path: Path) -> None:
+        ends = _whale_day_ends(NOW_MS)
+        fake = _FakeWhaleClient(_flat_series(["AUSDT"], ends))
+        module._refresh_carry_whale_cache(
+            tmp_path, ["AUSDT"], now_ms=NOW_MS, state=CarryCycleState(),
+            client_factory=lambda: fake,
+        )
+        # Fresh state (a producer restart): served from disk, no fetching.
+        _FakeWhaleClient.calls = []
+        events, _stats = module._refresh_carry_whale_cache(
+            tmp_path, ["AUSDT"], now_ms=NOW_MS, state=CarryCycleState(),
+            client_factory=lambda: fake,
+        )
+        assert _FakeWhaleClient.calls == []
+        assert events.height == module.WHALE_FEED_DAYS
+
+    def test_transient_failure_leaves_pair_missing_and_cooldown_gates_retry(
+        self, tmp_path: Path
+    ) -> None:
+        state = CarryCycleState()
+        fake = _FakeWhaleClient({}, transient={"AUSDT"})
+        _FakeWhaleClient.calls = []
+        events, stats = module._refresh_carry_whale_cache(
+            tmp_path, ["AUSDT"], now_ms=NOW_MS, state=state, client_factory=lambda: fake,
+        )
+        assert events.height == 0
+        assert stats["whale_pairs_fetched"] == 0
+        assert stats["whale_pairs_missing"] == module.WHALE_FEED_DAYS
+        first_calls = len(_FakeWhaleClient.calls)
+        assert first_calls == module.WHALE_FEED_DAYS
+
+        # Inside the cooldown: no new attempts.
+        module._refresh_carry_whale_cache(
+            tmp_path, ["AUSDT"], now_ms=NOW_MS + 60_000, state=state,
+            client_factory=lambda: fake,
+        )
+        assert len(_FakeWhaleClient.calls) == first_calls
+
+        # Past the cooldown: retried, and a healed feed fills the store.
+        fake.transient = set()
+        fake.series = _flat_series(["AUSDT"], _whale_day_ends(NOW_MS))
+        events, stats = module._refresh_carry_whale_cache(
+            tmp_path,
+            ["AUSDT"],
+            now_ms=NOW_MS + module._WHALE_REFRESH_COOLDOWN_MS,
+            state=state,
+            client_factory=lambda: fake,
+        )
+        assert len(_FakeWhaleClient.calls) == 2 * first_calls
+        assert events.height == module.WHALE_FEED_DAYS
+
+    def test_attach_matches_the_panel_convention(self) -> None:
+        klines = pl.DataFrame(
+            {
+                "ts_ms": [D0 - 2 * MS_PER_HOUR, D0 - MS_PER_HOUR] * 2,
+                "symbol": ["AUSDT", "AUSDT", "NOWHALEUSDT", "NOWHALEUSDT"],
+                "close": [10.0, 11.0, 5.0, 6.0],
+                "turnover_quote": [1.0, 1.0, 1.0, 1.0],
+            }
+        )
+        funding = pl.DataFrame(
+            {
+                "symbol": ["AUSDT"],
+                "funding_ts_ms": [D0 - MS_PER_HOUR],
+                "funding_rate": [-0.001],
+            }
+        )
+        events = pl.DataFrame(
+            {
+                "symbol": ["AUSDT", "AUSDT"],
+                "_tt_ls_ts_ms": [D0 - MS_PER_DAY, D0],
+                "bn_tt_ls": [1.5, 1.2],
+            }
+        )
+        view = _carry_venue_view(
+            klines, funding, window_start_ms=D0 - MS_PER_HOUR, max_bar_ts_ms=D0,
+            whale_events=events,
+        )
+        rows = {
+            (row["symbol"], int(row["bar_ts_ms"])): row for row in view.to_dicts()
+        }
+        # Backward as-of: the D0-1h bar still reads yesterday's EOD (age 23h);
+        # the D0 bar reads the value stamped at D0 with age exactly 0 — the
+        # same shape the research panel attaches bn_tt_ls with.
+        assert rows[("AUSDT", D0 - MS_PER_HOUR)]["bn_tt_ls"] == 1.5
+        assert rows[("AUSDT", D0 - MS_PER_HOUR)]["bn_tt_ls_age_h"] == pytest.approx(23.0)
+        assert rows[("AUSDT", D0)]["bn_tt_ls"] == 1.2
+        assert rows[("AUSDT", D0)]["bn_tt_ls_age_h"] == 0.0
+        # A name with no events carries nulls (the rule fails open on them).
+        assert rows[("NOWHALEUSDT", D0)]["bn_tt_ls"] is None
+        assert rows[("NOWHALEUSDT", D0)]["bn_tt_ls_age_h"] is None
+
+        empty = _carry_venue_view(
+            klines, funding, window_start_ms=D0 - MS_PER_HOUR, max_bar_ts_ms=D0,
+            whale_events=pl.DataFrame(
+                schema={"symbol": pl.String, "_tt_ls_ts_ms": pl.Int64, "bn_tt_ls": pl.Float64}
+            ),
+        )
+        assert empty.get_column("bn_tt_ls").null_count() == empty.height
+        assert empty.get_column("bn_tt_ls_age_h").null_count() == empty.height
+
+        # No whale leg (v1..v4): the view is bit-identical to before the feed.
+        plain = _carry_venue_view(
+            klines, funding, window_start_ms=D0 - MS_PER_HOUR, max_bar_ts_ms=D0
+        )
+        assert "bn_tt_ls" not in plain.columns
+        assert "bn_tt_ls_age_h" not in plain.columns
+
+
+class TestV6DecidesLive:
+    """The promoted rule end to end on the live frame: bent depth ladder,
+    flow halving (flat synthetic turnover growth is 0 <= +0.40, so it fires
+    for every name), and the whale halving fed by attached Binance EODs."""
+
+    START_MS = D0 - 60 * MS_PER_DAY
+
+    def _whale_events(self) -> pl.DataFrame:
+        stamps = [D0 - k * MS_PER_DAY for k in range(5, 0, -1)] + [D0]
+        rows = []
+        for stamp in stamps:
+            # DEEP_B: 1.3 until the newest EOD drops to 1.0 -> 3d change -0.30
+            # (below the -0.26 cut). DEEP_A: flat 1.3 -> change 0, full size.
+            rows.append({"symbol": DEEP_B, "_tt_ls_ts_ms": stamp,
+                         "bn_tt_ls": 1.0 if stamp == D0 else 1.3})
+            rows.append({"symbol": DEEP_A, "_tt_ls_ts_ms": stamp, "bn_tt_ls": 1.3})
+        return pl.DataFrame(rows).sort(["_tt_ls_ts_ms", "symbol"])
+
+    def _funding_frame(self) -> pl.DataFrame:
+        grid = 8 * MS_PER_HOUR
+        rows = []
+        for symbol in ALL_SYMBOLS:
+            for ts in range(self.START_MS, D0 + 1, grid):
+                rows.append(
+                    {"symbol": symbol, "funding_ts_ms": ts,
+                     "funding_rate": _funding_rate(symbol, ts)}
+                )
+        return pl.DataFrame(rows)
+
+    def test_decide_book_halves_the_whale_flagged_name_only(self) -> None:
+        klines = _synth_klines(
+            list(ALL_SYMBOLS), start_ms=self.START_MS - MS_PER_HOUR, end_ms=D0 - MS_PER_HOUR
+        )
+        view = _carry_venue_view(
+            klines,
+            self._funding_frame(),
+            window_start_ms=self.START_MS,
+            max_bar_ts_ms=D0,
+            whale_events=self._whale_events(),
+        )
+        cfg = load_carry_config(module._CONFIGS_DIR / "lane2_carry_hold_v6.json")
+        decision = module.decide_book(view, cfg, D0)
+
+        assert set(decision.weights) == {DEEP_A, DEEP_B, RESIZED}
+        # DEEP_A / RESIZED trail -45 bp: (45/120)^1.5 = 0.2296 floors at 0.25;
+        # flow halves; whale change is 0 (DEEP_A) or null (RESIZED) - no cut.
+        assert decision.weights[DEEP_A] == pytest.approx(0.1 * 0.25 * 0.5)
+        assert decision.weights[RESIZED] == pytest.approx(0.1 * 0.25 * 0.5)
+        # DEEP_B trail -75 bp: (75/120)^1.5 above the floor, flow halves, and
+        # the -0.30 whale change halves again.
+        assert decision.weights[DEEP_B] == pytest.approx(
+            0.1 * (75.0 / 120.0) ** 1.5 * 0.5 * 0.5
+        )
+
+    def test_run_cycle_wires_the_whale_feed_through_the_live_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        demo_config = _routed_config(tmp_path / "route", strategy_profile="v6")
+        _patch_demo_market_data(monkeypatch)
+        _patch_planning(monkeypatch, standing=None)
+        ends = _whale_day_ends(NOW_MS)
+        series = _flat_series([DEEP_A], ends)
+        series[DEEP_B] = [
+            (end - 5 * 60_000, 1.0 if end == ends[0] else 1.3) for end in ends
+        ]
+        fake = _FakeWhaleClient(series)
+        monkeypatch.setattr(module, "_whale_client_factory", lambda: fake)
+
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=_FakeCarryMarket(),
+            now_ms=NOW_MS,
+        )
+
+        assert payload["decision_error"] is None
+        assert payload["decision_ts_ms"] == D0
+        assert payload["desired_book_size"] == 3
+        expected_gross = (
+            0.1 * 0.25 * 0.5 * 2  # DEEP_A + RESIZED: floored ladder, flow halved
+            + 0.1 * (75.0 / 120.0) ** 1.5 * 0.5 * 0.5  # DEEP_B: whale-halved too
+        )
+        assert payload["desired_gross_weight"] == pytest.approx(expected_gross)
+        # The cycle's own receipt shows the feed ran and the store persisted.
+        assert payload["whale_pairs_fetched"] > 0
+        assert module._whale_store_path(tmp_path / "producer").exists()

@@ -217,7 +217,8 @@ def test_carry_summary_formatter_remains_selected(tmp_path: Path) -> None:
     line = daemon._format_cycle_summary(_flat_payload())
     assert line.startswith("carry target producer")
     assert "pub exit/entry/resize=0/0/0" in line
-    assert daemon._strategy_profile_name() == "carry_hold_v4_live_v1"
+    # The deployed default followed the 2026-08-19 v6 promotion.
+    assert daemon._strategy_profile_name() == "carry_hold_v6_live_v1"
     assert daemon._sleeve_label == "carry"
 
 

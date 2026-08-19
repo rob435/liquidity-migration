@@ -345,11 +345,15 @@ paper retirement, so no valid demo-vs-paper number exists on either side of that
 boundary. All demo equity/P&L numbers before the 2026-08-03 14:38 UTC clean-slate
 reset belong to the archived epoch.
 
-Change points currently accruing forward days: CARRY `lane2_carry_hold_v4`
-(promoted 2026-08-03 with zero forward days at promotion; v3 keeps scoring as
-comparator), LONG v12 wide-stop (2026-08-03), and the entry execution recipes
+Change points currently accruing forward days: CARRY `lane2_carry_hold_v6`
+(promoted 2026-08-19 with zero forward days at promotion — registered the same
+morning; v4 and v5 keep scoring, and the v6−v5 capital-normalised differential
+is the registered forward experiment; v4 held the sleeve from 2026-08-03), LONG
+v12 wide-stop (2026-08-03), and the entry execution recipes
 (quote-first entries, touch-sized windows, and the replay-selected resting recipe,
-all 2026-08-04 — deployed with `f85371e`). Full statements in
+all 2026-08-04 — deployed with `f85371e`). The v6 whale halving makes the carry
+producers read one non-Bybit input (Binance top-trader EODs, public endpoint,
+fail-open under the registered 48h freshness clause). Full statements in
 [docs/research/strategy_program.md](docs/research/strategy_program.md).
 
 ## Evidence boundary

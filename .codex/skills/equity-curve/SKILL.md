@@ -29,7 +29,7 @@ contract. Do not assume a default window is OOS or that both venues are required
 - `long` loads the active LONG profile and runs the long-native research
   engine.
 - `carry` renders the registered research config
-  `configs/lane2_carry_hold_v4.json` from the cross-venue panel, through the
+  `configs/lane2_carry_hold_v6.json` from the cross-venue panel, through the
   same `--research-config` path (below). It is the registered research shape,
   not a demo daemon replay.
 - Neither curve is automatically a literal daemon replay. Capacity, live state,

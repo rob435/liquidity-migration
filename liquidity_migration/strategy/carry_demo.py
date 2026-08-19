@@ -1,7 +1,7 @@
 """CARRY sleeve decision engine: the crowd-fee collector.
 
 Computes the daily target book for the deployed carry sleeve by replaying
-the registered rule (``resolve_carry_strategy_profile``; v4 by default) over
+the registered rule (``resolve_carry_strategy_profile``; v6 by default) over
 a rolling window of Bybit hourly data. The strategy logic is NOT reimplemented here: the
 engine calls the exact registered-scorer functions
 (:func:`liquidity_migration.rules.carry_hold.carry_hold_weights` and friends)
@@ -22,9 +22,19 @@ The registered config file is loaded only so the deployed parameters are
 byte-identical to the registered ones. Version selection is the
 ``CARRY_STRATEGY_PROFILE`` env dial → ``--strategy-profile`` (v3 → v4 promoted
 2026-08-03: the toxic band's high edge moves to 0% and a crowding-persistence
-size multiplier zeroes names whose recent settlements were rarely deep; both
-live in the shared registered scorer, so a version is a config file plus a
-profile name — never a code edit).
+size multiplier zeroes names whose recent settlements were rarely deep; v4 →
+v6 promoted 2026-08-19: the flow and whale size halvings from v5 plus the
+bent depth ladder, all in the shared registered scorer, so a version is a
+config file plus a profile name — never a code edit).
+
+v5/v6's whale halving reads a SECOND venue: Binance's top-trader position
+long/short ratio, the one non-Bybit input in the book. The producer keeps a
+tiny per-symbol-day cache of end-of-day ratio values (the same series the
+research panel attaches as ``bn_tt_ls``) and refreshes it from Binance's
+public data endpoint — no key, no account, no orders. Every failure of that
+feed fails OPEN per the registered rule's 48h freshness clause: a name with
+no fresh ratio keeps full size, and a dead feed degrades v6 toward v6-minus-
+whale rather than blocking a decision.
 """
 
 from __future__ import annotations
@@ -34,7 +44,7 @@ import json
 import logging
 import math
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +71,7 @@ from liquidity_migration.account.account_intent_client import (
 from liquidity_migration.account.account_route import require_account_route
 from liquidity_migration.account.account_service import RequestedIntent, SleeveAdapterKind
 from liquidity_migration.strategy.account_strategy_state import target_reservation_rows
+from liquidity_migration.marketdata.binance import BinanceDataError, BinanceUSDMData
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.strategy.event_demo_data import (
@@ -120,13 +131,15 @@ _CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
 #: The DEFAULT deployed rule file — what envelope proofs and research charts
 #: read when no profile is named. The running producer resolves its own file
 #: through ``resolve_carry_strategy_profile``.
-CARRY_CONFIG_PATH = _CONFIGS_DIR / "lane2_carry_hold_v4.json"
+CARRY_CONFIG_PATH = _CONFIGS_DIR / "lane2_carry_hold_v6.json"
 
 #: Registered CARRY deployments, selectable per unit exactly like LONG's
 #: (``CARRY_STRATEGY_PROFILE`` env → ``--strategy-profile``). Switching
-#: versions is an env change plus a registered config file — never a code edit.
-CARRY_STRATEGY_PROFILE_CHOICES: tuple[str, ...] = ("v3", "v4")
-DEFAULT_CARRY_STRATEGY_PROFILE = "v4"
+#: versions is an env change plus a registered config file — never a code
+#: edit. Exception: v6 was the first profile whose rule reads a second venue
+#: (the Binance whale ratio), so ITS first deploy carried the feed code too.
+CARRY_STRATEGY_PROFILE_CHOICES: tuple[str, ...] = ("v3", "v4", "v6")
+DEFAULT_CARRY_STRATEGY_PROFILE = "v6"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -140,6 +153,7 @@ class CarryStrategyProfile:
 _CARRY_STRATEGY_PROFILES: dict[str, CarryStrategyProfile] = {
     "v3": CarryStrategyProfile("carry_hold_v3_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v3.json"),
     "v4": CarryStrategyProfile("carry_hold_v4_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v4.json"),
+    "v6": CarryStrategyProfile("carry_hold_v6_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v6.json"),
 }
 
 
@@ -397,6 +411,8 @@ class CarryCycleState:
         "sizing_equity_by_decision",
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
+        "whale_last_attempt_ms",
+        "whale_store",
     )
 
     def __init__(self) -> None:
@@ -420,6 +436,11 @@ class CarryCycleState:
         self.sizing_equity_by_decision: dict[int, float] = {}
         self.sizing_equity_usdt: float | None = None
         self.sizing_equity_decision_ts_ms: int | None = None
+        # Whale-ratio cache (v5/v6 rules only): the in-memory copy of the
+        # on-disk per-symbol-day store, and the last refresh attempt so a
+        # Binance outage retries on a cooldown instead of every 60s cycle.
+        self.whale_store: pl.DataFrame | None = None
+        self.whale_last_attempt_ms: int | None = None
 
     def frozen_decision(
         self, decision_ts_ms: int
@@ -629,6 +650,239 @@ def next_carry_decision_deadline_ts_ms(now_ms: int) -> int:
     return candidate if int(now_ms) < candidate else candidate + DAY_MS
 
 
+# ---------------------------------------------------------------------------
+# Whale-ratio feed (v5/v6 rules only): Binance top-trader position long/short
+# end-of-day values, the live twin of the research panel's ``bn_tt_ls``. Reads
+# a public no-key endpoint; every failure fails OPEN under the registered 48h
+# freshness clause, so a dead feed thins the whale halving instead of blocking
+# a decision.
+# ---------------------------------------------------------------------------
+
+#: Trailing complete UTC days of EOD values the cache maintains. The decision
+#: bar needs yesterday's EOD and the value 72 bars earlier (~EOD four days
+#: back); six covers both through a one-day feed hole, and anything staler
+#: fails open under the registered 48h freshness clause anyway.
+WHALE_FEED_DAYS = 6
+#: While pairs are missing, retry no more than every five minutes — a Binance
+#: outage must not add a fetch attempt to every 60-second cycle.
+_WHALE_REFRESH_COOLDOWN_MS = 5 * 60 * 1000
+#: Wall-clock bound on one refresh pass. Pairs that miss it stay missing and
+#: heal on a later cycle; the decision never waits longer than this.
+_WHALE_FETCH_DEADLINE_S = 45.0
+_WHALE_FETCH_WORKERS = 8
+_WHALE_STORE_KEEP_DAYS = 30
+_WHALE_STORE_NAME = "binance_whale_daily.parquet"
+
+_WHALE_STORE_SCHEMA: dict[str, Any] = {
+    "symbol": pl.String,
+    # The day's END stamp (next UTC midnight, ms) — when the EOD value becomes
+    # knowable, and the key the panel's as-of attach uses.
+    "day_end_ms": pl.Int64,
+    # Null value = the venue has nothing for this symbol-day (not listed on
+    # Binance, or no ratio rows). Recorded so the pair is not refetched.
+    "bn_tt_ls": pl.Float64,
+    "fetched_ms": pl.Int64,
+}
+
+
+def _whale_store_path(root: Path) -> Path:
+    return root / _WHALE_STORE_NAME
+
+
+def _load_whale_store(root: Path) -> pl.DataFrame:
+    path = _whale_store_path(root)
+    if path.exists():
+        try:
+            df = pl.read_parquet(path)
+            if set(_WHALE_STORE_SCHEMA) <= set(df.columns):
+                return df.select(list(_WHALE_STORE_SCHEMA))
+        except Exception:  # noqa: BLE001 - a torn cache refetches; it never blocks
+            _logger.warning("whale cache unreadable, refetching: %s", path)
+    return pl.DataFrame(schema=_WHALE_STORE_SCHEMA)
+
+
+def _whale_missing_pairs(
+    store: pl.DataFrame, symbols: list[str], now_ms: int
+) -> list[tuple[str, int]]:
+    newest_end = (int(now_ms) // DAY_MS) * DAY_MS
+    wanted_ends = [newest_end - k * DAY_MS for k in range(WHALE_FEED_DAYS)]
+    have: set[tuple[str, int]] = set()
+    if store.height:
+        have = set(
+            zip(store["symbol"].to_list(), store["day_end_ms"].to_list(), strict=True)
+        )
+    return [(s, e) for s in symbols for e in wanted_ends if (s, e) not in have]
+
+
+def _fetch_whale_pair(
+    symbol: str, day_end_ms: int, client_factory: Any
+) -> tuple[str, int, float | None] | None:
+    """One (symbol, day) EOD read: the last 5-minute ratio print of the day,
+    the same value ``refresh_binance_metrics.py`` collapses to ``tt_ls_eod``.
+
+    ``None`` = transient failure, nothing recorded, retried on a later pass.
+    A tuple with a null value = the venue definitively has nothing here.
+    """
+    client = client_factory()
+    try:
+        rows = client.get_top_trader_ls_position_ratio(
+            symbol, "5m", int(day_end_ms) - 6 * HOUR_MS, int(day_end_ms)
+        )
+    except BinanceDataError as exc:
+        if getattr(exc, "permanent", False):
+            return (symbol, int(day_end_ms), None)
+        return None
+    except Exception:  # noqa: BLE001 - transport oddity; retry on a later pass
+        return None
+    if not rows:
+        return (symbol, int(day_end_ms), None)
+    last = max(rows, key=lambda r: int(r["timestamp"]))
+    try:
+        return (symbol, int(day_end_ms), float(last["longShortRatio"]))
+    except (KeyError, TypeError, ValueError):
+        return (symbol, int(day_end_ms), None)
+
+
+def _whale_client_factory() -> BinanceUSDMData:
+    # Snappier than the offline-build defaults: a missed pair heals on the
+    # next cooldown pass, so long retries only stall the cycle.
+    return BinanceUSDMData(retries=2, retry_sleep_seconds=0.25, timeout_seconds=5.0)
+
+
+def _refresh_carry_whale_cache(
+    root: Path,
+    symbols: list[str],
+    *,
+    now_ms: int,
+    state: CarryCycleState,
+    client_factory: Any = None,
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Serve the whale EOD event frame, refreshing missing symbol-days first.
+
+    Never raises. The returned frame holds one row per known (symbol, day)
+    EOD value — ``symbol``, ``_tt_ls_ts_ms`` (day-end stamp), ``bn_tt_ls`` —
+    ready for the view's as-of attach; rows the venue has nothing for are
+    held in the store as nulls (so they are not refetched) and excluded here,
+    which is exactly how the research panel treats them.
+    """
+    factory = client_factory or _whale_client_factory
+    stats: dict[str, Any] = {}
+    store = state.whale_store
+    try:
+        if store is None:
+            store = _load_whale_store(root)
+        missing = _whale_missing_pairs(store, symbols, now_ms)
+        cooling = (
+            state.whale_last_attempt_ms is not None
+            and int(now_ms) - state.whale_last_attempt_ms < _WHALE_REFRESH_COOLDOWN_MS
+        )
+        fetched = 0
+        if missing and not cooling:
+            state.whale_last_attempt_ms = int(now_ms)
+            rows: list[dict[str, Any]] = []
+            pool = ThreadPoolExecutor(max_workers=_WHALE_FETCH_WORKERS)
+            futures = [
+                pool.submit(_fetch_whale_pair, sym, end, factory) for sym, end in missing
+            ]
+            try:
+                for fut in as_completed(futures, timeout=_WHALE_FETCH_DEADLINE_S):
+                    res = fut.result()
+                    if res is not None:
+                        rows.append(
+                            {
+                                "symbol": res[0],
+                                "day_end_ms": res[1],
+                                "bn_tt_ls": res[2],
+                                "fetched_ms": int(now_ms),
+                            }
+                        )
+            except TimeoutError:
+                undone = sum(1 for f in futures if not f.done())
+                _logger.warning(
+                    "whale refresh hit the %.0fs bound with %d pairs pending; they retry later",
+                    _WHALE_FETCH_DEADLINE_S,
+                    undone,
+                )
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+            if rows:
+                fetched = len(rows)
+                keep_from = (int(now_ms) // DAY_MS) * DAY_MS - _WHALE_STORE_KEEP_DAYS * DAY_MS
+                store = (
+                    pl.concat([store, pl.DataFrame(rows, schema=_WHALE_STORE_SCHEMA)])
+                    .unique(subset=["symbol", "day_end_ms"], keep="last")
+                    .filter(pl.col("day_end_ms") >= keep_from)
+                    .sort(["symbol", "day_end_ms"])
+                )
+                path = _whale_store_path(root)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(path.name + ".tmp")
+                store.write_parquet(tmp)
+                os.replace(tmp, path)
+        state.whale_store = store
+        stats = {
+            "whale_pairs_missing": max(0, len(missing) - fetched),
+            "whale_pairs_fetched": fetched,
+        }
+    except Exception as exc:  # noqa: BLE001 - the whale leg fails open, never the cycle
+        _logger.exception("whale refresh failed; the whale halving fails open this cycle")
+        stats["whale_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        if store is None:
+            store = pl.DataFrame(schema=_WHALE_STORE_SCHEMA)
+    events = (
+        store.filter(pl.col("bn_tt_ls").is_not_null())
+        .select(
+            "symbol",
+            pl.col("day_end_ms").alias("_tt_ls_ts_ms"),
+            "bn_tt_ls",
+        )
+        .sort(["_tt_ls_ts_ms", "symbol"])
+    )
+    stats["whale_event_rows"] = events.height
+    return events, stats
+
+
+def _attach_whale_columns(
+    view: pl.DataFrame, whale_events: pl.DataFrame | None
+) -> pl.DataFrame:
+    """Attach ``bn_tt_ls`` / ``bn_tt_ls_age_h`` exactly the way the research
+    panel does — backward as-of of day-end EOD events per symbol, age in
+    float hours — so the registered rule computes the whale change from the
+    same shape live. ``None`` (a rule with no whale leg) leaves the frame
+    untouched: the v1..v4 view stays bit-identical to before the feed existed.
+    """
+    if whale_events is None:
+        return view
+    if whale_events.is_empty():
+        return view.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("bn_tt_ls"),
+            pl.lit(None, dtype=pl.Float64).alias("bn_tt_ls_age_h"),
+        )
+    events = whale_events.select(
+        pl.col("symbol").cast(pl.String),
+        pl.col("_tt_ls_ts_ms").cast(pl.Int64),
+        pl.col("bn_tt_ls").cast(pl.Float64),
+    ).sort(["_tt_ls_ts_ms", "symbol"])
+    return (
+        view.join_asof(
+            events,
+            left_on="bar_ts_ms",
+            right_on="_tt_ls_ts_ms",
+            by="symbol",
+            strategy="backward",
+            # Same global-ts-then-symbol sortedness argument as the funding
+            # join above; polars cannot verify it once `by` groups are given.
+            check_sortedness=False,
+        )
+        .with_columns(
+            ((pl.col("bar_ts_ms") - pl.col("_tt_ls_ts_ms")) / HOUR_MS).alias(
+                "bn_tt_ls_age_h"
+            )
+        )
+        .drop("_tt_ls_ts_ms")
+    )
+
+
 def _empty_venue_view() -> pl.DataFrame:
     return pl.DataFrame(
         schema={
@@ -648,6 +902,7 @@ def _carry_venue_view(
     *,
     window_start_ms: int,
     max_bar_ts_ms: int,
+    whale_events: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Build the Bybit venue-view frame the registered engine decides on.
 
@@ -692,7 +947,7 @@ def _carry_venue_view(
             pl.lit(None, dtype=pl.Float64).alias("by_funding"),
             pl.lit(None, dtype=pl.Float64).alias("by_funding_age_h"),
         )
-        return view.sort(["symbol", "bar_ts_ms"])
+        return _attach_whale_columns(view, whale_events).sort(["symbol", "bar_ts_ms"])
     events = (
         funding.select(
             pl.col("symbol").cast(pl.String),
@@ -718,7 +973,8 @@ def _carry_venue_view(
             "by_funding_age_h"
         )
     )
-    return view.drop("funding_ts_ms").sort(["symbol", "bar_ts_ms"])
+    view = view.drop("funding_ts_ms")
+    return _attach_whale_columns(view, whale_events).sort(["symbol", "bar_ts_ms"])
 
 
 def _validate_carry_view_health(
@@ -807,6 +1063,7 @@ def _freeze_decision_ahead(
     current_decision_ts_ms: int,
     replay_days: int,
     standing_symbols: set[str],
+    whale_events: pl.DataFrame | None = None,
 ) -> bool:
     """Compute and freeze the UPCOMING day's book from this cycle's build.
 
@@ -847,6 +1104,7 @@ def _freeze_decision_ahead(
             funding,
             window_start_ms=ahead_ts_ms - replay_days * DAY_MS,
             max_bar_ts_ms=ahead_ts_ms,
+            whale_events=whale_events,
         )
         if view.is_empty():
             return False
@@ -1692,6 +1950,7 @@ def run_carry_demo_cycle(
         freeze_ahead_frozen = False
         built_klines: pl.DataFrame | None = None
         built_funding: pl.DataFrame | None = None
+        whale_events: pl.DataFrame | None = None
         # A deadline wake exists to publish the frozen day the instant it
         # becomes actionable; rebuilding caches first spends seconds on data
         # the frozen decision cannot read. Timer cycles keep the build (it IS
@@ -1733,6 +1992,19 @@ def run_carry_demo_cycle(
                     state_cache_stale_seconds=state_cache_stale_seconds,
                 )
                 built_klines, built_funding = klines, funding
+                if rule.whale_cut is not None:
+                    # The whale halving reads Binance EODs; refresh the tiny
+                    # cache for exactly the symbols this build fetched. Never
+                    # raises — a dead feed fails open per the registered rule.
+                    whale_symbols = (
+                        sorted(set(klines.get_column("symbol").to_list()))
+                        if not klines.is_empty()
+                        else []
+                    )
+                    whale_events, whale_stats = _refresh_carry_whale_cache(
+                        root, whale_symbols, now_ms=cycle_now_ms, state=state
+                    )
+                    build_stats.update(whale_stats)
                 # Asked before the panel is built, not after: the decision is frozen
                 # for the whole day, so on all but the first cycle the rebuild below
                 # — two sorts and an as-of join over the whole window — produced a
@@ -1751,6 +2023,7 @@ def run_carry_demo_cycle(
                         funding,
                         window_start_ms=window_start_ms,
                         max_bar_ts_ms=decision_ts_ms,
+                        whale_events=whale_events,
                     )
                     if not view.is_empty():
                         # A cold-started cache begins mid-day, which the engine's
@@ -1794,6 +2067,7 @@ def run_carry_demo_cycle(
                 current_decision_ts_ms=decision_ts_ms,
                 replay_days=demo.replay_days,
                 standing_symbols=standing_symbols,
+                whale_events=whale_events,
             )
         if (
             freeze_ahead_decision_ts_ms is not None
@@ -1982,6 +2256,13 @@ def run_carry_demo_cycle(
             "universe_fetched": int(build_stats.get("universe_fetched", 0)),
             "universe_eligible": universe_eligible,
             "candidate_skipped_symbols": int(build_stats.get("candidate_skipped_symbols", 0)),
+            # Whale-feed receipt (v6+): how many Binance EOD symbol-days were
+            # fetched/missing this cycle and how many known values fed the
+            # view. Absent keys mean the rule has no whale leg (v3/v4).
+            "whale_pairs_fetched": build_stats.get("whale_pairs_fetched"),
+            "whale_pairs_missing": build_stats.get("whale_pairs_missing"),
+            "whale_event_rows": build_stats.get("whale_event_rows"),
+            "whale_error": build_stats.get("whale_error"),
             "open_positions": open_trades.height,
             "target_reservations": reservations.height,
             "standing_symbols": len(standing_symbols),

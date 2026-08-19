@@ -21,6 +21,13 @@ pins that v4 moved nothing in them.)*
 producer profile `carry_hold_v4_live_v1`, promotion note and forward-record
 caveat (0 scored days at promotion) in
 `docs/research/strategy_program.md`, deploy receipt in `CHANGELOG.md`.)*
+*(2026-08-19: **v5 and v6 are registered** — v5 adds the flow and whale size
+halvings, v6 bends the depth ladder with a 1.5 exponent on top — and **v6 is
+PROMOTED to both CARRY producers the same evening** by owner override:
+profile `carry_hold_v6_live_v1`, 0 scored forward days at promotion, v4/v5
+keep scoring as comparators. The whale leg makes the deployed book read one
+non-Bybit input (Binance top-trader EODs, fail-open). Promotion note in
+`docs/research/strategy_program.md`, deploy receipt in `CHANGELOG.md`.)*
 
 ## 0. Corrections and registrations — read this before any number below
 

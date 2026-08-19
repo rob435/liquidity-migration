@@ -497,7 +497,11 @@ unknown real-money spellings.
 Each demo target producer owns one bounded public kline store fed by its own WS stream (LONG top-120 by
 turnover, carry top-150 spanning its replay window). Missing or lagging bars retain the public REST
 fallback; settled funding history has no stream on the venue, so carry's hourly funding sweep stays REST
-by necessity. The demo credential file is read by `check_demo_order_permissions`, which loads it into the
+by necessity. Since the 2026-08-19 v6 promotion each carry producer also keeps
+`binance_whale_daily.parquet` under its data root — per-symbol-day Binance top-trader position
+long/short EODs (public endpoint, no key, ~one request per symbol per day), the live twin of the
+research panel's `bn_tt_ls`. Every failure of that feed fails OPEN per the registered rule's 48h
+freshness clause; it can thin the whale halving, never block a decision. The demo credential file is read by `check_demo_order_permissions`, which loads it into the
 process environment, runs `scripts/maintain/check_bybit_order_permissions.py` and unsets the keys again;
 `activate` runs it in `deploy` context and `verify` re-runs it in `verify` context.
 

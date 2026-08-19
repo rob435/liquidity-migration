@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import io
+import json
 from urllib.error import HTTPError
 
 import pytest
@@ -269,3 +271,57 @@ def test_429_without_retry_after_uses_rate_limit_backoff(monkeypatch) -> None:
     client._get("/fapi/v1/klines", {"symbol": "X"})
     # No Retry-After -> the dedicated rate-limit fallback (30s), not the 0.5s base.
     assert sleeps and sleeps[0] == pytest.approx(30.0)
+
+
+# The whale-feed endpoint (v6 carry): request shaping and the permanent flag.
+def test_top_trader_ls_position_ratio_requests_and_pages(monkeypatch) -> None:
+    seen: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        seen.append(request.full_url)
+        body = json.dumps(
+            [
+                {"timestamp": 1_700_000_100_000, "longShortRatio": "1.31"},
+                {"timestamp": 1_700_000_400_000, "longShortRatio": "1.28"},
+            ]
+        ).encode()
+        return contextlib.closing(io.BytesIO(body))
+
+    monkeypatch.setattr(binance, "urlopen", fake_urlopen)
+    # Pin the 30-day availability clamp so the fixed window stays requestable.
+    monkeypatch.setattr(binance.time, "time", lambda: 1_700_000_000.0)
+    client = binance.BinanceUSDMData(retries=1)
+    rows = client.get_top_trader_ls_position_ratio(
+        "AUSDT", "5m", 1_700_000_100_000, 1_700_000_700_000
+    )
+    assert [row["longShortRatio"] for row in rows] == ["1.31", "1.28"]
+    assert len(seen) == 1
+    assert "/futures/data/topLongShortPositionRatio" in seen[0]
+    assert "period=5m" in seen[0]
+    # end is exclusive: the wire request caps at end - 1, like every pager.
+    assert "endTime=1700000699999" in seen[0]
+
+
+def test_permanent_flag_marks_client_rejections_only(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):
+        raise _http_error(400, b'{"code": -1121, "msg": "Invalid symbol."}')
+
+    monkeypatch.setattr(binance, "urlopen", fake_urlopen)
+    monkeypatch.setattr(binance.time, "time", lambda: 1_700_000_000.0)
+    client = binance.BinanceUSDMData(retries=2, retry_sleep_seconds=0.0)
+    with pytest.raises(binance.BinanceDataError) as excinfo:
+        client.get_top_trader_ls_position_ratio(
+            "BADUSDT", "5m", 1_700_000_100_000, 1_700_000_700_000
+        )
+    assert excinfo.value.permanent is True
+
+    def fake_urlopen_down(request, timeout):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(binance, "urlopen", fake_urlopen_down)
+    monkeypatch.setattr(binance.time, "sleep", lambda *_a, **_k: None)
+    with pytest.raises(binance.BinanceDataError) as excinfo:
+        client.get_top_trader_ls_position_ratio(
+            "AUSDT", "5m", 1_700_000_100_000, 1_700_000_700_000
+        )
+    assert excinfo.value.permanent is False

@@ -86,6 +86,39 @@ one-off runners are retired.
   candidates a day fails** (t −2.38 / −2.00). CARRY and LONG v12 correlate **+0.012**
   across all 24 decision clocks — at equal risk the pair is 16.56 bp/day, Sharpe
   1.81, worst dip −24.2%, against carry alone at 14.46 / 1.13 / −45.6%.
+- **`lane2_carry_hold_v6` is PROMOTED to both CARRY producers (2026-08-19
+  evening, owner: "get v6 live and running… the real money side as well,
+  everything needs to be running").** The demo producer's book now trades
+  through the live engine under v6; the mainnet producer publishes a v6
+  target book that the funded engine reads in shadow — promotion changes
+  what is published, never what is armed (`governance.md` §6). Promotion
+  note (`governance.md` §3):
+  - **Claim:** v5's book on ~3.5% less average gross via the bent depth
+    ladder; capital-normalised differential vs v5 **+0.43 bp/day mean across
+    all 24 clock phases** (midnight +0.63, t 2.86) on seen data; own-capital
+    deliberately a wash (Sharpe 1.842 vs 1.841). Inherits v5's flow + whale
+    halvings, so this is also the first deployment of both.
+  - **Config commit:** registered 2026-08-19 (`configs/lane2_carry_hold_v6.json`,
+    commit `50156e80`); producer switch is this promotion commit
+    (`CARRY_STRATEGY_PROFILE=v6` → profile `carry_hold_v6_live_v1`; the
+    journal filing id stays the version-free `carry_hold`).
+  - **Forward record: 0 scored days** — v6 registered the same morning, so
+    this promotion rides on seen-data evidence and the owner's decision,
+    exactly like the v4 promotion did. v4 and v5 keep scoring; the v6−v5
+    capital-normalised differential is the experiment the forward record
+    grades.
+  - **Decision:** owner, 2026-08-19 ("get v6 live and running. implement it
+    into live and get it deployed", then "the real money side as well").
+  - **Date:** 2026-08-19. Change point = the deploy receipt in `CHANGELOG.md`.
+  Engineering note: v6 is the first deployed rule that reads a second venue.
+  The producer now keeps a per-symbol-day cache of Binance top-trader
+  position long/short EODs (public endpoint, no key) — the live twin of the
+  panel's `bn_tt_ls` — and every feed failure fails OPEN under the registered
+  48h freshness clause, degrading v6 toward v6-minus-whale rather than
+  blocking a decision. Migration is the ordinary path: the stateless replay
+  recomputes the book under v6 at the first post-deploy cycle and the diff
+  machine resizes (same names, mid-depth sizes shrink, whale/flow-flagged
+  names halve); no flatten, no stranded components.
 - **`lane2_carry_hold_v6` is REGISTERED, research-only (2026-08-19, owner:
   "the causes are right, the implementation is crude — be more sophisticated,
   non-overfit").** v5's book with ONE shape change: the depth ladder bends —
@@ -107,8 +140,9 @@ one-off runners are retired.
   book's per-unit payoff is flat below ~1.4× ref and jumps above — but
   chasing that jump (raising the cap) is regime-local; the bend harvests
   the stable part only. v5 and v4 keep scoring untouched; the v6−v5
-  differential is what the forward record grades. NOT promoted to any
-  sleeve.
+  differential is what the forward record grades. (Promoted to both CARRY
+  producers the same evening — see the promotion entry above; this
+  registration entry records the evidence as it stood at registration.)
 - **`lane2_carry_hold_v5` is REGISTERED, research-only (2026-08-19, owner:
   "do an A/B test and fit it into our system").** v4's book plus two size
   halvings on axes outside the funding/price complex: stale turnover flow
@@ -172,9 +206,9 @@ one-off runners are retired.
   funding-boundary convention understates carry configs by ~+0.5 bp/day at
   midnight, 24/24 phases (§4 there). The deployed ~00:20 fill stays as-is
   (H7: it saves ~42 bp per entry).
-- The publishing profiles are `lane2_carry_hold_v4` (CARRY, since the
-  2026-08-03 promotion) and `LongV12WideStop` (LONG, since the 2026-08-03
-  rollout). `continuous_ensemble_v2` at revision
+- The publishing profiles are `lane2_carry_hold_v6` (CARRY, since the
+  2026-08-19 promotion; v4 held from 2026-08-03) and `LongV12WideStop`
+  (LONG, since the 2026-08-03 rollout). `continuous_ensemble_v2` at revision
   `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the profile
   id predates the 2026-07-26 replacement and no longer implies an ensemble) was
   retired from demo and paper on 2026-07-29 by owner override and its code was

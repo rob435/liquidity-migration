@@ -122,17 +122,19 @@ methodology label `invalid` / `biased_benchmark` / `exploratory` from taint and 
 (`_methodology_run_label`, same file). `full_pit_universe_pass=true` beside a
 `full_pit_universe_funding_coverage_low` label is not a historical-universe claim.
 
-## CARRY — `lane2_carry_hold_v4`
+## CARRY — `lane2_carry_hold_v6`
 
-> **Promoted 2026-08-03 by owner override** (previously v3; change point and promotion note in
-> [`strategy_program.md`](research/strategy_program.md), deploy receipt in `CHANGELOG.md`). v4
-> moves the toxic band's high edge to 0% and adds a crowding-persistence size multiplier, both
-> in the shared registered scorer. Selection is `CARRY_STRATEGY_PROFILE` (`v3`/`v4`) in the
-> unit environment → `--strategy-profile`, the same dial shape as LONG's; the journal filing
-> id is the version-free `carry_hold` and never changes with the profile (components born
-> under the pre-2026-08-05 `carry_hold_v3` id drain under it). v3 keeps scoring daily as the
-> primary comparator and the v4−v3 paired differential is the registered forward experiment;
-> at promotion the forward record had **0 scored days**. See
+> **Promoted 2026-08-19 by owner override** (previously v4 from 2026-08-03, v3 before that;
+> change point and promotion note in [`strategy_program.md`](research/strategy_program.md),
+> deploy receipt in `CHANGELOG.md`). On top of v4, v6 carries v5's two size halvings — stale
+> turnover flow and Binance top-trader de-longing (the whale leg, the book's one non-Bybit
+> input) — and bends the depth ladder with a 1.5 exponent, all in the shared registered
+> scorer. Selection is `CARRY_STRATEGY_PROFILE` (`v3`/`v4`/`v6`) in the unit environment →
+> `--strategy-profile`, the same dial shape as LONG's; the journal filing id is the
+> version-free `carry_hold` and never changes with the profile (components born under the
+> pre-2026-08-05 `carry_hold_v3` id drain under it). v4 and v5 keep scoring daily and the
+> v6−v5 capital-normalised paired differential is the registered forward experiment; at
+> promotion the forward record had **0 scored days**, exactly like the v4 promotion. See
 > [`carry_hold.md`](research/carry_hold.md) §0.1.
 
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
@@ -148,13 +150,21 @@ Per-name hysteresis:
 | Block entry, suspend hold to zero weight | trailing 3d return in [−30%, 0%) — v4 widened the high edge from −5% |
 | Block entry | trailing 30d daily vol < 5% |
 | Drop to zero weight (v4) | ≤ 10% of the name's last 20 settlements printed deeper than −10 bp — the isolated deep print is the book's one losing cohort |
+| Halve size (v5/v6, flow) | trailing 24h turnover grew ≤ +40% vs 72h earlier — a held name whose crowd is not growing is a stale crowd |
+| Halve size (v5/v6, whale) | Binance top-trader position long/short ratio fell ≥ 0.26 over 3 days — the informed side de-longing while the crowd still pays |
 
-Null conditioning values fail open. The book is empty on 28% of days in the full record;
-flat is a state, not a fault.
+Null conditioning values fail open. The whale input is the book's one non-Bybit read: the
+producer caches Binance end-of-day ratio values per symbol-day (public endpoint, no key,
+`binance_whale_daily.parquet` under the producer root) and the registered 48h freshness
+clause nulls anything stale, so a dead feed degrades v6 toward v6-minus-whale instead of
+blocking a decision. The book is empty on 28% of days in the full record; flat is a state,
+not a fault.
 
-**Sizing.** `weight = 0.10 × clip(|trailing 24h settled funding| / 120bp-day, 0.25, 1.0)
-× persistence` — the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it (a
-name with fewer than 20 settlements of history fails open at full size) — gross capped at
+**Sizing.** `weight = 0.10 × clip((|trailing 24h settled funding| / 120bp-day)^1.5, 0.25, 1.0)
+× persistence × flow × whale` — the exponent is v6's one change (v1..v5 ran the straight
+ratio); the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it (a
+name with fewer than 20 settlements of history fails open at full size); flow and whale are
+the ×0.5 halvings above — gross capped at
 1.0, then `weight × sizing_equity × notional_multiplier` (1.0). Sizing equity is anchored to
 the decision, not the live mark — sizing off the live mark makes the day's target a function
 of the book's own unrealized P&L (2026-07-30: $84.7k traded against a ~$30k book in thirteen

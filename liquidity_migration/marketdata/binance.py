@@ -12,7 +12,10 @@ from liquidity_migration.core._common import exact_duration_ms
 
 
 class BinanceDataError(RuntimeError):
-    pass
+    #: True when the venue rejected the request itself (HTTP 4xx: invalid
+    #: symbol, illegal parameters) — retrying or re-asking later cannot
+    #: succeed. False covers transport faults and exhausted retries.
+    permanent: bool = False
 
 
 BINANCE_INTERVAL_MS = {
@@ -77,6 +80,27 @@ class BinanceUSDMData:
             return []
         return self._paged_forward(
             "/futures/data/openInterestHist",
+            symbol=symbol,
+            start=start,
+            end=end,
+            limit=min(limit, 500),
+            timestamp_key="timestamp",
+            extra_params={"period": period},
+            step_ms=BINANCE_INTERVAL_MS[period],
+        )
+
+    def get_top_trader_ls_position_ratio(self, symbol: str, period: str, start: int, end: int, limit: int = 500) -> list[dict[str, Any]]:
+        """Top-trader POSITION long/short ratio — the same series the
+        ``data.binance.vision`` metrics files publish a day later as
+        ``sum_toptrader_long_short_ratio`` (the carry whale signal's basis).
+        The venue serves only the trailing 30 days."""
+        start = _recent_history_start(start, end, days=30)
+        start = _ceil_to_period(start, period)
+        end = _floor_to_period(end, period)
+        if start > end:
+            return []
+        return self._paged_forward(
+            "/futures/data/topLongShortPositionRatio",
             symbol=symbol,
             start=start,
             end=end,
@@ -228,9 +252,11 @@ class BinanceUSDMData:
                     # burns the whole budget. 429/418 are transient and keep
                     # retrying under Retry-After.
                     if exc.code not in (418, 429) and 400 <= exc.code < 500:
-                        raise BinanceDataError(
+                        rejected = BinanceDataError(
                             f"Binance {path} failed with HTTP {exc.code}: {_http_error_detail(exc)}"
-                        ) from exc
+                        )
+                        rejected.permanent = True
+                        raise rejected from exc
                 last_error = exc
                 if attempt + 1 >= self.retries:
                     break

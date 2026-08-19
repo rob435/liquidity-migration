@@ -195,7 +195,7 @@ class ContinuousTargetAdapter(_SignedNotionalAdapter):
 
 
 class CarryTargetAdapter(_SignedNotionalAdapter):
-    """Long-only funding-carry sleeve (registered config lane2_carry_hold_v4)."""
+    """Long-only funding-carry sleeve (deployed config lane2_carry_hold_v6)."""
 
     def __init__(self, *, producer_price_max_age_ns: int | None = None) -> None:
         super().__init__(
