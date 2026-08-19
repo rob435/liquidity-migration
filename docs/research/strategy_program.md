@@ -304,12 +304,18 @@ chronically-deep 4h/8h tail names; the book's fresh entries are top-100
 tardis `funding_rate` field often never converges to the settled print at
 all (last-minute −2.4 vs settled −82; +0.1 vs −193), which also taints
 every pool-level capture estimate. The forfeited-print accounting stands;
-there is simply no reliable one-hour-ahead signal to collect it. The only
-untested variant is a within-final-hour trigger on the raw mark−index
-premium (the primitive, which cannot be baseline-anchored) — one
-measurement of whether trailing premium predicts these prints is the open
-sub-question, and unless it says otherwise this section is a closed door,
-not a candidate.
+there is simply no reliable one-hour-ahead signal to collect it. The raw
+mark−index premium (the primitive, which cannot be baseline-anchored) was
+then measured on both sides: sensitivity is real — the (22:00, 23:00]
+mean premium at ≤ −10 bp fires on **75%** of book-eligible deep prints,
+against 6% for the displayed rate — but precision is fatal: scanned over
+ALL 4,398 top-100 tardis name-days it fires on 12% of them and only **4%
+of fires confirm** (19 captures, 511 false positives). True positives pay
++188 bp mean; the blend is era-unstable false-positive price drift
+(2023/24 "profit" with zero confirms) and runs **−33 bp per fire in
+2026**, the only era with real captures. Tightening the threshold from
+here would be mining n = 19. **This door is closed with both signals
+measured.**
 
 ### 5. Open, unmeasured
 
