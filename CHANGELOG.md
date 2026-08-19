@@ -16,6 +16,21 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~21:30 UTC — the evening exit: tonight's exit is knowable at
+  23:00, and it is the largest execution number this book has produced
+  (owner: "more exits, intraday, be creative").** The modern book is ~100%
+  hourly settlers, so the last settled print visible at 23:00 forecasts the
+  midnight recovery exit at 98% precision (15 false fires in five years,
+  sensitivity 56%). Selling fired names at 23:00: all-in +49 bp per fire
+  (t 4.2), decaying monotonically to zero by the deployed 00:20 — recovered
+  names leak price all evening, and unfired exits drift identically (+53),
+  so the print is the causal permission slip, not the alpha. Combined with
+  the 00:02 pass for the rest, the two-leg exit clock is worth
+  **+0.7 to +5.3 bp/day, positive all six years, +2.6 in 2026** —
+  weight-summed, all-in (skipped prints booked, false fires charged fees +
+  re-buy). PROPOSED in `strategy_program.md` §5, owner to decide; nothing
+  deployed, no config changed. Full grids and the selection note in
+  `research_findings.md` §Settlement-instant timing.
 - **2026-08-19 ~20:30 UTC — fill-clock research: entries are already
   optimal, exits are on the wrong side of the drift (owner: "why 00:20 not
   00:00", then "make it predictive").** Two studies on Bybit's own 1m
