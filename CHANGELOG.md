@@ -16,6 +16,26 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~23:20 UTC — the first live early-exit fire has full
+  receipts, and the demo engine is refusing NEW entries on a ledger
+  disagreement it inherited.** (1) At 21:57:06 UTC the settled-print early
+  exit fired EDENUSDT (under `f38f38d7`, before the v7 deploy); the engine
+  sold the whole 1,526-unit position at market one second later —
+  WAL-recorded fill at 0.05413, 21:57:07.9 UTC, tag `book-exit`, $82.60.
+  The producer's `pub exit=0 suppressed=1` counters describe the vestigial
+  inbox path; the engine's book-omission path is what executes, and it
+  did. (2) Every engine boot today (19:21, 21:55, 22:49) journals
+  `reconciled … may_open:false` on one finding: the venue holds 371.1
+  ACEUSDT while the engine's own log accounts −14,455.6 — inherited
+  accounting debt (five private-stream reconnect gaps whose fills were
+  never delivered, plus the 2026-08-07 ACE hand-trade wedge era), not a
+  today defect. Consequence: **exits work, new entries are refused** until
+  the disagreement clears. The v6-deploy note calling the boot ERRORs
+  transient was half right: the symbol-5/7 findings were transient (7 was
+  EDEN mid-exit and cleared once it sold to zero — evidence the check
+  clears a vanished position at the next boot), the ACE finding is
+  persistent. Repair is an owner decision; the natural candidate is
+  letting ACE exit on its own dead print, then one engine restart.
 - **2026-08-19 ~22:49 UTC — v7 is DEPLOYED to both carry producers: the
   early exit now fires BEFORE the fee pays (owner: "10 min before, let's
   call this v7 … keep improving").** Commit `68b6a29e`, staged deploy with
