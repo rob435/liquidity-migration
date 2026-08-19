@@ -202,6 +202,30 @@ pub struct VenueOrder {
     pub reduce_only: bool,
 }
 
+/// One execution from the venue's own history, as the venue says it.
+///
+/// The private stream forgets: a fill that lands while the engine is down or
+/// while the stream is reconnecting is never delivered. This is the venue's
+/// answer to "what traded on this account between these times", which is the
+/// only way the log can learn those fills after the fact. The symbol is the
+/// venue's own spelling for the same reason as [`VenueOrder`]'s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VenueExecution {
+    /// The venue's own id for this execution — unique per fill, and the
+    /// dedup key against reading the same history twice.
+    pub exec_id: String,
+    /// The venue calls this `orderLinkId`. Empty for executions the engine
+    /// never ordered: a venue-attached stop firing, a hand trade.
+    pub client_order_id: String,
+    pub symbol: String,
+    pub side: Side,
+    pub qty: f64,
+    pub px: f64,
+    pub fee: f64,
+    pub is_maker: bool,
+    pub venue_ts_ms: i64,
+}
+
 /// One of a strategy's own orders that the log says is still working. Handed
 /// out by [`crate::strategy::StrategyCtx::resting`] so a quoting strategy can
 /// find the order it wants to pull or move. Borrowed, not owned: reading your

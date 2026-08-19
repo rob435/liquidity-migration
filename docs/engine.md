@@ -202,6 +202,30 @@ parallel and integrate by type-check.
   run. And a shadow book flip produces exits the kernel refuses, because the
   real account holds nothing to reduce: a long shadow run's denial lines on
   flips are that, not a fault.
+- **The log recovers the fills its stream never delivered, and the may-open
+  latch has a keyed door (2026-08-19).** The private stream forgets: a stop
+  firing during a deploy window or an execution inside a reconnect gap used
+  to leave the log's per-symbol fill sum permanently behind the venue, and
+  the boot comparison would latch `may_open` false on debt no restart could
+  repay — the demo engine spent an evening refusing entries on exactly that.
+  Two repairs, neither touching the check itself:
+
+  - **Recovery.** At boot, and again after every private-stream reconnect,
+    the engine asks the venue's own execution history for the window it was
+    deaf in and writes what it missed as `recovered_fill` records — deduped
+    by the venue's execution id and against recently delivered fills, durable
+    before the log is compared to the venue, attributed through the order
+    that produced them when the log knows it. History unavailable means the
+    old behaviour, exactly.
+  - **The clear.** `engine reconcile-clear --config engine.toml [--execute]`
+    is "somebody looks at the log" made executable, for debt older than the
+    venue's history (about a week). It holds the log's own lock (so the
+    engine must be stopped), prints the standing findings and the per-symbol
+    ledger-versus-venue table, and with `--execute` appends one
+    `latch_cleared` record: the exposure ledger restated to the venue's
+    positions, the absorbed findings kept as the receipt, the latch reset.
+    The next boot still runs the same comparison and latches again on
+    anything that stands — the clear resets the memory, never the check.
 - **The four capital controls are ported, not bypassed.** They were ported
   from `account_loss_guard.py`, `equity_anchored_envelope.py`,
   `venue_protection.py` and the partition in `account_kernel.py`, with

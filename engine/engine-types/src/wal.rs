@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{StrategyId, SymbolId};
-use crate::orders::{AmendSpec, Intent, OrderRequest, OrderUpdate};
+use crate::orders::{AmendSpec, Intent, OrderRequest, OrderUpdate, Side};
 use crate::risk::RiskVerdict;
 
 /// One record in the append-only log. Serialized as tagged JSON inside a
@@ -144,6 +144,47 @@ pub enum WalRecord {
         wall_ts_ms: i64,
         findings: Vec<String>,
         may_open: bool,
+    },
+    /// A fill this engine's own stream never delivered, recovered from the
+    /// venue's execution history: it happened while the engine was down, or
+    /// inside a private-stream gap. Counted into the per-symbol exposure sum
+    /// exactly like a delivered fill, so the log stays an account of what the
+    /// position actually is rather than only of what this process witnessed.
+    RecoveredFill {
+        /// The venue's own execution id — the dedup key against fetching the
+        /// same history twice.
+        exec_id: String,
+        /// Empty when the venue reports none: a venue-attached stop firing,
+        /// or a hand trade.
+        client_order_id: String,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        px: f64,
+        fee: f64,
+        is_maker: bool,
+        /// When it happened, by the venue's clock.
+        venue_ts_ms: i64,
+        /// When this engine learned of it.
+        recovered_wall_ts_ms: i64,
+    },
+    /// An operator looked at the log (`engine reconcile-clear --execute`):
+    /// the per-symbol exposure sum is restated to the venue's own positions,
+    /// with the standing findings kept here as the receipt, and the may-open
+    /// latch resets. This is the deliberate act [`WalRecord::Reconciled`]'s
+    /// latch waits for — the next boot still runs its own comparison, so a
+    /// difference that appears again latches again.
+    LatchCleared {
+        wall_ts_ms: i64,
+        /// Why, in the operator's words.
+        note: String,
+        /// The exposure ledger as restated — the venue's signed positions at
+        /// the moment of clearing. A reader treats this as "set", like
+        /// [`WalRecord::SegmentBase`]'s copy.
+        restated_exposure: Vec<SymbolTotal>,
+        /// What stood unexplained before the clear, so the log keeps saying
+        /// what was absorbed.
+        findings: Vec<String>,
     },
     /// The first record of every log segment after the first: everything boot
     /// replay needs from the segments before this one, restated, so replaying

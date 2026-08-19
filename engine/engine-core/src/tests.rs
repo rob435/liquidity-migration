@@ -61,6 +61,8 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::ControlAnchor { .. } => "control_anchor",
         WalRecord::Reconciled { .. } => "reconciled",
         WalRecord::SegmentBase { .. } => "segment_base",
+        WalRecord::RecoveredFill { .. } => "recovered_fill",
+        WalRecord::LatchCleared { .. } => "latch_cleared",
     }
     .to_string()
 }

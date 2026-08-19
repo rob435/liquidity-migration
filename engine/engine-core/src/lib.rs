@@ -9,6 +9,7 @@
 pub mod assembly;
 pub mod attribution;
 pub mod bench;
+pub mod clear;
 pub mod clock;
 pub mod config;
 pub mod covers;

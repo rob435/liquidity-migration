@@ -70,6 +70,16 @@ impl Attribution {
                     };
                     me.on_update(strategy, update);
                 }
+                // A fill recovered from the venue's history joins the same
+                // way, through the order that produced it. One recovered
+                // without an order of ours — a hand trade, a venue stop with
+                // no id — is charged to nobody, exactly like a foreign fill.
+                WalRecord::RecoveredFill { client_order_id, symbol, side, qty, .. } => {
+                    let Some(strategy) = sender.get(client_order_id.as_str()).copied() else {
+                        continue;
+                    };
+                    me.note(strategy, *symbol, *side, *qty);
+                }
                 // A rotation restated the whole table. Set, not add: at its
                 // place in a chain read these rows are exactly what the fills
                 // before it summed to, and in a fresh segment they are all
@@ -112,13 +122,18 @@ impl Attribution {
         else {
             return;
         };
+        self.note(strategy, *symbol, *side, *qty);
+    }
+
+    /// The one arithmetic behind both the delivered and the recovered path.
+    pub fn note(&mut self, strategy: StrategyId, symbol: SymbolId, side: Side, qty: f64) {
         // An unreal number would poison the running total for good.
         if !qty.is_finite() {
             return;
         }
         let signed = match side {
-            Side::Buy => *qty,
-            Side::Sell => -*qty,
+            Side::Buy => qty,
+            Side::Sell => -qty,
         };
         let key = (strategy.0, symbol.0);
         let total = self.filled.entry(key).or_insert(0.0);

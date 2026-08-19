@@ -64,6 +64,46 @@ pub const MAX_INTENTS_PER_WAKE: usize = 64;
 
 pub const ENGINE_VERSION: &str = concat!("engine-core ", env!("CARGO_PKG_VERSION"));
 
+/// Pad both ends of a fill-recovery window: clocks differ and an execution
+/// can land on the boundary. Overlap is safe — recovery dedups by the
+/// venue's own execution id — and a miss is not.
+const RECOVERY_PAD_MS: i64 = 120_000;
+
+/// How far back the venue serves execution history (Bybit: about a week).
+/// A log further behind than this cannot be completed by recovery, and
+/// `engine reconcile-clear` is the tool for what the findings still name.
+const RECOVERY_REACH_MS: i64 = 7 * 86_400_000;
+
+/// How many recently journaled fills to remember for gap-recovery dedup.
+/// A gap plus its pads spans minutes; this covers hours of fills.
+const RECENT_FILLS_KEPT: usize = 2048;
+
+/// The newest wall-clock stamp a log carries, of any kind. What fill
+/// recovery measures its window from.
+fn newest_stamp_ms(replayed: &[WalRecord]) -> Option<i64> {
+    let mut newest: Option<i64> = None;
+    for record in replayed {
+        let stamp = match record {
+            WalRecord::Boot { wall_ts_ms, .. }
+            | WalRecord::Reconciled { wall_ts_ms, .. }
+            | WalRecord::SegmentBase { wall_ts_ms, .. }
+            | WalRecord::LatchCleared { wall_ts_ms, .. } => Some(*wall_ts_ms),
+            WalRecord::OrderUpdate { update: OrderUpdate::Fill { venue_ts_ms, .. } } => {
+                Some(*venue_ts_ms)
+            }
+            WalRecord::RecoveredFill { venue_ts_ms, .. } => Some(*venue_ts_ms),
+            WalRecord::Markout { fill_ts_ms, .. } => Some(*fill_ts_ms),
+            _ => None,
+        };
+        if let Some(stamp) = stamp {
+            if newest.is_none_or(|n| stamp > n) {
+                newest = Some(stamp);
+            }
+        }
+    }
+    newest
+}
+
 #[derive(Debug)]
 pub enum EngineError {
     Wal(WalError),
@@ -190,6 +230,18 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// the same reason: a stop the venue drops after a rotation must still
     /// be repairable at the level the log intended.
     intended_stops: std::collections::BTreeMap<u16, f64>,
+    /// Everything the venue traded before this wall time is in the log —
+    /// delivered by the stream or recovered from the venue's history.
+    /// Advanced only when a recovery pass completes, and it is where the
+    /// next gap recovery starts reading.
+    recovered_until_ms: i64,
+    /// Venue execution ids already recovered, so overlapping recovery
+    /// windows cannot write the same fill twice.
+    recovered_exec_ids: std::collections::HashSet<String>,
+    /// Recently journaled delivered fills (order id, venue stamp, qty) —
+    /// the other half of that dedup: a fill the stream DID deliver near a
+    /// gap's edge must not come back as recovered.
+    recent_fills: std::collections::VecDeque<(String, i64, f64)>,
     shadow: bool,
     group_flush: Duration,
     refresh_after_ns: u64,
@@ -244,15 +296,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         sleeves: &[String],
         replayed: &[WalRecord],
     ) -> Result<Self, EngineError> {
-        let mut orders = LedgerOfOrders::from_records(replayed);
-        // Same records, same join: a restart must not forget whose
-        // position is whose, or the other sleeve trades straight into it.
-        let attribution = Attribution::from_records(replayed);
-        // Seeded by the same scans reconcile trusts and kept live from here
-        // on, because a rotation restates them into the new segment's first
-        // record and must say exactly what a replay would have said.
-        let logged_exposure = crate::reconcile::logged_exposure(replayed);
-        let intended_stops = crate::reconcile::intended_stops(replayed);
+        // The order/attribution/exposure scans happen AFTER fill recovery
+        // below, so a fill the venue saw while this process was down seeds
+        // every book the same way a delivered one would have.
 
         let boot_ms = clock::wall_ms();
         wal.append(&WalRecord::Boot {
@@ -354,6 +400,37 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // UTC day from the first evaluation.
         risk.observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
 
+        // Fills the venue saw and this log never heard: a stop that fired
+        // during a deploy window, an execution inside a private-stream gap.
+        // Recovered from the venue's own history and made durable before the
+        // log is compared to the venue, so what actually traded is a fill in
+        // the log rather than a finding against it.
+        let recovered_fills = Self::recover_missed_fills(&mut wal, &mut venue, replayed, &market.table).await;
+        let effective_owned: Vec<WalRecord>;
+        let effective: &[WalRecord] = if recovered_fills.is_empty() {
+            replayed
+        } else {
+            effective_owned = replayed.iter().cloned().chain(recovered_fills).collect();
+            &effective_owned
+        };
+
+        let mut orders = LedgerOfOrders::from_records(effective);
+        // Same records, same join: a restart must not forget whose
+        // position is whose, or the other sleeve trades straight into it.
+        let attribution = Attribution::from_records(effective);
+        // Seeded by the same scans reconcile trusts and kept live from here
+        // on, because a rotation restates them into the new segment's first
+        // record and must say exactly what a replay would have said.
+        let logged_exposure = crate::reconcile::logged_exposure(effective);
+        let intended_stops = crate::reconcile::intended_stops(effective);
+        let recovered_exec_ids: std::collections::HashSet<String> = effective
+            .iter()
+            .filter_map(|record| match record {
+                WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.clone()),
+                _ => None,
+            })
+            .collect();
+
         // What the log believes against what the venue says. Boot is the one
         // moment the two can be compared: from here on the engine only ever
         // learns about its own orders.
@@ -361,7 +438,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             &mut wal,
             &mut venue,
             &orders,
-            replayed,
+            effective,
             &account,
             &market.table,
             &rules,
@@ -459,6 +536,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             control_anchors,
             logged_exposure,
             intended_stops,
+            // Boot recovery just read the venue's history up to now; the
+            // next gap starts here.
+            recovered_until_ms: clock::wall_ms(),
+            recovered_exec_ids,
+            recent_fills: VecDeque::new(),
             ledger: LatencyLedger::new(now),
             // Deliberately not rebuilt from the log at boot, unlike
             // attribution: this is a running score for the run in front of
@@ -477,6 +559,116 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             events_seen: 0,
             subscriptions,
         })
+    }
+
+    /// Ask the venue what traded on this account since the log's newest
+    /// stamp, and write down every execution the log has never seen.
+    ///
+    /// Failure is "history unavailable": boot proceeds exactly as it did
+    /// before this existed, and reconcile says whatever the venue's
+    /// positions force it to say. Success is durable before the reconcile
+    /// that would otherwise have read what actually traded as somebody
+    /// else's trading.
+    async fn recover_missed_fills(
+        wal: &mut W,
+        venue: &mut V,
+        replayed: &[WalRecord],
+        table: &SymbolTable,
+    ) -> Vec<WalRecord> {
+        let now_ms = clock::wall_ms();
+        let Some(newest) = newest_stamp_ms(replayed) else {
+            // A fresh log has nothing to be behind on. Whatever the account
+            // already holds predates this engine, and reconcile is what says
+            // so.
+            return Vec::new();
+        };
+        let mut since = newest - RECOVERY_PAD_MS;
+        if since < now_ms - RECOVERY_REACH_MS {
+            tracing::warn!(
+                behind_ms = now_ms - newest,
+                "the log is further behind than the venue's execution history \
+                 reaches; fills older than that are not recoverable, and \
+                 `engine reconcile-clear` is the tool for what the findings \
+                 still name"
+            );
+            since = now_ms - RECOVERY_REACH_MS;
+        }
+        if since >= now_ms {
+            return Vec::new();
+        }
+        let mut execs = match venue.executions(since, now_ms).await {
+            Ok(execs) => execs,
+            Err(e) => {
+                tracing::warn!(error = %e, "no execution history; fills in gaps stay unrecovered");
+                return Vec::new();
+            }
+        };
+        let known_ids: std::collections::HashSet<&str> = replayed
+            .iter()
+            .filter_map(|record| match record {
+                WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let delivered: Vec<(&str, i64, f64)> = replayed
+            .iter()
+            .filter_map(|record| match record {
+                WalRecord::OrderUpdate {
+                    update: OrderUpdate::Fill { client_order_id, venue_ts_ms, qty, .. },
+                } if *venue_ts_ms >= since => {
+                    Some((client_order_id.as_str(), *venue_ts_ms, *qty))
+                }
+                _ => None,
+            })
+            .collect();
+        execs.sort_by_key(|exec| exec.venue_ts_ms);
+        let mut out = Vec::new();
+        for exec in execs {
+            if known_ids.contains(exec.exec_id.as_str()) {
+                continue;
+            }
+            let same_delivered = delivered.iter().any(|(id, ts, qty)| {
+                *id == exec.client_order_id
+                    && *ts == exec.venue_ts_ms
+                    && (*qty - exec.qty).abs() <= 1e-9
+            });
+            if same_delivered {
+                continue;
+            }
+            let Some(symbol) = table.get(&exec.symbol) else {
+                // A symbol this engine never followed is somebody else's
+                // trading, which is reconcile's to report, not this path's
+                // to absorb.
+                continue;
+            };
+            let record = WalRecord::RecoveredFill {
+                exec_id: exec.exec_id,
+                client_order_id: exec.client_order_id,
+                symbol,
+                side: exec.side,
+                qty: exec.qty,
+                px: exec.px,
+                fee: exec.fee,
+                is_maker: exec.is_maker,
+                venue_ts_ms: exec.venue_ts_ms,
+                recovered_wall_ts_ms: now_ms,
+            };
+            if let Err(e) = wal.append(&record) {
+                tracing::error!(error = %e, "could not write a recovered fill; stopping recovery");
+                break;
+            }
+            out.push(record);
+        }
+        if !out.is_empty() {
+            tracing::warn!(
+                count = out.len(),
+                "recovered fills the private stream never delivered"
+            );
+            if let Err(e) = wal.barrier() {
+                tracing::error!(error = %e, "recovered fills are written but not yet durable");
+            }
+        }
+        out
     }
 
     /// Compare the log against the venue, write down what was found, and say
@@ -509,6 +701,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // of the log has said otherwise or the scan would have stopped
             // there first.
             WalRecord::SegmentBase { may_open, .. } => Some(*may_open),
+            // An operator ran `reconcile-clear`: the deliberate look the
+            // latch waits for. It resets the memory, not the check — the
+            // comparison below still latches again on anything that stands.
+            WalRecord::LatchCleared { .. } => Some(true),
             _ => None,
         });
 
@@ -1822,6 +2018,81 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
     }
 
+    /// After a private-stream gap: ask the venue what traded while the
+    /// stream was away and fold anything the log missed into the same books
+    /// a delivered fill feeds. Failure leaves things exactly as they stood
+    /// before this existed — the gap stays a gap, and boot's own recovery
+    /// reads the same history at the next start.
+    async fn recover_gap_fills(&mut self) {
+        let now_ms = clock::wall_ms();
+        let since = (self.recovered_until_ms - RECOVERY_PAD_MS).max(now_ms - RECOVERY_REACH_MS);
+        if since >= now_ms {
+            return;
+        }
+        let mut execs = match self.venue.executions(since, now_ms).await {
+            Ok(execs) => execs,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "no execution history after the gap; fills inside it stay unrecovered"
+                );
+                return;
+            }
+        };
+        execs.sort_by_key(|exec| exec.venue_ts_ms);
+        let mut recovered = 0usize;
+        for exec in execs {
+            if self.recovered_exec_ids.contains(exec.exec_id.as_str()) {
+                continue;
+            }
+            let same_delivered = self.recent_fills.iter().any(|(id, ts, qty)| {
+                *id == exec.client_order_id
+                    && *ts == exec.venue_ts_ms
+                    && (*qty - exec.qty).abs() <= 1e-9
+            });
+            if same_delivered {
+                continue;
+            }
+            let Some(symbol) = self.market.table.get(&exec.symbol) else {
+                // Somebody else's trading in a symbol no strategy follows;
+                // reconcile's to report at the next boot, not this path's to
+                // absorb.
+                continue;
+            };
+            let record = WalRecord::RecoveredFill {
+                exec_id: exec.exec_id.clone(),
+                client_order_id: exec.client_order_id.clone(),
+                symbol,
+                side: exec.side,
+                qty: exec.qty,
+                px: exec.px,
+                fee: exec.fee,
+                is_maker: exec.is_maker,
+                venue_ts_ms: exec.venue_ts_ms,
+                recovered_wall_ts_ms: now_ms,
+            };
+            if let Err(e) = self.wal.append(&record) {
+                tracing::error!(error = %e, "could not write a recovered fill; stopping this pass");
+                return;
+            }
+            self.recovered_exec_ids.insert(exec.exec_id);
+            reconcile::note_fill(&mut self.logged_exposure, symbol, exec.side, exec.qty);
+            // Through the order that produced it, exactly like a delivered
+            // fill; one with no order of ours is charged to nobody.
+            if let Some(sid) = self.orders.owner_of(&exec.client_order_id) {
+                self.attribution.note(sid, symbol, exec.side, exec.qty);
+            }
+            recovered += 1;
+        }
+        if recovered > 0 {
+            tracing::warn!(count = recovered, "recovered fills from the stream gap");
+            if let Err(e) = self.wal.barrier() {
+                tracing::error!(error = %e, "recovered fills are written but not yet durable");
+            }
+        }
+        self.recovered_until_ms = now_ms;
+    }
+
     /// Every order update, wherever it came from, goes through here.
     async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
         self.wal.append(&WalRecord::OrderUpdate {
@@ -1834,6 +2105,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // a rotation can restate it.
         if let OrderUpdate::Fill { symbol, side, qty, .. } = &update {
             reconcile::note_fill(&mut self.logged_exposure, *symbol, *side, *qty);
+        }
+        // Remembered for gap recovery's dedup: a fill the stream DID deliver
+        // near a gap's edge must not come back from the venue's history as a
+        // recovered one.
+        if let OrderUpdate::Fill { client_order_id, venue_ts_ms, qty, .. } = &update {
+            self.recent_fills.push_back((client_order_id.clone(), *venue_ts_ms, *qty));
+            while self.recent_fills.len() > RECENT_FILLS_KEPT {
+                self.recent_fills.pop_front();
+            }
         }
         // Whose fill it was, before any strategy is woken, so the one that
         // placed the order sees its own position already changed. The ledger
@@ -1879,9 +2159,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // A private-stream gap may have swallowed fills. Refresh the account
         // reading now rather than trusting exposure across the gap.
         if let OrderUpdate::StreamReset { .. } = update {
-            // Exposure can be repaired from the venue; the fills themselves
-            // cannot. Remembered so the cost ledger does not go on claiming to
-            // be a complete account of what the trading cost.
+            // The cost ledger stays marked: recovered fills carry no arrival
+            // anchor, so the cost report is still not a complete account of
+            // what the trading cost.
             self.fills.stream_gap();
             match self.venue.account_view().await {
                 Ok(view) => self.adopt_view(view),
@@ -1889,6 +2169,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     tracing::warn!(error = %e, "no fresh account reading after a stream gap");
                 }
             }
+            // The fills themselves CAN be repaired from the venue: its
+            // execution history is asked for the gap, so the log keeps
+            // accounting for what actually traded.
+            self.recover_gap_fills().await;
         }
 
         let now = clock::now_ns();

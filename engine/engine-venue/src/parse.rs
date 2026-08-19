@@ -6,7 +6,7 @@
 //! risk kernel a picture of an account that does not exist.
 
 use engine_types::ids::{Symbol, SymbolId};
-use engine_types::orders::{InstrumentRule, OrderAck, VenueOrder};
+use engine_types::orders::{InstrumentRule, OrderAck, VenueExecution, VenueOrder};
 use engine_types::risk::PositionView;
 use engine_types::{Side, VenueError};
 use serde_json::Value;
@@ -193,6 +193,46 @@ pub(crate) fn parse_working_orders(
             qty: num_field(row, "qty")?,
             filled_qty: opt_num_field(row, "cumExecQty")?.unwrap_or(0.0),
             reduce_only: row.get("reduceOnly").and_then(Value::as_bool).unwrap_or(false),
+        });
+    }
+    Ok((out, next_cursor(result)))
+}
+
+/// One page of `/v5/execution/list`. Only quantity-moving executions come
+/// back: a funding charge appears in this history too, and folding it into a
+/// position sum would corrupt the very number this read exists to repair.
+pub(crate) fn parse_executions(
+    result: &Value,
+) -> Result<(Vec<VenueExecution>, String), VenueError> {
+    let rows = list_field(result)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        // Trade, AdlTrade, BustTrade and Settle move the position; Funding
+        // and the rest do not.
+        let exec_type = str_field(row, "execType").unwrap_or_default();
+        if !matches!(exec_type.as_str(), "Trade" | "AdlTrade" | "BustTrade" | "Settle") {
+            continue;
+        }
+        let symbol = str_field(row, "symbol")?;
+        let side = match str_field(row, "side")?.as_str() {
+            "Buy" => Side::Buy,
+            "Sell" => Side::Sell,
+            other => {
+                return Err(VenueError::BadReply(format!(
+                    "execution in {symbol} has an unknown side {other:?}"
+                )))
+            }
+        };
+        out.push(VenueExecution {
+            exec_id: str_field(row, "execId")?,
+            client_order_id: str_field(row, "orderLinkId").unwrap_or_default(),
+            symbol,
+            side,
+            qty: num_field(row, "execQty")?,
+            px: num_field(row, "execPrice")?,
+            fee: opt_num_field(row, "execFee")?.unwrap_or(0.0),
+            is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
+            venue_ts_ms: num_field(row, "execTime")? as i64,
         });
     }
     Ok((out, next_cursor(result)))
@@ -483,5 +523,42 @@ mod tests {
             parse_instruments(&json!({"nothing": true})),
             Err(VenueError::BadReply(_))
         ));
+    }
+
+    #[test]
+    fn executions_read_the_history_page_and_skip_the_funding_rows() {
+        let result = json!({
+            "list": [
+                {"execId": "e-1", "orderLinkId": "eng-9", "symbol": "ACEUSDT",
+                 "side": "Sell", "execQty": "1526", "execPrice": "0.05413",
+                 "execFee": "0.0454", "isMaker": false,
+                 "execTime": "1787176627876", "execType": "Trade"},
+                // The funding charge shows up in the same history and moves
+                // no quantity; folding it in would corrupt the position sum.
+                {"execId": "e-2", "orderLinkId": "", "symbol": "ACEUSDT",
+                 "side": "Buy", "execQty": "1526", "execPrice": "0.05",
+                 "execFee": "0.001", "isMaker": false,
+                 "execTime": "1787176627877", "execType": "Funding"},
+                // A venue stop firing carries no order id of ours and still
+                // moves the position: kept.
+                {"execId": "e-3", "orderLinkId": "", "symbol": "ACEUSDT",
+                 "side": "Sell", "execQty": "10", "execPrice": "0.05",
+                 "execFee": "0.0003", "isMaker": true,
+                 "execTime": "1787176627878", "execType": "Trade"},
+            ],
+            "nextPageCursor": ""
+        });
+        let (rows, cursor) = parse_executions(&result).unwrap();
+        assert!(cursor.is_empty());
+        assert_eq!(rows.len(), 2, "the funding row is not a fill");
+        assert_eq!(rows[0].exec_id, "e-1");
+        assert_eq!(rows[0].client_order_id, "eng-9");
+        assert_eq!(rows[0].side, Side::Sell);
+        assert_eq!(rows[0].qty, 1526.0);
+        assert_eq!(rows[0].px, 0.05413);
+        assert_eq!(rows[0].venue_ts_ms, 1_787_176_627_876);
+        assert!(!rows[0].is_maker);
+        assert_eq!(rows[1].client_order_id, "");
+        assert!(rows[1].is_maker);
     }
 }

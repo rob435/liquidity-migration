@@ -27,7 +27,8 @@ pub use market::{
 };
 pub use orders::{
     Action, AmendSpec, Intent, InstrumentRule, OrderAck, OrderFacts, OrderKind, OrderRequest,
-    OrderUpdate, RestingOrder, Side, StopSpec, TimeInForce, VenueError, VenueOrder, WorkPolicy,
+    OrderUpdate, RestingOrder, Side, StopSpec, TimeInForce, VenueError, VenueExecution,
+    VenueOrder, WorkPolicy,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{EngineEvent, Strategy, StrategyCtx};
@@ -149,4 +150,20 @@ pub trait VenueGateway {
     /// placed it. Read at boot: the log says what this engine sent, and only
     /// the venue can say what is actually out there.
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError>;
+    /// Every execution on this account between the two wall-clock times,
+    /// whoever ordered it — the venue's own history, read to recover fills
+    /// the private stream never delivered (an engine-down gap, a reconnect
+    /// gap). Callers treat an error as "history unavailable" and fall back
+    /// to today's behaviour, so the default refusal costs nothing beyond
+    /// the recovery it cannot do.
+    async fn executions(
+        &mut self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
+        let _ = (start_ms, end_ms);
+        Err(VenueError::BadRequest(
+            "this venue cannot list its execution history".to_string(),
+        ))
+    }
 }

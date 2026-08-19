@@ -33,6 +33,13 @@ engine — the execution loop
       What the trading cost: maker share, fee, how far each fill landed from
       the price on the screen when its order left, and where the market went
       afterwards. Per sleeve and symbol.
+
+  engine reconcile-clear --config engine.toml [--note TEXT] [--execute]
+      The deliberate look the may-open latch waits for. Stop the engine
+      first (this takes the log's own lock). Shows the standing findings;
+      with --execute, restates the exposure ledger to the venue's positions
+      and resets the latch, keeping the findings in the log as the receipt.
+      The next boot still runs its own comparison.
 ";
 
 fn main() -> ExitCode {
@@ -124,6 +131,12 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
                 );
             }
             Ok(())
+        }
+        "reconcile-clear" => {
+            let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+            let note = value(args, "--note").unwrap_or("operator reconcile-clear".into());
+            let execute = args.iter().any(|a| a == "--execute");
+            runtime()?.block_on(engine_core::clear::run(&config, &note, execute))
         }
         "-h" | "--help" | "help" => {
             print!("{USAGE}");

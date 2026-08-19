@@ -268,8 +268,22 @@ pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
             WalRecord::OrderUpdate { update: OrderUpdate::Fill { symbol, side, qty, .. } } => {
                 note_fill(&mut out, *symbol, *side, *qty);
             }
+            // A fill recovered from the venue's history counts exactly like a
+            // delivered one: it moved the position whether or not the stream
+            // was up to say so.
+            WalRecord::RecoveredFill { symbol, side, qty, .. } => {
+                note_fill(&mut out, *symbol, *side, *qty);
+            }
             WalRecord::SegmentBase { logged_exposure, .. } => {
                 out = logged_exposure
+                    .iter()
+                    .map(|row| (row.symbol.0, row.signed_qty))
+                    .collect();
+            }
+            // An operator restated the ledger to the venue's positions after
+            // looking at the findings. "Set", like a rotation's restatement.
+            WalRecord::LatchCleared { restated_exposure, .. } => {
+                out = restated_exposure
                     .iter()
                     .map(|row| (row.symbol.0, row.signed_qty))
                     .collect();
@@ -550,6 +564,71 @@ mod tests {
         ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 2.0, false)]));
         assert_eq!(out.stop_repairs(), vec![(SymbolId(3), 85.0)]);
+    }
+
+    fn recovered(exec: &str, id: &str, symbol: u16, side: Side, qty: f64) -> WalRecord {
+        WalRecord::RecoveredFill {
+            exec_id: exec.into(),
+            client_order_id: id.into(),
+            symbol: SymbolId(symbol),
+            side,
+            qty,
+            px: 100.0,
+            fee: 0.0,
+            is_maker: false,
+            venue_ts_ms: 5,
+            recovered_wall_ts_ms: 6,
+        }
+    }
+
+    #[test]
+    fn a_recovered_fill_squares_the_venue_position() {
+        // A fill landed while the engine was down. Without recovery the
+        // venue holds more than the log accounts for and the engine stops
+        // opening; with the recovered record the same picture is clean.
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 3.0, Some(90.0)),
+            fill("eng-1", 3, Side::Buy, 2.0),
+        ];
+        let without = run(&log, &[], &account(vec![held(3, Side::Buy, 3.0, true)]));
+        assert!(without.must_not_open(), "the gap fill is unaccounted until recovered");
+        let mut with = log.clone();
+        with.push(recovered("2f6e", "eng-1", 3, Side::Buy, 1.0));
+        let out = run(&with, &[], &account(vec![held(3, Side::Buy, 3.0, true)]));
+        // The order itself still reads as vanished (its remainder ended in
+        // the same gap), which reports and does not stop anything.
+        assert!(!out.must_not_open(), "{:?}", out.findings);
+        assert!(
+            !out.findings.iter().any(|f| matches!(f, Finding::UnaccountedExposure { .. })),
+            "{:?}",
+            out.findings
+        );
+    }
+
+    #[test]
+    fn an_operators_restatement_is_the_ledger_from_then_on() {
+        use engine_types::SymbolTotal;
+        // Debt older than the venue's history cannot be replayed, only
+        // looked at and absorbed. After the clear the ledger says what the
+        // venue said, and later fills move THAT number.
+        let mut log = vec![
+            sent("eng-1", 3, Side::Sell, 14_455.0, Some(110.0)),
+            fill("eng-1", 3, Side::Sell, 14_455.0),
+            WalRecord::LatchCleared {
+                wall_ts_ms: 9,
+                note: "looked at the log".into(),
+                restated_exposure: vec![SymbolTotal {
+                    symbol: SymbolId(3),
+                    signed_qty: 371.1,
+                }],
+                findings: vec!["symbol 3: unaccounted".into()],
+            },
+        ];
+        let out = run(&log, &[], &account(vec![held(3, Side::Buy, 371.1, true)]));
+        assert!(out.findings.is_empty(), "{:?}", out.findings);
+        log.push(fill("eng-1", 3, Side::Sell, 100.0));
+        let out = run(&log, &[], &account(vec![held(3, Side::Buy, 271.1, true)]));
+        assert!(out.findings.is_empty(), "{:?}", out.findings);
     }
 
     #[test]

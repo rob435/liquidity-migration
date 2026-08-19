@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
     AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce,
-    VenueOrder,
+    VenueExecution, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
@@ -20,8 +20,8 @@ use crate::clock::mono_ns;
 use crate::creds::Credentials;
 use crate::fmt::venue_num;
 use crate::parse::{
-    parse_instruments, parse_order_ack, parse_positions, parse_wallet, parse_working_orders,
-    venue_result,
+    parse_executions, parse_instruments, parse_order_ack, parse_positions, parse_wallet,
+    parse_working_orders, venue_result,
 };
 use crate::realm::VenueRealm;
 use crate::rest::RestClient;
@@ -38,6 +38,7 @@ const PATH_POSITIONS: &str = "/v5/position/list";
 const PATH_INSTRUMENTS: &str = "/v5/market/instruments-info";
 const PATH_QUERY_API: &str = "/v5/user/query-api";
 const PATH_ORDERS_OPEN: &str = "/v5/order/realtime";
+const PATH_EXECUTIONS: &str = "/v5/execution/list";
 
 /// Enough to cover every linear contract several times over; a cursor that
 /// never empties is a venue fault, not a reason to loop forever.
@@ -413,6 +414,55 @@ impl VenueGateway for BybitGateway {
         Err(VenueError::BadReply(format!(
             "working-order listing still had pages after {MAX_PAGES}"
         )))
+    }
+
+    async fn executions(
+        &mut self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
+        // The venue caps one query's window at 7 days, so a longer ask walks
+        // in slices. `settleCoin` rather than a symbol, for the same reason
+        // as working_orders: this read exists to find what the log missed,
+        // and asking only about known symbols would hide exactly that.
+        const SLICE_MS: i64 = 6 * 86_400_000;
+        let mut out = Vec::new();
+        let mut from = start_ms;
+        while from < end_ms {
+            let to = (from + SLICE_MS).min(end_ms);
+            let mut cursor = String::new();
+            let mut pages = 0;
+            loop {
+                if pages >= MAX_PAGES {
+                    // A truncated history would quietly leave fills missing,
+                    // which is the one answer this read must never give.
+                    return Err(VenueError::BadReply(format!(
+                        "execution listing still had pages after {MAX_PAGES}"
+                    )));
+                }
+                let query = if cursor.is_empty() {
+                    format!(
+                        "category={CATEGORY}&settleCoin=USDT&startTime={from}&endTime={to}&limit=100"
+                    )
+                } else {
+                    format!(
+                        "category={CATEGORY}&settleCoin=USDT&startTime={from}&endTime={to}\
+                         &limit=100&cursor={}",
+                        percent_encode(&cursor)
+                    )
+                };
+                let envelope = self.rest.get_signed(PATH_EXECUTIONS, &query).await?;
+                let (rows, next) = parse_executions(&venue_result(envelope)?)?;
+                out.extend(rows);
+                if next.is_empty() {
+                    break;
+                }
+                cursor = next;
+                pages += 1;
+            }
+            from = to;
+        }
+        Ok(out)
     }
 
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
