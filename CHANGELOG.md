@@ -16,6 +16,24 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~22:30 UTC — measured: the early exit can fire BEFORE the
+  print settles; proposed, not built (owner: "why not exit before funding
+  is paid — front-run the farmers").** The deployed exit sells ~1 min
+  after the dying print pays, into the crowd's exodus. Tardis tick data
+  shows the venue locks the upcoming rate ~55 s before settlement — the
+  S−1 min read matched the final print in 230/230 walk-forward days, so
+  the same fire decision is knowable minutes early from a public ticker
+  read. On the deployed cascade's own 1,112 fires (5y, 1m klines):
+  selling at S−1/S−5/S−10 is worth +6.6/+12.8/+21.3 bp per fire all-in
+  over today's S+1 sell (medians +1.9/+3.6/+11.3; the forfeited final
+  print costs ~nothing), 2025/26-concentrated; book-level +1.6–3.1 bp/day
+  in the modern eras, ~0 before. Premature-fire drag ~1.5 bp/fire-day at
+  S−5, zero at S−1. Full row in `research_findings.md` §Settlement-instant
+  timing; proposal in `strategy_program.md` §5 (dials S−1 free / S−5
+  recommended / S−10 aggressive; settled-print path stays as fallback).
+  The side finding — universe-drop exits leak +74/+43 bp over the last 25
+  min before the 00:20 fill but only +18/+15 in 2026 — is recorded and
+  not proposed. Research only: no producer or engine change shipped.
 - **2026-08-19 ~21:55 UTC — the early exit is DEPLOYED to both carry
   producers (owner: "sell after 1 dead hour is the most interesting, I do
   believe it is the right approach").** Commit `f38f38d7`, staged deploy

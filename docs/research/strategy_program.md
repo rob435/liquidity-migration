@@ -378,6 +378,27 @@ measured.**
   name-days in 5.5 years; the per-sleeve capital partition in `account_kernel.py`
   budgets each sleeve separately and does not see combined per-symbol exposure.
   Small, but it is the only genuine coupling between them.
+- **PROPOSED — fire the early exit before the print settles (2026-08-19
+  night, owner: "why not exit before funding is paid — front-run the
+  farmers").** The deployed exit below sells ~1 minute AFTER the dying
+  print pays, into the farmer exodus. The venue locks the upcoming rate
+  ~55 s before settlement (tardis tick evidence; the S−1 read matched the
+  final print 230/230 walk-forward days), so the same fire decision is
+  knowable minutes early with a public ticker read. On the deployed
+  cascade's own 1,112 fires: all-in **+6.6/+12.8/+21.3 bp per fire selling
+  at S−1/S−5/S−10** (medians +1.9/+3.6/+11.3; forfeited final print ≈ 0);
+  book-level +1.6–2.0 (S−5) to +2.4–3.1 (S−10) bp/day in 2025/26, ~0
+  before — the modern farmer-dump signature again. Premature-fire drag is
+  small and tail-driven (~1.5 bp/fire-day at S−5; zero at S−1). Dials:
+  S−1 free, S−5 recommended, S−10 aggressive. Build: one public tickers
+  batch (fundingRate, nextFundingTime) for held names in the final minutes
+  before their next settlement, firing the existing mask path early;
+  settled-print path stays as fallback; same `CARRY_EARLY_EXIT` switch.
+  Full numbers and caveats:
+  [research_findings.md §Settlement-instant timing](research_findings.md).
+  The side discovery — universe-drop exits leak +74/+43 bp over the last
+  25 minutes before the 00:20 fill — is NOT proposed (2026 weak at
+  +18/+15, t 0.8, and it needs a 23:55 shadow decision).
 - **The early exit is DEPLOYED (2026-08-19 late evening, owner: "sell
   after 1 dead hour is the right approach").** The shipped form is the
   parameter-free version of leg A below, generalized all-day: sell a held
