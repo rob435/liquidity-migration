@@ -14,9 +14,12 @@ match; never append history to this file.
 ### The fleet
 
 - **The engine owns the demo account, and both sleeves feed it.** First
-  deployed 2026-08-14 20:34 UTC; currently at `ee8b72a6` (staged deploy
-  2026-08-18 ~23:53 UTC, `staged-ok commit=ee8b72a6 profile=operational`,
-  `verify-ok … mainnet=armed`), which brought the in-flight cover book, WAL
+  deployed 2026-08-14 20:34 UTC; currently at `8074942d` (staged deploy
+  2026-08-19 ~19:20 UTC, `staged-ok commit=8074942d profile=operational`,
+  `verify-ok … mainnet=armed`), which promoted carry_hold v6 to both CARRY
+  producers (`strategy_profile=v6`, the Binance whale-EOD cache beside each
+  producer root — CHANGELOG 2026-08-19). The prior `ee8b72a6` (2026-08-18)
+  brought the in-flight cover book, WAL
   segment rotation, the quote-age bound, and leverage pre-arm. The demo
   engine runs `leverage_authority = "sole"` (set in the host's
   `/etc/liquidity-migration/engine.toml`, which staged deploys deliberately
@@ -113,11 +116,16 @@ match; never append history to this file.
 
 ### The funded account
 
-- **It is near-empty: equity ≈0.04 USDT** (owner health read 2026-08-12
-  19:14 UTC: equity 0.0398, available 0.0073, `healthy`, no positions). It went
-  306.06 → ~0 entirely outside the bot's halted book — hand trading and/or funds
-  moved off, cause not independently confirmed. No entry can size against it
-  (6 USDT floor), so **the fleet decides cash until the account is funded**.
+- **It holds money again: the 2026-08-19 19:24 UTC owner-health read shows
+  equity 541.26 USDT** (the mainnet CARRY producer sized its book off it, so
+  the mainnet target book is no longer near-zero). The funding arrived by
+  hand, outside the bot — not independently confirmed beyond the health
+  read. Before that it was near-empty: equity ≈0.04 USDT (read 2026-08-12
+  19:14 UTC: 0.0398, available 0.0073, `healthy`, no positions), after going
+  306.06 → ~0 entirely outside the bot's halted book — hand trading and/or
+  funds moved off, cause not independently confirmed. The funded engine
+  remains **shadow** either way; money in the account changes what the
+  producers publish, not what can trade.
 - **The daily loss halt tripped 2026-08-10 and was reset 2026-08-12 19:13 UTC by
   owner instruction.** Hand-trading drawdown took equity 450.08 → 306.06,
   crossing the 76.52 USDT ceiling; the bot's book was flat and it refused new risk

@@ -16,7 +16,38 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
-- **2026-08-19 ~20:15 UTC — everything that is not carry-hold or LONG is
+- **2026-08-19 ~19:20 UTC — carry_hold v6 is PROMOTED and DEPLOYED to both
+  CARRY producers (owner: "get v6 live and running… the real money side as
+  well, everything needs to be running").** Commit `8074942d`, staged deploy
+  with `--stop-first`: `staged-ok commit=8074942d profile=operational`,
+  `verify-ok … mainnet=armed`, `engine-ok` + `mainnet-engine-ok` on the same
+  commit, all nine units active after. Both producers boot
+  `strategy_profile=v6` (profile `carry_hold_v6_live_v1`); the old demo unit
+  drained cleanly after 1,077 cycles with zero errors. v6 is the first
+  deployed rule reading a second venue: each producer now keeps
+  `binance_whale_daily.parquet` (Binance top-trader position long/short
+  EODs, public endpoint, no key) and attaches it to the venue view with the
+  research panel's exact as-of shape; every feed failure fails OPEN under
+  the registered 48h freshness clause. First live receipts, both books:
+  demo whale store 648 rows / 108 symbols / 30 venue-absent nulls,
+  `whale_event_rows=618`, `whale_error=None`, decision universe 100; first
+  v6 decision holds ACE/EDEN/HOME at gross **0.162** against the v4 book's
+  4 names at 0.372 (the bent ladder plus the flow halving, arithmetic
+  verified by hand), and demo and mainnet decide identically. The engine
+  reads and routes the book (`source=v6 targets=3`); its two boot-time
+  "cannot account for" ERRORs are the known transient reconcile shape and
+  cleared. Boot-time `failed=8` kline lines are the known benign restart
+  shape. The mid-day restart leaves today's entry validity expired
+  (decision+6h), so the book re-arms entries at the next 00:20 boundary —
+  registered behavior. Forward record at promotion: **0 scored v6 days**;
+  v4/v5 keep scoring and the v6−v5 capital-normalised differential is the
+  registered experiment. Promotion note in
+  `docs/research/strategy_program.md`; archive-vs-API series check ≤0.015
+  divergence on a ~1.8 ratio against a −0.26 trigger. Observed in passing:
+  the mainnet producer sized off owner-health equity **$541.26** — the
+  funded account is no longer near-empty (the 2026-08-12 read was $0.04);
+  hand-funded outside the bot, funded engine still shadow.
+- **2026-08-19 ~18:40 UTC — everything that is not carry-hold or LONG is
   DELETED, operator override ("kill everything else, brutal again").**
   Sixteen files removed: the three non-carry configs
   (`lane2_financed_leaders_v1`, `lane2_financed_leaders_binance_v1`,
@@ -40,7 +71,7 @@ edit STATE.md to match.
   "result-bearing, test-pinned") consciously overridden by today's order.
   Tombstones in strategy_program §Theses 1 and research_findings; dated
   archive dossiers untouched. Full gate green after the cut.
-- **2026-08-19 ~19:45 UTC — the premium/momentum blend is DELETED, operator
+- **2026-08-19 ~18:20 UTC — the premium/momentum blend is DELETED, operator
   override ("brutal deletion, exterminate old research stuff so it doesn't
   contaminate").** Removed: `configs/lane2_premium_momentum_blend_v1.json`,
   `liquidity_migration/research/panels/lane2_blend.py`, its test file,
@@ -55,7 +86,7 @@ edit STATE.md to match.
   the momentum_1w thesis section deleted with it); dated archive dossiers
   and old CHANGELOG entries stay as history, per the reading rule at the
   top of this file. `cross_section.py` stays — the idio screens use it.
-- **2026-08-19 ~19:10 UTC — the three-book portfolio question is answered:
+- **2026-08-19 ~17:15 UTC — the three-book portfolio question is answered:
   two books.** The last big open item in `strategy_program.md` §Theses:
   carry↔LONG correlate +0.002 (stable ~0 in every era, 1,747 shared days);
   **carry_v6+LONG at equal risk is Sharpe 2.15 with a 3.6% worst dip**, and
@@ -66,7 +97,7 @@ edit STATE.md to match.
   the previously-declined envelope decision, not research. LONG leg = the
   2026-07-24 on-disk mark-to-market build (ends 2026-07-17); weights
   in-sample. Recorded in `strategy_program.md` §Theses item 6; docs only.
-- **2026-08-19 ~18:40 UTC — entry/exit timing program closed with mechanism;
+- **2026-08-19 ~17:10 UTC — entry/exit timing program closed with mechanism;
   one designed-not-built candidate (pre-settlement entry).** Owner: "we don't
   have to enter at a specific time every day, we don't have to exit after
   funding is confirmed." Third hunt of the day, documented in
@@ -89,7 +120,7 @@ edit STATE.md to match.
   four eras on tardis, unbacktestable on the panel, so it waits for the
   research box's forward capture or an owner-decided demo A/B. No code or
   config changed; docs only.
-- **2026-08-19 ~16:40 UTC — `lane2_carry_hold_v6` registered (research-only):
+- **2026-08-19 ~16:10 UTC — `lane2_carry_hold_v6` registered (research-only):
   the depth ladder bends.** Second hunt of the day, owner directive "the
   causes are right, the implementation is crude — more sophisticated,
   non-overfit." ~40 response-shape cells through the same verified harness
@@ -115,7 +146,7 @@ edit STATE.md to match.
   with the full selection-debt ledger, forward scorer + differential
   `carry_hold_v6_minus_v5`. v6 is NOT promoted; v5's and v4's forward
   records accrue untouched.
-- **2026-08-19 ~13:50 UTC — `lane2_carry_hold_v5` registered (research-only)
+- **2026-08-19 ~15:30 UTC — `lane2_carry_hold_v5` registered (research-only)
   after an owner-directed A/B: two size halvings on non-price axes.** The
   day's hunt scored ~60 in-book cells through the registered settlement-exact
   scorer (harness proved bit-exact v4 reproduction first); premium-discount,
