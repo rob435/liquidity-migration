@@ -28,7 +28,7 @@
 //! separate variants would duplicate every method below to no purpose.
 
 use engine_types::ids::{Symbol, SymbolId};
-use engine_types::orders::{AmendSpec, InstrumentRule, OrderAck, OrderRequest, VenueOrder};
+use engine_types::orders::{AmendSpec, InstrumentRule, OrderAck, OrderRequest, VenueExecution, VenueOrder};
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
 
@@ -170,6 +170,16 @@ impl VenueGateway for Venue {
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
         match self {
             Venue::Bybit(gw) => gw.working_orders().await,
+        }
+    }
+
+    async fn executions(
+        &mut self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
+        match self {
+            Venue::Bybit(gw) => gw.executions(start_ms, end_ms).await,
         }
     }
 }
