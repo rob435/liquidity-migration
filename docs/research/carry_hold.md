@@ -69,12 +69,13 @@ the paired daily differential is the primary forward comparison:
   ~1.2), the daily frame carries a terminal-day look-ahead (~+0.13), and the
   owner's unconditional Sharpe-2 target was NOT reached — the supportable version
   is conditional (2.15–2.35 on the PIT deep-funding half of days).
-- **`configs/lane2_funding_spread_v1.json`** (wave 3) — the same premium captured
-  market-neutrally as a cross-venue funding spread (Sharpe 1.34 full / 1.61
-  bench, DD −16.7%, offset-stable, corr +0.09 to v3). The two-book funding-carry
-  program (PIT vol-parity) measures bench-window Sharpe 2.34 (1.93–2.34 across
-  clocks) / full-window 1.55–1.87 — the Sharpe-2 target met on the program's
-  standard quote basis, not on the strictest one. Review §10.
+- The funding-spread config (wave 3; **DELETED 2026-08-19, operator
+  override**) — the same premium captured market-neutrally as a cross-venue
+  funding spread (Sharpe 1.34 full / 1.61 bench, DD −16.7%, offset-stable,
+  corr +0.09 to v3). The two-book funding-carry program (PIT vol-parity)
+  measured bench-window Sharpe 2.34 (1.93–2.34 across clocks) / full-window
+  1.55–1.87. Numbers kept as the record; the config and its scorer code are
+  gone. Review §10.
 
 ### 0.1 2026-07-31 — v4 registered, and the program bar moved to 2.5
 

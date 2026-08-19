@@ -31,7 +31,7 @@ liquidation risk with a named counterparty, which is why the easy construction w
 | [carry_hold_v1](../../configs/lane2_carry_hold_v1.json) | 18.0 | 2.31 | 1.02 / **1.21** | −60.0% | 0.271 |
 | [carry_hold_v2](../../configs/lane2_carry_hold_v2.json) | 16.7 | 2.47 | 1.09 / 1.35 | −48.6% | 0.198 |
 | [carry_hold_v3](../../configs/lane2_carry_hold_v3.json) | 19.83 | 3.13 | 1.38 / 1.71 | −28.7% | 0.156 |
-| [funding_spread_v1](../../configs/lane2_funding_spread_v1.json) | 5.08 | 2.92 | 1.34 / 1.61 | −16.7% | 0.087 |
+| funding_spread_v1 (**config DELETED 2026-08-19, operator override** — numbers kept as the record) | 5.08 | 2.92 | 1.34 / 1.61 | −16.7% | 0.087 |
 
 - **v4 is scored over 1,756 days, not 1,894** — it does not trade early-2021, so its row above is not
   directly comparable with v1–v3's. On the shared spine v3 reads 21.12 bp/day and Sharpe 1.41. v4's own-capital
@@ -49,10 +49,12 @@ liquidation risk with a named counterparty, which is why the easy construction w
   cohort: moderate grind-down (trailing 3d return in [−30%, −5%) earns −114 bp/name-day at Sharpe −2.1), dead
   names (30d vol < 5%/day, −77 bp/nd), post-recovery holds (−54 bp/nd). Its registered forward experiment is
   the paired differential vs v2: +3.09 bp/day, t 1.64.
-- funding_spread takes the same premium market-neutrally (long the perp on the more-negative-funding venue,
+- funding_spread took the same premium market-neutrally (long the perp on the more-negative-funding venue,
   short the same symbol on the other): correlation with v3 **+0.09**, and decision-clock stable unlike the
   directional family. Basis risk concentrates where it trades — the cross-venue price difference runs 40 bp/day
-  sd normally and 677 bp/day when |spread| > 50, which is why its standalone Sharpe is 1.3 and not 3.
+  sd normally and 677 bp/day when |spread| > 50, which is why its standalone Sharpe was 1.3 and not 3.
+  **Deleted 2026-08-19 with the financed-leaders pair, operator override** — everything that is not
+  carry-hold or LONG left the repo; old forward-ledger rows remain as receipts.
 - **Two-book portfolio** (Lane-1 selection on seen data — this grades nothing), PIT 60d vol-parity: bench Sharpe **2.34** (max DD −11.2%, MAR 5.07), 1.93–2.34 across
   clocks; full 2021-inclusive window 1.55–1.87. The Sharpe ≥ 2 target is met on the standard quote basis and
   not on the strictest basis. Both numbers are the claim.

@@ -221,22 +221,20 @@ context attached. Confirmed dead ends belong in the do-not-retest ledger in
 are not run. Nothing here has a forward record: every number is Lane-1
 simulation on data that also shaped the idea, under `governance.md`.
 
-### 1. `lane2_financed_leaders_v1` — momentum crossed with the financing condition
+### 1. Financed leaders and funding spread — DELETED 2026-08-19, operator override
 
-**What it is.** Registered
-([config](../../configs/lane2_financed_leaders_v1.json)), long-only: the top decile
-by 1-week return among names whose last settled funding is ≤ 0 bp/8h, with a BTC
-30-day regime gate, vol-targeted. It is the object you get when you force the
-merge of "buy winners" with "get paid to hold".
-
-**Measured:** 14.32 bp/day, Sharpe 1.02, worst dip −40.3% — comparable to
-carry_hold v4 standalone (14.46 / 1.13 / −45.6%).
-
-**Why it is not run: it is substantially carry wearing a costume.** It correlates
-**+0.544** with carry_hold v4. The funding condition dominates the momentum
-condition, so combining the two does not produce a third bet — it recovers the
-first one at extra complexity. **The funding condition is what creates the
-redundancy, not the momentum.**
+Both non-carry funding books are gone — configs
+(`lane2_financed_leaders_v1`, `lane2_financed_leaders_binance_v1`,
+`lane2_funding_spread_v1`), their scorer code, and their forward-ledger
+slots ("kill everything that's not carry-hold and LONG"). The reasons they
+were never run stand as the do-not-rebuild fence: financed leaders was
+carry wearing a costume (+0.544 correlation to carry_hold v4, 14.32 bp/day
+Sharpe 1.02 — no third bet, just the first one at extra complexity), and
+the funding spread never beat its costs at the measured 2-leg fee. The
+idio screen family (panels, screens, its panel builder) went in the same
+wave — its program had already closed 0/24 hedged cells. Dated dossiers in
+`archive/` and the ledger rows in `research_findings.md` §2 keep the
+numbers; old ledger CSV rows remain as receipts.
 
 ---
 
@@ -620,10 +618,10 @@ evidence trail.
       favours it. That is what closes the programme rather than merely bounding
       it to one book. Across all three screens: **0 of 96 pre-declared cells are
       profitable and significant.**
-      New: `liquidity_migration/research/panels/residual_price.py`,
-      `liquidity_migration/research/panels/idio_features.py`, `scripts/data/build_idio_panel.py`,
-      `scripts/research/screen_idio_charts.py`, `scripts/research/screen_idio_hedged.py`,
-      `scripts/data/diagnose_idio_panel.py`.
+      New at the time: `residual_price.py`, `idio_features.py`,
+      `build_idio_panel.py`, the three `screen_idio_*` scripts,
+      `diagnose_idio_panel.py` — all deleted (the diagnostic 2026-08-19
+      morning wave, the rest the same evening, operator override).
 - [x] Collapse old evidence into decision-useful priors.
 - [x] Falsify simple young-listing continuation and mature turnover-decay rules.
 - [x] Verify a viable long-history cross-venue premium/funding overlap.
@@ -691,11 +689,11 @@ evidence trail.
       directly since the 2026-07-27 M19 turnover fix), evidence
       `docs/research/archive/2026-07-26-financed-longs.md` with the 22-row
       negative-results ledger.
-- [ ] Score the seven registered financed-longs configs on each new completed
-      UTC day (`lane2_carry_hold_v1/v2/v3/v4`, `lane2_funding_spread_v1`,
-      `lane2_financed_leaders_v1`, `lane2_financed_leaders_binance_v1`;
-      `DEFAULT_CONFIGS` in the scorer is the list — this item said six and
-      omitted v4, the promoted live config, until 2026-08-19)
+- [ ] Score the registered carry-hold configs on each new completed UTC day
+      (`lane2_carry_hold_v1..v6`; `DEFAULT_CONFIGS` in the scorer is the
+      list. The funding-spread and financed-leaders configs scored here
+      until their 2026-08-19 deletion by operator override; their old
+      ledger rows remain as receipts)
       (rolling forward record; the registration commit is the change point;
       since 2026-07-28 the scorer charges each settlement exactly once;
       the paired daily differentials v2−v1, v3−v2, and **v4−v3 — the

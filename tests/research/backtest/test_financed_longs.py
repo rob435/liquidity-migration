@@ -14,10 +14,7 @@ import polars as pl
 import pytest
 
 from liquidity_migration.research.backtest.financed_longs import (
-    FinancedLeadersConfig,
-    btc_gate,
     daily_scores,
-    financed_leaders_weights,
     prepare,
     score_carry_hold,
     venue_view,
@@ -38,11 +35,6 @@ CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
 @pytest.fixture
 def carry_cfg() -> CarryHoldConfig:
     return CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v1.json")
-
-
-@pytest.fixture
-def leaders_cfg() -> FinancedLeadersConfig:
-    return FinancedLeadersConfig.from_json(CONFIG_DIR / "lane2_financed_leaders_v1.json")
 
 
 def _panel(
@@ -86,107 +78,6 @@ def _universe(panel: pl.DataFrame, top_n: int = 100) -> pl.DataFrame:
     return top_n_universe(daily_grid(prepare(panel)), top_n)
 
 
-class TestFundingSpread:
-    """Cross-venue neutral spread book: sign convention, hysteresis, fees.
-
-    The fixture ties bn_funding = by_funding / 2, so a deep bybit print of -60 bp
-    gives an 8h-settled spread of 3 x (-60 + 30) = -90 bp/day: long bybit / short
-    binance, receiving the differential.
-    """
-
-    def test_config_round_trip_and_dispatch(self) -> None:
-        from liquidity_migration.research.backtest.financed_longs import FundingSpreadConfig, config_scores
-
-        cfg = FundingSpreadConfig.from_json(CONFIG_DIR / "lane2_funding_spread_v1.json")
-        assert (cfg.enter_bp_per_day, cfg.exit_bp_per_day) == (80.0, 20.0)
-        panel = _panel(hours=1100, funding_bp={"S01USDT": [-60.0]})
-        _, _, cid, venue = config_scores(panel, CONFIG_DIR / "lane2_funding_spread_v1.json")
-        assert cid == "lane2_funding_spread_v1"
-        assert venue == "bybit+binance"
-
-    def test_neutral_return_is_the_funding_differential_when_prices_track(self) -> None:
-        from liquidity_migration.research.backtest.financed_longs import prepare_spread
-
-        # Flat prices on both venues: the neutral fwd-24h return must equal
-        # -(paid_by) + paid_bn = 3 x (60 - 30) bp = +90 bp for the deep name.
-        panel = _panel(hours=1100, funding_bp={"S01USDT": [-60.0]})
-        u = daily_grid(prepare_spread(panel))
-        row = u.filter(pl.col("symbol") == "S01USDT").head(1)
-        assert row["spread_bpd"][0] == pytest.approx(-90.0, rel=1e-9)
-        assert row["net_return"][0] == pytest.approx(90.0 / 1e4, rel=1e-6)
-
-    def test_hysteresis_enters_deep_and_exits_converged(self) -> None:
-        from liquidity_migration.research.backtest.financed_longs import (
-            FundingSpreadConfig,
-            funding_spread_weights,
-            prepare_spread,
-        )
-
-        cfg = FundingSpreadConfig.from_json(CONFIG_DIR / "lane2_funding_spread_v1.json")
-        n = 1100 // 8
-        # deep spread (-90 bp/day) for the first half, converged (-22.5) after:
-        # exit fires when |spread| < 20?  -22.5 stays above 20 -> pick -6 bp
-        # prints -> spread -9 bp/day < 20 -> exit.
-        pattern = [-60.0] * (n // 2) + [-6.0] * (n - n // 2)
-        panel = _panel(hours=1100, funding_bp={"S01USDT": pattern})
-        u = daily_grid(prepare_spread(panel))
-        w = funding_spread_weights(u, cfg).filter(pl.col("symbol") == "S01USDT")
-        assert w.height > 0
-        spreads = dict(zip(u.filter(pl.col("symbol") == "S01USDT")["bar_ts_ms"].to_list(),
-                           u.filter(pl.col("symbol") == "S01USDT")["spread_bpd"].to_list()))
-        held_spreads = [spreads[t] for t in w["bar_ts_ms"].to_list()]
-        assert all(abs(s) >= cfg.exit_bp_per_day for s in held_spreads)
-
-    def test_fees_charged_on_both_legs(self) -> None:
-        from liquidity_migration.research.backtest.financed_longs import FundingSpreadConfig, score_funding_spread
-
-        cfg = FundingSpreadConfig.from_json(CONFIG_DIR / "lane2_funding_spread_v1.json")
-        panel = _panel(hours=1100, funding_bp={"S01USDT": [-60.0]})
-        out = score_funding_spread(panel, cfg)
-        assert out["config_id"] == "lane2_funding_spread_v1"
-        assert out["days"] > 0
-        # entry day cost = 0.10 notional x BOTH legs x per-side fee
-        from liquidity_migration.research.backtest.financed_longs import (
-            funding_spread_weights, prepare_spread,
-        )
-        u = top_n_universe(daily_grid(prepare_spread(panel)), cfg.universe_top_n)
-        w = funding_spread_weights(u, cfg)
-        s = daily_scores(w, u, 2.0 * cfg.fee_side_bp).sort("bar_ts_ms")
-        assert s["cost_bp"][0] == pytest.approx(0.10 * 2.0 * cfg.fee_side_bp, rel=1e-6)
-
-
-class TestFinancedLeaders:
-    def test_funding_cap_excludes_paying_longs(self, leaders_cfg: FinancedLeadersConfig) -> None:
-        # S01 rallies with negative funding (financed); S02 rallies with positive.
-        # 24 symbols so the momentum decile holds both leaders; 1,100 hours so
-        # the 30-day BTC gate window exists on the daily grid.
-        panel = _panel(
-            symbols=24,
-            hours=1100,
-            funding_bp={"S01USDT": [-2.0], "S02USDT": [5.0]},
-            drift={"S01USDT": 0.0041, "S02USDT": 0.004},
-        )
-        grid = daily_grid(prepare(panel))
-        u = top_n_universe(grid, 100)
-        gate = btc_gate(grid, leaders_cfg.btc_gate_lookback_days)
-        w = financed_leaders_weights(u, gate, leaders_cfg)
-        names = set(w["symbol"].to_list())
-        assert "S01USDT" in names
-        assert "S02USDT" not in names
-
-    def test_gate_uses_prior_days_only(self, leaders_cfg: FinancedLeadersConfig) -> None:
-        grid = daily_grid(prepare(_panel()))
-        gate = btc_gate(grid, leaders_cfg.btc_gate_lookback_days)
-        # flat BTC: trend defined only once a full prior window exists, and nulls before
-        head = gate.head(leaders_cfg.btc_gate_lookback_days)
-        assert head["btc_trend"].null_count() == head.height
-
-    def test_config_round_trip(self, leaders_cfg: FinancedLeadersConfig) -> None:
-        assert leaders_cfg.funding_cap_bp == 0.0
-        assert leaders_cfg.btc_gate_threshold == -0.05
-        assert leaders_cfg.venue == "bybit"
-
-
 class TestResearchEquityChart:
     """The wrapper-supported standard-format render for registered configs, so a Lane-2
     config never needs a hand-built lookalike chart.
@@ -215,16 +106,25 @@ class TestResearchEquityChart:
             payload["metrics"]
         )
 
-    def test_config_scores_dispatches_both_rule_shapes(self) -> None:
+    def test_config_scores_dispatches_carry_and_rejects_dead_shapes(self) -> None:
+        import json as _json
+
         from liquidity_migration.research.backtest.financed_longs import config_scores
 
         panel = _panel(funding_bp={"S01USDT": [-15.0]})
         _, _, carry_id, _ = config_scores(panel, CONFIG_DIR / "lane2_carry_hold_v1.json")
         _, _, carry2_id, _ = config_scores(panel, CONFIG_DIR / "lane2_carry_hold_v2.json")
-        _, _, leaders_id, _ = config_scores(panel, CONFIG_DIR / "lane2_financed_leaders_v1.json")
         assert carry_id == "lane2_carry_hold_v1"
         assert carry2_id == "lane2_carry_hold_v2"
-        assert leaders_id == "lane2_financed_leaders_v1"
+        # The leaders ("signal") and spread ("spread") shapes were deleted
+        # 2026-08-19 by operator override; a leftover config must fail loudly.
+        import tempfile
+
+        for shape in ("signal", "spread"):
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                _json.dump({"config_id": "ghost", "rule": {shape: {}}}, f)
+            with pytest.raises(FinancedLongsError, match="unrecognized"):
+                config_scores(panel, f.name)
 
 
 class TestAccounting:
@@ -286,8 +186,6 @@ class TestAccounting:
             venue_view(_panel(), "okx")
 
     def test_binance_view_scores(self) -> None:
-        cfg = FinancedLeadersConfig.from_json(CONFIG_DIR / "lane2_financed_leaders_binance_v1.json")
-        assert cfg.venue == "binance"
         view = venue_view(_panel(), "binance")
         assert "by_close" in view.columns and "bn_close" not in view.columns
 

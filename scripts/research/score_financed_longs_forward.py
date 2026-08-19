@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Append the financed-longs rolling forward ledger (one row per config-day).
 
-The Lane-2 recipe for the registered financed-longs configs (``DEFAULT_CONFIGS``
-below: ``lane2_carry_hold_v1``, ``lane2_carry_hold_v2``, ``lane2_carry_hold_v3``,
-``lane2_carry_hold_v4``,
-``lane2_funding_spread_v1``, ``lane2_financed_leaders_v1``,
-``lane2_financed_leaders_binance_v1``) is one
-score row per completed UTC day; only days strictly after each config's
-registration commit date count as forward evidence. This tool materializes
+The Lane-2 recipe for the registered carry-hold configs (``DEFAULT_CONFIGS``
+below, ``lane2_carry_hold_v1`` through ``v6``) is one score row per completed
+UTC day; only days strictly after each config's registration commit date
+count as forward evidence. (The funding-spread and financed-leaders configs
+scored here until their 2026-08-19 deletion by operator override; their old
+ledger rows remain as receipts.) This tool materializes
 that ledger append-first from a cross-venue panel:
 
 * existing (date, config_id) rows are never rewritten — receipts, not state;
@@ -54,9 +53,6 @@ DEFAULT_CONFIGS = (
     "lane2_carry_hold_v4.json",
     "lane2_carry_hold_v5.json",
     "lane2_carry_hold_v6.json",
-    "lane2_funding_spread_v1.json",
-    "lane2_financed_leaders_v1.json",
-    "lane2_financed_leaders_binance_v1.json",
 )
 DIFF_ID = "carry_hold_v2_minus_v1"
 DIFF_PAIRS = (

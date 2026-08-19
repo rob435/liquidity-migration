@@ -150,8 +150,7 @@ def calendar_roll(
     whereas row-based ``rolling_*`` counts non-nulls. On a densified grid
     ``min_samples`` therefore degenerates into a warm-up-age gate -- a nominal
     ``min_samples=15`` can be met by two real values. Aggregate on the sparse
-    frame and join onto the grid when the threshold must bound sample size
-    (``residual_price.build_idio_price`` does this).
+    frame and join onto the grid when the threshold must bound sample size.
     """
     window = f"{int(n_periods) * int(period_ms)}i"
     closed = "left" if shifted else "right"

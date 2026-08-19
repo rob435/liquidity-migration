@@ -16,6 +16,30 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~20:15 UTC — everything that is not carry-hold or LONG is
+  DELETED, operator override ("kill everything else, brutal again").**
+  Sixteen files removed: the three non-carry configs
+  (`lane2_financed_leaders_v1`, `lane2_financed_leaders_binance_v1`,
+  `lane2_funding_spread_v1`), the whole idio family
+  (`idio_features.py`, `residual_price.py`, `cross_section.py`,
+  `build_idio_panel.py`, the three `screen_idio_*` scripts),
+  `screen_financed_longs.py` (the leaders-vs-benchmark reproduction
+  harness), and their six test files. `financed_longs.py` lost its
+  leaders/spread classes and dispatch branches — it is now the carry-hold
+  scorer only, and a new test pins that the dead rule shapes raise loudly.
+  The forward scorer's `DEFAULT_CONFIGS` is carry v1..v6 only; old
+  spread/leaders ledger rows remain as receipts. KEPT with reasons: the
+  execution/ tree and quote lab (they serve the two live books; quote-lab
+  keep-decision of 2026-08-08 still stands), the residual-momentum data
+  chain (`daily_feature_panel.py`, `risk_model.py`,
+  `residual_momentum.py`, its precompute — the LONG candidate tape and the
+  reset tooling carry the artifact as a contract, though no current
+  profile reads the feature), `volume_alpha` config +
+  `volume_events_charts.py` (LONG substrate), and the cross-venue panel.
+  Idio-family keep-note from 2026-08-14 (`screen_idio_directional.py`
+  "result-bearing, test-pinned") consciously overridden by today's order.
+  Tombstones in strategy_program §Theses 1 and research_findings; dated
+  archive dossiers untouched. Full gate green after the cut.
 - **2026-08-19 ~19:45 UTC — the premium/momentum blend is DELETED, operator
   override ("brutal deletion, exterminate old research stuff so it doesn't
   contaminate").** Removed: `configs/lane2_premium_momentum_blend_v1.json`,
