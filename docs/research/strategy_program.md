@@ -379,11 +379,13 @@ mechanically grounded; not worth a strategy change without one of those two.
   the envelope/leverage decision the owner declined on 2026-07-28
   (notional_multiplier 1.0 needed ~4× the envelope), not a research output.
   Scratch: session artifact `three_book_portfolio.py`.
-- **Premium divergence as a LONG entry filter.** `premium_diff_bp` is a free
-  public ranking signal that needs no Binance account to *trade*, only to read.
-  The blend's diversification comes from this leg rather than the momentum leg,
-  and it has never been tested as a condition on LONG's event rather than as a
-  separate book.
+- **Premium divergence as a LONG entry filter: MEASURED 2026-08-19, null at
+  available power.** Joined PIT `premium_diff_bp` onto all 292 LONG trades
+  (97% coverage): quintile means +9.4/+11.0/+8.7/+14.8/+16.4 bp per trade —
+  a ~7 bp spread in the WRONG direction (Bybit-rich entries mildly better),
+  far inside noise at n≈57 per cell, and the book fires too rarely (~1
+  trade/week, essentially all one pattern) for any per-era read. Not worth
+  a config; re-open only if LONG's event rate grows several-fold.
 - **Per-symbol coordination between the two sleeves.** They collide on 11
   name-days in 5.5 years; the per-sleeve capital partition in `account_kernel.py`
   budgets each sleeve separately and does not see combined per-symbol exposure.

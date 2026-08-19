@@ -65,7 +65,7 @@ def _run_long(
     out: Path,
     pit_tol: float,
     long_notional: float | None = None,
-    long_profile: str = "v11a",
+    long_profile: str = "v12",
 ) -> dict[str, Any]:
     # LONG records its own PIT pass/taint label; pit_tol does not apply.
     del pit_tol
@@ -274,11 +274,11 @@ def main() -> int:
     p.add_argument(
         "--long-profile",
         choices=("v11a", "v12"),
-        default="v11a",
+        default="v12",
         help=(
-            "Which LONG profile to render. v11a is the deployed one; v12 is the "
-            "same signal with the stop widened to 3x ATR for two days and then "
-            "tightened to 1.5x."
+            "Which LONG profile to render. v12 wide-stop is the deployed one "
+            "(STATE.md change point 2026-08-03); v11a is its predecessor, kept "
+            "for comparison."
         ),
     )
     # Default --years to a sentinel so an unset window preserves the active
