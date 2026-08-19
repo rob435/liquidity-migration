@@ -16,6 +16,22 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~06:10 UTC — The evidence machine is caught up, and the
+  promoted carry config has its first forward record.** The 22-day
+  backfill ran end to end: append-first data refresh on both venues (the
+  one incomplete step is Binance's own not-yet-published 2026-08-18 daily
+  archive — everything the panel reads got there), full panel rebuild
+  (2021-01-01 → 2026-08-18), ledger append (+3,730 rows, scored through
+  2026-08-17). First forward reading, stated with its size: over ~17–22
+  forward days, `lane2_carry_hold_v4` is the **only config positive**
+  (+15.04 bp/day, 17 days), and the promotion's own experiment — the
+  paired daily differential **v4−v3 — reads +37.01 bp/day** over those 17
+  days. Right sign for the 2026-08-03 promotion; far too few days to call
+  significant, and the window was brutal for the whole family (v1 −94.20,
+  v3 −20.00 bp/day forward). The machine only stopped because it was a
+  hand ritual; automating the daily sequence remains proposed, owner's
+  call.
+
 - **2026-08-19 ~04:30 UTC — The brutal cleanup, by owner order ("delete and
   don't look back"), executed with receipts.** Three read-only scouts
   inventoried; every candidate was re-verified from source before a single
