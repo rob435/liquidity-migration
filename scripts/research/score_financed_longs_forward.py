@@ -53,6 +53,7 @@ DEFAULT_CONFIGS = (
     "lane2_carry_hold_v3.json",
     "lane2_carry_hold_v4.json",
     "lane2_carry_hold_v5.json",
+    "lane2_carry_hold_v6.json",
     "lane2_funding_spread_v1.json",
     "lane2_financed_leaders_v1.json",
     "lane2_financed_leaders_binance_v1.json",
@@ -63,13 +64,14 @@ DIFF_PAIRS = (
     ("carry_hold_v3_minus_v2", "lane2_carry_hold_v3", "lane2_carry_hold_v2"),
     ("carry_hold_v4_minus_v3", "lane2_carry_hold_v4", "lane2_carry_hold_v3"),
     ("carry_hold_v5_minus_v4", "lane2_carry_hold_v5", "lane2_carry_hold_v4"),
+    ("carry_hold_v6_minus_v5", "lane2_carry_hold_v6", "lane2_carry_hold_v5"),
 )
 PANEL_COLS = [
     "symbol", "bar_ts_ms", "by_close", "by_turnover_quote", "by_funding",
     "by_funding_age_h", "bn_close", "bn_turnover_quote", "bn_funding", "bn_funding_age_h",
 ]
 #: Present only on panels built with --metrics-root. Kept when every shard has
-#: them; v5 then scores, and on an older panel v5 raises its own loud
+#: them; v5 and v6 then score, and on an older panel each raises its own loud
 #: missing-column error while v1..v4 keep scoring.
 OPTIONAL_PANEL_COLS = ["bn_tt_ls", "bn_tt_ls_age_h"]
 SCHEMA = {

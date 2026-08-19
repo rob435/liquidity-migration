@@ -1,0 +1,107 @@
+{
+  "config_id": "lane2_carry_hold_v6",
+  "registered": "2026-08-19",
+  "lane": 2,
+  "surface": "research-only",
+  "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
+  "descends_from": "lane2_carry_hold_v5 (registered earlier the same day; v5's and v4's forward records are NOT superseded and must keep accruing)",
+  "claim": "v5's book with ONE shape change and nothing else: the depth ladder bends. A held name's size multiplier becomes clip((|trail_fund_24h|/ref)^1.5, floor, 1.0) instead of the straight clip(ratio, floor, 1.0). Deep names (at or above ref) keep full size, floor names keep the floor; only mid-depth names - paying a fraction of the reference premium - get proportionally less. No new signal, no new threshold, and one FEWER effective lever than a new overlay would add. The claim is capital efficiency: the same money on ~3.5% less average gross.",
+  "read_this_before_citing_a_number": {
+    "selection_debt": "Chosen 2026-08-19 during the day's SECOND owner-directed hunt (the response-shape program: 'the causes are right, the transfer functions are crude'), roughly 40 scored in-book cells on seen data on top of the ~60 cells behind v5 the same morning. Every sibling axis failed its battery and is closed with receipts: smooth ramps replacing the v5 flow step (wash), whale step (worse, the effect is threshold-local), softened persistence kill (worse - names that rarely print deep are net negative even at quarter size), inverse-vol name sizing (worse, t -2.5; low-vol names lack squeeze fuel), raising the depth cap above 1.0 (real by placebo but a pure 2025-26 regime bet that worsens Sharpe and drawdown at matched capital), an age taper (episodes last 1-2 days, nothing to taper), and a depth-conditional flow drop (midnight capnorm +1.80 t +1.96 with clean placebo and balanced eras, but 14/24 clock phases, mean +0.27 - decision-hour luck, the clock sweep caught what era and placebo missed). This exponent is the sole survivor.",
+    "the_registered_experiment": "the capital-normalised paired daily differential v6-v5 on shared days. Midnight grid +0.63 bp/day at t +2.86; positive in 24/24 hourly grid phases, mean +0.43 bp/day (t +0.80 to +2.94) - cite the +0.43 mean, not the midnight number. Own-capital the pair is a wash by construction (v6 holds the same names on less gross): own-capital diff -0.16 bp/day at t -1.00.",
+    "placebo": "the per-name-day gamma adjustment factor handed to 20 random permutations of the held book: mean t -0.26, best +2.23, 0/20 reach the real +2.86.",
+    "plateau": "exponent 1.25 / 1.5 / 2.0 give capnorm +0.36 / +0.63 / +0.96 at t +2.90 / +2.86 / +2.71. 1.5 is frozen as the midpoint of the probed plateau, not a fitted optimum; the effect grows with the exponent because the bend deepens, and 2.0 was declined because it pushes further toward the deep-name concentration the same day's cap-raise cells showed to be regime-local.",
+    "era_shape": "capital-normalised differential by year: 2021 +0.16, 2022 -0.14, 2023 +0.05, 2024 -0.13, 2025 +1.50, 2026 +2.78. Flat floor, no materially negative year, and the economic weight sits in 2025-26 exactly like the book itself. Expect roughly nothing from this bend outside squeeze regimes.",
+    "scale_free_statements": "at its OWN capital v6 is the same book as v5: mean +21.82 vs +21.98 bp/day, Sharpe 1.842 vs 1.841, worst dip -18.6% vs -18.7% - on 3.5% less average gross (0.0724 vs 0.0750) and slightly less turnover. Nothing about v6 is a return claim at own capital; it is a claim about capital released."
+  },
+  "rule": {
+    "universe": {
+      "venue": "bybit",
+      "rank_by": "trailing_24h_quote_turnover",
+      "top_n": 100,
+      "note": "identical to v1..v5"
+    },
+    "state": {
+      "type": "per_name_hysteresis_long",
+      "enter_below_funding_bp": 10.0,
+      "exit_above_funding_bp": 3.0,
+      "exit_on_trail_recovery_bp_2d": 30.0,
+      "signal": "last settled funding rate at the decision bar (by_funding); trailing daily rate for the recovery exit",
+      "note": "identical to v3/v4/v5"
+    },
+    "filters": {
+      "toxic_band_ret_3d": { "lo": -0.30, "hi": 0.0, "note": "identical to v4/v5" },
+      "min_vol_30d_daily": 0.05,
+      "min_vol_note": "identical to v3/v4/v5"
+    },
+    "sizing": {
+      "per_name_cap": 0.1,
+      "gross_cap": 1.0,
+      "depth_scaling": {
+        "basis": "trail_fund_24h",
+        "ref_bp_per_day": 120.0,
+        "floor": 0.25,
+        "exponent": 1.5,
+        "note": "NEW in v6: the exponent. multiplier = clip((|trail_fund_24h|/ref)^exponent, floor, 1.0). The measured per-unit-weight response of the held book is flat below ~1.4x ref and jumps above it (2026-08-19 dose-response tables), so the straight ladder was differentiating exactly where the response is flat; the bend moves size toward where the response actually changes without touching the floor or breaching the cap. Names with ratio <= 0.397 land on the floor (the straight ladder floored at 0.25). Everything else in this block is identical to v2..v5."
+      },
+      "persistence_scaling": { "basis": "deep_settlement_share", "window_settlements": 20, "cut": 0.10, "low_multiplier": 0.0, "note": "identical to v4/v5" },
+      "flow_scaling": { "basis": "turnover_growth_3d", "cut": 0.40, "low_multiplier": 0.5, "note": "identical to v5" },
+      "whale_scaling": { "basis": "binance_toptrader_ls_3d_change", "cut": -0.26, "low_multiplier": 0.5, "note": "identical to v5, including the 48h freshness rule and fail-open nulls" }
+    },
+    "risk": {
+      "vol_target_annual": 0.15,
+      "vol_lookback_days": 30,
+      "max_leverage": 3.0,
+      "note": "recipe comparability only, identical to v4/v5; RAW is primary"
+    }
+  },
+  "cost_model": {
+    "measured_fee_side_bp": 7.78,
+    "charging": "measured one-way turnover x fee per side, per day, identical to v1..v5",
+    "funding": "settlement_exact (2026-07-28 corrected detector)",
+    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"]
+  },
+  "scoring_recipe": {
+    "metric": "mean net bp per day and annualised Sharpe on the raw daily series",
+    "secondary": ["compounded total return", "max drawdown", "MAR", "mean one-way turnover", "mean gross", "paired daily differentials vs lane2_carry_hold_v5 on shared days, BOTH at own capital and capital-normalised"],
+    "comparator": "lane2_carry_hold_v5's forward rows are the primary comparator; v4 and zero are secondary",
+    "grid": "none; single committed configuration",
+    "cadence": "one row per completed UTC day after the registration commit (scripts/research/score_financed_longs_forward.py)",
+    "eligibility": "only days strictly after the registration commit date count as forward evidence",
+    "panel_requirement": "a panel built with --metrics-root (bn_tt_ls columns), same as v5; scoring against a panel without them raises rather than silently degrading",
+    "reproduce_with": "liquidity_migration.research.backtest.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
+  },
+  "measured_at_registration": {
+    "basis": "corrected settlement-exact scorer, panel 2021-01-01..2026-08-19 (seen data; Lane-1 selection, not evidence), midnight grid",
+    "own_record": {
+      "days": 1778,
+      "mean_net_bp_per_day": 21.82,
+      "sharpe_raw": 1.842,
+      "max_drawdown_raw_pct": -18.6,
+      "mean_gross": 0.0724,
+      "note": "the same names on the same days as v5; only mid-depth sizes shrink"
+    },
+    "v5_same_panel_same_days": {
+      "mean_net_bp_per_day": 21.98,
+      "sharpe_raw": 1.841,
+      "max_drawdown_raw_pct": -18.7,
+      "mean_gross": 0.075
+    },
+    "paired_differential_vs_v5": {
+      "own_capital_bp_per_day": -0.16,
+      "own_capital_t": -1.0,
+      "capital_normalised_bp_per_day": 0.63,
+      "capital_normalised_t": 2.86,
+      "clock_sweep": "positive in 24/24 hourly phases, mean +0.43 bp/day - cite the mean",
+      "note": "THE REGISTERED FORWARD EXPERIMENT is the capital-normalised differential on shared days; at own capital the pair is deliberately a wash."
+    },
+    "provenance": "Selected 2026-08-19 in the response-shape hunt (owner directive: better transfer functions, SOTA, non-overfit). The dose-response measurement that motivated it and the full closed-cell ledger live in the session artifacts; the selection-debt paragraph above lists every closed axis."
+  },
+  "known_weaknesses": [
+    "inherits every v1..v5 weakness: concentrated, long-only crash beta, single-venue execution evidence, capacity ~$1M at 1% participation, terminal-day frame caveat, the whale leg's external dependency and its zero 2026 contribution so far",
+    "the effect is small: +0.43 bp/day mean across clock phases against a book whose daily noise is ~120 bp; the forward differential will take months to say anything",
+    "the era gain concentrates in 2025-26 squeeze regimes (floor is flat, not negative); do not project the midnight +0.63 forward unconditionally",
+    "the exponent 1.5 is frozen from a plateau probed the same day on seen data (1.25/1.5/2.0 all positive, t >= 2.7); the placebo margin is comfortable (0/20, best shuffle +2.23 vs real +2.86) but the selection debt of ~40 same-day cells still discounts the headline t",
+    "the dose-response tables that motivated the bend were measured on the midnight-grid held book; the 24/24 clock sweep of the differential is what defends against that circularity, and it is the number to watch forward"
+  ]
+}

@@ -82,7 +82,9 @@ class TestForwardLedger:
             "lane2_carry_hold_v1",
             "lane2_carry_hold_v2",
             "lane2_carry_hold_v5",
+            "lane2_carry_hold_v6",
             "carry_hold_v5_minus_v4",
+            "carry_hold_v6_minus_v5",
             DIFF_ID,
         } <= ids
         # the differential is exactly v2 - v1 per shared date
@@ -144,8 +146,12 @@ class TestOldPanelWithoutMetricsColumns:
         stripped.write_parquet(old_root / "1970" / "panel.parquet")
         ledger = tmp_path / "ledger.csv"
         assert main(["--panel-root", str(old_root), "--ledger", str(ledger)]) == 1
-        assert "SKIPPED lane2_carry_hold_v5.json" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "SKIPPED lane2_carry_hold_v5.json" in err
+        assert "SKIPPED lane2_carry_hold_v6.json" in err
         ids = set(pl.read_csv(ledger)["config_id"].to_list())
         assert "lane2_carry_hold_v4" in ids
         assert "lane2_carry_hold_v5" not in ids
+        assert "lane2_carry_hold_v6" not in ids
         assert "carry_hold_v5_minus_v4" not in ids
+        assert "carry_hold_v6_minus_v5" not in ids

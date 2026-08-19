@@ -86,6 +86,29 @@ one-off runners are retired.
   candidates a day fails** (t −2.38 / −2.00). CARRY and LONG v12 correlate **+0.012**
   across all 24 decision clocks — at equal risk the pair is 16.56 bp/day, Sharpe
   1.81, worst dip −24.2%, against carry alone at 14.46 / 1.13 / −45.6%.
+- **`lane2_carry_hold_v6` is REGISTERED, research-only (2026-08-19, owner:
+  "the causes are right, the implementation is crude — be more sophisticated,
+  non-overfit").** v5's book with ONE shape change: the depth ladder bends —
+  the size multiplier becomes clip((|trail_fund_24h|/ref)^1.5, 0.25, 1.0)
+  instead of the straight ratio. Same names, same days; mid-depth names get
+  less size, the floor and cap don't move. Registered experiment: the
+  capital-normalised daily differential vs v5 — **+0.63 bp/day (t 2.86)** at
+  midnight, positive **24/24** clock phases (mean **+0.43** — cite the mean),
+  placebo 0/20, exponent plateau 1.25/1.5/2.0 all t ≥ 2.7, no materially
+  negative year. Own-capital it is deliberately a wash (Sharpe 1.842 vs
+  1.841, dip −18.6% vs −18.7%) on **3.5% less capital**. It is the sole
+  survivor of the same-day response-shape hunt (~40 cells); the config's
+  selection-debt block lists every closed sibling — smoothed flow/whale
+  steps (wash/worse), softened persistence kill (worse), inverse-vol sizing
+  (worse), depth cap raises (2025-26 regime bet, worse Sharpe at matched
+  capital), age taper (episodes are 1-2 days), and the depth-conditional
+  flow drop that passed era + placebo but failed the clock sweep 14/24.
+  Notable negative worth keeping: the measured dose-response says the
+  book's per-unit payoff is flat below ~1.4× ref and jumps above — but
+  chasing that jump (raising the cap) is regime-local; the bend harvests
+  the stable part only. v5 and v4 keep scoring untouched; the v6−v5
+  differential is what the forward record grades. NOT promoted to any
+  sleeve.
 - **`lane2_carry_hold_v5` is REGISTERED, research-only (2026-08-19, owner:
   "do an A/B test and fit it into our system").** v4's book plus two size
   halvings on axes outside the funding/price complex: stale turnover flow

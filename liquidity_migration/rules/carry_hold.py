@@ -39,8 +39,9 @@ class CarryHoldConfig:
     """Committed carry-hold rule. Field names mirror the JSON.
 
     ``depth_ref_bp_per_day``: when set, a held name's weight is ``per_name_cap *
-    clip(|trailing 24h settled funding| / ref, depth_floor, 1.0)`` — bet size
-    proportional to the premium being paid. ``None`` keeps the flat per-name cap.
+    clip((|trailing 24h settled funding| / ref) ** depth_exponent, depth_floor,
+    1.0)`` — bet size follows the premium being paid, bent by the exponent
+    (1.0 = the straight v2..v5 ladder). ``None`` keeps the flat per-name cap.
     """
 
     config_id: str
@@ -56,6 +57,13 @@ class CarryHoldConfig:
     max_leverage: float
     depth_ref_bp_per_day: float | None = None
     depth_floor: float = 0.25
+    #: v6 sizing, default 1.0 so v1..v5 stay bit-identical. Bends the depth
+    #: ladder: the ratio |trail_fund_24h|/ref is raised to this power before
+    #: the clip, so mid-depth names get less size while the floor and the cap
+    #: do not move. Chosen 2026-08-19 after every other response-shape cell
+    #: (smoothed cuts, softened kills, raised caps, inverse-vol) failed its
+    #: battery; this one passed 24/24 clock phases and a 0/20 placebo.
+    depth_exponent: float = 1.0
     #: v3 filters, all default OFF so v1/v2 stay bit-identical.
     #: toxic_band: no entry, and holds suspend to zero weight, while the
     #: trailing 3d return sits in [lo, hi) — shorts are slowly right there.
@@ -137,6 +145,9 @@ class CarryHoldConfig:
                 float(depth["ref_bp_per_day"]) if depth is not None else None
             ),
             depth_floor=float(depth["floor"]) if depth is not None else 0.25,
+            depth_exponent=(
+                float(depth.get("exponent", 1.0)) if depth is not None else 1.0
+            ),
             toxic_band_ret3d=(
                 (float(band["lo"]), float(band["hi"])) if band is not None else None
             ),
@@ -354,8 +365,9 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
     The loop is deliberately explicit: the state at bar ``i`` depends only on
     settled funding at bars ``<= i``, which is the entire PIT argument. With
     ``depth_ref_bp_per_day`` set (v2), a held name's weight is scaled by
-    ``clip(|trail_fund_24h| / ref, depth_floor, 1.0)`` — size follows the
-    premium being paid; a missing trailing value fails to the floor, never up.
+    ``clip((|trail_fund_24h| / ref) ** depth_exponent, depth_floor, 1.0)`` —
+    size follows the premium being paid, bent convex when the exponent is
+    above 1 (v6); a missing trailing value fails to the floor, never up.
 
     With ``persistence_window`` set (v4) that weight is multiplied again by a
     crowding-persistence step: names whose recent settlements have rarely been
@@ -436,7 +448,10 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
                 w = cfg.per_name_cap
                 if sized and tr is not None:
                     depth = abs(tr[i]) if math.isfinite(tr[i]) else 0.0
-                    w *= min(1.0, max(cfg.depth_floor, depth / ref))
+                    scale = depth / ref
+                    if cfg.depth_exponent != 1.0:
+                        scale **= cfg.depth_exponent
+                    w *= min(1.0, max(cfg.depth_floor, scale))
                 if persisted and pr is not None:
                     # A null persistence — fewer than PERSISTENCE_WINDOW
                     # settlements of history — fails OPEN at full size.

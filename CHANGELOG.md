@@ -16,6 +16,32 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~16:40 UTC — `lane2_carry_hold_v6` registered (research-only):
+  the depth ladder bends.** Second hunt of the day, owner directive "the
+  causes are right, the implementation is crude — more sophisticated,
+  non-overfit." ~40 response-shape cells through the same verified harness
+  (bit-exact v4/v5 reproduction first), and every crude-to-smooth idea LOST:
+  smoothing v5's flow step is a wash (the step is at the right place — the
+  measured response is flat above the cut), smoothing the whale step is
+  worse (the effect is threshold-local), softening v4's persistence kill is
+  worse (names that rarely print deep are net negative even at quarter
+  size), inverse-vol sizing is worse (t −2.5; low-vol names lack squeeze
+  fuel), raising the depth cap is a pure 2025-26 regime bet (placebo-real
+  but worse Sharpe and dip at matched capital), an age taper has nothing to
+  taper (median episode 1 day), and the depth-conditional flow drop passed
+  era + placebo but failed the clock sweep (14/24, mean +0.27 — the sweep
+  caught what the other gates missed). The one survivor: exponent 1.5 on
+  the depth ladder's ratio, floor and cap unchanged — same names, same
+  days, mid-depth names sized down. vs v5: capital-normalised +0.63 bp/day
+  (t 2.86) at midnight, 24/24 clock phases (mean +0.43 — the citable),
+  placebo 0/20, exponent plateau 1.25/1.5/2.0 all t ≥ 2.7, worst year
+  −0.14; own-capital a wash (Sharpe 1.842 vs 1.841) on 3.5% less gross.
+  Pipeline verification reproduced the harness to three digits. Change:
+  `depth_scaling.exponent` in the rules (default 1.0; v1–v5 bit-identical
+  pinned by test, 8 new tests failed before the fix), `lane2_carry_hold_v6.json`
+  with the full selection-debt ledger, forward scorer + differential
+  `carry_hold_v6_minus_v5`. v6 is NOT promoted; v5's and v4's forward
+  records accrue untouched.
 - **2026-08-19 ~13:50 UTC — `lane2_carry_hold_v5` registered (research-only)
   after an owner-directed A/B: two size halvings on non-price axes.** The
   day's hunt scored ~60 in-book cells through the registered settlement-exact

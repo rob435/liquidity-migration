@@ -688,3 +688,56 @@ class TestV5FlowAndWhaleScaling:
             cfg,
         )
         assert plain.equals(with_cols)
+
+
+class TestV6DepthExponent:
+    """v6 bends the depth ladder — w = cap * clip((|trail_fund_24h| / ref)
+    ** exponent, floor, 1.0) — and changes nothing else. The exponent
+    defaults to 1.0 so v1..v5 stay bit-identical; the floor and the cap do
+    not move."""
+
+    @pytest.mark.parametrize("name", ["v1", "v2", "v3", "v4", "v5"])
+    def test_exponent_defaults_to_one(self, name: str) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / f"lane2_carry_hold_{name}.json")
+        assert cfg.depth_exponent == 1.0
+
+    def test_v6_declares_the_one_lever_and_nothing_else(self) -> None:
+        v5 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v5.json")
+        v6 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v6.json")
+        changed = {
+            f.name
+            for f in dataclasses.fields(CarryHoldConfig)
+            if getattr(v5, f.name) != getattr(v6, f.name)
+        }
+        assert changed == {"config_id", "depth_exponent"}, (
+            f"v6 changed more than the one declared lever: {changed}"
+        )
+        assert v6.depth_exponent == 1.5
+
+    def test_bent_ladder_downsizes_mid_depth_only(self, carry_cfg: CarryHoldConfig) -> None:
+        # Constant 8h prints give trailing daily rates -150/-60/-36 bp/day,
+        # depth ratios 1.25/0.5/0.3 against ref 120. The straight ladder gave
+        # 0.10/0.05/0.03 (TestDepthScaling above); the bend must leave the
+        # capped name alone, cut the mid name to cap * 0.5^1.5, and push the
+        # shallow one down onto the floor.
+        cfg = dataclasses.replace(
+            carry_cfg, depth_ref_bp_per_day=120.0, depth_floor=0.25, depth_exponent=1.5
+        )
+        panel = _panel(
+            funding_bp={"S01USDT": [-50.0], "S02USDT": [-20.0], "S03USDT": [-12.0]}
+        )
+        w = carry_hold_weights(_universe(panel), cfg)
+        last = w.filter(pl.col("bar_ts_ms") == w["bar_ts_ms"].max())
+        by_sym = dict(zip(last["symbol"].to_list(), last["w"].to_list()))
+        assert by_sym["S01USDT"] == pytest.approx(0.10, rel=1e-9)
+        assert by_sym["S02USDT"] == pytest.approx(0.1 * 0.5**1.5, rel=1e-9)
+        assert by_sym["S03USDT"] == pytest.approx(0.025, rel=1e-9)
+
+    def test_score_carry_hold_v6_end_to_end(self) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v6.json")
+        panel = _panel(funding_bp={"S01USDT": [-15.0]}).with_columns(
+            pl.lit(1.5).alias("bn_tt_ls"), pl.lit(1.0).alias("bn_tt_ls_age_h")
+        )
+        out = score_carry_hold(panel, cfg)
+        assert out["config_id"] == "lane2_carry_hold_v6"
+        assert out["days"] > 0
