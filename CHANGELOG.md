@@ -16,6 +16,22 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~20:30 UTC — fill-clock research: entries are already
+  optimal, exits are on the wrong side of the drift (owner: "why 00:20 not
+  00:00", then "make it predictive").** Two studies on Bybit's own 1m
+  klines, all 1,255 v6-book entries and all 1,255 exits, 2021–2026, zero
+  fetch failures. (1) The 00:20 entry fill — born as a kline REST margin —
+  collects the post-payout dump in full: filling at 00:00 costs 46 bp/entry
+  mean (2026 deep entries 90 bp); later buys nothing; the one positive
+  early cell is 2025-only. (2) Adaptive snipe rules (sign-flip, retrace,
+  stall) are early-fill in disguise and die in 2026; the oracle gap shows
+  the path is noise. (3) NEW: exits sold at minute 0/1/3 beat 00:20 by
+  +45/+31/+24 bp/exit (t 5.3/4.0/3.5, every era positive, trim-robust),
+  worth +0.6–3.8 bp/day weight-summed — an **exit-first early pass is
+  proposed in `strategy_program.md` §5, owner to decide**; the exit inputs
+  are knowable by ~00:01–00:03 via the WS kline store and the swept print.
+  Findings rows beside the 2026-08-03 fill-delay grid in
+  `research_findings.md`; no config or clock changed.
 - **2026-08-19 ~19:20 UTC — carry_hold v6 is PROMOTED and DEPLOYED to both
   CARRY producers (owner: "get v6 live and running… the real money side as
   well, everything needs to be running").** Commit `8074942d`, staged deploy

@@ -378,6 +378,24 @@ measured.**
   name-days in 5.5 years; the per-sleeve capital partition in `account_kernel.py`
   budgets each sleeve separately and does not see combined per-symbol exposure.
   Small, but it is the only genuine coupling between them.
+- **Exit-first early pass — MEASURED 2026-08-19, PROPOSED, owner to
+  decide.** The book's names drift down after the 00:00 settlement (the
+  farmer unwind). Entries already fill on the right side of that drift
+  (00:20, after it — measured to the minute the same day); exits currently
+  sell on the wrong side of it. All 1,255 exit events on Bybit 1m data:
+  selling at minute 0/1/3 beats the 00:20 fill by **+45/+31/+24 bp per
+  exit** (t 5.3/4.0/3.5; trimmed means agree; positive in every era,
+  2026 alone +31/+24/+12), decaying to nothing by ~00:25. Weight-summed
+  it is **+0.6 (2026) to +3.8 (2025) bp/day** at a minute-3 fill. The
+  inputs are causal: a held name's exit needs only the swept 00:00 print
+  and the WS-closed kline, both knowable by ~00:01–00:03 — the 00:20
+  clock is a REST-era margin the WS store made unnecessary for exits.
+  Implementation sketch: the producer publishes zero targets for exiting
+  held names at the first post-midnight cycle, leaving entries/resizes on
+  the registered 00:20 clock. A clock change is a strategy change — its
+  own change point, graded live by the engine's fill records
+  (`research_findings.md` §Settlement-instant timing has the full grid,
+  including the refuted adaptive entry-sniping arms).
 
 ## Priors from the 2026-07-21 reset
 
