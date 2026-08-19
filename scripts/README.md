@@ -17,7 +17,7 @@ a group below, so moving a grouped script never edits a unit file.
 | `runtime/` | systemd, via the wrapper | three files: the LONG and CARRY event engines, and the fleet liveness check the two liveness timers run (the account-execution owner entry went with the Python order path, 2026-08-14) |
 | `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, rollout readiness, flatten |
 | `maintain/` | you, one-shot | ledger reset, universe and instrument-rule freezes, the candidate-universe schema-4 to schema-5 converter, demo-rule probe and its projection, order-permission check, venue-accounting reconcile |
-| `data/` | you or the refresh timer | point-in-time data-root and panel builders, residual-momentum precompute |
+| `data/` | you or the refresh timer | point-in-time data-root and panel builders, residual-momentum precompute, and the Binance positioning-metrics refresh (`refresh_binance_metrics.py`, feeds the panel's `--metrics-root` columns) |
 | `research/` | you, offline | screens, scorers, equity curves, cost and diagnostic reports, the research-refresh workflow, and `daily_evidence_run.sh` (refresh → panel → forward ledger; status in `daily_run_status.json` beside the ledger; refuses a dirty checkout by the provenance rule) — run by hand until the dedicated research box arrives (owner decision 2026-08-19; no scheduler on the owner's Mac) |
 | `devtools/` | `dev.sh` | `repo_doctor.py`, `run_with_stub.py` |
 | `git-hooks/` | git, on push | the tracked `pre-push` gate, which runs `dev.sh check` before anything leaves |

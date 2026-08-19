@@ -16,6 +16,30 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~13:50 UTC — `lane2_carry_hold_v5` registered (research-only)
+  after an owner-directed A/B: two size halvings on non-price axes.** The
+  day's hunt scored ~60 in-book cells through the registered settlement-exact
+  scorer (harness proved bit-exact v4 reproduction first); premium-discount,
+  funding-instability, OI-unwind, and cross-venue-disagreement all closed
+  negative or noise — the durable lesson is that depth-correlated cuts remove
+  the book's payoff days (the deepest-discount name-days alone are 39% of
+  v4's gross P&L). What survived every battery only as a COMPOSITE: halve a
+  held name when its 3d turnover growth is ≤ +40% (stale flow), halve when
+  Binance's top-trader long/short ratio fell ≥ 0.26 in 3d (whales de-longing);
+  the two fire on nearly disjoint name-days and cover each other's blind
+  regime. A/B vs v4 on seen data: same mean at own capital, Sharpe 1.62 →
+  1.84, worst dip 24.5% → 18.7%; capital-normalised +6.13 bp/day (t 3.30),
+  24/24 clock phases positive (mean +3.10), placebo 0/20 (best shuffle 3.26 —
+  thin), era gain concentrated 2025-26. Selection debt is stated in the
+  config; the v5−v4 forward differential is the experiment. Plumbing: new
+  `scripts/data/refresh_binance_metrics.py` (public Binance metrics archive →
+  daily parquet), panel `--metrics-root` attaches `bn_tt_ls` as a next-midnight
+  as-of join (48h freshness, nulls fail open), `flow_scaling`/`whale_scaling`
+  knobs in the rules (default OFF; v1–v4 proven bit-identical by test), the
+  daily runner gains the metrics step, and the forward ledger scores v5 +
+  v5−v4 (a config whose panel lacks the columns is skipped loudly, exit 1,
+  without costing the others their rows).
+
 - **2026-08-19 ~12:10 UTC — The daily automation came off the owner's Mac
   the same day, by owner order.** The owner is buying a dedicated machine
   (a Mac mini) for data work and wants no background load on this one. The

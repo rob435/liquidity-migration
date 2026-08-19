@@ -380,3 +380,60 @@ class TestSpecAndOutput:
         assert pl.read_parquet(panel_path).height == panel.height
         assert len(payload["panel_sha256"]) == 64
         assert payload["config_hash"] == manifest["config_hash"]
+
+
+class TestBinanceMetricsJoin:
+    """The daily top-trader ratio becomes knowable at the NEXT UTC midnight,
+    never on its own day, and a set-but-broken store fails the build closed."""
+
+    def _store(self, tmp_path: Path, rows: list[dict[str, object]]) -> Path:
+        path = tmp_path / "metrics_daily.parquet"
+        pl.DataFrame(
+            rows,
+            schema={"symbol": pl.String, "date": pl.String, "tt_ls_eod": pl.Float64},
+        ).write_parquet(path)
+        return path
+
+    def test_prior_day_attaches_with_age_and_same_day_is_invisible(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        store = self._store(
+            tmp_path,
+            [
+                {"symbol": "AAAUSDT", "date": (DAY - dt.timedelta(days=1)).isoformat(), "tt_ls_eod": 1.7},
+                {"symbol": "AAAUSDT", "date": DAY.isoformat(), "tt_ls_eod": 9.9},
+            ],
+        )
+        panel, manifest = build_panel(_spec(roots, binance_metrics_root=store))
+        assert panel["bn_tt_ls"].to_list() == [1.7] * panel.height
+        ages = panel.sort("decision_ts_ms")["bn_tt_ls_age_h"].to_list()
+        # ages carry the same float-epsilon noise the settlement flag documents
+        assert ages == pytest.approx([1.0, 2.0, 3.0, 4.0])
+        assert panel["cov_binance_tt_ls"].all()
+        assert manifest["roots"]["binance_metrics"] == str(store)
+
+    def test_without_a_metrics_root_the_columns_are_absent(
+        self, roots: tuple[Path, Path]
+    ) -> None:
+        panel, manifest = build_panel(_spec(roots))
+        assert "bn_tt_ls" not in panel.columns
+        assert "cov_binance_tt_ls" not in panel.columns
+        for year_stats in manifest["coverage_by_year"].values():
+            assert "cov_binance_tt_ls" not in year_stats
+
+    def test_a_set_but_missing_store_fails_the_build_closed(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        with pytest.raises(PanelBuildError, match="metrics parquet missing"):
+            build_panel(_spec(roots, binance_metrics_root=tmp_path / "nope.parquet"))
+
+    def test_a_symbol_without_metrics_days_stays_null_with_a_false_flag(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        store = self._store(
+            tmp_path,
+            [{"symbol": "OTHERUSDT", "date": (DAY - dt.timedelta(days=1)).isoformat(), "tt_ls_eod": 1.7}],
+        )
+        panel, _ = build_panel(_spec(roots, binance_metrics_root=store))
+        assert panel["bn_tt_ls"].null_count() == panel.height
+        assert not panel["cov_binance_tt_ls"].any()

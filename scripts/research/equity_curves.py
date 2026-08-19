@@ -40,6 +40,9 @@ RESEARCH_PANEL_COLUMNS = (
     "symbol", "bar_ts_ms", "by_close", "by_turnover_quote", "by_funding",
     "by_funding_age_h", "bn_close", "bn_turnover_quote", "bn_funding", "bn_funding_age_h",
 )
+#: Present only on panels built with --metrics-root; kept when every shard has
+#: them so v5 renders, while older panels still render v1..v4.
+OPTIONAL_RESEARCH_PANEL_COLUMNS = ("bn_tt_ls", "bn_tt_ls_age_h")
 
 
 def _today() -> dt.date:
@@ -85,9 +88,15 @@ def _load_research_panel(panel_root: str | Path) -> Any:
     shards = sorted(str(x) for x in root.glob("*/panel.parquet"))
     if not shards:
         raise RuntimeError(f"no cross-venue panel shards under {root}")
+    scans = [pl.scan_parquet(s) for s in shards]
+    optional = [
+        c
+        for c in OPTIONAL_RESEARCH_PANEL_COLUMNS
+        if all(c in s.collect_schema().names() for s in scans)
+    ]
+    cols = list(RESEARCH_PANEL_COLUMNS) + optional
     return (
-        pl.scan_parquet(shards)
-        .select(list(RESEARCH_PANEL_COLUMNS))
+        pl.concat([s.select(cols) for s in scans])
         .collect()
         .sort(["symbol", "bar_ts_ms"])
     )

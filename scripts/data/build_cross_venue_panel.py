@@ -50,6 +50,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bybit-root", type=Path, default=DEFAULT_BYBIT_ROOT)
     parser.add_argument("--binance-root", type=Path, default=DEFAULT_BINANCE_ROOT)
     parser.add_argument(
+        "--metrics-root",
+        type=Path,
+        default=None,
+        help=(
+            "daily Binance USDM metrics parquet (scripts/data/refresh_binance_metrics.py); "
+            "adds the bn_tt_ls top-trader positioning columns. Omitted = columns absent, "
+            "and configs that need them fail loudly at scoring."
+        ),
+    )
+    parser.add_argument(
         "--execution-delay-ms",
         type=int,
         default=0,
@@ -95,6 +105,9 @@ def main(argv: list[str] | None = None) -> int:
             end=window_end,
             execution_delay_ms=args.execution_delay_ms,
             symbols=symbols,
+            binance_metrics_root=(
+                args.metrics_root.expanduser() if args.metrics_root else None
+            ),
         )
         try:
             panel, manifest = build_panel(spec)

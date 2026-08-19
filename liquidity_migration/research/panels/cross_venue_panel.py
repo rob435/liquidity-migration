@@ -60,6 +60,7 @@ import polars as pl
 from liquidity_migration.core.symbol_codec import SymbolIdentityError, decode_symbol_partition, normalize_exchange_symbol
 
 HOUR_MS = 3_600_000
+DAY_MS = 24 * HOUR_MS
 FUNDING_LOOKBACK_DAYS = 2
 FUNDING_KIND_COLUMN = "funding_event_kind"
 
@@ -107,6 +108,8 @@ COVERAGE_FIELDS: tuple[tuple[str, str], ...] = (
     ("cov_binance_price", "bn_close"),
     ("cov_binance_premium", "bn_premium_close"),
     ("cov_binance_funding", "bn_funding"),
+    # Present only when the spec names a binance_metrics_root.
+    ("cov_binance_tt_ls", "bn_tt_ls"),
 )
 
 
@@ -130,6 +133,11 @@ class PanelSpec:
     end: dt.date
     execution_delay_ms: int = 0
     symbols: tuple[str, ...] | None = None
+    #: Daily Binance USDM metrics parquet (one row per symbol-day with the
+    #: end-of-day top-trader position long/short ratio). None omits the
+    #: bn_tt_ls columns entirely; a set-but-unreadable path fails the build
+    #: closed rather than silently attaching an all-null feature.
+    binance_metrics_root: Path | None = None
 
     def __post_init__(self) -> None:
         if self.end <= self.start:
@@ -148,6 +156,9 @@ class PanelSpec:
             "end": self.end.isoformat(),
             "execution_delay_ms": self.execution_delay_ms,
             "symbols": sorted(self.symbols) if self.symbols else None,
+            "binance_metrics_root": (
+                str(self.binance_metrics_root) if self.binance_metrics_root else None
+            ),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -409,8 +420,56 @@ def build_panel(spec: PanelSpec) -> tuple[pl.DataFrame, dict[str, Any]]:
             .drop(stamp)
         )
 
+    if spec.binance_metrics_root is not None:
+        metrics_path = spec.binance_metrics_root
+        if not metrics_path.exists():
+            raise PanelBuildError(f"binance metrics parquet missing: {metrics_path}")
+        metrics = (
+            pl.read_parquet(metrics_path)
+            .select("symbol", "date", "tt_ls_eod")
+            .filter(pl.col("symbol").is_in(list(universe)))
+            .drop_nulls()
+            .with_columns(pl.col("date").str.to_date().alias("_d"))
+        )
+        # A metrics day becomes knowable when the day completes: stamp the
+        # end-of-day value at the NEXT UTC midnight and as-of join backward,
+        # the same shape as the funding join above.
+        events = (
+            metrics.with_columns(
+                (
+                    (pl.col("_d") - dt.date(1970, 1, 1)).dt.total_days().cast(pl.Int64)
+                    * DAY_MS
+                    + DAY_MS
+                ).alias("_tt_ls_ts_ms"),
+                pl.col("tt_ls_eod").alias("bn_tt_ls"),
+            )
+            .select("symbol", "_tt_ls_ts_ms", "bn_tt_ls")
+            .sort(["_tt_ls_ts_ms", "symbol"])
+        )
+        panel = (
+            panel.sort(["decision_ts_ms", "symbol"])
+            .join_asof(
+                events,
+                left_on="decision_ts_ms",
+                right_on="_tt_ls_ts_ms",
+                by="symbol",
+                strategy="backward",
+                check_sortedness=False,
+            )
+            .with_columns(
+                ((pl.col("decision_ts_ms") - pl.col("_tt_ls_ts_ms")) / HOUR_MS).alias(
+                    "bn_tt_ls_age_h"
+                )
+            )
+            .drop("_tt_ls_ts_ms")
+        )
+
     panel = panel.with_columns(
-        [pl.col(field).is_not_null().alias(flag) for flag, field in COVERAGE_FIELDS]
+        [
+            pl.col(field).is_not_null().alias(flag)
+            for flag, field in COVERAGE_FIELDS
+            if field in panel.columns
+        ]
     ).with_columns(
         # Cross-venue differences: mechanical transforms of aligned fields,
         # not signals.
@@ -444,7 +503,7 @@ def _manifest(
 ) -> dict[str, Any]:
     """Describe exactly what was built, from what, and what was left out."""
 
-    flags = [flag for flag, _ in COVERAGE_FIELDS]
+    flags = [flag for flag, _ in COVERAGE_FIELDS if flag in panel.columns]
     by_year: dict[str, dict[str, Any]] = {}
     if not panel.is_empty():
         yearly = (
@@ -467,7 +526,15 @@ def _manifest(
         "artifact": "cross_venue_panel",
         "git_commit": _git_commit(),
         "config_hash": spec.config_hash(),
-        "roots": {"bybit": str(spec.bybit_root), "binance": str(spec.binance_root)},
+        "roots": {
+            "bybit": str(spec.bybit_root),
+            "binance": str(spec.binance_root),
+            **(
+                {"binance_metrics": str(spec.binance_metrics_root)}
+                if spec.binance_metrics_root
+                else {}
+            ),
+        },
         "date_bounds": {"start": spec.start.isoformat(), "end_exclusive": spec.end.isoformat()},
         "timing": {
             "bar_completion_lag_ms": HOUR_MS,

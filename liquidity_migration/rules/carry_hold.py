@@ -77,6 +77,18 @@ class CarryHoldConfig:
     persistence_cut: float = 0.10
     #: Weight multiplier at or below the cut. 0.0 drops the name entirely.
     persistence_lo: float = 0.0
+    #: v5 sizing, default OFF so v1..v4 stay bit-identical. Two multipliers on
+    #: axes deliberately OUTSIDE the funding/price complex (any depth-correlated
+    #: cut removes the book's payoff days — measured 2026-08-19, ~60 cells).
+    #: flow: trailing 24h turnover vs 72h earlier; a held name whose turnover
+    #: is not growing is a stale crowd. whale: 3-day change of Binance's
+    #: top-trader position long/short ratio; falling = the informed side is
+    #: de-longing the name. Null conditioning values fail OPEN at full size,
+    #: the same convention as every v3/v4 conditioning variable.
+    flow_cut: float | None = None
+    flow_lo: float = 0.5
+    whale_cut: float | None = None
+    whale_lo: float = 0.5
 
     @classmethod
     def from_json(cls, path: str | Path) -> "CarryHoldConfig":
@@ -96,6 +108,18 @@ class CarryHoldConfig:
             raise FinancedLongsError(
                 f"unsupported persistence_scaling basis {pers.get('basis')!r}; "
                 "only 'deep_settlement_share' is implemented"
+            )
+        flow = rule["sizing"].get("flow_scaling")
+        if flow is not None and flow.get("basis") != "turnover_growth_3d":
+            raise FinancedLongsError(
+                f"unsupported flow_scaling basis {flow.get('basis')!r}; "
+                "only 'turnover_growth_3d' is implemented"
+            )
+        whale = rule["sizing"].get("whale_scaling")
+        if whale is not None and whale.get("basis") != "binance_toptrader_ls_3d_change":
+            raise FinancedLongsError(
+                f"unsupported whale_scaling basis {whale.get('basis')!r}; "
+                "only 'binance_toptrader_ls_3d_change' is implemented"
             )
         return cls(
             config_id=payload["config_id"],
@@ -127,6 +151,10 @@ class CarryHoldConfig:
             persistence_window=(int(pers["window_settlements"]) if pers is not None else None),
             persistence_cut=(float(pers["cut"]) if pers is not None else 0.10),
             persistence_lo=(float(pers["low_multiplier"]) if pers is not None else 0.0),
+            flow_cut=(float(flow["cut"]) if flow is not None else None),
+            flow_lo=(float(flow["low_multiplier"]) if flow is not None else 0.5),
+            whale_cut=(float(whale["cut"]) if whale is not None else None),
+            whale_lo=(float(whale["low_multiplier"]) if whale is not None else 0.5),
         )
 
 
@@ -237,7 +265,26 @@ def _signal_frame(panel: pl.DataFrame, momentum_lookback_hours: int) -> pl.DataF
         (pl.col("trail_fund_24h") - pl.col("trail_fund_24h").shift(48).over("symbol")).alias(
             "dtrail_2d"
         ),
+        # v5 conditioning: trailing-24h turnover now vs 72h earlier, PIT at
+        # bars <= t. A zero denominator yields a non-finite value, which the
+        # weights loop treats as null (fails open).
+        (pl.col("adv24") / pl.col("adv24").shift(72).over("symbol") - 1.0).alias(
+            "turn_growth_3d"
+        ),
     ).drop("_r24")
+    if "bn_tt_ls" in frame.columns:
+        # Binance top-trader position long/short ratio, panel-attached as the
+        # last COMPLETE UTC day's end value (join-asof, age recorded). Values
+        # older than 48h mean the feed died for the name (delisting, outage);
+        # they are nulled so the 3d change fails open instead of freezing.
+        fresh = (
+            pl.when(pl.col("bn_tt_ls_age_h") <= 48.0)
+            .then(pl.col("bn_tt_ls"))
+            .otherwise(None)
+        )
+        frame = frame.with_columns(
+            (fresh - fresh.shift(72).over("symbol")).alias("d_tt_ls_3d")
+        )
     # Attached unconditionally so the research and live frames cannot diverge on
     # whether the column exists; configs that leave persistence off ignore it.
     return _persistence_frame(frame, DEFAULT_ENTER_BP)
@@ -333,12 +380,16 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
                 f"{cfg.config_id}: persistence counts settlements deeper than "
                 f"{DEFAULT_ENTER_BP} bp but this config enters at {cfg.enter_bp} bp"
             )
+    flowed = cfg.flow_cut is not None
+    whaled = cfg.whale_cut is not None
     need = (
         ["trail_fund_24h"] * sized
         + ["ret_3d"] * banded
         + ["vol_30d_daily"] * volfloored
         + ["dtrail_2d"] * veled
         + ["crowd_persistence"] * persisted
+        + ["turn_growth_3d"] * flowed
+        + ["d_tt_ls_3d"] * whaled
     )
     missing = [c for c in dict.fromkeys(need) if c not in universe.columns]
     if missing:
@@ -362,6 +413,8 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
         vf = g["vol_30d_daily"].to_numpy() if volfloored else None
         vl = g["dtrail_2d"].to_numpy() if veled else None
         pr = g["crowd_persistence"].to_numpy() if persisted else None
+        tg = g["turn_growth_3d"].to_numpy() if flowed else None
+        wh = g["d_tt_ls_3d"].to_numpy() if whaled else None
         ts = g["bar_ts_ms"].to_numpy()
         state = False
         for i in range(len(ts)):
@@ -393,6 +446,12 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
                     # fires: every held name-day has a full window.
                     if math.isfinite(pr[i]) and pr[i] <= cfg.persistence_cut:
                         w *= cfg.persistence_lo
+                if flowed and tg is not None:
+                    if math.isfinite(tg[i]) and tg[i] <= (cfg.flow_cut or 0.0):
+                        w *= cfg.flow_lo
+                if whaled and wh is not None:
+                    if math.isfinite(wh[i]) and wh[i] <= (cfg.whale_cut or 0.0):
+                        w *= cfg.whale_lo
                 if w <= 0.0:
                     continue  # persistence cut this name to nothing today
                 rows["bar_ts_ms"].append(int(ts[i]))

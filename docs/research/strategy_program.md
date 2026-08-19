@@ -86,6 +86,24 @@ one-off runners are retired.
   candidates a day fails** (t −2.38 / −2.00). CARRY and LONG v12 correlate **+0.012**
   across all 24 decision clocks — at equal risk the pair is 16.56 bp/day, Sharpe
   1.81, worst dip −24.2%, against carry alone at 14.46 / 1.13 / −45.6%.
+- **`lane2_carry_hold_v5` is REGISTERED, research-only (2026-08-19, owner:
+  "do an A/B test and fit it into our system").** v4's book plus two size
+  halvings on axes outside the funding/price complex: stale turnover flow
+  (growth ≤ +40%/3d) and Binance top-trader de-longing (ratio change ≤
+  −0.26/3d), composing with depth and persistence. The registered experiment
+  is the capital-normalised daily differential vs v4: **+6.13 bp/day (t 3.30)**
+  at midnight, positive 24/24 clock phases (mean +3.10 — cite the mean),
+  own-capital a wash (+0.18, t 0.11) — a capital-efficiency claim, v4-over-v3's
+  shape. Scale-free: Sharpe 1.62 → 1.84, worst dip 24.5% → 18.7% at own
+  capital. Read the selection-debt block in the config before citing anything:
+  both features came out of a ~60-cell one-day search, the era gain is
+  2025-26-concentrated, and neither component clears the bar alone. New data
+  seam: the whale leg reads the public Binance metrics archive
+  (`scripts/data/refresh_binance_metrics.py` → panel `--metrics-root`,
+  bn_tt_ls columns; nulls fail open, 81% held-name-day coverage at
+  registration). v4 keeps scoring untouched; the v5−v4 differential is what
+  the forward record grades. NOT promoted to any sleeve; that is a separate
+  owner decision with its own note.
 - **`lane2_carry_hold_v4` is PROMOTED to the demo CARRY sleeve (2026-08-03,
   owner override).** v4 adds a crowding-persistence size multiplier and moves
   the toxic band's high edge to 0%; its claim is capital efficiency (same

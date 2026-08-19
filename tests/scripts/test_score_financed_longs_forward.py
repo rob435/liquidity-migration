@@ -51,6 +51,10 @@ def _panel_parquet(tmp_path: Path) -> Path:
                     "bn_turnover_quote": 900_000.0 * (symbols - s),
                     "bn_funding": rate / 2.0,
                     "bn_funding_age_h": 0.0 if settle else float(h % 8),
+                    # constant top-trader ratio: v5 scores, its whale
+                    # multiplier never fires
+                    "bn_tt_ls": 1.5,
+                    "bn_tt_ls_age_h": 1.0,
                 }
             )
     root = tmp_path / "panel"
@@ -74,7 +78,13 @@ class TestForwardLedger:
         _run(panel_root, ledger)
         out = pl.read_csv(ledger)
         ids = set(out["config_id"].to_list())
-        assert {"lane2_carry_hold_v1", "lane2_carry_hold_v2", DIFF_ID} <= ids
+        assert {
+            "lane2_carry_hold_v1",
+            "lane2_carry_hold_v2",
+            "lane2_carry_hold_v5",
+            "carry_hold_v5_minus_v4",
+            DIFF_ID,
+        } <= ids
         # the differential is exactly v2 - v1 per shared date
         v1 = out.filter(pl.col("config_id") == "lane2_carry_hold_v1")
         v2 = out.filter(pl.col("config_id") == "lane2_carry_hold_v2")
@@ -120,3 +130,22 @@ class TestForwardLedger:
         )
         assert (merged["net_bp"] - merged["net_bp_new"]).abs().max() == pytest.approx(0.0, abs=1e-12)
         assert (merged["scored_at"] == merged["scored_at_new"]).all()
+
+
+class TestOldPanelWithoutMetricsColumns:
+    def test_v5_is_skipped_loudly_and_the_rest_still_score(
+        self, panel_root: Path, tmp_path: Path, capsys: "pytest.CaptureFixture[str]"
+    ) -> None:
+        stripped = pl.read_parquet(panel_root / "1970" / "panel.parquet").drop(
+            "bn_tt_ls", "bn_tt_ls_age_h"
+        )
+        old_root = tmp_path / "old_panel"
+        (old_root / "1970").mkdir(parents=True)
+        stripped.write_parquet(old_root / "1970" / "panel.parquet")
+        ledger = tmp_path / "ledger.csv"
+        assert main(["--panel-root", str(old_root), "--ledger", str(ledger)]) == 1
+        assert "SKIPPED lane2_carry_hold_v5.json" in capsys.readouterr().err
+        ids = set(pl.read_csv(ledger)["config_id"].to_list())
+        assert "lane2_carry_hold_v4" in ids
+        assert "lane2_carry_hold_v5" not in ids
+        assert "carry_hold_v5_minus_v4" not in ids

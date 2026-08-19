@@ -41,6 +41,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from liquidity_migration.research.backtest.financed_longs import config_scores  # noqa: E402
+from liquidity_migration.rules.carry_hold import FinancedLongsError  # noqa: E402
 
 DEFAULT_PANEL_ROOT = Path.home() / "SHARED_DATA" / "cross_venue_panel_v1"
 DEFAULT_LEDGER = (
@@ -51,6 +52,7 @@ DEFAULT_CONFIGS = (
     "lane2_carry_hold_v2.json",
     "lane2_carry_hold_v3.json",
     "lane2_carry_hold_v4.json",
+    "lane2_carry_hold_v5.json",
     "lane2_funding_spread_v1.json",
     "lane2_financed_leaders_v1.json",
     "lane2_financed_leaders_binance_v1.json",
@@ -60,11 +62,16 @@ DIFF_PAIRS = (
     ("carry_hold_v2_minus_v1", "lane2_carry_hold_v2", "lane2_carry_hold_v1"),
     ("carry_hold_v3_minus_v2", "lane2_carry_hold_v3", "lane2_carry_hold_v2"),
     ("carry_hold_v4_minus_v3", "lane2_carry_hold_v4", "lane2_carry_hold_v3"),
+    ("carry_hold_v5_minus_v4", "lane2_carry_hold_v5", "lane2_carry_hold_v4"),
 )
 PANEL_COLS = [
     "symbol", "bar_ts_ms", "by_close", "by_turnover_quote", "by_funding",
     "by_funding_age_h", "bn_close", "bn_turnover_quote", "bn_funding", "bn_funding_age_h",
 ]
+#: Present only on panels built with --metrics-root. Kept when every shard has
+#: them; v5 then scores, and on an older panel v5 raises its own loud
+#: missing-column error while v1..v4 keep scoring.
+OPTIONAL_PANEL_COLS = ["bn_tt_ls", "bn_tt_ls_age_h"]
 SCHEMA = {
     "date": pl.String,
     "config_id": pl.String,
@@ -82,8 +89,15 @@ def load_panel(root: Path) -> pl.DataFrame:
     shards = sorted(root.glob("*/panel.parquet"))
     if not shards:
         raise SystemExit(f"no panel shards under {root}")
+    scans = [pl.scan_parquet(p) for p in shards]
+    optional = [
+        c
+        for c in OPTIONAL_PANEL_COLS
+        if all(c in s.collect_schema().names() for s in scans)
+    ]
+    cols = PANEL_COLS + optional
     return pl.concat(
-        [pl.scan_parquet(p).select(PANEL_COLS).collect() for p in shards], how="vertical"
+        [s.select(cols).collect() for s in scans], how="vertical"
     ).sort(["symbol", "bar_ts_ms"])
 
 
@@ -161,15 +175,23 @@ def main(argv: list[str] | None = None) -> int:
 
     panel = load_panel(args.panel_root)
     scored_at = dt.datetime.now(dt.UTC).date().isoformat()
-    fresh = pl.concat(
-        [
-            config_rows(
-                panel, args.config_dir / name, end_date=args.end_date, scored_at=scored_at
+    # One config's missing panel feature must not cost the others their rows:
+    # score what can be scored, report the failure, exit nonzero.
+    frames: list[pl.DataFrame] = []
+    failed: list[str] = []
+    for name in args.config or list(DEFAULT_CONFIGS):
+        try:
+            frames.append(
+                config_rows(
+                    panel, args.config_dir / name, end_date=args.end_date, scored_at=scored_at
+                )
             )
-            for name in (args.config or list(DEFAULT_CONFIGS))
-        ],
-        how="vertical",
-    )
+        except FinancedLongsError as exc:
+            failed.append(name)
+            print(f"SKIPPED {name}: {exc}", file=sys.stderr)
+    if not frames:
+        raise SystemExit("no config produced rows")
+    fresh = pl.concat(frames, how="vertical")
     fresh = pl.concat([fresh, diff_rows(fresh)], how="vertical")
 
     if args.ledger.exists():
@@ -193,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             line += "  | no forward-eligible days yet"
         print(line)
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

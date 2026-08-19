@@ -40,10 +40,15 @@ echo "=== daily evidence run $(date -u +%FT%TZ) ==="
 "$PYTHON" "$ROOT/scripts/research/research_refresh.py" run \
   --force-rmom-full-rewrite || fail refresh
 
+# Binance positioning metrics (top-trader long/short) feed the v5 whale
+# multiplier; same late-morning-UTC publish cadence as the other dailies.
+"$PYTHON" "$ROOT/scripts/data/refresh_binance_metrics.py" --days 3 || fail metrics
+
 # --end is EXCLUSIVE: today's date covers through yesterday, the last
 # complete UTC day.
 "$PYTHON" "$ROOT/scripts/data/build_cross_venue_panel.py" \
-  --start 2021-01-01 --end "$(date -u +%F)" --out "$PANEL_OUT" || fail panel
+  --start 2021-01-01 --end "$(date -u +%F)" --out "$PANEL_OUT" \
+  --metrics-root "$DATA_ROOT/binance_metrics_daily/_all_daily.parquet" || fail panel
 
 "$PYTHON" "$ROOT/scripts/research/score_financed_longs_forward.py" || fail ledger
 

@@ -560,3 +560,131 @@ class TestRegisteredConfigsAreImmutable:
         }, f"v4 changed more than the two declared levers: {changed}"
         assert v3.toxic_band_ret3d == (-0.30, -0.05)
         assert v4.toxic_band_ret3d == (-0.30, 0.0)
+
+
+class TestV5FlowAndWhaleScaling:
+    """v5 must not move v1..v4, and its two multipliers must be exactly the
+    declared halvings on the declared PIT features, failing open on null."""
+
+    @pytest.mark.parametrize("name", ["v1", "v2", "v3", "v4"])
+    def test_flow_and_whale_default_off(self, name: str) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / f"lane2_carry_hold_{name}.json")
+        assert cfg.flow_cut is None
+        assert cfg.whale_cut is None
+
+    def test_v5_declares_the_two_levers_and_nothing_else(self) -> None:
+        v4 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v4.json")
+        v5 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v5.json")
+        changed = {
+            f.name
+            for f in dataclasses.fields(CarryHoldConfig)
+            if getattr(v4, f.name) != getattr(v5, f.name)
+        }
+        assert changed == {"config_id", "flow_cut", "whale_cut"}, (
+            f"v5 changed more than the two declared levers: {changed}"
+        )
+        assert v5.flow_cut == 0.40
+        assert v5.flow_lo == 0.5
+        assert v5.whale_cut == -0.26
+        assert v5.whale_lo == 0.5
+
+    def test_unsupported_bases_are_rejected(self, tmp_path: Path) -> None:
+        import json as _json
+
+        payload = _json.loads((CONFIG_DIR / "lane2_carry_hold_v5.json").read_text())
+        payload["rule"]["sizing"]["flow_scaling"]["basis"] = "volume_zscore"
+        bad = tmp_path / "bad.json"
+        bad.write_text(_json.dumps(payload))
+        with pytest.raises(FinancedLongsError, match="flow_scaling basis"):
+            CarryHoldConfig.from_json(bad)
+
+    def _flow_cfg(self) -> CarryHoldConfig:
+        base = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v1.json")
+        return dataclasses.replace(base, flow_cut=0.40, flow_lo=0.5)
+
+    def test_stale_flow_is_halved_and_growing_flow_is_not(self) -> None:
+        panel = _panel(funding_bp={"S01USDT": [-15.0], "S02USDT": [-15.0]})
+        # S02's hourly turnover compounds 1%/h: +105% per 72h, above the cut.
+        panel = panel.with_columns(
+            pl.when(pl.col("symbol") == "S02USDT")
+            .then(pl.col("by_turnover_quote") * (1.01 ** (pl.col("bar_ts_ms") / HOUR_MS)))
+            .otherwise(pl.col("by_turnover_quote"))
+            .alias("by_turnover_quote")
+        )
+        w = carry_hold_weights(_universe(panel), self._flow_cfg())
+        late = 240 * HOUR_MS  # a daily-grid bar (origin is the 168h momentum floor)
+        stale = w.filter((pl.col("symbol") == "S01USDT") & (pl.col("bar_ts_ms") == late))
+        growing = w.filter((pl.col("symbol") == "S02USDT") & (pl.col("bar_ts_ms") == late))
+        assert stale["w"].item() == pytest.approx(growing["w"].item() * 0.5)
+
+    def test_non_finite_flow_growth_fails_open_at_full_size(self) -> None:
+        # S01 traded nothing until h=200: at the 240h bar its 72h-earlier adv24
+        # is zero, growth divides to non-finite, and the multiplier must not
+        # fire. S02's flat turnover (growth 0) fires at the same bar.
+        panel = _panel(funding_bp={"S01USDT": [-15.0], "S02USDT": [-15.0]})
+        panel = panel.with_columns(
+            pl.when(
+                (pl.col("symbol") == "S01USDT") & (pl.col("bar_ts_ms") < 200 * HOUR_MS)
+            )
+            .then(0.0)
+            .otherwise(pl.col("by_turnover_quote"))
+            .alias("by_turnover_quote")
+        )
+        w = carry_hold_weights(_universe(panel), self._flow_cfg())
+        late = 240 * HOUR_MS
+        open_ = w.filter((pl.col("symbol") == "S01USDT") & (pl.col("bar_ts_ms") == late))
+        fired = w.filter((pl.col("symbol") == "S02USDT") & (pl.col("bar_ts_ms") == late))
+        assert open_["w"].item() == pytest.approx(fired["w"].item() * 2.0)
+
+    def _whale_cfg(self) -> CarryHoldConfig:
+        base = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v1.json")
+        return dataclasses.replace(base, whale_cut=-0.26, whale_lo=0.5)
+
+    def _whale_panel(self) -> pl.DataFrame:
+        # S01: top traders de-longing fast (-0.36 per 72h). S02: adding.
+        # S03: de-longing but the feed is stale (age 60h > 48h cap).
+        panel = _panel(
+            funding_bp={"S01USDT": [-15.0], "S02USDT": [-15.0], "S03USDT": [-15.0]}
+        )
+        h = pl.col("bar_ts_ms") / HOUR_MS
+        return panel.with_columns(
+            pl.when(pl.col("symbol").is_in(["S01USDT", "S03USDT"]))
+            .then(2.0 - 0.005 * h)
+            .otherwise(1.0 + 0.001 * h)
+            .alias("bn_tt_ls"),
+            pl.when(pl.col("symbol") == "S03USDT")
+            .then(pl.lit(60.0))
+            .otherwise(pl.lit(1.0))
+            .alias("bn_tt_ls_age_h"),
+        )
+
+    def test_delonged_names_are_halved_and_stale_feed_fails_open(self) -> None:
+        w = carry_hold_weights(_universe(self._whale_panel()), self._whale_cfg())
+        late = 240 * HOUR_MS
+        at = {
+            sym: w.filter((pl.col("symbol") == sym) & (pl.col("bar_ts_ms") == late))["w"].item()
+            for sym in ("S01USDT", "S02USDT", "S03USDT")
+        }
+        assert at["S01USDT"] == pytest.approx(at["S02USDT"] * 0.5)
+        assert at["S03USDT"] == pytest.approx(at["S02USDT"])
+
+    def test_whale_enabled_without_the_panel_column_fails_loudly(self) -> None:
+        u = _universe(_panel(funding_bp={"S01USDT": [-15.0]}))
+        with pytest.raises(FinancedLongsError, match="d_tt_ls_3d"):
+            carry_hold_weights(u, self._whale_cfg())
+
+    @pytest.mark.parametrize("name", ["v1", "v4"])
+    def test_registered_weights_ignore_the_whale_columns(self, name: str) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / f"lane2_carry_hold_{name}.json")
+        plain = carry_hold_weights(
+            _universe(_panel(funding_bp={"S01USDT": [-15.0, 1.0], "S02USDT": [-12.0]})), cfg
+        )
+        with_cols = carry_hold_weights(
+            _universe(
+                _panel(funding_bp={"S01USDT": [-15.0, 1.0], "S02USDT": [-12.0]}).with_columns(
+                    pl.lit(1.5).alias("bn_tt_ls"), pl.lit(1.0).alias("bn_tt_ls_age_h")
+                )
+            ),
+            cfg,
+        )
+        assert plain.equals(with_cols)
