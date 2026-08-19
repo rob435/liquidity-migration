@@ -117,9 +117,9 @@ historical-universe claim ([`data.md`](data.md)). The scoped run label carries a
 funding-coverage dimension as well as a PIT one, and funding downgrades it independently:
 `pit_required_missing_manifest`, `pit_membership_filtered_current_universe`,
 `full_pit_universe_funding_missing`, `full_pit_universe_funding_coverage_low`,
-`full_pit_universe_funding_partial`, `full_pit_universe` (`long_native.py:1135-1153`), plus a
+`full_pit_universe_funding_partial`, `full_pit_universe` (`research/backtest/long_native.py`, `_run_label` — not the 403-line `rules/long_native.py` the header links), plus a
 methodology label `invalid` / `biased_benchmark` / `exploratory` from taint and manifest state
-(`:1156-1171`). `full_pit_universe_pass=true` beside a
+(`_methodology_run_label`, same file). `full_pit_universe_pass=true` beside a
 `full_pit_universe_funding_coverage_low` label is not a historical-universe claim.
 
 ## CARRY — `lane2_carry_hold_v4`
@@ -186,10 +186,15 @@ Its own code — the producer, its daemon, the cycle-status projection, and the 
 modules behind it — was deleted from the tree in the 2026-08-14 cleanup, together with the
 `continuous-event-demo-cycle` CLI subcommand. Git history holds all of it.
 
-Three things the sleeve left behind are data, not code, and they stay:
+What the sleeve left behind (this list said "three things … and they stay" until
+2026-08-19; the same 2026-08-14 day that wrote it also removed the first item
+nine hours later, and the schema now *refuses* a profile carrying a
+`continuous` block — only the last two survive):
 
-- A token CONTINUOUS envelope in both operational profiles, still proved against the account
-  caps. Its sizing shape is now frozen as constants in `policy/operational_profile.py`.
+- ~~A token CONTINUOUS envelope in both operational profiles~~ — removed
+  2026-08-14 (`4a8f8301`); its share went back to the dial ceiling
+  (9.9 → 10.0). No `continuous` key exists in either profile or in
+  `policy/operational_profile.py`.
 - The tradable population itself, which schema 4 of the frozen candidate universe kept under
   the `continuous` name. It was never that sleeve's population: every gate in it was off, so
   it was simply every crypto-linear perpetual the venue listed at snapshot time, minus the
@@ -204,7 +209,10 @@ Three things the sleeve left behind are data, not code, and they stay:
   copies forward onto its close.
 
 The hedge that sat against the CONTINUOUS short book — its model code and its committed
-warmstart prior — was removed from the tree in the same cleanup.
+warmstart prior — was removed from the tree in the same cleanup. What did stay is the
+`hedge` *envelope*: `PARTITIONABLE_SLEEVES` in `policy/operational_profile.py` is still
+`("carry", "hedge", "long")` and both operational profiles carry a `hedge` block — an
+empty seat, kept so a future hedge does not need a schema change.
 
 The negative results, and what the retired sleeves did and did not establish, are in
 [`research_findings.md`](research/research_findings.md) and the
@@ -216,40 +224,50 @@ The negative results, and what the retired sleeves did and did not establish, ar
 sizing surface. Caps are a fraction of observed wallet equity
 ([`envelope.rs`](../engine/engine-risk/src/envelope.rs):
 contraction immediate, expansion behind a dead band, unknown equity moves nothing);
-[`account_kernel.py`](../liquidity_migration/account/account_kernel.py) holds each sleeve to
-its own partition of it;
+the per-sleeve partition is the engine's
+([`kernel.rs`](../engine/engine-risk/src/kernel.rs), fed from the profile's
+`sleeve_limits` — and note the demo profile declares no `sleeve_limits`, so on
+the demo account there is no per-sleeve fence; the Python partition in
+`account_kernel.py` survives in the tree but nothing on the order path runs it);
 [`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs) halts the day
 at a loss ceiling.
 
-**The venue stop comes from the outermost declared stop.**
-`venue_protection.py:280-321` installs one Full-position exchange-native stop per net
-symbol, taken from the *outermost* declared `stop_loss_pct` among the symbol's components,
-anchored to entry fill VWAP and tagged `fill_anchored_outermost_component_stop`; it falls
-back to `explicit_account_fallback_fraction` off `average_price` only when no component
-declares one. A declared value outside (0, 1) raises rather than silently widening to the
-fallback. CARRY declares 0.35.
+**The venue stop is exchange-native, one Full-position stop per symbol.** The
+installer is now the engine
+([`gateway.rs`](../engine/engine-venue/src/gateway.rs) posts `tpslMode: "Full"`
+with the stop; [`reconcile.rs`](../engine/engine-core/src/reconcile.rs) and
+[`working.rs`](../engine/engine-core/src/working.rs) keep it true), taking one
+`stop_loss_fraction` per symbol from the routed target book. CARRY declares
+0.35. Honest difference from the deleted Python installer
+(`venue_protection.py`, removed 2026-08-14, described here until 2026-08-19):
+the old *outermost-among-components* aggregation did not transfer — the engine
+takes the book's single per-symbol stop, so if two components of one symbol
+ever declared different stops, the producer's book, not the engine, would have
+to resolve them. Today's producers publish one target per symbol per sleeve,
+so nothing exercises that difference.
 
 **Profile load refusals** (all in
-[`operational_profile.py`](../liquidity_migration/policy/operational_profile.py)): unknown or
-missing fields in any block (`_object`, `:44-50`); any producer `entry_leverage` above
-`account_risk.max_leverage` (`:447-453`); an account gross cap above `capital_reference_usdt
-× max_leverage` (`:455-458`); an initial-margin cap above `capital_reference_usdt`
-(`:459-462`); a symbol cap above the component cap, or a component cap above the account cap
-(`:309-312`); a LONG full-book margin projection above its own
-`max_projected_initial_margin_pct_equity` (`:493-500`); and any registered
-LONG/CONTINUOUS/CARRY envelope — per-symbol, combined gross, combined margin — outside the
-account caps (`:558-568`). When `sleeve_limits` is declared, each producer envelope must
-also fit its own share, and a sleeve with a non-zero envelope but no share is refused
-(`:570-594`). The validator is `_validate_profile_envelopes` and it re-runs on the
-equity-rescaled profile (`:682`), not only at load. Separately: a normal risk or venue-rule
-rejection when live account state differs from the validation reference is a safety
-decision, not configuration drift — do not "fix" it by raising caps.
+[`operational_profile.py`](../liquidity_migration/policy/operational_profile.py); cited by
+function, not line — the 2026-08-14 CONTINUOUS removal cut ~90 lines and rotted every line
+number this paragraph used to carry, one past end-of-file): unknown or missing fields in
+any block (`_object`); any producer `entry_leverage` above `account_risk.max_leverage`; an
+account gross cap above `capital_reference_usdt × max_leverage`; an initial-margin cap
+above `capital_reference_usdt`; a symbol cap above the component cap, or a component cap
+above the account cap; a LONG full-book margin projection above its own
+`max_projected_initial_margin_pct_equity`; and any registered LONG/CARRY envelope —
+per-symbol, combined gross, combined margin — outside the account caps
+(`_validate_profile_envelopes`). A profile still carrying a `continuous` block is refused
+by name. When `sleeve_limits` is declared (`_parse_sleeve_limits`), each producer envelope
+must also fit its own share, and a sleeve with a non-zero envelope but no share is refused.
+The validator re-runs on the equity-rescaled profile, not only at load. Separately: a
+normal risk or venue-rule rejection when live account state differs from the validation
+reference is a safety decision, not configuration drift — do not "fix" it by raising caps.
 
 **Universe membership.** Turnover, listing age, and rank are re-evaluated every cycle, so a
 symbol can be skipped without disappearing. A newly observed future `deliveryTime` drops it
 from new-entry membership, and retiring it requires position, component targets, component
 desires, working orders, the aggregate target, **and** the unresolved inbox all flat for that
-symbol (`require_scheduled_retirements_flat`, `account_candidate_universe.py:1470-1503`);
+symbol (`require_scheduled_retirements_flat` in `account_candidate_universe.py`);
 any remainder raises `scheduled-retirement symbols are not account-flat`. The private
 retirement registry preserves the delivery observation after the venue removes the instrument
 row; a moved delivery date updates the record in place, keeping the original first-observed
@@ -264,7 +282,7 @@ evidence stands). Malformed eligibility input still raises.
 
 The frozen candidate artifact is a forward population contract: the active set is the
 intersection of the frozen per-profile population with the current live population
-(`account_candidate_universe.py:1327-1331`), so a post-freeze listing can never enter until
+(the freeze-intersection step in `account_candidate_universe.py`), so a post-freeze listing can never enter until
 someone re-freezes, and a frozen symbol failing a dynamic filter is skipped with its exact
 reason written to the cycle receipt (`temporarily_ineligible_candidates_json`) — normal
 ranking movement, distinct from disappearance.

@@ -16,6 +16,43 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-19 ~02:00 UTC — The owner's skepticism audited: 24 stale doc
+  claims fixed, the queue consolidated, and the "short system" question
+  answered with receipts.** Two independent read-only sweeps plus source
+  spot-checks verified every claim before any edit. The worst rot: this
+  repo's own program file kept the settlement-sawtooth item OPEN for 18
+  days after its dossier killed every hypothesis (H1 "blocked on minute
+  data" was withdrawn by that same dossier on 2026-08-01 — the fetcher
+  exists and `klines_1m/` holds 2,034 partitions); `trading_logic.md`
+  asserted a CONTINUOUS envelope "stays" in profiles whose schema now
+  refuses one; `STATE.md` carried a stale live risk ceiling (dials total
+  10.0, not 9.9, since `4a8f8301`) and presented the deleted Python owner's
+  latency numbers as current state. All four docs corrected; line-number
+  citations that had rotted (one past end-of-file) replaced with function
+  names. **The short-system answer:** production never shorted — carry is
+  long-only (long the names crowded shorts pay to press), LONG is long-only,
+  and no producer has ever emitted a negative notional; what left the tree
+  was the CONTINUOUS BTC/ETH hedge (08-14) and ancient `research_v3`
+  listing-short runners (long before). The engine's short *execution* path
+  is alive and tested; the registered blend and funding-spread short legs
+  are intact and forward-scored. **Owner deletion decisions executed
+  tonight:** the deletion-blocked CONTINUOUS admission scoring item is
+  RETIRED (both docs, one line each); the two dead listing-short tables in
+  the program file's priors are compacted to their conclusions (git history
+  holds the tables). **Deletion refused, with proof:** the six ex-owner
+  `account/` modules are all load-bearing per a transitive import graph
+  from live entry points — `carry_demo` → `account_route`, LONG producer →
+  `account_service`, watchdog → `account_kernel`/`account_owner_health`,
+  quote lab → `market_capture`, `execution_adapters` carries the
+  never-rename adapter name. File-level deletion there breaks the demo
+  fleet; the dead weight is intra-module functions, a separate carving job
+  nobody has ordered. **The evidence machine restarted:** every data root
+  on both venues had sat at `date=2026-07-27` since the last hand-run on
+  2026-07-28 — three weeks of the promoted v4's forward record never
+  scored. The 22-day append-first backfill is running; panel rebuild and
+  ledger append follow. Automating the daily sequence so it cannot
+  silently stop again is proposed and awaits the owner.
+
 - **2026-08-18 23:53 UTC — The whole 08-17/08-18 wave shipped: committed as
   `ee8b72a6`, pushed, and staged-deployed to the fleet.** Gate before the
   push: doctor, ruff, mypy clean; 2,483 Python tests and 29 engine suites

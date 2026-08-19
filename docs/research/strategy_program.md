@@ -136,8 +136,10 @@ one-off runners are retired.
   rollout). `continuous_ensemble_v2` at revision
   `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the profile
   id predates the 2026-07-26 replacement and no longer implies an ensemble) was
-  retired from demo and paper on 2026-07-29 by owner override and its code is
-  dormant. All of these are runtime configurations, not validated alpha claims;
+  retired from demo and paper on 2026-07-29 by owner override and its code was
+  **deleted from the tree on 2026-08-14** (`79e5ce89`, ~14,600 lines; git
+  history holds it — "dormant" was true when written and is not any more).
+  All of these are runtime configurations, not validated alpha claims;
   `deploy/sleeves.env` and `STATE.md` are the authority for what publishes.
 - No researched replacement currently qualifies for implementation.
 - Passive execution: the in-flow A/B is **retired** (it lived on the paper
@@ -157,8 +159,10 @@ one-off runners are retired.
   closed.** The anomaly program's conclusion is economic: the durable premium
   is compensation for liquidation risk this capital structure cannot survive,
   and no construction the repository can express clears the bar. CONTINUOUS
-  declares a 35% stop its backtest also models (honest headline: Sharpe 1.87,
-  +15.79%, max DD −2.85%). Full phase record verbatim in
+  declared a 35% stop its backtest also modeled (honest headline: Sharpe 1.87,
+  +15.79%, max DD −2.85%; that backtest code left the tree 2026-08-14 —
+  the numbers stand as recorded, the scorer is git-history only). Full
+  phase record verbatim in
   `archive/2026-08-03-strategy-program-change-log.md`; durable summary in
   `docs/research/research_findings.md`.
 - **Dated change points 2026-07-26 .. 2026-08-03 are decanted verbatim to
@@ -323,38 +327,19 @@ genuinely new strategy is better graded on post-commit days.
 | Cross-venue follow-ups merged 2026-07-21 | A Bybit turnover-collapse listing short looked strong by era (+247/+246/+510 bp at day 2) but failed in every Binance era (-415/-41/-290 bp). Hedged extreme-funding carry was negative across every declared arm on both venues. Naive pump-event longs were negative in 23 of 24 venue/era cells; D9 and BTC-uptrend short-path differences were only about +26 to +62 bp and uncertain. | Preserve venue divergence, the post-2025 negative-funding explosion, and the small D9/uptrend directional effect as anomaly leads. Retire the fixed admission bars, bulk reports, and one-off runners. |
 | Book-level overlay follow-ups | A monotone BTC-risk intensity bought roughly 19-33% tail relief for about 3.8 percentage points/year of net premium on the deployed-shape render. A realized daily loss budget helped mainly on the negative barebones surface, while a cluster cap never bound the deployed-shape book. | Priced, regime-dependent insurance diagnostics, not automatic governors. Retire the staged hardcoded implementations; revisit through open anomaly research if new evidence warrants it. |
 
-**Young listings: turnover decay was the only interesting lead.** Six event-day-2
-rules were declared from price extension, turnover retention, and already-settled
-funding before their day-2-to-day-7 outcomes were read; trades used actual
-hold-period funding, 100 bp round-trip cost, and a listing-month block bootstrap.
-The turnover-decay short was positive in aggregate but had only nine 2021-22
-observations and each era-specific interval crossed zero — a mechanism lead, not
-a candidate. Persistent-attention continuation was directly refuted.
-
-| Rule | N | Mean net | Median net | 95% block CI |
-| --- | ---: | ---: | ---: | ---: |
-| Short every listing | 896 | -59 bp | +460 bp | -468 to +274 bp |
-| Short when turnover retention is below 0.5 | 243 | +348 bp | +493 bp | +66 to +606 bp |
-| Short pumped-and-decayed listings | 5 | -1,111 bp | -434 bp | -3,119 to +630 bp |
-| Short crowded/decaying listings | 28 | -4,580 bp | +581 bp | -15,462 to +404 bp |
-| Long pumped listings with persistent turnover | 98 | -722 bp | -1,015 bp | -1,341 to -105 bp |
-
-**Mature symbols: the simple mechanism did not generalize.** Falsified on the
-canonical Bybit daily panel (`2022-01-03` through `2026-07-03`, 889 symbols).
-Signals required 240 observed days, at least 12 million USDT daily turnover,
-exact daily continuity, entry at the next daily close, exit five days later, and
-at least seven days between signals for a symbol; the screen includes price and
-round-trip cost but not funding, so it is optimistic for a short strategy. Price
-extension, listing age, and turnover retention are context, not a standalone
-signal, and their pooled medians hide severe era dependence.
-
-| Rule | Cost | N | Full mean | 2023-24 mean | 2025-26 mean | 95% block CI, full |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Short turnover decay | 100 bp | 5,729 | -45 bp | -158 bp | +84 bp | -181 to +86 bp |
-| Short turnover decay | 200 bp | 5,729 | -145 bp | -258 bp | -16 bp | -279 to -16 bp |
-| Short pumped + decayed | 100 bp | 241 | -170 bp | -774 bp | +298 bp | -916 to +475 bp |
-| Long pumped + persistent | 100 bp | 5,171 | -119 bp | +71 bp | -312 bp | -320 to +86 bp |
-| Long pumped + persistent | 200 bp | 5,171 | -219 bp | -29 bp | -412 bp | -422 to -11 bp |
+**Young listings and mature-symbol turnover decay: dead, in compact form**
+(full tables deleted 2026-08-19 by owner consolidation decision — git history
+at this file's pre-2026-08-19 revisions holds them; the runners were
+`research_v3` scripts deleted long before that). Young listings: six
+pre-declared event-day-2 rules, honest costs and funding, block bootstrap —
+the turnover-decay short was positive in aggregate on nine 2021-22
+observations with every era-specific interval crossing zero (a mechanism
+lead, not a candidate), and persistent-attention continuation was directly
+refuted (n=98, CI −1,341 to −105 bp). Mature symbols: falsified on the
+canonical daily panel (889 symbols, 2022-01..2026-07) — pooled means near
+zero with severe era dependence, and the screen omitted funding, so it was
+optimistic for shorts even so. Price extension, listing age, and turnover
+retention are context, not a standalone signal.
 
 ## Starting hypothesis, not mandated direction: Crowding Transfer
 
@@ -499,8 +484,9 @@ When a formulation becomes worth grading, commit its exact config and scorer
 before the first new day; that commit is the registration. Append one row per
 new day. Grade only post-commit decisions and keep mechanics-only days
 separate. Multiple distinct formulations may accumulate their own honest
-records. The existing LONG/CONTINUOUS sleeves remain controls and are not
-modified to help a challenger.
+records. The existing LONG/CARRY sleeves remain controls and are not
+modified to help a challenger. (Said LONG/CONTINUOUS until 2026-08-19;
+CONTINUOUS cannot be a control — its code left the tree 2026-08-14.)
 
 Promotion requires the five-line note in `docs/research/governance.md`, a recorded
 change point, stable demo execution, and an explicit replacement/migration
@@ -533,19 +519,20 @@ ceiling is Sharpe 0.69 -> ~1.17). Completed items below are retained as the
 evidence trail.
 
 
-- [ ] **Settlement sawtooth program — OPEN 2026-07-31, dossier at
-      `docs/research/archive/2026-08-01-settlement-sawtooth-program.md`.** Seven ranked hypotheses; that file
-      carries the tables, the falsification tests (cross-venue replication
-      passes, the deep-positive mirror does *not*), the already-closed dead ends,
-      and the kill criteria. Order of work: **H5** (which mechanism — harvest
-      flow vs squeeze-and-fade; produces no trade but decides which other items
-      are worth running), then **H7** (fill scheduling for the live CARRY sleeve
-      — cheapest, operational, no alpha claim), then **H2/H3** (entry and exit
-      timing for the deployed book — unblocked, and read the degenerate-cycle-
-      phase trap in H2 before building). **P0 is a data task:** `tick_ohlc_1m/`
-      is empty and no script in `scripts/data/` fetches sub-hourly bars, so H1 —
-      the highest-value item — is *blocked*, not refuted. Report every result as
-      a sweep over the 24 grid phases, never a single clock.
+- [x] **Settlement sawtooth program — CLOSED 2026-08-01 by its own dossier;
+      this queue item went stale and said OPEN until 2026-08-19.** The dossier
+      (`docs/research/archive/2026-08-01-settlement-sawtooth-program.md`, §5
+      verdict table) resolved every hypothesis: H1 DEAD twice over (the entry
+      gate is not knowable at entry, and 97.0% of the move lands inside two
+      minutes), H2 DEAD (−336.20 bp/entry, t −6.15), H3 DEAD, H4 DEAD, H5
+      RESOLVED, H6/H7 ANSWERED — H7's ~00:20 fill is deployed. The "P0 data
+      task" this item used to carry was doubly false by then: the dossier's
+      own §4 ("the blocking dependency: minute data") is struck through and
+      WITHDRAWN 2026-08-01, `scripts/data/download_bybit_klines_1m.py` exists,
+      and `klines_1m/` holds 2,034 date partitions from 2021-01-01 (tier F in
+      `docs/data.md`). Nothing here is blocked and nothing here is worth
+      re-running; the Current-truth bullet above recorded the closure on day
+      one, and this queue line simply never got checked off.
 - [x] **Enumerate the "~44 mechanisms", or stop quoting a threshold derived from
       them — CLOSED 2026-07-31 by taking the second option.** The bar is now a
       fixed t >= 2.5 owned by `docs/research/governance.md` 2, so no threshold in this
@@ -670,36 +657,39 @@ evidence trail.
       directly since the 2026-07-27 M19 turnover fix), evidence
       `docs/research/archive/2026-07-26-financed-longs.md` with the 22-row
       negative-results ledger.
-- [ ] Score the six registered financed-longs configs on each new completed UTC day
-      (`lane2_carry_hold_v1/v2/v3`, `lane2_funding_spread_v1`,
+- [ ] Score the seven registered financed-longs configs on each new completed
+      UTC day (`lane2_carry_hold_v1/v2/v3/v4`, `lane2_funding_spread_v1`,
       `lane2_financed_leaders_v1`, `lane2_financed_leaders_binance_v1`;
-      `DEFAULT_CONFIGS` in the scorer is the list)
+      `DEFAULT_CONFIGS` in the scorer is the list — this item said six and
+      omitted v4, the promoted live config, until 2026-08-19)
       (rolling forward record; the registration commit is the change point;
       since 2026-07-28 the scorer charges each settlement exactly once;
-      `lane2_carry_hold_v2`/`v3` score beside v1 with the paired daily
-      differentials v2−v1 and v3−v2 as the primary comparisons). Tooling:
-      `scripts/research/score_financed_longs_forward.py` appends
-      `reports/financed_longs_forward/ledger.csv` (append-first, idempotent,
-      `forward_eligible` flagged). Panel refreshed through 2026-07-27 on
-      2026-07-28; the daily sequence is research-refresh → panel 2026
-      rebuild (`scripts/data/build_cross_venue_panel.py --start 2021-01-01`,
-      full rebuild — the index is whole-file) → ledger append.
+      the paired daily differentials v2−v1, v3−v2, and **v4−v3 — the
+      experiment the 2026-08-03 promotion rides on** — are the primary
+      comparisons). Tooling: `scripts/research/score_financed_longs_forward.py`
+      appends `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`
+      (append-first, idempotent, `forward_eligible` flagged; the path is under
+      the data root, not the repo's `reports/`). The daily sequence is
+      research-refresh → panel 2026 rebuild
+      (`scripts/data/build_cross_venue_panel.py --start 2021-01-01`, full
+      rebuild — the index is whole-file) → ledger append.
+      **The sequence stopped on 2026-07-28 and nobody noticed for three
+      weeks**: every data root's last partition sat at 2026-07-27 and the
+      ledger's last scored day at 2026-07-26 until the 2026-08-19 backfill.
+      The promoted v4 accrued zero scored forward days in that gap. If this
+      is to be believed as a forward record it cannot be a hand ritual —
+      automating it is proposed in CHANGELOG 2026-08-19, owner's call.
 - [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
       the `lane2_premium_momentum_blend_v1` table, the anomaly-research
       funding-leg numbers (leg-attribution reversal, dispersion-gate
       withdrawal), and financed-longs negative-ledger rows 1/2/13–17/20
       (2026-07-28 double-count correction).
-- [ ] Score the venue-scoped CONTINUOUS admission variant beside the shipped
-      shape on post-2026-07-27 days (registered 2026-07-27, evidence
-      `docs/research/archive/2026-07-27-continuous-ladder-mechanism.md` §5 — the 2025-carried
-      era profile is the thing the forward record must test).
-      **Blocked by deletion, not by evidence (2026-08-14):** the sleeve this
-      scores was retired 2026-07-29 and its code, including
-      `scripts/research/render_continuous_admission_variants.py` and the
-      backtest modules it drove, was deleted from the tree in the 2026-08-14
-      cleanup. Git history holds all of it. Running this item now means
-      restoring that tooling first — or retiring the item, which is an owner
-      decision and not one a cleanup gets to make.
+- [x] Score the venue-scoped CONTINUOUS admission variant — **RETIRED
+      2026-08-19, owner decision.** Its tooling left the tree with the
+      CONTINUOUS sleeve on 2026-08-14; the owner chose retirement over
+      restoration. Evidence and design constraints stay in
+      `docs/research/archive/2026-07-27-continuous-ladder-mechanism.md` §5
+      and git history.
 - [ ] Measure realised maker-fill probability in flow (target was 100 fills
       per arm; the retired paper-owner A/B froze at 2 of 8). This is the last
       unmeasured cost input. **Blocked, not pending:** it now needs a

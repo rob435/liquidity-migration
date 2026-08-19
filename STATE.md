@@ -22,8 +22,18 @@ match; never append history to this file.
   `/etc/liquidity-migration/engine.toml`, which staged deploys deliberately
   never rewrite; backup beside it). Mainnet stays `"shared"` — the owner
   hand-trades there. The Python order path is gone from the repository and
-  from the host: the account owner, its two units, its launcher scripts and
-  its risk layer, about 25,000 lines.
+  from the host: the account owner's runner, its two units, its launcher
+  scripts and its risk layer, about 25,000 lines. Six `account/` modules
+  survived that deletion and the 2026-08-19 import-graph check proved every
+  one load-bearing — the producers, the watchdog, and the kept quote-lab
+  tooling all reach them (`carry_demo` → `account_route`, the LONG producer
+  → `account_service`, `check_fleet_liveness` → `account_kernel` and
+  `account_owner_health`, quote lab → `market_capture`, and
+  `execution_adapters` carries the never-rename
+  `BybitDemoExecutionAdapter.name`). They are the producers' library now,
+  not a dormant order path; none is deletable at file level. Their dedicated
+  test files went with the runner, so coverage is thinner than before —
+  known, accepted 2026-08-19.
 
   The chain runs end to end and was watched doing it:
 
@@ -192,44 +202,35 @@ match; never append history to this file.
 - **Entries rest for 45 s, not 120 s.** 15 live resting entries filled at a
   median of 1.28 s and a maximum of 36.6 s, so 45 s keeps every passive fill
   120 s got and bounds the tail; 30 s would have crossed 1 of 15, 15 s, 3 of 15.
-- **Sizing from the producer's decision price is built but off**
-  (`--producer-price-max-age-seconds`, default 0). Producers publish a notional
-  with no price, carry's own price is a daily bar close, and publish-to-sizing is
-  3.1 s median but **443 s at p90**. Exits always size off the live price.
-- **All 509 candidate symbols carry a pushed top of book** (`tickers`), which is
-  exactly what the order path reads, and **there is no switch to turn it off** —
-  `--no-touch-feed` and `ACCOUNT_TOUCH_FEED` were deleted 2026-08-09. A/B on the
-  same host, symbol and probe: feed off, a cold entry waited 1002 ms to be
-  commanded; feed on, 216 ms. Warm entries are unchanged (~830–880 ms). It costs
-  ~500 frames/s and ~14 points of one core per owner (29.8% vs 15.5%) and does
-  **not** slow the owner loop (76 ms on, 77 ms off — the loop is sleep-bound and
-  the feed runs on its own thread). A traded symbol keeps its subscription for 10
-  minutes after its work clears; a head no socket is carrying yet is priced by one
-  REST read.
-- **A ticker touch is a price, not a book.** Callers opt in per read; markout
-  grading and raw capture still refuse anything but real L2; a decision priced
-  from it records `book_source=bybit_ticker_touch`. Subscribed depth stays at 50
-  because `book_walk_shortfall_bps` walks the visible depth-50 decision book —
-  the only measured impact evidence there is.
+- **Pricing and market data for the order path now live in the engine.** It
+  subscribes its own venue stream per followed symbol and refuses an entry
+  decided against a quote older than its declared bound (default 30 s —
+  `docs/engine.md`). Four bullets that used to sit here — producer-price
+  sizing, the touch feed, ticker-touch reads — described the Python account
+  owner deleted 2026-08-14; they were removed 2026-08-19 and CHANGELOG holds
+  the history.
 
 ### Measured latency
 
-- **Owner loop: ~76 ms per iteration and sleep-bound** — `--idle-seconds` 0.05,
-  `--reconcile-seconds` 0.5, reconcile 3.7% of the loop, owner 89.6% idle, and a
-  steady-state reconcile pass makes no REST call at all.
-- **Our own software time — durable intent to bytes on the wire — is 25.7 ms
-  median, 9.1 ms best (n=60)**; the floor is two durable journal commits (the
-  plan, then `record_submission_attempt`, the single-winner guard that makes a
-  crash unable to submit the same exposure twice).
-- **End-to-end on demo (2026-08-09, n=16 cycles): entry 276 ms median / 250 ms
-  best; exit 252 ms median / 228 ms best.**
-- **The ~175 ms venue round trip is geography** — `api.bybit.com`,
+The live order path is the Rust engine's; the honest latency contract and the
+measured table are `docs/engine.md`. The short version, measured on the fleet:
+**83 ns** to decide, **~2.7 ms** decision to bytes-on-wire (the
+fsync-dominated software chain), and live against the venue 2026-08-18
+(n=67): **179 ms median decision→acknowledgment, 512 ms p90, 1013 ms p99**.
+The 2026-08-18 leverage pre-arm removed the last software round trip in
+entries — proven live 2026-08-19, 8.7 ms decided→wire on a leverage-needing
+entry that paid ~169 ms median the day before. (The owner-loop numbers that
+used to sit here — 76 ms loop, 25.7 ms durable-to-wire, 276 ms entries —
+measured the Python owner deleted 2026-08-14 and moved to history.)
+
+- **The ~172 ms venue round trip is geography** — `api.bybit.com`,
   `api.bytick.com` and `api.byhkbit.com` are the same Frankfurt CloudFront edge
   proxying to an Asian origin. No code change reaches it; a host near the origin
   is the only lever and the largest single win left. Owner decision.
-- **A sub-10 ms median needs a faster host, not more software** — every remaining
-  software item together lands near 18 ms, not 10; the measured menu is in
-  CHANGELOG 2026-08-09.
+- **What remains of the software tail is grouped sibling entries sending
+  serially** — each awaits the previous order's ~190 ms venue acknowledgment
+  (measured 2026-08-19: 8.7 / 199 / 369 ms for three same-decision entries).
+  Concurrent sends are the one software lever left; observed, not built.
 - **Cross-session latency comparisons are confounded by account-state growth** —
   protections, orders, decisions and executions accumulate for the life of the
   account and nothing prunes them. Compare within a run, or reset the epoch first.
@@ -271,7 +272,10 @@ from the host 2026-08-06; the installed risk profile is the render of them).
 `RM_CARRY_LEVERAGE` (**2.0** since 2026-08-06, was 1.0) and `RM_LONG_LEVERAGE`
 (**1.88**) are each sleeve's book ceiling as a multiple of equity, worst case
 included — each carry name takes a tenth of its dial (≈ $20 on ~$100 equity), each
-LONG entry ≈ its dial / 18.75 (≈ $10), and the two dials may total 9.9.
+LONG entry ≈ its dial / 18.75 (≈ $10), and the two dials may total 10.0
+(`MAX_REAL_MONEY_LEVERAGE` in `policy/real_money_profile.py`; was 9.9 until the
+2026-08-14 CONTINUOUS-envelope removal freed its token share — this line said
+9.9 until 2026-08-19).
 `RM_DAILY_LOSS_FRACTION` (**0.25**) and `RM_CARRY_STOP_LOSS_FRACTION` (0.35) are
 the protections. Everything else the old surface exposed is derived and still
 proved at render; a retired `RM_*` line in an env file is refused by name. Derived
@@ -317,10 +321,13 @@ liquidation engine, can still outrun it at high leverage.
   `--stop-first` is passed explicitly. Push only from the primary checkout until
   the pre-push hook's git-fixture tests are hermetic (a linked worktree run
   corrupted the repo once, repaired 2026-08-03).
-- Three CONTINUOUS candidates (`HIGHUSDT`, `PUMPBTCUSDT`, `WHITEWHALEUSDT`) have
+- Three delisting candidates (`HIGHUSDT`, `PUMPBTCUSDT`, `WHITEWHALEUSDT`) have
   venue `deliveryTime=1784538000000`, recorded prospectively in private mode-0600
   retirement registries; they may retire only while positions, targets, orders,
-  and inbox exposure are all flat.
+  and inbox exposure are all flat. (Recorded under CONTINUOUS when that sleeve
+  existed; the 2026-08-14 schema-5 converter re-keyed them to LONG's registry
+  with their first-observed anchors intact — this line said "CONTINUOUS
+  candidates" until 2026-08-19.)
 
 ## Forward evidence stream
 

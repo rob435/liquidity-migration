@@ -408,7 +408,7 @@ registered v4 bit-identically (1,756 days, 22.1939 bp/day) before any arm ran.
 | funding floor at +1 bp | 1.65 vs 2.18 at 0.0 | past the economic boundary |
 | gate off / loosened to >−0.05 | 0.93 / 1.35, and 1.31 even with the funding filter | not loosenable |
 | reject-unknown admission | 641 trades, +11.39%, −1.84%, fc 1.49 — identical to the shipped book on every line | exact null; on root funding there are no historical unknowns |
-| cooldown as an independent parameter | `cooldown_ms = hold_ms` in the engine, so the hold-12 test conflated the two | deprioritized: separating them needs an identity-shifting engine field and the prior on more same-symbol re-entries is too weak |
+| cooldown as an independent parameter | `cooldown_ms = hold_ms` in the CONTINUOUS backtest engine (deleted 2026-08-14 — not the Rust execution engine), so the hold-12 test conflated the two | deprioritized then, moot now: the scorer is git-history only |
 | force every entry passive | −90.57 bp/day, t −7.20, Sharpe −3.19; discards 49% of intended entries | the most damaging change tested — in a momentum book the entries that come back to you are the ones about to go wrong. Immediate taker +28.42 t 1.96; hybrid chase-then-cross +31.30 t 2.16 |
 
 ## 3. Corrections that changed a conclusion
@@ -541,17 +541,17 @@ that this research was replacing a broken deployed book was wrong.
 
 - **Re-derive the stale magnitudes.** Every *(stale)* row above needs the corrected scorer before any
   magnitude is trusted. Directions are already safe to use.
-- **Forward records.** `scripts/research/score_financed_longs_forward.py` appends one row per config-day (plus the
-  `carry_hold_v2_minus_v1` differential) to `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`; the record still
-  needs the data refresh past 2026-07-17. Live-runtime parity — order lifecycle, venue stops, partial fills —
-  is modelled nowhere.
-- **Score the venue-scoped CONTINUOUS admission variant** against `fund0_base` re-run identically
-  (`scripts/research/render_continuous_admission_variants.py admission --end-date <later>`, variant
-  `fund0_venue_scoped`). It re-renders on history, so it works with the sleeve off. Promotion would need a
-  deliberate admission-scope field on `ContinuousEventConfig` (identity-shifting: it moves `config_hash()` and
-  `kernel_strategy_id` for every CONTINUOUS config), a committed both-venue registry with a refresh policy so
-  the panel union cannot silently drift, and an explicit re-size — the retired profile block was shrunk to
-  `max_active` 1.
+- **Forward records.** `scripts/research/score_financed_longs_forward.py` appends one row per config-day (plus
+  three paired differentials — `carry_hold_v2_minus_v1`, `v3_minus_v2`, and `v4_minus_v3`, the last being the
+  experiment the 2026-08-03 v4 promotion rides on) to
+  `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`. Live-runtime parity — order
+  lifecycle, venue stops, partial fills — is modelled nowhere. **The daily sequence stopped 2026-07-28 and sat
+  idle for three weeks** (backfilled 2026-08-19); a forward record that stops accruing the moment nobody runs
+  it by hand is the standing argument for automating it, proposed and awaiting the owner.
+- **Score the venue-scoped CONTINUOUS admission variant — RETIRED 2026-08-19, owner decision.** Its tooling
+  (`render_continuous_admission_variants.py`, `ContinuousEventConfig`) left the tree with the CONTINUOUS
+  sleeve on 2026-08-14; the owner chose retirement over restoration. Design constraints for anyone who ever
+  reopens it are in the 2026-07-27 archive dossier and git history.
 - **Loser-identification doors — two closed, one taken, one still open (2026-07-31).**
   - **Closed: same-symbol cross-venue funding confirmation at entry.** The diagnostic pointed the right way
     (name-days where Binance funding is also deep earn +59.6 bp/nd vs +16.0 where it is ≥ 0) but the
@@ -586,9 +586,11 @@ that this research was replacing a broken deployed book was wrong.
   were downgraded to a completeness item because the index proxy already answered the delta-neutral question.
 - **If Bybit's interval mix shifts materially again** (e.g. majority-1h), rerun the acuteness-vs-chronic
   tables — that split is microstructure-shaped and could invert.
-- **The coarse funding-coverage label.** `trade_lifecycle.py` exposes `funding_modeled_fraction` and
-  `long_native.py` consumes it, but `continuous_events.py` still collapses the whole book to "partial" from
-  per-trade modes — a flag that fires on 2 of 843 trades at 99.82% notional-weighted coverage.
+- **The coarse funding-coverage label — subject deleted 2026-08-14.** `trade_lifecycle.py` exposes
+  `funding_modeled_fraction` and `long_native.py` consumes it; the third file this row used to name,
+  `continuous_events.py` (which collapsed the whole book to "partial" from per-trade modes — a flag that fired
+  on 2 of 843 trades at 99.82% notional-weighted coverage), left the tree with the CONTINUOUS sleeve. The
+  defect no longer has a subject; the two surviving consumers are correct.
 - **Structural target never built.** One shared causal feature library, few signals each with a stated
   mechanism, one portfolio construction layer, one execution layer, parameters set by economics. Sizing and
   the BTC hedge remain per-sleeve.
