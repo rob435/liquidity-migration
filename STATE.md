@@ -13,7 +13,21 @@ match; never append history to this file.
 
 ### The fleet
 
-- **The engine owns the demo account, and both sleeves feed it.** First
+- **A third sleeve, the EXODUS SHORT, is registered and deployed to demo
+  (2026-08-20, owner: "build the exodus short as a standalone strat sleeve,
+  but synergising").** When carry's v7 pre-settle exit fires, the carry
+  producer publishes the abandoned position as a SHORT to the engine's new
+  `exodus` sleeve (its own `[[strategy]]` block — appended, per the id
+  discipline — book `exodus-demo.json`, fill attribution), covered 60
+  minutes after the settlement. Registered config
+  `configs/lane2_exodus_short_v1.json`; dial `EXODUS_SHORT_PROFILE=v1` on
+  the demo carry unit only, mainnet unset; unsetting it drains the book
+  flat. The declared 0.35 stop is a disaster fence (every measured stop
+  level loses; the cover clock is the exit). No live fire yet — the sleeve
+  waits for the first v7 fire like everything else. Evidence and the
+  honest 2024-negative era shape: `docs/research/research_findings.md`
+  §the exodus short; promotion note in `strategy_program.md`.
+- **The engine owns the demo account, and the sleeves feed it.** First
   deployed 2026-08-14 20:34 UTC; currently at `ff3ca996` (staged deploy
   2026-08-20 ~12:31 UTC — the price-touch event-kind fix, CHANGELOG that
   day). The 2026-08-19 ~22:49 deploy (`68b6a29e`) put carry_hold **v7** on
@@ -98,8 +112,8 @@ match; never append history to this file.
     `ops.sh flatten` did, on the engine's own path.
 
   - **`operational.demo.json` carries no `sleeve_limits`**, so there is no
-    per-sleeve capital partition on demo: both sleeves draw on the
-    account-wide caps and either can spend the lot. The engine logs
+    per-sleeve capital partition on demo: every sleeve draws on the
+    account-wide caps and any one can spend the lot. The engine logs
     `sleeves=0` at boot, against `sleeves=2` on mainnet. It is left alone
     deliberately: demo's `capital_reference_usdt` is 250,000 against an account
     holding about $1,400, so every cap in that profile is already far above

@@ -82,7 +82,7 @@ min_order_notional_usdt = 1.0
 max_account_view_age_s = 120
 
 # ---------------------------------------------------------------------------
-# The two sleeves
+# The sleeves
 # ---------------------------------------------------------------------------
 # Each reads its own book. Books are routed, not broadcast: one reaches its own
 # sleeve and no other.
@@ -98,7 +98,7 @@ max_account_view_age_s = 120
 # engine runs. Listing the names each sleeve most often holds only saves the
 # admission round trip the first time.
 #
-# The two lists must not overlap -- the engine refuses a config where two
+# The lists must not overlap -- the engine refuses a config where two
 # strategies claim one symbol. If their books later name the same symbol
 # anyway, which they can, the engine handles it at run time: whichever sleeve
 # is holding the name keeps it, and the other leaves it alone until it is flat.
@@ -122,3 +122,17 @@ book_path = "/var/lib/liquidity-migration/targets/long-demo.json"
 # sit behind a market that has left. It crosses.
 rest_entries = false
 symbols = ["SOLUSDT", "XRPUSDT"]
+
+[[strategy]]
+name = "target_book"
+sleeve = "exodus"
+# Written by the CARRY producer, not a unit of its own: the sleeve's whole
+# trigger is carry's pre-settle exit fire, so it lives in that process
+# (lane2_exodus_short_v1). The book holds shorts for ~75 minutes at a time.
+book_path = "/var/lib/liquidity-migration/targets/exodus-demo.json"
+# Entries cross: the ride is an hour and the measured economics already pay
+# the taker fee. Resting a dying name's entry misses the move it exists for.
+rest_entries = false
+# Seed only; every real name arrives via the book. Must not overlap the
+# other sleeves' seeds (see above).
+symbols = ["DOGEUSDT"]

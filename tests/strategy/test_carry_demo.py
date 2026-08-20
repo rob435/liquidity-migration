@@ -2753,13 +2753,19 @@ class TestPresettleExit:
             DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR),  # -1 bp, pays in 10 min
             DEEP_B: (-0.0025, D0 + 9 * MS_PER_HOUR),  # still -25 bp deep
         }
-        masked, fires = module._apply_presettle_exits(
+        masked, fires, details = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=state,
             root=tmp_path, now_ms=now, tickers=tickers,
         )
         assert fires == [DEEP_A]
         assert set(masked.weights) == {DEEP_B, RESIZED}
         assert masked.gross == pytest.approx(0.0247 + 0.0125)
+        # The exodus trigger rides the same fire: the weight carry held and
+        # the settlement the rate was read against, captured before the mask
+        # deletes them.
+        assert [
+            (d.symbol, d.weight, d.settlement_ts_ms) for d in details
+        ] == [(DEEP_A, 0.0125, D0 + 9 * MS_PER_HOUR)]
         # The mask persists in the SAME file the settled-print path owns.
         assert module._early_exit_state_path(tmp_path).exists()
         reloaded = module._load_early_exits(tmp_path)
@@ -2771,13 +2777,13 @@ class TestPresettleExit:
         rule = load_carry_config()
         pay = D0 + 9 * MS_PER_HOUR
         now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
-        _, fires = module._apply_presettle_exits(
+        _, fires, _ = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=self._state(),
             root=tmp_path / "a", now_ms=now,
             tickers={DEEP_A: (-rule.exit_bp / 1e4, pay)},
         )
         assert fires == [DEEP_A]
-        _, fires = module._apply_presettle_exits(
+        _, fires, _ = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=self._state(),
             root=tmp_path / "b", now_ms=now,
             tickers={DEEP_A: (-rule.exit_bp / 1e4 - 1e-6, pay)},
@@ -2788,14 +2794,14 @@ class TestPresettleExit:
         rule = load_carry_config()
         pay = D0 + 9 * MS_PER_HOUR
         # 20 minutes ahead: outside the measured 15-minute window.
-        _, fires = module._apply_presettle_exits(
+        _, fires, _ = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=self._state(),
             root=tmp_path / "a", now_ms=pay - 20 * 60_000,
             tickers={DEEP_A: (0.0001, pay)},
         )
         assert fires == []
         # Already paid (the ticker not yet rolled): never fire on lead <= 0.
-        _, fires = module._apply_presettle_exits(
+        _, fires, _ = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=self._state(),
             root=tmp_path / "b", now_ms=pay,
             tickers={DEEP_A: (0.0001, pay)},
@@ -2806,12 +2812,13 @@ class TestPresettleExit:
         rule = load_carry_config()
         state = self._state()
         state.early_exits = {DEEP_A: D0}
-        masked, fires = module._apply_presettle_exits(
+        masked, fires, details = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=state,
             root=tmp_path, now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
             tickers={DEEP_A: (0.0001, D0 + 9 * MS_PER_HOUR)},
         )
         assert fires == []
+        assert details == []
         assert DEEP_A not in masked.weights
 
     def test_fetch_fails_open_and_coerces_venue_strings(self) -> None:
@@ -2937,3 +2944,192 @@ class TestPresettleExit:
         )
         assert payload["presettle_exit_enabled"] is False
         assert payload["presettle_fired"] == []
+
+
+# --- the exodus short (owner-directed 2026-08-20): the fire flips to a short ---
+
+
+class TestExodusShort:
+    SETTLE = D0 + 9 * MS_PER_HOUR
+
+    def _fire(self) -> "module.PresettleFire":
+        return module.PresettleFire(
+            symbol=DEEP_A, weight=0.0125, settlement_ts_ms=self.SETTLE
+        )
+
+    def _arm(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+        book = tmp_path / "targets" / "exodus-demo.json"
+        monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v1")
+        monkeypatch.setenv("EXODUS_ENGINE_TARGET_BOOK_PATH", str(book))
+        return book
+
+    def test_absent_env_means_absent_sleeve(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("EXODUS_SHORT_PROFILE", raising=False)
+        monkeypatch.delenv("EXODUS_ENGINE_TARGET_BOOK_PATH", raising=False)
+        receipt = module._run_exodus_short(
+            state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            now_ms=self.SETTLE - 10 * 60_000,
+        )
+        assert receipt == {}
+        assert not module._exodus_state_path(tmp_path).exists()
+
+    def test_a_fire_opens_the_abandoned_notional_as_a_short(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book_path = self._arm(monkeypatch, tmp_path)
+        state = CarryCycleState()
+        now = self.SETTLE - 10 * 60_000
+        receipt = module._run_exodus_short(
+            state=state, root=tmp_path, fires=[self._fire()],
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0, now_ms=now,
+        )
+        assert receipt["exodus_opened"] == [DEEP_A]
+        assert receipt["exodus_open_names"] == 1
+        assert receipt["exodus_error"] == ""
+        # The cover clock is the wake accelerator the daemon adopts.
+        assert receipt["exodus_next_cover_ts_ms"] == self.SETTLE + 60 * 60_000
+        book = json.loads(book_path.read_text(encoding="utf-8"))
+        (target,) = book["targets"]
+        # The short IS carry's abandoned position: weight x equity x
+        # multiplier, negative, with the fence stop, frozen at fire.
+        assert target["symbol"] == DEEP_A
+        assert target["notional_usdt"] == -50.0
+        assert target["stop_loss_fraction"] == 0.35
+        assert book["valid_until_ms"] == self.SETTLE + 20 * 60_000
+        # Persisted: a restart re-renders the same book from disk.
+        assert module._load_exodus_shorts(tmp_path)[0].notional_usdt == 50.0
+        # The same fire again does not double the position.
+        receipt = module._run_exodus_short(
+            state=state, root=tmp_path, fires=[self._fire()],
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            now_ms=now + 60_000,
+        )
+        assert receipt["exodus_opened"] == []
+        assert receipt["exodus_open_names"] == 1
+
+    def test_covers_on_the_clock_and_the_book_drains(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book_path = self._arm(monkeypatch, tmp_path)
+        module._save_exodus_shorts(
+            tmp_path,
+            [module.ExodusShortRecord(DEEP_A, 50.0, self.SETTLE, self.SETTLE - 600_000)],
+        )
+        receipt = module._run_exodus_short(
+            state=CarryCycleState(), root=tmp_path, fires=[],
+            sizing_equity_usdt=None, notional_multiplier=1.0,
+            now_ms=self.SETTLE + 60 * 60_000,
+        )
+        assert receipt["exodus_covered"] == [DEEP_A]
+        assert receipt["exodus_open_names"] == 0
+        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
+        assert module._load_exodus_shorts(tmp_path) == []
+
+    def test_dial_off_drains_to_flat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book_path = self._arm(monkeypatch, tmp_path)
+        monkeypatch.delenv("EXODUS_SHORT_PROFILE")
+        module._save_exodus_shorts(
+            tmp_path,
+            [module.ExodusShortRecord(DEEP_A, 50.0, self.SETTLE, self.SETTLE - 600_000)],
+        )
+        receipt = module._run_exodus_short(
+            state=CarryCycleState(), root=tmp_path, fires=[],
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            # Well before the cover clock: off means flat NOW, not at S+60.
+            now_ms=self.SETTLE - 5 * 60_000,
+        )
+        assert receipt["exodus_enabled"] is False
+        assert receipt["exodus_covered"] == [DEEP_A]
+        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
+        assert module._load_exodus_shorts(tmp_path) == []
+
+    def test_no_sizing_basis_blocks_the_entry_for_good(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book_path = self._arm(monkeypatch, tmp_path)
+        receipt = module._run_exodus_short(
+            state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
+            sizing_equity_usdt=None, notional_multiplier=1.0,
+            now_ms=self.SETTLE - 10 * 60_000,
+        )
+        assert receipt["exodus_entry_blocked"] == [DEEP_A]
+        assert receipt["exodus_opened"] == []
+        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
+
+    def test_bookkeeping_failure_never_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v1")
+        # The book path is a DIRECTORY: the write must fail, be receipted,
+        # and leave the carry cycle alone.
+        monkeypatch.setenv("EXODUS_ENGINE_TARGET_BOOK_PATH", str(tmp_path))
+        receipt = module._run_exodus_short(
+            state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            now_ms=self.SETTLE - 10 * 60_000,
+        )
+        assert receipt["exodus_error"] != ""
+
+    def test_an_unknown_profile_is_inert_and_receipted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book_path = self._arm(monkeypatch, tmp_path)
+        monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v9")
+        receipt = module._run_exodus_short(
+            state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            now_ms=self.SETTLE - 10 * 60_000,
+        )
+        assert "unknown exodus profile" in receipt["exodus_error"]
+        assert not book_path.exists()
+
+    def test_run_cycle_flips_the_fire_into_an_exodus_short(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book_path = tmp_path / "targets" / "exodus-demo.json"
+        monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v1")
+        monkeypatch.setenv("EXODUS_ENGINE_TARGET_BOOK_PATH", str(book_path))
+        _route(tmp_path / "route")
+        demo_config = _routed_config(
+            tmp_path / "route", strategy_profile="v7", early_exit_enabled=True
+        )
+        _patch_demo_market_data(monkeypatch)
+        now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
+        ends = _whale_day_ends(now)
+        monkeypatch.setattr(
+            module, "_whale_client_factory",
+            lambda: _FakeWhaleClient(_flat_series([DEEP_A], ends)),
+        )
+        _patch_planning(monkeypatch, standing=None)
+        fake = _FakeTickerClient(
+            [
+                {"symbol": DEEP_A, "fundingRate": "-0.0001",
+                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
+                {"symbol": DEEP_B, "fundingRate": "-0.0025",
+                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
+            ]
+        )
+        monkeypatch.setattr(module, "_presettle_ticker_factory", lambda: fake)
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=_FakeCarryMarket(),
+            now_ms=now,
+        )
+        assert payload["presettle_fired"] == [DEEP_A]
+        assert payload["exodus_enabled"] is True
+        assert payload["exodus_opened"] == [DEEP_A]
+        assert payload["exodus_error"] == ""
+        book = json.loads(book_path.read_text(encoding="utf-8"))
+        (target,) = book["targets"]
+        assert target["symbol"] == DEEP_A
+        assert target["notional_usdt"] < 0.0
+        assert target["stop_loss_fraction"] == 0.35
+        # The daemon's next wake is the cover, not the next carry decision.
+        assert payload["next_time_deadline_ts_ms"] == D0 + 10 * MS_PER_HOUR

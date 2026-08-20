@@ -8,6 +8,34 @@ one-off runners are retired.
 
 ## Current truth
 
+- **`lane2_exodus_short_v1` is REGISTERED and DEPLOYED to the demo fleet as a
+  third engine sleeve (2026-08-20, owner: "build the exodus short as a
+  standalone strat sleeve, but synergising").** The first genuinely new
+  mechanism since the timing program, and the program's first short: when
+  carry's v7 pre-settle exit fires, the sleeve takes over the abandoned
+  position as a short and covers 60 minutes after the settlement — the
+  measured bottom of the post-settlement fall. Standalone at the engine (own
+  `[[strategy]]` block, book, fill attribution), produced inside the carry
+  process because the trigger IS carry's fire. Promotion note
+  (`governance.md` §3):
+  - **Claim:** the book's own fires leave the larger half of the move on the
+    table; shorting through it earns **+95 bp mean / +50 median per clean
+    event** net of the 15.56 bp round trip, **+6.1 bp/day book-weighted
+    overlay** with the 18 real premature fires charged at their measured
+    7.8% rate — but 2024 is negative (−0.8) and 2021–23 flat: a priced
+    regime trade on the 2025–26 farmer crowd.
+  - **Config commit:** registered 2026-08-20
+    (`configs/lane2_exodus_short_v1.json`, this commit); dial
+    `EXODUS_SHORT_PROFILE=v1` on the demo carry unit, mainnet unset.
+  - **Forward record: 0 scored days** — rides on seen-data evidence and the
+    owner's decision, like every first deployment here. The first demo weeks
+    measure the kline-vs-fill gap; fires are graded per event from the
+    engine's own WAL fills.
+  - **Decision:** owner, 2026-08-20. The stop question was settled by
+    measurement before the config froze: every strategy-level stop from
+    +30 bp to +1500 bp loses against the time-boxed cover, so the declared
+    0.35 stop is a disaster fence, carry's exact posture.
+  - **Date:** 2026-08-20. Change point = the deploy receipt in `CHANGELOG.md`.
 - **Entries stopped crossing the spread (2026-08-04, owner instruction; the
   basic recipe from the overnight quote lab).** Both account owners now place
   an exposure-increasing entry as a GTC limit resting at the touch, chase a

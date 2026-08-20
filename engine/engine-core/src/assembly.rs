@@ -965,13 +965,14 @@ mod deployed_templates {
     }
 
     #[test]
-    fn the_demo_template_runs_carry_first_and_long_second() {
+    fn the_demo_template_runs_carry_then_long_then_exodus() {
         // A strategy's id is its position in the file, and the engine's record
         // of whose position is whose is keyed on it and rebuilt from the log.
         // Reordering these blocks hands one sleeve's fill history to the other.
+        // Exodus was APPENDED 2026-08-20; anything after it appends too.
         let config = config_from("engine.demo.toml.template", "operational.demo.json");
         let sleeves: Vec<&str> = config.strategies.iter().map(|s| s.sleeve_name()).collect();
-        assert_eq!(sleeves, ["carry", "long"]);
+        assert_eq!(sleeves, ["carry", "long", "exodus"]);
     }
 
     #[test]
@@ -984,7 +985,11 @@ mod deployed_templates {
             .iter()
             .map(|s| s.book_path.as_deref().expect("every sleeve names a book"))
             .collect();
-        assert_eq!(paths.len(), 2);
-        assert_ne!(paths[0], paths[1], "one file cannot be two sleeves' decisions");
+        assert_eq!(paths.len(), 3);
+        for (i, a) in paths.iter().enumerate() {
+            for b in paths.iter().skip(i + 1) {
+                assert_ne!(a, b, "one file cannot be two sleeves' decisions");
+            }
+        }
     }
 }

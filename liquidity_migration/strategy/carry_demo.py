@@ -108,6 +108,15 @@ from liquidity_migration.rules.carry_hold import (
     prepare_decision,
     top_n_universe,
 )
+from liquidity_migration.rules.exodus_short import (
+    ExodusShortConfig,
+    ExodusShortRecord,
+    next_cover_deadline_ts_ms,
+    records_from_payload,
+    records_to_payload,
+    render_exodus_book,
+    split_due_covers,
+)
 from liquidity_migration.data.storage import (
     exclusive_file_lock,
     read_dataset,
@@ -436,6 +445,7 @@ class CarryCycleState:
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
         "early_exits",
+        "exodus_shorts",
         "whale_last_attempt_ms",
         "whale_store",
     )
@@ -469,6 +479,10 @@ class CarryCycleState:
         # Early-exit mask: symbol -> the decision bar it fired under. None
         # until first use, then mirrors the on-disk state file.
         self.early_exits: dict[str, int] | None = None
+        # Open exodus shorts. None until first use, then mirrors the on-disk
+        # state file; losing it re-loads from disk, and a lost FILE covers
+        # every open short (absence from the book is the exit).
+        self.exodus_shorts: list[ExodusShortRecord] | None = None
 
     def frozen_decision(
         self, decision_ts_ms: int
@@ -1021,6 +1035,17 @@ def _fetch_presettle_tickers(
     return out, ""
 
 
+@dataclasses.dataclass(frozen=True)
+class PresettleFire:
+    """One fire, captured before the mask deletes it: the weight carry held
+    and the settlement the running rate was read against. This is the exodus
+    sleeve's entire trigger."""
+
+    symbol: str
+    weight: float
+    settlement_ts_ms: int
+
+
 def _apply_presettle_exits(
     *,
     decision: CarryDecision,
@@ -1029,7 +1054,7 @@ def _apply_presettle_exits(
     root: Path,
     now_ms: int,
     tickers: Mapping[str, tuple[float, int]],
-) -> tuple[CarryDecision, list[str]]:
+) -> tuple[CarryDecision, list[str], list[PresettleFire]]:
     """Fire the registered exit test on the pre-settlement running rate.
 
     Runs after :func:`_apply_early_exits` (which loads and day-filters the
@@ -1040,6 +1065,7 @@ def _apply_presettle_exits(
 
     fired = dict(state.early_exits or {})
     new_fires: list[str] = []
+    fire_details: list[PresettleFire] = []
     exit_thr = -(rule.exit_bp / 1e4)
     for sym in sorted(decision.weights):
         if sym in fired:
@@ -1054,6 +1080,13 @@ def _apply_presettle_exits(
         if not (float(rate) < exit_thr):
             fired[sym] = decision.decision_ts_ms
             new_fires.append(sym)
+            fire_details.append(
+                PresettleFire(
+                    symbol=sym,
+                    weight=float(decision.weights[sym]),
+                    settlement_ts_ms=int(next_pay_ms),
+                )
+            )
     if new_fires:
         state.early_exits = fired
         try:
@@ -1061,12 +1094,174 @@ def _apply_presettle_exits(
         except Exception:  # noqa: BLE001 - a lost mask re-buys once at worst
             _logger.warning("early-exit state not persisted; mask is memory-only")
     if not fired:
-        return decision, new_fires
+        return decision, new_fires, fire_details
     masked = {s: w for s, w in decision.weights.items() if s not in fired}
     return (
         dataclasses.replace(decision, weights=masked, gross=sum(masked.values())),
         new_fires,
+        fire_details,
     )
+
+
+# --- the exodus short (lane2_exodus_short_v1) -------------------------------
+# A standalone sleeve at the engine (its own [[strategy]] block, book file,
+# and fill attribution) produced from inside this process, because its whole
+# trigger is the fire above: when carry abandons a dying name, take the same
+# position over as a short and cover 60 minutes after the settlement. The
+# rules module owns the decision surface; this section owns wiring only.
+
+_EXODUS_STATE_NAME = "exodus_shorts.json"
+#: Book file the engine's exodus follower reads. Absent = this unit does not
+#: publish the sleeve; same convention as CARRY_ENGINE_TARGET_BOOK_PATH.
+EXODUS_TARGET_BOOK_PATH_ENV = "EXODUS_ENGINE_TARGET_BOOK_PATH"
+#: Registered exodus config dial. Absent or empty = the sleeve is OFF: no new
+#: entries, and any state drains to a flat book. Same env->registry shape as
+#: CARRY_STRATEGY_PROFILE, read here because the sleeve lives in this process.
+EXODUS_PROFILE_ENV = "EXODUS_SHORT_PROFILE"
+_EXODUS_PROFILES: dict[str, Path] = {
+    "v1": _CONFIGS_DIR / "lane2_exodus_short_v1.json",
+}
+_EXODUS_BOOK_SOURCE = "exodus_short"
+_exodus_rule_cache: dict[str, ExodusShortConfig] = {}
+
+
+def _registered_exodus_rule(profile_name: str) -> ExodusShortConfig:
+    # Parsed once per process, like the carry rule: registered files are
+    # immutable once committed.
+    cached = _exodus_rule_cache.get(profile_name)
+    if cached is None:
+        cached = ExodusShortConfig.from_json(_EXODUS_PROFILES[profile_name])
+        _exodus_rule_cache[profile_name] = cached
+    return cached
+
+
+def _exodus_state_path(root: Path) -> Path:
+    return root / _EXODUS_STATE_NAME
+
+
+def _load_exodus_shorts(root: Path) -> list[ExodusShortRecord]:
+    path = _exodus_state_path(root)
+    if path.exists():
+        try:
+            return records_from_payload(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001 - unreadable state fails toward flat
+            _logger.warning("exodus state unreadable, starting flat: %s", path)
+    return []
+
+
+def _save_exodus_shorts(root: Path, records: list[ExodusShortRecord]) -> None:
+    path = _exodus_state_path(root)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(records_to_payload(records)), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _run_exodus_short(
+    *,
+    state: CarryCycleState,
+    root: Path,
+    fires: list[PresettleFire],
+    sizing_equity_usdt: float | None,
+    notional_multiplier: float,
+    now_ms: int,
+) -> dict[str, Any]:
+    """One exodus pass per carry cycle: open on this cycle's fires, cover on
+    the clock, publish the book. Runs on EVERY cycle — covers must drain even
+    when the carry decision is unavailable, so nothing here depends on it.
+
+    ``sizing_equity_usdt`` is ``None`` when the owner-health read failed; a
+    fire arriving in that state is skipped for good (one-shot, like the fire
+    itself) and receipted, mirroring carry's own entry gate.
+    """
+
+    profile_name = os.environ.get(EXODUS_PROFILE_ENV, "").strip()
+    book_path_text = os.environ.get(EXODUS_TARGET_BOOK_PATH_ENV, "").strip()
+    if not profile_name and not book_path_text:
+        return {}
+    receipt: dict[str, Any] = {
+        "exodus_enabled": bool(profile_name),
+        "exodus_opened": [],
+        "exodus_covered": [],
+        "exodus_entry_blocked": [],
+        "exodus_open_names": 0,
+        "exodus_error": "",
+    }
+    try:
+        if profile_name and profile_name not in _EXODUS_PROFILES:
+            receipt["exodus_error"] = f"unknown exodus profile {profile_name!r}"
+            _logger.error("unknown %s=%r; exodus sleeve inert", EXODUS_PROFILE_ENV, profile_name)
+            return receipt
+        if state.exodus_shorts is None:
+            state.exodus_shorts = _load_exodus_shorts(root)
+        records = list(state.exodus_shorts)
+        if not profile_name:
+            # Dial off: no config to run a cover clock against, so the book
+            # goes flat now and the state drains with it.
+            kept: list[ExodusShortRecord] = []
+            covered = records
+            cfg = None
+        else:
+            cfg = _registered_exodus_rule(profile_name)
+            kept, covered = split_due_covers(records, now_ms=now_ms, cfg=cfg)
+            open_symbols = {r.symbol for r in kept}
+            for fire in fires:
+                if fire.symbol in open_symbols:
+                    continue
+                if sizing_equity_usdt is None or sizing_equity_usdt <= 0.0:
+                    receipt["exodus_entry_blocked"].append(fire.symbol)
+                    continue
+                notional = fire.weight * sizing_equity_usdt * notional_multiplier
+                if notional <= 0.0:
+                    continue
+                kept.append(
+                    ExodusShortRecord(
+                        symbol=fire.symbol,
+                        notional_usdt=notional,
+                        settlement_ts_ms=fire.settlement_ts_ms,
+                        fired_ts_ms=now_ms,
+                    )
+                )
+                open_symbols.add(fire.symbol)
+                receipt["exodus_opened"].append(fire.symbol)
+        receipt["exodus_covered"] = sorted(r.symbol for r in covered)
+        receipt["exodus_open_names"] = len(kept)
+        if kept != records:
+            state.exodus_shorts = kept
+            try:
+                _save_exodus_shorts(root, kept)
+            except Exception:  # noqa: BLE001 - a lost state file covers, never strands
+                _logger.warning("exodus state not persisted; memory-only until next change")
+        else:
+            state.exodus_shorts = kept
+        if receipt["exodus_opened"]:
+            _logger.info(
+                "exodus short OPENED: %s (cover %d min after settlement)",
+                ",".join(receipt["exodus_opened"]),
+                cfg.cover_minutes_after_settlement if cfg else 0,
+            )
+        if receipt["exodus_covered"]:
+            _logger.info("exodus short covering: %s", ",".join(receipt["exodus_covered"]))
+        if book_path_text:
+            if cfg is not None:
+                text = render_exodus_book(
+                    kept, cfg=cfg, now_ms=now_ms, source=_EXODUS_BOOK_SOURCE
+                )
+            else:
+                text = render_target_book(
+                    source=_EXODUS_BOOK_SOURCE,
+                    decision_ts_ms=now_ms,
+                    valid_until_ms=now_ms + SIGNAL_VALIDITY_MS,
+                    targets=[],
+                )
+            write_target_book(Path(book_path_text), text)
+        if cfg is not None and kept:
+            deadline = next_cover_deadline_ts_ms(kept, cfg)
+            if deadline is not None:
+                receipt["exodus_next_cover_ts_ms"] = deadline
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must never stop the carry sleeve
+        receipt["exodus_error"] = f"{type(exc).__name__}: {exc}"[:300]
+        _logger.exception("exodus short pass failed; carry cycle continues")
+    return receipt
 
 
 def _attach_whale_columns(
@@ -2363,6 +2558,7 @@ def run_carry_demo_cycle(
                 )
 
         presettle_fires: list[str] = []
+        presettle_fire_details: list[PresettleFire] = []
         presettle_error = ""
         if (
             decision is not None
@@ -2378,13 +2574,15 @@ def run_carry_demo_cycle(
                     sorted(decision.weights)
                 )
                 if tickers:
-                    decision, presettle_fires = _apply_presettle_exits(
-                        decision=decision,
-                        rule=rule,
-                        state=state,
-                        root=root,
-                        now_ms=cycle_now_ms,
-                        tickers=tickers,
+                    decision, presettle_fires, presettle_fire_details = (
+                        _apply_presettle_exits(
+                            decision=decision,
+                            rule=rule,
+                            state=state,
+                            root=root,
+                            now_ms=cycle_now_ms,
+                            tickers=tickers,
+                        )
                     )
                 if presettle_fires:
                     _logger.info(
@@ -2399,6 +2597,31 @@ def run_carry_demo_cycle(
                         "stands: %s",
                         presettle_error,
                     )
+
+        # The exodus pass runs on EVERY cycle: covers must drain even when
+        # the carry decision is unavailable. Entries additionally need the
+        # same sizing basis carry entries need, computed the same way.
+        exodus_sizing_equity: float | None = None
+        if (
+            decision is not None
+            and not account_owner_health_error
+            and equity_usdt > 0.0
+        ):
+            exodus_sizing_equity = state.sizing_equity(
+                decision_ts_ms=decision.decision_ts_ms, equity_usdt=equity_usdt
+            )
+            if demo.capital_reference_usdt > 0.0:
+                exodus_sizing_equity = min(
+                    exodus_sizing_equity, float(demo.capital_reference_usdt)
+                )
+        exodus_receipt = _run_exodus_short(
+            state=state,
+            root=root,
+            fires=presettle_fire_details,
+            sizing_equity_usdt=exodus_sizing_equity,
+            notional_multiplier=float(demo.notional_multiplier),
+            now_ms=cycle_now_ms,
+        )
 
         plan = _carry_target_plan(
             decision=decision,
@@ -2557,6 +2780,14 @@ def run_carry_demo_cycle(
             ),
             "presettle_fired": presettle_fires,
             "presettle_error": presettle_error,
+            # Exodus-short receipt (lane2_exodus_short_v1): what the sleeve
+            # did this cycle. Absent keys mean the unit does not publish it.
+            "exodus_enabled": exodus_receipt.get("exodus_enabled"),
+            "exodus_opened": exodus_receipt.get("exodus_opened"),
+            "exodus_covered": exodus_receipt.get("exodus_covered"),
+            "exodus_entry_blocked": exodus_receipt.get("exodus_entry_blocked"),
+            "exodus_open_names": exodus_receipt.get("exodus_open_names"),
+            "exodus_error": exodus_receipt.get("exodus_error"),
             "open_positions": open_trades.height,
             "target_reservations": reservations.height,
             "standing_symbols": len(standing_symbols),
@@ -2623,7 +2854,13 @@ def run_carry_demo_cycle(
         # For the daemon only, added after the dataset write above so the
         # persisted cycle schema does not change: the next instant a new
         # daily decision exists, where the daemon cuts its timer wait short.
-        payload["next_time_deadline_ts_ms"] = next_carry_decision_deadline_ts_ms(cycle_now_ms)
+        # An exodus cover due sooner wins the slot; the 60s idle floor is the
+        # correctness backstop either way, this is the accelerator.
+        next_deadline_ts_ms = next_carry_decision_deadline_ts_ms(cycle_now_ms)
+        exodus_cover_ts_ms = exodus_receipt.get("exodus_next_cover_ts_ms")
+        if type(exodus_cover_ts_ms) is int and exodus_cover_ts_ms > 0:
+            next_deadline_ts_ms = min(next_deadline_ts_ms, exodus_cover_ts_ms)
+        payload["next_time_deadline_ts_ms"] = next_deadline_ts_ms
     return PublishedTargetCyclePayload(
         payload,
         publication=publication,

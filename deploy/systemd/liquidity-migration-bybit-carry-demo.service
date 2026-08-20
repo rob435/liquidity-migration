@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration Bybit carry-hold demo target producer (lane2_carry_hold_v6 + v7 pre-settle exit)
+Description=liquidity-migration Bybit carry-hold demo target producer (lane2_carry_hold_v6 + v7 pre-settle exit + exodus short)
 Wants=network-online.target
 # No account owner to depend on any more. This producer's whole output is a
 # target book on disk; the engine reads that book and owns the account. A
@@ -35,6 +35,13 @@ Environment=CARRY_EARLY_EXIT=1
 # producer writes a file nobody reads and the engine waits on one nobody
 # writes, which from outside looks like a sleeve with no signals.
 Environment=CARRY_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/carry-demo.json
+# The exodus short (lane2_exodus_short_v1): when the pre-settle exit above
+# fires, this same process publishes the abandoned position as a SHORT to its
+# own engine sleeve, covered 60 min after the settlement. Off = unset the
+# profile; the book then drains flat. Same path-agreement warning as above:
+# this must match the `exodus` sleeve's book_path in engine.toml.
+Environment=EXODUS_SHORT_PROFILE=v1
+Environment=EXODUS_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/exodus-demo.json
 # The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
 Environment=LOOKBACK_DAYS=90
 Environment=WORKERS=2

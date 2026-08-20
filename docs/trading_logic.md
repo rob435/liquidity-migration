@@ -5,7 +5,9 @@ the authority: [`long_native_event_demo.py`](../liquidity_migration/strategy/lon
 and [`rules/long_native.py`](../liquidity_migration/rules/long_native.py),
 [`carry_demo.py`](../liquidity_migration/strategy/carry_demo.py) and
 [`rules/carry_hold.py`](../liquidity_migration/rules/carry_hold.py) (scored by
-[`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py)).
+[`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py)),
+[`rules/exodus_short.py`](../liquidity_migration/rules/exodus_short.py) for the exodus
+short (wired inside `carry_demo.py`).
 
 ## On today
 
@@ -15,6 +17,11 @@ Publication switches live in [`deploy/sleeves.env`](../deploy/sleeves.env).
 | --- | --- | --- | --- |
 | LONG | Long a fresh volume pump, bought on a shallow retrace | on | off |
 | CARRY | Long coins whose shorts pay a deep crowd fee | on | off |
+| EXODUS | Short the name carry just abandoned, through the post-settlement fall | on | off |
+
+EXODUS has no toggle in `sleeves.env`: it is published by the carry producer (its trigger
+is carry's own pre-settle exit fire), armed per unit by `EXODUS_SHORT_PROFILE` in the unit
+environment, and holds its own engine sleeve, book file, and fill attribution.
 
 Producers publish absolute component targets; they never place orders and never own fills,
 funding, or P&L ([`architecture.md`](architecture.md)). The paper fleet — a credential-free
@@ -214,6 +221,56 @@ carry-hold benchmark Sharpe is **1.21 (t 2.31)** — it does **not** beat the CO
 benchmark; the superseded 2.57 / t 4.87 figures are wrong. Detail:
 [`carry_hold.md`](research/carry_hold.md),
 [`research_findings.md`](research/research_findings.md).
+
+## EXODUS — `lane2_exodus_short_v1`
+
+> **Registered and deployed to demo 2026-08-20** (owner: "build the exodus short as a
+> standalone strat sleeve, but synergising"). A standalone sleeve at the engine — its own
+> `[[strategy]]` block, book file (`exodus-demo.json`), capital attribution, and kill dial —
+> produced from inside the carry process, because its entire trigger is carry's v7
+> pre-settle exit fire. Registered config: [`lane2_exodus_short_v1.json`](../configs/lane2_exodus_short_v1.json);
+> rules module: [`rules/exodus_short.py`](../liquidity_migration/rules/exodus_short.py).
+
+**Signal.** None of its own. When the carry sleeve's pre-settle exit fires — the running
+rate says a held name's deep funding print is dying — the name's price keeps falling for
+about an hour past the settlement (measured bottom S+60: −104 bp all-era, −127 bp 2025-26
+vs S+1, on all 1,112 historical fires). The sleeve takes over the exact position carry
+abandons, as a short.
+
+**Entry.** At the fire, immediately; the engine crosses. Book validity ends 20 minutes
+after the settlement, and the engine closes entries 15 minutes before expiry, so no fill
+happens later than S+5. The venue holds one net position per symbol, so the short cannot
+open until carry's exit fill lands — the engine leaves foreign-held names alone and
+retries; the seconds-scale delay is inside the measured entry tolerance.
+
+**Sizing.** The notional carry held at the fire (weight × sizing equity × carry's
+multiplier), frozen at fire so covers never need an equity read. No entry without a live
+owner-health read, same gate as carry entries; a fire arriving during an outage is
+skipped for good and receipted (`exodus_entry_blocked`).
+
+**Exit.** A hard clock: cover 60 minutes after the settlement — the name simply leaves the
+book, and the engine reads absence as the exit. Time-boxed, never price-boxed. The
+declared 0.35 stop is a disaster fence, not an exit: every strategy-level stop tested
+(+30 bp to +1500 bp on 1m wicks, all 1,130 event windows) lost more on clean-event
+whipsaw than it saved on the tail — these names wick violently while dying. Covers ride
+the producer's 60s idle-floor contract; the cover time also becomes the daemon's next
+wake deadline.
+
+**Kill switches.** Unset `EXODUS_SHORT_PROFILE` on the carry unit: no new entries, and the
+book drains flat immediately (open records are covered on the next cycle, not at S+60).
+`CARRY_EARLY_EXIT=0` silences the fires (so also all new exodus entries) while open
+records still cover on their clock. A lost or torn state file reads as flat and covers
+every open short — losing state never strands a position.
+
+**Limits.** The edge is a regime trade on the 2025-26 farmer crowd: overlay +6.1 bp/day
+pooled, but 2023 +0.2, **2024 −0.8 (a losing year)**, 2025 +7.8, 2026 +18.2. The premature
+tail is fat and real: ~8% of fire-days the print was still deep — the short pays it and
+sometimes gets squeezed (worst −945 bp, SOMI 2025-10-01); the measured answer is size and
+the account loss guard, not a stop. Entries and covers are priced at 1m kline opens — no
+fill model yet; the first demo weeks exist to measure that gap. The all-name
+generalization (shorting settlement deaths carry never held) is measured-but-unrun and NOT
+part of this config. Evidence: [`research_findings.md`](research/research_findings.md)
+§The exodus short.
 
 ## Retired sleeves
 
