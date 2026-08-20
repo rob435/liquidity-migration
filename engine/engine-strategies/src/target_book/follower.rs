@@ -85,6 +85,11 @@ pub struct TargetBookFollower {
     /// note: something other than this plug closed them, and buying them back
     /// would undo it. Cleared per symbol when the book stops asking.
     closed_under_us: Vec<String>,
+    /// Entries the kernel refused for the book in hand. A refused order never
+    /// rests and never fills, so the reading stays flat and the book keeps
+    /// wanting it: without this the next quote asks again, forever. Entries
+    /// only — an exit is always retried. Cleared by the next book.
+    refused_entries: Vec<String>,
     /// Which of the book's names were held last time `act` ran. Without it a
     /// position that *disappeared* cannot be told from one that was never
     /// there, and every unfilled entry would latch itself.
@@ -136,6 +141,7 @@ impl TargetBookFollower {
             rules: PlanRules::FLEET,
             complained: Vec::new(),
             closed_under_us: Vec::new(),
+            refused_entries: Vec::new(),
             was_held: Vec::new(),
             we_reduced: Vec::new(),
         })
@@ -228,6 +234,12 @@ impl TargetBookFollower {
         }
         targets.retain(|target| !foreign.contains(&target.symbol));
         held.retain(|symbol| !foreign.contains(symbol));
+
+        // An entry the kernel just refused is left out of this pass entirely,
+        // the same way a foreign holding is: planning it again would only
+        // produce the same refusal on the next quote. The next book clears it.
+        targets.retain(|target| !self.refused_entries.contains(&target.symbol));
+        held.retain(|symbol| !self.refused_entries.contains(symbol));
 
         // The latch lifts when the producer stops asking for the name, not
         // when the next book lands. See the module note: a producer writing
@@ -420,20 +432,47 @@ impl Strategy for TargetBookFollower {
             .collect()
     }
 
-    // Only books and quotes are acted on. Order news and refused intents
-    // used to be handled here too, purely to keep the plug's own cover
-    // records straight; that bookkeeping is the engine's now (`covers.rs`),
-    // settled before this plug is even woken, so both fall through to the
-    // trait's do-nothing defaults. That also keeps an old property by
+    // Only books and quotes are acted on. Order news falls through to the
+    // trait's do-nothing default: that bookkeeping is the engine's now
+    // (`covers.rs`), settled before this plug is even woken. A refusal is
+    // recorded but never acted on, which keeps the old property by
     // construction: nothing is ever emitted from inside an order or refusal
     // wake, which would re-emit into the queue being drained — the next
     // quote re-plans instead.
 
+    fn on_intent_refused(&mut self, symbol: SymbolId, reduce_only: bool, ctx: &mut dyn StrategyCtx) {
+        // Exits are never held back. Only an entry latches, and only until
+        // the next book.
+        if reduce_only {
+            return;
+        }
+        let named = self
+            .symbols
+            .iter()
+            .cloned()
+            .chain(
+                self.book
+                    .iter()
+                    .flat_map(|book| book.targets.iter().map(|target| target.symbol.clone())),
+            )
+            .find(|name| ctx.symbol_id(name) == Some(symbol));
+        if let Some(name) = named {
+            if !self.refused_entries.contains(&name) {
+                tracing::warn!(
+                    symbol = %name,
+                    "the kernel refused this entry; not asking again until the next book"
+                );
+                self.refused_entries.push(name);
+            }
+        }
+    }
+
     fn on_targets(&mut self, book: &TargetBook, ctx: &mut dyn StrategyCtx) {
         self.book = Some(book.clone());
         // A new book earns a fresh hearing, including for the names it could
-        // not reach last time.
+        // not reach last time and the entries the kernel refused.
         self.complained.clear();
+        self.refused_entries.clear();
         self.act(ctx);
     }
 

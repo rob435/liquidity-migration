@@ -16,6 +16,28 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~20:15 UTC — the write loop is fixed at the strategy, where it
+  lives.** Removing the loss halt stopped the `LossGuardTripped` spam and
+  changed nothing about the rate: the funded engine went straight on refusing
+  at ~340/second, now `AvailableMarginExhausted`, because the owner's hand
+  positions hold the account's available margin at 5.9e-05. So the halt was
+  never the cause — it was only the reason on the line.
+
+  **The cause is structural: a shadow engine never converges.** The target-book
+  follower plans on every quote; a refused order never rests and never fills,
+  so the account reading stays flat, the book keeps wanting the name, and the
+  next quote asks again. Forever. The follower already solved this exact shape
+  for *warnings* — the `complained` list exists because "this runs on every
+  quote" — but refused intents fell through to the trait's do-nothing default.
+  They now latch the same way: an entry the kernel refused is left out of the
+  pass entirely, and the next book clears it, because a new book has always
+  earned a fresh hearing here. **Exits never latch** — taking risk off is
+  retried on the next quote, and there is a test for each half. The entry test
+  was proved failing first.
+
+  Nothing is emitted from inside the refusal wake, so the old property holds by
+  construction: no plug ever re-emits into the queue being drained.
+
 - **2026-08-20 ~20:00 UTC — the daily loss halt is removed, whole, on the
   owner's instruction** ("just remove the daily loss ceiling all together, we
   use per position safety"). `loss_guard.rs`, `LossGuardConfig`, the

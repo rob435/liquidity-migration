@@ -326,6 +326,13 @@ impl Harness {
         self.deliver(EngineEvent::Targets(book));
     }
 
+    /// The kernel refused an intent the strategy placed. The engine delivers
+    /// this after the refusal is journaled, so nothing is resting and the
+    /// account reading is unchanged.
+    pub fn refuse(&mut self, symbol: SymbolId, reduce_only: bool) {
+        self.deliver(EngineEvent::IntentRefused { symbol, reduce_only });
+    }
+
     pub fn feed_reset(&mut self) {
         let recv_ns = self.ctx.now_ns;
         self.deliver(EngineEvent::Market(MarketEvent::FeedReset { recv_ns }));

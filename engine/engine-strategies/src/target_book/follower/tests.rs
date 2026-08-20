@@ -189,6 +189,53 @@ fn a_second_identical_book_does_not_resend_an_order_that_is_already_resting() {
 }
 
 #[test]
+fn an_entry_the_kernel_refused_is_not_re_emitted_on_every_quote() {
+    // The shape that filled a trading box's disk: the funded engine wanted a
+    // book it could never acquire, the kernel refused every entry for want of
+    // margin, and nothing rests or fills — so the account reading stays flat,
+    // the book keeps wanting it, and the next quote asks again. Measured on
+    // the live host at ~340 refusals a second.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert_eq!(h.drain().len(), 1, "the book opens the position");
+
+    let symbol = h.ctx.id_of("KAITOUSDT");
+    h.refuse(symbol, false);
+
+    h.quote("KAITOUSDT", 9.5, 10.5);
+    h.quote("KAITOUSDT", 9.6, 10.6);
+    assert!(
+        h.drain_actions().is_empty(),
+        "a refused entry waits for a new book, not for the next quote"
+    );
+
+    // A new book earns a fresh hearing, exactly as it does for a name that
+    // could not be reached last time.
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert_eq!(h.drain().len(), 1, "the next book tries again");
+}
+
+#[test]
+fn a_refused_exit_is_still_retried_on_the_next_quote() {
+    // Taking risk off must never be held back. Only entries latch.
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
+    h.ctx.set_my_position("KAITOUSDT", 10.0);
+    h.targets(book(vec![]));
+    assert_eq!(h.drain().len(), 1, "an empty book exits what is held");
+
+    let symbol = h.ctx.id_of("KAITOUSDT");
+    h.refuse(symbol, true);
+
+    h.quote("KAITOUSDT", 9.5, 10.5);
+    assert_eq!(
+        h.drain().len(),
+        1,
+        "a refused exit is asked again at the next quote"
+    );
+}
+
+#[test]
 fn what_was_sent_is_remembered_until_the_reading_shows_it() {
     // The dangerous shape: the order has left the resting set (a filled one
     // is ended the moment the fill lands) and the account reading has not
