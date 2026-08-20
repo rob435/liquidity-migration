@@ -173,7 +173,9 @@ not a fault.
 ratio); the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it (a
 name with fewer than 20 settlements of history fails open at full size); flow and whale are
 the ×0.5 halvings above — gross capped at
-1.0, then `weight × sizing_equity × notional_multiplier` (1.0). Sizing equity is anchored to
+1.0, then `weight × sizing_equity × notional_multiplier` (0.5 since 2026-08-20 — each sleeve
+sizes from half the account at 5x entry leverage, owner sizing directive; 1.0 before,
+CHANGELOG that day). Sizing equity is anchored to
 the decision, not the live mark — sizing off the live mark makes the day's target a function
 of the book's own unrealized P&L (2026-07-30: $84.7k traded against a ~$30k book in thirteen
 hours, zero strategy exits). A 5%-of-standing / $1 dead-band is the backstop; entries below

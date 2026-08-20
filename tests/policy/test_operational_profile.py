@@ -25,9 +25,13 @@ def test_tracked_operational_profile_is_coherent_and_feeds_account_owner() -> No
     profile = load_operational_profile_bytes(data)
     policy = load_risk_policy_bytes(data)
 
-    assert profile.long.entry_leverage == 2.0
-    assert profile.carry.entry_leverage == 2.0
-    assert profile.hedge.entry_leverage == 2.0
+    # 5x since 2026-08-20 (owner: each sleeve sizes from half the account,
+    # levered 5x so three sleeves never fight for entry margin).
+    assert profile.long.entry_leverage == 5.0
+    assert profile.carry.entry_leverage == 5.0
+    assert profile.hedge.entry_leverage == 5.0
+    assert profile.long.notional_multiplier == 0.5
+    assert profile.carry.notional_multiplier == 0.5
     assert policy == profile.account_risk.to_policy()
 
 
@@ -36,7 +40,7 @@ def test_profile_rejects_producer_leverage_above_owner_cap(producer: str) -> Non
     payload = _payload()
     section = payload[producer]
     assert isinstance(section, dict)
-    section["entry_leverage"] = 3.0
+    section["entry_leverage"] = 6.0
 
     with pytest.raises(ValueError, match="producer leverage exceeds"):
         load_operational_profile_bytes(_bytes(payload))

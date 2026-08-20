@@ -163,17 +163,23 @@ def render_exodus_book(
     cfg: ExodusShortConfig,
     now_ms: int,
     source: str,
+    entry_leverage: float | None = None,
 ) -> str:
     """The absolute short book: every open record, negative, with the fence
     stop. Validity runs to the latest settlement plus the entry window, so
     the engine stops opening once the ride is spent but the book keeps
-    standing as the hold instruction until the cover book replaces it."""
+    standing as the hold instruction until the cover book replaces it.
+
+    ``entry_leverage`` is a deployment dial (the operational profile's,
+    same as carry's own book) and overrides the registered file's value;
+    leverage changes margin usage, never the measured economics."""
+    leverage = cfg.entry_leverage if entry_leverage is None else entry_leverage
     targets = [
         EngineTarget(
             symbol=r.symbol,
             notional_usdt=-abs(r.notional_usdt),
             stop_loss_fraction=cfg.stop_loss_fraction,
-            leverage=cfg.entry_leverage,
+            leverage=leverage,
         )
         for r in records
     ]

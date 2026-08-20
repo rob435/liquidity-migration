@@ -27,6 +27,12 @@ match; never append history to this file.
   waits for the first v7 fire like everything else. Evidence and the
   honest 2024-negative era shape: `docs/research/research_findings.md`
   §the exodus short; promotion note in `strategy_program.md`.
+- **Demo sizing since 2026-08-20 evening: each sleeve sizes from HALF the
+  account at 5x entry leverage** (owner directive; CHANGELOG that day).
+  `operational.demo.json`: carry multiplier 0.5 (was 1.0; LONG already
+  0.5; exodus inherits carry's notional so it halves too), all
+  `entry_leverage` 5.0, account `max_leverage` 5.0. A forward-record
+  change point for all demo fill receipts. Mainnet untouched.
 - **The engine owns the demo account, and the sleeves feed it.** First
   deployed 2026-08-14 20:34 UTC; currently at `e3ac11bf` (staged deploy
   2026-08-20 ~15:5x UTC — the exodus sleeve plus the feed interning-order

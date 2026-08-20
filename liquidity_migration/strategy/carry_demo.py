@@ -1163,6 +1163,7 @@ def _run_exodus_short(
     fires: list[PresettleFire],
     sizing_equity_usdt: float | None,
     notional_multiplier: float,
+    entry_leverage: float,
     now_ms: int,
 ) -> dict[str, Any]:
     """One exodus pass per carry cycle: open on this cycle's fires, cover on
@@ -1244,7 +1245,11 @@ def _run_exodus_short(
         if book_path_text:
             if cfg is not None:
                 text = render_exodus_book(
-                    kept, cfg=cfg, now_ms=now_ms, source=_EXODUS_BOOK_SOURCE
+                    kept,
+                    cfg=cfg,
+                    now_ms=now_ms,
+                    source=_EXODUS_BOOK_SOURCE,
+                    entry_leverage=entry_leverage,
                 )
             else:
                 text = render_target_book(
@@ -2620,6 +2625,7 @@ def run_carry_demo_cycle(
             fires=presettle_fire_details,
             sizing_equity_usdt=exodus_sizing_equity,
             notional_multiplier=float(demo.notional_multiplier),
+            entry_leverage=float(demo.entry_leverage),
             now_ms=cycle_now_ms,
         )
 

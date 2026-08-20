@@ -16,6 +16,24 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 evening — demo sizing change point, all three sleeves
+  (owner: "each sleeve to use 50% of the account… lever up 5x so we have
+  plenty room for entries… we are running tiny size, lets just see how it
+  does").** `operational.demo.json`: carry `notional_multiplier` 1.0 →
+  0.5 (LONG already 0.5 — each sleeve now sizes from half the account;
+  the exodus short inherits carry's notional at fire, so it halves with
+  it), `entry_leverage` 2.0 → 5.0 on all three producer blocks, and the
+  account cap `max_leverage` 2.0 → 5.0 so the kernel admits it. Margin
+  per entry drops to a fifth, which un-tightens LONG's projected-margin
+  gate — the "room for entries" the directive names. The exodus book's
+  leverage now follows the operational dial like carry's own book does
+  (the registered `lane2_exodus_short_v1` file is untouched; leverage is
+  a margin knob, never part of the measured economics — test pins the
+  override). Mainnet untouched. **This is a forward-record change point
+  for all demo sleeves' fill receipts**: notionals halve for carry, and
+  every entry margins at 5x. Research configs and their RAW records are
+  unaffected. Deploy receipt below this entry's push.
+
 - **2026-08-20 ~15:55 UTC — the exodus short is live on demo as a third
   engine sleeve, and its first boot exposed (and paid for fixing) a
   boot-order fault in the engine's market feed.** Registered

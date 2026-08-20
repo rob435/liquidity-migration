@@ -2970,7 +2970,7 @@ class TestExodusShort:
         monkeypatch.delenv("EXODUS_ENGINE_TARGET_BOOK_PATH", raising=False)
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
             now_ms=self.SETTLE - 10 * 60_000,
         )
         assert receipt == {}
@@ -2984,7 +2984,7 @@ class TestExodusShort:
         now = self.SETTLE - 10 * 60_000
         receipt = module._run_exodus_short(
             state=state, root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0, now_ms=now,
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=5.0, now_ms=now,
         )
         assert receipt["exodus_opened"] == [DEEP_A]
         assert receipt["exodus_open_names"] == 1
@@ -2998,13 +2998,17 @@ class TestExodusShort:
         assert target["symbol"] == DEEP_A
         assert target["notional_usdt"] == -50.0
         assert target["stop_loss_fraction"] == 0.35
+        # Leverage is the operational profile's dial, not the registered
+        # file's constant (which stays 2.0): the deployment margin knob
+        # must reach the book without touching the evidence contract.
+        assert target["leverage"] == 5.0
         assert book["valid_until_ms"] == self.SETTLE + 20 * 60_000
         # Persisted: a restart re-renders the same book from disk.
         assert module._load_exodus_shorts(tmp_path)[0].notional_usdt == 50.0
         # The same fire again does not double the position.
         receipt = module._run_exodus_short(
             state=state, root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
             now_ms=now + 60_000,
         )
         assert receipt["exodus_opened"] == []
@@ -3020,7 +3024,7 @@ class TestExodusShort:
         )
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[],
-            sizing_equity_usdt=None, notional_multiplier=1.0,
+            sizing_equity_usdt=None, notional_multiplier=1.0, entry_leverage=2.0,
             now_ms=self.SETTLE + 60 * 60_000,
         )
         assert receipt["exodus_covered"] == [DEEP_A]
@@ -3039,7 +3043,7 @@ class TestExodusShort:
         )
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
             # Well before the cover clock: off means flat NOW, not at S+60.
             now_ms=self.SETTLE - 5 * 60_000,
         )
@@ -3054,7 +3058,7 @@ class TestExodusShort:
         book_path = self._arm(monkeypatch, tmp_path)
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=None, notional_multiplier=1.0,
+            sizing_equity_usdt=None, notional_multiplier=1.0, entry_leverage=2.0,
             now_ms=self.SETTLE - 10 * 60_000,
         )
         assert receipt["exodus_entry_blocked"] == [DEEP_A]
@@ -3070,7 +3074,7 @@ class TestExodusShort:
         monkeypatch.setenv("EXODUS_ENGINE_TARGET_BOOK_PATH", str(tmp_path))
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
             now_ms=self.SETTLE - 10 * 60_000,
         )
         assert receipt["exodus_error"] != ""
@@ -3082,7 +3086,7 @@ class TestExodusShort:
         monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v9")
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0,
+            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
             now_ms=self.SETTLE - 10 * 60_000,
         )
         assert "unknown exodus profile" in receipt["exodus_error"]
