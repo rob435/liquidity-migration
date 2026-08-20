@@ -140,18 +140,28 @@ def test_repository_doctor_emits_machine_readable_state() -> None:
     # The doctor is reporting on this very checkout, so the answer is knowable:
     # the lock is the committed one, and the tree is whatever the run left.
     assert report["dependency_lock"]["status"] == "matched"
-    porcelain = subprocess.run(
-        # repo_doctor asks with --untracked-files=all; asking with the default
-        # collapses an untracked directory to one line and the lists diverge.
-        ["git", "-C", str(ROOT), "status", "--short", "--untracked-files=all"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    changed = [line for line in porcelain.splitlines() if line.strip()]
-    assert report["git"]["status"] == ("dirty" if changed else "clean")
-    assert report["git"]["change_count"] == len(changed)
-    assert report["git"]["changes"] == changed
+    # Internally consistent, always checkable: the doctor's own three fields
+    # must agree with each other, so an inverted status or a miscount fails.
+    own = report["git"]["changes"]
+    assert report["git"]["change_count"] == len(own)
+    assert report["git"]["status"] == ("dirty" if own else "clean")
+
+    # And against git itself — but only when the tree held still across the
+    # doctor's sample and ours. repo_doctor asks with --untracked-files=all, so
+    # we must too (the default collapses an untracked directory to one line);
+    # and a second session writing to this checkout between the two samples is
+    # a real thing that happens here, not a fault in the doctor.
+    def _porcelain() -> list[str]:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--short", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return [line for line in out.splitlines() if line.strip()]
+
+    if _porcelain() == _porcelain():
+        assert own == _porcelain()
     assert report["skill_mirrors"]["status"] == "matched"
     assert report["deploy_env"]["status"] == "matched"
     assert report["deploy_env"]["stale_allowlist"] == []
