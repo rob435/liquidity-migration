@@ -141,7 +141,12 @@ def test_repository_doctor_emits_machine_readable_state() -> None:
     # the lock is the committed one, and the tree is whatever the run left.
     assert report["dependency_lock"]["status"] == "matched"
     porcelain = subprocess.run(
-        ["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True, text=True, check=True
+        # repo_doctor asks with --untracked-files=all; asking with the default
+        # collapses an untracked directory to one line and the lists diverge.
+        ["git", "-C", str(ROOT), "status", "--short", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     changed = [line for line in porcelain.splitlines() if line.strip()]
     assert report["git"]["status"] == ("dirty" if changed else "clean")

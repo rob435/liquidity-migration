@@ -17,7 +17,7 @@ edit STATE.md to match.
 > 2026-07-31 in `cdb6e61`.
 
 - **2026-08-20 evening — a deep clean of the repository (owner: "deep clean
-  the repo"). Seven commits, `bb8bbe0c`…`63f0c8ba`, nothing deployed.** Four
+  the repo"). Commits from `bb8bbe0c` on.** Four
   audits ran in parallel — dead Python, engine cruft, doc staleness, test
   hygiene — and every finding was re-verified from source before anything
   moved.
@@ -69,10 +69,34 @@ edit STATE.md to match.
   doc. The markdown-link test covers none of this: backticked paths and prose
   numbers are not links.
 
-  **Also removed:** 126 bare `# noqa` markers naming rules this repo does not
-  lint (the 143 carrying a written reason keep their comment; the 84 live ones
-  are untouched). `scripts/dev.sh check` green throughout: doctor ready, ruff
+  **Also removed:** 126 bare `# noqa` markers that ruff reported as unused
+  under this repo's own selection (the 143 carrying a written reason keep their
+  comment; the live ones are untouched). Most name rules the repo does not lint
+  at all — BLE001, the ANN family, PLC0415, S310 — but eight were `E402` in
+  `scripts/maintain/freeze_venue_instrument_rules.py`, which IS selected: ruff
+  exempts imports that follow a `sys.path` mutation, so those markers were
+  already inert. `scripts/dev.sh check` green throughout: doctor ready, ruff
   clean, mypy clean, 2371 Python and 745 engine tests passing.
+
+  **Before deploying it, five agents audited the range adversarially** (the
+  shipped Python, the engine binary and its dependency graph, the deploy
+  mechanics, the registered-evidence surfaces, then a completeness critic).
+  Verdict GO: an AST-level comparison of every changed shipped module proved
+  no surviving function body changed — all 87 added lines are re-added
+  `except`/`import` lines from the noqa strip plus seven docstring lines — and
+  the trimmed manifests produce a `cargo check --locked` that leaves the lock
+  consistent. It found four things worth fixing, all fixed here: the hardened
+  doctor assertion compared `git status --porcelain` against the doctor's own
+  `--untracked-files=all`, so any untracked *directory* in a checkout reddened
+  the pre-push gate (proved both ways and fixed); the `--telegram` assertion
+  dropped above was wrong to drop, because unlike the other five literals that
+  flag is live in `check_fleet_liveness.py` and `run_authorized_runtime.sh` and
+  the guard pinned that a *producer* runner never gets it (restored); the
+  `real_money_profile.py` inline comment still said "past 2x" where the
+  docstring beside it now says 5 (deleted, per the minimal-comment rule); and
+  `engine-venue/src/tls.rs` justified its crypto-provider pin by a two-provider
+  conflict that stopped existing when `rcgen` left the graph in this very range
+  — the pin stays, the note now says why it still stays.
 
 - **2026-08-20 ~17:5x UTC — the sub-minimum resize churn is dead at the
   planner (`c15c4740`, staged deploy verified).** The follower's dead band

@@ -282,6 +282,10 @@ def test_producer_runners_declare_their_route_and_owner_roots() -> None:
         "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
     ):
         text = _read(runner)
+        # --telegram is a LIVE flag (check_fleet_liveness.py defines it,
+        # run_authorized_runtime.sh passes it to the liveness entries). A
+        # producer runner that gained it would exit 2 at unit start.
+        assert "--telegram" not in text, runner
         assert "case \"${EXECUTION_ENVIRONMENT:-}\" in" in text, runner
         assert "    demo) ;;" in text, runner
         assert "EXECUTION_ENVIRONMENT must be explicitly set" in text, runner

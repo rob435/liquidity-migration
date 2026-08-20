@@ -203,9 +203,6 @@ def render_real_money_profile_json(
     account_gross = reference * account_multiple
     margin_cap = reference  # margin above the wallet is the venue's business
 
-    # Venue margin leverage scales with the dials: gross above
-    # entry-leverage x wallet is physically unreachable, so a book dialled
-    # past 2x raises the per-order leverage it requests along with it.
     leverage = max(_ENTRY_LEVERAGE, account_multiple)
 
     upscale = long_worst_case_upscale()
