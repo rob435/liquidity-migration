@@ -54,6 +54,10 @@ class TestAllocation:
         assert allocate_arm(salt="s", symbol="btcusdt", attempt_index=3) == allocate_arm(
             salt="s", symbol="BTCUSDT", attempt_index=3
         )
+        # An allocator stuck on one arm satisfies every equality above.
+        assert {
+            allocate_arm(salt="s", symbol="BTCUSDT", attempt_index=i) for i in range(20)
+        } == {ARM_TAKER, ARM_POST_ONLY}
 
     def test_is_roughly_balanced(self) -> None:
         arms = [allocate_arm(salt="s", symbol="BTCUSDT", attempt_index=i) for i in range(400)]

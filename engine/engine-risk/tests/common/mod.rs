@@ -13,7 +13,7 @@ use engine_types::risk::{AccountView, PositionView};
 pub const SEC: u64 = 1_000_000_000;
 pub const DAY: u64 = 86_400 * SEC;
 
-/// account_loss_guard.py: DEFAULT_MAX_EQUITY_STALENESS_NS.
+/// Was account_loss_guard.py: DEFAULT_MAX_EQUITY_STALENESS_NS, deleted 2026-08-14.
 pub const MAX_VIEW_AGE_NS: u64 = 120 * SEC;
 /// deploy/account-execution-mainnet.env.template: DISASTER_STOP_FRACTION.
 pub const DISASTER_STOP_FRACTION: f64 = 0.35;

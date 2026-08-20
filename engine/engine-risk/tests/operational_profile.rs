@@ -11,13 +11,8 @@ use std::path::PathBuf;
 use engine_risk::{kernel_config_from_profile, ProfileInputs};
 use engine_types::ids::StrategyId;
 
-const CARRY: StrategyId = StrategyId(0);
-const LONG: StrategyId = StrategyId(1);
-
-/// deploy/account-execution-mainnet.env.template: DISASTER_STOP_FRACTION.
-const DISASTER_STOP_FRACTION: f64 = 0.35;
-const MIN_ORDER_NOTIONAL_USDT: f64 = 1.0;
-const MAX_VIEW_AGE_NS: u64 = 120 * 1_000_000_000;
+mod common;
+use common::{CARRY, DISASTER_STOP_FRACTION, LONG, MAX_VIEW_AGE_NS, MIN_ORDER_NOTIONAL_USDT};
 
 fn inputs<'a>(sleeves: &'a [(&'a str, StrategyId)]) -> ProfileInputs<'a> {
     ProfileInputs {
