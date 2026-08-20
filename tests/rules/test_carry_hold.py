@@ -543,6 +543,10 @@ class TestRegisteredConfigsAreImmutable:
         u = _universe(_panel(funding_bp={"S01USDT": [-15.0, 1.0], "S02USDT": [-12.0]}))
         with_col = carry_hold_weights(u, cfg)
         without = carry_hold_weights(u.drop("crowd_persistence"), cfg)
+        # Two empty frames are equal, so the comparison below only means
+        # something once there are weights on both sides to compare.
+        assert with_col.height == 18, with_col
+        assert with_col["w"].min() > 0.0, with_col
         assert with_col.equals(without)
 
     def test_v4_declares_the_two_changes_and_nothing_else(self) -> None:
@@ -687,6 +691,10 @@ class TestV5FlowAndWhaleScaling:
             ),
             cfg,
         )
+        # Same trap as the persistence-column guard: prove there are weights
+        # before proving the extra columns did not move them.
+        assert plain.height == 18, plain
+        assert plain["w"].min() > 0.0, plain
         assert plain.equals(with_cols)
 
 

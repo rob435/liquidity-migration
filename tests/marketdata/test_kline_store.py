@@ -352,7 +352,7 @@ def test_concurrent_add_and_get_thread_safety() -> None:
             for i in range(n_bars):
                 ts = base + i * MS_PER_HOUR
                 store.add_bar("BTCUSDT", _ws_bar(ts, close=float(i)), confirmed=True)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     def reader() -> None:
@@ -363,7 +363,7 @@ def test_concurrent_add_and_get_thread_safety() -> None:
                 # Frame should always be internally consistent: no missing
                 # columns, no NaN values written by a partial dict mutation.
                 assert frame.columns[:2] == ["ts_ms", "symbol"]
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
@@ -596,6 +596,9 @@ def test_get_klines_cache_matches_uncached_output() -> None:
     a.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)  # warm cache
     cached = a.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
     fresh = b.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
+    # Two stores agreeing on nothing is agreement: pin the bars first.
+    assert cached.height == 6, cached
+    assert sorted(cached["symbol"].unique()) == ["BTCUSDT", "ETHUSDT"]
     assert cached.equals(fresh)
 
 
@@ -659,7 +662,7 @@ def test_flush_failure_cleans_up_temp_file(tmp_path: Path, monkeypatch) -> None:
     store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     store.add_bar("BTCUSDT", _ws_bar(MS_PER_HOUR, close=100.0), confirmed=True)
 
-    def boom(self, target):  # noqa: ANN001
+    def boom(self, target):
         raise OSError("simulated rename failure")
 
     monkeypatch.setattr(Path, "replace", boom)

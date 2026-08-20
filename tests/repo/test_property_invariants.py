@@ -75,15 +75,20 @@ def test_all_positive_returns_have_zero_drawdown() -> None:
 def test_annualized_sharpe_scale_invariant_and_sign_flip() -> None:
     """Sharpe = mean/std is invariant to a positive scale and negates under a sign flip."""
     rng = random.Random(11)
+    checked = 0
     for _ in range(400):
         n = rng.randint(2, 40)
         xs = [rng.uniform(-0.1, 0.1) for _ in range(n)]
         base = annualized_sharpe(xs)
         if not math.isfinite(base) or base == 0.0:
             continue
+        checked += 1
         k = rng.uniform(0.01, 100.0)
         assert math.isclose(annualized_sharpe([k * x for x in xs]), base, rel_tol=1e-9), (k, xs)
         assert math.isclose(annualized_sharpe([-x for x in xs]), -base, rel_tol=1e-9), xs
+    # Without this the degenerate skip above swallows the whole test: a Sharpe
+    # that always returned 0.0 would take every `continue` and assert nothing.
+    assert checked == 400, f"only {checked} of 400 samples had a Sharpe to test"
 
 
 def test_annualized_sharpe_degenerate_is_zero() -> None:
@@ -96,6 +101,7 @@ def test_daily_sharpe_invariant_to_intraday_exit_hour() -> None:
     """_daily_sharpe must depend only on the calendar day + equity, NEVER the intra-day
     wall-clock hour of the exit. The iter-1 bug (intraday-stamped grid) violated this."""
     rng = random.Random(23)
+    nonzero = 0
     for _ in range(200):
         ndays = rng.randint(2, 30)
         days = sorted(rng.sample(range(0, 400), ndays))  # distinct calendar days, random gaps
@@ -113,6 +119,10 @@ def test_daily_sharpe_invariant_to_intraday_exit_hour() -> None:
         s_midnight = _daily_sharpe(_df([0] * ndays))
         s_random = _daily_sharpe(_df([rng.randint(0, 23) for _ in range(ndays)]))
         assert math.isclose(s_midnight, s_random, rel_tol=1e-9, abs_tol=1e-12), (days, eqs)
+        nonzero += abs(s_midnight) > 1e-9
+    # Two equal numbers prove nothing if both are the same constant: a Sharpe
+    # stuck at 0.0 satisfies every comparison above.
+    assert nonzero == 200, f"only {nonzero} of 200 samples produced a Sharpe at all"
 
 
 def test_normalize_funding_8h_equiv_finite_and_correct() -> None:
