@@ -249,8 +249,15 @@ pub fn plan(
                     });
                     continue;
                 }
-                let threshold =
-                    rules.resize_floor_usdt.max(rules.resize_floor_fraction * standing.abs());
+                // The venue's own minimum order value joins the floor: a
+                // resize under it can never be sent, and planning one anyway
+                // re-sends it on every quote forever. Found live 2026-08-20
+                // when halved notionals put the 5% dead-band under the venue
+                // minimum for mid-sized positions (~55 refused sends/second).
+                let threshold = rules
+                    .resize_floor_usdt
+                    .max(rules.resize_floor_fraction * standing.abs())
+                    .max(rule.min_notional);
                 if delta_usdt.abs() <= threshold {
                     skipped.push(Skipped::TooSmallToBother {
                         symbol: symbol.to_string(),
@@ -354,6 +361,26 @@ mod tests {
 
     fn plan_now(targets: &[Target], held: &[String], facts: &dyn SymbolFacts) -> Plan {
         plan(targets, held, facts, NOW, VALID, PlanRules::FLEET)
+    }
+
+    #[test]
+    fn a_resize_the_venue_could_never_accept_is_not_planned() {
+        // Standing $65 long, target $69: the $4 delta clears the 5% dead-band
+        // ($3.25) but sits under the venue's $5 minimum order value. The old
+        // planner emitted it anyway, and the engine refused the same send on
+        // every quote forever — the churn the 2026-08-20 sizing change
+        // amplified to ~55/second. It must be skipped, not emitted.
+        let facts = Facts::default().holding("LINKUSDT", 6.5, Side::Buy, 10.0);
+        let plan = plan_now(&[target("LINKUSDT", 69.0)], &[], &facts);
+        assert_eq!(plan.steps, vec![]);
+        assert!(
+            matches!(plan.skipped[0], Skipped::TooSmallToBother { .. }),
+            "{:?}",
+            plan.skipped
+        );
+        // A delta above the venue minimum still resizes.
+        let plan = plan_now(&[target("LINKUSDT", 71.0)], &[], &facts);
+        assert_eq!(plan.steps.len(), 1, "{:?}", plan.skipped);
     }
 
     #[test]
