@@ -178,6 +178,16 @@ match; never append history to this file.
   for the two days between. The reset archived the anchor file beside itself
   (`account_loss_guard.json.tripped-20260810.reset-20260812T191330Z.bak`) and
   re-anchored the day cleanly on restart.
+- **The funded daily loss halt is TRIPPED and latched, since ~2026-08-20 18:00
+  UTC.** The engine's refusal carries the numbers: equity 479.225 against a
+  floor of 479.446, under by 22 cents, on an opening equity near 532.7 with the
+  10% ceiling. Equity has since recovered (517.8 at 19:20 UTC) but the latch
+  does not care: `loss_guard.rs` returns the trip before the day-roll check, so
+  it never expires on its own, it is persisted and restored across boots, and
+  `reset_loss_guard()` has no production caller — **no shipped command clears
+  it.** The funded engine is in shadow so nothing was going to trade anyway;
+  what the latch actually produces is the write loop in Open operational
+  defects below.
 - **Real money is armed**, and the owner hand-trades the same venue account.
 - **The bot and the owner keep separate books on one account** (owner's decision
   2026-08-07). Venue exposure above what the bot owns, and venue orders the bot
@@ -493,6 +503,7 @@ green, treat the checks as the suspect.
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7, item 5 states it rather than treating it as settled |
 | Nothing watches the venue and our records disagreeing | Since 2026-08-14. `account_health_unhealthy` had one writer, the deleted Python owner; the engine reconciles but publishes no mismatch. Freshness was retargeted at the engine's heartbeat on 08-17, agreement was not. `gather_account_health_alerts()` is kept uncalled as the specification. Needs the engine to publish a mismatch — a design question, owner to decide ([`docs/notifications.md`](docs/notifications.md) §What stopped being watched) |
+| **The funded shadow engine writes ~1 GB/hour while its loss guard is latched** | Found 2026-08-20 19:00 UTC. The loop: the engine logs an intent, the kernel denies it `LossGuardTripped`, the denial is logged, the strategy is told "refused" and re-emits on the next market message — ~300–450 refusals/second, ~30,000 orders "decided" per minute, from a process in shadow that has never sent an order. Measured after the 19:19 restart: 657 MB/h of WAL plus 356 MB/h of syslog. It survives a restart because the trip is persisted, and it cannot expire because the trip is checked before the UTC day-roll. **It fills the disk in ~20 hours and takes the live demo engine down with it** — a full disk already killed a deploy on 2026-08-05. It also destroyed the fleet's journal history: journald is correctly capped at 500 MB and 99% of it is now this one message, so the oldest entry is hours old. Mitigated 2026-08-20 by reclaiming ~10 GB (archived WAL segments, syslog); the loop is unfixed. Owner decision: clear the funded trip, stop the funded engine, or fix the re-emit loop |
 | No positive liveness signal reaches the chat | The hourly digest was retired with the Python owner and the dead-man's switch URL is unprovisioned, so silence means either a healthy fleet or a dead box. The engine's heartbeat is checked on-box only, and an on-box watchdog cannot report that the box died |
 
 Audit reports are not kept as standing files. Their findings live in the topic

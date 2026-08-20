@@ -16,6 +16,54 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~19:20 UTC — the deep clean is deployed (`41f8c1d4`, staged
+  `--stop-first`), and cleaning the VPS found a live defect.** `staged-ok`,
+  `verify-ok … mainnet=armed`, and both `engine-ok` and `mainnet-engine-ok` on
+  the new binary — the two-units-one-binary trap checked, not assumed. All
+  eight units active and enabled, producer state intact across the restart,
+  demo engine holding its lease with zero refusals and zero unsent orders, both
+  heartbeats fresh. The mainnet preflight prints the sizing this evening
+  installed: `leverage 5, gross 1x equity, partition carry 0.50x, long 0.50x`.
+
+  **The defect: the funded shadow engine writes about 1 GB an hour.** Its daily
+  loss halt latched at ~18:00 UTC (equity 479.225 against a floor of 479.446)
+  and a latched guard turns into an unbounded loop — intent logged, kernel
+  denies `LossGuardTripped`, denial logged, strategy told "refused", strategy
+  re-emits on the next market message. 300–450 refusals a second, ~30,000
+  orders "decided" a minute, from a process in shadow that has never sent an
+  order. Measured after the restart: 657 MB/h of WAL and 356 MB/h of syslog,
+  against 20 GiB free — **a ~20-hour fuse**, and the live demo engine shares
+  that disk. It does not self-heal: the trip is checked before the UTC
+  day-roll, is persisted across boots, and `reset_loss_guard()` has no
+  production caller. It had already destroyed the journal — journald is
+  correctly capped at 500 MB and 99% of it was this one message, leaving the
+  oldest entry hours old. Recorded in STATE.md; the fix is an owner decision.
+
+  **The cleanup itself reclaimed ~10 GB, 68% → 43% of a 38 G disk.** Twenty-two
+  archived mainnet WAL segments (6 GB): the WAL's own module doc says boot
+  replays only the newest trusted segment and "retention is the owner's
+  decision", and `rotation.rs` proves an engine booted from a restatement alone
+  equals one booted from the whole log — so the archives were droppable, and
+  the flock path plus two segments were kept. `/var/log/syslog` at 3.5 GB
+  against yesterday's 56 MB, 93% of it the storm: the 798,433 non-storm lines
+  were archived to `retired-state` first. A stale 302 MB build clone
+  (`engine.old`, untracked, so no deploy could ever have cleaned it). The six
+  unreferenced files in `/etc/liquidity-migration` — five tarred to
+  `retired-state` with the live engine TOMLs, and the duplicate funded
+  credential deleted outright rather than copied into an archive. Rotated
+  brute-force login logs, a journal from a machine-id the box no longer uses,
+  month-stale deploy staging dirs, a failed rules-probe receipt nothing reads.
+
+  **Left alone deliberately:** the quote-lab tapes (2.5 GB of compressed
+  order-book capture behind the registered entry recipes, a twice-recorded
+  owner keep-decision), the ledger-reset archives, the superseded receipts, and
+  the cargo caches (283 MB of `target/` costs a full cold rebuild on the next
+  deploy — 2m44s of build time is worth more than the space here). Two
+  pre-existing things surfaced for the owner: `/root/live_demo.sh`, which greps
+  the demo key and secret out of the env file with `sed` and launches an
+  engine, and an orphaned quote-forge poll loop running since 2026-08-04 that
+  STATE.md believes was killed.
+
 - **2026-08-20 evening — a deep clean of the repository (owner: "deep clean
   the repo"). Commits from `bb8bbe0c` on.** Four
   audits ran in parallel — dead Python, engine cruft, doc staleness, test
