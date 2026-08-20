@@ -29,6 +29,9 @@ _PHASES = {
     # An account-journal commit (fill, receipt, protection event) ended the
     # producer's wait. Same phase tier as the other data arrivals.
     "journal_change": 10,
+    # A watched price level was hit and woke the producer — a data arrival
+    # like the rest.
+    "price_touch": 10,
     "timer": 20,
 }
 

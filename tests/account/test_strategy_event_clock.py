@@ -101,3 +101,21 @@ def test_tape_rejects_unhashed_or_non_object_fields(tmp_path, mutate) -> None:
 
     with pytest.raises(ValueError, match="invalid fields|unexpected"):
         load_strategy_event_tape(path)
+
+
+def test_every_cycle_kind_the_host_can_set_is_a_kind_the_clock_accepts() -> None:
+    # strategy_host._run_one_cycle builds a StrategyEvent straight from
+    # _pending_cycle_kind, so a kind assigned anywhere in the host but missing
+    # from the clock's table kills the producer at the first such wake — both
+    # LONG producers died on the first live price_touch (2026-08-20 ~03:00 UTC).
+    import inspect
+    import re
+
+    from liquidity_migration.strategy import strategy_host
+
+    kinds = set(
+        re.findall(r'_pending_cycle_kind = "([a-z_]+)"', inspect.getsource(strategy_host))
+    )
+    assert "price_touch" in kinds, "the host seam moved; repoint this test at it"
+    for kind in sorted(kinds):
+        StrategyEvent(1_000, 1_010, "host", 1, kind, {})
