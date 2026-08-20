@@ -423,9 +423,10 @@ them directly, so a book that stops refreshing is a producer fault, not an execu
 watchdog's cycle-age check pages it.
 
 **The fleet is wrong after a bad deploy.** Re-deploy the good commit — `scripts/ops.sh deploy staged
---profile operational`, with `EXPECTED_COMMIT` set to that commit. Quiescing is not your job: `staged`
-stops the running fleet itself. A failed rollout leaves everything stopped, and the same `staged`
-finishes it; add `--refresh-demo-rules` if it died inside demo-rule maintenance.
+--profile operational --stop-first`, with `EXPECTED_COMMIT` set to that commit. `--stop-first`
+quiesces a still-running fleet; a plain `staged` refuses while any unit is active. A failed rollout
+leaves everything stopped, and a plain `staged` finishes it; add `--refresh-demo-rules` if it died
+inside demo-rule maintenance.
 
 Host replacement, SSH or deploy-key recovery, and expected-commit drift: the `vps-migrate` skill.
 

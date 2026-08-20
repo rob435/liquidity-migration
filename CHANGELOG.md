@@ -16,6 +16,21 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~21:35 UTC — the lean-docs commit is deployed (`58a57ecd`,
+  staged `--stop-first`).** Pushed with the pre-push gate green, then
+  `ops.sh deploy staged --profile operational --stop-first`: install verified
+  `commit=58a57ecd requested=58a57ecd`, both engine binaries rebuilt at that
+  commit (`engine-ok` and `mainnet-engine-ok`), all units active and enabled,
+  `mainnet=armed` untouched. Running proof after the restart: the demo engine
+  holds the single-writer lease on 555899665 and read all three target books
+  (carry v7, LONG v12 with 9 targets, exodus); the mainnet engine sits in
+  shadow with heartbeat, market feed, and private stream up; the carry
+  producer's first cycle reports `stale=False frozen=False err=none`, equity
+  $1,465.91; the demo watchdog reports 0 active alerts. One doc claim died on
+  contact: a plain `staged` does not quiesce a running fleet — it refuses and
+  lists the active units; `--stop-first` is what stops them. operations.md
+  §recovery now says so.
+
 - **2026-08-20 ~21:26 UTC — the docs and comments lose their history, and a
   rule keeps them lean.** Every core doc is rewritten in the present tense:
   what changed, when, and what it replaced now lives only here and in the
