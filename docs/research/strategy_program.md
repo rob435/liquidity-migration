@@ -488,9 +488,15 @@ two well enough. Full tables:
 
 **Active forward experiment — the driver-judgment ledger**
 (`scripts/research/llm_driver_ledger.py`). Nominates live movers from public
-tickers, has a language model judge each driver (listing, news, shill, market
-beta) BEFORE the outcome exists, journals facts + judgment, and grades the
-72h forward return by judged kind. Forward-only by construction: a model
+tickers, enriches each with the facts a judgment needs (funding, perp
+premium, open-interest change, BTC/ETH beta context, distance from the 30d
+high, volume vs the coin's own 90d norm, vol-adjusted depth, listing age),
+then has a language model walk a fixed step-rubric — identity, beta check,
+leverage-vs-organic flow, structure, driver hypothesis, this repo's measured
+priors — and journal every step's answer BEFORE the outcome exists. Grading
+prints the 72h forward return by prompt version and judged driver kind, so a
+failed grade localizes to the step that failed; a rubric change is a new
+prompt version and grades separately. Forward-only by construction: a model
 judged on historical pumps already knows how they ended. Armed by
 `DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible endpoint via
 `LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals nominations.
