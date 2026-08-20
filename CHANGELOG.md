@@ -16,6 +16,20 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~17:5x UTC — the sub-minimum resize churn is dead at the
+  planner (`c15c4740`, staged deploy verified).** The follower's dead band
+  (max($1, 5% of standing)) could sit under the venue's $5 minimum order
+  value; drift landing in that gap was planned every quote and refused
+  every send, forever. The evening's halved notionals widened the gap to
+  every position between ~$20 and ~$100 and the churn hit ~55 refused
+  sends/second (~33k lines per 10 minutes of journal). The venue minimum
+  now joins the resize floor, so a position waits until its drift is
+  worth an order the venue will take. Test proven failing against the old
+  threshold; live verification after deploy: 0 not-sent and 0 refusals in
+  the window that previously logged ~6,600. This closes the long-standing
+  churn defect (it predates today at ~1/s; the demo-fleet journals since
+  ~2026-08-19 carry its spam).
+
 - **2026-08-20 evening, second entry — the SAME sizing goes to the mainnet
   surface (owner: "make sure the live system has the same sizing too …
   remove the dollar caps … im responsible for flipping the switch, you can
