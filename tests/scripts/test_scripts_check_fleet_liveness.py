@@ -643,36 +643,6 @@ def test_account_health_production_time_is_read_adjacent(tmp_path, monkeypatch) 
     assert "-0.0 min old" in explicit_future[0].message
 
 
-def _write_owner_health_for(
-    root, *, environment: str, now_ms: int, venue_fact_age_ms: int
-) -> None:
-    from liquidity_migration.account.account_owner_health import (
-        TEST_ACCOUNT_OWNER_INVOCATION_ID,
-        AccountOwnerHealth,
-        write_account_owner_health,
-    )
-
-    write_account_owner_health(
-        root,
-        AccountOwnerHealth(
-            owner="account_execution",
-            environment=environment,
-            account_id="demo",
-            status="healthy",
-            observed_ts_ns=(now_ms - 1_000) * 1_000_000,
-            loop_sequence=1,
-            journal_sequence=0,
-            journal_state_hash="0" * 64,
-            equity_usdt=10_000.0,
-            available_margin_usdt=9_000.0,
-            requested_symbols_ready=True,
-            venue_facts_at_ns=(now_ms - venue_fact_age_ms) * 1_000_000,
-            venue_facts_healthy=True,
-            invocation_id=TEST_ACCOUNT_OWNER_INVOCATION_ID,
-        ),
-    )
-
-
 def test_account_health_tail_window_survives_bursty_non_snapshot_traffic(
     tmp_path,
 ) -> None:

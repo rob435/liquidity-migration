@@ -11,9 +11,6 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 PUBLIC_MODULE = REPO / "liquidity_migration" / "marketdata" / "bybit_market_data.py"
-PRIVATE_MODULE = REPO / "liquidity_migration" / "venue" / "bybit.py"
-OWNER_ADAPTER_MODULE = REPO / "liquidity_migration" / "venue" / "bybit_execution_adapter.py"
-OWNER_RUNNER_MODULE = REPO / "liquidity_migration" / "runtime" / "account_service_runner.py"
 ACTIVE_MARKET_DATA_PRODUCERS = (
     "data/downloaders.py",
     "strategy/event_demo_data.py",

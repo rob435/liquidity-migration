@@ -70,7 +70,7 @@ def test_a_void_declared_floor_or_leverage_is_refused() -> None:
             symbols=["BUSDT"],
             observed_ts_ns=1_000,
         )
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match="declares no minimum notional"):
         build_venue_instrument_rules(
             _ReadOnlyVenue([_row("BUSDT", min_notional="0")]),
             realm="mainnet",

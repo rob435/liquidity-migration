@@ -536,14 +536,27 @@ def test_probe_distance_must_be_positive_and_below_full_price(distance: float) -
         )
 
 
+def _source_without_comments(path: Path) -> str:
+    """The file's code, with `#` comments removed.
+
+    A grep over raw source is satisfied by a comment describing the code, so
+    the code can go and the comment can stay: `single all-symbol snapshot`
+    below matched nothing else.
+    """
+    import tokenize
+
+    with path.open("rb") as handle:
+        tokens = [tok for tok in tokenize.tokenize(handle.readline) if tok.type != tokenize.COMMENT]
+    return tokenize.untokenize(tokens).decode("utf-8")
+
+
 def test_probe_cli_checks_explicit_conditional_order_view() -> None:
-    text = (REPO_ROOT / "scripts" / "maintain" / "probe_bybit_demo_rules.py").read_text()
+    text = _source_without_comments(REPO_ROOT / "scripts" / "maintain" / "probe_bybit_demo_rules.py")
 
     assert 'client.get_open_orders(settle_coin="USDT")' in text
     assert 'order_filter="StopOrder"' in text
     assert "_open_orders_all_kinds(client)" in text
     assert "client.get_tickers(symbol=symbol)" in text
-    assert "single all-symbol snapshot" in text
     assert "eta_seconds=" in text
     assert "DemoAccountIdentity.from_api_key_info" in text
     assert "DemoAccountMutationLease(identity)" in text

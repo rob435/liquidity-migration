@@ -6,7 +6,6 @@ import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import polars as pl
 
@@ -28,17 +27,6 @@ from _event_demo_fixtures import (
     FakeKlineMarket,
     _RecordingInstrumentsMarket,
 )
-
-
-def _public_config(**overrides: object) -> SimpleNamespace:
-    values: dict[str, object] = {
-        "universe_rank_end": 0,
-        "universe_max_symbols": 0,
-        "universe_min_turnover_24h": 0.0,
-        "lookback_days": 45,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
 
 
 def test_demo_kline_cache_avoids_refetching_complete_window(tmp_path: Path) -> None:
@@ -732,10 +720,6 @@ def test_download_recent_1h_klines_prunes_stale_partitions_after_rest_write(tmp_
     assert not stale.exists(), "out-of-window partition must be pruned after the REST write"
     # today's freshly written partitions survive
     assert read_dataset(tmp_path, "event_demo_klines_1h").height == 3
-
-
-def _hour_floor_now_ms() -> int:
-    return (int(time.time() * 1000) // MS_PER_HOUR) * MS_PER_HOUR
 
 
 def test_demo_kline_fetch_ranges_backfills_a_missing_window_head() -> None:

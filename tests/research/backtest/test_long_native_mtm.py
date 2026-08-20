@@ -10,9 +10,6 @@ import pytest
 from liquidity_migration.research.backtest.long_native import _mtm_daily_curve, _mtm_summary
 
 D1 = dt.date(2026, 1, 1)
-MS_DAY = 86_400_000
-
-
 def _ts(day: dt.date, hour: int = 12) -> int:
     return int(dt.datetime(day.year, day.month, day.day, hour, tzinfo=dt.timezone.utc).timestamp() * 1000)
 

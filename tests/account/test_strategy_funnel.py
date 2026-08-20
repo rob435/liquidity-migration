@@ -125,40 +125,6 @@ def test_long_writer_failure_cannot_suppress_or_mutate_target_candidate() -> Non
     assert actual == expected
 
 
-def _continuous_frame(symbols: int = 40) -> tuple[pl.DataFrame, pl.DataFrame]:
-    ts_ms = 10 * MS_PER_HOUR
-    rows = []
-    rmom = []
-    for index in range(symbols):
-        rows.append(
-            {
-                "symbol": f"S{index:02d}",
-                "ts_ms": ts_ms,
-                "turnover_quote": 600_000.0 + index * 10_000.0,
-                "ret168": index / 100.0,
-                "ret72": index / 200.0,
-                "rv_168h": 0.01 + index / 10_000.0,
-                "vov": 0.001 + index / 100_000.0,
-                "dist_low": index / symbols,
-                "ret1": index / 1_000.0,
-                "max_ret168": index / 100.0,
-                "prior6_ret1_max": index / 1_000.0,
-                "giveback_from_prior6_high": -index / 10_000.0,
-                "turnover_spike_168h": 1.0 + index / 10.0,
-                "turnover_24h": 10_000_000.0 + index,
-                "turnover_zscore_168h": index / 10.0,
-            }
-        )
-        rmom.append(
-            {
-                "symbol": f"S{index:02d}",
-                "day_ts": 0,
-                "residual_momentum": (index - symbols / 2) / 10_000.0,
-            }
-        )
-    return pl.DataFrame(rows), pl.DataFrame(rmom)
-
-
 def _writer_row(*, liquidity: str, evaluation_ts_ms: int) -> dict[str, Any]:
     return finalize_funnel_row(
         {

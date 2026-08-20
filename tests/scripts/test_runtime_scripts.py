@@ -267,25 +267,21 @@ def test_demo_watchdog_repages_within_the_hour_like_the_mainnet_one() -> None:
         assert "--cooldown-min 360" not in case, unit
 
 
-def test_producer_runners_carry_no_kernel_latch_cross_product() -> None:
-    """Two tri-state parsers with eight accepted spellings each, plus an
-    EXECUTION_ENVIRONMENT x latch consistency matrix, only re-derived values the unit
-    files hard-code. The demo Telegram refusals were the same shape and were a latent
-    fleet-wide start failure: a runner that had them would exit 2 on a variable another
-    runner ignored, and no runner passes --telegram either way.
+def test_producer_runners_declare_their_route_and_owner_roots() -> None:
+    """What a producer runner must state for itself: the environment it is
+    allowed to run in, the two roots it writes through, and — on the mainnet
+    arm — that it takes neither credentials nor REAL_MONEY.
+
+    This test used to also assert the absence of six literals from the retired
+    kernel-latch and sleeve-Telegram parsers. None of those strings exists
+    anywhere in the tree any more, so those lines could not fail; they were
+    dropped in the 2026-08-20 clean.
     """
     for runner in (
         "scripts/runtime/run_bybit_long_demo_event_engine.sh",
         "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
     ):
         text = _read(runner)
-        assert "ACCOUNT_PAPER_KERNEL_REQUIRED" not in text, runner
-        assert "kernel_required" not in text, runner
-        assert "Kernel latch requires" not in text, runner
-        assert "requires only ACCOUNT_" not in text, runner
-        assert "Sleeve Telegram is retired" not in text, runner
-        assert "--telegram" not in text, runner
-        # What is left is the route and its owner roots.
         assert "case \"${EXECUTION_ENVIRONMENT:-}\" in" in text, runner
         assert "    demo) ;;" in text, runner
         assert "EXECUTION_ENVIRONMENT must be explicitly set" in text, runner
@@ -297,11 +293,6 @@ def test_producer_runners_carry_no_kernel_latch_cross_product() -> None:
         mainnet_arm = text[text.index("    mainnet)") : text.index("\n    *)\n        echo \"EXECUTION_ENVIRONMENT")]
         assert "A target producer must not receive venue credentials." in mainnet_arm, runner
         assert "A target producer must not receive REAL_MONEY; it submits no orders." in mainnet_arm, runner
-
-
-def test_retired_auth_shutdown_toggle_has_no_remaining_reference() -> None:
-    for path in (".env.example", "scripts/deploy_vps_live.sh", "deploy/lib_sleeves.sh"):
-        assert "AUTH_SHUTDOWN_EXPIRED_DEMO_RULES" not in _read(path), path
 
 
 def test_liveness_observer_never_activates_or_orders_after_monitored_owner() -> None:
@@ -347,7 +338,6 @@ def test_mainnet_liveness_observer_pages_without_holding_trading_authority() -> 
     assert environment["TELEGRAM_ENABLED"] == "1"
 
     wrapper = _read(WRAPPER)
-    assert "scripts/check_demo_liveness.py" not in wrapper
     start = wrapper.index("liquidity-migration-mainnet-liveness.service:main)")
     case = wrapper[start : wrapper.index("\n        ;;", start)]
     assert "scripts/runtime/check_fleet_liveness.py" in case

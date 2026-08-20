@@ -137,8 +137,16 @@ def test_repository_doctor_emits_machine_readable_state() -> None:
     assert report["schema_version"] == 1
     assert report["repository"] == str(ROOT)
     assert report["python"]["supported"] is True
-    assert report["git"]["status"] in {"clean", "dirty"}
-    assert report["dependency_lock"]["status"] in {"matched", "drift"}
+    # The doctor is reporting on this very checkout, so the answer is knowable:
+    # the lock is the committed one, and the tree is whatever the run left.
+    assert report["dependency_lock"]["status"] == "matched"
+    porcelain = subprocess.run(
+        ["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True, text=True, check=True
+    ).stdout
+    changed = [line for line in porcelain.splitlines() if line.strip()]
+    assert report["git"]["status"] == ("dirty" if changed else "clean")
+    assert report["git"]["change_count"] == len(changed)
+    assert report["git"]["changes"] == changed
     assert report["skill_mirrors"]["status"] == "matched"
     assert report["deploy_env"]["status"] == "matched"
     assert report["deploy_env"]["stale_allowlist"] == []
