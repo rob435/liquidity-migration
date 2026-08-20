@@ -239,6 +239,17 @@ the entry-target metadata and cannot revise it, so the 48h tightening needs `_pl
 to fire on a breached decayed stop. The wide initial stop alone is config-only but t 1.84, below the bar.
 Detail and the promotion note: [`trading_logic.md`](../trading_logic.md), [`strategy_program.md`](strategy_program.md).
 
+**A full entry/exit rework of v12 was measured and nothing clears the bar** (25 cells, 2021→2026-08, paired
+daily vs v12 through the same kernel accounting; receipts:
+[archive/2026-08-21-long-v13-rework-program.md](archive/2026-08-21-long-v13-rework-program.md)). The
+decomposition that survives: entering a pump at its intraday trigger instead of the daily confirmation is
+**+16 bp/trade (t 3.76) on the pumps that go on to confirm** — v12 pays a median 2.05% entry premium for
+waiting — but the pumps that trigger and fail confirmation (−4.5 bp mean, 42% win) swamp the gain in every
+mechanical variant, gated or not. The daily confirmation is information, not latency; the discriminator
+(will this pump confirm?) is not in the price/turnover panel, which is the same wall the idio-movers
+program hit. The forward-only driver-judgment ledger (`scripts/research/llm_driver_ledger.py`) is the one
+honest route left to that per-trade edge.
+
 **CARRY and LONG are the two-sleeve book because they are opposite sides of one crowd.** Daily book returns
 correlate **+0.012** across all 24 decision clocks (+0.002 to +0.024), and they hold the same symbol on the
 same day 11 times in 5.5 years — 1.04% of LONG's open name-days, 0.22% of CARRY's. CARRY is long what the
@@ -263,6 +274,21 @@ cross-sectional, cross-venue and time-series screens:
 | shorter hold as a substitute for the decayed stop | stop 3× at hold 2d → t −0.28, at hold 1d → t −1.78 | cutting every trade at two days is worse than leaving them. The value is in cutting only what is losing |
 | loosening the shape filters (close location, ATR ceiling) | t 1.33 full-sample and *worse* held-out (1.42 vs 1.52) | noise; the paired test caught what the Sharpe comparison suggested |
 | dropping the weekend 1.5× size boost | −0.19 bp/day, t −1.45 | its apparent Sharpe gain was the mechanical effect of running smaller |
+
+### LONG v13 rework — 25 cells on the same kernel accounting, 2026-08-21
+
+Receipts: [archive/2026-08-21-long-v13-rework-program.md](archive/2026-08-21-long-v13-rework-program.md).
+
+| mechanism | measured | verdict |
+| --- | --- | --- |
+| exits re-anchored to latest ATR (decayed stop ×1.0/1.5/2.0, TP ×3/4/5) | t −0.06 to −1.30, all ≤ 0 bp/day | the stale signal-day anchor does not matter |
+| removing the take-profit, graded on total and MAR | +0.15 bp/day t 0.66; best-20 share 61%→84% | buys nothing, concentrates the sleeve |
+| extending winners past the 3-day clock (+2d/+4d, two thresholds) | −0.27 to −0.50 bp/day | the give-back eats the extension; the clock is right |
+| mid-hold information exits (regime off, volume-rank fade) | t −0.65 to +0.38, 1–38 exits fire in 5.6y | a 3-day hold rarely crosses the information |
+| price-volume alignment factor as veto or exit | −0.52 to **−0.93 bp/day (t −2.74)** | crowding continues on these names; its mean-reversion premise is backwards here |
+| intraday rolling-24h entries (immediate / retrace / retrace+fallthrough) | −0.37 / **−1.44 (t −2.58)** / −0.61 bp/day | early entry buys more trades and worse ones; retrace-after-trigger is adverse selection |
+| gated early entry (deep and/or late triggers, 62–89% confirm rates) | +0.10 t 0.44 / −0.02 t −0.08, 2025–26 worse in both | the timing edge is real (+16 bp/trade t 3.76 on shared pumps) but no mechanical gate captures it |
+| dropping the 6h deadline fallthrough entry | −0.88 bp/day, t −1.97 | the chase entry is 294 of 514 fills and load-bearing |
 
 ### Cross-sectional and cross-venue screens
 

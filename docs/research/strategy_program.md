@@ -474,7 +474,30 @@ several-fold.
 
 ---
 
-### 9. Genuinely open
+### 9. LONG v13 rework — closed, v12 stands; one forward experiment survives
+
+25 cells over the full 2021→2026-08 window through the registered kernel
+accounting (exit re-anchoring, hold extension, information exits, the
+price-volume alignment factor, intraday rolling-24h entries, gated hybrids,
+fallthrough removal): nothing clears the t ≥ 2.5 bar and most lose. The
+surviving fact is a decomposition — the intraday entry earns **+16 bp/trade
+(t 3.76) on the pumps that go on to confirm the daily close** and loses it
+all on the pumps that do not; no mechanical trigger-time gate separates the
+two well enough. Full tables:
+[archive/2026-08-21-long-v13-rework-program.md](archive/2026-08-21-long-v13-rework-program.md).
+
+**Active forward experiment — the driver-judgment ledger**
+(`scripts/research/llm_driver_ledger.py`). Nominates live movers from public
+tickers, has a language model judge each driver (listing, news, shill, market
+beta) BEFORE the outcome exists, journals facts + judgment, and grades the
+72h forward return by judged kind. Forward-only by construction: a model
+judged on historical pumps already knows how they ended. Armed by
+`DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible endpoint via
+`LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals nominations.
+It trades nothing and has no capital claim; whether a graded discriminator
+ever becomes an entry gate is a later, separate registration.
+
+### 10. Genuinely open
 
 - **Per-symbol coordination between the two sleeves.** They collide on 11
   name-days in 5.5 years; the per-sleeve capital partition in `account_kernel.py`

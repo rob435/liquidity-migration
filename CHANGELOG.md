@@ -16,6 +16,24 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 — the LONG v13 rework is measured and closed: v12 stands.**
+  Owner-directed rework attempt of the LONG sleeve's entries and exits. 25
+  cells over 2021→2026-08 through the registered kernel accounting, every
+  cell paired daily against a v12 baseline the lab first reproduced
+  trade-for-trade: exit re-anchoring to live ATR, hold extension for winners,
+  regime and volume-fade exits, take-profit removal, the price-volume
+  alignment factor (entry veto and exit — both harmful, worst −0.93 bp/day
+  t −2.74), intraday rolling-24h entries (immediate, retrace, fallthrough —
+  worst −1.44 bp/day t −2.58), confirmation-gated hybrids, and fallthrough
+  removal. Nothing clears the bar. The surviving decomposition: intraday
+  entry beats the daily-confirmed entry by +16 bp/trade (t 3.76) on the pumps
+  that go on to confirm and loses everything on the ones that don't — the
+  daily confirmation is information, not latency. New forward-only tool:
+  `scripts/research/llm_driver_ledger.py` journals live mover nominations and
+  LLM driver judgments before outcomes exist (unarmed without a key; trades
+  nothing). Receipts: `docs/research/archive/2026-08-21-long-v13-rework-program.md`;
+  conclusions folded into research_findings.md §LONG and strategy_program.md §9.
+
 - **2026-08-20 ~21:35 UTC — the lean-docs commit is deployed (`58a57ecd`,
   staged `--stop-first`).** Pushed with the pre-push gate green, then
   `ops.sh deploy staged --profile operational --stop-first`: install verified
