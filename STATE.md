@@ -26,14 +26,17 @@ match; never append history to this file.
   first live early-exit fire has receipts: EDENUSDT fired 21:57:06 UTC,
   engine sold all 1,526 units one second later (WAL fill 0.05413, tag
   `book-exit`).
-- **The demo engine currently refuses NEW entries** (`may_open:false` at
-  every boot since at least 19:21 UTC 2026-08-19): the venue holds 371.1
-  ACEUSDT while the engine's log accounts −14,455.6 — inherited accounting
-  debt from private-stream gaps and the ACE hand-trade era. Exits are
-  unaffected (proven live above). The transient symbol-5/7 findings
-  cleared on their own; the ACE one is persistent until the position
-  leaves the venue (a vanished position clears at the next boot) or the
-  owner directs a ledger repair. CHANGELOG 2026-08-19 ~23:20 UTC. The prior `ee8b72a6` (2026-08-18)
+- **The demo engine's entry block is CLEARED, and the fault class is fixed
+  for good (2026-08-20 ~00:10 UTC, owner: "fix this permanently").** The
+  engine now recovers fills its stream never delivered from the venue's own
+  execution history — at boot and after every private-stream reconnect —
+  so the ledger stops drifting behind the venue; and `engine
+  reconcile-clear` is the deliberate operator act the may-open latch waits
+  for (docs/engine.md §Safety posture). The inherited ACE debt (−14,455.6
+  logged vs 371.1 at the venue) was cleared with a journaled `latch_cleared`
+  record; the next boot reconciled with **zero findings, may_open true**,
+  and the 00:20 boundary traded normally (2 orders decided). The check
+  itself is untouched: a fresh finding latches again. CHANGELOG 2026-08-20. The prior `ee8b72a6` (2026-08-18)
   brought the in-flight cover book, WAL
   segment rotation, the quote-age bound, and leverage pre-arm. The demo
   engine runs `leverage_authority = "sole"` (set in the host's

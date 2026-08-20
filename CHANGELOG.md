@@ -16,6 +16,33 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~00:10 UTC — the engine's ledger heals itself now, and the
+  demo entry block is CLEARED (owner: "fix this permanently").** Two
+  repairs shipped in `ce6465ac`+`2c071703` (staged deploys, engines
+  verified), the fail-closed check untouched:
+  (1) **Recovery** — at boot and after every private-stream reconnect the
+  engine asks the venue's own execution history for the window it was deaf
+  in and journals the missed fills as `recovered_fill` records, deduped by
+  the venue's execution id, durable before the log is compared to the
+  venue. The per-symbol fill sum therefore stops drifting behind the venue
+  — the root cause of the entry block. (2) **The clear** — `engine
+  reconcile-clear --config … --execute` is "somebody looks at the log"
+  made executable, for debt older than the ~week of history the venue
+  serves: it requires the engine stopped (it takes the log's own lock),
+  prints the findings and the ledger-vs-venue table, then appends one
+  `latch_cleared` record restating the exposure ledger to the venue's
+  positions with the findings kept as the receipt. Run once on the demo
+  WAL for the inherited ACE debt: the WAL now reads `reconciled …
+  may_open:false` → `latch_cleared` (ACE −14,455.6 → 371.1, note attached)
+  → `reconciled … findings:[], may_open:true`. The 00:20 boundary then
+  traded normally (2 orders decided at 00:20:58). The next boot still runs
+  the same comparison and latches again on anything new — 290 engine tests
+  pin exactly that, including "a clear resets the memory, not the check".
+  One trap found live and fixed in `2c071703`: the venue wrapper enum
+  delegates trait methods by hand, so the new method's default impl
+  silently swallowed the real one on the first deploy. The mainnet shadow
+  engine gets the same recovery; its latch state is the owner's
+  hand-trading and stays as-is (shadow sends nothing).
 - **2026-08-19 ~23:20 UTC — the first live early-exit fire has full
   receipts, and the demo engine is refusing NEW entries on a ledger
   disagreement it inherited.** (1) At 21:57:06 UTC the settled-print early
