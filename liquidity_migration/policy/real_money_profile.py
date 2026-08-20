@@ -42,17 +42,17 @@ REAL_MONEY_DIAL_PREFIX = "RM_"
 
 #: Ceiling on total account gross, as a multiple of the wallet: the two
 #: sleeve dials may sum to at most 10.0. Owner's dial, owner's risk — but be
-#: clear what protects the book up there: the loss halt fires on realised loss
-#: and the envelope on observed equity, while an open position's drawdown meets
-#: the venue's liquidation engine first. At 10x gross a ~10% adverse move on
-#: the book is the wallet.
+#: clear what protects the book up there: the envelope reads observed equity
+#: and each position's venue-native stop bounds that position, while an open
+#: position's drawdown meets the venue's liquidation engine first. At 10x
+#: gross a ~10% adverse move on the book is the wallet.
 MAX_REAL_MONEY_LEVERAGE = 10.0
 
-# Derived constants the old dial surface used to expose. Fixed on purpose:
-# none of them is a sizing decision, and every one is still enforced.
+# Derived constants, not dials. Fixed on purpose: none of them is a sizing
+# decision, and every one is still enforced.
 # 5.0 since 2026-08-20 (owner sizing directive, matching the demo fleet):
-# a margin knob, so entries never fight for room; the loss halt and the
-# envelope are what actually bound the book.
+# a margin knob, so entries never fight for room; the envelope and the
+# per-position venue stops are what actually bound the book.
 _ENTRY_LEVERAGE = 5.0  # venue margin leverage floor requested per order
 _EQUITY_FLOOR_USDT = 100.0  # reference floor against unreadable balances
 _EXPAND_DEAD_BAND_FRACTION = 0.05  # envelope expands only past this band

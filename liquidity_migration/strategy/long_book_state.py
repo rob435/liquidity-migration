@@ -53,8 +53,7 @@ __all__ = [
     "write_book_state",
 ]
 
-#: Where this producer keeps the record. Unset means it keeps none, which is
-#: the old inbox path and what the fleet ran before the engine.
+#: Where this producer keeps the record. Unset means it keeps none.
 LONG_BOOK_STATE_PATH_ENV = "LONG_ENGINE_BOOK_STATE_PATH"
 
 #: Bumped when the shape changes in a way an older reader would misread. A

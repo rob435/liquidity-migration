@@ -24,11 +24,9 @@ Eleven unit files: nine services and the two liveness timers.
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
 | `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume — there is no close button) — the sole `getUpdates` consumer |
 
-The liveness services are invoked by their matching timers. The two
-`account-execution` owner units that used to head this table were deleted with
-the Python order path on 2026-08-14; the engines own the accounts now.
-Target producers and auxiliary services have private API, mainnet, `REAL_MONEY`,
-and unnecessary Telegram variables explicitly removed.
+The liveness services are invoked by their matching timers, and the engines own
+the accounts. Target producers and auxiliary services have private API, mainnet,
+`REAL_MONEY`, and unnecessary Telegram variables explicitly removed.
 
 ## Dependency edges
 
@@ -37,10 +35,8 @@ are `Wants=`/`After=` on `network-online.target` — nothing `Requires=`
 anything else in the fleet.
 
 - **Producers** (demo and mainnet alike) publish target books to disk; the
-  engine reads the books and owns the account. The `Requires=` the mainnet
-  producers once carried on an account owner went with the Python order path
-  on 2026-08-14 — with no owner unit there is nothing to bind to. A dead
-  engine leaves the producers running and publishing.
+  engine reads the books and owns the account. No producer binds to the engine:
+  a dead engine leaves the producers running and publishing.
 - **Neither liveness unit** has an ordering, requirement, binding, part-of,
   requisite, uphold, or wants edge to the units it watches — a stopped or
   failed unit is what it alerts on. The mainnet observer loads
@@ -54,15 +50,14 @@ anything else in the fleet.
 
 ## The engine units
 
-`liquidity-migration-engine.service` is the odd one, in three ways.
+What the engine does with an account is [`../../docs/engine.md`](../../docs/engine.md);
+`liquidity-migration-engine.service` is the odd unit here, in three ways.
 
 - **It owns the fleet's demo account.** It loads `bybit-demo.env` — demo
   account 555899665, the live demo book — and holds that account's
-  single-writer kernel lease. (Until 2026-08-14 it ran a second demo account,
-  579580669 in `bybit-quote-lab.env`, so it could not fight the Python owner
-  of 555899665; that owner is deleted and nothing else writes to the account.
-  The lease still means anything else taking the account stops the engine
-  from starting rather than letting two writers wedge each other.)
+  single-writer kernel lease. Nothing else writes to the account: anything
+  else taking the lease stops the engine from starting rather than letting
+  two writers wedge each other.
 - **The host opts in.** The manifest installs the unit file everywhere, but
   the deploy starts and verifies it only where `/etc/liquidity-migration/engine.env`
   and the built binary both exist (`engine_installed` in
@@ -86,13 +81,6 @@ Neither engine unit is in `LM_AUTHORIZED_UNITS`
 installed byte-identical on every host and runs with the credential pairs
 stripped; the engines are opt-in per host and need their account's key pair —
 they are what trades.
-
-## Owner unit shapes (historical)
-
-The section that compared the two `account-execution` owner units — demo with
-no readiness gate, mainnet with one — described units deleted with the Python
-order path on 2026-08-14. It is preserved in git history; the ported behavior
-lives in the engine ([`../../docs/engine.md`](../../docs/engine.md)).
 
 ## Watchdog timers
 

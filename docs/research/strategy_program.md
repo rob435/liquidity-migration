@@ -1,276 +1,302 @@
-# Strategy program — reset 2026-07-21
+# Strategy program
 
-This is the single current authority for strategy evidence, direction, and next
-work. `docs/research/governance.md` still owns evidence policy, `STATE.md` owns deployed
-state, and code/tests own implemented behavior. Historical research is useful
-only through the compact priors below; its old plans, queues, reports, and
-one-off runners are retired.
+The single current authority for strategy evidence, direction, and next work.
+`docs/research/governance.md` owns evidence policy, `STATE.md` owns deployed
+state, and code/tests own implemented behavior. Dated history lives in
+`CHANGELOG.md` and `docs/research/archive/`.
 
 ## Current truth
 
+### What is deployed
+
+- **`lane2_carry_hold_v6` is the CARRY profile on both producers.** The demo
+  producer's book trades through the live engine under v6; the mainnet producer
+  publishes a v6 target book that the funded engine reads in shadow — promotion
+  changes what is published, never what is armed (`governance.md` §6). v6 is
+  v5's book with ONE shape change: the depth ladder bends, so the size
+  multiplier is clip((|trail_fund_24h|/ref)^1.5, 0.25, 1.0) instead of the
+  straight ratio. Same names, same days; mid-depth names get less size, the
+  floor and cap do not move. Promotion note (`governance.md` §3):
+  - **Claim:** v5's book on ~3.5% less average gross; capital-normalised
+    differential vs v5 **+0.43 bp/day mean across all 24 clock phases**
+    (midnight +0.63, t 2.86) on seen data; own-capital deliberately a wash
+    (Sharpe 1.842 vs 1.841, dip −18.6% vs −18.7%). Inherits v5's flow + whale
+    halvings, so this is also the first deployment of both.
+  - **Config commit:** registered 2026-08-19 (`configs/lane2_carry_hold_v6.json`,
+    commit `50156e80`); producer switch `CARRY_STRATEGY_PROFILE=v6` → profile
+    `carry_hold_v6_live_v1`; the journal filing id stays the version-free
+    `carry_hold`.
+  - **Forward record: 0 scored days** — registered and promoted the same day, so
+    this rides on seen-data evidence and the owner's decision. v4 and v5 keep
+    scoring; the v6−v5 capital-normalised differential is the experiment the
+    forward record grades.
+  - **Decision:** owner, 2026-08-19 ("get v6 live and running. implement it
+    into live and get it deployed", then "the real money side as well").
+  - **Date:** 2026-08-19. Change point = the deploy receipt in `CHANGELOG.md`.
+
+  Registration evidence: placebo 0/20, exponent plateau 1.25/1.5/2.0 all
+  t ≥ 2.7, positive **24/24** clock phases, no materially negative year. v6 is
+  the sole survivor of a ~40-cell response-shape hunt, and the config's
+  selection-debt block lists every closed sibling — smoothed flow/whale steps
+  (wash/worse), softened persistence kill (worse), inverse-vol sizing (worse),
+  depth cap raises (a 2025-26 regime bet, worse Sharpe at matched capital), age
+  taper (episodes are 1-2 days), and the depth-conditional flow drop that passed
+  era + placebo but failed the clock sweep 14/24. Negative worth keeping: the
+  measured dose-response says the book's per-unit payoff is flat below ~1.4× ref
+  and jumps above, but chasing that jump by raising the cap is regime-local, so
+  the bend harvests the stable part only.
+
+  Engineering note: v6 is the first deployed rule that reads a second venue.
+  The producer keeps a per-symbol-day cache of Binance top-trader position
+  long/short EODs (public endpoint, no key) — the live twin of the panel's
+  `bn_tt_ls` — and every feed failure fails OPEN under the registered 48h
+  freshness clause, degrading v6 toward v6-minus-whale rather than blocking a
+  decision.
+
+- **The carry early exit is deployed and fires before the print settles (v7).**
+  A held name is sold at the first read at or above the registered −3 bp exit
+  threshold — the K=1 cascade, all day, no new parameters. v7 changes an
+  execution clock only: it trades `lane2_carry_hold_v6` byte-identical (one
+  config id, its forward grade unbroken) and moves the fire from the settled
+  print (sell ~S+1 min) to the venue's running rate read inside the last 15
+  minutes before a held name's next settlement. The venue locks that rate ~55 s
+  before it pays (tardis ticks; the S−1 read matched the final print 230/230
+  walk-forward days), so this is the same registered −3 bp test on the same
+  number, read early.
+  - Evidence: on the cascade's own 1,112 fires the sell-minute curve is
+    monotone — S−10 is +21.3 bp/fire all-in (median +11.3, t 4.9); the deployed
+    continuous 15-minute window nets **+19.0 all-era / +28.3 bp per fire in
+    2025/26** after the measured premature drag (~4 bp/fire-day; every-minute
+    walk-forward, 230 held→fire days), beating flat S−10 (+16.6/+23.5) and the
+    shrinking-margin variant (+9.2) in a 13-cell sweep. The S−30 first read was
+    the runner-up (+20.2/+31.7) and was rejected for doubled premature days on
+    half-formed hourly averages. Book-level ≈ +2.4–3.1 bp/day in 2025/26, ~0
+    before.
+  - The gap the owner accepted: read at print time, the full-day cascade is
+    tail-exposed both ways — fires are 100% fresh-settlement events, medians
+    +49…+150 per fire with ~59% of fires positive 2023–26 (trimmed ~+2.5–5
+    bp/day book-level), but 2024's mean went negative on adverse tails, 2022 is
+    flat, and the mean never clears the t ≥ 2.5 bar (pooled t 2.3, 2026 t 1.5).
+  - Kill switches: `CARRY_STRATEGY_PROFILE=v6` (settled-print clock only) or
+    `CARRY_EARLY_EXIT=0` (registered midnight clock).
+  - Change point = the v7 deploy receipt in `CHANGELOG.md`. Forward grade:
+    realized engine exit fills against the same-day settled-print
+    counterfactual. Full numbers:
+    [research_findings.md §Settlement-instant timing](research_findings.md).
+
+- **`LongV12WideStop` is the LONG sleeve's deployed profile** (registered
+  2026-08-01, deployed 2026-08-03; deploy receipt in `CHANGELOG.md`). v12 changes
+  exactly one thing against v11a — the stop opens to 3× ATR and decays back to
+  1.5× after 48h. Paired daily difference **+0.48 bp/day, t 3.27, n 1927**;
+  total 38.5% → 51.6%, daily Sharpe 1.24 → 1.49, worst dip −4.4% → −3.9%, better
+  or equal in all six years, and *less* concentrated (best-20 share 78% → 62%).
+  Mechanism detail: `docs/trading_logic.md`.
+  - Both halves must be wired. The wide initial stop alone
+    (`fc_atr_stop_mult=3.0`, no decay) is t 1.84 — below the 2.5 bar — and costs
+    drawdown (−6.6% against v11a's −4.4%). The runtime carries the pair: entries
+    freeze a per-trade decay contract in their target metadata and
+    `_plan_time_stop_exits` publishes a `decayed_stop_loss` zero target on a
+    breached decayed stop; the wide half stays a venue-native resting stop.
+  - **No config-only cell clears the bar**: a 12-cell stop × hold sweep (stop
+    1.5/2/3/4 × hold 1/2/3) tops out at that same t 1.84, and shortening the
+    hold is *not* a substitute for the tightening — stop 3× at hold 2d is
+    t −0.28, at hold 1d t −1.78. Cutting every trade at two days is worse than
+    leaving them; the value is in cutting only the ones that are losing, which
+    is what the decayed stop expresses.
+  - Measured and do-not-retest, from the same sweep: **every funding gate on the
+    LONG event fails** (16 cells, none beat 1.24 — on the days LONG fires,
+    median 3d funding is +9.0 bp and only 12.7% are ≤ 0, so carry's condition
+    does not transfer); **every "sell into strength" rally exit fails**
+    (trailing, breakeven ratchets, exit-on-lower-close: 15 cells, best 1.17);
+    **loss-only cooldown fails** (0.87); **concentrating on the best 1-2
+    candidates a day fails** (t −2.38 / −2.00).
+  - CARRY and LONG v12 correlate **+0.012** across all 24 decision clocks — at
+    equal risk the pair is 16.56 bp/day, Sharpe 1.81, worst dip −24.2%, against
+    carry alone at 14.46 / 1.13 / −45.6%.
+
 - **`lane2_exodus_short_v1` is REGISTERED and DEPLOYED to the demo fleet as a
-  third engine sleeve (2026-08-20, owner: "build the exodus short as a
-  standalone strat sleeve, but synergising").** The first genuinely new
-  mechanism since the timing program, and the program's first short: when
-  carry's v7 pre-settle exit fires, the sleeve takes over the abandoned
-  position as a short and covers 60 minutes after the settlement — the
-  measured bottom of the post-settlement fall. Standalone at the engine (own
-  `[[strategy]]` block, book, fill attribution), produced inside the carry
-  process because the trigger IS carry's fire. Promotion note
-  (`governance.md` §3):
+  third engine sleeve** (2026-08-20, owner: "build the exodus short as a
+  standalone strat sleeve, but synergising"). When carry's v7 pre-settle exit
+  fires, this sleeve takes over the abandoned position as a short and covers 60
+  minutes after the settlement — the measured bottom of the post-settlement
+  fall. Standalone at the engine (own `[[strategy]]` block, book, fill
+  attribution), produced inside the carry process because the trigger IS carry's
+  fire. Promotion note (`governance.md` §3):
   - **Claim:** the book's own fires leave the larger half of the move on the
     table; shorting through it earns **+95 bp mean / +50 median per clean
     event** net of the 15.56 bp round trip, **+6.1 bp/day book-weighted
-    overlay** with the 18 real premature fires charged at their measured
-    7.8% rate — but 2024 is negative (−0.8) and 2021–23 flat: a priced
-    regime trade on the 2025–26 farmer crowd.
+    overlay** with the 18 real premature fires charged at their measured 7.8%
+    rate — but 2024 is negative (−0.8) and 2021–23 flat: a priced regime trade
+    on the 2025–26 farmer crowd.
   - **Config commit:** registered 2026-08-20
     (`configs/lane2_exodus_short_v1.json`, this commit); dial
     `EXODUS_SHORT_PROFILE=v1` on the demo carry unit, mainnet unset.
   - **Forward record: 0 scored days** — rides on seen-data evidence and the
-    owner's decision, like every first deployment here. The first demo weeks
-    measure the kline-vs-fill gap; fires are graded per event from the
-    engine's own WAL fills.
+    owner's decision. The first demo weeks measure the kline-vs-fill gap; fires
+    are graded per event from the engine's own WAL fills.
   - **Decision:** owner, 2026-08-20. The stop question was settled by
-    measurement before the config froze: every strategy-level stop from
-    +30 bp to +1500 bp loses against the time-boxed cover, so the declared
-    0.35 stop is a disaster fence, carry's exact posture.
+    measurement before the config froze: every strategy-level stop from +30 bp
+    to +1500 bp loses against the time-boxed cover, so the declared 0.35 stop is
+    a disaster fence, carry's exact posture.
   - **Date:** 2026-08-20. Change point = the deploy receipt in `CHANGELOG.md`.
-- **Entries stopped crossing the spread (2026-08-04, owner instruction; the
-  basic recipe from the overnight quote lab).** Both account owners now place
-  an exposure-increasing entry as a GTC limit resting at the touch, chase a
-  touch that moves away every 15s, and at 120s amend the price through the far
-  touch so the remainder fills as a taker at a bounded price; a remainder the
-  cross cannot clear within 20s is cancelled and the owner's convergence
-  machinery re-plans it. Exits, resizes, and native stops are unchanged
-  (taker). The numbers are the overnight lab's measured arm, not a guess:
-  seg00 (Buy, reprice 15s, timeout 120s, 34 symbols, n=1,586 attempts) filled
-  **70.4%** passively, median time-to-fill 41.6s, clean all-in cost median
-  **1.9 bp/side** against the fleet's measured 7.78 bp taker basis
-  (`docs/research/research_findings.md` §1). **This is an execution change
-  point for both sleeves' forward records**: entry fills should turn
-  maker-heavy and entry prices move from crossing to the touch. Change point =
-  this commit; deploy receipt in `CHANGELOG.md`. **The full night fit is done
-  (2026-08-04 morning, n=12,656 across all six arms plus a repeat): the
-  recipe stays as shipped.** The Sell side quotes as well as the Buy side
-  (the short entries carry makes are covered), the slower 30s/180s arm ties
-  on cost while exceeding the owner's 120 s sibling-batch budget, and the
-  10s/60s no-chase arm is rejected. Per-arm table and the three recorded
-  decisions in `docs/research/research_findings.md` §1. **Same day, second
-  execution change point (owner: "prepare for big sizing, up to 5,000 USDT
-  notional"):** an entry larger than the displayed touch now arrives as a
-  sequence of touch-sized quote windows instead of one resting order — the
-  measured touch on the thin half of the universe holds only 23–181 USDT,
-  so this is the difference between joining the queue and being the whole
-  market. Forward-record effect: large entries take minutes instead of
-  seconds, in exchange for staying maker-priced; ungraded until real
-  entries at size produce receipts. **Third execution change point
-  (2026-08-04 evening, the quote-forge lab; owner mandate "Jane Street
-  level execution")**: the resting recipe now places by the displayed touch
-  sizes (improve into the spread when the book leans toward the entry, rest
-  one tick behind when it leans hard against), escalates with the clock,
-  and crosses early once the mid has run against the entry past twice the
-  half-spread-plus-taker-fee. Selected on a 199,785-attempt queue-honest
-  replay of the full overnight tape: **−0.36 bp/entry against the shipped
-  recipe, t = −11.1, deadline crosses halved**; the churn alternatives
-  (reprice on every touch move, toxicity brake) measured *worse* than
-  shipped and are recorded as negative results. Change point = this commit;
-  evidence `docs/research/research_findings.md` §1 and
-  `~/Desktop/quote-forge/FINDINGS.md`. Out-of-sample honesty (13 unseen
-  daytime hours): the cost edge is a night-regime effect — daytime it
-  reads zero — while the halved deadline crosses and faster fills hold in
-  both regimes; the fleet enters at 00:20 UTC, in the measured regime.
-  Forward-record effect: entry cost per window should fall ~0.2–0.4 bp on
-  overnight entries and window-end taker crosses should roughly halve
-  everywhere; graded on funded `is_maker`/fill receipts as they accrue.
-- **The significance bar is `t >= 2.5`** since 2026-07-31 (owner decision;
-  authority `docs/research/governance.md` §2), replacing the family-wise ≈3.25/3.58. It is
-  prospective — earlier verdicts stand as recorded. Because it no longer controls
-  family-wise error, a survivor needs a reported plateau and a failed placebo
-  beside the number.
-- **`LongV12WideStop` is registered (2026-08-01) and wired as the LONG sleeve's
-  deployed profile (2026-08-03; deployment receipt in `CHANGELOG.md`).** v12 changes
-  exactly one thing — the stop opens to 3× ATR and decays back to 1.5× after 48h —
-  after ablating all ~20 v11a quirks on the real engine. Paired daily difference
-  **+0.48 bp/day, t 3.27, n 1927**; total 38.5% → 51.6%, daily Sharpe 1.24 → 1.49,
-  worst dip −4.4% → −3.9%, better or equal in all six years, and *less* concentrated
-  (best-20 share 78% → 62%). Detail: `docs/trading_logic.md`. The runtime change the
-  registration called for is built: entries freeze a per-trade decay contract in their
-  target metadata and `_plan_time_stop_exits` publishes a `decayed_stop_loss` zero
-  target on a breached decayed stop; the wide half stays a venue-native resting stop.
-  The wide initial stop alone (`fc_atr_stop_mult=3.0`, no decay) is t 1.84 — below the
-  2.5 bar — and costs drawdown (−6.6% against v11a's −4.4%). The pair is what clears
-  the bar, which is why the profile only ships with both halves wired.
-  **No config-only cell clears it**: a 12-cell stop × hold sweep (stop 1.5/2/3/4 ×
-  hold 1/2/3) tops out at that same t 1.84, and shortening the hold is *not* a
-  substitute for the tightening — stop 3× at hold 2d is t −0.28, at hold 1d t −1.78.
-  Cutting every trade at two days is worse than leaving them; the value is in cutting
-  only the ones that are losing, which is what the decayed stop expresses. Negative results from the same sweep, all measured, all
-  do-not-retest: **every funding gate on the LONG event fails** (16 cells, none beat
-  1.24 — on the days LONG fires, median 3d funding is +9.0 bp and only 12.7% are
-  ≤ 0, so carry's condition does not transfer); **every "sell into strength" rally
-  exit fails** (trailing, breakeven ratchets, exit-on-lower-close: 15 cells, best
-  1.17); **loss-only cooldown fails** (0.87); **concentrating on the best 1-2
-  candidates a day fails** (t −2.38 / −2.00). CARRY and LONG v12 correlate **+0.012**
-  across all 24 decision clocks — at equal risk the pair is 16.56 bp/day, Sharpe
-  1.81, worst dip −24.2%, against carry alone at 14.46 / 1.13 / −45.6%.
-- **`lane2_carry_hold_v6` is PROMOTED to both CARRY producers (2026-08-19
-  evening, owner: "get v6 live and running… the real money side as well,
-  everything needs to be running").** The demo producer's book now trades
-  through the live engine under v6; the mainnet producer publishes a v6
-  target book that the funded engine reads in shadow — promotion changes
-  what is published, never what is armed (`governance.md` §6). Promotion
-  note (`governance.md` §3):
-  - **Claim:** v5's book on ~3.5% less average gross via the bent depth
-    ladder; capital-normalised differential vs v5 **+0.43 bp/day mean across
-    all 24 clock phases** (midnight +0.63, t 2.86) on seen data; own-capital
-    deliberately a wash (Sharpe 1.842 vs 1.841). Inherits v5's flow + whale
-    halvings, so this is also the first deployment of both.
-  - **Config commit:** registered 2026-08-19 (`configs/lane2_carry_hold_v6.json`,
-    commit `50156e80`); producer switch is this promotion commit
-    (`CARRY_STRATEGY_PROFILE=v6` → profile `carry_hold_v6_live_v1`; the
-    journal filing id stays the version-free `carry_hold`).
-  - **Forward record: 0 scored days** — v6 registered the same morning, so
-    this promotion rides on seen-data evidence and the owner's decision,
-    exactly like the v4 promotion did. v4 and v5 keep scoring; the v6−v5
-    capital-normalised differential is the experiment the forward record
-    grades.
-  - **Decision:** owner, 2026-08-19 ("get v6 live and running. implement it
-    into live and get it deployed", then "the real money side as well").
-  - **Date:** 2026-08-19. Change point = the deploy receipt in `CHANGELOG.md`.
-  Engineering note: v6 is the first deployed rule that reads a second venue.
-  The producer now keeps a per-symbol-day cache of Binance top-trader
-  position long/short EODs (public endpoint, no key) — the live twin of the
-  panel's `bn_tt_ls` — and every feed failure fails OPEN under the registered
-  48h freshness clause, degrading v6 toward v6-minus-whale rather than
-  blocking a decision. Migration is the ordinary path: the stateless replay
-  recomputes the book under v6 at the first post-deploy cycle and the diff
-  machine resizes (same names, mid-depth sizes shrink, whale/flow-flagged
-  names halve); no flatten, no stranded components.
-- **`lane2_carry_hold_v6` is REGISTERED, research-only (2026-08-19, owner:
-  "the causes are right, the implementation is crude — be more sophisticated,
-  non-overfit").** v5's book with ONE shape change: the depth ladder bends —
-  the size multiplier becomes clip((|trail_fund_24h|/ref)^1.5, 0.25, 1.0)
-  instead of the straight ratio. Same names, same days; mid-depth names get
-  less size, the floor and cap don't move. Registered experiment: the
-  capital-normalised daily differential vs v5 — **+0.63 bp/day (t 2.86)** at
-  midnight, positive **24/24** clock phases (mean **+0.43** — cite the mean),
-  placebo 0/20, exponent plateau 1.25/1.5/2.0 all t ≥ 2.7, no materially
-  negative year. Own-capital it is deliberately a wash (Sharpe 1.842 vs
-  1.841, dip −18.6% vs −18.7%) on **3.5% less capital**. It is the sole
-  survivor of the same-day response-shape hunt (~40 cells); the config's
-  selection-debt block lists every closed sibling — smoothed flow/whale
-  steps (wash/worse), softened persistence kill (worse), inverse-vol sizing
-  (worse), depth cap raises (2025-26 regime bet, worse Sharpe at matched
-  capital), age taper (episodes are 1-2 days), and the depth-conditional
-  flow drop that passed era + placebo but failed the clock sweep 14/24.
-  Notable negative worth keeping: the measured dose-response says the
-  book's per-unit payoff is flat below ~1.4× ref and jumps above — but
-  chasing that jump (raising the cap) is regime-local; the bend harvests
-  the stable part only. v5 and v4 keep scoring untouched; the v6−v5
-  differential is what the forward record grades. (Promoted to both CARRY
-  producers the same evening — see the promotion entry above; this
-  registration entry records the evidence as it stood at registration.)
-- **`lane2_carry_hold_v5` is REGISTERED, research-only (2026-08-19, owner:
-  "do an A/B test and fit it into our system").** v4's book plus two size
-  halvings on axes outside the funding/price complex: stale turnover flow
-  (growth ≤ +40%/3d) and Binance top-trader de-longing (ratio change ≤
-  −0.26/3d), composing with depth and persistence. The registered experiment
-  is the capital-normalised daily differential vs v4: **+6.13 bp/day (t 3.30)**
-  at midnight, positive 24/24 clock phases (mean +3.10 — cite the mean),
-  own-capital a wash (+0.18, t 0.11) — a capital-efficiency claim, v4-over-v3's
-  shape. Scale-free: Sharpe 1.62 → 1.84, worst dip 24.5% → 18.7% at own
-  capital. Read the selection-debt block in the config before citing anything:
-  both features came out of a ~60-cell one-day search, the era gain is
-  2025-26-concentrated, and neither component clears the bar alone. New data
-  seam: the whale leg reads the public Binance metrics archive
-  (`scripts/data/refresh_binance_metrics.py` → panel `--metrics-root`,
-  bn_tt_ls columns; nulls fail open, 81% held-name-day coverage at
-  registration). v4 keeps scoring untouched; the v5−v4 differential is what
-  the forward record grades. NOT promoted to any sleeve; that is a separate
+
+- **Entries rest at the touch; they do not cross the spread** (owner
+  instruction, 2026-08-04). Both account owners place an exposure-increasing
+  entry as a GTC limit resting at the touch, chase a touch that moves away every
+  15s, and at 120s amend the price through the far touch so the remainder fills
+  as a taker at a bounded price; a remainder the cross cannot clear within 20s
+  is cancelled and the owner's convergence machinery re-plans it. Exits,
+  resizes, and native stops are taker.
+  - Measured arm behind the recipe — seg00 (Buy, reprice 15s, timeout 120s, 34
+    symbols, n=1,586 attempts): **70.4%** filled passively, median time-to-fill
+    41.6s, clean all-in cost median **1.9 bp/side** against the fleet's measured
+    7.78 bp taker basis. The full night fit (n=12,656 across all six arms plus a
+    repeat) keeps it as shipped: the Sell side quotes as well as the Buy side
+    (the short entries carry makes are covered), the slower 30s/180s arm ties on
+    cost while exceeding the owner's 120 s sibling-batch budget, and the
+    10s/60s no-chase arm is rejected.
+  - An entry larger than the displayed touch arrives as a sequence of
+    touch-sized quote windows instead of one resting order (owner: "prepare for
+    big sizing, up to 5,000 USDT notional") — the measured touch
+    on the thin half of the universe holds only 23–181 USDT, so this is the
+    difference between joining the queue and being the whole market. Large
+    entries take minutes instead of seconds, in exchange for staying
+    maker-priced; ungraded until real entries at size produce receipts.
+  - The resting recipe places by the displayed touch sizes (improve into the
+    spread when the book leans toward the entry, rest one tick behind when it
+    leans hard against), escalates with the clock, and crosses early once the
+    mid has run against the entry past twice the half-spread-plus-taker-fee.
+    Selected on a 199,785-attempt queue-honest replay of the full overnight
+    tape: **−0.36 bp/entry** against the touch-resting recipe above, t = −11.1,
+    deadline crosses halved. The churn alternatives (reprice on every touch
+    move, toxicity brake) measured *worse* and are recorded as negative results.
+  - Out-of-sample honesty (13 unseen daytime hours): the cost edge is a
+    night-regime effect — daytime it reads zero — while the halved deadline
+    crosses and faster fills hold in both regimes; the fleet enters at 00:20
+    UTC, in the measured regime.
+  - **These are execution change points for both sleeves' forward records**
+    (all 2026-08-04; deploy receipts in `CHANGELOG.md`): entry fills turn
+    maker-heavy, entry prices move from crossing to the touch, entry cost per
+    window should fall ~0.2–0.4 bp on overnight entries, and window-end taker
+    crosses should roughly halve everywhere. Graded on funded `is_maker`/fill
+    receipts as they accrue. Evidence:
+    `docs/research/research_findings.md` §1 and `~/Desktop/quote-forge/FINDINGS.md`.
+
+- The publishing profiles are `lane2_carry_hold_v6` (CARRY), `LongV12WideStop`
+  (LONG), and `lane2_exodus_short_v1` (exodus short). All are runtime
+  configurations, not validated alpha claims; `deploy/sleeves.env` and
+  `STATE.md` are the authority for what publishes.
+
+### Registered, not promoted
+
+- **`lane2_carry_hold_v5` — registered 2026-08-19, research-only**
+  (`configs/lane2_carry_hold_v5.json`; owner: "do an A/B test and fit it into
+  our system"). v4's book plus two size halvings on axes outside the
+  funding/price complex: stale turnover flow (growth ≤ +40%/3d) and Binance
+  top-trader de-longing (ratio change ≤ −0.26/3d), composing with depth and
+  persistence. The registered experiment is the capital-normalised daily
+  differential vs v4: **+6.13 bp/day (t 3.30)** at midnight, positive 24/24
+  clock phases (mean +3.10 — cite the mean), own-capital a wash (+0.18, t 0.11)
+  — a capital-efficiency claim, v4-over-v3's shape. Scale-free: Sharpe
+  1.62 → 1.84, worst dip 24.5% → 18.7% at own capital. Read the selection-debt
+  block in the config before citing anything: both features came out of a
+  ~60-cell one-day search, the era gain is 2025-26-concentrated, and neither
+  component clears the bar alone. Data seam: the whale leg reads the public
+  Binance metrics archive (`scripts/data/refresh_binance_metrics.py` → panel
+  `--metrics-root`, `bn_tt_ls` columns; nulls fail open, 81% held-name-day
+  coverage at registration). v4 keeps scoring untouched; the v5−v4 differential
+  is what the forward record grades. Promoting it to a sleeve is a separate
   owner decision with its own note.
-- **`lane2_carry_hold_v4` is PROMOTED to the demo CARRY sleeve (2026-08-03,
-  owner override).** v4 adds a crowding-persistence size multiplier and moves
-  the toxic band's high edge to 0%; its claim is capital efficiency (same
-  money, ~30% less capital) and not return — at its own capital the paired
-  differential against v3 is t 0.47. Detail: `docs/research/carry_hold.md`
-  §0.1. Promotion note (`governance.md` §3):
-  - **Claim:** v3's book on ~30% less capital; capital-normalised differential
-    vs v3 **+10.76 bp/day (t 3.23)** on seen data, own-capital +1.07 (t 0.47,
-    not significant); Sharpe 1.41 → 1.64 is the scale-free statement.
-  - **Config commit:** registered 2026-07-31
-    (`configs/lane2_carry_hold_v4.json`); producer switch is this commit
-    (`CARRY_PROFILE_NAME = carry_hold_v4_live_v1`; the journal strategy id
-    stays `carry_hold_v3` — a frozen lineage key, documented at the constant).
-  - **Forward record: 0 scored days.** The daily scorer has not run since v4
-    entered `DEFAULT_CONFIGS` (ledger ends at panel day 2026-07-27), so this
-    promotion rides on seen-data evidence and the owner's decision. v3 keeps
-    scoring as the primary comparator; the v4−v3 paired differential is the
-    experiment the forward record grades.
-  - **Decision:** owner, 2026-08-03 ("promote v4 to demo and live now").
-    Demo is done through the normal deploy flow; mainnet trades v4 whenever
-    the owner arms `REAL_MONEY` (separate door, `governance.md` §6).
-  - **Date:** 2026-08-03. Change point = the deploy receipt in `CHANGELOG.md`.
-  Migration: the producer's stateless replay recomputes the desired book under
-  v4 at the first post-deploy cycle, so the standing v3 book converges by
-  ordinary exit-first diffs (persistence-cut names exit, the rest resize); no
-  flatten, no stranded components.
-- **The settlement sawtooth program is CLOSED (2026-08-01; kill criteria 2
-  and 4 fired).** The step is arbitrage-free by construction — slope 1.0340 on
-  365,691 settlements, net to a long zero at every depth — and every trade
-  tried there is dead. Dossier archived verbatim:
-  `archive/2026-08-01-settlement-sawtooth-program.md`. Two durable bounds
-  survive it and must be quoted before anyone re-proposes either: **the carry
-  book's price leg cannot be hedged** (a per-name Binance short removes 94% of
-  the price variance but eats 74% of the funding — neutral Sharpe 0.62 against
-  directional 1.24), and **the settlement-window trade needs a zero-latency
-  exit** (Sharpe 2.96 at zero lag, −2.14 at one hour).
-- **Settlement-instant timing is closed on the v4 book too (2026-08-03, owner
-  request).** Entering just before the fee to collect it, shorting the post-fee
-  crash (including a cadence-aware exit that never pays funding: −29.6 bp/event,
-  t −4.1, negative in all six eras), and every entry/exit fill delay up to 12h
-  are measured dead — `docs/research/research_findings.md` §2
-  "Settlement-instant timing". One accounting fact survives: the scorer's
-  funding-boundary convention understates carry configs by ~+0.5 bp/day at
-  midnight, 24/24 phases (§4 there). The deployed ~00:20 fill stays as-is
-  (H7: it saves ~42 bp per entry).
-- The publishing profiles are `lane2_carry_hold_v6` (CARRY, since the
-  2026-08-19 promotion; v4 held from 2026-08-03) and `LongV12WideStop`
-  (LONG, since the 2026-08-03 rollout). `continuous_ensemble_v2` at revision
-  `active_single_fund0_tp12_sl35_v1` (the single funding-gated cell — the profile
-  id predates the 2026-07-26 replacement and no longer implies an ensemble) was
-  retired from demo and paper on 2026-07-29 by owner override and its code was
-  **deleted from the tree on 2026-08-14** (`79e5ce89`, ~14,600 lines; git
-  history holds it — "dormant" was true when written and is not any more).
-  All of these are runtime configurations, not validated alpha claims;
-  `deploy/sleeves.env` and `STATE.md` are the authority for what publishes.
+
+- **`lane2_carry_hold_v4` — registered 2026-07-31**
+  (`configs/lane2_carry_hold_v4.json`), the CARRY profile from 2026-08-03 until
+  v6 replaced it. v4 adds a crowding-persistence size multiplier and moves the
+  toxic band's high edge to 0%; its claim is capital efficiency (v3's book on
+  ~30% less capital) and not return — capital-normalised differential vs v3
+  **+10.76 bp/day (t 3.23)** on seen data, own-capital +1.07 (t 0.47, not
+  significant), with Sharpe 1.41 → 1.64 as the scale-free statement. Detail:
+  `docs/research/carry_hold.md` §0.1. **The journal strategy id stays
+  `carry_hold_v3`** — a frozen lineage key, documented at the constant. v3 keeps
+  scoring as the primary comparator; the v4−v3 paired differential is what the
+  forward record grades.
+
+### Standing rules
+
+- **The significance bar is `t >= 2.5`** (owner decision 2026-07-31; authority
+  `docs/research/governance.md` §2). It is prospective — verdicts recorded
+  before that date stand as recorded. It does not control family-wise error, so
+  a survivor needs a reported plateau and a failed placebo beside the number.
 - No researched replacement currently qualifies for implementation.
-- Passive execution: the in-flow A/B is **retired** (it lived on the paper
-  owner, retired 2026-08-03; the sample froze at 2 of 8 fills when CONTINUOUS
-  went off 2026-07-29 — `docs/research/research_findings.md` §1); the measured
-  floors stand. A fast instrument survives it:
+- Passive execution: the measured floors stand
+  (`docs/research/research_findings.md` §1). The instrument that survives is
   `scripts/research/probe_passive_fill_ab.py` (protocol in
   `liquidity_migration/research/execution/passive_fill_probe.py`, ITT
-  accounting, written kill criteria) bounds the mechanism in hours — it
-  answers whether the 5.40 bp passive floor is mechanically reachable, and
-  only that. Blocked on demo credentials this box does not hold; run with the
-  fleet stopped and flat.
-- The account-kernel remediation was independent of this research reset and
-  deployed with the 2026-07-25/26/27 rollouts of canonical `main`; `STATE.md`
-  is the authority for what is installed (deploy receipts in `CHANGELOG.md`).
-- **The 2026-07-25 instrument-repair and program phases (1, 2A/2B, 5) are
-  closed.** The anomaly program's conclusion is economic: the durable premium
-  is compensation for liquidation risk this capital structure cannot survive,
-  and no construction the repository can express clears the bar. CONTINUOUS
-  declared a 35% stop its backtest also modeled (honest headline: Sharpe 1.87,
-  +15.79%, max DD −2.85%; that backtest code left the tree 2026-08-14 —
-  the numbers stand as recorded, the scorer is git-history only). Full
-  phase record verbatim in
-  `archive/2026-08-03-strategy-program-change-log.md`; durable summary in
-  `docs/research/research_findings.md`.
-- **Dated change points 2026-07-26 .. 2026-08-03 are decanted verbatim to
-  `archive/2026-08-03-strategy-program-change-log.md`** to keep this file
-  small. New change points keep being recorded here, then decanted.
+  accounting, written kill criteria) — it bounds the mechanism in hours and
+  answers whether the 5.40 bp passive floor is mechanically reachable, and only
+  that. Blocked on demo credentials this box does not hold; run with the fleet
+  stopped and flat.
+
+### Closed, with receipts
+
+- **Settlement sawtooth — CLOSED 2026-08-01** (kill criteria 2 and 4 fired). The
+  step is arbitrage-free by construction — slope 1.0340 on 365,691 settlements,
+  net to a long zero at every depth — and every trade tried there is dead. Two
+  durable bounds survive it and must be quoted before anyone re-proposes either:
+  **the carry book's price leg cannot be hedged** (a per-name Binance short
+  removes 94% of the price variance but eats 74% of the funding — neutral Sharpe
+  0.62 against directional 1.24), and **the settlement-window trade needs a
+  zero-latency exit** (Sharpe 2.96 at zero lag, −2.14 at one hour). Dossier:
+  [`archive/2026-08-01-settlement-sawtooth-program.md`](archive/2026-08-01-settlement-sawtooth-program.md).
+- **Settlement-instant timing on the v4 book — CLOSED 2026-08-03.** Entering
+  just before the fee to collect it, shorting the post-fee crash (including a
+  cadence-aware exit that never pays funding: −29.6 bp/event, t −4.1, negative
+  in all six eras), and every entry/exit fill delay up to 12h are measured dead.
+  One accounting fact survives: the scorer's funding-boundary convention
+  understates carry configs by ~+0.5 bp/day at midnight, 24/24 phases. The
+  deployed ~00:20 entry fill stays as-is — it saves ~42 bp per entry. Receipts:
+  `docs/research/research_findings.md` §2 "Settlement-instant timing" and §4.
+- **Idio charts — CLOSED 2026-07-30** as a Sharpe upgrade for this book. Across
+  the three pre-declared screens, **0 of 96 cells are profitable and
+  significant**: residualisation yields a real signal that does not pay this
+  cost stack, and COMMON4 explains only **6.0%** of daily cross-sectional
+  dispersion. Two reusable defects went into the failure taxonomy as items
+  **34** (log returns as a P&L target — a −34.76 bp/day variance drag that
+  manufactured an apparent Sharpe 4.46) and **35** (full-rebalance cost models).
+  Dossier:
+  [`archive/2026-07-30-idio-charts.md`](archive/2026-07-30-idio-charts.md).
+- **The anomaly search — 37 mechanisms under one harness (2026-07-24).**
+  Survivors are cross-venue premium divergence and 1-week cross-sectional
+  momentum, both concentrated in the *most* liquid names and effectively
+  uncorrelated (+0.009). Funding carry broke in 2025-26 exactly when funding
+  inverted. **Venue volume-share migration — the most direct test of the
+  Crowding Transfer hypothesis below — is dead**: the price dislocation pays,
+  the flow migration does not. The premium leg is Bybit-local (23.81 bp, t 2.06
+  at 24h, against Binance's 11.42, t 1.01; adding a Binance leg dilutes to
+  17.62), so **true cross-venue execution is not worth building for this
+  signal**. Hold 24h: under disjoint sampling t peaks at 24h (3.48) and falls to
+  1.18 at 168h. Under settlement-exact funding the leg attribution reverses
+  (premium 33.63 → 16.55 bp, momentum 16.98 → 35.42 bp, blend unchanged at ~26),
+  and the dispersion gate is withdrawn as an artifact of the funding
+  approximation. The delisting-decay lead is withdrawn as a look-ahead label
+  (220.8 bp/day): turnover collapse identifies dying contracts at **0.96× lift**
+  and pays *more* on contracts that never died (+38.0 bp, t 4.26), so the
+  residual is generic "short low-turnover". Dossier:
+  [`archive/2026-07-24-anomaly-research.md`](archive/2026-07-24-anomaly-research.md).
+- **The 2026-07-25 instrument-repair and program phases (1, 2A/2B, 5) — CLOSED.**
+  The anomaly program's conclusion is economic: the durable premium is
+  compensation for liquidation risk this capital structure cannot survive, and
+  no construction the repository can express clears the bar. Full phase record
+  and the dated change points through 2026-08-03:
+  [`archive/2026-08-03-strategy-program-change-log.md`](archive/2026-08-03-strategy-program-change-log.md).
+  New change points are recorded here, then decanted there.
+- **The financed-longs program (2026-07-26) — its three registrations are
+  deleted.** Registered tables and the 22-row negative-results ledger:
+  [`archive/2026-07-26-financed-longs.md`](archive/2026-07-26-financed-longs.md).
+- **CONTINUOUS and its venue-scoped admission variant — retired** (sleeve
+  retired 2026-07-29 by owner override, code out of the tree 2026-08-14). It
+  cannot serve as a control for anything. Evidence and design constraints:
+  [`archive/2026-07-27-continuous-ladder-mechanism.md`](archive/2026-07-27-continuous-ladder-mechanism.md)
+  §5.
 
 ## Theses — measured, not registered
 
@@ -283,20 +309,19 @@ context attached. Confirmed dead ends belong in the do-not-retest ledger in
 are not run. Nothing here has a forward record: every number is Lane-1
 simulation on data that also shaped the idea, under `governance.md`.
 
-### 1. Financed leaders and funding spread — DELETED 2026-08-19, operator override
+### 1. Financed leaders and funding spread — deleted, do not rebuild
 
-Both non-carry funding books are gone — configs
-(`lane2_financed_leaders_v1`, `lane2_financed_leaders_binance_v1`,
-`lane2_funding_spread_v1`), their scorer code, and their forward-ledger
-slots ("kill everything that's not carry-hold and LONG"). The reasons they
-were never run stand as the do-not-rebuild fence: financed leaders was
-carry wearing a costume (+0.544 correlation to carry_hold v4, 14.32 bp/day
-Sharpe 1.02 — no third bet, just the first one at extra complexity), and
-the funding spread never beat its costs at the measured 2-leg fee. The
-idio screen family (panels, screens, its panel builder) went in the same
-wave — its program had already closed 0/24 hedged cells. Dated dossiers in
-`archive/` and the ledger rows in `research_findings.md` §2 keep the
-numbers; old ledger CSV rows remain as receipts.
+Both non-carry funding books are gone — configs (`lane2_financed_leaders_v1`,
+`lane2_financed_leaders_binance_v1`, `lane2_funding_spread_v1`), their scorer
+code, and their forward-ledger slots (owner: "kill everything that's not
+carry-hold and LONG"). The reasons they were never run are the fence: financed
+leaders was carry wearing a costume (+0.544 correlation to carry_hold v4, 14.32
+bp/day Sharpe 1.02 — no third bet, just the first one at extra complexity), and
+the funding spread never beat its costs at the measured 2-leg fee. The idio
+screen family (panels, screens, its panel builder) went in the same wave; its
+program had already closed 0/24 hedged cells. Dated dossiers in `archive/` and
+the ledger rows in `research_findings.md` §2 keep the numbers; old ledger CSV
+rows remain as receipts.
 
 ---
 
@@ -346,132 +371,115 @@ this same lever already in the profile, and both *cost* Sharpe when widened.
 
 ---
 
-### 4. Pre-settlement (23:00) entry — REFUTED at rule level the same day
+### 4. Pre-settlement (23:00) entry — refuted, with both signals measured
 
 **What it was.** The registered engine decides at the midnight bar, so a
-position opens one hour AFTER the 00:00 settlement and never collects the
-entry print itself — 291 of 1,833 v6-book entries forfeit a mean +41.8 bp
-print, +12,161 bp raw over 4.9 years (~+0.3–0.5 bp/day at entry weights).
-The idea: enter at 23:00 when the venue's RUNNING funding rate already
-qualifies, collecting the print. Pool-level tardis numbers looked good
-(positive median in all four eras).
+position opens one hour AFTER the 00:00 settlement and never collects the entry
+print itself — 291 of 1,833 v6-book entries forfeit a mean +41.8 bp print,
++12,161 bp raw over 4.9 years (~+0.3–0.5 bp/day at entry weights). The idea:
+enter at 23:00 when the venue's RUNNING funding rate already qualifies,
+collecting the print. Pool-level tardis numbers looked good (positive median in
+all four eras).
 
-**Why it is dead (2026-08-19, same day — the rule-level check killed it).**
-Simulated on the book's OWN eligible entry moments across the 44 tardis
-days: only **1 of 16 had the signal at 23:00** (the pool ran ~50%;
+**Why it is dead.** Simulated on the book's OWN eligible entry moments across
+the 44 tardis days, only **1 of 16 had the signal at 23:00** (the pool ran ~50%;
 P(≤1/16 | 0.44) ≈ 1e-4). The pool's early-warning story came from
 chronically-deep 4h/8h tail names; the book's fresh entries are top-100
-1h-interval names whose displayed running rate is **baseline-anchored**
-(+0.1 bp reset) until late in the final hour — and for those symbols the
-tardis `funding_rate` field often never converges to the settled print at
-all (last-minute −2.4 vs settled −82; +0.1 vs −193), which also taints
-every pool-level capture estimate. The forfeited-print accounting stands;
-there is simply no reliable one-hour-ahead signal to collect it. The raw
-mark−index premium (the primitive, which cannot be baseline-anchored) was
-then measured on both sides: sensitivity is real — the (22:00, 23:00]
-mean premium at ≤ −10 bp fires on **75%** of book-eligible deep prints,
-against 6% for the displayed rate — but precision is fatal: scanned over
-ALL 4,398 top-100 tardis name-days it fires on 12% of them and only **4%
-of fires confirm** (19 captures, 511 false positives). True positives pay
-+188 bp mean; the blend is era-unstable false-positive price drift
-(2023/24 "profit" with zero confirms) and runs **−33 bp per fire in
-2026**, the only era with real captures. Tightening the threshold from
-here would be mining n = 19. **This door is closed with both signals
-measured.**
+1h-interval names whose displayed running rate is **baseline-anchored** (+0.1 bp
+reset) until late in the final hour — and for those symbols the tardis
+`funding_rate` field often never converges to the settled print at all
+(last-minute −2.4 vs settled −82; +0.1 vs −193), which also taints every
+pool-level capture estimate. The forfeited-print accounting stands; there is
+simply no reliable one-hour-ahead signal to collect it.
 
-### 5. Open, unmeasured
+The raw mark−index premium (the primitive, which cannot be baseline-anchored)
+was then measured on both sides. Sensitivity is real — the (22:00, 23:00] mean
+premium at ≤ −10 bp fires on **75%** of book-eligible deep prints, against 6%
+for the displayed rate — but precision is fatal: scanned over ALL 4,398 top-100
+tardis name-days it fires on 12% of them and only **4% of fires confirm** (19
+captures, 511 false positives). True positives pay +188 bp mean; the blend is
+era-unstable false-positive price drift (2023/24 "profit" with zero confirms)
+and runs **−33 bp per fire in 2026**, the only era with real captures.
+Tightening the threshold from here would be mining n = 19. **This door is closed
+with both signals measured.**
 
-- **Two-book portfolio: MEASURED 2026-08-19.** On the 1,747 shared days
-  (2021-10-05..2026-07-17; LONG leg = the on-disk 2026-07-24 mark-to-market
-  build; equal-risk = inverse full-window vol, in-sample): carry↔LONG
-  correlation is **+0.002** and ~0 in every era; **carry_v6+LONG at equal
-  risk is Sharpe 2.15, worst dip 3.6%**. A third book (a premium/momentum
-  blend, research-only) was tested the same day, LOWERED the portfolio
-  (1.99 vs 2.15 without it), and was **DELETED by operator override
-  2026-08-19** — config, module, tests, and its screen harness; do not
-  rebuild it (the do-not-retest ledger in `research_findings.md` §2 keeps
-  the receipt). The equal-risk pair is 89% LONG by capital because LONG
-  runs ~27 bp/day vol against carry's ~225 — converting Sharpe 2.15 into
-  money is the envelope/leverage decision the owner declined on 2026-07-28
-  (notional_multiplier 1.0 needed ~4× the envelope), not a research output.
-  Scratch: session artifact `three_book_portfolio.py`.
-- **Premium divergence as a LONG entry filter: MEASURED 2026-08-19, null at
-  available power.** Joined PIT `premium_diff_bp` onto all 292 LONG trades
-  (97% coverage): quintile means +9.4/+11.0/+8.7/+14.8/+16.4 bp per trade —
-  a ~7 bp spread in the WRONG direction (Bybit-rich entries mildly better),
-  far inside noise at n≈57 per cell, and the book fires too rarely (~1
-  trade/week, essentially all one pattern) for any per-era read. Not worth
-  a config; re-open only if LONG's event rate grows several-fold.
+---
+
+### 5. The two-leg exit clock — the measured floor under the deployed early exit
+
+The book's names drift down after the 00:00 settlement, and on exit days they
+leak price all evening; the old 00:20 sell sat at the bottom of both. The
+deployed early exit is leg A's parameter-free generalization; leg B is not
+built. Measured on every held name-day 2021–2026 with all-in accounting:
+
+- **Leg A (evening, the big one):** the modern book is ~100% hourly settlers, so
+  the last SETTLED print visible at 23:00 forecasts tonight's recovery exit at
+  **98% precision** (15 false fires in five years), catching 56% of exits.
+  Selling those at 23:00 is **all-in +49.0 bp per fire (t 4.2)**, decaying
+  monotonically to zero by 00:20; the skipped final print costs ~nothing
+  (recovered prints are ~0) and false fires are charged the full re-buy round
+  trip.
+- **Leg B (early morning):** the remaining exits sell at ~00:02 off the swept
+  midnight print + WS-closed kline instead of 00:20 — +15–24 bp per exit (the
+  00:20 clock is a REST-era margin exits no longer need).
+
+Combined, weight-summed: **+0.71/+1.97/+0.94/+5.26/+2.56 bp/day for 2022–2026**
+— positive all six years, several times the v6−v5 improvement. Membership logic
+is untouched: both legs sell only names the registered rule is exiting anyway,
+on settled prints only, never the displayed rate. It degrades gracefully to the
+00:20 clock if the venue's interval mix reverts toward 8h. A clock change is a
+strategy change: it needs its own change point and is graded live by the
+engine's fill records. Full grids, including the refuted adaptive entry-sniping
+arms and the entry-side answer (00:20 is already optimal for entries; the drift
+is one-sided): `research_findings.md` §Settlement-instant timing.
+
+---
+
+### 6. Universe-drop exits leak the last 25 minutes — not built
+
+Exits forced by a universe drop leak **+74/+43 bp over the last 25 minutes**
+before the 00:20 fill. Not built: 2026 is weak at +18/+15 (t 0.8), and capturing
+it needs a 23:55 shadow decision the producer does not make.
+
+---
+
+### 7. Two-book portfolio — measured 2026-08-19
+
+On the 1,747 shared days (2021-10-05..2026-07-17; LONG leg = the on-disk
+2026-07-24 mark-to-market build; equal-risk = inverse full-window vol,
+in-sample): carry↔LONG correlation is **+0.002** and ~0 in every era, and
+**carry_v6+LONG at equal risk is Sharpe 2.15, worst dip 3.6%**. The equal-risk
+pair is 89% LONG by capital because LONG runs ~27 bp/day vol against carry's
+~225 — converting Sharpe 2.15 into money is the envelope/leverage decision the
+owner declined on 2026-07-28 (`notional_multiplier` 1.0 needed ~4× the
+envelope), not a research output. Scratch: session artifact
+`three_book_portfolio.py`.
+
+A third book — the premium/momentum blend `lane2_premium_momentum_blend_v1` —
+was tested the same day, LOWERED the portfolio (1.99 against 2.15 without it),
+and was **deleted by operator override**: config, module, tests, and its
+phase-1 screen harness. Do not rebuild it; the receipt is in
+`research_findings.md` §2 and the dated archive dossiers.
+
+---
+
+### 8. Premium divergence as a LONG entry filter — measured null at available power
+
+Joined PIT `premium_diff_bp` onto all 292 LONG trades (97% coverage): quintile
+means +9.4/+11.0/+8.7/+14.8/+16.4 bp per trade — a ~7 bp spread in the WRONG
+direction (Bybit-rich entries mildly better), far inside noise at n≈57 per cell,
+and the book fires too rarely (~1 trade/week, essentially all one pattern) for
+any per-era read. Not worth a config; re-open only if LONG's event rate grows
+several-fold.
+
+---
+
+### 9. Genuinely open
+
 - **Per-symbol coordination between the two sleeves.** They collide on 11
   name-days in 5.5 years; the per-sleeve capital partition in `account_kernel.py`
   budgets each sleeve separately and does not see combined per-symbol exposure.
   Small, but it is the only genuine coupling between them.
-- **v7 IS DEPLOYED — the early exit fires before the print settles
-  (2026-08-19 night; owner: "why not exit before funding is paid — front-run
-  the farmers", then "10 min before, let's call this v7 … keep improving").**
-  What changed: an execution clock only. v7 trades `lane2_carry_hold_v6`
-  byte-identical (one config id, its forward grade unbroken) and moves the
-  early-exit fire from the settled print (sell ~S+1 min) to the venue's
-  running rate read inside the last 15 minutes before a held name's next
-  settlement — the venue locks that rate ~55 s before it pays (tardis
-  ticks; the S−1 read matched the final print 230/230 walk-forward days),
-  so this is the same registered −3 bp test on the same number, read
-  early. Evidence: on the cascade's own 1,112 fires, the sell-minute curve
-  is monotone — the owner's S−10 is +21.3 bp/fire all-in (median +11.3,
-  t 4.9); the deployed continuous 15-minute window nets **+19.0 all-era /
-  +28.3 bp per fire in 2025/26** after the measured premature drag
-  (~4 bp/fire-day; every-minute walk-forward, 230 held→fire days), which
-  beat flat S−10 (+16.6/+23.5) and the shrinking-margin variant (+9.2) in
-  a 13-cell sweep; the S−30 first read was the runner-up (+20.2/+31.7)
-  and was rejected for doubled premature days on half-formed hourly
-  averages. Book-level ≈ +2.4–3.1 bp/day in 2025/26, ~0 before.
-  Change point: the v7 deploy receipt in `CHANGELOG.md`. Forward grade:
-  realized engine exit fills vs the same-day settled-print counterfactual.
-  Rollback: `CARRY_STRATEGY_PROFILE=v6` (settled-print clock only) or
-  `CARRY_EARLY_EXIT=0` (registered midnight clock). Full numbers:
-  [research_findings.md §Settlement-instant timing](research_findings.md).
-  The side discovery — universe-drop exits leak +74/+43 bp over the last
-  25 minutes before the 00:20 fill — is NOT built (2026 weak at +18/+15,
-  t 0.8, and it needs a 23:55 shadow decision).
-- **The early exit is DEPLOYED (2026-08-19 late evening, owner: "sell
-  after 1 dead hour is the right approach").** The shipped form is the
-  parameter-free version of leg A below, generalized all-day: sell a held
-  name at the first settled print at/above the registered −3 bp exit
-  threshold (the K=1 cascade; no new numbers, the registered exit test at
-  print time). Full-day evidence: fires are 100% fresh-settlement events;
-  central tendency positive 2023–26 (medians +49…+150 per fire, ~59%
-  of fires positive, trimmed ~+2.5–5 bp/day book-level) but TAIL-EXPOSED
-  both ways — 2024's mean went negative on adverse tails, 2022 flat, and
-  the mean never clears the t≥2.5 bar (pooled t 2.3, 2026 t 1.5). The
-  owner chose it with that gap stated. Kill switch: `CARRY_EARLY_EXIT=0`.
-  Change point = the deploy receipt in `CHANGELOG.md`; the forward grade
-  is the engine's realized exit fills vs the same-day 00:20 counterfactual.
-- **The two-leg exit clock — MEASURED 2026-08-19, superseded by the
-  deployed all-day early exit above (the 23:00/00:02 legs remain the
-  provable floor of the same mechanism).** The book's names drift down after the 00:00 settlement, and on
-  exit days they leak price all evening; the deployed 00:20 sell is at the
-  bottom of both. Two causal legs, measured on every held name-day
-  2021–2026 with all-in accounting:
-  - **Leg A (evening, the big one):** the modern book is ~100% hourly
-    settlers, so the last SETTLED print visible at 23:00 forecasts
-    tonight's recovery exit at **98% precision** (15 false fires in five
-    years), catching 56% of exits. Selling those at 23:00 is **all-in
-    +49.0 bp per fire (t 4.2)**, decaying monotonically to zero by 00:20;
-    the skipped final print costs ~nothing (recovered prints are ~0) and
-    false fires are charged the full re-buy round trip.
-  - **Leg B (early morning):** the remaining exits sell at ~00:02 off the
-    swept midnight print + WS-closed kline instead of 00:20 — +15–24 bp
-    per exit (the 00:20 clock is a REST-era margin exits no longer need).
-  Combined, weight-summed: **+0.71/+1.97/+0.94/+5.26/+2.56 bp/day for
-  2022–2026** — positive all six years, several times the v6−v5
-  improvement. Membership logic untouched: both legs sell only names the
-  registered rule is exiting anyway, on settled prints only (never the
-  displayed rate). Degrades gracefully to the deployed clock if the
-  venue's interval mix reverts toward 8h. A clock change is a strategy
-  change — its own change point, graded live by the engine's fill records
-  (`research_findings.md` §Settlement-instant timing has the full grids,
-  including the refuted adaptive entry-sniping arms and the entry-side
-  answer: 00:20 is already optimal for entries; the drift is one-sided).
 
 ## Priors from the 2026-07-21 reset
 
@@ -487,23 +495,20 @@ genuinely new strategy is better graded on post-commit days.
 | Historical sleeve curves | Some are positive, but LONG is materially dependent on a small take-profit tail and CONTINUOUS has no complete live-runtime reconstruction. | Keep as descriptive controls, not promotion evidence. |
 | Breadth study | CONTINUOUS increased from about 6.55 to 7.30 bets per open day, but per-bet volatility was about 1,000 bp and average dependence about 0.21. A 25 bp effect would need roughly 5.6 years at that information rate. | Breadth alone is not a research direction. Fix quantization only as an execution-validity issue. |
 | Young-listing lifecycle | The 2021-24 unconditional short effect reversed in 2025-26. A day-0 long was negative or flat. The required listing-week 1-minute cost data had zero symbol/date overlap with the 27,398-row event panel. | Retire calendar-age rules and the proposed T-L v2. |
-| Execution cost | The first 23 measured demo fills showed positive 15-second/1-minute realized spread against our taker flow. The in-flow maker-first A/B froze at 2 of 8 fills when CONTINUOUS retired 2026-07-29 and was itself retired with the paper fleet 2026-08-03 (`docs/research/research_findings.md` §1). | Continue measuring execution separately; do not confuse cost improvement with alpha. |
+| Execution cost | The first 23 measured demo fills showed positive 15-second/1-minute realized spread against our taker flow. The in-flow maker-first A/B froze at 2 of 8 fills when CONTINUOUS retired and was itself retired with the paper fleet (`docs/research/research_findings.md` §1). | Continue measuring execution separately; do not confuse cost improvement with alpha. |
 | Cross-venue follow-ups merged 2026-07-21 | A Bybit turnover-collapse listing short looked strong by era (+247/+246/+510 bp at day 2) but failed in every Binance era (-415/-41/-290 bp). Hedged extreme-funding carry was negative across every declared arm on both venues. Naive pump-event longs were negative in 23 of 24 venue/era cells; D9 and BTC-uptrend short-path differences were only about +26 to +62 bp and uncertain. | Preserve venue divergence, the post-2025 negative-funding explosion, and the small D9/uptrend directional effect as anomaly leads. Retire the fixed admission bars, bulk reports, and one-off runners. |
 | Book-level overlay follow-ups | A monotone BTC-risk intensity bought roughly 19-33% tail relief for about 3.8 percentage points/year of net premium on the deployed-shape render. A realized daily loss budget helped mainly on the negative barebones surface, while a cluster cap never bound the deployed-shape book. | Priced, regime-dependent insurance diagnostics, not automatic governors. Retire the staged hardcoded implementations; revisit through open anomaly research if new evidence warrants it. |
 
-**Young listings and mature-symbol turnover decay: dead, in compact form**
-(full tables deleted 2026-08-19 by owner consolidation decision — git history
-at this file's pre-2026-08-19 revisions holds them; the runners were
-`research_v3` scripts deleted long before that). Young listings: six
-pre-declared event-day-2 rules, honest costs and funding, block bootstrap —
-the turnover-decay short was positive in aggregate on nine 2021-22
-observations with every era-specific interval crossing zero (a mechanism
+**Young listings and mature-symbol turnover decay: dead, in compact form.**
+Young listings: six pre-declared event-day-2 rules, honest costs and funding,
+block bootstrap — the turnover-decay short was positive in aggregate on nine
+2021-22 observations with every era-specific interval crossing zero (a mechanism
 lead, not a candidate), and persistent-attention continuation was directly
-refuted (n=98, CI −1,341 to −105 bp). Mature symbols: falsified on the
-canonical daily panel (889 symbols, 2022-01..2026-07) — pooled means near
-zero with severe era dependence, and the screen omitted funding, so it was
-optimistic for shorts even so. Price extension, listing age, and turnover
-retention are context, not a standalone signal.
+refuted (n=98, CI −1,341 to −105 bp). Mature symbols: falsified on the canonical
+daily panel (889 symbols, 2022-01..2026-07) — pooled means near zero with severe
+era dependence, and the screen omitted funding, so it was optimistic for shorts
+even so. Price extension, listing age, and turnover retention are context, not a
+standalone signal.
 
 ## Starting hypothesis, not mandated direction: Crowding Transfer
 
@@ -536,8 +541,7 @@ direction.
 
 ### Feasibility already checked
 
-Re-measured 2026-07-24; the earlier taker-flow line was materially wrong and is
-corrected here. The current tiered census is `docs/data.md`.
+Measured 2026-07-24. The current tiered census is `docs/data.md`.
 
 - Bybit hourly premium, funding, index, mark, and open-interest partitions span
   `2021-01-01` through `2026-07-17`. **Bybit open interest is the deepest
@@ -576,11 +580,16 @@ population/PIT scope, missingness, executable fills/costs/funding for a
 performance claim, reconstructable accounting, and provenance. A violation
 changes what the result can mean; it does not make the diagnostic useless.
 
-### P0 — minimal causal research substrate
+### P0 — the causal research substrate
 
-Build the smallest reusable panel that can answer the first questions, not
-another family of bespoke report scripts or a months-long infrastructure
-project.
+The substrate is `liquidity_migration/research/panels/cross_venue_panel.py` plus
+`scripts/data/build_cross_venue_panel.py`, built over the both-venue population
+from `2021-01-01`; coverage lives in each shard's `manifest.json`, and the two
+source defects it exposed (`open_interest_value` is contract units,
+`funding_event_kind` on 2 of 2,024 partitions) are in
+`docs/research/research_findings.md` §4. Anything added to it holds the same
+rules, and the answer to a new field is a live research question, not another
+family of bespoke report scripts:
 
 - Exact symbol mapping with collisions and contract differences rejected.
 - Decision time, source publication/availability time, a claim-appropriate
@@ -592,10 +601,6 @@ project.
 - If common-population coverage or timing cannot support a proposed claim,
   narrow or relabel that claim and preserve the gap as an anomaly. A root name
   is not evidence.
-
-Deliverables: a reusable cross-venue panel builder, focused synthetic
-timing/mapping tests, and one compact manifest. Get to a first anomaly read
-quickly; add fields only when a live research question requires them.
 
 ### P1 — anomaly atlas
 
@@ -648,9 +653,8 @@ When a formulation becomes worth grading, commit its exact config and scorer
 before the first new day; that commit is the registration. Append one row per
 new day. Grade only post-commit decisions and keep mechanics-only days
 separate. Multiple distinct formulations may accumulate their own honest
-records. The existing LONG/CARRY sleeves remain controls and are not
-modified to help a challenger. (Said LONG/CONTINUOUS until 2026-08-19;
-CONTINUOUS cannot be a control — its code left the tree 2026-08-14.)
+records. The existing LONG and CARRY sleeves remain the controls and are not
+modified to help a challenger.
 
 Promotion requires the five-line note in `docs/research/governance.md`, a recorded
 change point, stable demo execution, and an explicit replacement/migration
@@ -671,202 +675,34 @@ authorized.
 
 ## Live task queue
 
-The measured position this list starts from: the significance bar is **t >= 2.5**
-since 2026-07-31 (`docs/research/governance.md` 2, owner decision), replacing the
-family-wise t = 3.25 derived from a ~44-mechanism count that was never
-enumerable. At the measured 15.56 bp round trip the anomaly-program signals are
-t 1.30-2.06 and still do not clear it. The one thing that does is the
-`lane2_carry_hold_v4` crowding-persistence size, whose capital-normalised
-differential against v3 is t 3.23 on seen data — registered 2026-07-31 and
-accruing forward days, not validated. Execution work cannot create an edge (its
-ceiling is Sharpe 0.69 -> ~1.17). Completed items below are retained as the
-evidence trail.
+The measured position this list starts from: at the measured 15.56 bp round trip
+the anomaly-program signals are t 1.30-2.06 and do not clear the t ≥ 2.5 bar.
+Execution work cannot create an edge — its ceiling is Sharpe 0.69 → ~1.17.
 
-
-- [x] **Settlement sawtooth program — CLOSED 2026-08-01 by its own dossier;
-      this queue item went stale and said OPEN until 2026-08-19.** The dossier
-      (`docs/research/archive/2026-08-01-settlement-sawtooth-program.md`, §5
-      verdict table) resolved every hypothesis: H1 DEAD twice over (the entry
-      gate is not knowable at entry, and 97.0% of the move lands inside two
-      minutes), H2 DEAD (−336.20 bp/entry, t −6.15), H3 DEAD, H4 DEAD, H5
-      RESOLVED, H6/H7 ANSWERED — H7's ~00:20 fill is deployed. The "P0 data
-      task" this item used to carry was doubly false by then: the dossier's
-      own §4 ("the blocking dependency: minute data") is struck through and
-      WITHDRAWN 2026-08-01, `scripts/data/download_bybit_klines_1m.py` exists,
-      and `klines_1m/` holds 2,034 date partitions from 2021-01-01 (tier F in
-      `docs/data.md`). Nothing here is blocked and nothing here is worth
-      re-running; the Current-truth bullet above recorded the closure on day
-      one, and this queue line simply never got checked off.
-- [x] **Enumerate the "~44 mechanisms", or stop quoting a threshold derived from
-      them — CLOSED 2026-07-31 by taking the second option.** The bar is now a
-      fixed t >= 2.5 owned by `docs/research/governance.md` 2, so no threshold in this
-      program rests on the unverifiable count any more. `bonferroni_t` and
-      `PRIOR_MECHANISMS` survive as reference numbers printed beside the bar, not
-      as the pass/fail rule. The original defect statement follows.
-      ORIGINAL: Found 2026-07-30 while setting the bar for the idio screen: no
-      artifact in the tree or in git history lists them. `scripts/research/screen_phase1.py`
-      and four configs all *assert* the count, none enumerates it. Every Bonferroni threshold this programme quotes — the
-      standing t = 3.25, and the 3.46 / 3.57 the idio screens derived from it —
-      therefore rests on an unverifiable denominator, and whether a new grid
-      overlaps something already inside the 44 cannot be checked. Either build
-      the list (it is recoverable from the research docs and git history) or
-      replace the count-based threshold with something auditable. This is a
-      defect in the evidence standard itself, not in any one result.
-- [x] **Idio charts — closed as a Sharpe upgrade for this book (2026-07-30).**
-      `docs/research/archive/2026-07-30-idio-charts.md`. Pre-declared 48-cell grid over
-      the Bybit full-PIT panel (2023-06-01..2026-06-30, 1,126 days, 880
-      symbols): **0 cells profitable in their best direction and clearing
-      t > 3.46** on measured turnover; max t anywhere is 1.90. Idio beats the
-      information-matched (3-day-lagged) raw control on 2/6 features, 1/6
-      era-stable. A demean-only control arm decomposes the null: de-marketing
-      buys a median −0.032 Sharpe and factor-stripping on top +0.083 median /
-      −0.057 mean — a decile long/short is already market-neutral, so
-      residualising before ranking sells it something it has for free.
-      COMMON4 explains only **6.0%** of daily cross-sectional dispersion.
-      Corroborates two deleted June-2026 receipts recovered from git
-      (`rmom-latency-falsification-2026-06-09`,
-      `intraday-residual-scout-2026-06-10`): residualisation yields a real
-      signal that does not pay this cost stack.
-      **Mode (b) run and the declared kill condition FIRED:** the BTC-beta-hedged
-      book (only `btc_beta` has a tradable instrument; the three rank factors do
-      not) improves net Sharpe in 3/24 cells, median Δ −0.183, 0/24 profitable
-      and clearing the bar. Inside that null: the decile books are *not*
-      beta-neutral (|net_beta| 0.38–0.59 raw) and residualising genuinely
-      de-betas them (0.26–0.39 idio) — the construction works, it just does not
-      pay. **Momentum arms re-run on a momentum-free factor set** (`nomom3`,
-      COMMON4 minus `xs_rank_ret_30d`, which had made those arms circular):
-      idio beats the control in 1/6 rather than 2/6, so the defect was real and
-      not load-bearing.
-      Two reusable defects were found and added to the failure taxonomy as
-      items **34** (log returns as a P&L target — a −34.76 bp/day variance drag
-      that manufactured an apparent Sharpe 4.46) and **35** (full-rebalance cost
-      models). Item 34 was then reintroduced by this same work via a column
-      rename and caught by a negative R²; read it as a naming discipline.
-      **The directional single-name book — the claim's strongest form — was also
-      run and fails harder.** `pos = sign(60d per-symbol z-score)`, no
-      cross-sectional information, so common-factor motion does not cancel:
-      raw arms carry |net_beta| 0.82–0.84 (3× the decile book) and idio arms cut
-      it to 0.22–0.40, so the mechanism works — but median Δ Sharpe
-      (idio − control) is **−0.572** and 0/24 hedged cells clear |t| > 3.57.
-      Residualising performs *worse* in the construction that theoretically
-      favours it. That is what closes the programme rather than merely bounding
-      it to one book. Across all three screens: **0 of 96 pre-declared cells are
-      profitable and significant.**
-      New at the time: `residual_price.py`, `idio_features.py`,
-      `build_idio_panel.py`, the three `screen_idio_*` scripts,
-      `diagnose_idio_panel.py` — all deleted (the diagnostic 2026-08-19
-      morning wave, the rest the same evening, operator override).
-- [x] Collapse old evidence into decision-useful priors.
-- [x] Falsify simple young-listing continuation and mature turnover-decay rules.
-- [x] Verify a viable long-history cross-venue premium/funding overlap.
-- [x] Build the minimal P0 causal substrate and publish its coverage map.
-      `liquidity_migration/research/panels/cross_venue_panel.py` +
-      `scripts/data/build_cross_venue_panel.py`, built 2026-07-24 over the
-      both-venue population from `2021-01-01`. Coverage lives in each shard's
-      `manifest.json`; the two source defects it exposed (`open_interest_value`
-      is contract units, `funding_event_kind` on 2 of 2,024 partitions) are in
-      `docs/research/research_findings.md` §4.
-- [x] Produce the P1 anomaly search with the full log, and consolidate it.
-      `docs/research/archive/2026-07-24-anomaly-research.md` — 37 mechanisms tested identically.
-      Survivors are cross-venue premium divergence and 1-week cross-sectional
-      momentum, both concentrated in the *most* liquid names and effectively
-      uncorrelated (+0.009). Funding carry broke in 2025-26 exactly when funding
-      inverted. The 24h-display rollover is a confirmed mechanism that does not
-      pay. The edge is non-monotone — essentially all of it is the short leg. Venue
-      volume-share migration — the most direct test of the Crowding Transfer
-      starting hypothesis below — is dead; the price dislocation pays, the flow
-      migration does not. Scoring primitives were
-      `liquidity_migration/research/panels/cross_section.py`, deleted with the
-      non-carry, non-LONG research tree.
-- [x] Withdraw the delisting-decay lead. The 220.8 bp/day figure used a
-      look-ahead label (contract stops appearing). No point-in-time trigger
-      reaches it: turnover collapse identifies dying contracts at **0.96× lift**,
-      and the same trigger pays *more* on contracts that never died (+38.0 bp,
-      t 4.26), so the residual is generic "short low-turnover", not delisting.
-      No announcement-lead-time check can rescue it.
-- [x] Withdraw the weekly-horizon recommendation. The rising t-stat was an
-      overlap artifact; under disjoint sampling t peaks at 24h (3.48) and falls
-      to 1.18 at 168h. Hold 24h.
-- [x] Settlement-exact funding replay. Charging funding only at settlements
-      inside the hold (not `rate × hours/8`) **reverses the leg attribution**:
-      premium 33.63→16.55 bp, momentum 16.98→35.42 bp, blend unchanged at ~26.
-      The blend is robust to the funding treatment; the legs are not.
-- [x] Withdraw the dispersion gate. Under settlement-exact funding it gives
-      Sharpe 1.30 vs 1.29 ungated and a *worse* compounded drawdown (51.6% vs
-      46.1%). It was an artifact of the funding approximation.
-- [x] Compounded accounting and volatility target. The blend was never near
-      liquidation — worst day −29.17%, no day below −50%; the >100% drawdowns in
-      the earlier caveat were single legs, not the blend. A 15% annual vol target
-      (cap 3×) lifts Sharpe 1.24→1.59 and cuts compounded drawdown 46%→13.6%.
-- [x] Decompose `premium_diff` by venue. Net of each venue's own settlement-exact
-      funding, **Bybit carries the return** (23.81 bp, t 2.06 at 24h) and Binance
-      does not (11.42 bp, t 1.01); adding a Binance leg dilutes to 17.62. The
-      effect is Bybit-local, so **true cross-venue execution is not worth building
-      for this signal**. Caveat: the premium leg is marginal and clears t = 2 only
-      at 24h.
-- [x] **Lane-2 registration**: the premium/momentum blend
-      (`lane2_premium_momentum_blend_v1`). Daily, top-100 Bybit, 50/50
-      premium + 1-week momentum continuation, settlement-exact funding.
-      **DELETED 2026-08-19 by operator override** after losing the
-      portfolio test (it lowered carry+LONG from Sharpe 2.15 to 1.99):
-      config, module, tests, and the phase-1 screen harness all removed.
-      Do not rebuild; the receipt lives in `research_findings.md` §2 and
-      the dated archive dossiers.
-- [x] **2026-07-26 financed-longs program**: three Lane-2 registrations
-      (`lane2_carry_hold_v1`, `lane2_financed_leaders_v1`,
-      `lane2_financed_leaders_binance_v1`) against the regenerated CONTINUOUS
-      sl35 benchmark (Sharpe 1.84, +15.85%) at measured costs. On the
-      full-calendar basis the two Bybit books beat it on return AND Sharpe; the
-      Binance replication arm beats on return only (Sharpe 1.66 vs 1.84) — see
-      the registration block above, which has said so since the same-day
-      correction. Module `liquidity_migration/research/backtest/financed_longs.py`, reproduction
-      `scripts/research/screen_financed_longs.py` (deleted 2026-08-19 with the
-      financed-leaders line; it reproduced the registered table directly from
-      the 2026-07-27 M19 turnover fix onward), evidence
-      `docs/research/archive/2026-07-26-financed-longs.md` with the 22-row
-      negative-results ledger.
 - [ ] Score the registered carry-hold configs on each new completed UTC day
-      (`lane2_carry_hold_v1..v6`; `DEFAULT_CONFIGS` in the scorer is the
-      list. The funding-spread and financed-leaders configs scored here
-      until their 2026-08-19 deletion by operator override; their old
-      ledger rows remain as receipts)
-      (rolling forward record; the registration commit is the change point;
-      since 2026-07-28 the scorer charges each settlement exactly once;
-      the paired daily differentials v2−v1, v3−v2, and **v4−v3 — the
-      experiment the 2026-08-03 promotion rides on** — are the primary
-      comparisons). Tooling: `scripts/research/score_financed_longs_forward.py`
-      appends `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`
+      (`lane2_carry_hold_v1..v6`; `DEFAULT_CONFIGS` in the scorer is the list).
+      This is the rolling forward record; the registration commit is the change
+      point; the scorer charges each settlement exactly once; the paired daily
+      differentials v2−v1, v3−v2, v4−v3, v5−v4 and v6−v5 are the primary
+      comparisons. Tooling:
+      `scripts/research/score_financed_longs_forward.py` appends
+      `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`
       (append-first, idempotent, `forward_eligible` flagged; the path is under
       the data root, not the repo's `reports/`). The daily sequence is
       research-refresh → panel 2026 rebuild
       (`scripts/data/build_cross_venue_panel.py --start 2021-01-01`, full
-      rebuild — the index is whole-file) → ledger append.
-      **The sequence stopped on 2026-07-28 and nobody noticed for three
-      weeks**: every data root's last partition sat at 2026-07-27 and the
-      ledger's last scored day at 2026-07-26 until the 2026-08-19 backfill.
-      The promoted v4 accrued zero scored forward days in that gap. If this
-      is to be believed as a forward record it cannot be a hand ritual —
-      the owner ordered automation on 2026-08-19 and the runner exists:
-      `scripts/research/daily_evidence_run.sh` — refresh → panel rebuild →
-      ledger append — writing `daily_run_status.json` beside the ledger.
-      **It is run by hand.** The launchd job that ran it at 14:30 local was
-      removed the same day it was built, with the scheduler leaving the
-      owner's Mac (CHANGELOG 2026-08-19); nothing schedules it until the new
-      box arrives, so the gap this bullet is about can reopen. It refuses a dirty
-      checkout (the provenance rule) and fails closed with the failing
-      step named.
-- [ ] Re-derive the settlement-exact surfaces on the corrected scorer:
-      the anomaly-research funding-leg numbers (leg-attribution reversal,
+      rebuild — the index is whole-file) → ledger append, and
+      `scripts/research/daily_evidence_run.sh` runs all three, writing
+      `daily_run_status.json` beside the ledger. It refuses a dirty checkout
+      (the provenance rule) and fails closed with the failing step named.
+      **It is run by hand and nothing schedules it** until the new box arrives —
+      the sequence once stopped for three weeks unnoticed and the promoted
+      config accrued zero scored forward days, so a silent gap here is the
+      failure mode to watch.
+- [ ] Re-derive the settlement-exact surfaces on the corrected scorer: the
+      anomaly-research funding-leg numbers (leg-attribution reversal,
       dispersion-gate withdrawal) and financed-longs negative-ledger rows
-      1/2/13–17/20 (2026-07-28 double-count correction). The blend's table
-      left this item when the blend was deleted (2026-08-19, operator
-      override).
-- [x] Score the venue-scoped CONTINUOUS admission variant — **RETIRED
-      2026-08-19, owner decision.** Its tooling left the tree with the
-      CONTINUOUS sleeve on 2026-08-14; the owner chose retirement over
-      restoration. Evidence and design constraints stay in
-      `docs/research/archive/2026-07-27-continuous-ladder-mechanism.md` §5
-      and git history.
+      1/2/13–17/20 (2026-07-28 double-count correction).
 - [ ] Measure realised maker-fill probability in flow (target was 100 fills
       per arm; the retired paper-owner A/B froze at 2 of 8). This is the last
       unmeasured cost input. **Blocked, not pending:** it now needs a

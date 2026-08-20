@@ -486,11 +486,10 @@ def apply_account_event(state: AccountState, event: AccountEvent) -> None:
             reconstructed = abs(order.filled_signed_qty)
             cumulative = abs(float(payload.get("cumulative_filled_qty") or 0.0))
             # The venue's Filled closes ITS order. A clip-sized resting entry
-            # places less than the command on purpose (2026-08-04 sizing
-            # program), so the reconstruction must cover the venue's own
-            # cumulative — not the commanded quantity. Events without a
-            # cumulative keep the original commanded-quantity rule they were
-            # written under.
+            # places less than the command on purpose, so the reconstruction
+            # must cover the venue's own cumulative — not the commanded
+            # quantity. Events without a cumulative keep the original
+            # commanded-quantity rule they were written under.
             required = cumulative if cumulative > 0.0 else abs(order.signed_qty)
             if reconstructed + tolerance < required:
                 raise AccountTransitionError("filled status precedes reconstructed executions")
@@ -1212,9 +1211,9 @@ def _append_jsonl_projection(
     if not appended:
         return
     path = account_journal_path(root)
-    # One stat answers all three questions this used to ask separately: whether
-    # the file exists, whether the cached tail still describes it, and whether
-    # the parent needs syncing for a fresh inode.
+    # One stat answers all three questions: whether the file exists, whether
+    # the cached tail still describes it, and whether the parent needs syncing
+    # for a fresh inode.
     actual_previous = _projection_previous_hash(path)
     if actual_previous != expected_previous_hash:
         _PROJECTION_TAIL.pop(str(path), None)
@@ -4100,8 +4099,8 @@ class AccountExecutionKernel:
         # of the identity when the venue named the order: ``active(symbol)``
         # legitimately changes between two executions of the same order (the
         # first adoption moves the protection to a reduction status), and
-        # keying on it split a single manual close across two synthetic
-        # commands, both left partially filled forever (ACEUSDT, 2026-08-07).
+        # keying on it splits a single manual close across two synthetic
+        # commands, each left partially filled forever.
         command_id = self.ids.make(
             f"{event_prefix}-order",
             *((external_order_key,) if venue_order_id else (protection_key, external_order_key)),
@@ -4133,8 +4132,8 @@ class AccountExecutionKernel:
             # A venue reduction may be larger than this book, because the venue
             # nets the account owner's exposure with exposure opened outside it.
             # Book the part that reduces what this book owns and account the
-            # remainder as foreign; refusing the whole row instead left the
-            # book permanently long against a flat venue (ACEUSDT, 2026-08-07).
+            # remainder as foreign; refusing the whole row instead leaves the
+            # book permanently long against a flat venue.
             booked_qty = fill_qty
             foreign_qty = 0.0
             if abs(fill_qty) > abs(position.signed_qty):

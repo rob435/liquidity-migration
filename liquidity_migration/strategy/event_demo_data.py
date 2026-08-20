@@ -788,7 +788,7 @@ def _fetch_recent_1h_klines(
         # Ranges are INCLUSIVE over bar opens; get_klines' end is EXCLUSIVE.
         # Without the +1h a tail-only range [X, X] fetches nothing, the newest
         # closed bar is unreachable by REST, and the 00:20 daily decision
-        # starves whenever the WS store cannot serve it (live 2026-08-04).
+        # starves whenever the WS store cannot serve it.
         return _normalize_klines(
             symbol,
             client.get_klines(symbol, "60", start_ms, end_ms + MS_PER_HOUR),

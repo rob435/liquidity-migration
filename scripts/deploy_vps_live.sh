@@ -1170,10 +1170,9 @@ verify_topology() {
     VERIFY_UNIT_ROWS=()
     VERIFY_MISMATCHES=()
 
-    # No unconditional account-owner row here. The Python owner used to be one;
-    # the engine that replaced it is checked further down, but only where it is
-    # installed, because a host that has not taken the engine yet must still be
-    # deployable — that is how it gets one.
+    # No unconditional account-owner row here. The engine is checked further
+    # down, but only where it is installed, because a host that has not taken
+    # the engine yet must still be deployable — that is how it gets one.
     if sleeve_on "$LONG_SLEEVE"; then
         verify_unit on liquidity-migration-bybit-long-demo.service "LONG demo producer is not active"
     else
@@ -1384,10 +1383,9 @@ build_engine() {
     # And the funded engine, which shares this binary.
     #
     # It is started in the activate phase, which runs BEFORE this build, so
-    # without this line a deploy left it running whatever binary it came up
-    # on: the demo engine got the new code and the funded one silently kept
-    # the old. Found on 2026-08-14 by reading the two heartbeats after a
-    # deploy and seeing them disagree about something only new code changed.
+    # without this line a deploy leaves it running whatever binary it came up
+    # on: the demo engine gets the new code and the funded one silently keeps
+    # the old.
     #
     # Same gate as everywhere else -- a host says it runs the funded engine by
     # having its environment file -- and never fatal, for the same reason the
@@ -1441,10 +1439,7 @@ activate_mode() {
     verify_topology
 }
 
-# The engine owns the funded account now. The Python owner this used to name
-# was deleted with the rest of the Python order path, so starting it here
-# failed the strict activate phase on any host with REAL_MONEY armed -- the
-# unit file is not in the manifest and never will be again.
+# The engine owns the funded account.
 #
 # Naming the engine is not arming it. The mainnet gateway refuses to build
 # unless REAL_MONEY is set in the host credential file by the account owner,
@@ -1475,8 +1470,8 @@ lm_run_with_mainnet_credentials() {
 }
 
 # The owner writes one file: the credential env (key, secret, REAL_MONEY,
-# optional dials). Everything the old nine-step runbook demanded by hand is
-# derived here at activation, and preflight still gates below.
+# optional dials). Everything else is derived here at activation, and
+# preflight still gates below.
 provision_mainnet_prerequisites() {
     if [ ! -f "$MAINNET_ROUTE_ENV" ]; then
         # Fully static committed template, no secrets. Installed only when
@@ -1545,10 +1540,10 @@ provision_mainnet_prerequisites() {
 #
 # A renewal freezes a FRESH universe and rules as one pair from the live
 # venue (owner directive 2026-08-13: membership follows the venue). A
-# delisted symbol leaves the universe instead of blocking every renewal —
-# VANRYUSDT pinned the old frozen-forever universe against a live venue that
-# no longer listed it, which made every renewal fail until the receipt's
-# 168-hour cliff. Symbols the account still has exposure on keep rules
+# delisted symbol leaves the universe instead of blocking every renewal:
+# a universe pinned against a live venue that no longer lists one of its
+# names fails every renewal until the receipt's 168-hour cliff.
+# Symbols the account still has exposure on keep rules
 # beyond the universe via the freeze script's exposure scan. Nothing rebinds
 # until both freezes and the coverage proof pass, so any failure keeps the
 # installed pair consistent.
@@ -1600,8 +1595,7 @@ PY
     # This renewal is opportunistic: the installed receipt validated above and
     # is merely past half-life, so a failed re-freeze keeps the valid
     # installed PAIR and the deploy continues instead of stopping with the
-    # fleet half-down (2026-08-13: delisted VANRYUSDT failed the freeze here
-    # and stranded the mainnet units stopped and disabled). The 168-hour
+    # fleet half-down, mainnet units stopped and disabled. The 168-hour
     # ceiling is untouched -- the funded owner still refuses to start on an
     # expired receipt, and the renewal is retried on every deploy until it
     # succeeds. An orphaned fresh-universe file from a failed rules freeze is
@@ -1771,9 +1765,7 @@ ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-telegram-controls.service
     # Retired fleets stay in the stop list so the rollout that carries each
     # retirement quiesces a host still running them; the manifest install
-    # then removes the unit files for good. Paper retired 2026-08-03; the
-    # continuous units left the deploy set 2026-08-03 (sleeve retired
-    # 2026-07-29).
+    # then removes the unit files for good.
     liquidity-migration-bybit-long-paper.service
     liquidity-migration-bybit-continuous-paper.service
     liquidity-migration-bybit-carry-paper.service

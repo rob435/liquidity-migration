@@ -27,9 +27,6 @@ runbook, and what is still unproven — is *Real money* below. Deployed state:
 A `UNIT` that does not already start with `liquidity-migration-` gets the prefix, so `logs
 bybit-carry-demo.service` reads `liquidity-migration-bybit-carry-demo.service`.
 
-Tests are local and are not an operator route: `scripts/dev.sh test`, `scripts/dev.sh check`, or
-`.venv/bin/python -m pytest -q`.
-
 `SSH_TARGET` (`root@116.202.15.128`), `REPO_DIR` (`/opt/liquidity-migration`) and `PYTHON` override the
 defaults; `LOCAL=1` runs `real-money` and `venue-accounting` against this checkout. `EXPECTED_COMMIT` is
 optional: left unset it defaults to `$REMOTE/$BRANCH` (`origin/main`) and falls back to local `HEAD`,
@@ -115,11 +112,10 @@ after the stopped flat checks pass (why it exists: [`architecture.md`](architect
 credentials*).
 
 The GitHub Actions workflow dispatches four of the modes — `rollout`, `install`, `activate`, `verify` —
-and passes `--profile` on rollout. A push runs CI only. The two absent modes are `staged` and
-`stop-mainnet`; only the second is a mainnet mode, and it is absent deliberately — arming or stopping a
-funded account is the owner's own act at a shell, not a button in CI. `staged` is simply not exposed;
-`install` then `activate` covers it from CI. All dispatches share one
-repository-wide VPS concurrency group whatever Git ref they select.
+and passes `--profile` on rollout. A push runs CI only. `staged` and `stop-mainnet` are not exposed:
+`install` then `activate` covers `staged` from CI, and arming or stopping a funded account is the
+owner's own act at a shell, not a button in CI. All dispatches share one repository-wide VPS
+concurrency group whatever Git ref they select.
 
 Deploy Git commands inherit no caller `GIT_*` variables, user or system Git configuration, replacement
 objects, external index, or hooks — commit selection is insulated from ordinary Git-environment drift
@@ -135,12 +131,12 @@ observed wallet equity.
 same root-owned `0600` file the live API key goes into, edited on the VPS by the owner's own hand.
 There is no repo toggle, so a git commit can never arm. When the switch is armed, a plain `activate` or
 `rollout` creates the mainnet state roots, requires `real-money preflight` to pass, then starts the
-mainnet engine (`liquidity-migration-engine-mainnet.service`), both producers, and the liveness timer. Which sleeves trade, and at what share, is the
-installed risk profile's decision.
+mainnet engine (`liquidity-migration-engine-mainnet.service`), both producers, and the liveness timer.
+Which sleeves trade, and at what share, is the installed risk profile's decision.
 
 **stop-mainnet** (`scripts/ops.sh deploy stop-mainnet`) disables and stops the mainnet timer, watchdog,
-both producers and the mainnet engine unit, and fails if any survives. It stops publication only — exposure is
-unchanged, so flatten. While `REAL_MONEY` stays armed, `verify` fails and the next `activate` or
+both producers and the mainnet engine unit, and fails if any survives. It stops publication only —
+exposure is unchanged, so flatten. While `REAL_MONEY` stays armed, `verify` fails and the next `activate` or
 `rollout` restarts the fleet; set `REAL_MONEY=false` to make a stop stick, then `scripts/ops.sh flatten
 --execute --environment mainnet --reason ...` to close the book.
 
@@ -171,12 +167,12 @@ size, raise the multiple:
 | `RM_LONG_LEVERAGE` | 0.5 | LONG book ceiling, ×equity, worst case included (10 slots; entries scale up to 1.25× calm / 1.5× weekend). Each entry ≈ dial/18.75 of equity: 0.5 → ~2.7% per entry, 1.88 → ~10%. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 
-The two leverage dials may total at most 10.0. Past a total of 5 — the entry-leverage floor — the venue
-margin leverage the producers request rises with the dials — gross above `entry leverage × wallet` is
-physically unreachable — and the honest protection picture changes: nothing account-level bounds the
-day, a fast enough drawdown meets the venue's liquidation engine (at 10× gross, a ~10% adverse move is
-the wallet), and some symbols' own venue leverage limits
-may bind. Account caps, the sleeve partition, margin ceilings, entry leverage and the equity floor are
+The two leverage dials may total at most 10.0. Past a total of 5 — the entry-leverage floor — the
+venue margin leverage the producers request rises with the dials — gross above `entry leverage ×
+wallet` is physically unreachable — and the honest protection picture changes: nothing account-level
+bounds the day, a fast enough drawdown meets the venue's liquidation engine (at 10× gross, a ~10%
+adverse move is the wallet), and some symbols' own venue leverage limits may bind. Account caps, the
+sleeve partition, margin ceilings, entry leverage and the equity floor are
 all derived from the dials and proved at render; a retired `RM_*` variable left in the env file is
 refused by name. `scripts/ops.sh real-money render-profile` turns the dials into the profile the kernel
 enforces; a pair that cannot produce a loadable profile is refused there, naming the dial to move,
@@ -421,11 +417,10 @@ One unit failing does not take the fleet with it. No unit depends on another —
 `network-online.target` — so a dead engine leaves the producers up, still writing their target books,
 and the engine acts on the standing books when it comes back.
 
-**A request is sitting in the inbox** — historical. The intent inbox went with the Python order path
-(2026-08-14). Producers write target books now
+**A target book stopped refreshing.** Producers write target books
 ([`rules/engine_targets.py`](../liquidity_migration/rules/engine_targets.py)) and the engine reads
-them directly; there is no `failed/` queue to drain. A book that stops refreshing is a producer
-fault, and the watchdog's cycle-age check pages it.
+them directly, so a book that stops refreshing is a producer fault, not an execution one, and the
+watchdog's cycle-age check pages it.
 
 **The fleet is wrong after a bad deploy.** Re-deploy the good commit — `scripts/ops.sh deploy staged
 --profile operational`, with `EXPECTED_COMMIT` set to that commit. Quiescing is not your job: `staged`
@@ -436,6 +431,7 @@ Host replacement, SSH or deploy-key recovery, and expected-commit drift: the `vp
 
 ## Rules
 
-- Local gates, none of which touch the VPS: `scripts/dev.sh doctor`, `scripts/dev.sh check`,
-  `.venv/bin/python -m pytest -q`. CI on `main` runs the same gates; the deploy does not.
+- Tests are local and are not an operator route: `scripts/dev.sh doctor`, `scripts/dev.sh test`,
+  `scripts/dev.sh check`, `.venv/bin/python -m pytest -q`. None of them touch the VPS. CI on `main`
+  runs the same gates; the deploy does not.
 - Mainnet arming: *Real money* above. Agent working rules: [`AGENTS.md`](../AGENTS.md).

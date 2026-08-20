@@ -7,10 +7,10 @@
 //! at the venue and shows nowhere a strategy can look, and a strategy that
 //! decides from "target minus position" sends the same order twice.
 //!
-//! The target-book follower used to keep this memory for itself. It is an
-//! execution problem, not a strategy decision, so the engine keeps it now —
-//! one book, keyed per (strategy, symbol), fed from the engine's own
-//! lifecycle knowledge and read back through `StrategyCtx::in_flight`:
+//! This is an execution problem, not a strategy decision, so the engine keeps
+//! the memory rather than any plug — one book, keyed per (strategy, symbol),
+//! fed from the engine's own lifecycle knowledge and read back through
+//! `StrategyCtx::in_flight`:
 //!
 //! - **Booked at the send**, with the quantized size that actually went out —
 //!   truer than the size the strategy asked for, so no ack ever needs to
@@ -35,8 +35,7 @@
 //!
 //! Covers are deliberately not rebuilt from the log at boot: boot compares
 //! the log against the venue directly, which is a better answer than a memory
-//! of what was in flight, and the follower's own records never survived a
-//! restart either.
+//! of what was in flight.
 
 use engine_types::{AccountView, Side, StrategyId, SymbolId};
 

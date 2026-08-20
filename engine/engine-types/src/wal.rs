@@ -124,10 +124,11 @@ pub enum WalRecord {
         source: String,
         text: String,
     },
-    /// Control state that must outlive the process — above all the loss
-    /// guard's daily anchor and trip latch. Written (and made durable) the
-    /// moment it changes; the newest one is restored at boot, so a restart
-    /// can never hand the day a fresh loss budget or clear a trip.
+    /// Control state that must outlive the process. Written (and made
+    /// durable) the moment it changes; the newest one is restored at boot.
+    /// Every one of these in an existing log is the daily anchor and trip
+    /// latch of the loss halt that has since been removed. The variant stays
+    /// so those logs still parse — an unreadable record refuses the boot.
     ControlAnchor {
         source: String,
         state: String,
@@ -136,10 +137,9 @@ pub enum WalRecord {
     /// whether the engine may open new exposure afterwards.
     ///
     /// `may_open` false is a latch, and it is written here rather than held in
-    /// memory for the same reason the loss guard's trip is: a restart that
-    /// cleared it would turn "stop and tell somebody" into "stop until the
-    /// next crash". Boot reads the newest one back before it reads anything
-    /// from the venue.
+    /// memory: a restart that cleared it would turn "stop and tell somebody"
+    /// into "stop until the next crash". Boot reads the newest one back before
+    /// it reads anything from the venue.
     Reconciled {
         wall_ts_ms: i64,
         findings: Vec<String>,

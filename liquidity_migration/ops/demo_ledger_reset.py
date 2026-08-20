@@ -99,11 +99,10 @@ STOP_UNITS = (
     "liquidity-migration-bybit-carry-demo.service",
     "liquidity-migration-demo-liveness.service",
 )
-# Empty since the Python account owner was deleted. These held the one
-# venue-mutating process, which had to load exactly the credential file
-# selected by --env-file. The engine that replaced it does not read the
-# account route env file at all — it has its own env, its own state
-# directory, and its own log — so no unit is bound to that file now.
+# Empty. A unit belongs here only if it must load exactly the credential file
+# selected by --env-file, and the engine — the one venue-mutating process —
+# does not read the account route env file at all: it has its own env, its own
+# state directory, and its own log.
 ACCOUNT_BOUND_UNITS: tuple[str, ...] = ()
 NON_RESTARTABLE_ONESHOTS = (
     "liquidity-migration-demo-liveness.service",

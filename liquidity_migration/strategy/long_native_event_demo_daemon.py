@@ -80,7 +80,7 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
             # startup-boundary failures must instead terminate the process.
             _validate_long_daemon_startup(resolved_demo_config, self._strategy_config)
         # `get(...) is None` rather than setdefault: an explicit None keeps
-        # meaning "use the LONG default", as it did before the host split.
+        # meaning "use the LONG default".
         if kwargs.get("kline_stream_manager_factory") is None:
             kwargs["kline_stream_manager_factory"] = _default_long_kline_stream_manager_factory
         default_journal_change_wake_dir(kwargs, resolved_demo_config)

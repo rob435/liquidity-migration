@@ -101,11 +101,11 @@ pub struct TargetBookFollower {
     we_reduced: Vec<String>,
 }
 
-// The sent-ahead cover records that used to live here — the memory of what
-// was sent that the account reading has not shown yet — moved down into the
-// engine (`engine-core/src/covers.rs`). The plug reads the engine's own
-// answer back as `ctx.in_flight` and adds it to the reading; it keeps no
-// in-flight bookkeeping of its own any more.
+// The sent-ahead cover records — the memory of what was sent that the account
+// reading has not shown yet — live in the engine
+// (`engine-core/src/covers.rs`). The plug reads that answer back as
+// `ctx.in_flight` and adds it to the reading; it keeps no in-flight
+// bookkeeping of its own.
 
 /// Whether the book in hand asks for any of this name. Exactly zero is an
 /// instruction to hold none, so it does not count as wanting it.
@@ -433,12 +433,11 @@ impl Strategy for TargetBookFollower {
     }
 
     // Only books and quotes are acted on. Order news falls through to the
-    // trait's do-nothing default: that bookkeeping is the engine's now
+    // trait's do-nothing default: that bookkeeping is the engine's
     // (`covers.rs`), settled before this plug is even woken. A refusal is
-    // recorded but never acted on, which keeps the old property by
-    // construction: nothing is ever emitted from inside an order or refusal
-    // wake, which would re-emit into the queue being drained — the next
-    // quote re-plans instead.
+    // recorded but never acted on, so nothing is ever emitted from inside an
+    // order or refusal wake, which would re-emit into the queue being
+    // drained — the next quote re-plans instead.
 
     fn on_intent_refused(&mut self, symbol: SymbolId, reduce_only: bool, ctx: &mut dyn StrategyCtx) {
         // Exits are never held back. Only an entry latches, and only until

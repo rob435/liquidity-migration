@@ -1,7 +1,6 @@
 # The execution engine (Rust)
 
-The program's purpose shifted on 2026-08-13: this repository now has two parts
-with a hard wall between them.
+This repository has two parts, with a hard wall between them.
 
 - **The research system** (Python, `liquidity_migration/`): finds and grades
   strategies. It owns data, backtests, evidence notes, and the research queue.
@@ -95,10 +94,10 @@ release build, Apple silicon; 20,000 quotes in, 1,000 orders out):
 
 The durable step is nearly the whole chain, and it is the platform's price:
 on macOS, Rust's `sync_data` is a full drive-cache flush (~3.2 ms/barrier
-measured); the VPS's Linux `fdatasync` measured ~2.2 ms in wave 3. The
-pretend venue is plain HTTP on localhost, so the venue-side cost is short by
-about one TLS record's work. Numbers are re-measured by running
-`engine bench` — they live in the log the bench writes, not only here.
+measured); the VPS's Linux `fdatasync` measures ~2.2 ms. The pretend venue is
+plain HTTP on localhost, so the venue-side cost is short by about one TLS
+record's work. Numbers are re-measured by running `engine bench` — they live
+in the log the bench writes, not only here.
 
 The <100 ms decision-to-execution goal is met on our side of the wire with
 a ~25× margin at p99; the venue round trip on top is the same geography
@@ -117,9 +116,9 @@ running fleet):
 | **in → durable → out the socket** | **2.28 ms** | **5.18 ms** | **9.47 ms** |
 
 The box's CPU is slower than the laptop's, so thinking costs more; its disk
-is faster to make durable, so the chain is shorter overall. The comparison
-that matters is against the Python fleet on that same box: 25.7 ms of
-software time per order, median. Same hardware, same venue, ~10× less time.
+is faster to make durable, so the chain is shorter overall. For scale: the
+Python fleet measured 25.7 ms of software time per order, median, on that same
+box — same hardware, same venue, ~10× more time.
 
 ### Against the real venue
 
@@ -132,20 +131,20 @@ placed since 2026-08-14, each order's decide, wire, and venue-ack stamps:
 | socket → the venue acknowledges | 172.4 ms | 177.5 ms | 486 ms |
 | decision → order live at the venue | 179 ms | 512 ms | 1.01 s |
 
-Two findings, one fixed and one named. Fixed: 27 of the 67 entries paid an
-extra ~169 ms (844 ms worst) *before* the wire, because every entry from
-flat re-confirmed leverage with the venue inline — that is what the p90 and
-p99 above are made of. Under `leverage_authority = "sole"` (the demo
-config), the confirmation moved off the order path: what the engine set
-stays trusted across flat spells, the book's leverage is armed at book
-arrival, and every held position's leverage is verified against the venue's
-own position rows — a mismatch alarms, is written to the log, and turns the
-inline confirmation back on for that symbol. Under `"shared"` (the default,
-and the mainnet setting) nothing changed: a hand may retune a flat symbol,
-so the engine keeps re-confirming. Named and left alone: two long-idle
-orders acked at 277 ms and 486 ms with no proven local cause (the account
-poll keeps the connection pool warm, so cold TLS does not explain them);
-that residue is the venue's, not ours, until more samples say otherwise.
+The slow tail above is 27 of those 67 entries paying an extra ~169 ms (844 ms
+worst) *before* the wire, because every entry from flat re-confirmed leverage
+with the venue inline. Under `leverage_authority = "sole"` (the demo config)
+the confirmation is off the order path: what the engine set stays trusted
+across flat spells, the book's leverage is armed at book arrival, and every
+held position's leverage is verified against the venue's own position rows — a
+mismatch alarms, is written to the log, and turns the inline confirmation back
+on for that symbol. Under `"shared"` (the default, and the mainnet setting)
+the engine keeps re-confirming, because a hand may retune a flat symbol.
+
+What is left is the venue's: two long-idle orders acked at 277 ms and 486 ms
+with no proven local cause — the account poll keeps the connection pool warm,
+so cold TLS does not explain them. That residue is not ours, until more
+samples say otherwise.
 
 ## Layout
 
@@ -159,17 +158,14 @@ parallel and integrate by type-check.
 | `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
 | `engine-marketdata` | Bybit public WebSocket: subscribe, sequence-check, parse once into flat per-symbol state, stamp arrival time |
 | `engine-venue` | the venue gateway, demo or funded by realm: HMAC signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and wallet reads, the realm's private WebSocket for order/fill updates |
-| `engine-risk` | the capital controls, ported: equity-anchored envelope, per-strategy capital partition, stop-attach discipline. Fail-closed |
+| `engine-risk` | the capital controls: equity-anchored envelope, per-strategy capital partition, stop-attach discipline. Fail-closed |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
 | `engine-strategies` | the plugs: a registry from name + TOML to a boxed `Strategy` |
 
 ## Safety posture
 
-- **The funded account is reachable, and only with the owner's switch.** This
-  changed on 2026-08-14. The venue crate used to contain no mainnet hostname at
-  all, which made a whole class of mistake impossible and also made the engine
-  unable to do the job it was built for. What replaced it is the Python fleet's
-  own rule, ported so both halves behave identically while both are running:
+- **The funded account is reachable, and only with the owner's switch.** The
+  rule is the fleet's own:
 
   - `REAL_MONEY=true`, in the host credential file, set by the account owner.
     Without it a mainnet gateway fails at the credential read, before a socket
@@ -182,11 +178,10 @@ parallel and integrate by type-check.
   - A typo stops the engine. `REAL_MONEY=ture` is not "off"; it is a mistake in
     the one line that decides whether this is real.
 
-  The structural half is still checked against the source, and now checks
-  something sharper than absence: the four venue hosts may be written in
-  exactly one file, `realm.rs`. That closes the door that opens the moment a
-  mainnet address exists anywhere — the test-only constructor takes a hostname,
-  and no test, benchmark or module can spell one.
+  The structural half is checked against the source: the four venue hosts may
+  be written in exactly one file, `realm.rs`. That closes the door a mainnet
+  address opens the moment it exists anywhere — the test-only constructor takes
+  a hostname, and no test, benchmark or module can spell one.
 
   `engine-marketdata` holds `wss://stream.bybit.com/v5/public/linear`
   separately, because Bybit serves demo public data from the mainnet stream. It
@@ -203,20 +198,19 @@ parallel and integrate by type-check.
   real account holds nothing to reduce: a long shadow run's denial lines on
   flips are that, not a fault.
 - **The log recovers the fills its stream never delivered, and the may-open
-  latch has a keyed door (2026-08-19).** The private stream forgets: a stop
-  firing during a deploy window or an execution inside a reconnect gap used
-  to leave the log's per-symbol fill sum permanently behind the venue, and
-  the boot comparison would latch `may_open` false on debt no restart could
-  repay — the demo engine spent an evening refusing entries on exactly that.
-  Two repairs, neither touching the check itself:
+  latch has a keyed door.** The private stream forgets: a stop firing during a
+  deploy window or an execution inside a reconnect gap would otherwise leave
+  the log's per-symbol fill sum permanently behind the venue, and the boot
+  comparison would latch `may_open` false on debt no restart could repay. Two
+  mechanisms answer that, neither touching the check itself:
 
   - **Recovery.** At boot, and again after every private-stream reconnect,
     the engine asks the venue's own execution history for the window it was
     deaf in and writes what it missed as `recovered_fill` records — deduped
     by the venue's execution id and against recently delivered fills, durable
     before the log is compared to the venue, attributed through the order
-    that produced them when the log knows it. History unavailable means the
-    old behaviour, exactly.
+    that produced them when the log knows it. When history is unavailable the
+    comparison runs on the log alone.
   - **The clear.** `engine reconcile-clear --config engine.toml [--execute]`
     is "somebody looks at the log" made executable, for debt older than the
     venue's history (about a week). It holds the log's own lock (so the
@@ -226,37 +220,25 @@ parallel and integrate by type-check.
     positions, the absorbed findings kept as the receipt, the latch reset.
     The next boot still runs the same comparison and latches again on
     anything that stands — the clear resets the memory, never the check.
-- **The four capital controls are ported, not bypassed.** They were ported
-  from `account_loss_guard.py`, `equity_anchored_envelope.py`,
-  `venue_protection.py` and the partition in `account_kernel.py`, with
-  table-driven parity tests written against those files' decision semantics.
-  Those Python originals were deleted on 2026-08-14 once the port was proved,
-  so the parity tests are now the reference rather than a comparison — read
-  them and `engine-risk/PORT_NOTES.md` together. Unknown state refuses the
-  order.
-- **One writer per account — measured, then enforced.** On 2026-08-14 the
-  engine held a 0.001 BTCUSDT position on the demo account for about a
-  hundred seconds. The Python owner refused new intents for the whole of it:
-  its native-protection reconciliation requires the venue's size and its own
-  reconstruction to agree per symbol, and a position it did not place never
-  can. It recovered by itself once the engine closed out. The separate-books
-  policy covers a foreign position for trading; it does not cover this. So
-  the two **cannot share an account**, even briefly.
-
-  The engine now takes the fleet's own lease rather than relying on that
-  being remembered. It is one kernel `flock` per venue account, at
-  `/run/lock/liquidity-migration/bybit-{realm}-user-{userID}.lock`, and the
-  engine joins it exactly — same directory, same name from the venue's own
-  authenticated account number, same open flags, same re-proof after the lock
-  that the file locked is still the file at that path. A lease that differed
-  in any one of those would protect nothing: two processes would hold two
-  different locks and each would believe it was alone. A live engine takes
-  it before it boots and refuses to start if somebody has it, naming the
-  holder. A shadow engine only looks, because a shadow run holding the lease
-  would lock out the writer that does. There is no heartbeat and no expiry —
-  the kernel drops the lock when the holder dies, which is the only expiry
-  that cannot be wrong. The log file is claimed the same way, so two engines
-  cannot share one log either.
+- **The capital controls are the kernel's, and unknown state refuses the
+  order.** The equity-anchored envelope, the per-strategy capital partition
+  and the stop-attach discipline live in `engine-risk`, each with
+  table-driven tests over its decision semantics. Read those tests and
+  `engine-risk/PORT_NOTES.md` together: the notes carry every rule, its
+  defaults, and every place this kernel is deliberately stricter.
+- **One writer per account.** The engine takes the fleet's own lease: one
+  kernel `flock` per venue account, at
+  `/run/lock/liquidity-migration/bybit-{realm}-user-{userID}.lock`, joined
+  exactly — same directory, same name from the venue's own authenticated
+  account number, same open flags, same re-proof after the lock that the file
+  locked is still the file at that path. A lease that differed in any one of
+  those would protect nothing: two processes would hold two different locks
+  and each would believe it was alone. A live engine takes it before it boots
+  and refuses to start if somebody has it, naming the holder. A shadow engine
+  only looks, because a shadow run holding the lease would lock out the writer
+  that does. There is no heartbeat and no expiry — the kernel drops the lock
+  when the holder dies, which is the only expiry that cannot be wrong. The log
+  file is claimed the same way, so two engines cannot share one log either.
 
 ## Worked entries
 
@@ -268,9 +250,9 @@ displayed size leans and rests inside the spread or behind the touch
 accordingly, moves the order as the market moves, **never chases a touch that
 fell away** (an order left alone at the front of the book is where you want to
 be), escalates as the window runs out, and finally crosses at a bounded price
-rather than sending an unbounded market order. Every number is the recipe the
-Python fleet measured; the decision is a pure function and the engine's
-group-flush tick drives it.
+rather than sending an unbounded market order. Every number in the recipe is
+measured; the decision is a pure function and the engine's group-flush tick
+drives it.
 
 Two gates decide whether resting is worth it at all: the spread must be at
 least two ticks **and** at least one basis point of the price. The second is
@@ -287,26 +269,23 @@ connects, so the first entry after a restart crosses.
 
 ## What the fills cost
 
-Latency is half the question. The engine measured our own side of the wire to
-the nanosecond and could say nothing about the price it got — and a fast order
-path that quietly pays two basis points more than it needs to is a worse thing
-to own than a slow one that does not. Since 2026-08-14 there is a second
-ledger, for the price.
+Latency is half the question. A fast order path that quietly pays two basis
+points more than it needs to is a worse thing to own than a slow one that does
+not, so there is a second ledger, for the price.
 
 The names and the signs are the repository's own, from
 [`architecture.md`](architecture.md) §Trade diagnostics, which the Python
-research half already computes against recorded books. `s` is +1 for a buy and
+research half computes against recorded books. `s` is +1 for a buy and
 −1 for a sell, `M0` is the midpoint when the order left, `P` is the fill price,
 `Mh` is the first healthy midpoint at or after the horizon. **Shortfall, spread
 and fee are positive when they cost us**; `signed_markout_bps` is the one
 number with the opposite convention, positive when the price moved our way.
 
-Two facts had to start being kept:
+Two facts are kept that the rest is built on:
 
-- **`is_maker`.** Bybit sends it on every execution and the parser dropped it.
-  It is the difference between earning the spread and paying it, and
-  [`STATE.md`](../STATE.md) has been waiting on those receipts for the funded
-  maker-share grade.
+- **`is_maker`.** Bybit sends it on every execution. It is the difference
+  between earning the spread and paying it, and [`STATE.md`](../STATE.md)
+  waits on those receipts for the funded maker-share grade.
 - **`M0`, on the `OrderSent` record.** Written at the send, because that is
   the only moment it exists: a rested entry can wait a minute, and by the time
   it fills the price it was decided against is gone. Zero means the book could
@@ -350,9 +329,9 @@ is only taken against a book that **arrived at or after the horizon it
 measures** — a halted or delisted symbol keeps its last quote for ever, and
 four horizons marking against the identical mid read exactly like a
 measurement while being a measurement of nothing; a book that spoke once just
-after the fill and went quiet is the same trap one step later. And a mark that turns up long after its horizon is not
-that horizon: a stall or a replayed backlog would otherwise be averaged into
-the one-second column at full weight.
+after the fill and went quiet is the same trap one step later. And a mark that
+turns up long after its horizon is not that horizon: a stall or a replayed
+backlog would otherwise be averaged into the one-second column at full weight.
 
 What it cannot repair, it confesses. A private-stream reconnection is a window
 in which fills happened and were never delivered; the engine repairs its idea
@@ -408,17 +387,12 @@ The latch is written into the log and read on the next boot, because a restart
 that cleared it would turn "stop and tell somebody" into "stop until the next
 crash", and something restarts this process automatically.
 
-Proved against a real account on 2026-08-14: an engine restarted on its own log
-while holding a live position found nothing wrong; the same position under a
-fresh log reported `the venue holds 299 and this log accounts for 0` and
-refused to open anything.
-
 ### The log rotates
 
-The log no longer grows without bound. Once the current file passes
-`wal_rotate_mb` (default 256; zero turns it off; a config written before the
-key existed still boots), the engine — on its group-flush tick, never between
-an order's fsync and its send — starts a fresh segment in the same directory:
+The log does not grow without bound. Once the current file passes
+`wal_rotate_mb` (default 256; zero turns it off; a config that omits the key
+still boots), the engine — on its group-flush tick, never between an order's
+fsync and its send — starts a fresh segment in the same directory:
 `engine.wal` is segment 1, then `engine.wal.000002`, `engine.wal.000003`, and
 so on. Old segments stay in place as archives; nothing in the engine ever
 deletes one — retention is the owner's decision.
@@ -437,7 +411,7 @@ and nothing lost. The one flock on the configured path still covers every
 segment, so no second engine can slip in during a rotation.
 
 What a rotation drops: almost nothing, because a restart already dropped it.
-Markout horizons still owed at a restart were never rebuilt from the log, and
+Markout horizons still owed at a restart are not rebuilt from the log, and
 the run's own cost score starts fresh each boot — rotation changes neither.
 The one genuine narrowing: after a rotation and a restart, a fill arriving
 for an order that ENDED before the rotation is charged to no strategy (the
@@ -457,10 +431,10 @@ Three layers, from the socket up:
   quote as current. What the reconnect machinery cannot catch is a socket
   that stays open and says nothing, or a redial loop that never lands — both
   leave the engine's last picture standing.
-- **The account reading is bounded** (this existed first). `[risk]
-  max_account_view_age_s` — 120 in the deployed configs — is the age past
-  which the kernel refuses to judge an entry against the reading.
-- **The quote is bounded too** (`max_quote_age_ms`, default 30000): an entry
+- **The account reading is bounded.** `[risk] max_account_view_age_s` — 120 in
+  the deployed configs — is the age past which the kernel refuses to judge an
+  entry against the reading.
+- **The quote is bounded** (`max_quote_age_ms`, default 30000): an entry
   decided against a quote older than the bound is refused before the risk
   kernel sees it, the refusal is written to the log as a verdict, and the
   strategy hears it the way it hears every refusal. The age is measured from
@@ -488,9 +462,8 @@ asked to move a quote would never learn it had been given something else.
 
 The engine picks its venue by name: `[engine] venue = "bybit_demo"` in
 `engine.toml`, resolved once in `engine-venue/src/registry.rs`. Leaving the
-key out means the Bybit demo account, so every config written before the key
-existed still says what it said. An unknown name is refused at boot, by name,
-listing what the binary knows — never defaulted to a venue nobody chose.
+key out means the Bybit demo account. An unknown name is refused at boot, by
+name, listing what the binary knows — never defaulted to a venue nobody chose.
 
 To add one (Hyperliquid, MEXC), four steps in `engine-venue`:
 
@@ -521,57 +494,44 @@ is why config may choose the venue at all. Whether an adapter may touch real
 money is that adapter's own decision, made in its own crate: the trait cannot
 express an endpoint.
 
-## What the engine cannot do yet
-
-Measured against the Python fleet it is meant to replace, and kept honest
-because the deletion order depends on it:
+## What the engine does
 
 | Capability | State |
 | --- | --- |
 | Decide, gate, make durable, sign, send | Done, and measured |
-| The four capital controls | Ported whole, including every load-time proof — the last one, that the account gross cap sits inside what the reference could fund, landed 2026-08-14. `engine-risk/PORT_NOTES.md` has the line-by-line |
+| The capital controls | In the kernel, with every load-time proof, down to the proof that the account gross cap sits inside what the reference could fund. `engine-risk/PORT_NOTES.md` has the line-by-line |
 | The fleet's own risk limits | Done. `[risk] operational_profile_path` loads `configs/operational.mainnet.json` itself, so a cap the owner tightens tightens for both halves. Measured: the Python and Rust loaders read that file identically, field for field |
 | Quantizing to tick and step, venue minimums | Done |
-| Following a research target book | Built, tested, and run against the demo account. The engine remembers what each strategy sent until the account reading shows it, so the window between a fill and the next reading cannot become a second entry — see the in-flight row below |
-| One account, more than one sleeve | Done. Each sleeve names its own book path and that book reaches that sleeve only. Before this a book went to every strategy, and two followers on one account would have fought over the same positions |
+| Following a research target book | Done, and run against the demo account. The engine remembers what each strategy sent until the account reading shows it, so the window between a fill and the next reading cannot become a second entry — see the in-flight row below |
+| One account, more than one sleeve | Done. Each sleeve names its own book path and that book reaches that sleeve only |
 | Stating leverage at the venue | Done. The leverage a decision was sized at travels with it, and an order whose leverage cannot be set is not sent. Entries only |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
 | Venue reconciliation and restart recovery | Done. Boot reads the venue's working orders and compares them, and the account, against the log |
 | Stop verify, repair, and a durable breach latch | Done. A position missing its stop gets back the one the log says it was opened behind; exposure the log cannot account for latches the engine out of opening |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | Done, by feeding the fleet's own watchdog rather than growing a second one. The engine writes a heartbeat file; `check_fleet_liveness.py` reads it and pages on stale, unreadable, or latched. Off unless a path is configured |
-| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file. Deployed and running in shadow since 2026-08-14; **it has never sent an order** — see below |
-| Saying what the fills cost | Done, 2026-08-14. `is_maker` kept from the venue, `M0` written on every send, arrival shortfall / effective spread / fee / all-in derived, and the signed markout at 1s/15s/1m/5m written when its horizon comes due. `engine fills --wal PATH` is the read; five of the numbers are in the heartbeat |
-| Saying what its own ids mean | Done, 2026-08-14. Strategy and symbol ids are positions, so the log records both tables — at boot and again whenever a book names a new symbol. Before this, `engine replay` could say an order was strategy 1's for symbol 4 and no more |
-| A strategy reading its own position | Done, 2026-08-14. `my_position` is that strategy's own fills, moving the instant one arrives. The account reading beside it lags seconds and, on a two-sleeve account, is the sum of both |
-| A strategy reading what it has in flight | Done, 2026-08-18. `in_flight` is the engine's own note of what a strategy sent that the account reading has not absorbed yet — booked at the send, at the quantized size that actually went, and released as the reading catches up or a reject, cancel, or refused exit ends it. The follower used to keep these records privately; the mechanism moved into the engine (`engine-core/src/covers.rs`) so every plug gets the one truthful reading |
+| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file. Deployed and running in shadow; **it has never sent an order** — see below |
+| Saying what the fills cost | Done. `is_maker` kept from the venue, `M0` written on every send, arrival shortfall / effective spread / fee / all-in derived, and the signed markout at 1s/15s/1m/5m written when its horizon comes due. `engine fills --wal PATH` is the read; five of the numbers are in the heartbeat |
+| Saying what its own ids mean | Done. Strategy and symbol ids are positions, so the log records both tables — at boot and again whenever a book names a new symbol |
+| A strategy reading its own position | Done. `my_position` is that strategy's own fills, moving the instant one arrives. The account reading beside it lags seconds and, on a two-sleeve account, is the sum of both |
+| A strategy reading what it has in flight | Done. `in_flight` (`engine-core/src/covers.rs`) is the engine's own note of what a strategy sent that the account reading has not absorbed yet — booked at the send, at the quantized size that actually went, and released as the reading catches up or a reject, cancel, or refused exit ends it. Every plug gets the one truthful reading |
 | Following a symbol a book names late | Done. A name the engine has never followed is taken on when a book asks for it: interned, subscribed, added to the gateway, taught to the private stream, and given an instrument rule. The four tables that map names to ids are checked against each other and a symbol they disagree about is dropped rather than traded |
 
-### What that leaves
+### What is left
 
-Not a capability, as of 2026-08-14. Every row above is Done, and on the same
-day the Python order path was deleted, so there is no second implementation to
-compare against any more.
+**Evidence.** Nothing above has ever run against real money. The mainnet path
+exists, is fenced, and is tested; it has never carried an order. A capability
+that has not been exercised is a claim, and the only thing that turns it into a
+fact is running it — in shadow first, against the account, for long enough to
+watch it.
 
-What is left is **evidence**. Nothing above has ever run against real money.
-The mainnet path exists, is fenced, and is tested; it has never carried an
-order. A capability that has not been exercised is a claim, and the only thing
-that turns it into a fact is running it — in shadow first, against the account,
-for long enough to watch it.
-
-**The engine is the account owner, in the repository and on the host.**
-Deployed 2026-08-14 and watched running: it reads the venue, writes
-`account_equity_usdt` into its heartbeat, both producers size from that
-equity, both write an absolute target book, and the engine reads each book,
-routes it to its own sleeve, and takes on symbols the books name that no
-config listed. It is **live on the demo account** and holds that account's
-single-writer lease. The funded engine runs in **shadow** and has never sent
-an order.
-
-The paragraphs that used to stand here said the deploy was blocked because
-`long_native_event_demo` had no target-book writer and carry's was switched
-off. Both closed on 2026-08-14; see [`CHANGELOG.md`](../CHANGELOG.md) for that
-day.
+**The engine is the account owner, in the repository and on the host.** It
+reads the venue, writes `account_equity_usdt` into its heartbeat, both
+producers size from that equity, both write an absolute target book, and the
+engine reads each book, routes it to its own sleeve, and takes on symbols the
+books name that no config listed. It is **live on the demo account** and holds
+that account's single-writer lease. The funded engine runs in **shadow** and
+has never sent an order.
 
 - **The producers size from the engine.** They read `account_equity_usdt` and
   `account_observed_wall_ts_ms` out of the heartbeat and plan every entry as
@@ -582,28 +542,23 @@ day.
 
   The heartbeat sends an **age**, and the renderer turns it into a wall stamp
   beside its own. The engine's other clocks are monotonic and count from an
-  arbitrary instant near boot, so an earlier `account_observed_ns` read as
-  fifty-six thousand years stale from outside and blocked every entry.
+  arbitrary instant near boot, so a raw `account_observed_ns` means nothing
+  read from outside the process.
 
-**Of the two capabilities that did not survive the deletion, one is back:**
+Two operator capabilities sit beside the engine, one built and one owed:
 
 1. **Flatten** — `ops.sh flatten`, on the engine's own path. It stops the
    producers, then writes a book of explicit zero rows naming everything the
    engine says it holds, which the engine reads as "hold none of this" and
    closes. Explicit rows rather than an empty book, because an empty book only
    reaches the names the plug already has in hand. Dry run unless `--execute`.
-2. **The hourly digest** is still owed. It was rendered by the deleted owner
-   from the canonical journal; [`notifications.md`](notifications.md) keeps its
-   description as the specification for whatever replaces it.
-
-And the producers are not the order path. A carry decision is a batch over
-ninety days of funding and bars; it stays in research and arrives as a target
-book. "Delete the Python one" never meant deleting that, and it did not.
+2. **The hourly digest** is owed. [`notifications.md`](notifications.md) keeps
+   its description as the specification for whatever renders it.
 
 ### The funded engine, concretely
 
-**It is installed on the host and running in shadow**, since 2026-08-14. It has
-never sent an order and cannot: `shadow = true` in `engine-mainnet.toml` and
+**It is installed on the host and running in shadow.** It has never sent an
+order and cannot: `shadow = true` in `engine-mainnet.toml` and
 `ENGINE_LIVE=false` in `engine-mainnet.env`, two switches, both the owner's,
 and a shadow engine takes no account lease. Delete
 `/etc/liquidity-migration/engine-mainnet.env` to keep it off for good — a
@@ -612,18 +567,7 @@ file and the binary both exist.
 
 The account it reads, the caps it reads them under, and why it is left running
 rather than stopped are operational state, so they live in one place:
-[STATE.md](../STATE.md) §The fleet. Five sentences of this section were a
-verbatim copy of that one until 2026-08-20, and the copy is how a re-rendered
-mainnet cap stayed stale here after STATE.md was corrected.
-
-Getting there found a fault worth remembering: `account_identity` returned
-`realm: "demo"` as a hardcoded literal, with a comment explaining that the
-crate reached the practice account and nothing else. True when written; not
-after the mainnet adapter landed in the same crate, and nothing failed. Both
-readers would have been wrong in opposite directions — the mainnet producers
-compare realm against their own environment and would have blocked every entry,
-and the single-writer lease is *named* by realm, so a live funded engine would
-have taken a demo-realm lease and protected nothing.
+[STATE.md](../STATE.md) §The fleet.
 
 The pieces, all in `deploy/`:
 
@@ -646,42 +590,13 @@ against a funded account that is not near-empty, long enough to see what it
 would have done and what it would have cost — `engine fills` off its log is the
 reading that answers the second half. Only then, if it has earned it:
 `ENGINE_LIVE=true` and `shadow = false`, by someone who meant it. Reversible
-the same way.
+the same way. **That step is the owner's and nobody else's.**
 
-### The order it can actually happen in
+## What the engine does not do
 
-Each step earns the next. Nothing here is a policy anyone chose to impose; each
-one is what the step after it needs in order not to be reckless. Steps 1 to 5
-closed on 2026-08-14, in one day.
-
-1. **The engine can be seen from outside.** Done — it writes a heartbeat and
-   the fleet's watchdog pages on stale, unreadable, or latched.
-2. **The engine enforces what the fleet enforces.** Done — and from the same
-   document rather than a copy of its numbers.
-3. **The engine can widen its universe without a restart.** Done — a name a
-   book mentions for the first time is taken on while the engine runs.
-4. **The engine runs as a service, live, on a demo account.** Done. It holds
-   that account's lease, both producers feed it, and it is producing evidence
-   continuously rather than once.
-5. **The Python order path is retired.** Done, and deleted — the account
-   owner, its units, its launchers and its risk layer, about 25,000 lines,
-   after the engine carried all four capital controls with parity tests
-   written against them.
-6. **Mainnet.** The adapter, the leverage call and the profile are built,
-   fenced, deployed and running in shadow. What is left is not code: it is
-   `REAL_MONEY`, set by the owner's own hand in the host credential file, and
-   a shadow run against a funded account long enough to be worth trusting.
-   **This step is the owner's and nobody else's.**
-
-What changed on 2026-08-14 is that the distance stopped being capability at
-all. The question now is not what the engine can do but whether anyone has
-watched it do it — and the answer, on the funded account, is nobody, ever.
-
-## What v1 does not do
-
-- No carry or continuous *decision* port — a carry decision is a batch over
-  ninety days of funding and bars, so it stays in research and reaches the
-  engine as a target book.
+- No carry or continuous *decision* inside the engine — a carry decision is a
+  batch over ninety days of funding and bars, so it stays in research and
+  reaches the engine as a target book.
 - No funded trading. The mainnet path is built, fenced, deployed and running
   in shadow; it has never sent an order.
 - No market impact measurement. `engine fills` anchors on the top of book,

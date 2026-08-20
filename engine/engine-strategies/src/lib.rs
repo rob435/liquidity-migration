@@ -33,11 +33,9 @@ type Builder = fn(StrategyId, &toml::Value) -> Result<Box<dyn Strategy>, BuildEr
 
 /// Every plug the engine can load, and how to load it.
 ///
-/// One table, rather than the name list beside a `match` that used to stand
-/// here. Those were two places that had to agree about the same fact, and a
-/// plug added to one and not the other is either a name the engine advertises
-/// and cannot build, or one it can build and will not admit to. Adding a plug
-/// is now one line, and forgetting the other half is no longer possible.
+/// One table: the name the engine advertises and the builder it reaches are
+/// one fact in one place, so a plug is added in one line and cannot be half
+/// added.
 const PLUGS: &[(&str, Builder)] = &[
     (target_book::follower::NAME, |id, params| {
         Ok(Box::new(TargetBookFollower::from_params(id, params)?))

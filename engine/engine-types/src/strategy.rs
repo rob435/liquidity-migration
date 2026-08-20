@@ -164,8 +164,7 @@ pub trait StrategyCtx {
 /// [`EngineEvent`] lives in the provided `on_event` below and nowhere else,
 /// so adding a new kind of event means: add the variant, add a hook with a
 /// do-nothing default body, route it in that one match. No strategy needs an
-/// edit. (Before this, every strategy matched exhaustively, and a new
-/// variant broke each one's compile in turn.)
+/// edit.
 pub trait Strategy {
     fn name(&self) -> &str;
     /// Market data wanted, collected once at boot.

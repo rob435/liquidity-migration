@@ -24,8 +24,8 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 # The route a producer publishes onto is EXECUTION_ENVIRONMENT plus its owner
-# roots. The kernel-latch variables only restated what the unit files already
-# hard-code, so they are no longer re-derived or cross-checked here.
+# roots. The kernel-latch variables restate what the unit files already
+# hard-code, so they are not re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
     demo) ;;
     mainnet)

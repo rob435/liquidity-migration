@@ -352,9 +352,9 @@ CARRY_FETCH_UNIVERSE_TOP_N = 150
 DECISION_KLINE_LAG_MS = 20 * 60 * 1000
 
 #: How long before the decision deadline a cycle may compute and freeze the
-#: upcoming day's book (2026-08-13). The window sits entirely inside the
-#: 20-minute kline lag, so every input row for the new decision bar is already
-#: public and cached when it opens; one 60-second grid cycle always lands in
+#: upcoming day's book. The window sits entirely inside the 20-minute kline
+#: lag, so every input row for the new decision bar is already public and
+#: cached when it opens; one 60-second grid cycle always lands in
 #: 90 seconds, which is what lets the deadline wake publish instead of compute.
 FREEZE_AHEAD_WINDOW_MS = 90 * 1000
 # The boundary may serve any owner-health reading taken inside the freeze
@@ -372,11 +372,11 @@ SIGNAL_VALIDITY_MS = 6 * HOUR_MS
 #: service an entry it can only expire.
 ENTRY_PUBLISH_GUARD_MS = 15 * 60 * 1000
 #: Where to write the decided book for the Rust execution engine to follow.
-#: Set on the fleet's units since 2026-08-14: the engine owns the account and
-#: this book is how a carry decision reaches it. Setting it also stops the
-#: cycle publishing intents to the inbox — the Python owner that drained the
-#: inbox is deleted, so those requests would sit unclaimed forever. Unset
-#: means write no book and publish the old way, which no deployed unit does.
+#: Set on the fleet's units: the engine owns the account and this book is how
+#: a carry decision reaches it. Setting it also stops the cycle publishing
+#: intents to the inbox — nothing drains the inbox, so those requests would
+#: sit unclaimed forever. Unset means write no book and publish intents,
+#: which no deployed unit does.
 ENGINE_TARGET_BOOK_PATH_ENV = "CARRY_ENGINE_TARGET_BOOK_PATH"
 #: A sleeve whose newest successful decision is older than this is loudly
 #: stale: today's decision still failing past 06:00 the next day.
@@ -399,8 +399,8 @@ RESIZE_MIN_FRACTION_OF_STANDING = 0.05
 #: The venue's own floor is 5 USDT per order and the kernel enforces the exact
 #: per-symbol rule (min qty, min notional, step rounding), so this is only a
 #: coarse pre-filter with headroom over 5 — not a second safety margin. At
-#: 10.0 it silently blanked a small account: on 2026-08-06 the funded book
-#: missed both its entries at 0.1 x 99.94 = 9.99 USDT, six cents under.
+#: 10.0 it silently blanked a small account: the funded book missed both its
+#: entries at 0.1 x 99.94 = 9.99 USDT, six cents under.
 ENTRY_MIN_NOTIONAL_USDT = 6.0
 #: Decision-bar rows with a settled print, as a fraction of all decision-bar
 #: rows. Every listed perp settles at least every 8h, so this sits near 1.0 when
@@ -2126,11 +2126,10 @@ def _candidate_filtered_universe(
         frozen = load_candidate_universe(candidate_universe_file, realm=realm)
         # CARRY's own profile is registered and checked here, but it does NOT
         # narrow what CARRY trades: the sleeve trades the whole frozen
-        # instrument set, exactly as it did when that set was called the
-        # retired continuous sleeve's profile. Binding to the carry profile
-        # instead would cut the tradable population from every listed
-        # perpetual (510 on demo, 512 on mainnet as of the 2026-08-13 freeze)
-        # to the carry top-150 — a strategy change, not a rename. Whether to
+        # instrument set. Binding to the carry profile instead would cut the
+        # tradable population from every listed perpetual (510 on demo, 512 on
+        # mainnet as of the 2026-08-13 freeze) to the carry top-150 — a
+        # strategy change, not a rename. Whether to
         # narrow it is an open question for the owner and is not decided here.
         require_profile_binding(
             frozen,
@@ -2191,14 +2190,12 @@ def _build_carry_demo_market_data(
         launch_times = {}
     start_ms, window_end_open_ms = _kline_window(now_ms, lookback_days=demo.replay_days)
     # The shared reader's window is INCLUSIVE over bar OPENS and its end must
-    # be the newest CLOSED bar's open — the same convention LONG passes. The
-    # old +1h here shifted the whole window one bar forward, which made the
-    # WS store's coverage probe unfulfillable (the store bootstrapped, flushed,
-    # and never served a single cycle; observed live 2026-08-03 as
-    # kline_store_rows=0) and asked REST for the in-progress bar. Close-keyed
-    # (see _carry_venue_view), the newest closed bar still IS the current
-    # day's 00:00 decision bar during the 00:xx hour, so decision inputs are
-    # unchanged by the fix.
+    # be the newest CLOSED bar's open — the same convention LONG passes. A +1h
+    # here shifts the whole window one bar forward, which makes the WS store's
+    # coverage probe unfulfillable (the store bootstraps, flushes, and never
+    # serves a single cycle, at kline_store_rows=0) and asks REST for the
+    # in-progress bar. Close-keyed (see _carry_venue_view), the newest closed
+    # bar still IS the current day's 00:00 decision bar during the 00:xx hour.
     klines, kline_stats = _download_recent_1h_klines(
         fetch_symbols,
         start_ms=start_ms,
@@ -2664,9 +2661,8 @@ def run_carry_demo_cycle(
             raise RuntimeError("carry planner proposed duplicate component target keys")
         if os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip():
             # The engine follows the absolute book this cycle already wrote,
-            # and nothing reads the inbox any more — the Python owner that
-            # drained it was deleted 2026-08-14. Publishing would only grow a
-            # queue of never-claimed requests (and past the queued-cache
+            # and nothing drains the inbox any more. Publishing would only
+            # grow a queue of never-claimed requests (and past the queued-cache
             # limit, re-parse the lot every pass). The same gate LONG runs
             # under; the plan and its suppression accounting still run, so
             # the cycle receipt says what was decided.
@@ -2901,7 +2897,7 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
     stranded_text = f" stranded={stranded}" if stranded else ""
     # Only rendered when non-zero: entries skipped as too small to place.
     # Without this the line reads suppressed=0 err=none while the whole
-    # book silently fails to enter (the 2026-08-06 funded miss).
+    # book silently fails to enter.
     dust = int(payload.get("entry_dust_skips", 0) or 0)
     dust_text = f" dust={dust}" if dust else ""
     # Only rendered when engaged: the deadline pass that skipped the build,

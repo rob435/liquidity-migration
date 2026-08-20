@@ -72,8 +72,6 @@ shadow = true
 # the fleet and the engine at once.
 [risk]
 max_account_view_age_s = 120
-# Daily loss ceiling against the UTC day's opening equity. Remove the line
-# to run without a ceiling; the guard still refuses on blindness.
 # Account leverage: turns each strategy's capital into its gross share.
 leverage = 2.0
 # An order smaller than this after the partition clamp is refused, not sent.

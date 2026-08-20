@@ -112,10 +112,9 @@ pub struct Intent {
     /// Engine monotonic nanoseconds when the strategy decided.
     pub decided_ns: u64,
     /// Rest this entry and let the engine work it. `None` sends the order
-    /// exactly as written, which is what every strategy did before this
-    /// field existed — and what an exit always gets, whatever it asks for.
-    /// Defaulted on the way in so a log written before the field existed
-    /// still replays.
+    /// exactly as written, which is what an exit always gets, whatever it
+    /// asks for. Defaulted on the way in so a log written before the field
+    /// existed still replays.
     #[serde(default)]
     pub work: Option<WorkPolicy>,
     /// The venue margin leverage this size was worked out at.

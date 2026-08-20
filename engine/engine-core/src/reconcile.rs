@@ -73,8 +73,8 @@ impl Finding {
     ///
     /// An order or a position the log cannot explain is another writer on the
     /// account, and every number the risk kernel works from — the partition,
-    /// the envelope, the loss guard — is then measuring somebody else's
-    /// trading as well as its own.
+    /// the envelope — is then measuring somebody else's trading as well as
+    /// its own.
     pub fn stops_opening(&self) -> bool {
         match self {
             Finding::ForeignOrder { ours_to_trade, .. } => *ours_to_trade,

@@ -4,8 +4,8 @@
 
 use engine_types::ids::StrategyId;
 
-/// A config the kernel refuses to run on. Mirrors the `ValueError`s the Python
-/// profile loader and the loss guard raise at construction.
+/// A config the kernel refuses to run on. Raised at construction, so a bad
+/// number never reaches a decision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigError {
     pub detail: String,
@@ -182,10 +182,9 @@ impl PartitionConfig {
             .iter()
             .map(|share| share.max_initial_margin_usdt)
             .sum();
-        // Against the declared account margin cap, as _parse_sleeve_limits does.
-        // Before that cap was a config key this compared against the gross cap
-        // divided by leverage, which is a different number: the mainnet shares
-        // sum to exactly the declared cap and would have been refused by it.
+        // Against the declared account margin cap, as _parse_sleeve_limits
+        // does — not against the gross cap divided by leverage, which is a
+        // different number the mainnet shares would be refused by.
         if margin > envelope.max_initial_margin_usdt * (1.0 + 1e-12) {
             return Err(bad(
                 "partition margin shares sum above max_initial_margin_usdt",

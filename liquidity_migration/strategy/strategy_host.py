@@ -587,11 +587,10 @@ class StrategyHostDaemon:
         self._max_cycle_seconds = max(self._max_cycle_seconds, elapsed)
         # The payload is NOT decorated with WS-plane stats here: every sleeve
         # persists its cycle row inside its own runner, before this point, and
-        # no formatter, capture, or watchdog column read the post-persist
-        # attach — it was computed and dropped on every cycle (removed
-        # 2026-08-13; LONG's watchdog column ``kline_store_max_ts_ms`` comes
-        # from the runner's own build stats, and completion health reads a
-        # fresh ``manager.stats()`` in ``_current_ws_kline_store_rows``).
+        # no formatter, capture, or watchdog column reads a post-persist
+        # attach. LONG's watchdog column ``kline_store_max_ts_ms`` comes from
+        # the runner's own build stats, and completion health reads a fresh
+        # ``manager.stats()`` in ``_current_ws_kline_store_rows``.
         if payload is not None:
             try:
                 print(self._format_cycle_summary(payload), flush=True)

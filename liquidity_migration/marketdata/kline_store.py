@@ -376,7 +376,7 @@ class KlineStore:
         turnover_col: list[float] = []
         source_col: list[str] = []
         # Sort symbols so the output is in (symbol, ts_ms) order regardless
-        # of what the caller passed — matches the old .sort() behavior.
+        # of what the caller passed.
         sorted_symbols = sorted(symbols)
         with self._lock:
             self._reads_total += 1

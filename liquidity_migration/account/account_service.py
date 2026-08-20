@@ -1589,10 +1589,9 @@ class AccountExecutionService:
         # queue, and admission is the only place left to refuse it.
         self.new_risk_halt = new_risk_halt
         # First monotonic instant each inbox file started failing, cleared on
-        # success or retirement. The 2026-08-01 outage was a head request
-        # bouncing pending<->claimed every ~2s for two days: a request that
-        # cannot succeed inside this budget retires to failed/ and the
-        # producer's next cycle publishes a fresh one.
+        # success or retirement. A head request that cannot succeed inside this
+        # budget retires to failed/ and the producer's next cycle publishes a
+        # fresh one, instead of bouncing pending<->claimed for ever.
         self._inbox_failure_first_ns: dict[str, int] = {}
         # The authorized native-breach flat set, and the committed state object
         # it was derived from. Recomputed only when the journal head moves.
@@ -2311,9 +2310,9 @@ class AccountExecutionService:
             # of a sliced entry the previous clip is terminal (nothing works)
             # while the manager still holds its time-bounded state — that gap
             # is exactly what the exemption must cover, or a multi-window
-            # entry flickers unhealthy at every hand-over (observed live
-            # 2026-08-04). The probe expires on its own past the window
-            # horizon, so a stalled sequence still ages and pages.
+            # entry flickers unhealthy at every hand-over. The probe expires
+            # on its own past the window horizon, so a stalled sequence still
+            # ages and pages.
             resting_quote_active = bool(
                 self.resting_entry_quotes is not None
                 and self.resting_entry_quotes(symbol)
@@ -2905,12 +2904,12 @@ class AccountExecutionService:
                 inbox.fail(path, error=exc)
                 self._inbox_failure_first_ns.pop(path.name, None)
             elif isinstance(exc, StaleUnsubmittedExposureCommand) and self._entry_request_retry_expired(request):
-                # The 2026-08-01 outage: a committed entry batch bounced
-                # pending<->failed for two days, partially re-executing a stale
-                # decision on every owner restart. Once every entry in the
-                # request is past its own declared signal validity, the retry
-                # loop can only ever act on dead decisions — retire the request
-                # terminally instead. Never-attempted commands the batch may
+                # A committed entry batch that keeps bouncing pending<->failed
+                # partially re-executes a stale decision on every owner restart.
+                # Once every entry in the request is past its own declared
+                # signal validity, the retry loop can only ever act on dead
+                # decisions — retire the request terminally instead.
+                # Never-attempted commands the batch may
                 # have journaled terminalize on venue evidence via the
                 # reconciler's automatic wedge pass (`ops.sh wedged-command`
                 # remains the manual path); already-attempted commands

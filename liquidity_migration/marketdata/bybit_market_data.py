@@ -701,8 +701,8 @@ class _KlineConnectionState:
     closed: bool = False
     # monotonic timestamp of the last reconnect ATTEMPT — the watchdog uses this
     # to space retries per-connection instead of sleeping while holding the pool
-    # lock (which previously blocked subscribe/stats for backoff×N seconds on a
-    # multi-connection reconnect). 0.0 = never attempted, so first reconnect is
+    # lock, which would block subscribe/stats for backoff×N seconds on a
+    # multi-connection reconnect. 0.0 = never attempted, so first reconnect is
     # immediate.
     last_reconnect_monotonic: float = 0.0
 

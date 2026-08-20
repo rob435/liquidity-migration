@@ -606,9 +606,8 @@ class EntryQuoteManager:
         if not gate_open and not reprice_now:
             return
         if gate_open:
-            # The periodic schedule stamps before the read, exactly as it did
-            # before tick wakes existed, so a failing touch read stays paced
-            # on the reprice cadence.
+            # The periodic schedule stamps before the read, so a failing touch
+            # read stays paced on the reprice cadence.
             quote.last_reprice_ns = now_ns
         tick = self.tick_size(quote.symbol)
         if tick <= 0.0:

@@ -371,11 +371,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             tracing::warn!(symbols = ?missing, "no instrument rules; these symbols cannot trade");
         }
 
-        // The newest control anchor per source is the loss guard's memory:
-        // restored before anything is judged, so a restart can neither
-        // refresh the day's loss budget nor clear a latched trip. A segment
-        // restatement carries the same anchors and counts the same way —
-        // set, then overridden by anything written after it.
+        // The newest control anchor per source, restored before anything is
+        // judged. What existing logs hold here is the removed loss halt's
+        // anchor and trip, which the kernel ignores. A segment restatement
+        // carries the same anchors and counts the same way — set, then
+        // overridden by anything written after it.
         let mut control_anchors: std::collections::BTreeMap<String, String> = Default::default();
         for record in replayed {
             match record {
@@ -396,8 +396,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
 
         let account = venue.account_view().await?;
-        // The reading's wall time, so the loss guard anchors on the right
-        // UTC day from the first evaluation.
+        // A wall clock before the first evaluation. No control reads it back
+        // today.
         risk.observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
 
         // Fills the venue saw and this log never heard: a stop that fired
@@ -1124,8 +1124,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // A cover the fresh reading has caught up with is released, so the
         // strategies woken after this read one truthful in-flight number.
         self.covers.absorb(&self.account);
-        // The loss guard's daily anchor rolls on the READING's UTC day, so
-        // hand it the reading's wall time.
+        // A wall clock, refreshed with each account reading. No control reads
+        // it back today.
         self.risk
             .observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
     }
@@ -1485,9 +1485,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.persist_control_anchor()
     }
 
-    /// Write a changed control anchor down and force it to disk. Rare (a
-    /// day roll or a trip), and a trip that is not durable is a trip a
-    /// crash-loop can forget.
+    /// Write a changed control anchor down and force it to disk. No kernel
+    /// the engine ships has anchor state to hand over, so this writes nothing
+    /// today; state that outlives a process has to be durable the moment it
+    /// changes, or a crash-loop forgets it.
     fn persist_control_anchor(&mut self) -> Result<(), EngineError> {
         if let Some(state) = self.risk.take_control_anchor() {
             // Mirrored so a rotation can restate the newest anchor without

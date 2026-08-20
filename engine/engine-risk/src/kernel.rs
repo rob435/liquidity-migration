@@ -40,9 +40,9 @@ impl Kernel {
         })
     }
 
-    /// Venue wall-clock nanoseconds, for the loss guard's UTC day roll. Until
-    /// the engine supplies one the day's anchor is set once and never
-    /// re-anchors, which spends the budget rather than refreshing it.
+    /// Venue wall-clock nanoseconds. The engine feeds this on every account
+    /// reading, and nothing here reads it back: every rule judges on engine
+    /// monotonic nanoseconds instead.
     pub fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
         self.wall_ns = Some(wall_ns);
     }
@@ -378,8 +378,7 @@ impl RiskKernel for Kernel {
     ///    [`DenyReason::UnknownState`] (the Python guard also puts "no
     ///    reading" before its age check);
     /// 3. exit or entry: a genuine exit is clamped to the position and stops
-    ///    here — risk-reducing orders flow even under a stale reading or a
-    ///    tripped guard, exactly as the fleet lets them;
+    ///    here — risk-reducing orders flow even under a stale reading;
     /// 4. entry freshness — too old is [`DenyReason::StaleAccountView`];
     /// 5. stop discipline — [`DenyReason::MissingStop`];
     /// 6. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];

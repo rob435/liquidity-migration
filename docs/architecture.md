@@ -5,17 +5,10 @@ generated artifacts define behavior when this file drifts; deployed state is
 [`STATE.md`](../STATE.md), its dated history [`CHANGELOG.md`](../CHANGELOG.md).
 
 The program has two parts: the research system, in Python, and the execution engine, in Rust
-([`engine.md`](engine.md)). The engine is the order path now: the Python one was deleted on
-2026-08-14 (CHANGELOG that date), from the repository and from the host — no `account-execution`
-unit exists anywhere any more.
-
-**Scope warning.** Much of what follows describes that deleted Python order path — the account
-owner, its inbox, its protection modules, its journal transitions — in the present tense, and cites
-line numbers in files that no longer exist. It is kept because it is the specification the engine
-was ported and parity-tested against, the most precise description of the behaviour the engine had
-to reproduce. Read the owner-era sections as historical reference, not as a map of the current
-tree; `engine.md` is the current tree. The producer half of this document — universes, target
-books, sleeve planning — is unaffected and current.
+([`engine.md`](engine.md)). The engine is the order path. What follows covers the producer side —
+universes, target books, sleeve planning — and the account journal, inbox and kernel that producers
+and research tools read and write. Where the engine and a Python module describe the same duty,
+`engine.md` is what trades.
 
 ## Producer / owner split
 
@@ -84,8 +77,8 @@ replacements and carries component revisions, so an older entry cannot reopen a 
 zero target. Each queued file carries its own arrival order; a new request's order is one past whatever
 unfinished requests already claim, floored by an advisory counter (buffered, no fsync) that keeps
 numbering climbing across drained queues and restarts. An unreadable queue file is skipped with a
-warning rather than blocking the publish — the owner's claim walk still fails closed on it. (`arrival/`
-still exists and is still read for requests queued by an older build.)
+warning rather than blocking the publish — the owner's claim walk still fails closed on it. `arrival/`
+is still read, for requests queued by an older build.
 
 A failed request releases back to `pending/` for retry, with one exception: when the failure is the
 never-attempted `StaleUnsubmittedExposureCommand` and every entry intent is past its own declared
@@ -93,8 +86,8 @@ never-attempted `StaleUnsubmittedExposureCommand` and every entry intent is past
 Exits never expire; a batch with attempted commands keeps resuming past expiry so possibly-live venue
 state reconciles.
 
-Journals of the retired credential-free paper twin remain on disk; intents in them carry
-`mirror_source_request_id` / `mirror_source_environment` / `mirror_scale` metadata.
+Paper-twin journals remain on disk; intents in them carry `mirror_source_request_id` /
+`mirror_source_environment` / `mirror_scale` metadata.
 
 ## The account journal
 
@@ -172,10 +165,8 @@ Three read paths, not interchangeable.
    Sanctioned callers: `account_strategy_state.py`, `account_candidate_universe.py` (offline only;
    per-cycle callers pass their cursor), owner startup (`AccountJournal._events_ref`, which is what
    makes the head and tail reads valid), and the report tools
-   `scripts/vps/check_deploy_rollout_readiness.py`, and
-   `scripts/research/build_trade_diagnostics.py` (`build_execution_cost_report.py` was deleted in the
-   2026-08-19 cleanup; the engine's `fills` subcommand is the execution-cost reading now).
-   `account_venue_accounting.py` verifies the same
+   `scripts/vps/check_deploy_rollout_readiness.py` and
+   `scripts/research/build_trade_diagnostics.py`. `account_venue_accounting.py` verifies the same
    way over a captured byte snapshot via `read_account_journal_bytes`.
 2. **Resumable cursor** — `AccountJournalCursor` for per-cycle producers: re-reads only segments added
    since the last call, cold-reads on any prefix mismatch. Never put a bare `read_account_journal` in a
@@ -225,11 +216,9 @@ not a pinned number. Equity down rescales immediately; equity up waits for a mov
 missing, non-finite, non-positive or stale reading holds the current reference — unknown is not evidence
 of small.
 
-**Daily loss halt — removed 2026-08-20, owner's instruction.** It was
-account-level, anchored on the day's opening equity, and on an account the owner hand-trades that meant
-it measured their drawdown as the bot's; it tripped twice that way. Per-position venue-native stops are
-the loss bound now. The paragraph that described its states read:
-not a high-water mark, snapshotted so a restart cannot refresh the budget.
+**No daily loss halt, and do not add one.** It is the owner's standing decision: an account-level
+ceiling on an account the owner also hand-trades reads their drawdown as the bot's. Per-position
+venue-native stops are the loss bound.
 
 **Venue-native protection**
 ([`working.rs`](../engine/engine-core/src/working.rs),
@@ -237,57 +226,19 @@ not a high-water mark, snapshotted so a restart cannot refresh the budget.
 demo command durably carries a Full-position MarkPrice stop before any provider call — `stopLoss`,
 `slTriggerBy=MarkPrice`, `tpslMode=Full`, `slOrderType=Market` in the create request. A position without
 a durable active stop cannot be scaled up; an existing stop never moves inward. Order creation is
-asynchronous, so the private stream and REST position truth still confirm it.
+asynchronous, so the private stream and REST position truth still confirm it. Stop verify, repair and
+the durable breach latch are the engine's: [`engine.md`](engine.md).
 
-*The two blocks below are historical* — the deleted Python owner's protection spec, kept as
-written before 2026-08-14. `venue_protection.py` and `protection_engine.py`, which they cite, were
-deleted with the Python order path; the live behaviour is the engine's: the stop attached at
-create and verified at fill in [`working.rs`](../engine/engine-core/src/working.rs), the repair
-and breach latch in [`reconcile.rs`](../engine/engine-core/src/reconcile.rs). The stop-price math
-itself still lives in `account_kernel.py` and is cited by name.
-
-*Stop price at entry (historical spec).* The kernel takes the outermost price across all same-direction component stop
+**Stop price at entry.** The kernel takes the outermost price across all same-direction component stop
 contracts, anchored to each component's durable **decision reference** price
 (`payload["reference_price"]`), never to a fill. Component metadata key is `stop_loss_pct`, required
 finite in (0,1); source label `decision_reference_outermost_component_fraction`
 (`_native_entry_stop_spec` in `account_kernel.py`). With no component declaring a stop it falls back to
 the explicit account fraction under `decision_reference_account_fallback_fraction` (same function). The
-stop is rounded outward to the verified tick (`round_native_stop`). The account fraction was
-`DISASTER_STOP_FRACTION` → `--disaster-stop-fraction` → `fallback_stop_fraction`, required in (0,1)
-with no default; the launcher that refused to start the owner without it
-(`scripts/runtime/run_account_execution_service.sh`) went with the Python order path on 2026-08-14.
-Reduce-only commands carry no entry TP/SL fields. Confirmed fills then re-anchor the Full-position stop
-to exact component fill evidence — a separate later stage labelled
-`fill_anchored_outermost_component_stop` (`venue_protection.py:310`); the two labels must not be merged.
-A coalesced entry fill plus stop execution is processed entry-first even when Bybit sends the stop row
-first (`account_execution_stream.py:309`) — processing the stop first would reconstruct a position that
-never opened.
-
-*Repair and the breach latch (historical spec).* Repair begins from authenticated venue position truth. An exact matching
-Full-position `stopLoss` is adopted without mutation (`_adopt_verified_venue_stop`). A missing or
-mismatched stop is repaired via `set_trading_stop` (`:746-760`) from a positive authenticated MarkPrice
-— absent one, repair raises rather than guessing — and is **never** latched. Only three things latch
-`breached_unprotected` and flatten: an already-crossed stop threshold (`_require_repair_not_crossed`,
-`:568`), a venue rejection of the mutation as crossed (`rejection_crossed`, `:843`), and an entry whose
-declared stop never landed *and* whose direct repair already failed (`_resolve_unarmed_entry`, `:1055`).
-A late-arriving stop does the opposite of flattening: "The stop landed late; clear rather than flatten a
-live book" (`:1035-1037`).
-
-The latch is durable — it survives price recovery and owner restart, rehydrated from journal
-`protections` rows carrying `breach_mark` / `breach_evidence_source` / `breach_detail` (`:467-500`), so
-"a price recovery or target revision cannot re-arm protection" (`:734-736`). Only authenticated proof of
-the matching stop (status → `protection_restored`, `:600`) or a complete authenticated position snapshot
-proving flat terminalizes it; reconstructed flatness has no such authority. One symbol's failure cannot
-prevent reconciliation of sibling symbols.
-
-A latched breach produces one atomic, revision-dominating zero-target request for every accepted or
-unresolved component on the symbol. The priority FIFO bypass and the authenticated-mark market fallback
-require an exact `software_flat_requested` journal authorization whose request hash matches the
-immutable inbox request (`protection_engine.py:400,426`; `account_service.py:1062,2205`). The bypass may
-cross uncommitted work but never a prior journal-committed crash-replay boundary. Execution still
-requires fresh same-symbol venue/local quantity agreement and an in-kernel strict risk-reduction proof.
-Startup may stay alive only for a structured breach-only reconciliation result so this recovery can run;
-every other startup mismatch aborts.
+stop is rounded outward to the verified tick (`round_native_stop`). The account fraction comes from
+`DISASTER_STOP_FRACTION` in the owner env file and lands on `fallback_stop_fraction`
+(`account_contracts.py`), required finite in (0,1) with no default. Reduce-only commands carry no entry
+TP/SL fields.
 
 ## Owner health, streams, convergence
 
@@ -304,22 +255,8 @@ evidence ladder as the `wedged-command` CLI — a live order, an unreadable venu
 has not booked yet always refuse it. An order the kernel adopted from the venue rather than submitted
 carries no `orderLinkId`, so it is probed by venue order id; a reduce-only order whose book is already
 flat has no reduction left to lose, so venue quantity past what it booked is foreign rather than
-missing. What survives the automatic pass is listed in health as `wedged_command:<kind>:<symbol>:...`
-(`:337`), blocking new entries on that symbol without ever blocking its reductions. Each open wedge is
-probed at most once a minute and at most five per pass (`WEDGE_PROBE_INTERVAL_NS`,
-`WEDGE_PROBES_PER_PASS`, `:53-54`).
-
-**Private stream.** Readiness is probed every owner-loop iteration and again at exposure-increasing
-admission. After `ACCOUNT_PRIVATE_WS_RECONNECT_SECONDS` (default 180; still in `.env.example` — the deleted
-launcher passed it as `--private-ws-reconnect-seconds`) continuously
-not-ready, the owner builds and subscribes one replacement in a background thread, reusing that value as
-an attempt cooldown against authentication storms. Every authentication generation must obtain fresh
-subscription ACKs — old ACKs do not survive an internal reconnect. The candidate gets 10 s to prove
-readiness (`candidate_ready_timeout_seconds = 10.0` in `account_execution_stream.py`, deleted
-2026-08-19) while the prior
-stream stays published; a recovered prior stream wins. REST reconciliation and strict risk-reducing
-requests remain available during the handshake. An unavailable or ambiguous socket probe fails health
-closed but is not enough evidence to destroy a possibly live authenticated connection.
+missing. What survives the automatic pass is listed in health as `wedged_command:<kind>:<symbol>:...`,
+blocking new entries on that symbol without ever blocking its reductions.
 
 **Public L2 watchdog.** Three distinct states: a connection attempt, an open transport, and a
 subscription's first frame. A connection generation that does not open or deliver its first orderbook
@@ -332,22 +269,20 @@ before the potentially blocking operation. Public-stream failure blocks market r
 exposure but does not kill the owner or disable REST/private reconciliation.
 
 **Convergence.** Exposure-increasing or sign-flipping work has a finite configured retry budget and
-becomes `retry_exhausted` after definite non-fills (`account_service.py:1696`). A strict reduce-only
+becomes `retry_exhausted` after definite non-fills (`account_service.py`). A strict reduce-only
 residual is never abandoned because that budget elapsed: it stays durable, retries with exponential
-backoff `convergence_retry_backoff_ns * 2**exponent` from a 1 s base (`:1164`) capped at 30 s
-(`DEFAULT_CONVERGENCE_RETRY_BACKOFF_CAP_NS = 30_000_000_000`, `:65`; intermediate status
-`retry_backoff`, `:1698`), and stays visibly unhealthy past the grace period
-(`convergence_health_grace_ns`, default `30_000_000_000`, `:1163`) until it fills or the
+backoff `convergence_retry_backoff_ns * 2**exponent` from a 1 s base capped at 30 s
+(`DEFAULT_CONVERGENCE_RETRY_BACKOFF_CAP_NS = 30_000_000_000`; intermediate status
+`retry_backoff`), and stays visibly unhealthy past the grace period
+(`convergence_health_grace_ns`, default `30_000_000_000`) until it fills or the
 desired/position state changes. A residual below verified venue quantity granularity is healthy
-`venue_minimum_dust` (`:342, 1661, 1693`) and excluded from the unhealthy set (`:364, 373`) rather than
+`venue_minimum_dust` and excluded from the unhealthy set rather than
 retried forever — do not hand-close dust on the venue.
 
 **Submission freshness and ambiguity.** An exposure-increasing command with zero prior submission
 attempts is refused as `StaleUnsubmittedExposureCommand` when `command.created_ts_ns <= 0`, `now_ns <
 command.created_ts_ns`, or `now_ns − command.created_ts_ns > max_unsubmitted_exposure_age_ns` (default
-`120_000_000_000` — 120 s — `bybit_execution_adapter.py`, kept only as a test fixture now; the owner
-flag that set it, `--max-unsubmitted-exposure-age-seconds`, went with the deleted
-`account_service_runner.py`). The budget must cover
+`120_000_000_000` — 120 s — `bybit_execution_adapter.py`). The budget must cover
 whole-batch venue latency rather than one round trip, because command age is anchored to the shared
 batch journal instant. It is checked twice — before `prepare_submission` / leverage negotiation
 (`execution_adapters.py:747-764`) and again at the order-create boundary (`:787-800`). Exactly one
@@ -369,12 +304,7 @@ to "… waiting for the exchange to confirm" stores an exact pending confirmatio
 advances only after all lossless Telegram-sized pages are delivered. The hourly digest labels
 owner/reconciliation state `Health:`; realized P&L carries a short `(pending: …)` note whenever funding
 fees, trade fees or the exchange cross-check are not final — the digest number is reconstructed from
-fills, never venue-final. Component bookkeeping detail goes to the service journal, not the chat. The
-digest once carried a CONTINUOUS BTC gate and entry-funnel line, read from a separate receipt-bound
-projection. That projection, the `CONTINUOUS_CYCLE_ROOT` switch that enabled it, and the owner flags
-behind it were deleted with the sleeve on 2026-08-14. The root was already unset on the owner unit, so
-the digest was unchanged. (The launcher and the readiness test that pinned it naming no cycle root
-were themselves deleted with the Python order path on 2026-08-14.)
+fills, never venue-final. Component bookkeeping detail goes to the service journal, not the chat.
 
 ## Epoch reset
 
@@ -438,10 +368,10 @@ orders on demo to find the empirically accepted minimum notional: the demo realm
 own `minNotionalValue` says it should accept. It refuses any realm but demo; mainnet takes the declared
 `minNotionalValue` at face value and labels the source `venue_declared`.
 
-The modeled execution twin (`MarketOrderExecutionTwin`) survives for historical replay: commit-owned,
+The modeled execution twin (`MarketOrderExecutionTwin`) serves historical replay: commit-owned,
 uncalibrated — 5.5 bps taker fee, 2.0 bps residual adverse slippage, a walk of the visible decision book,
 partial fills by book level, zero modeled latency — every modeled observation tagged
-`integration_only_uncalibrated`. Retired paper journals (modeled fills, `paper_modeled_funding` rows,
+`integration_only_uncalibrated`. Paper journals (modeled fills, `paper_modeled_funding` rows,
 marked equity) carry that tag and must never be summed with venue-observed demo rows without filtering
 on `source`.
 
@@ -452,7 +382,7 @@ A unit names only `UNIT:ENTRYPOINT`;
 complete command line and `exec`s it. Callers cannot append argv. The installed profile is a plain marker
 at `/etc/liquidity-migration/profile`, written at rollout and read back by verify. One profile exists —
 `operational`: every demo producer its toggles allow, demo liveness, the Telegram controls, and the
-engines — there is no owner unit any more; the engine is what trades. `demo-operational`
+engines. `demo-operational`
 is rejected by name; an old marker self-heals on the next rollout. Liveness scope is hardcoded in the
 committed argv: `check_fleet_liveness.py --account-scope demo` for the demo watchdog,
 `--account-scope mainnet` for the mainnet one, choices `_ACCOUNT_SCOPES = ("demo", "mainnet")`. Deploy
@@ -476,17 +406,15 @@ publishing zero targets through the owner and waiting for fills.
 Operator routes all run through [`scripts/ops.sh`](../scripts/ops.sh); the verb set and every deploy mode
 are tabulated in [`operations.md`](operations.md).
 
-**`ACCOUNT_RAW_MARKET_PERSISTENCE` is a leftover name, no longer set or asserted anywhere.** The
-runner that refused to start unless it was explicitly `0` or `1`
-(`scripts/runtime/run_account_execution_service.sh`) went with the Python order path on 2026-08-14, and
-no deploy step touches the variable now. It survives in three places: the historical
-`deploy/account-execution-mainnet.env.template` still pins `0`, `.env.example` ships it empty, and the
-mainnet arming preflight (`liquidity_migration/policy/real_money_arming.py`) still lists it among the
-owner-env keys it requires non-empty. Nothing reads its value at runtime.
+**`ACCOUNT_RAW_MARKET_PERSISTENCE` is a leftover name — nothing reads its value at runtime and no
+deploy step touches it.** It survives in three places: `deploy/account-execution-mainnet.env.template`
+pins `0`, `.env.example` ships it empty, and the mainnet arming preflight
+(`liquidity_migration/policy/real_money_arming.py`) lists it among the owner-env keys it requires
+non-empty.
 
 Deployment derives one authorization-bound scheduling-capture tape:
 `<ACCOUNT_CAPTURE_ROOT>/strategy-targets.jsonl`. Every producer shares it through a locked,
-hash-chained writer — not one tape per producer. Older per-producer fallback tapes remain preserved as
+hash-chained writer — not one tape per producer. Per-producer fallback tapes remain preserved as
 pre-boundary history and are not silently merged into a prospective epoch.
 
 Filesystem modes: demo and credential env files and `sleeves.resolved.env` root-owned `0600`. Deploy
@@ -496,11 +424,13 @@ unknown real-money spellings.
 Each demo target producer owns one bounded public kline store fed by its own WS stream (LONG top-120 by
 turnover, carry top-150 spanning its replay window). Missing or lagging bars retain the public REST
 fallback; settled funding history has no stream on the venue, so carry's hourly funding sweep stays REST
-by necessity. Since the 2026-08-19 v6 promotion each carry producer also keeps
+by necessity. Each carry producer also keeps
 `binance_whale_daily.parquet` under its data root — per-symbol-day Binance top-trader position
 long/short EODs (public endpoint, no key, ~one request per symbol per day), the live twin of the
 research panel's `bn_tt_ls`. Every failure of that feed fails OPEN per the registered rule's 48h
-freshness clause; it can thin the whale halving, never block a decision. The demo credential file is read by `check_demo_order_permissions`, which loads it into the
+freshness clause; it can thin the whale halving, never block a decision.
+
+The demo credential file is read by `check_demo_order_permissions`, which loads it into the
 process environment, runs `scripts/maintain/check_bybit_order_permissions.py` and unsets the keys again;
 `activate` runs it in `deploy` context and `verify` re-runs it in `verify` context.
 
@@ -523,15 +453,15 @@ Moving a module physically is a separate refactor: a file move breaks the system
 difference from it into a failing diagnostic — the way to reproduce a deploy-only dependency failure
 locally.
 
-Removed from the tree, and not to be recreated from an old document: `research_data_snapshot`,
+Do not recreate these from an old document: `research_data_snapshot`,
 `unit_numeric_comparison`, the `active_runtime_comparator`, the `forward_epoch_start` collector,
 `venue_lifecycle`, the Strategy Overhaul V2 aggregate analyser and full-ledger replay runner, the
-`bybit_render_1m` / `binance_vision_alt` acquisition plans and their fetchers, and
-the continuous hedge manager with its warm-start regeneration, and — on 2026-08-14 — the whole
-CONTINUOUS sleeve: `continuous_demo*`, `continuous_cycle_status`, `continuous_identity`,
-`continuous_component_sources`, the five `research/backtest/continuous_*` modules, the two
-continuous research runners, and the `continuous-event-demo-cycle` subcommand. (The quote-lab package stays:
-it is the machinery behind the registered entry recipes — CHANGELOG 2026-08-08.)
+`bybit_render_1m` / `binance_vision_alt` acquisition plans and their fetchers, the continuous hedge
+manager with its warm-start regeneration, and the whole CONTINUOUS sleeve — `continuous_demo*`,
+`continuous_cycle_status`, `continuous_identity`, `continuous_component_sources`, the five
+`research/backtest/continuous_*` modules, the two continuous research runners, and the
+`continuous-event-demo-cycle` subcommand. The quote-lab package stays: it is the machinery behind the
+registered entry recipes (CHANGELOG 2026-08-08).
 
 ## Trade diagnostics
 
@@ -588,14 +518,11 @@ update). Task symbols stay subscribed only until their tasks clear. Over-capacit
 surface as `not_registered`
 (`trade_diagnostics.py:460`) and leave no schedule record behind.
 
-**Nothing feeds this route any more, and the reader survived the writer.** The bridge that registered
-fills for marking (`account/post_fill_markouts.py`) and the loop that drained it
-(`runtime/account_service_runner.py`) went with the Python order path on 2026-08-14;
-`market_capture.register_post_fill_markouts` is now called only from `tests/account/test_market_capture.py`.
-The analysis stack above still works against already-captured roots, and produces nothing new. This
-paragraph used to cite line numbers inside the deleted bridge.
+**Nothing feeds this route.** `market_capture.register_post_fill_markouts` is called only from
+`tests/account/test_market_capture.py`. The analysis stack above still works against already-captured
+roots, and produces nothing new.
 
-**New markouts come from the Rust engine instead**, since 2026-08-14: it marks its own fills at the same
+**New markouts come from the Rust engine instead**: it marks its own fills at the same
 four horizons with the same signs, writes each one into its log when the horizon comes due, and reports
 them through `engine fills --wal PATH` ([`engine.md`](engine.md) §What the fills cost). Two differences
 are not cosmetic and must not be papered over when the two are read side by side. The engine anchors `M0`
@@ -627,8 +554,7 @@ Freeze source-population and transition semantics before enabling the writer, wh
 
 LONG sources are closed feature rows keyed by symbol and daily `ts_ms`, captured before
 `_classify_entry`, with dynamic retrace, cooldown, capacity, health, unresolved-target, terminal-attempt
-and publication gates as transitions. (The tape once carried CONTINUOUS `entry_state` symbol/hour rows
-alongside them; that half went with the sleeve on 2026-08-14, and the tape is now the LONG funnel alone.)
+and publication gates as transitions. The tape is the LONG funnel alone.
 
 **Artifact budget.** At most four claim-bearing payloads per run: `manifest.json` (identities, schema,
 counts, nulls, hashes, deviations), `execution_tca.parquet` (one row per canonical command),
@@ -667,8 +593,8 @@ for trial-count and multiple-testing discipline.
 
 ## Evidence boundary and working rules
 
-Demo observes real venue order lifecycle, latency, fees and funding for its exact epoch. The retired
-paper route validated the software path against its declared model and supports no execution-quality or
+Demo observes real venue order lifecycle, latency, fees and funding for its exact epoch. The paper
+route validated the software path against its declared model and supports no execution-quality or
 performance claim. LONG's forward record is demo-only. A venue-accounting receipt proves only its named
 journal/venue interval. Grading: [`../AGENTS.md`](../AGENTS.md).
 

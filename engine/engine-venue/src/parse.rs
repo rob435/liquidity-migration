@@ -93,10 +93,9 @@ pub(crate) fn parse_instruments(
 
 /// Total equity and available balance, in USDT.
 ///
-/// Bybit blanks these totals in some margin modes — the Python fleet was bitten
-/// by exactly that on 2026-08-04. A blank is unreadable state and fails here;
-/// reading it as zero would look like an emptied account and trip the loss
-/// guard.
+/// Bybit blanks these totals in some margin modes. A blank is unreadable
+/// state and fails here; reading it as zero would look like an emptied
+/// account.
 pub(crate) fn parse_wallet(result: &Value) -> Result<(f64, f64), VenueError> {
     let rows = list_field(result)?;
     let row = rows

@@ -27,8 +27,7 @@ pub const MIN_SPREAD_FRACTION: f64 = 0.0001;
 /// The touch, with the displayed sizes when the feed carries them.
 ///
 /// A size of zero or less means the sizes are not known. Every rule that reads
-/// the lean then falls back to plainly joining the touch, which is what the
-/// fleet did before it had sizes to read.
+/// the lean then falls back to plainly joining the touch.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Touch {
     pub bid_px: f64,

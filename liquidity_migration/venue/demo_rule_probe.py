@@ -1208,7 +1208,7 @@ def probe_demo_instrument_rule(
     rejected_notional = rejected_qty * probe_price
     # This is a conservative, venue-observed upper bound on the effective
     # notional floor at the probe price, at most one qty step above the exact
-    # hidden threshold.  It replaces the old arbitrary $25 resize floor.
+    # hidden threshold.
     rule = InstrumentRules(
         symbol=symbol,
         qty_step=structural.qty_step,

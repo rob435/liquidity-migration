@@ -50,17 +50,13 @@ This is the single number a screen or a registration is measured against, and
 this document is its authority. Code constants in research screens derive
 from here, not the other way round.
 
-**What changed.** The program previously used a family-wise Bonferroni threshold
-derived from its own search history — t ≈ 3.25 over ~44 mechanisms, rising to
-≈ 3.58 over a 144-cell tuning grid. That is now replaced by a fixed **t ≥ 2.5**,
-by owner decision on 2026-07-31.
-
 **What it costs, stated plainly.** t 2.5 two-sided is p ≈ 0.012. Across the
 ~45 mechanisms this program has screened that is roughly **one false positive
-expected**, against roughly one in twenty at 3.25. The bar no longer controls
-family-wise error; it is a fixed evidence threshold and it will admit results
-that would previously have been rejected. Two things carry the weight the
-threshold used to:
+expected**, against roughly one in twenty under the family-wise Bonferroni
+threshold it replaced (t ≈ 3.25 over ~44 mechanisms, rising to ≈ 3.58 over a
+144-cell tuning grid). The bar no longer controls family-wise error; it is a
+fixed evidence threshold and it admits results a family-wise threshold would
+reject. Two things carry the weight the threshold used to:
 
 - **A plateau, not a cell.** Report the neighbouring parameter values. One cell
   at 2.5 with worse neighbours is a spike and should be treated as noise
@@ -71,7 +67,7 @@ threshold used to:
   reason.
 
 **It is prospective.** Verdicts recorded before 2026-07-31 stand as written;
-`docs/research/archive/` entries quoting 3.25 or 3.58 are accurate history and are not
+`docs/research/archive/` entries quoting 3.25 or 3.58 are accurate and are not
 restated. A pre-2026-07-31 result that sits between 2.5 and 3.25 is not thereby
 promoted — it is eligible to be re-examined, and the re-examination is a new
 registration.
@@ -84,10 +80,10 @@ decision, date. Ship it through the normal deploy flow and record the change
 point.
 
 Demotion is the mirror: the same five lines, a sleeve toggle, and a recorded
-change point. There is no standing per-sleeve kill-criteria checker — the
-module, its script and its two registrations were removed — so the exit rule
-lives with the config that declares it. Writing that rule down before the
-outcome is known is what keeps the rolling record honest in both directions.
+change point. There is no standing per-sleeve kill-criteria checker, so the
+exit rule lives with the config that declares it. Writing that rule down before
+the outcome is known is what keeps the rolling record honest in both
+directions.
 
 Live runtime is **continuous with recorded change points**, not frozen. Each
 change is recorded so the rolling record stays interpretable across it (a

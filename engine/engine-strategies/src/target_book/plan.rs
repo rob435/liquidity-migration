@@ -253,9 +253,9 @@ pub fn plan(
                 }
                 // The venue's own minimum order value joins the floor: a
                 // resize under it can never be sent, and planning one anyway
-                // re-sends it on every quote forever. Found live 2026-08-20
-                // when halved notionals put the 5% dead-band under the venue
-                // minimum for mid-sized positions (~55 refused sends/second).
+                // re-sends it on every quote forever. A dead-band alone does
+                // not cover it — a percentage floor sits under the venue
+                // minimum for mid-sized positions.
                 let threshold = rules
                     .resize_floor_usdt
                     .max(rules.resize_floor_fraction * standing.abs())

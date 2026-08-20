@@ -173,10 +173,6 @@ class AccountRiskPolicy:
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float = 1e-12
-    #: Absolute daily loss ceiling in USDT against the UTC day's opening equity;
-    #: 0.0 disables it. Enforced by the engine's loss guard
-    #: (``engine/engine-risk/src/loss_guard.rs``), not here: it needs the day's
-    #: opening equity and a trip must survive a restart.
     #: Per-sleeve partition of the account envelope. Empty means unpartitioned.
     #: Non-empty partitions the envelope *and* refuses any sleeve it does not
     #: name.

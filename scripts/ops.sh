@@ -223,8 +223,7 @@ exec .venv/bin/python scripts/maintain/reconcile_bybit_demo_accounting.py \
     remote_python_module liquidity_migration.policy.real_money_arming "$@"
     ;;
   flatten)
-    # Back, on the engine's own path. It used to publish zero targets into the
-    # Python owner's intent inbox; it now stops the producers and writes a book
+    # On the engine's own path: it stops the producers and writes a book
     # of explicit zero rows naming everything the engine says it holds, which
     # the engine reads as "hold none of this" and closes.
     #
@@ -280,7 +279,7 @@ exec .venv/bin/python -m liquidity_migration.venue.wedged_command_resolution \
   "${REMOTE_ARGS[@]}"' "$@"
     ;;
   deploy)
-    # A leading --execute is accepted and discarded: it used to be mandatory.
+    # A leading --execute is accepted and discarded, for callers that still pass it.
     if [[ "${1:-}" == "--execute" ]]; then
       shift
     fi

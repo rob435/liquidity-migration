@@ -145,9 +145,8 @@ def account_owner_health_reading(
             environment,
             max_age_ns=max_age_ns,
             # Deliberately not `now_ns`. How old the venue reading is, is a
-            # question about the wall clock, and the old owner-health check
-            # asked it that way too. A caller's `now_ns` is its cycle stamp --
-            # a replay or a back-dated test drives it -- and comparing a real
+            # question about the wall clock. A caller's `now_ns` is its cycle
+            # stamp -- a replay or a back-dated test drives it -- and comparing a real
             # timestamp against a simulated one makes a healthy engine look
             # like one reading the venue from the future.
         )

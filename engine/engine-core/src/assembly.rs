@@ -71,10 +71,8 @@ pub fn symbol_order(replayed: &[WalRecord], wanted: &[Subscription]) -> Vec<Symb
 /// directly. Emitting the seeds first misaligns the two tables the moment
 /// a config seed names a symbol the log already carries as a runtime
 /// admission: every symbol between the seed block and the old admission
-/// shifts by one on the feed side only, and prices land in the wrong
-/// slots (2026-08-20 — the exodus sleeve's DOGEUSDT seed did exactly
-/// this; the follower saw phantom standing and the kernel refused the
-/// resulting resize storm at ~150 orders a second).
+/// shifts by one on the feed side only, prices land in the wrong slots, and
+/// what a follower then reads as standing exposure is another symbol's.
 pub fn boot_subscriptions(symbols: &[Symbol], wanted: &[Subscription]) -> Vec<Subscription> {
     let mut subs: Vec<Subscription> = Vec::new();
     for name in symbols {
@@ -250,7 +248,6 @@ pub fn heartbeat(
 #[serde(deny_unknown_fields)]
 struct RiskSection {
     max_account_view_age_s: u64,
-    /// Absent means no daily ceiling; the guard still refuses on blindness.
     leverage: f64,
     min_order_notional_usdt: f64,
     #[serde(default = "default_qty_tolerance")]
@@ -481,7 +478,7 @@ pub fn strategies(configured: &[StrategyConfig]) -> Result<Vec<Box<dyn Strategy>
 /// caller's. Two strategies claiming one symbol is a config saying two things
 /// at once, and it is refused here rather than resolved at run time.
 ///
-/// This is not the only line of defence, and no longer the load-bearing one.
+/// This is not the only line of defence, and not the load-bearing one.
 /// A target book may name a symbol no config listed, and the engine takes that
 /// name on while it runs, so overlap can arrive hours after boot where this
 /// check cannot see it. `StrategyCtx::foreign_position` is what answers it

@@ -1,12 +1,11 @@
 //! Working the entries that are resting at the venue.
 //!
-//! Every strategy in this engine used to cross the spread on the way in and
-//! pay the taker fee for it. An intent that carries a [`WorkPolicy`] instead
-//! goes out as a limit at the touch, and this supervisor advances it: it moves
-//! with the book, escalates as the window runs out, crosses at the end, and
-//! pulls the order if the cross cannot clear it. The Python fleet has run this
-//! for months (`liquidity_migration/venue/entry_quote_manager.py`); this is a
-//! port of it.
+//! Crossing the spread on the way in pays the taker fee. An intent that
+//! carries a [`WorkPolicy`] instead goes out as a limit at the touch, and this
+//! supervisor advances it: it moves with the book, escalates as the window
+//! runs out, crosses at the end, and pulls the order if the cross cannot clear
+//! it. This is a port of the Python fleet's
+//! `liquidity_migration/venue/entry_quote_manager.py`.
 //!
 //! It lives in the core rather than in a strategy on purpose. Every strategy
 //! should get this, and no strategy should be writing a repricing loop — a

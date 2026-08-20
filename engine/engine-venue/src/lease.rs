@@ -20,7 +20,7 @@
 //!
 //! `mainnet` appears here as a realm — half of a lock file's name. It is not
 //! an endpoint: this crate still knows only the two demo hosts, and the fence
-//! in `tests/demo_fence.rs` still reads the whole crate back to prove it. A
+//! in `tests/venue_fence.rs` still reads the whole crate back to prove it. A
 //! lease names an account; it does not reach one.
 
 use std::ffi::CString;

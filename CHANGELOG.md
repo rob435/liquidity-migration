@@ -16,6 +16,28 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~21:26 UTC — the docs and comments lose their history, and a
+  rule keeps them lean.** Every core doc is rewritten in the present tense:
+  what changed, when, and what it replaced now lives only here and in the
+  archive directories. Gone: deletion notes, "formerly/previously/used to"
+  framings, retellings of closed programs (each cut verified present in this
+  file or an archive dossier first), and whole sections describing deleted
+  Python machinery (verified dead symbol by symbol). Kept: every number,
+  command, contract, grading anchor, and standing decision. Headline sizes:
+  STATE.md 541→446, strategy_program 878→714, architecture 676→602, engine.md
+  691→606, carry_hold 428→380 — carry_hold now documents the registered v6
+  config in full instead of v1 plus a version story. ~85 history-narration
+  comments cleaned across ~40 Python/shell/Rust files with zero executable
+  lines changed; the stale comments naming the removed daily loss halt as
+  live machinery are reconciled everywhere, including a dangling block in
+  `engine.toml` and an unread `.env.example` line. Three stale facts fixed on
+  the way: `(deployed)` moved from LONG v11a to v12 in research_findings, the
+  evidence boundary now says the missing piece is funded fills (the funded
+  engine shadows; the account holds money), and operations.md §Flatten states
+  the kernel's real exit-clamp contract. The rule that keeps it this way is
+  AGENTS.md §Lean Docs. No behavior change; `dev.sh check` green (ruff, mypy,
+  2370 tests, engine suite).
+
 - **2026-08-20 ~20:15 UTC — the write loop is fixed at the strategy, where it
   lives.** Removing the loss halt stopped the `LossGuardTripped` spam and
   changed nothing about the rate: the funded engine went straight on refusing

@@ -56,11 +56,10 @@ _RETIREMENT_REGISTRY_KIND = "candidate_retirement_registry"
 
 #: Where a scheduled retirement's date came from. Both are written by the
 #: reconciler below: the first when a delisting is seen for the first time, the
-#: second when the venue moves a date it had already given. The reader accepted
-#: only the first until 2026-08-14, so the cycle after a venue moved a date
-#: could not load the registry it had just written, and LONG raised
-#: "candidate-retirement registry record is invalid" on every pass from then
-#: on. Nothing downstream reads the value; it is evidence, and both are true.
+#: second when the venue moves a date it had already given. Both must be
+#: accepted here, or the cycle after a venue moves a date cannot load the
+#: registry it has just written. Nothing downstream reads the value; it is
+#: evidence, and both are true.
 _RETIREMENT_EVIDENCE_SOURCES = frozenset({
     "live_instrument_delivery_time",
     "live_instrument_delivery_time_updated",

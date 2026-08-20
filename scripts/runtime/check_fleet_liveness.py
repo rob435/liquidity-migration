@@ -352,13 +352,12 @@ def evaluate_demo_rule_age(
             headline="The trading-rules receipt is future-dated — invalid.",
         )
     if remaining_hours <= 0.0:
-        # Demo's expiry was a start refusal while the Python account owner
-        # loaded the receipt as it came up. That owner was deleted on
-        # 2026-08-14: run_authorized_runtime.sh has no rule gate, neither
-        # producer script mentions one, and the engine reads instrument rules
-        # off the venue. So nothing fails closed, and calling it CRITICAL taught
-        # the operator that CRITICAL can be ignored. What is genuinely stale is
-        # the bound receipt the research and candidate-universe tooling reads.
+        # Nothing on demo fails closed on an expired receipt:
+        # run_authorized_runtime.sh has no rule gate, neither producer script
+        # mentions one, and the engine reads instrument rules off the venue.
+        # Calling it CRITICAL only teaches the operator that CRITICAL can be
+        # ignored. What is genuinely stale is the bound receipt the research
+        # and candidate-universe tooling reads.
         #
         # Mainnet keeps both the severity and the claim: its receipt does gate
         # the funded owner, and every deploy renews it.
@@ -550,11 +549,6 @@ ENGINE_MODES = (ENGINE_MODE_LIVE, ENGINE_MODE_SHADOW)
 # stopped arriving altogether, not to grade the venue's latency, and a tight
 # bound here would page on ordinary jitter. Tightening it is an operator dial,
 # not a thing to discover by being woken up.
-#
-# It carried the same number when the reading came from the Python account
-# owner's journal, where the justification was that journal's ten-minute
-# checkpoint. That owner is gone; the number is kept because it is safe for the
-# new reader too, not because the old reasoning still applies.
 VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 25.0
 
 
@@ -829,8 +823,8 @@ def gather_engine_heartbeat_alerts(
     # Read the file first, ask the clock second. The content in hand was written
     # before the read, so it cannot be newer than a reading taken now, and the
     # age cannot come out negative unless a clock genuinely disagrees. Sampling
-    # first — or being handed a caller's earlier sample — is what made this page
-    # every time the engine wrote its heartbeat mid-run.
+    # first — or being handed a caller's earlier sample — pages every time the
+    # engine writes its heartbeat mid-run.
     observed_now_ms = _now_ms() if now_ms is None else now_ms
     return evaluate_engine_heartbeat(
         heartbeat=heartbeat,
@@ -1474,11 +1468,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--account-notification-state",
-        # Empty by default because the hourly digest was retired with the Python
-        # account owner on 2026-08-14 and nothing has written this file since.
-        # Defaulting it from ACCOUNT_EXECUTION_ROOT, as it used to, pointed both
-        # fleets at a frozen file and paged 47 times a day about a notification
-        # channel that was not broken but abolished. The flag still works if a
+        # Empty by default: the hourly digest is retired and nothing writes
+        # this file. Defaulting it from ACCOUNT_EXECUTION_ROOT points both
+        # fleets at a frozen file and pages all day about a notification
+        # channel that is not broken but abolished. The flag still works if a
         # digest ever returns and is pointed at it explicitly.
         default="",
         help=(
@@ -1516,10 +1509,9 @@ def main() -> int:
     carry_root = Path(args.carry_root) if str(args.carry_root).strip() else None
     carry_mainnet_root = Path(args.carry_mainnet_root) if str(args.carry_mainnet_root).strip() else None
     long_mainnet_root = Path(args.long_mainnet_root) if str(args.long_mainnet_root).strip() else None
-    # Repo-data anchoring for both scopes: the state file used to live under
-    # the first sleeve root, which meant a retired sleeve's directory kept
-    # being recreated just to hold it. The two scopes still share no alert
-    # keys, so they keep separate file names.
+    # Repo-data anchoring for both scopes, so no sleeve root is recreated just
+    # to hold this file. The two scopes share no alert keys, so they keep
+    # separate file names.
     _state_root = _REPO_ROOT / "data"
     _state_name = "liveness_watchdog_mainnet.json" if mainnet else "liveness_watchdog.json"
     state_file = args.state_file or (_state_root / ".cache" / _state_name)
@@ -1570,13 +1562,8 @@ def main() -> int:
                 realm="mainnet" if mainnet else "demo",
             )
         )
-    # The account journal is not read here any more. When the Python order path
-    # was deleted on 2026-08-14 this call stayed, on the belief — written into
-    # the comment that used to sit here — that the engine kept feeding the
-    # journal through the same kernel. It does not: no engine crate names the
-    # journal, and the demo file has not moved since 19:58 that day. So the
-    # check spent three days reporting a deleted component's last words as
-    # illness, 23 times a day, and could never clear.
+    # The account journal is not read here any more: no engine crate names the
+    # journal, so the file is frozen and a check against it can never clear.
     #
     # What replaced it is the engine's own account reading, checked inside the
     # heartbeat above, which has a live writer. What is genuinely not replaced
@@ -1634,9 +1621,8 @@ def main() -> int:
             gather_engine_heartbeat_alerts(
                 heartbeat_path=Path(args.engine_heartbeat_file),
                 max_age_seconds=args.max_engine_heartbeat_age_sec,
-                # The same operator dial that used to bound the journal's venue
-                # snapshot now bounds the engine's own account reading: one knob,
-                # pointed at the reader that actually has a writer.
+                # The operator dial that bounds the engine's own account
+                # reading: one knob, pointed at the reader that has a writer.
                 max_account_view_age_minutes=args.max_account_health_age_min,
                 # No now_ms: the engine rewrites this file every few seconds, and
                 # by the time this run reaches it the clock sampled at the top of

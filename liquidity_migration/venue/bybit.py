@@ -953,9 +953,9 @@ class BybitPrivateClient:
             ret_code = payload.get("retCode")
             if ret_code != 0:
                 # "Not now" is not "no". A busy matching engine answering a
-                # reduce-only close used to arrive here as a definite reject,
-                # which terminalizes the command — the stop had fired and the
-                # position kept running. Uncertain instead: the owner keeps the
+                # reduce-only close must not land as a definite reject: that
+                # terminalizes the command, and the position keeps running with
+                # its stop already fired. Uncertain instead: the owner keeps the
                 # command live, reconciliation probes the orderLinkId, and
                 # convergence re-plans what the venue never took.
                 if _is_transient_venue_fault(payload):

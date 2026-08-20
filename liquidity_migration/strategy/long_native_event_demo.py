@@ -135,8 +135,7 @@ from liquidity_migration.data.universe import build_current_universe_table
 SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
 
 #: Where this producer writes the book the engine follows. Unset means it
-#: writes none and publishes intents the old way, which is what the fleet ran
-#: before the engine owned the account.
+#: writes none and publishes intents instead.
 ENGINE_TARGET_BOOK_PATH_ENV = "LONG_ENGINE_TARGET_BOOK_PATH"
 
 #: How long a LONG book may be acted on. It must clear the engine's own
@@ -440,8 +439,7 @@ def run_long_native_demo_cycle(
             # not a fault: entries for it are already suppressed below via
             # active_symbols, and the exits that clear it are planned from the
             # account journal further down this very cycle. Failing here would
-            # block the only publisher of those exits (the pre-2026-08-13
-            # deadlock).
+            # block the only publisher of those exits.
             retirement_exposure = scheduled_retirement_exposure(
                 candidate_reconciliation,
                 route=route,

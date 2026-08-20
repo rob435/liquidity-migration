@@ -2,13 +2,13 @@
 //!
 //! `configs/operational.mainnet.json` is the document that says how much of
 //! the funded account may be at risk. The Python fleet loads it and proves it
-//! at start-up. Until now the engine did not read it at all — the same numbers
-//! were transcribed by hand into a test, which is a copy, and a copy of a risk
-//! limit is a limit that can drift without anyone noticing.
+//! at start-up, and the engine reads the same file rather than a copy of its
+//! numbers — a copy of a risk limit is a limit that can drift without anyone
+//! noticing.
 //!
-//! So the engine reads the same file. If an operator tightens a cap, both
-//! halves tighten. If the two disagree, they disagree because the file says
-//! two things, which is a thing you can go and look at.
+//! If an operator tightens a cap, both halves tighten. If the two disagree,
+//! they disagree because the file says two things, which is a thing you can go
+//! and look at.
 //!
 //! **What is deliberately strict.** Unknown keys inside `account_risk` and
 //! `capital_reference` are refused rather than ignored. Those are the blocks

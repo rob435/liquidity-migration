@@ -1,12 +1,9 @@
 # What was ported, and what changed on the way
 
-This was written while the Python controls were still the reference. Three of
-the four were deleted with the rest of the Python order path on 2026-08-14 —
-`policy/account_loss_guard.py`, `policy/equity_anchored_envelope.py` and
-`venue/venue_protection.py` — after the parity tests below were written against
-them; only the per-sleeve partition's home, `account/account_kernel.py`,
-survives. The comparison columns are kept as the record of what was ported and
-what changed on the way, and the Rust tests are the reference now.
+This is the record of the decision rules the risk kernel carries: what each one
+became in Rust, the defaults it was given, and every place the Rust rule
+deliberately differs from the Python rule it came from. The Rust tests are the
+reference.
 
 What moved here is the **decision**: given an account and an order, allow it,
 allow less of it, or refuse it and say why. Everything the Python controls do
@@ -132,20 +129,20 @@ a capital control nobody chose.
 
 ## The tests
 
-`cargo test -p engine-risk`. Each case names the Python test it mirrors in a
+`cargo test -p engine-risk`. Where a Python twin exists, the case names it in a
 comment above it, so the two implementations are checked against one table:
 
-- `tests/loss_guard.rs` — mirrored `tests/policy/test_account_loss_guard.py`,
-  deleted 2026-08-14 with its module; the Rust file stands alone now
-- `tests/envelope.rs` — mirrored `tests/policy/test_equity_anchored_envelope.py`,
-  deleted the same day; likewise
-- `tests/partition.rs` — `tests/account/test_sleeve_capital_partition.py`,
-  which is still here and still the twin
-- `tests/stops.rs` — mirrored `tests/venue/test_venue_protection.py`, deleted
-  the same day; the entry protection cases in
-  `tests/account/test_account_kernel.py` are still here
+- `tests/envelope.rs` — the equity-anchored envelope
+- `tests/partition.rs` — twinned with
+  `tests/account/test_sleeve_capital_partition.py`
+- `tests/stops.rs` — the stop-attach discipline; the entry protection cases in
+  `tests/account/test_account_kernel.py` are the twin
 - `tests/account_caps.rs` — the account-level checks in `account_kernel.py`:
   `symbol_notional_limit`, `component_gross_limit`, `initial_margin_limit`, and
   the pair `negative_available_margin` / `available_margin_limit`. Each cap is
   checked just under, just over, and after the capital reference has moved
+- `tests/operational_profile.rs` — loads the repository's own
+  `configs/operational.mainnet.json` and `configs/operational.demo.json`, the
+  files the fleet installs, rather than a copy, so a cap that changes in the
+  file changes here
 - `tests/order_and_fail_closed.rs` — evaluation order and unknown state

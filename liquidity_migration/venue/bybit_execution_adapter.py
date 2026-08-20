@@ -45,7 +45,7 @@ class BybitDemoExecutionAdapter:
         # Anchored to the batch journal instant shared by every sibling
         # command, so the budget has to absorb whole-batch venue latency
         # (leverage + create + stop verification per earlier sibling), not one
-        # round trip. 5s wedged a nine-slice entry batch on 2026-08-01.
+        # round trip. A nine-slice entry batch needs more than 5s.
         max_unsubmitted_exposure_age_ns: int = 120_000_000_000,
         entry_stop_verifier: EntryStopVerifier | None = None,
         entry_quotes: EntryQuoteManager | None = None,

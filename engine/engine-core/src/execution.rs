@@ -614,10 +614,10 @@ impl Fills {
         }
         // Replaying a log is not trading: nothing is owed a future mark,
         // because every mark this log will ever hold is already in it. The
-        // drop count goes with the queue -- it counted this replay popping its
+        // drop count goes with the queue -- it counts this replay popping its
         // own transient queue, which is not something that happened to the
-        // run, and reporting it as one sent a reader looking for an incident
-        // that never was.
+        // run, and reporting it as one would send a reader looking for an
+        // incident that never was.
         me.pending.clear();
         me.dropped = 0;
         me

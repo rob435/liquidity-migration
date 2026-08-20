@@ -118,9 +118,8 @@ class KlineStreamManager:
         # The store must retain at least the bootstrap lookback: eviction is
         # anchored to the NEWEST bar, so a retention shorter than the lookback
         # evicts the window head as it lands and the reader's full-window
-        # check can never pass for a name older than retention (observed live
-        # 2026-08-03: LONG served 4/120 symbols). +1 day so the head is never
-        # clipped between hourly refreshes.
+        # check can never pass for a name older than retention. +1 day so the
+        # head is never clipped between hourly refreshes.
         self.retain_days = max(int(self.retain_days), int(self.lookback_days) + 1)
         store_factory = self.store_factory or _default_store_factory
         self._store = store_factory(
@@ -512,7 +511,7 @@ class KlineStreamManager:
         # ``end_ms`` is the newest CLOSED bar's open (inclusive intent), while
         # get_klines' end is EXCLUSIVE — without the +interval the bootstrap
         # can never fetch its newest target bar, and a symbol missing only
-        # that bar re-fetches zero rows on every restart (live 2026-08-04).
+        # that bar re-fetches zero rows on every restart.
         interval_ms = self.interval_minutes * 60_000
         for attempt in range(max(self.bootstrap_max_attempts_per_symbol, 1)):
             try:

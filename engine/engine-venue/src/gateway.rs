@@ -331,14 +331,9 @@ impl VenueGateway for BybitGateway {
         Ok(AccountIdentity {
             user_id,
             // Which realm this gateway was built for, not a reading and not
-            // a guess. This said `demo` unconditionally until 2026-08-14,
-            // from a time when the crate reached the practice account and
-            // nothing else — so the funded engine published `realm: "demo"`
-            // beside the funded account's own user id. Both halves that read
-            // a realm would then have been wrong: the mainnet producers check
-            // it against their own environment and would have blocked every
-            // entry, and the single-writer lease is named by it, so a live
-            // funded engine would have taken a lease in the demo realm's name.
+            // a guess. Both halves that read a realm depend on it: the
+            // mainnet producers check it against their own environment, and
+            // the single-writer lease is named by it.
             realm: realm_name(self.realm).to_string(),
         })
     }
@@ -523,13 +518,11 @@ fn percent_encode(raw: &str) -> String {
 /// file, the heartbeat, and the environment the target producers check their
 /// own against.
 ///
-/// This was `demo` unconditionally until 2026-08-14, left over from a time
-/// when the crate reached the practice account and nothing else. The funded
-/// engine therefore published `realm: "demo"` beside the funded account's own
-/// user id, and both halves that read a realm would have been wrong: the
-/// mainnet producers compare it against their own environment and would have
-/// blocked every entry, and the single-writer lease is named by it, so a live
-/// funded engine would have taken its lease in the demo realm's name.
+/// It is the realm the gateway was built for and never a fixed spelling: the
+/// mainnet producers compare it against their own environment and block every
+/// entry when it disagrees, and the single-writer lease is named by it, so a
+/// funded engine reporting `demo` would take its lease in the wrong realm's
+/// name.
 fn realm_name(realm: VenueRealm) -> &'static str {
     match realm {
         VenueRealm::Demo => crate::lease::REALM_DEMO,

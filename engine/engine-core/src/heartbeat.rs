@@ -71,20 +71,18 @@ pub struct Facts<'a> {
     pub wire: Quantiles,
     /// The account as the venue last described it, and how old that reading
     /// is. This is not telemetry like the rest of this struct: the target
-    /// producers size their entries from the equity here, having read it from
-    /// the Python owner's health file until that owner was deleted. All three
-    /// are written as null when no reading has been taken yet, rather than as
-    /// a confident zero — a producer must be able to tell "no reading" from
+    /// producers size their entries from the equity here. All three are
+    /// written as null when no reading has been taken yet, rather than as a
+    /// confident zero — a producer must be able to tell "no reading" from
     /// "no money".
     ///
-    /// The **age** crosses, not the stamp, and the reason is a fault this cost
-    /// a live deploy to find. The engine's clock is monotonic: it counts from
-    /// an arbitrary instant near boot, so `observed_ns` was a few seconds
-    /// after the engine started. A producer comparing that against the wall
-    /// clock read a healthy engine as fifty-six thousand years stale and
-    /// blocked every entry. An age is the same number in both clocks, so the
-    /// renderer turns it into a wall stamp beside its own, and nothing has to
-    /// know which clock the other half keeps.
+    /// The **age** crosses, not the stamp. The engine's clock is monotonic: it
+    /// counts from an arbitrary instant near boot, so `observed_ns` is a few
+    /// seconds after the engine started, and a producer comparing that against
+    /// the wall clock reads a healthy engine as tens of thousands of years
+    /// stale and blocks every entry. An age is the same number in both clocks,
+    /// so the renderer turns it into a wall stamp beside its own, and nothing
+    /// has to know which clock the other half keeps.
     pub equity_usdt: f64,
     pub available_usdt: f64,
     /// `None` when the engine has not read the venue yet.
