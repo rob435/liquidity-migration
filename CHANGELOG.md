@@ -16,6 +16,34 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~12:34 UTC — both LONG producers were down ~10 hours on the
+  first live price-touch wake; fixed, redeployed, recovered.** The strategy
+  host has been able to wake on a touched price level since the wave-3
+  event clocks (2026-08-13), but the event clock's kind table never learned
+  the word: the first real touches (mainnet ~01:08 UTC, demo 03:01:23 UTC)
+  raised `unknown strategy event kind: price_touch` mid-cycle and killed
+  each producer — and each dying process left its target-capture tape
+  hash-chain inconsistent near the tail (mainnet line 41225 of 41230, demo
+  43425 of 43425), so every later boot failed closed at tape load and the
+  units restart-looped until ~12:30 (demo restart counter 588). Held LONG
+  positions stayed protected throughout — stops are venue-native and the
+  engine keeps its working orders without the producers; carry and the
+  engine were unaffected. The fix (`ff3ca996`, test proven failing first):
+  `price_touch` joins the clock's kind table at the data-arrival tier, and
+  a new contract test derives every kind the host can set from the host's
+  own source and constructs each one, so the next wake kind cannot ship
+  half-wired. Deployed staged 12:31 (`staged-ok commit=ff3ca996`); the two
+  broken tapes were set aside on the host as
+  `strategy-targets.jsonl.chain-broken-2026-08-20` (capture tapes are
+  derived records on the demo-reset deletion list, so a fresh chain is the
+  established recovery shape) and both producers booted clean and cycled
+  healthy by 12:34 (`owner=healthy` on both; demo equity $1,454). Also in
+  this push (`c1780c86`): v7 is named as the current carry version
+  everywhere the dial is documented (trading_logic, operations, STATE's
+  forward-days list, the equity wrapper and skill), and the wrapper summary
+  now reports the PNG the run actually wrote instead of the alphabetically
+  oldest name in the folder.
+
 - **2026-08-20 ~00:10 UTC — the engine's ledger heals itself now, and the
   demo entry block is CLEARED (owner: "fix this permanently").** Two
   repairs shipped in `ce6465ac`+`2c071703` (staged deploys, engines

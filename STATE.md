@@ -14,10 +14,10 @@ match; never append history to this file.
 ### The fleet
 
 - **The engine owns the demo account, and both sleeves feed it.** First
-  deployed 2026-08-14 20:34 UTC; currently at `68b6a29e` (staged deploy
-  2026-08-19 ~22:49 UTC, `staged-ok commit=68b6a29e profile=operational`,
-  `verify-ok … mainnet=armed`), which put carry_hold **v7** on both CARRY
-  producers: v6's registered rule byte-identical plus the pre-settlement
+  deployed 2026-08-14 20:34 UTC; currently at `ff3ca996` (staged deploy
+  2026-08-20 ~12:31 UTC — the price-touch event-kind fix, CHANGELOG that
+  day). The 2026-08-19 ~22:49 deploy (`68b6a29e`) put carry_hold **v7** on
+  both CARRY producers: v6's registered rule byte-identical plus the pre-settlement
   exit read (`strategy_profile=v7 early_exit=1` — the early exit now fires
   on the venue's running rate up to 15 minutes before a dying print pays;
   settled-print fallback kept — CHANGELOG 2026-08-19). Earlier the same
