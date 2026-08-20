@@ -31,7 +31,9 @@ contract. Do not assume a default window is OOS or that both venues are required
 - `carry` renders the registered research config
   `configs/lane2_carry_hold_v6.json` from the cross-venue panel, through the
   same `--research-config` path (below). It is the registered research shape,
-  not a demo daemon replay.
+  not a demo daemon replay. This is also the deployed v7 profile's config —
+  v7 is an execution clock on the same registered file (never create a v7
+  JSON), and its pre-settle exit uplift is not in this render.
 - Neither curve is automatically a literal daemon replay. Capacity, live state,
   netting, optional overlays, order lifecycle, and deploy environment can differ.
   Read `docs/trading_logic.md` and the emitted config before claiming

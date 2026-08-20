@@ -110,9 +110,10 @@ def _run_carry(
 ) -> dict[str, Any]:
     """Render the CARRY sleeve's registered research shape.
 
-    The carry runtime replays ``configs/lane2_carry_hold_v6.json``, so its
-    standard curve is that same config through the --research-config path. It
-    reads the cross-venue panel, not the demo cycle record.
+    The carry runtime (v7 profile) trades ``configs/lane2_carry_hold_v6.json``,
+    so its standard curve is that same config through the --research-config
+    path. It reads the cross-venue panel, not the demo cycle record; v7's
+    pre-settle exit clock is execution-time and is not modeled here.
     """
     from liquidity_migration.strategy.carry_demo import CARRY_CONFIG_PATH
     from liquidity_migration.research.backtest.financed_longs import research_equity_chart
@@ -264,8 +265,10 @@ def main() -> int:
         default="long",
         help=(
             "Comma list: long, carry. 'carry' renders the registered "
-            "research config (lane2_carry_hold_v6) from the cross-venue panel — "
-            "a research-shape simulation, not a daemon replay."
+            "research config (lane2_carry_hold_v6, the file the deployed v7 "
+            "profile trades) from the cross-venue panel — a research-shape "
+            "simulation, not a daemon replay; the v7 pre-settle exit clock "
+            "is execution-time and is not modeled here."
         ),
     )
     p.add_argument(
@@ -368,7 +371,7 @@ def main() -> int:
             print(f"  [X] {s} failed: {type(exc).__name__}: {exc}\n", flush=True)
             results[s] = {"error": str(exc)}
             continue
-        png = _find_png(out) or _plot_equity_csv(out, s)
+        png = payload.get("png") or _find_png(out) or _plot_equity_csv(out, s)
         label = _label(payload)
         needs_pit_detail = "current_universe" in label or "missing_manifest" in label
         verdict = _pit_verdict(label, _delisted_traded(out, root) if needs_pit_detail else None)

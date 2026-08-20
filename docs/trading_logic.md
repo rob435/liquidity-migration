@@ -129,7 +129,8 @@ methodology label `invalid` / `biased_benchmark` / `exploratory` from taint and 
 > deploy receipt in `CHANGELOG.md`). On top of v4, v6 carries v5's two size halvings — stale
 > turnover flow and Binance top-trader de-longing (the whale leg, the book's one non-Bybit
 > input) — and bends the depth ladder with a 1.5 exponent, all in the shared registered
-> scorer. Selection is `CARRY_STRATEGY_PROFILE` (`v3`/`v4`/`v6`) in the unit environment →
+> scorer. Selection is `CARRY_STRATEGY_PROFILE` (`v3`/`v4`/`v6`/`v7` — v7, deployed
+> 2026-08-19, is the current dial on both carry units) in the unit environment →
 > `--strategy-profile`, the same dial shape as LONG's; the journal filing id is the
 > version-free `carry_hold` and never changes with the profile (components born under the
 > pre-2026-08-05 `carry_hold_v3` id drain under it). v4 and v5 keep scoring daily and the

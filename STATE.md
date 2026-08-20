@@ -378,7 +378,14 @@ is the registered forward experiment; v4 held the sleeve from 2026-08-03), the
 CARRY early exit (2026-08-19 late evening: an exiting name is sold at the
 settled print that ends it, not at the next midnight — the registered exit
 test at print time, `CARRY_EARLY_EXIT=1` on both carry units, kill switch is
-setting it to 0; graded from the engine's realized exit fills), LONG
+setting it to 0; graded from the engine's realized exit fills), the CARRY v7
+pre-settle exit clock (2026-08-19 ~22:49 UTC, `CARRY_STRATEGY_PROFILE=v7` on
+both carry units: the same exit test read on the venue's running rate inside
+the last 15 minutes before a held name's settlement, selling before the
+payment instead of one minute after it; config unchanged — v7 trades
+`lane2_carry_hold_v6` byte-identical, so its forward grade continues under one
+config id; graded from engine exit fills against the settled-print
+counterfactual; rollback dial is `v6`), LONG
 v12 wide-stop (2026-08-03), and the entry execution recipes
 (quote-first entries, touch-sized windows, and the replay-selected resting recipe,
 all 2026-08-04 — deployed with `f85371e`). The v6 whale halving makes the carry
