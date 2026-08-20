@@ -51,8 +51,8 @@ concurrent positions, 7-day per-symbol cooldown.
 **Sizing.** Base slot `gross_exposure / max_concurrent_positions` = 10% of equity, times
 `notional_multiplier` 0.5, times the BTC-vol scalar `clip(0.60 / btc_rv, 0.30, 1.25)`,
 times the vol-parity weight `max(min(0.30/vol_used, 3.0), 0.25)` (30d realized vol, 30%
-annual floor, 30% position-weight cap), times 1.5 on weekend entries. Entry leverage 2
-changes margin only, never quantity. Five new entries per cycle maximum; the producer
+annual floor, 30% position-weight cap), times 1.5 on weekend entries. Entry leverage
+(5 since 2026-08-20, 2 before) changes margin only, never quantity. Five new entries per cycle maximum; the producer
 refuses to run if projected full-book initial margin exceeds 50% of equity.
 
 ### `LongV12WideStop` — registered 2026-08-01, deployed 2026-08-03
@@ -106,12 +106,13 @@ from `max_order_notional_pct_equity` 2026-08-05: the old name read as a bound wh
 value replaced the whole sizing chain.)
 
 At the profile's 250,000 USDT capital reference the registered worst-case envelope is
-**234,375.00 USDT gross** and **117,187.50 USDT initial margin**: per-order 9.375% of
-equity (= 23,437.50) × 10 concurrent positions ÷ entry leverage 2. The 9.375% is 5% base
+**234,375.00 USDT gross** and **46,875.00 USDT initial margin**: per-order 9.375% of
+equity (= 23,437.50) × 10 concurrent positions ÷ entry leverage 5. The 9.375% is 5% base
 slot × 1.25 worst-case BTC-vol scale × 1.5 weekend multiplier. Projected full-book initial
-margin is therefore 46.875% against the 50% ceiling — 6.7% of headroom, so barely any
-increase to `notional_multiplier` leaves the fleet able to boot. Runtime profile bytes
-override any number written here.
+margin is therefore 18.75% against the 50% ceiling. Until the 2026-08-20 move to 5×
+leverage the same book projected 117,187.50 USDT — 46.875%, a hair under the ceiling —
+and that is what used to make any rise in `notional_multiplier` a boot risk. Runtime
+profile bytes override any number written here.
 
 **Exit.** Each target declares a 1.5×ATR14 stop and a 4.0×ATR14 take-profit; the account
 owner converts both to venue prices off the first attributable fill and places the stop.
@@ -272,7 +273,7 @@ the account loss guard, not a stop. Entries and covers are priced at 1m kline op
 fill model yet; the first demo weeks exist to measure that gap. The all-name
 generalization (shorting settlement deaths carry never held) is measured-but-unrun and NOT
 part of this config. Evidence: [`research_findings.md`](research/research_findings.md)
-§The exodus short.
+§1 (the exodus short row).
 
 ## Retired sleeves
 

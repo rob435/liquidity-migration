@@ -4,7 +4,7 @@ The underlying run notes, newest last. Each one is a single day's Lane-1
 exploration on already-seen data: it *selected* a result and therefore cannot
 grade it. Registered configs cite these by section for provenance.
 
-Read [`docs/research_findings.md`](../research_findings.md) first — it is the
+Read [`docs/research/research_findings.md`](../research_findings.md) first — it is the
 durable summary of what the evidence supports, including the negative results.
 Come here for the full tables and the reasoning behind a specific number.
 

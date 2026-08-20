@@ -372,8 +372,9 @@ and deploy this strategy in its place. The runtime now exists:
    series is monotone, converging to the baseline from below. Ledger row and method:
    `docs/research/research_findings.md` §2; report in
    `~/SHARED_DATA/bybit_full_pit/reports/carry_hold_exit_grid_2026-08-07/`. Sizing: weight × owner equity × profile multiplier
-   (1.0), per-name 0.10, gross cap 1.0, entry leverage 2 under the engine
-   risk kernel's unchanged caps. **The equity in that product is the equity as
+   (0.5 since 2026-08-20, 1.0 when this was measured), per-name 0.10, gross
+   cap 1.0, entry leverage 5 (2 then) under the engine risk kernel's
+   unchanged caps. **The equity in that product is the equity as
    of the decision, not the live mark** (2026-07-30 change point): sizing off
    the live mark made the day's targets a function of the book's own
    unrealized P&L and rebalanced the whole book every few minutes. Targets are

@@ -775,8 +775,9 @@ evidence trail.
       pay. The edge is non-monotone — essentially all of it is the short leg. Venue
       volume-share migration — the most direct test of the Crowding Transfer
       starting hypothesis below — is dead; the price dislocation pays, the flow
-      migration does not. Scoring primitives are
-      `liquidity_migration/research/panels/cross_section.py`.
+      migration does not. Scoring primitives were
+      `liquidity_migration/research/panels/cross_section.py`, deleted with the
+      non-carry, non-LONG research tree.
 - [x] Withdraw the delisting-decay lead. The 220.8 bp/day figure used a
       look-ahead label (contract stops appearing). No point-in-time trigger
       reaches it: turnover collapse identifies dying contracts at **0.96× lift**,
@@ -819,8 +820,9 @@ evidence trail.
       Binance replication arm beats on return only (Sharpe 1.66 vs 1.84) — see
       the registration block above, which has said so since the same-day
       correction. Module `liquidity_migration/research/backtest/financed_longs.py`, reproduction
-      `scripts/research/screen_financed_longs.py` (reproduces the registered table
-      directly since the 2026-07-27 M19 turnover fix), evidence
+      `scripts/research/screen_financed_longs.py` (deleted 2026-08-19 with the
+      financed-leaders line; it reproduced the registered table directly from
+      the 2026-07-27 M19 turnover fix onward), evidence
       `docs/research/archive/2026-07-26-financed-longs.md` with the 22-row
       negative-results ledger.
 - [ ] Score the registered carry-hold configs on each new completed UTC day
@@ -844,11 +846,13 @@ evidence trail.
       ledger's last scored day at 2026-07-26 until the 2026-08-19 backfill.
       The promoted v4 accrued zero scored forward days in that gap. If this
       is to be believed as a forward record it cannot be a hand ritual —
-      the owner ordered automation on 2026-08-19 and it now runs daily:
-      launchd job `com.liquidity-migration.daily-evidence` (14:30 local on
-      the research box) runs `scripts/research/daily_evidence_run.sh` —
-      refresh → panel rebuild → ledger append — writing
-      `daily_run_status.json` beside the ledger. It refuses a dirty
+      the owner ordered automation on 2026-08-19 and the runner exists:
+      `scripts/research/daily_evidence_run.sh` — refresh → panel rebuild →
+      ledger append — writing `daily_run_status.json` beside the ledger.
+      **It is run by hand.** The launchd job that ran it at 14:30 local was
+      removed the same day it was built, with the scheduler leaving the
+      owner's Mac (CHANGELOG 2026-08-19); nothing schedules it until the new
+      box arrives, so the gap this bullet is about can reopen. It refuses a dirty
       checkout (the provenance rule) and fails closed with the failing
       step named.
 - [ ] Re-derive the settlement-exact surfaces on the corrected scorer:

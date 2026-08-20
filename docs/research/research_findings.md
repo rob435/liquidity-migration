@@ -558,14 +558,15 @@ that this research was replacing a broken deployed book was wrong.
 - **Re-derive the stale magnitudes.** Every *(stale)* row above needs the corrected scorer before any
   magnitude is trusted. Directions are already safe to use.
 - **Forward records.** `scripts/research/score_financed_longs_forward.py` appends one row per config-day (plus
-  three paired differentials — `carry_hold_v2_minus_v1`, `v3_minus_v2`, and `v4_minus_v3`, the last being the
-  experiment the 2026-08-03 v4 promotion rides on) to
+  five paired differentials — `carry_hold_v2_minus_v1` through `v6_minus_v5`; the registered forward
+  experiment is now v6−v5) to
   `~/SHARED_DATA/bybit_full_pit/reports/financed_longs_forward/ledger.csv`. Live-runtime parity — order
   lifecycle, venue stops, partial fills — is modelled nowhere. **The daily sequence stopped 2026-07-28 and sat
   idle for three weeks** (backfilled 2026-08-19); a forward record that stops accruing the moment nobody runs
-  it by hand was the standing argument for automating it — done 2026-08-19 by owner order:
-  `scripts/research/daily_evidence_run.sh` under launchd (`com.liquidity-migration.daily-evidence`,
-  14:30 local), status in `daily_run_status.json` beside the ledger, dirty-checkout refusal kept.
+  it by hand was the standing argument for automating it — the runner was built 2026-08-19 by owner order
+  (`scripts/research/daily_evidence_run.sh`, status in `daily_run_status.json` beside the ledger,
+  dirty-checkout refusal kept) but **the launchd job that drove it was removed the same day** — it is
+  run by hand until the new box arrives, so the argument still stands.
 - **Score the venue-scoped CONTINUOUS admission variant — RETIRED 2026-08-19, owner decision.** Its tooling
   (`render_continuous_admission_variants.py`, `ContinuousEventConfig`) left the tree with the CONTINUOUS
   sleeve on 2026-08-14; the owner chose retirement over restoration. Design constraints for anyone who ever

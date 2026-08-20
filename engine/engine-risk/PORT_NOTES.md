@@ -1,10 +1,12 @@
 # What was ported, and what changed on the way
 
-The Python controls stay the reference and are untouched:
-`liquidity_migration/policy/account_loss_guard.py`,
-`liquidity_migration/policy/equity_anchored_envelope.py`,
-`liquidity_migration/venue/venue_protection.py`, and the per-sleeve capital
-partition in `liquidity_migration/account/account_kernel.py`.
+This was written while the Python controls were still the reference. Three of
+the four were deleted with the rest of the Python order path on 2026-08-14 —
+`policy/account_loss_guard.py`, `policy/equity_anchored_envelope.py` and
+`venue/venue_protection.py` — after the parity tests below were written against
+them; only the per-sleeve partition's home, `account/account_kernel.py`,
+survives. The comparison columns are kept as the record of what was ported and
+what changed on the way, and the Rust tests are the reference now.
 
 What moved here is the **decision**: given an account and an order, allow it,
 allow less of it, or refuse it and say why. Everything the Python controls do
@@ -71,7 +73,7 @@ what the Python kernel does to a batch that breaches one.
 | `notional > max_symbol_notional_usdt` for every symbol of the projected book, entries only (`account_kernel.py:3206-3213`) | `SymbolNotionalBreached`, against every symbol in the projected book | Python's per-symbol figure nets the producers' rows first; the engine adds this order on top of what the symbol already holds and nets nothing | The un-netted figure is never the smaller one, so the engine refuses at least as early. The refusal names this order's symbol when that is the one over, otherwise the lowest-numbered other symbol — the book is assembled partly from hash maps, so "the first one found" would not be the same answer twice |
 | `component_gross > max_component_gross_notional_usdt`, entries only (`account_kernel.py:3121`) | `ComponentGrossBreached`, against the projected gross notional | Both Python sums are account-wide despite the name — `account_kernel.py:3147` says so itself. `component_gross` adds up the target rows; `account_gross` nets each symbol across rows first | The engine's gross is Python's larger figure. It never nets this order against the book, and while the account view does report one net position per symbol, the venue holds only one and the engine refuses two strategies on one symbol at boot, so there is no second row to net away |
 | `account_gross > max_account_gross_notional_usdt`, entries only (`account_kernel.py:3123`) | The envelope allowance, two rows above. **No separate gate** | — | A separate gate could not fire. `component_gross ≥ account_gross` by the triangle inequality, and the profile loader proves `component cap ≤ account cap` (`operational_profile.py:298`), so even in Python this test never refuses on its own. In Rust the envelope is stricter again: worst-case loss is at least gross × the disaster stop fraction, so any book over `reference × multiple` breaches the allowance first. Code here would be unreachable and its test could only pass vacuously |
-| `component_margin > max_initial_margin_usdt`, entries only (`account_kernel.py:3125`) | `InitialMarginBreached`: projected gross ÷ the account leverage | Python divides each row by that row's own requested leverage; the engine's `Intent` carries none, so one account-wide leverage stands in, as the partition's margin share already does | **Looser in one direction, and worth naming.** A row's requested leverage is proved ≤ the account maximum (`account_kernel.py:3073`), so Python's margin figure is never smaller than the engine's. They agree when every order runs at the account leverage, which is how both profiles are written (`entry_leverage` = `max_leverage` = 2.0). Below that the engine charges less margin than Python would. Separately: with both shipped profiles `max_initial_margin_usdt × max_leverage ≥ max_account_gross_notional_usdt`, so the envelope reaches the same book first and this cap binds only where an operator sets it below what the gross cap funds |
+| `component_margin > max_initial_margin_usdt`, entries only (`account_kernel.py:3125`) | `InitialMarginBreached`: projected gross ÷ the account leverage | Python divides each row by that row's own requested leverage; the engine's `Intent` carries none, so one account-wide leverage stands in, as the partition's margin share already does | **Looser in one direction, and worth naming.** A row's requested leverage is proved ≤ the account maximum (`account_kernel.py:3073`), so Python's margin figure is never smaller than the engine's. They agree when every order runs at the account leverage, which is how both profiles are written (`entry_leverage` = `max_leverage` = 5.0 since 2026-08-20, 2.0 before). Below that the engine charges less margin than Python would. Separately: with both shipped profiles `max_initial_margin_usdt × max_leverage ≥ max_account_gross_notional_usdt`, so the envelope reaches the same book first and this cap binds only where an operator sets it below what the gross cap funds |
 | `additional_margin > available_margin`, where `additional` is the projected book's margin minus the standing book's at the same prices, entries only (`account_kernel.py:3127-3146`); and the outright refusal of an entry batch on a negative reading (`account_kernel.py:3022`) | `AvailableMarginExhausted`: this order's own notional ÷ leverage, against `available_usdt` | The engine judges one order against a standing book it never nets against, so the increase *is* this order. The negative-reading refusal needs no second gate | Same quantity and same test. An entry always adds margin, so a negative reading refuses it through the increase test alone — which is what `account_kernel.py:3022` does one branch earlier. Spare margin is what is left *after* the standing book is paid for, so charging the whole book against it would count the standing book twice and cap the account near half its equity |
 | Adapter refuses an exposure-increasing command with no durable entry-attached protection, before any venue call | `MissingStop` | The engine attaches the stop with the entry the same way; the kernel only decides | Same refusal, and equally before any venue call |
 | Long stop must be below the durable decision reference price, short above, both comparisons inclusive | Same, against **every** price the order could fill at: its own limit and the last price the kernel was given | Python has one durable reference price; the engine may hold two disagreeing numbers | Same inclusive geometry; requiring the stop to clear both is stricter than picking either |
@@ -115,13 +117,13 @@ a capital control nobody chose.
 | `envelope.equity_fraction` | `capital_reference.equity_fraction` | 1.0 |
 | `envelope.floor_usdt` | `capital_reference.floor_usdt` | 100.0 |
 | `envelope.expand_dead_band_fraction` | `capital_reference.expand_dead_band_fraction` | 0.05 |
-| `envelope.gross_notional_multiple` | `max_account_gross_notional_usdt / capital_reference_usdt` | demo 2.0, mainnet 1.75 — which is (1.0 carry + 0.75 long) |
+| `envelope.gross_notional_multiple` | `max_account_gross_notional_usdt / capital_reference_usdt` | demo 2.0, mainnet 1.0 — which is (0.5 carry + 0.5 long) |
 | `envelope.disaster_stop_fraction` | `DISASTER_STOP_FRACTION` in `deploy/account-execution-mainnet.env.template` → `--disaster-stop-fraction` → `fallback_stop_fraction`, required in (0, 1) with no default | 0.35, the same number as carry's `declared_stop_loss_fraction` |
 | `envelope.max_symbol_notional_usdt` | `account_risk.max_symbol_notional_usdt` | demo 125_000.0, mainnet 50.0 — half the reference in both |
-| `envelope.max_component_gross_notional_usdt` | `account_risk.max_component_gross_notional_usdt` | demo 500_000.0, mainnet 175.0 — equal to the account gross cap in both, so it never binds as shipped |
+| `envelope.max_component_gross_notional_usdt` | `account_risk.max_component_gross_notional_usdt` | demo 500_000.0, mainnet 100.0 — equal to the account gross cap in both, so it never binds as shipped |
 | `envelope.max_initial_margin_usdt` | `account_risk.max_initial_margin_usdt` | demo 250_000.0, mainnet 100.0 — the reference exactly in both |
-| `partition.leverage` | `account_risk.max_leverage` | 2.0 |
-| `partition.allocations` (mainnet) | `account_risk.sleeve_limits` | carry 100.0 gross / 57.14285714285714 margin; long 75.0 gross / 42.857142857142854 margin. The two margin shares sum to the 100.0 account margin cap exactly |
+| `partition.leverage` | `account_risk.max_leverage` | 5.0 |
+| `partition.allocations` (mainnet) | `account_risk.sleeve_limits` | carry 50.0 gross / 50.0 margin; long 50.0 gross / 50.0 margin. The two margin shares sum to the 100.0 account margin cap exactly |
 | `partition.allocations` (demo) | none declared | empty — unpartitioned |
 | `partition.min_order_notional_usdt` | `InstrumentRules.min_notional`, per symbol from the venue | 1.0 in the partition tests |
 | `qty_tolerance` | `AccountRiskPolicy.quantity_tolerance` | 1e-12 |
@@ -131,11 +133,15 @@ a capital control nobody chose.
 `cargo test -p engine-risk`. Each case names the Python test it mirrors in a
 comment above it, so the two implementations are checked against one table:
 
-- `tests/loss_guard.rs` — `tests/policy/test_account_loss_guard.py`
-- `tests/envelope.rs` — `tests/policy/test_equity_anchored_envelope.py`
-- `tests/partition.rs` — `tests/account/test_sleeve_capital_partition.py`
-- `tests/stops.rs` — `tests/venue/test_venue_protection.py` and the entry
-  protection cases in `tests/account/test_account_kernel.py`
+- `tests/loss_guard.rs` — mirrored `tests/policy/test_account_loss_guard.py`,
+  deleted 2026-08-14 with its module; the Rust file stands alone now
+- `tests/envelope.rs` — mirrored `tests/policy/test_equity_anchored_envelope.py`,
+  deleted the same day; likewise
+- `tests/partition.rs` — `tests/account/test_sleeve_capital_partition.py`,
+  which is still here and still the twin
+- `tests/stops.rs` — mirrored `tests/venue/test_venue_protection.py`, deleted
+  the same day; the entry protection cases in
+  `tests/account/test_account_kernel.py` are still here
 - `tests/account_caps.rs` — the account-level checks in `account_kernel.py`:
   `symbol_notional_limit`, `component_gross_limit`, `initial_margin_limit`, and
   the pair `negative_available_margin` / `available_margin_limit`. Each cap is

@@ -73,8 +73,10 @@ other tool — a lookalike is a second format even when labelled, and this exact
 mistake was made and reverted on 2026-07-28. If a series needs the standard
 format, the wrapper is the only path:
 
-- Registered Lane-2 financed-longs configs render through the SAME standard
-  chart via `--research-config configs/lane2_*.json` (repeatable; output under
+- Registered Lane-2 configs render through the SAME standard chart via
+  `--research-config configs/lane2_*.json` — the carry-hold versions today;
+  the financed-leaders configs this was built for were deleted 2026-08-19
+  (repeatable; output under
   `<out>/research/<config_id>/`, labelled RESEARCH / simulation-on-seen-data;
   added 2026-07-28 with `liquidity_migration.research.backtest.financed_longs.research_equity_chart`).
 

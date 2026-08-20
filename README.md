@@ -12,10 +12,12 @@ account's single-writer lease, both producers size from its heartbeat, and
 the Python order path is deleted. A second engine unit runs against the
 funded account in shadow and has never sent an order.
 
-Measured on-box by `cd engine && cargo run --release -- bench`, with real
-signing and a real disk flush in the chain: the decision itself takes ~83 ns;
-decision → order durable on disk → out the socket takes 3.9 ms median, ~5 ms
-p99. The venue round trip on top is ~175 ms — geography, not software.
+Measured by `cd engine && cargo run --release -- bench`, with real signing and
+a real disk flush in the chain. On the production box: the decision itself
+takes 721 ns; decision → order durable on disk → out the socket takes 2.28 ms
+median, 5.18 ms p99. (On a laptop the decision is faster and the flush slower —
+84 ns and 3.9 ms; both tables are in [docs/engine.md](docs/engine.md).) The
+venue round trip on top is ~172 ms — geography, not software.
 
 The four venue hostnames may be written in exactly one file (`realm.rs`), the
 funded one refuses to build unless `REAL_MONEY` is armed in the host
@@ -29,6 +31,7 @@ sends nothing. Design, crates and safety posture:
 | --- | --- | --- |
 | LONG | `LongV12WideStop` | `LONG_SLEEVE` |
 | CARRY | `lane2_carry_hold_v6` (v7 pre-settle exit clock) | `CARRY_SLEEVE` |
+| EXODUS SHORT | `lane2_exodus_short_v1` — shorts what CARRY's pre-settle exit abandons, demo only | `EXODUS_SHORT_PROFILE` on the demo carry unit; unset drains the book flat |
 | LONG / CARRY, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
 
 Which demo toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not

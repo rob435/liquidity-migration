@@ -26,7 +26,7 @@ match; never append history to this file.
   level loses; the cover clock is the exit). No live fire yet — the sleeve
   waits for the first v7 fire like everything else. Evidence and the
   honest 2024-negative era shape: `docs/research/research_findings.md`
-  §the exodus short; promotion note in `strategy_program.md`.
+  §1 (the exodus short row); promotion note in `strategy_program.md`.
 - **Sizing since 2026-08-20 evening, BOTH surfaces: each sleeve sizes from
   HALF the account at 5x entry leverage** (owner directive; CHANGELOG that
   day, two entries). Demo: `operational.demo.json` — carry multiplier 0.5
@@ -110,8 +110,9 @@ match; never append history to this file.
   - **The funded engine runs in shadow and has never sent an order.** Its
     config and env file are on the host, both mainnet producers write books,
     and it has been watched reading the funded account (552445993, equity
-    $0.0397) under the mainnet profile — reference $100, gross cap $175, a real
-    per-sleeve partition. It sends nothing: `shadow = true` in
+    $0.0397) under the mainnet profile — reference $100, a real per-sleeve
+    partition, and since the 2026-08-20 re-render a $100 gross cap (it was
+    $175). It sends nothing: `shadow = true` in
     `engine-mainnet.toml` and `ENGINE_LIVE=false` in `engine-mainnet.env`, two
     switches, both the owner's, and it takes no account lease while shadow.
 
@@ -207,8 +208,9 @@ match; never append history to this file.
   decide.
 - **No copy of the funded API key remains on the laptop.** `deploy/.env` is
   deleted; `/etc/liquidity-migration/bybit-mainnet.env` on the host is the only
-  copy and the only authority (`REAL_MONEY=true`, carry 2.0, long 1.88, daily
-  loss 0.25). The key was readable in plaintext on the Desktop from 2026-08-05 to
+  copy and the only authority (`REAL_MONEY=true`, daily loss 0.25, carry stop
+  0.35 — the two sizing dials left that file on 2026-08-20, see Risk envelope).
+  The key was readable in plaintext on the Desktop from 2026-08-05 to
   2026-08-08, so **rotation is still owed and is the owner's act.**
 
 ### Trading-rule receipts
@@ -252,9 +254,12 @@ match; never append history to this file.
   it came up with. `mainnet-engine-ok` now prints beside `engine-ok`. Verify a
   deploy by a field only the new code produces, read on **both** heartbeats —
   "active" says nothing about which binary.
-- **Entries rest for 45 s, not 120 s.** 15 live resting entries filled at a
-  median of 1.28 s and a maximum of 36.6 s, so 45 s keeps every passive fill
-  120 s got and bounds the tail; 30 s would have crossed 1 of 15, 15 s, 3 of 15.
+- **A resting entry waits 120 s.** That is the engine's
+  `WorkPolicy::default().window_ms` (`engine-types/src/orders.rs`), it is not
+  exposed in the strategy block, so no host setting reaches it. The 45 s this
+  line claimed until 2026-08-20 was the deleted Python owner's dial, measured
+  from 15 live resting entries that filled at a median of 1.28 s and a maximum
+  of 36.6 s — the measurement stands, the setting went with its owner.
 - **Pricing and market data for the order path now live in the engine.** It
   subscribes its own venue stream per followed symbol and refuses an entry
   decided against a quote older than its declared bound (default 30 s —
@@ -269,7 +274,8 @@ The live order path is the Rust engine's; the honest latency contract and the
 measured table are `docs/engine.md`. The short version, measured on the fleet:
 **83 ns** to decide, **~2.7 ms** decision to bytes-on-wire (the
 fsync-dominated software chain), and live against the venue 2026-08-18
-(n=67): **179 ms median decision→acknowledgment, 512 ms p90, 1013 ms p99**.
+(n=67): **179 ms median decision→acknowledgment, 512 ms p90, 1013 ms worst**
+(at n=67 the tail figure is the worst of the sample, not an estimated p99).
 The 2026-08-18 leverage pre-arm removed the last software round trip in
 entries — proven live 2026-08-19, 8.7 ms decided→wire on a leverage-needing
 entry that paid ~169 ms median the day before. (The owner-loop numbers that
@@ -313,27 +319,30 @@ L2 readiness and exact decision-book capture remain enabled.
 ## Risk envelope
 
 **Demo** (the 25× profile, deployed 2026-07-27): capital reference 250,000 USDT,
-entry leverage 2×, per-symbol notional 125,000, component/account gross 500,000,
-initial margin 250,000; LONG notional multiplier 0.5, CARRY multiplier 1.0
-(per-name 0.10 and gross cap 1.0 from the registered rule, so the CARRY book tops
-out at 1.0× the reference, unlevered). Startup and authorization reject unknown
-profile fields, producer leverage above the owner cap, or registered envelopes
-outside the bound profile.
+per-symbol notional 125,000, component/account gross 500,000, initial margin
+250,000. Since 2026-08-20 evening: entry leverage 5× on every sleeve, account
+max leverage 5×, LONG notional multiplier 0.5 and CARRY multiplier 0.5 (per-name
+0.10 and gross cap 1.0 come from the registered rule and multiply through, so
+the CARRY book tops out at half the sizing equity). Startup and authorization
+reject unknown profile fields, producer leverage above the owner cap, or
+registered envelopes outside the bound profile.
 
-**Real money**: four owner dials, set in the host `bybit-mainnet.env` (values read
-from the host 2026-08-06; the installed risk profile is the render of them).
-`RM_CARRY_LEVERAGE` (**2.0** since 2026-08-06, was 1.0) and `RM_LONG_LEVERAGE`
-(**1.88**) are each sleeve's book ceiling as a multiple of equity, worst case
-included — each carry name takes a tenth of its dial (≈ $20 on ~$100 equity), each
-LONG entry ≈ its dial / 18.75 (≈ $10), and the two dials may total 10.0
+**Real money**: two owner dials remain set in the host `bybit-mainnet.env` (read
+from the host 2026-08-20; the installed risk profile is the render of the dials).
+`RM_DAILY_LOSS_FRACTION` (**0.25**) and `RM_CARRY_STOP_LOSS_FRACTION` (**0.35**)
+are the protections and are the owner's own. The two sizing dials that used to
+sit beside them — `RM_CARRY_LEVERAGE` 2.0 and `RM_LONG_LEVERAGE` 1.88, about 4×
+gross — were removed from the host on 2026-08-20 so that sizing comes from the
+committed defaults instead: carry 0.5 and long 0.5, each sleeve at most half the
+wallet, worst case included (CHANGELOG that day). A sleeve dial is still that
+sleeve's book ceiling as a multiple of equity, each carry name takes a tenth of
+its dial and each LONG entry ≈ its dial / 18.75, and the two may total 10.0
 (`MAX_REAL_MONEY_LEVERAGE` in `policy/real_money_profile.py`; was 9.9 until the
 2026-08-14 CONTINUOUS-envelope removal freed its token share — this line said
-9.9 until 2026-08-19).
-`RM_DAILY_LOSS_FRACTION` (**0.25**) and `RM_CARRY_STOP_LOSS_FRACTION` (0.35) are
-the protections. Everything else the old surface exposed is derived and still
-proved at render; a retired `RM_*` line in an env file is refused by name. Derived
-venue margin leverage ≈ 3.9× at these dials — on a fixed wallet a bigger book is
-more leverage; the two cannot move independently. Honest protection note: the halt
+9.9 until 2026-08-19). Everything else the old surface exposed is derived and
+still proved at render; a retired `RM_*` line in an env file is refused by name.
+Entry leverage is now floored at 5× (it was 2×), so margin at the venue is 5×
+where a book needs it. Honest protection note: the halt
 trips on the day's equity reading falling to the floor — paper loss counts,
 because equity marks the open book — but it only sees the account as often as
 the engine reads it, so a move faster than that reading, or the venue's own
@@ -482,7 +491,7 @@ green, treat the checks as the suspect.
 | The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 90 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
-| Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7.5 states it rather than treating it as settled |
+| Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7, item 5 states it rather than treating it as settled |
 | Nothing watches the venue and our records disagreeing | Since 2026-08-14. `account_health_unhealthy` had one writer, the deleted Python owner; the engine reconciles but publishes no mismatch. Freshness was retargeted at the engine's heartbeat on 08-17, agreement was not. `gather_account_health_alerts()` is kept uncalled as the specification. Needs the engine to publish a mismatch — a design question, owner to decide ([`docs/notifications.md`](docs/notifications.md) §What stopped being watched) |
 | No positive liveness signal reaches the chat | The hourly digest was retired with the Python owner and the dead-man's switch URL is unprovisioned, so silence means either a healthy fleet or a dead box. The engine's heartbeat is checked on-box only, and an on-box watchdog cannot report that the box died |
 

@@ -167,13 +167,13 @@ size, raise the multiple:
 
 | Dial | Default | Meaning |
 | --- | --- | --- |
-| `RM_CARRY_LEVERAGE` | 1.0 | Carry book ceiling, ×equity. Each name takes up to a tenth of the dial: 1.0 → names up to 10% of equity, book up to 100%. |
-| `RM_LONG_LEVERAGE` | 0.75 | LONG book ceiling, ×equity, worst case included (10 slots; entries scale up to 1.25× calm / 1.5× weekend). Each entry ≈ dial/18.75 of equity: 0.75 → ~4% per entry, 1.88 → ~10%. |
+| `RM_CARRY_LEVERAGE` | 0.5 | Carry book ceiling, ×equity. Each name takes up to a tenth of the dial: 0.5 → names up to 5% of equity, book up to 50%. |
+| `RM_LONG_LEVERAGE` | 0.5 | LONG book ceiling, ×equity, worst case included (10 slots; entries scale up to 1.25× calm / 1.5× weekend). Each entry ≈ dial/18.75 of equity: 0.5 → ~2.7% per entry, 1.88 → ~10%. |
 | `RM_DAILY_LOSS_FRACTION` | 0.1 | Daily loss halt against the day's opening **wallet equity**, so an open position's paper loss counts. Trips a flatten, refuses queued entries at admission, never clears on its own. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 
-The two leverage dials may total at most 9.9 (the retired-CONTINUOUS token share keeps its 1% of a 10×
-ceiling). Past a total of ~2 the venue margin leverage the producers request rises with the dials —
+The two leverage dials may total at most 10.0. Past a total of 5 — the entry-leverage floor since
+2026-08-20 — the venue margin leverage the producers request rises with the dials —
 gross above `entry leverage × wallet` is physically unreachable — and the honest protection picture
 changes: the daily loss halt reads wallet equity, so it does see an open book's paper loss, but it only
 gets to act once per owner pass and a fast enough drawdown still meets the venue's liquidation engine
@@ -343,7 +343,14 @@ Terminal states, which are also the exit codes:
 | `LONG_SLEEVE` | `bybit-long-demo` |
 | `CARRY_SLEEVE` | `bybit-carry-demo` |
 
-Which are on right now is in the file itself, not here. The mainnet units have no sleeve toggle:
+Which are on right now is in the file itself, not here.
+
+The exodus short is not in that file. It rides the carry producer and is dialled by
+`EXODUS_SHORT_PROFILE=v1`, set as an `Environment=` line on the demo carry unit
+(`deploy/systemd/liquidity-migration-bybit-carry-demo.service`) and unset on mainnet, which
+is what keeps it demo-only. Unsetting it does flatten: the next cycle publishes a cover for
+every open exodus short rather than leaving the book standing — the one sleeve here whose
+off switch drains it. The mainnet units have no sleeve toggle:
 `REAL_MONEY=true` in the host's `bybit-mainnet.env` is the single arming switch (see *Real money*
 above), and it brings up the mainnet engine, both producers, and the liveness timer together.
 

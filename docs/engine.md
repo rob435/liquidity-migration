@@ -604,7 +604,8 @@ book. "Delete the Python one" never meant deleting that, and it did not.
 
 **It is installed on the host and running in shadow**, since 2026-08-14. It
 has been watched reading the funded account (552445993) under the mainnet
-profile — reference $100, gross cap $175, a real per-sleeve partition — and
+profile — reference $100, a real per-sleeve partition, and since the
+2026-08-20 re-render a $100 gross cap (it was $175) — and
 both mainnet producers write books it reads and routes. It has never sent an
 order and cannot: `shadow = true` in `engine-mainnet.toml` and
 `ENGINE_LIVE=false` in `engine-mainnet.env`, two switches, both the owner's,

@@ -13,9 +13,9 @@ that ledger append-first from a cross-venue panel:
 * every scored panel day is written (seen-data rows carry
   ``forward_eligible=false``) so the ledger is self-describing;
 * the carry-hold sizing experiments get derived rows (``DIFF_PAIRS``):
-  ``carry_hold_v2_minus_v1``, ``carry_hold_v3_minus_v2`` and
-  ``carry_hold_v4_minus_v3``, paired daily differentials, the primary
-  comparison each registration declares. v4's registration declares the
+  ``carry_hold_v2_minus_v1`` through ``carry_hold_v6_minus_v5``, paired daily
+  differentials, the primary comparison each registration declares. v6−v5 is
+  the currently registered forward experiment. v4's registration declares the
   CAPITAL-NORMALISED differential as its experiment, not this raw one — at its
   own capital v4 is not a return improvement (+1.07 bp/day, t 0.47) and this
   row will show that. Read it beside ``mean_gross``: v4's claim is the same

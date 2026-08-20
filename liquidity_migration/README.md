@@ -1,7 +1,8 @@
 # liquidity_migration/
 
-112 modules in twelve subpackages. The path tells you what a module is for; the
-import order tells you what it is allowed to know.
+106 modules in twelve subpackages, not counting the seventeen `__init__.py`.
+The path tells you what a module is for; the import order tells you what it is
+allowed to know.
 
 ## Where things are
 
@@ -11,7 +12,7 @@ import order tells you what it is allowed to know.
 | `marketdata/` | The credential-free public price plane: Bybit public REST/WS, the Binance public client, the WS kline pipeline, the ticker cache | Anything authenticated — that is `venue/` |
 | `data/` | The data root on disk and what fills or validates it: atomic dataset read/write, ingestion, archives and manifests, history fetchers, universe construction, PIT membership and coverage, the trade tape | Live sockets |
 | `account/` | The producers' library, left by the deleted Python order path and proven load-bearing 2026-08-19: contracts, the deterministic kernel, the filesystem route, leases, liveness, protection price math. Nothing here turns a target into a command any more — the Rust engine does | Credentials, venue transport, strategy decisions, placing orders |
-| `rules/` | The registered decision rules production replays, and the target-book contract: the carry-hold rule and its live decision frame, the LONG FC-v11a/v12 profiles with their features and signal, the persisted LONG identities, daily-bar feature math, the engine target-book writer | The historical engines and scorers that grade these rules — that is `research/backtest/` |
+| `rules/` | The registered decision rules production replays, and the target-book contract: the carry-hold rule and its live decision frame, the exodus short's sleeve surface, the LONG FC-v11a/v12 profiles with their features and signal, the persisted LONG identities, daily-bar feature math, the engine target-book writer | The historical engines and scorers that grade these rules — that is `research/backtest/` |
 | `venue/` | The credentialed Bybit edge the surviving Python tools use: private transport, instrument rules, wedged-command resolution, market data with a key. The Rust engine is the only order path; the Python order adapter and quote manager stay only as fixtures for the kernel's tests, and the REST reconciler and execution stream were deleted 2026-08-19 | Anything usable without an API key; placing real orders — that is the engine's |
 | `strategy/` | What the fleet decides to hold right now: the two sleeve producers and daemons, plus shared per-cycle machinery — candidate population, public data plane, planning, scheduling replay, cycle health | The historical engine behind a sleeve — that is `research/backtest/` |
 | `research/panels/` | Causal point-in-time math: panel in, score out — feature panel, risk model, residual momentum, cross-venue substrate | |
