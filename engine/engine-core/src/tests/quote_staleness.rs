@@ -7,6 +7,9 @@
 
 use super::*;
 
+/// Every refusal the opener saw: the symbol, and whether it was reduce-only.
+type Refusals = Rc<RefCell<Vec<(SymbolId, bool)>>>;
+
 /// Places one intent on the first quote it hears — for whatever symbol the
 /// test aimed it at, which is how an entry gets decided against a price that
 /// never arrived — and writes down every refusal.
@@ -15,7 +18,7 @@ struct Opener {
     target: String,
     reduce_only: bool,
     placed: bool,
-    refused: Rc<RefCell<Vec<(SymbolId, bool)>>>,
+    refused: Refusals,
 }
 
 impl Opener {
@@ -23,7 +26,7 @@ impl Opener {
         subscribe: &[&str],
         target: &str,
         reduce_only: bool,
-    ) -> (Self, Rc<RefCell<Vec<(SymbolId, bool)>>>) {
+    ) -> (Self, Refusals) {
         let refused = Rc::new(RefCell::new(Vec::new()));
         (
             Opener {

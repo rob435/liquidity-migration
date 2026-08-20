@@ -132,11 +132,6 @@ impl BybitPublicFeed {
         &self.table
     }
 
-    /// The clock the feed stamps `recv_ns` with.
-    pub fn clock(&self) -> MonoClock {
-        self.clock
-    }
-
     /// The topics this feed subscribes on every connect.
     pub fn topics(&self) -> &[String] {
         &self.topics

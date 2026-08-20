@@ -8,10 +8,12 @@
 //!
 //! Two absences mean different things, and confusing them is how a live book
 //! gets flattened by a data outage:
+//!
 //!   - no book at all (missing, unreadable, or a version we do not know) is
 //!     *no decision*: hold what you hold, do nothing;
 //!   - a book with no targets in it is a decision to *hold nothing*, and its
 //!     exits are acted on like any other.
+//!
 //! This module only ever sees a book that exists; the first case is the
 //! caller's to handle, and it must handle it by not calling.
 

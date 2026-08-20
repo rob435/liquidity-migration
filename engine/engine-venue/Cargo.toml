@@ -22,23 +22,8 @@ hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1
 # src/tls.rs. Already in the lock through hyper-rustls, so nothing new is
 # pulled in.
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
-serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["rt", "net", "time", "io-util", "macros", "sync"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1.44"
-
-# The integration tests reach the crate's own dependencies only through this
-# list; every entry repeats a dependency above at the same version, so the
-# build graph is unchanged. The signing crates are here so a test can derive
-# the expected signature itself rather than ask the code under test for it.
-[dev-dependencies]
-engine-types = { path = "../engine-types" }
-futures-util = "0.3.34"
-hex = "0.4.3"
-hmac = "0.13.0"
-serde_json = "1.0.151"
-sha2 = "0.11.0"
-tokio = { version = "1.53.1", features = ["rt", "net", "time", "io-util", "macros", "sync"] }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }

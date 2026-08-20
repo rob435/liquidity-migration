@@ -455,9 +455,7 @@ struct CtxFacts<'a> {
 
 impl SymbolFacts for CtxFacts<'_> {
     fn held(&self, symbol: &str) -> Option<Held> {
-        let Some(id) = self.ctx.symbol_id(symbol) else {
-            return None;
-        };
+        let id = self.ctx.symbol_id(symbol)?;
         let position = self.ctx.position(id);
         let entry_px = position.as_ref().map(|p| p.entry_px).unwrap_or(0.0);
         // What the reading shows, plus what the engine says was sent and has

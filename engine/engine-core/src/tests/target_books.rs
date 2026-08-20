@@ -196,7 +196,7 @@ fn a_symbol_that_goes_flat_forgets_its_leverage() {
     crate::engine::forget_leverage_where_flat(&mut at, &still_open);
 
     assert_eq!(at.get(&SymbolId(1)), Some(&3.0), "an open symbol keeps it");
-    assert!(at.get(&SymbolId(0)).is_none(), "a flat symbol forgets it");
+    assert!(!at.contains_key(&SymbolId(0)), "a flat symbol forgets it");
 }
 
 #[tokio::test]

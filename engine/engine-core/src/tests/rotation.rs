@@ -128,7 +128,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT", "ETHUSDT"],
-        &[base.clone()],
+        std::slice::from_ref(&base),
         working,
     )
     .await;

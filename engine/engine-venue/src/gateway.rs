@@ -519,6 +519,24 @@ fn percent_encode(raw: &str) -> String {
     out
 }
 
+/// The realm's name as everything outside this crate spells it: the lease
+/// file, the heartbeat, and the environment the target producers check their
+/// own against.
+///
+/// This was `demo` unconditionally until 2026-08-14, left over from a time
+/// when the crate reached the practice account and nothing else. The funded
+/// engine therefore published `realm: "demo"` beside the funded account's own
+/// user id, and both halves that read a realm would have been wrong: the
+/// mainnet producers compare it against their own environment and would have
+/// blocked every entry, and the single-writer lease is named by it, so a live
+/// funded engine would have taken its lease in the demo realm's name.
+fn realm_name(realm: VenueRealm) -> &'static str {
+    match realm {
+        VenueRealm::Demo => crate::lease::REALM_DEMO,
+        VenueRealm::Mainnet => crate::lease::REALM_MAINNET,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -579,20 +597,3 @@ mod tests {
     }
 }
 
-/// The realm's name as everything outside this crate spells it: the lease
-/// file, the heartbeat, and the environment the target producers check their
-/// own against.
-///
-/// This was `demo` unconditionally until 2026-08-14, left over from a time
-/// when the crate reached the practice account and nothing else. The funded
-/// engine therefore published `realm: "demo"` beside the funded account's own
-/// user id, and both halves that read a realm would have been wrong: the
-/// mainnet producers compare it against their own environment and would have
-/// blocked every entry, and the single-writer lease is named by it, so a live
-/// funded engine would have taken its lease in the demo realm's name.
-fn realm_name(realm: VenueRealm) -> &'static str {
-    match realm {
-        VenueRealm::Demo => crate::lease::REALM_DEMO,
-        VenueRealm::Mainnet => crate::lease::REALM_MAINNET,
-    }
-}

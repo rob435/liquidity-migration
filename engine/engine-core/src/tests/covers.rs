@@ -80,7 +80,7 @@ impl Strategy for CoverProbe {
                     side,
                     qty: signed_qty.abs(),
                     kind: OrderKind::Market,
-                    stop: (!reduce_only).then(|| StopSpec {
+                    stop: (!reduce_only).then_some(StopSpec {
                         trigger_px: quote.bid_px * 0.99,
                     }),
                     reduce_only,
