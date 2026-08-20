@@ -16,6 +16,64 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 evening — a deep clean of the repository (owner: "deep clean
+  the repo"). Seven commits, `bb8bbe0c`…`63f0c8ba`, nothing deployed.** Four
+  audits ran in parallel — dead Python, engine cruft, doc staleness, test
+  hygiene — and every finding was re-verified from source before anything
+  moved.
+
+  **Code that nothing calls: about 1,000 lines.** The largest was the indexed
+  trade simulator in `data/trade_lifecycle.py` (`_IndexedTradeState` and the
+  eight helpers only it reached, 402 lines): `long_native.py` reimplemented
+  the loop inline and left the original behind, and the class name appeared
+  exactly once in the tracked tree — its own `class` statement. Twenty single
+  symbols went the same way, each appearing once repo-wide: the whole
+  convergence-report chain, dead accessors on `market_capture` and
+  `account_service`, `BybitPositionStreamCache` (its wallet twin stays live),
+  ownership and metadata guards orphaned by the Python order-path deletion.
+  Ten `TradeLifecycleConfig` fields nothing set and nothing read, five
+  `.env.example` keys the same, ten orphan test helpers. Suite: 2385 → 2371,
+  the difference being the 13 tests that pinned only the dead simulator.
+
+  **Five guards that could not fail, each proved by mutation.** Make
+  `annualized_sharpe` return a constant 0.0 and all six property invariants
+  still pass — the loop's `continue` for a degenerate Sharpe swallows every
+  iteration. Make `carry_hold_weights` or `KlineStore.get_klines` return an
+  empty frame and their "this input changes nothing" guards still pass,
+  because two empty frames are equal. All now pin their content first, and
+  each was re-run red under the mutation and green without it. Eight further
+  assertions were greps for literals of retired features that exist nowhere
+  in the tree, and one grep matched only a comment — the probe-CLI test now
+  reads its source with comments tokenized out.
+
+  **The engine stops declaring what it never uses.** Five manifests named
+  crates no source line mentions; removing them takes 31 packages out of the
+  lock, `aws-lc-sys` and `cmake` included, so a clean build no longer compiles
+  a C crypto library nothing links. Clippy is at zero warnings from eight, and
+  the workspace's one uncalled public item is gone. A comment claiming
+  integration tests see only `[dev-dependencies]` was false and is deleted —
+  `engine-risk` proves it, declaring `engine-types` in `[dependencies]` alone
+  and using it from `tests/`.
+
+  **Twenty stale doc claims, most of them from this same evening.** The sizing
+  change left five files describing the old numbers: `STATE.md` still said the
+  funded env file holds carry 2.0 / long 1.88 (it does not — `grep ^RM_` on
+  the host returns the two protection dials only), and 2× entry leverage and
+  the $175 mainnet gross cap survived in `engine.md`, `trading_logic.md`,
+  `carry_hold.md`, the `operations.md` dial table and `PORT_NOTES.md`, whose
+  every mainnet number was stale and which named three deleted Python files as
+  the live reference in the present tense. `trading_logic.md`'s margin
+  projection was wrong by 2.5× as a result. Also: two research docs claiming a
+  launchd job deleted the day it was made, a p99 that was a worst-of-67, and
+  the exodus sleeve — shipped this afternoon — absent from every operational
+  doc. The markdown-link test covers none of this: backticked paths and prose
+  numbers are not links.
+
+  **Also removed:** 126 bare `# noqa` markers naming rules this repo does not
+  lint (the 143 carrying a written reason keep their comment; the 84 live ones
+  are untouched). `scripts/dev.sh check` green throughout: doctor ready, ruff
+  clean, mypy clean, 2371 Python and 745 engine tests passing.
+
 - **2026-08-20 ~17:5x UTC — the sub-minimum resize churn is dead at the
   planner (`c15c4740`, staged deploy verified).** The follower's dead band
   (max($1, 5% of standing)) could sit under the venue's $5 minimum order
