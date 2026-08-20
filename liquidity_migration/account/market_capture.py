@@ -668,19 +668,6 @@ def _optional_positive_float(value: Any) -> float | None:
     return number
 
 
-def ticker_cache_callback(cache: BybitTickerTouchCache) -> Callable[[Mapping[str, Any]], Any]:
-    """Bridge raw-stream receive stamps into the ticker cache."""
-
-    def callback(message: Mapping[str, Any]) -> Any:
-        cache.on_message(
-            message,
-            local_receive_ts_ns=int(message.get("_local_receive_ts_ns") or 0) or None,
-        )
-        return None
-
-    return callback
-
-
 @dataclass(slots=True)
 class BookReconstruction:
     symbol: str
@@ -945,25 +932,6 @@ class SequenceAwareMarketRecorder:
             self._last_market_readiness_publish_monotonic_ns = None
             if self.owner_invocation_id is not None:
                 _remove_owner_market_readiness(self.store.root)
-
-    def set_book_tick_watch(self, watch: Mapping[str, tuple[float, float]] | None) -> None:
-        """Publish symbol -> (bid, ask): the touch each resting quote's owner
-        last acted on. The stream thread wakes the owner when a watched
-        symbol's touch moves off its published pair.
-
-        Called from the owner thread without the recorder lock: the dict is
-        replaced wholesale, never mutated, and a stream-thread read of the old
-        reference costs at worst one extra wake.
-        """
-
-        self._book_tick_watch = (
-            {
-                str(symbol).upper(): (float(bid), float(ask))
-                for symbol, (bid, ask) in watch.items()
-            }
-            if watch
-            else {}
-        )
 
     def _persist(
         self,
@@ -2035,7 +2003,7 @@ class BybitRawPublicMarketStream:
                 # what is skipped is only the library re-proving UTF-8 validity
                 # in a Python byte loop before doing the same work again.
                 socket.run_forever(ping_interval=20, ping_timeout=10, skip_utf8_validation=True)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.exception("raw Bybit public stream failed")
             finally:
                 with self._lock:
@@ -2118,71 +2086,6 @@ def symbols_from_file(
             raise ValueError("symbol JSON must be a list or {'symbols': [...]} object")
         return {str(symbol).upper() for symbol in value if symbol}
     return {token.upper() for line in text.splitlines() for token in line.replace(",", " ").split() if token}
-
-
-def operational_market_symbols(
-    allowlist: Iterable[str],
-    *,
-    queued: Iterable[str] = (),
-    nonflat: Iterable[str] = (),
-    working: Iterable[str] = (),
-    component_targets: Iterable[str] = (),
-    convergence: Iterable[str] = (),
-    markouts: Iterable[str] = (),
-) -> set[str]:
-    """Return the bounded live-L2 set for an operational account owner.
-
-    The validated symbols file supplies one stable idle heartbeat. BTC is used
-    when available; otherwise the deterministic first allowlisted symbol keeps
-    liveness observable without subscribing the entire candidate universe.
-    Symbols with actual account work remain subscribed until that work clears.
-    """
-
-    allowed = {str(symbol).strip().upper() for symbol in allowlist if str(symbol).strip()}
-    if not allowed:
-        raise ValueError("operational market allowlist must not be empty")
-    required = {"BTCUSDT" if "BTCUSDT" in allowed else min(allowed)}
-    for symbols in (
-        queued,
-        nonflat,
-        working,
-        component_targets,
-        convergence,
-        markouts,
-    ):
-        required.update(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip())
-    return required
-
-
-def warm_symbol_set(
-    desired: set[str],
-    *,
-    warm_until_monotonic: dict[str, float],
-    now_monotonic: float,
-    warm_seconds: float,
-) -> set[str]:
-    """Add symbols whose account work has only just cleared back into ``desired``.
-
-    Dropping a symbol the pass it goes flat means the next entry on it waits
-    for a whole book warmup again. Every currently desired symbol gets a fresh
-    expiry; survivors of an earlier pass stay subscribed until theirs runs out.
-
-    Both arguments are updated in place, which is what the owner loop wants:
-    the expiry map is loop state and the desired set is rebuilt every pass.
-    """
-
-    if not math.isfinite(warm_seconds) or warm_seconds <= 0.0:
-        warm_until_monotonic.clear()
-        return desired
-    deadline = now_monotonic + warm_seconds
-    for symbol in desired:
-        warm_until_monotonic[symbol] = deadline
-    for symbol, expiry in tuple(warm_until_monotonic.items()):
-        if expiry <= now_monotonic:
-            del warm_until_monotonic[symbol]
-        else:
-            desired.add(symbol)
-    return desired
 
 
 def main(argv: list[str] | None = None) -> int:

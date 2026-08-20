@@ -6,7 +6,6 @@ import hashlib
 import logging
 import math
 import threading
-import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 
@@ -16,7 +15,6 @@ from liquidity_migration.account.account_contracts import (
     InstrumentRules,
     MarketInputRef,
 )
-from liquidity_migration.account.account_kernel import AccountExecutionKernel
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.account.market_capture import SequenceAwareMarketRecorder
@@ -206,19 +204,6 @@ class BybitWalletStreamCache:
         except Exception:  # noqa: BLE001 - a malformed frame must not kill the socket
             _logger_account.exception("private wallet frame could not be absorbed")
 
-    def absorb_account_row(self, row: Mapping[str, Any]) -> None:
-        """Store a UNIFIED row read some other way, e.g. the warm REST feed."""
-
-        if not isinstance(row, Mapping):
-            return
-        if str(row.get("accountType") or "UNIFIED").upper() != "UNIFIED":
-            return
-        observed = self.clock.wall_time_ns()
-        with self._lock:
-            self._account = dict(row)
-            self._observed_ns = observed
-            self._updates += 1
-
     @property
     def updates(self) -> int:
         with self._lock:
@@ -236,95 +221,6 @@ class BybitWalletStreamCache:
         if age_ns < 0 or age_ns > max_age_ns:
             return None
         return account, observed
-
-
-class BybitPositionStreamCache:
-    """Latest position row per symbol, as the venue pushed it.
-
-    Entry-attached stop verification reads position truth back the moment the
-    create is acknowledged, to prove the venue really applied the stop. Over
-    REST that is a round trip, and usually two: Bybit lags between accepting
-    the order and making the position readable, so the first read finds
-    nothing and the verifier retries. Measured against a Frankfurt edge that
-    is ~350 ms inside every market entry.
-
-    The push arrives when the position changes, which is exactly the moment
-    being verified, so this is fresher than the read it replaces. It is never
-    authoritative alone: the verifier only accepts a row observed strictly
-    after the order acknowledgement, and reads REST otherwise.
-    """
-
-    def __init__(self, *, clock: Clock | None = None) -> None:
-        self.clock = clock or SystemClock()
-        self._lock = threading.Lock()
-        self._rows: dict[str, tuple[dict[str, Any], int]] = {}
-        # Signalled on every absorbed frame so a caller can wait for the next
-        # one rather than poll the venue for it.
-        self._arrived = threading.Condition(self._lock)
-
-    def on_message(self, message: Mapping[str, Any]) -> None:
-        """Absorb one position frame. Never raises into the socket thread."""
-
-        try:
-            rows = message.get("data") if isinstance(message, Mapping) else None
-            if not isinstance(rows, list):
-                return
-            observed = self.clock.wall_time_ns()
-            with self._arrived:
-                for row in rows:
-                    if not isinstance(row, Mapping):
-                        continue
-                    symbol = str(row.get("symbol") or "").upper()
-                    if not symbol:
-                        continue
-                    self._rows[symbol] = (dict(row), observed)
-                self._arrived.notify_all()
-        except Exception:  # noqa: BLE001 - a malformed frame must not kill the socket
-            _logger_account.exception("private position frame could not be absorbed")
-
-    def wait_for(
-        self,
-        symbol: str,
-        *,
-        after_ts_ns: int,
-        timeout_seconds: float,
-    ) -> Mapping[str, Any] | None:
-        """Block until the venue pushes this symbol's position, or give up.
-
-        A market entry is acknowledged before it fills, and the position does
-        not exist until it does -- which is exactly why the REST verifier had
-        to retry. Waiting for the push costs the few milliseconds the venue
-        actually takes, where polling costs a round trip per attempt. Returning
-        None means the caller reads REST, as it always did.
-        """
-
-        symbol = symbol.upper()
-        bound = max(float(timeout_seconds), 0.0)
-        deadline = time.monotonic() + bound
-        with self._arrived:
-            while True:
-                entry = self._rows.get(symbol)
-                if entry is not None and entry[1] > int(after_ts_ns):
-                    return entry[0]
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    return None
-                self._arrived.wait(remaining)
-
-    def observed_after(self, symbol: str, *, after_ts_ns: int) -> Mapping[str, Any] | None:
-        """The pushed row for ``symbol``, only if it landed after ``after_ts_ns``.
-
-        The bound is the whole safety of this path: a row observed before the
-        order was acknowledged says nothing about whether that order's stop was
-        applied.
-        """
-
-        with self._lock:
-            entry = self._rows.get(symbol.upper())
-        if entry is None:
-            return None
-        row, observed = entry
-        return row if observed > int(after_ts_ns) else None
 
 
 class BybitAccountSnapshotProvider:
@@ -620,55 +516,6 @@ def inspect_bybit_order_ownership(
         conditional_rows_observed=len(conditional),
         unique_orders_observed=len(grouped),
         unowned_orders=tuple(unowned),
-    )
-
-
-def require_bybit_order_ownership(
-    *,
-    client: Any,
-    kernel: AccountExecutionKernel,
-    native_order_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
-) -> None:
-    """Report venue orders with no durable owner; refuse only on a new journal.
-
-    An omitted ``orderFilter`` covers all linear order kinds, but startup also
-    issues an explicit ``StopOrder`` query so a wrapper default cannot hide
-    conditional orders; duplicates fold by venue/client identity. An empty
-    journal owns nothing. Only a still-working kernel command or a
-    verifier-identified native protection is accepted, and nothing here cancels
-    or adopts an order.
-
-    By decision 2026-08-07 the account owner shares the venue account with the
-    owner trading by hand, so an order it does not own is expected and is
-    logged rather than refused. An empty journal still refuses: there, an
-    unowned order is indistinguishable from a journal pointed at the wrong
-    account, which is the case this gate was built for.
-    """
-
-    realm = require_named_realm(client, label="venue-order ownership inspection")
-    state_ref = getattr(kernel, "_state_ref", None)
-    state = state_ref() if callable(state_ref) else kernel.state()
-    snapshot = inspect_bybit_order_ownership(
-        client=client,
-        state=state,
-        native_order_verifier=native_order_verifier,
-    )
-    if not snapshot.unowned_orders:
-        return
-
-    row_summary = "; ".join(
-        order.description for order in snapshot.unowned_orders
-    )
-    if snapshot.journal_events_applied == 0:
-        raise RuntimeError(
-            f"Bybit {realm.value} startup refused venue orders with an empty/new account journal: "
-            + row_summary
-        )
-    _logger_account.warning(
-        "Bybit %s startup saw venue order(s) this account owner does not own; "
-        "treating them as hand-placed and leaving them alone: %s",
-        realm.value,
-        row_summary,
     )
 
 

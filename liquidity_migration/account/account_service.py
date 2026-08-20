@@ -389,46 +389,6 @@ class AccountConvergenceItem:
         return "persistent" if self.retry_limit is None else str(self.retry_limit)
 
 
-@dataclass(frozen=True, slots=True)
-class AccountConvergenceReport:
-    """Owner health view with an explicit grace period for normal fill latency."""
-
-    observed_ts_ns: int
-    grace_ns: int
-    items: tuple[AccountConvergenceItem, ...]
-
-    @property
-    def converged(self) -> bool:
-        return not self.items
-
-    @property
-    def healthy(self) -> bool:
-        return all(
-            item.venue_minimum_dust
-            or item.resting_quote_active
-            or (not item.exhausted and item.age_ns < self.grace_ns)
-            for item in self.items
-        )
-
-    def require_healthy(self) -> None:
-        if self.healthy:
-            return
-        overdue = [
-            item
-            for item in self.items
-            if not item.venue_minimum_dust
-            and not item.resting_quote_active
-            and (item.exhausted or item.age_ns >= self.grace_ns)
-        ]
-        detail = ", ".join(
-            f"{item.symbol}:{item.status}:age_ns={item.age_ns}:"
-            f"attempts={item.retry_attempts_since_fill}/{item.retry_budget_label}"
-            f":total={item.retry_attempts}"
-            for item in overdue
-        )
-        raise RuntimeError(f"account target convergence unhealthy: {detail}")
-
-
 def _sync_data(fd: int) -> None:
     """Force this descriptor's data and length to the disk.
 
@@ -1136,13 +1096,6 @@ class AccountIntentInbox:
                 return processing, request, replacements
             return None
 
-    def peek_next(self) -> AccountTargetRequest | None:
-        """Return the earliest pending request without moving or consuming it."""
-
-        with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
-            queued = self._queued()
-            return queued[0][3] if queued else None
-
     def claim_expected_next(
         self,
         expected_request_id: str,
@@ -1226,28 +1179,6 @@ class AccountIntentInbox:
                 if request.batch_id in processed_batches:
                     return None
             return None
-
-    def recover_processing(self) -> int:
-        with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
-            recovered = 0
-            for processing in sorted((self.root / "processing").glob("*.json")):
-                request = self._read_queued_locked(processing)[0]
-                completed = self.root / "completed" / processing.name
-                if completed.exists():
-                    payload = json.loads(completed.read_bytes())
-                    request_payload = payload.get("request") if isinstance(payload, Mapping) else None
-                    if not isinstance(request_payload, Mapping):
-                        raise RuntimeError(f"completed request {completed.name!r} is unreadable")
-                    completed_request = self._request_from_payload(request_payload)
-                    if completed_request.to_dict() != request.to_dict():
-                        raise RuntimeError(f"processing/completed request {request.request_id!r} changed content")
-                    processing.unlink()
-                    self._queued_cache.pop(str(processing), None)
-                    continue
-                pending = self.root / "pending" / processing.name
-                os.replace(processing, pending)
-                recovered += 1
-            return recovered
 
     def complete(self, claimed_path: Path, receipt: AccountServiceReceipt) -> Path:
         with exclusive_file_lock(self._lock_path, stale_seconds=600, poll_seconds=0.01):
@@ -2580,13 +2511,6 @@ class AccountExecutionService:
             }
         ]
         return max(observed, default=fallback)
-
-    def convergence_report(self) -> AccountConvergenceReport:
-        return AccountConvergenceReport(
-            observed_ts_ns=self.clock.wall_time_ns(),
-            grace_ns=self.convergence_health_grace_ns,
-            items=tuple(plan.item for plan in self._convergence_plans()),
-        )
 
     def _submit_convergence_plan(
         self,

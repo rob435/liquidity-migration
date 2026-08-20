@@ -52,21 +52,8 @@ class TradeLifecycleConfig:
     entry_delay_hours: int = 1
     stop_loss_pct: float = 0.08
     take_profit_pct: float = 0.0
-    mfe_giveback_trigger_pct: float = 0.0
-    mfe_giveback_retain_pct: float = 0.0
-    failed_fade_exit_hours: int = 0
-    failed_fade_min_mfe_pct: float = 0.0
-    failed_fade_loss_pct: float = 0.0
-    failed_fade_close_location_min: float = 1.0
-    # Breakeven trailing stop: once MFE >= breakeven_arm_pct, exit if close
-    # returns to or past entry price. Disabled when 0.0.
-    breakeven_arm_pct: float = 0.0
     cost_multiplier: float = 1.0
     side_mode: str = "long_high_short_low"
-    rank_exit_enabled: bool = False
-    rank_exit_threshold: float = 0.50
-    # Deterministic market-independent exit probability; zero disables it.
-    hash_exit_prob: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

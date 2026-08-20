@@ -10,7 +10,6 @@ import json
 import logging
 import math
 import os
-import secrets
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -67,87 +66,6 @@ class AccountOwnerMarketWarmupPending(RuntimeError):
 
 class AccountOwnerHealthHeadPending(RuntimeError):
     """Fresh healthy owner evidence is briefly behind an advancing journal."""
-
-
-def require_systemd_invocation_id(
-    environment: Mapping[str, str] | None = None,
-    *,
-    require_systemd: bool = True,
-) -> str:
-    """Read and strictly validate the current service generation from systemd.
-
-    Run by hand there is no ``INVOCATION_ID``. A funded owner must be the one
-    systemd supervises, so mainnet still refuses to start without it. Demo
-    synthesizes a generation id of the same shape and says so loudly: the id
-    only has to be unique per process for health and capture to be bound to
-    one generation.
-
-    A present but malformed value is a fault either way and still raises.
-    """
-
-    source = os.environ if environment is None else environment
-    value = source.get("INVOCATION_ID")
-    if value is None:
-        if require_systemd:
-            raise RuntimeError("systemd INVOCATION_ID is required for account-owner startup")
-        generation = secrets.token_hex(16)
-        _logger.warning(
-            "no systemd INVOCATION_ID: this owner is not systemd-supervised; "
-            "synthesized generation id %s for its health and capture projections",
-            generation,
-        )
-        return generation
-    try:
-        return validate_systemd_invocation_id(value)
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-
-def format_convergence_health(report: Any, *, max_items: int = 3) -> str:
-    """Render stable, human-readable desired-vs-executed owner health.
-
-    Ages stay out of the text so a pending transition does not rewrite the
-    health artifact every loop; ``report.healthy`` still applies the age SLA.
-    """
-
-    items = tuple(report.items)
-    if not items:
-        return ""
-    if max_items <= 0:
-        raise ValueError("max convergence health items must be positive")
-    rows = [
-        (
-            f"{item.symbol}:{item.status}:target={item.target_signed_qty:g}:"
-            f"position={item.position_signed_qty:g}:working={item.working_order_count}:"
-            f"residual={item.residual_signed_qty:g}:"
-            f"attempts={item.retry_attempts_since_fill}/{item.retry_budget_label}"
-            f":total={item.retry_attempts}"
-        )
-        for item in items[:max_items]
-    ]
-    omitted = len(items) - len(rows)
-    if omitted:
-        rows.append(f"+{omitted} more")
-    state = "unhealthy" if not report.healthy else "pending"
-    return f"target convergence {state}: " + "; ".join(rows)
-
-
-def fold_convergence_health(
-    report: Any,
-    *,
-    status: AccountOwnerHealthStatus | str,
-    detail: str = "",
-) -> tuple[AccountOwnerHealthStatus, str]:
-    """Fold convergence SLA state into the owner heartbeat projection."""
-
-    output_status = AccountOwnerHealthStatus(status)
-    convergence_detail = format_convergence_health(report)
-    if not report.healthy:
-        output_status = AccountOwnerHealthStatus.BLOCKED
-    output_detail = "; ".join(
-        part for part in (detail, convergence_detail) if part
-    )[:1000]
-    return output_status, output_detail
 
 
 @dataclass(frozen=True, slots=True)

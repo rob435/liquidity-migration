@@ -16,7 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Mapping, Sequence
 
 import polars as pl
 
@@ -31,25 +31,6 @@ _logger = logging.getLogger(__name__)
 
 _DEMO_INSTRUMENTS_CACHE_TTL_MS = 60 * 60 * 1000
 _MATCH_BACKTEST_UNIVERSE_FLOOR = 300
-
-
-class MarketUniverseConfig(Protocol):
-    """Structural public-data config implemented by both strategy configs."""
-
-    @property
-    def execution_environment(self) -> str: ...
-
-    @property
-    def universe_rank_end(self) -> int: ...
-
-    @property
-    def universe_max_symbols(self) -> int: ...
-
-    @property
-    def universe_min_turnover_24h(self) -> float: ...
-
-    @property
-    def lookback_days(self) -> int: ...
 
 
 def _float(value: Any) -> float:
@@ -116,7 +97,7 @@ def top_turnover_kline_universe(
 
     try:
         tickers = market.get_tickers()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _logger.warning("%s kline universe fetch failed (tickers): %s", label, exc)
         return []
     return rank_top_turnover_symbols(tickers, top_n=top_n)
@@ -369,7 +350,7 @@ def _download_recent_1h_klines(
                 store_frame = kline_store.get_klines(
                     covered_symbols, start_ms=start_ms, end_ms=end_ms,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _logger.warning("kline_store get_klines failed; ignoring store: %s", exc)
                 store_frame = _empty_klines()
                 covered_symbols = []

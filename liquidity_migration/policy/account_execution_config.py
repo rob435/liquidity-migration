@@ -28,29 +28,6 @@ from liquidity_migration.core.deterministic_serialization import canonical_json
 REGISTERED_MAX_DEMO_RULE_AGE_HOURS = 168.0
 
 
-def require_registered_demo_rule_max_age_hours(
-    value: object,
-    *,
-    enforce_registered_ceiling: bool = True,
-) -> float:
-    """Validate the instrument-rule receipt age bound.
-
-    Mainnet holds the registered 168-hour ceiling. Demo only needs a
-    finite positive value: with a stale receipt and a probe that will not run,
-    a hard ceiling leaves no way to start the owner short of a code deploy.
-    """
-
-    try:
-        hours = float(str(value))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("max demo rule age must be numeric") from exc
-    if not math.isfinite(hours) or hours <= 0.0:
-        raise ValueError("max demo rule age must be finite and positive")
-    if enforce_registered_ceiling and hours > REGISTERED_MAX_DEMO_RULE_AGE_HOURS:
-        raise ValueError("max demo rule age cannot exceed the registered 168 hours")
-    return hours
-
-
 def _load_json_bytes(data: bytes, *, label: str) -> Mapping[str, Any]:
     payload = json.loads(data)
     if not isinstance(payload, Mapping):
@@ -175,7 +152,7 @@ def load_risk_policy_bytes(data: bytes) -> AccountRiskPolicy:
     if payload.get("kind") == "liquidity_migration_operational_profile":
         # Producers and owner share one profile. The flat policy shape stays
         # readable for isolated tools/tests.
-        from liquidity_migration.policy.operational_profile import load_operational_profile_bytes  # noqa: PLC0415
+        from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
 
         return load_operational_profile_bytes(data).account_risk.to_policy()
     return AccountRiskPolicy(
@@ -189,10 +166,3 @@ def load_risk_policy_bytes(data: bytes) -> AccountRiskPolicy:
     )
 
 
-def load_risk_policy(path: str | Path) -> AccountRiskPolicy:
-    snapshot = read_stable_file(
-        path,
-        label="risk policy",
-        require_single_link=False,
-    )
-    return load_risk_policy_bytes(snapshot.data)

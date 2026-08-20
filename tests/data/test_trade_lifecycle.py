@@ -14,15 +14,11 @@ import pytest
 import liquidity_migration.data.trade_lifecycle as tl
 from liquidity_migration.core.config import TradeLifecycleConfig
 from liquidity_migration.data.trade_lifecycle import (
-    _bar_excursion,
-    _bar_exit_hits,
     _funding_lookup,
     _intrahold_and_gross_stats,
     _max_underwater_days,
     _perp_funding_return,
     _position_weight_stats,
-    _rank_exit_hit,
-    _side_return,
     _worst_rolling_equity_return,
     _worst_volume_day_return,
     build_equity_curve,
@@ -32,162 +28,6 @@ from liquidity_migration.data.trade_lifecycle import (
 
 MS_PER_HOUR = 3_600_000
 MS_PER_DAY = 24 * MS_PER_HOUR
-
-
-# --------------------------------------------------------------------------
-# Intrabar exit detection
-# --------------------------------------------------------------------------
-
-def test_bar_exit_hits_long_stop_only():
-    # Long stop at 92: low pierces it, high never reaches a 110 target.
-    stop_hit, tp_hit = _bar_exit_hits(
-        side="long", high=101.0, low=91.0, stop_price=92.0, take_profit_price=110.0
-    )
-    assert stop_hit is True
-    assert tp_hit is False
-
-
-def test_bar_exit_hits_long_take_profit_only():
-    stop_hit, tp_hit = _bar_exit_hits(
-        side="long", high=111.0, low=99.0, stop_price=92.0, take_profit_price=110.0
-    )
-    assert stop_hit is False
-    assert tp_hit is True
-
-
-def test_bar_exit_hits_short_side_uses_opposite_extremes():
-    # Short stop at 108 triggers on the high; short target at 90 triggers on the low.
-    stop_hit, tp_hit = _bar_exit_hits(
-        side="short", high=109.0, low=89.0, stop_price=108.0, take_profit_price=90.0
-    )
-    assert stop_hit is True
-    assert tp_hit is True
-
-
-def test_bar_exit_hits_no_exit_when_bar_stays_inside_band():
-    stop_hit, tp_hit = _bar_exit_hits(
-        side="long", high=105.0, low=95.0, stop_price=92.0, take_profit_price=110.0
-    )
-    assert stop_hit is False
-    assert tp_hit is False
-
-
-def test_bar_exit_hits_stop_and_target_both_touched_in_one_bar():
-    # Edge case: a single wide bar pierces BOTH the stop and the target.
-    # The helper reports both as hit; conservative resolution is the caller's job.
-    stop_hit, tp_hit = _bar_exit_hits(
-        side="long", high=115.0, low=90.0, stop_price=92.0, take_profit_price=110.0
-    )
-    assert stop_hit is True
-    assert tp_hit is True
-
-
-def test_bar_exit_hits_ignores_missing_protective_levels():
-    # When a level is None the corresponding side can never be flagged.
-    stop_hit, tp_hit = _bar_exit_hits(
-        side="long", high=200.0, low=1.0, stop_price=None, take_profit_price=None
-    )
-    assert stop_hit is False
-    assert tp_hit is False
-
-
-# --------------------------------------------------------------------------
-# Excursion + per-side return accounting
-# --------------------------------------------------------------------------
-
-def test_bar_excursion_sign_convention_long():
-    # Long entry at 100, bar [95, 108]: adverse is the loss leg, favorable the gain leg.
-    adverse, favorable = _bar_excursion(100.0, side="long", high=108.0, low=95.0)
-    assert adverse == pytest.approx(-0.05)
-    assert favorable == pytest.approx(0.08)
-
-
-def test_bar_excursion_sign_convention_short():
-    # Short entry at 100, bar [95, 108]: a higher print is adverse for a short.
-    adverse, favorable = _bar_excursion(100.0, side="short", high=108.0, low=95.0)
-    assert adverse == pytest.approx(-0.08)
-    assert favorable == pytest.approx(0.05)
-
-
-def test_side_return_flips_sign_for_shorts():
-    # Price rose 5%: a long gains it, a short loses it.
-    assert _side_return(100.0, 105.0, side="long") == pytest.approx(0.05)
-    assert _side_return(100.0, 105.0, side="short") == pytest.approx(-0.05)
-    # Price fell 5%: mirrored outcome.
-    assert _side_return(100.0, 95.0, side="long") == pytest.approx(-0.05)
-    assert _side_return(100.0, 95.0, side="short") == pytest.approx(0.05)
-
-
-# --------------------------------------------------------------------------
-# Rank exit logic
-# --------------------------------------------------------------------------
-
-def test_rank_exit_disabled_returns_false():
-    # With the feature off, no rank value can ever trigger an exit.
-    assert (
-        _rank_exit_hit(
-            symbol="AAA",
-            side="long",
-            side_mode="long_high_short_low",
-            bar_end_ts_ms=10,
-            rank_lookup={("AAA", 10): 0.99},
-            enabled=False,
-            threshold=0.5,
-        )
-        is False
-    )
-
-
-def test_rank_exit_missing_lookup_entry_returns_false():
-    # No rank snapshot for this (symbol, bar) -> cannot decide -> stay in.
-    assert (
-        _rank_exit_hit(
-            symbol="AAA",
-            side="long",
-            side_mode="long_high_short_low",
-            bar_end_ts_ms=10,
-            rank_lookup={},
-            enabled=True,
-            threshold=0.5,
-        )
-        is False
-    )
-
-
-def test_rank_exit_long_high_short_low_mode():
-    # long_high_short_low: a long is held for HIGH ranks, so it exits once the
-    # rank fraction drops below the threshold.
-    lookup = {("AAA", 10): 0.30, ("BBB", 10): 0.80}
-    assert _rank_exit_hit(
-        symbol="AAA", side="long", side_mode="long_high_short_low",
-        bar_end_ts_ms=10, rank_lookup=lookup, enabled=True, threshold=0.5,
-    )
-    assert not _rank_exit_hit(
-        symbol="BBB", side="long", side_mode="long_high_short_low",
-        bar_end_ts_ms=10, rank_lookup=lookup, enabled=True, threshold=0.5,
-    )
-    # A short in the same mode is held for LOW ranks; it exits above 1 - threshold.
-    assert _rank_exit_hit(
-        symbol="BBB", side="short", side_mode="long_high_short_low",
-        bar_end_ts_ms=10, rank_lookup=lookup, enabled=True, threshold=0.5,
-    )
-    assert not _rank_exit_hit(
-        symbol="AAA", side="short", side_mode="long_high_short_low",
-        bar_end_ts_ms=10, rank_lookup=lookup, enabled=True, threshold=0.5,
-    )
-
-
-def test_rank_exit_inverted_mode_flips_the_comparison():
-    # The non-default mode reverses which rank extreme each side is held for.
-    lookup = {("AAA", 10): 0.80}
-    assert _rank_exit_hit(
-        symbol="AAA", side="long", side_mode="long_low_short_high",
-        bar_end_ts_ms=10, rank_lookup=lookup, enabled=True, threshold=0.5,
-    )
-    assert not _rank_exit_hit(
-        symbol="AAA", side="short", side_mode="long_low_short_high",
-        bar_end_ts_ms=10, rank_lookup=lookup, enabled=True, threshold=0.5,
-    )
 
 
 # --------------------------------------------------------------------------

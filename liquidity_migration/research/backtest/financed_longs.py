@@ -44,12 +44,6 @@ from liquidity_migration.rules.carry_hold import (
 
 DAY_MS = 86_400_000
 
-#: Measured demo taker fee per side (bp). Provenance: the 2026-07-2x fill
-#: journals measured a 15.56 bp round trip (this constant is its per-side
-#: half); the registered carry configs commit their own copy of the number.
-MEASURED_FEE_SIDE_BP = 7.78
-
-
 #: Renames that make Binance the traded venue. One implementation, two venues:
 #: the replication arms must not be two different code paths.
 BINANCE_VIEW = {
