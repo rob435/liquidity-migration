@@ -16,6 +16,28 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 evening, second entry — the SAME sizing goes to the mainnet
+  surface (owner: "make sure the live system has the same sizing too …
+  remove the dollar caps … im responsible for flipping the switch, you can
+  do anything else").** The mainnet profile is a render of ratio dials and
+  already tracks live equity — there are no absolute dollar caps on that
+  surface; the dollar figures in the file are the render at the $100
+  floor. Committed dial defaults move to the demo posture: carry 1.0 →
+  0.5 and long 0.75 → 0.5 (each sleeve at most HALF the wallet, worst
+  case), and the venue entry-leverage floor 2 → 5
+  (`real_money_profile.py`); `configs/operational.mainnet.json`
+  re-rendered from the new defaults, and every pin updated on both sides
+  of the cross-language twin (`test_real_money_arming.py` /
+  `engine-risk/tests/operational_profile.rs`). KEPT, deliberately: the
+  10%-of-equity daily loss halt, the equity floor, the 50/50 sleeve
+  partition, and the 0.35 carry stop — capital-preservation controls, not
+  sizing. What this changes TODAY: the books the mainnet producers
+  publish and what the shadow engine computes — `shadow = true`,
+  `ENGINE_LIVE=false`, and `REAL_MONEY` stays the owner's own switch; no
+  real order flows from any of this until the owner flips it. Funded
+  equity at the change: $515.31, flat, the daily loss guard tripped
+  earlier today at −11% (its floor is 10%).
+
 - **2026-08-20 evening — demo sizing change point, all three sleeves
   (owner: "each sleeve to use 50% of the account… lever up 5x so we have
   plenty room for entries… we are running tiny size, lets just see how it

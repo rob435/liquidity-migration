@@ -27,12 +27,19 @@ match; never append history to this file.
   waits for the first v7 fire like everything else. Evidence and the
   honest 2024-negative era shape: `docs/research/research_findings.md`
   §the exodus short; promotion note in `strategy_program.md`.
-- **Demo sizing since 2026-08-20 evening: each sleeve sizes from HALF the
-  account at 5x entry leverage** (owner directive; CHANGELOG that day).
-  `operational.demo.json`: carry multiplier 0.5 (was 1.0; LONG already
-  0.5; exodus inherits carry's notional so it halves too), all
-  `entry_leverage` 5.0, account `max_leverage` 5.0. A forward-record
-  change point for all demo fill receipts. Mainnet untouched.
+- **Sizing since 2026-08-20 evening, BOTH surfaces: each sleeve sizes from
+  HALF the account at 5x entry leverage** (owner directive; CHANGELOG that
+  day, two entries). Demo: `operational.demo.json` — carry multiplier 0.5
+  (was 1.0; LONG already 0.5; exodus inherits carry's notional so it
+  halves too), all `entry_leverage` 5.0, account `max_leverage` 5.0.
+  Mainnet: the ratio-dial defaults in `real_money_profile.py` — carry
+  0.5x / long 0.5x of the wallet, entry-leverage floor 5 — with
+  `operational.mainnet.json` the render of those defaults; every cap on
+  that surface tracks live equity (no absolute dollar caps exist there).
+  The 10%-of-equity daily loss halt, the sleeve partition, and the 0.35
+  stops are unchanged. Mainnet remains `shadow = true`,
+  `ENGINE_LIVE=false`: publishing changed, arming did not. A
+  forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** First
   deployed 2026-08-14 20:34 UTC; currently at `e3ac11bf` (staged deploy
   2026-08-20 ~15:5x UTC — the exodus sleeve plus the feed interning-order

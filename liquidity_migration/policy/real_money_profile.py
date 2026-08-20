@@ -50,7 +50,10 @@ MAX_REAL_MONEY_LEVERAGE = 10.0
 
 # Derived constants the old dial surface used to expose. Fixed on purpose:
 # none of them is a sizing decision, and every one is still enforced.
-_ENTRY_LEVERAGE = 2.0  # venue margin leverage floor requested per order
+# 5.0 since 2026-08-20 (owner sizing directive, matching the demo fleet):
+# a margin knob, so entries never fight for room; the loss halt and the
+# envelope are what actually bound the book.
+_ENTRY_LEVERAGE = 5.0  # venue margin leverage floor requested per order
 _EQUITY_FLOOR_USDT = 100.0  # reference floor against unreadable balances
 _EXPAND_DEAD_BAND_FRACTION = 0.05  # envelope expands only past this band
 _SYMBOL_NOTIONAL_FRACTION = 0.5  # largest single-symbol position
@@ -71,12 +74,13 @@ class RealMoneyDials:
     """
 
     #: Carry book ceiling, x equity. Each name takes up to one tenth of the
-    #: dial: at 1.0 a name is up to 10% of equity and the book up to 100%.
-    carry_leverage: float = 1.0
+    #: dial: at 0.5 a name is up to 5% of equity and the book up to 50%.
+    #: 0.5 since 2026-08-20 (owner: each sleeve sizes from half the account).
+    carry_leverage: float = 0.5
     #: LONG book ceiling, x equity, across its 10 slots with the vol/weekend
-    #: upscaling included. Each entry is the dial / 18.75 of equity nominally:
-    #: 0.75 = 4% per entry, 1.875 = 10% per entry.
-    long_leverage: float = 0.75
+    #: upscaling included. Each entry is the dial / 18.75 of equity nominally.
+    #: 0.5 since 2026-08-20, same directive.
+    long_leverage: float = 0.5
     #: Daily realised-loss halt, as a fraction of equity. Trips a flatten.
     daily_loss_fraction: float = 0.1
     #: Venue-native disaster-stop distance on carry entries, armed with the

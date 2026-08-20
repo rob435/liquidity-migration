@@ -198,20 +198,22 @@ def test_the_partition_sums_inside_both_account_caps_at_any_dial_pair(
     )
 
 
-def test_dials_past_two_raise_the_venue_entry_leverage_with_them() -> None:
-    """Gross above entry-leverage x wallet is unreachable, so leverage follows."""
+def test_dials_past_the_floor_raise_the_venue_entry_leverage_with_them() -> None:
+    """Gross above entry-leverage x wallet is unreachable, so leverage follows.
+
+    The floor is 5.0 since 2026-08-20 (owner sizing directive)."""
 
     _data, profile = render_real_money_profile(
-        RealMoneyDials(carry_leverage=1.88, long_leverage=1.0)
+        RealMoneyDials(carry_leverage=4.0, long_leverage=2.0)
     )
-    multiple = 1.88 + 1.0
+    multiple = 4.0 + 2.0
     assert profile.account_risk.max_leverage == pytest.approx(multiple)
     assert profile.carry.entry_leverage == pytest.approx(multiple)
     assert profile.long.entry_leverage == pytest.approx(multiple)
-    # At or under a 2x total the venue leverage keeps its 2.0 floor.
+    # At or under a 5x total the venue leverage keeps its 5.0 floor.
     _data, modest = render_real_money_profile(RealMoneyDials())
-    assert modest.account_risk.max_leverage == 2.0
-    assert modest.carry.entry_leverage == 2.0
+    assert modest.account_risk.max_leverage == 5.0
+    assert modest.carry.entry_leverage == 5.0
 
 
 def test_a_mistyped_dial_is_an_error_not_a_silent_default() -> None:
@@ -956,18 +958,18 @@ def test_the_engine_and_the_fleet_read_the_same_caps_from_the_same_file() -> Non
     account = profile.account_risk
 
     assert profile.capital_reference_usdt == 100.0
-    assert account.max_account_gross_notional_usdt == 175.0
-    assert account.max_component_gross_notional_usdt == 175.0
+    assert account.max_account_gross_notional_usdt == 100.0
+    assert account.max_component_gross_notional_usdt == 100.0
     assert account.max_symbol_notional_usdt == 50.0
     assert account.max_initial_margin_usdt == 100.0
-    assert account.max_leverage == 2.0
+    assert account.max_leverage == 5.0
     assert account.quantity_tolerance == 1e-12
     assert account.max_daily_loss_usdt == 10.0
 
     # The engine holds the account gross cap as a multiple of the reference,
     # because its reference follows the wallet. Same number, stated the way
-    # each side needs it.
-    assert account.max_account_gross_notional_usdt / profile.capital_reference_usdt == 1.75
+    # each side needs it. 1.0 since 2026-08-20: two half-wallet sleeves.
+    assert account.max_account_gross_notional_usdt / profile.capital_reference_usdt == 1.0
 
     reference = profile.capital_reference
     assert reference.tracks_equity is True
@@ -976,10 +978,10 @@ def test_the_engine_and_the_fleet_read_the_same_caps_from_the_same_file() -> Non
     assert reference.expand_dead_band_fraction == 0.05
 
     shares = {limit.sleeve: limit for limit in account.sleeve_limits}
-    assert shares["carry"].max_gross_notional_usdt == 100.0
-    assert shares["carry"].max_initial_margin_usdt == 57.14285714285714
-    assert shares["long"].max_gross_notional_usdt == 75.0
-    assert shares["long"].max_initial_margin_usdt == 42.857142857142854
+    assert shares["carry"].max_gross_notional_usdt == 50.0
+    assert shares["carry"].max_initial_margin_usdt == 50.0
+    assert shares["long"].max_gross_notional_usdt == 50.0
+    assert shares["long"].max_initial_margin_usdt == 50.0
 
-    assert sum(s.max_gross_notional_usdt for s in shares.values()) == 175.0
+    assert sum(s.max_gross_notional_usdt for s in shares.values()) == 100.0
     assert sum(s.max_initial_margin_usdt for s in shares.values()) == 100.0
