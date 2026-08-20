@@ -38,7 +38,9 @@ Fixed, and the first refusal wins:
    below);
 4. **account view freshness**, entries only — older than
    `max_account_view_age_ns` is `StaleAccountView`;
-5. **account loss guard** — `LossGuardTripped`;
+5. ~~account loss guard~~ — the halt was removed on 2026-08-20 by the owner's
+   instruction; its rows in the table below are kept as the record of what was
+   ported, not of what runs;
 6. **stop discipline** — `MissingStop`;
 7. **equity-anchored envelope** — `EnvelopeBreached`;
 8. **account-wide capital caps**, smallest scope first: one symbol's gross

@@ -162,7 +162,6 @@ def load_risk_policy_bytes(data: bytes) -> AccountRiskPolicy:
         max_initial_margin_usdt=float(payload["max_initial_margin_usdt"]),
         max_leverage=float(payload["max_leverage"]),
         quantity_tolerance=float(payload.get("quantity_tolerance") or 1e-12),
-        max_daily_loss_usdt=float(payload.get("max_daily_loss_usdt") or 0.0),
     )
 
 

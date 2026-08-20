@@ -32,23 +32,6 @@ fn positive(value: f64, name: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Daily loss ceiling against the UTC day's opening equity.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LossGuardConfig {
-    /// `None` disables the ceiling; the guard still runs and still refuses on
-    /// blindness. Must be positive when set.
-    pub max_daily_loss_usdt: Option<f64>,
-}
-
-impl LossGuardConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
-        match self.max_daily_loss_usdt {
-            None => Ok(()),
-            Some(ceiling) => positive(ceiling, "max_daily_loss_usdt"),
-        }
-    }
-}
-
 /// The equity-anchored envelope: a capital reference that follows the wallet,
 /// and the worst-case-loss allowance derived from it.
 #[derive(Clone, Debug, PartialEq)]
@@ -223,7 +206,6 @@ impl PartitionConfig {
 pub struct KernelConfig {
     /// An account view older than this is not evidence about the account now.
     pub max_account_view_age_ns: u64,
-    pub loss_guard: LossGuardConfig,
     pub envelope: EnvelopeConfig,
     pub partition: PartitionConfig,
     /// Quantities at or below this are treated as zero.
@@ -232,7 +214,6 @@ pub struct KernelConfig {
 
 impl KernelConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        self.loss_guard.validate()?;
         self.envelope.validate()?;
         self.partition.validate(&self.envelope)?;
         if !self.qty_tolerance.is_finite() || self.qty_tolerance < 0.0 {

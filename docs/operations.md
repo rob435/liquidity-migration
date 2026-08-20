@@ -161,7 +161,7 @@ are what hold size.
 ### Dials
 
 One file: [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template) →
-`/etc/liquidity-migration/bybit-mainnet.env`. Four dials, all optional (omitting one takes the
+`/etc/liquidity-migration/bybit-mainnet.env`. Three dials, all optional (omitting one takes the
 committed default), all ratios of wallet equity. Sizing is one leverage multiple per sleeve — want more
 size, raise the multiple:
 
@@ -169,7 +169,6 @@ size, raise the multiple:
 | --- | --- | --- |
 | `RM_CARRY_LEVERAGE` | 0.5 | Carry book ceiling, ×equity. Each name takes up to a tenth of the dial: 0.5 → names up to 5% of equity, book up to 50%. |
 | `RM_LONG_LEVERAGE` | 0.5 | LONG book ceiling, ×equity, worst case included (10 slots; entries scale up to 1.25× calm / 1.5× weekend). Each entry ≈ dial/18.75 of equity: 0.5 → ~2.7% per entry, 1.88 → ~10%. |
-| `RM_DAILY_LOSS_FRACTION` | 0.1 | Daily loss halt against the day's opening **wallet equity**, so an open position's paper loss counts. Trips a flatten, refuses queued entries at admission, never clears on its own. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 
 The two leverage dials may total at most 10.0. Past a total of 5 — the entry-leverage floor since
@@ -224,11 +223,9 @@ Absolute pre-trade caps (component gross, account gross, initial margin, availab
 and the per-sleeve partition, enforced in the engine's risk kernel before any order leaves:
 [`kernel.rs`](../engine/engine-risk/src/kernel.rs). Caps rescale with observed
 equity: [`envelope.rs`](../engine/engine-risk/src/envelope.rs).
-Daily loss halt, tripping on the day's equity floor and refusing new risk:
-[`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs) — the Python
-owner's automatic safety-flat (`run_safety_flat_once`) went with that owner;
-the kernel gates orders and does not plan flattens, so closing a tripped book
-is `ops.sh flatten`, an operator's act. Venue-native stop armed
+The daily loss halt that used to sit here was removed 2026-08-20 on the
+owner's instruction: there is no account-level daily ceiling, and the
+per-position venue stop is the loss bound. Venue-native stop armed
 in the same `place_order` call and read back after create:
 [`working.rs`](../engine/engine-core/src/working.rs). One writer process per
 account — the engine holds the account lease

@@ -7,17 +7,12 @@ use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};
 use crate::config::{ConfigError, KernelConfig};
 use crate::envelope::Envelope;
 use crate::exposure::{Book, Pending};
-use crate::loss_guard::{LossGuard, LossGuardAnchor};
 
 pub struct Kernel {
     cfg: KernelConfig,
-    guard: LossGuard,
     envelope: Envelope,
     book: Book,
     wall_ns: Option<u64>,
-    /// The anchor as last handed to the engine for the log, so
-    /// `take_control_anchor` reports only real changes.
-    taken_anchor: Option<LossGuardAnchor>,
 }
 
 fn unknown(detail: impl Into<String>) -> DenyReason {
@@ -36,15 +31,12 @@ fn signed(side: Side, qty: f64) -> f64 {
 impl Kernel {
     pub fn new(cfg: KernelConfig) -> Result<Self, ConfigError> {
         cfg.validate()?;
-        let guard = LossGuard::new(cfg.loss_guard.clone());
         let envelope = Envelope::new(cfg.envelope.clone());
         Ok(Self {
             cfg,
-            guard,
             envelope,
             book: Book::default(),
             wall_ns: None,
-            taken_anchor: None,
         })
     }
 
@@ -81,20 +73,6 @@ impl Kernel {
                 px,
             },
         );
-    }
-
-    /// The persistable loss-guard anchor. Write it beside the log.
-    pub fn loss_guard_anchor(&self) -> LossGuardAnchor {
-        self.guard.anchor()
-    }
-
-    pub fn restore_loss_guard(&mut self, anchor: LossGuardAnchor) {
-        self.guard.restore(anchor);
-    }
-
-    /// Clear a loss-guard trip. Only an explicit operator action may call this.
-    pub fn reset_loss_guard(&mut self) {
-        self.guard.reset();
     }
 
     pub fn capital_reference_usdt(&self) -> f64 {
@@ -162,13 +140,6 @@ impl Kernel {
             });
         }
 
-        // 5. The account loss guard.
-        if let Some(trip) = self.guard.observe(view.equity_usdt, self.wall_ns) {
-            return Err(DenyReason::LossGuardTripped {
-                equity_usdt: trip.equity_usdt,
-                floor_usdt: trip.floor_usdt,
-            });
-        }
         self.envelope.observe_equity(view.equity_usdt);
 
         // 6. An unflagged reduction is judged as an entry from here on, but
@@ -410,16 +381,15 @@ impl RiskKernel for Kernel {
     ///    here — risk-reducing orders flow even under a stale reading or a
     ///    tripped guard, exactly as the fleet lets them;
     /// 4. entry freshness — too old is [`DenyReason::StaleAccountView`];
-    /// 5. the account loss guard — [`DenyReason::LossGuardTripped`];
-    /// 6. stop discipline — [`DenyReason::MissingStop`];
-    /// 7. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
-    /// 8. the account-wide capital caps, smallest scope first: one symbol's
+    /// 5. stop discipline — [`DenyReason::MissingStop`];
+    /// 6. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
+    /// 7. the account-wide capital caps, smallest scope first: one symbol's
     ///    gross ([`DenyReason::SymbolNotionalBreached`]), the whole book's
     ///    gross ([`DenyReason::ComponentGrossBreached`]), the whole book's
     ///    margin ([`DenyReason::InitialMarginBreached`]), and whether the
     ///    account's spare margin funds the increase
     ///    ([`DenyReason::AvailableMarginExhausted`]);
-    /// 9. the per-strategy partition, which clamps before it refuses —
+    /// 8. the per-strategy partition, which clamps before it refuses —
     ///    [`DenyReason::PartitionExhausted`].
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict {
         match self.evaluate(intent, account) {
@@ -472,27 +442,6 @@ impl RiskKernel for Kernel {
         Kernel::register_order(self, client_order_id, intent, approved_qty);
     }
 
-    fn take_control_anchor(&mut self) -> Option<String> {
-        let current = self.guard.anchor();
-        if current == LossGuardAnchor::default() && self.taken_anchor.is_none() {
-            return None;
-        }
-        if self.taken_anchor.as_ref() == Some(&current) {
-            return None;
-        }
-        let state = serde_json::to_string(&current).ok()?;
-        self.taken_anchor = Some(current);
-        Some(state)
-    }
-
-    fn restore_control_anchor(&mut self, state: &str) {
-        // An unreadable anchor restores nothing: the log's checksums make
-        // this unreachable short of a hand-edited record.
-        if let Ok(anchor) = serde_json::from_str::<LossGuardAnchor>(state) {
-            self.taken_anchor = Some(anchor.clone());
-            self.guard.restore(anchor);
-        }
-    }
 }
 
 fn read_intent_qty(intent: &Intent) -> Result<f64, DenyReason> {

@@ -5,12 +5,22 @@ initiative. Propose them; the owner decides. Fix a fault instead of proving it
 absent.
 
 Existing capital-preservation controls stay and are not yours to remove either.
-They live in the engine now: the daily loss halt
-([`loss_guard.rs`](engine/engine-risk/src/loss_guard.rs)), the equity-anchored
-envelope ([`envelope.rs`](engine/engine-risk/src/envelope.rs)), the venue-native
-stop discipline ([`working.rs`](engine/engine-core/src/working.rs) and
+They live in the engine now: the equity-anchored envelope
+([`envelope.rs`](engine/engine-risk/src/envelope.rs)), the venue-native stop
+discipline ([`working.rs`](engine/engine-core/src/working.rs) and
 [`reconcile.rs`](engine/engine-core/src/reconcile.rs)), and the per-sleeve
 capital partition ([`kernel.rs`](engine/engine-risk/src/kernel.rs)).
+
+The daily loss halt was the fifth, and it is **gone as of 2026-08-20 on the
+owner's explicit instruction** ("just remove the daily loss ceiling all
+together, we use per position safety"). Its absence is a decision, not a
+regression: do not re-add it, and do not read its absence as a fault. What
+bounds a loss now is the venue-native stop on each position; nothing bounds the
+accumulation of many stopped positions in one day, and the owner accepted that
+trade knowingly. It had tripped twice on the owner's own hand trading — the
+kernel folded whole-account equity, so a shared account made the owner's
+drawdown look like the bot's — and the ceiling was a flat dollar figure that
+never scaled with the wallet.
 
 Until 2026-08-14 this rule named the Python originals — `account_loss_guard.py`,
 `equity_anchored_envelope.py`, `venue_protection.py`, and the partition in

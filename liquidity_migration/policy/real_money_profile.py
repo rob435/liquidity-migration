@@ -82,8 +82,6 @@ class RealMoneyDials:
     #: upscaling included. Each entry is the dial / 18.75 of equity nominally.
     #: 0.5 since 2026-08-20, same directive.
     long_leverage: float = 0.5
-    #: Daily realised-loss halt, as a fraction of equity. Trips a flatten.
-    daily_loss_fraction: float = 0.1
     #: Venue-native disaster-stop distance on carry entries, armed with the
     #: entry. Wide on purpose: the funding-normalisation exit is the intended
     #: exit; this only covers the case where nothing local is running.
@@ -163,8 +161,6 @@ def _validate_dials(dials: RealMoneyDials) -> None:
             f"{MAX_REAL_MONEY_LEVERAGE:g}: that much of the wallet is the ceiling "
             "on a funded account"
         )
-    if not math.isfinite(dials.daily_loss_fraction) or not 0.0 < dials.daily_loss_fraction <= 1.0:
-        raise ValueError("RM_DAILY_LOSS_FRACTION must sit in (0, 1]")
     if not math.isfinite(dials.carry_stop_loss_fraction) or not 0.0 < dials.carry_stop_loss_fraction < 1.0:
         raise ValueError("RM_CARRY_STOP_LOSS_FRACTION must sit in (0, 1)")
 
@@ -254,7 +250,6 @@ def render_real_money_profile_json(
             "max_initial_margin_usdt": margin_cap,
             "max_leverage": leverage,
             "quantity_tolerance": 1e-12,
-            "max_daily_loss_usdt": reference * dials.daily_loss_fraction,
             "sleeve_limits": {
                 "carry": _share(dials.carry_leverage / account_multiple),
                 "long": _share(dials.long_leverage / account_multiple),

@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use engine_risk::{Kernel, KernelConfig, LossGuardConfig};
+use engine_risk::{Kernel, KernelConfig};
 use engine_types::orders::Side;
 use engine_types::risk::{DenyReason, RiskKernel, RiskVerdict};
 
@@ -13,9 +13,6 @@ use engine_types::risk::{DenyReason, RiskKernel, RiskVerdict};
 /// envelope rather than the guard.
 fn envelope_cfg() -> KernelConfig {
     KernelConfig {
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: None,
-        },
         ..equity_tracking_config()
     }
 }
@@ -37,9 +34,6 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
     use engine_types::orders::OrderUpdate;
 
     let cfg = KernelConfig {
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: None,
-        },
         ..demo_config()
     };
     let mut kernel = Kernel::new(cfg).expect("config");
@@ -91,9 +85,6 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
 // test_a_profile_without_the_block_keeps_the_historical_fixed_reference
 fn a_config_that_does_not_track_equity_keeps_its_fixed_reference() {
     let cfg = KernelConfig {
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: None,
-        },
         ..demo_config()
     };
     let mut kernel = Kernel::new(cfg).expect("config");

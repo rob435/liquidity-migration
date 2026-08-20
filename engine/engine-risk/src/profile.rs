@@ -29,7 +29,7 @@ use engine_types::ids::StrategyId;
 use serde_json::Value;
 
 use crate::config::{
-    ConfigError, EnvelopeConfig, KernelConfig, LossGuardConfig, PartitionConfig, StrategyAllocation,
+    ConfigError, EnvelopeConfig, KernelConfig, PartitionConfig, StrategyAllocation,
 };
 
 /// The only schema this reads. A profile from the future is refused rather
@@ -63,7 +63,6 @@ const ACCOUNT_RISK_KEYS: &[&str] = &[
     "max_initial_margin_usdt",
     "max_leverage",
     "quantity_tolerance",
-    "max_daily_loss_usdt",
     "sleeve_limits",
 ];
 
@@ -285,9 +284,6 @@ pub fn kernel_config_from_profile(
 
     let config = KernelConfig {
         max_account_view_age_ns: inputs.max_account_view_age_ns,
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: optional_number(account, "max_daily_loss_usdt", "account_risk")?,
-        },
         envelope,
         partition: PartitionConfig {
             allocations,

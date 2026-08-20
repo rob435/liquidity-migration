@@ -225,11 +225,10 @@ not a pinned number. Equity down rescales immediately; equity up waits for a mov
 missing, non-finite, non-positive or stale reading holds the current reference — unknown is not evidence
 of small.
 
-**Daily loss halt**
-([`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs)). Account-level, because
-the failure that matters is the whole book moving together. `OK`; `BLOCKED` when equity is too stale to
-judge (no new risk, positions stay under their venue stops); `TRIPPED` when the daily ceiling breaks
-against a fresh reading (flatten and stop, never self-clears). The anchor is the day's opening equity,
+**Daily loss halt — removed 2026-08-20, owner's instruction.** It was
+account-level, anchored on the day's opening equity, and on an account the owner hand-trades that meant
+it measured their drawdown as the bot's; it tripped twice that way. Per-position venue-native stops are
+the loss bound now. The paragraph that described its states read:
 not a high-water mark, snapshotted so a restart cannot refresh the budget.
 
 **Venue-native protection**

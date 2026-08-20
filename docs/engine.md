@@ -159,7 +159,7 @@ parallel and integrate by type-check.
 | `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
 | `engine-marketdata` | Bybit public WebSocket: subscribe, sequence-check, parse once into flat per-symbol state, stamp arrival time |
 | `engine-venue` | the venue gateway, demo or funded by realm: HMAC signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and wallet reads, the realm's private WebSocket for order/fill updates |
-| `engine-risk` | the four capital controls, ported: account loss guard, equity-anchored envelope, per-strategy capital partition, stop-attach discipline. Fail-closed |
+| `engine-risk` | the capital controls, ported: equity-anchored envelope, per-strategy capital partition, stop-attach discipline. Fail-closed |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
 | `engine-strategies` | the plugs: a registry from name + TOML to a boxed `Strategy` |
 
@@ -425,7 +425,7 @@ deletes one — retention is the owner's decision.
 
 Every new segment begins with one restatement record (`SegmentBase`) carrying
 everything boot replay needs from the segments before it: the id tables, the
-may-open latch, the loss guard's anchor, every still-open order with its
+may-open latch, every still-open order with its
 partial fills, whose fills built each position, the per-symbol fill totals
 reconciliation compares the venue against, and the intended stop per symbol.
 So boot replays only the newest segment it can trust, and recovers the same

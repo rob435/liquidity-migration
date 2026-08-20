@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use engine_marketdata::BybitPublicFeed;
 use engine_risk::{
-    EnvelopeConfig, Kernel, KernelConfig, LossGuardConfig, PartitionConfig, StrategyAllocation,
+    EnvelopeConfig, Kernel, KernelConfig, PartitionConfig, StrategyAllocation,
 };
 use engine_strategies::build_strategy;
 use engine_types::{
@@ -251,7 +251,6 @@ pub fn heartbeat(
 struct RiskSection {
     max_account_view_age_s: u64,
     /// Absent means no daily ceiling; the guard still refuses on blindness.
-    max_daily_loss_usdt: Option<f64>,
     leverage: f64,
     min_order_notional_usdt: f64,
     #[serde(default = "default_qty_tolerance")]
@@ -344,9 +343,6 @@ pub fn risk(
     }
     let cfg = KernelConfig {
         max_account_view_age_ns: parsed.max_account_view_age_s.saturating_mul(1_000_000_000),
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: parsed.max_daily_loss_usdt,
-        },
         envelope: EnvelopeConfig {
             tracks_equity: parsed.envelope.tracks_equity,
             reference_usdt: parsed.envelope.reference_usdt,
@@ -556,7 +552,6 @@ mod tests {
     /// The shipped engine.toml `[risk]` block.
     const RISK: &str = r#"
 max_account_view_age_s = 120
-max_daily_loss_usdt = 10.0
 leverage = 2.0
 min_order_notional_usdt = 1.0
 

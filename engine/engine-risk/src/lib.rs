@@ -13,14 +13,12 @@ mod config;
 mod envelope;
 mod exposure;
 mod kernel;
-mod loss_guard;
 mod profile;
 
 pub use config::{
-    ConfigError, EnvelopeConfig, KernelConfig, LossGuardConfig, PartitionConfig, StrategyAllocation,
+    ConfigError, EnvelopeConfig, KernelConfig, PartitionConfig, StrategyAllocation,
 };
 pub use kernel::Kernel;
-pub use loss_guard::{LossGuardAnchor, Trip};
 pub use profile::{
     kernel_config_from_profile, ProfileInputs, PROFILE_KIND, PROFILE_SCHEMA_VERSION,
 };

@@ -326,8 +326,8 @@ the per-sleeve partition is the engine's
 `sleeve_limits` — and note the demo profile declares no `sleeve_limits`, so on
 the demo account there is no per-sleeve fence; the Python partition in
 `account_kernel.py` survives in the tree but nothing on the order path runs it);
-[`loss_guard.rs`](../engine/engine-risk/src/loss_guard.rs) halts the day
-at a loss ceiling.
+there is no daily loss ceiling — it was removed 2026-08-20 on the owner's
+instruction, leaving the per-position venue stop as the loss bound.
 
 **The venue stop is exchange-native, one Full-position stop per symbol.** The
 installer is now the engine

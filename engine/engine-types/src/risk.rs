@@ -34,8 +34,6 @@ pub struct AccountView {
 /// log and in tests.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DenyReason {
-    /// The account loss guard tripped (equity below its floor).
-    LossGuardTripped { equity_usdt: f64, floor_usdt: f64 },
     /// The order would breach the equity-anchored envelope.
     EnvelopeBreached { worst_case_loss_usdt: f64, allowance_usdt: f64 },
     /// One symbol would carry more gross notional than the account allows on

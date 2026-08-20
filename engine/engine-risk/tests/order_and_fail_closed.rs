@@ -145,16 +145,6 @@ fn an_unreadable_equity_is_reported_even_when_the_view_is_also_stale() {
 }
 
 #[test]
-fn a_tripped_loss_guard_is_reported_before_a_missing_stop() {
-    let mut kernel = tripped_kernel();
-    let naked = naked_entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, NOW);
-    assert!(matches!(
-        deny_reason(kernel.assess(&naked, &flat(249_000.0, NOW))),
-        DenyReason::LossGuardTripped { .. }
-    ));
-}
-
-#[test]
 fn a_missing_stop_is_reported_before_an_exhausted_partition() {
     let mut kernel = Kernel::new(partition_config()).expect("config");
     // CONTINUOUS has no share at all, and this order carries no stop.

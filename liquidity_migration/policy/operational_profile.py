@@ -88,7 +88,6 @@ class AccountRiskSettings:
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float
-    max_daily_loss_usdt: float = 0.0
     sleeve_limits: tuple[SleeveLimitSettings, ...] = ()
 
     def sleeve_limit(self, sleeve: str) -> SleeveLimitSettings | None:
@@ -105,7 +104,6 @@ class AccountRiskSettings:
             max_initial_margin_usdt=self.max_initial_margin_usdt,
             max_leverage=self.max_leverage,
             quantity_tolerance=self.quantity_tolerance,
-            max_daily_loss_usdt=self.max_daily_loss_usdt,
             sleeve_limits=tuple(
                 SleeveCapitalLimit(
                     sleeve=limit.sleeve,
@@ -258,9 +256,8 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         value,
         label="operational profile account_risk",
         fields=fields,
-        # Absent ``max_daily_loss_usdt`` means no daily loss ceiling; absent
-        # ``sleeve_limits`` means one shared, unpartitioned envelope.
-        optional=frozenset({"max_daily_loss_usdt", "sleeve_limits"}),
+        # Absent ``sleeve_limits`` means one shared, unpartitioned envelope.
+        optional=frozenset({"sleeve_limits"}),
     )
     settings = AccountRiskSettings(
         max_component_gross_notional_usdt=_positive_float(
@@ -284,13 +281,6 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         ),
         quantity_tolerance=_positive_float(
             row["quantity_tolerance"], label="account_risk.quantity_tolerance"
-        ),
-        max_daily_loss_usdt=(
-            _positive_float(
-                row["max_daily_loss_usdt"], label="account_risk.max_daily_loss_usdt"
-            )
-            if row.get("max_daily_loss_usdt") is not None
-            else 0.0
         ),
     )
     if settings.max_symbol_notional_usdt > settings.max_component_gross_notional_usdt:
@@ -575,7 +565,6 @@ def profile_at_capital_reference(
             max_initial_margin_usdt=risk.max_initial_margin_usdt * scale,
             max_leverage=risk.max_leverage,
             quantity_tolerance=risk.quantity_tolerance,
-            max_daily_loss_usdt=risk.max_daily_loss_usdt * scale,
             # Shares are ratios of the reference like the caps they partition,
             # so they rescale with them.
             sleeve_limits=tuple(

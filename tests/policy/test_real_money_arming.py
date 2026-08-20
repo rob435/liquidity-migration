@@ -101,7 +101,6 @@ def test_a_dial_in_the_env_file_reaches_the_rendered_profile() -> None:
         {
             "RM_CARRY_LEVERAGE": "0.5",
             "RM_LONG_LEVERAGE": "1.0",
-            "RM_DAILY_LOSS_FRACTION": "0.05",
             "RM_CARRY_STOP_LOSS_FRACTION": "0.25",
         }
     )
@@ -118,7 +117,6 @@ def test_a_dial_in_the_env_file_reaches_the_rendered_profile() -> None:
         (0.5 + 1.0) * reference
     )
     assert {row.sleeve for row in profile.account_risk.sleeve_limits} == {"carry", "long"}
-    assert profile.account_risk.max_daily_loss_usdt == pytest.approx(0.05 * reference)
     assert profile.carry.declared_stop_loss_fraction == 0.25
     assert profile.carry.notional_multiplier == 0.5
     # LONG's multiplier absorbs the strategy's worst-case upscaling so the
@@ -159,6 +157,14 @@ def test_a_retired_dial_is_refused_by_name() -> None:
     with pytest.raises(ValueError, match="retired real-money dial.*RM_MAX_LEVERAGE"):
         parse_real_money_dials(
             {"RM_MAX_LEVERAGE": "2.0", "RM_CARRY_LEVERAGE": "1.0"}
+        )
+    # Retired 2026-08-20 with the daily loss halt itself. A host env file that
+    # still carries it must fail the render, not quietly render nothing.
+    with pytest.raises(
+        ValueError, match="retired real-money dial.*RM_DAILY_LOSS_FRACTION"
+    ):
+        parse_real_money_dials(
+            {"RM_DAILY_LOSS_FRACTION": "0.25", "RM_CARRY_LEVERAGE": "0.5"}
         )
     with pytest.raises(
         ValueError, match="RM_ACCOUNT_GROSS_MULTIPLE, RM_LONG_NOTIONAL_MULTIPLIER"
@@ -235,7 +241,6 @@ def test_a_mistyped_dial_is_an_error_not_a_silent_default() -> None:
             {"carry_leverage": 6.0, "long_leverage": 5.0},
             "cannot exceed 10",
         ),
-        ({"daily_loss_fraction": 1.5}, "RM_DAILY_LOSS_FRACTION must sit in"),
         ({"carry_stop_loss_fraction": 1.0}, "RM_CARRY_STOP_LOSS_FRACTION must sit in"),
     ],
 )
@@ -251,7 +256,7 @@ def test_every_render_is_reloadable_and_proved() -> None:
         RealMoneyDials(),
         RealMoneyDials(carry_leverage=1.5, long_leverage=0.4),
         RealMoneyDials(carry_leverage=0.05, long_leverage=0.05),
-        RealMoneyDials(daily_loss_fraction=0.02, carry_stop_loss_fraction=0.1),
+        RealMoneyDials(carry_stop_loss_fraction=0.1),
         RealMoneyDials(carry_leverage=0.99, long_leverage=0.99),
     ):
         data, profile = render_real_money_profile(dials)
@@ -964,7 +969,6 @@ def test_the_engine_and_the_fleet_read_the_same_caps_from_the_same_file() -> Non
     assert account.max_initial_margin_usdt == 100.0
     assert account.max_leverage == 5.0
     assert account.quantity_tolerance == 1e-12
-    assert account.max_daily_loss_usdt == 10.0
 
     # The engine holds the account gross cap as a multiple of the reference,
     # because its reference follows the wallet. Same number, stated the way

@@ -51,7 +51,6 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     assert_eq!(cfg.envelope.max_initial_margin_usdt, 100.0);
     assert_eq!(cfg.partition.leverage, 5.0);
     assert_eq!(cfg.qty_tolerance, 1e-12);
-    assert_eq!(cfg.loss_guard.max_daily_loss_usdt, Some(10.0));
 
     // 100 of gross against a 100 reference: the two half-wallet sleeves.
     assert_eq!(cfg.envelope.gross_notional_multiple, 1.0);
@@ -111,9 +110,6 @@ fn the_committed_demo_profile_loads_unpartitioned_and_pinned() {
     assert!(!cfg.envelope.tracks_equity);
     // No sleeve_limits: the account caps alone bind.
     assert!(cfg.partition.allocations.is_empty());
-    // No max_daily_loss_usdt: the ceiling is off, though the guard still runs
-    // and still refuses to act on an unreadable account.
-    assert_eq!(cfg.loss_guard.max_daily_loss_usdt, None);
 }
 
 #[test]
@@ -128,6 +124,22 @@ fn a_cap_the_engine_does_not_read_is_refused_rather_than_ignored() {
         err.to_string().contains("max_overnight_notional_usdt"),
         "{err}"
     );
+}
+
+#[test]
+fn the_retired_daily_loss_ceiling_is_refused_rather_than_ignored() {
+    // The daily loss halt was removed 2026-08-20 on the owner's instruction.
+    // Every funded host had `max_daily_loss_usdt` in its installed profile at
+    // that moment, so the dangerous outcome is not refusal — it is an engine
+    // that reads the key, ignores it, and lets the operator believe a ceiling
+    // is still in force. Refusal names the key and stops the start.
+    let sleeves = both_sleeves();
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    doc["account_risk"]["max_daily_loss_usdt"] = serde_json::json!(25.0);
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves))
+        .expect_err("a retired ceiling was accepted");
+    assert!(err.to_string().contains("max_daily_loss_usdt"), "{err}");
 }
 
 #[test]

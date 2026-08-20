@@ -11,9 +11,7 @@
 mod common;
 
 use common::*;
-use engine_risk::{
-    EnvelopeConfig, Kernel, KernelConfig, LossGuardConfig, PartitionConfig, StrategyAllocation,
-};
+use engine_risk::{EnvelopeConfig, Kernel, KernelConfig, PartitionConfig, StrategyAllocation};
 use engine_types::orders::Side;
 use engine_types::risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 
@@ -23,9 +21,6 @@ const NOW: u64 = SEC;
 fn mainnet_config() -> KernelConfig {
     KernelConfig {
         max_account_view_age_ns: MAX_VIEW_AGE_NS,
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: Some(10.0),
-        },
         envelope: EnvelopeConfig {
             tracks_equity: true,
             reference_usdt: 100.0,

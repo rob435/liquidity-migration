@@ -16,6 +16,46 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~20:00 UTC — the daily loss halt is removed, whole, on the
+  owner's instruction** ("just remove the daily loss ceiling all together, we
+  use per position safety"). `loss_guard.rs`, `LossGuardConfig`, the
+  `LossGuardTripped` refusal, the kernel's fifth evaluation step, the
+  `max_daily_loss_usdt` profile key, the `RM_DAILY_LOSS_FRACTION` dial and the
+  seventeen tests that held it: gone. **What bounds a loss now is the
+  venue-native stop on each position. Nothing bounds the accumulation of many
+  stopped positions in one day**, and the owner took that trade knowingly —
+  written into AGENTS.md so no later agent reads the absence as a regression
+  and puts it back.
+
+  **Why it went, measured rather than asserted.** It had tripped twice on the
+  owner's own hand trading, because `kernel.rs` folded whole-account equity and
+  the funded account is one the owner trades beside the bot: 2026-08-10 (450.08
+  → 306.06, bot flat, two days locked out) and again 2026-08-20 18:00 UTC
+  (equity 479.225 against a floor of 479.446) on an engine that has never sent
+  an order. And the ceiling was **a flat $25, not a fraction of anything**: the
+  render computes `reference × RM_DAILY_LOSS_FRACTION` at the $100 floor, and
+  `envelope.scale()` is applied to the symbol cap (`kernel.rs:292`) and both
+  partition shares (`:378-379`) but never to the loss ceiling — `loss_guard.rs`
+  read it raw. So a 0.25 dial bought $25 on a $530 wallet, ~4.7%, tightening as
+  the account grew. STATE.md called it "the 10%-of-equity daily loss halt" and
+  operations.md described it as working "against the day's opening wallet
+  equity"; both were wrong, and both are corrected.
+
+  **Two wire-format traps, both checked before cutting.** An unparseable WAL
+  record makes the engine refuse to boot by design ("the disk is fine and the
+  data is real, so refuse rather than delete it"), so removing a `DenyReason`
+  variant is only safe if no surviving log carries it: the **live demo ledger
+  has zero** `LossGuardTripped` records (demo never configured a ceiling) while
+  the funded log had 1.6 million — with zero orders sent and zero fills, so
+  nothing evidentiary — and it was purged with its engine stopped. The demo
+  ledger's six `ControlAnchor` records mean that variant STAYS; the kernel now
+  simply takes the trait's no-op default, so old anchors replay and are ignored.
+  Second trap: the engine refuses a profile key it does not read, and every
+  funded host had `max_daily_loss_usdt` installed — a new test asserts that key
+  is refused **by name** rather than silently ignored, because an engine that
+  reads a ceiling and drops it is worse than one that will not start. The
+  retired dial is refused the same way, by the mechanism the repo already had.
+
 - **2026-08-20 ~19:20 UTC — the deep clean is deployed (`41f8c1d4`, staged
   `--stop-first`), and cleaning the VPS found a live defect.** `staged-ok`,
   `verify-ok … mainnet=armed`, and both `engine-ok` and `mainnet-engine-ok` on

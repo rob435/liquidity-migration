@@ -36,8 +36,8 @@ match; never append history to this file.
   0.5x / long 0.5x of the wallet, entry-leverage floor 5 — with
   `operational.mainnet.json` the render of those defaults; every cap on
   that surface tracks live equity (no absolute dollar caps exist there).
-  The 10%-of-equity daily loss halt, the sleeve partition, and the 0.35
-  stops are unchanged. Mainnet remains `shadow = true`,
+  The sleeve partition and the 0.35 stops are unchanged (the daily loss
+  halt was removed 2026-08-20, below). Mainnet remains `shadow = true`,
   `ENGINE_LIVE=false`: publishing changed, arming did not. A
   forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** First
@@ -178,16 +178,21 @@ match; never append history to this file.
   for the two days between. The reset archived the anchor file beside itself
   (`account_loss_guard.json.tripped-20260810.reset-20260812T191330Z.bak`) and
   re-anchored the day cleanly on restart.
-- **The funded daily loss halt is TRIPPED and latched, since ~2026-08-20 18:00
-  UTC.** The engine's refusal carries the numbers: equity 479.225 against a
-  floor of 479.446, under by 22 cents, on an opening equity near 532.7 with the
-  10% ceiling. Equity has since recovered (517.8 at 19:20 UTC) but the latch
-  does not care: `loss_guard.rs` returns the trip before the day-roll check, so
-  it never expires on its own, it is persisted and restored across boots, and
-  `reset_loss_guard()` has no production caller — **no shipped command clears
-  it.** The funded engine is in shadow so nothing was going to trade anyway;
-  what the latch actually produces is the write loop in Open operational
-  defects below.
+- **There is no daily loss halt any more (removed 2026-08-20, owner's
+  instruction: "just remove the daily loss ceiling all together, we use per
+  position safety").** The whole control is out of the tree — `loss_guard.rs`,
+  `LossGuardConfig`, the `LossGuardTripped` refusal, the
+  `max_daily_loss_usdt` profile key and the `RM_DAILY_LOSS_FRACTION` dial. A
+  profile that still carries the key is refused by name at start-up rather than
+  silently ignored, and a host env that still carries the dial fails the render.
+  **What bounds a loss now is the venue-native stop on each position. Nothing
+  bounds the accumulation of many stopped positions in one day** — the owner
+  accepted that knowingly. Why it went: on an account the owner hand-trades the
+  kernel folded whole-account equity, so their drawdown read as the bot's, and
+  it had tripped twice that way (2026-08-10, and again 2026-08-20 18:00 UTC at
+  equity 479.225 against a 479.446 floor, on a funded engine that has never sent
+  an order). The ceiling was also a flat $25 that never scaled with the wallet
+  while every other cap did.
 - **Real money is armed**, and the owner hand-trades the same venue account.
 - **The bot and the owner keep separate books on one account** (owner's decision
   2026-08-07). Venue exposure above what the bot owns, and venue orders the bot
@@ -218,8 +223,9 @@ match; never append history to this file.
   decide.
 - **No copy of the funded API key remains on the laptop.** `deploy/.env` is
   deleted; `/etc/liquidity-migration/bybit-mainnet.env` on the host is the only
-  copy and the only authority (`REAL_MONEY=true`, daily loss 0.25, carry stop
-  0.35 — the two sizing dials left that file on 2026-08-20, see Risk envelope).
+  copy and the only authority (`REAL_MONEY=true` and the carry stop 0.35 — the
+  two sizing dials left that file on 2026-08-20, and the daily-loss dial went
+  with the halt itself the same evening).
   The key was readable in plaintext on the Desktop from 2026-08-05 to
   2026-08-08, so **rotation is still owed and is the owner's act.**
 
@@ -339,8 +345,9 @@ registered envelopes outside the bound profile.
 
 **Real money**: two owner dials remain set in the host `bybit-mainnet.env` (read
 from the host 2026-08-20; the installed risk profile is the render of the dials).
-`RM_DAILY_LOSS_FRACTION` (**0.25**) and `RM_CARRY_STOP_LOSS_FRACTION` (**0.35**)
-are the protections and are the owner's own. The two sizing dials that used to
+`RM_CARRY_STOP_LOSS_FRACTION` (**0.35**) is the protection dial and is the
+owner's own. `RM_DAILY_LOSS_FRACTION` was retired on 2026-08-20 with the daily
+loss halt; an env file that still carries it fails the render by name. The two sizing dials that used to
 sit beside them — `RM_CARRY_LEVERAGE` 2.0 and `RM_LONG_LEVERAGE` 1.88, about 4×
 gross — were removed from the host on 2026-08-20 so that sizing comes from the
 committed defaults instead: carry 0.5 and long 0.5, each sleeve at most half the
@@ -364,7 +371,7 @@ liquidation engine, can still outrun it at high leverage.
   `REAL_MONEY=true` in the root-owned
   `/etc/liquidity-migration/bybit-mainnet.env`, beside the live key. A git commit
   can never arm; activation still walks the full preflight, and every
-  capital-preservation control (loss halt, envelope, native stops, partition,
+  capital-preservation control (envelope, native stops, partition,
   single-writer lease, reconciliation) gates the start.
 - **The funded account must stay in one-way position mode** (see Now — a
   venue-side switch to hedge mode would reject every fleet order).
@@ -503,7 +510,6 @@ green, treat the checks as the suspect.
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7, item 5 states it rather than treating it as settled |
 | Nothing watches the venue and our records disagreeing | Since 2026-08-14. `account_health_unhealthy` had one writer, the deleted Python owner; the engine reconciles but publishes no mismatch. Freshness was retargeted at the engine's heartbeat on 08-17, agreement was not. `gather_account_health_alerts()` is kept uncalled as the specification. Needs the engine to publish a mismatch — a design question, owner to decide ([`docs/notifications.md`](docs/notifications.md) §What stopped being watched) |
-| **The funded shadow engine writes ~1 GB/hour while its loss guard is latched** | Found 2026-08-20 19:00 UTC. The loop: the engine logs an intent, the kernel denies it `LossGuardTripped`, the denial is logged, the strategy is told "refused" and re-emits on the next market message — ~300–450 refusals/second, ~30,000 orders "decided" per minute, from a process in shadow that has never sent an order. Measured after the 19:19 restart: 657 MB/h of WAL plus 356 MB/h of syslog. It survives a restart because the trip is persisted, and it cannot expire because the trip is checked before the UTC day-roll. **It fills the disk in ~20 hours and takes the live demo engine down with it** — a full disk already killed a deploy on 2026-08-05. It also destroyed the fleet's journal history: journald is correctly capped at 500 MB and 99% of it is now this one message, so the oldest entry is hours old. Mitigated 2026-08-20 by reclaiming ~10 GB (archived WAL segments, syslog); the loop is unfixed. Owner decision: clear the funded trip, stop the funded engine, or fix the re-emit loop |
 | No positive liveness signal reaches the chat | The hourly digest was retired with the Python owner and the dead-man's switch URL is unprovisioned, so silence means either a healthy fleet or a dead box. The engine's heartbeat is checked on-box only, and an on-box watchdog cannot report that the box died |
 
 Audit reports are not kept as standing files. Their findings live in the topic
