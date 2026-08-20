@@ -63,11 +63,38 @@ pub fn symbol_order(replayed: &[WalRecord], wanted: &[Subscription]) -> Vec<Symb
 /// table — exactly what `admit_wanted` subscribed when it took the name on.
 /// Without this a carried-over symbol has no price at boot, and a position
 /// recovered in it could not even be exited until a book re-named it.
+///
+/// EMITTED IN `symbols` ORDER, and that order is load-bearing: the feed
+/// interns its symbol table in subscription order, every other component
+/// interns `symbols` (the log's table, then new seeds), and nothing
+/// translates between them — a quote's `SymbolId` is used as a core id
+/// directly. Emitting the seeds first misaligns the two tables the moment
+/// a config seed names a symbol the log already carries as a runtime
+/// admission: every symbol between the seed block and the old admission
+/// shifts by one on the feed side only, and prices land in the wrong
+/// slots (2026-08-20 — the exodus sleeve's DOGEUSDT seed did exactly
+/// this; the follower saw phantom standing and the kernel refused the
+/// resulting resize storm at ~150 orders a second).
 pub fn boot_subscriptions(symbols: &[Symbol], wanted: &[Subscription]) -> Vec<Subscription> {
-    let mut subs: Vec<Subscription> = wanted.to_vec();
+    let mut subs: Vec<Subscription> = Vec::new();
     for name in symbols {
-        if !subs.iter().any(|s| &s.symbol == name) {
+        let mut named = false;
+        for sub in wanted.iter().filter(|s| &s.symbol == name) {
+            named = true;
+            if !subs.contains(sub) {
+                subs.push(sub.clone());
+            }
+        }
+        if !named {
             subs.push(Subscription { symbol: name.clone(), feed: engine_types::Feed::Quote });
+        }
+    }
+    // `symbol_order` already appends every wanted name, so nothing should
+    // remain; kept so a caller handing an unrelated list cannot silently
+    // drop a subscription.
+    for sub in wanted {
+        if !subs.contains(sub) {
+            subs.push(sub.clone());
         }
     }
     subs
@@ -901,6 +928,52 @@ disaster_stop_fraction = 0.35
         cfg.sleeve = Some("carry".into());
         let err = refusal(risk(&risk_block(RISK), &[cfg]), "a sleeve with no profile booted");
         assert!(err.to_string().contains("sleeve"), "{err}");
+    }
+
+    #[test]
+    fn a_seed_naming_a_symbol_the_log_already_carries_keeps_every_feed_id_aligned() {
+        // 2026-08-20: the exodus sleeve made DOGEUSDT a config seed while the
+        // log already carried it as a runtime admission. The feed interns in
+        // subscription order, the core in the log's order, and a quote's id is
+        // used as a core id with no translation — so the two tables must be
+        // byte-identical or prices land in the wrong slots. This is the boot
+        // that broke: the ids between the seed block and DOGE's old position
+        // shifted by one on the feed side only.
+        let quote = |name: &str| Subscription {
+            symbol: name.to_string(),
+            feed: engine_types::Feed::Quote,
+        };
+        let replayed = vec![engine_wal::WalRecord::Names {
+            strategies: vec!["carry".into(), "long".into()],
+            symbols: vec![
+                "BTCUSDT".into(),
+                "ETHUSDT".into(),
+                "SOLUSDT".into(),
+                "XRPUSDT".into(),
+                "HOMEUSDT".into(),
+                "ACEUSDT".into(),
+                "DOGEUSDT".into(),
+                "LINKUSDT".into(),
+                "HYPEUSDT".into(),
+            ],
+        }];
+        let wanted = vec![
+            quote("BTCUSDT"),
+            quote("ETHUSDT"),
+            quote("SOLUSDT"),
+            quote("XRPUSDT"),
+            quote("DOGEUSDT"), // the new seed the log already knows
+        ];
+        let symbols = symbol_order(&replayed, &wanted);
+        let feed = market_feed(&boot_subscriptions(&symbols, &wanted));
+        for (position, name) in symbols.iter().enumerate() {
+            assert_eq!(
+                feed.symbols().get(name),
+                Some(engine_types::SymbolId(position as u16)),
+                "{name} must sit at the same position in the feed's table as in \
+                 the core's, or its prices arrive under another symbol's id"
+            );
+        }
     }
 }
 
