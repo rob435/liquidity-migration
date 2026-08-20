@@ -16,6 +16,47 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-20 ~15:55 UTC — the exodus short is live on demo as a third
+  engine sleeve, and its first boot exposed (and paid for fixing) a
+  boot-order fault in the engine's market feed.** Registered
+  `lane2_exodus_short_v1` and built it in `146642f6`: when carry's v7
+  pre-settle exit fires, the carry producer publishes the abandoned
+  position as a SHORT to the engine's new `exodus` sleeve (own
+  `[[strategy]]` block appended to the demo engine config, book
+  `exodus-demo.json`, dial `EXODUS_SHORT_PROFILE=v1` on the demo carry
+  unit only), covered 60 minutes after the settlement. The stop was
+  settled by measurement before the config froze — every level from
+  +30 bp to +1500 bp loses against the time-boxed cover on 1m wicks, so
+  the declared 0.35 stop is a disaster fence like carry's. Evidence, the
+  honest 2024-negative era shape, and the promotion note are in
+  research_findings and strategy_program.
+  **The incident:** ten minutes after the first three-sleeve boot the
+  demo engine began refusing ~150 orders/second (`SymbolNotionalBreached`,
+  a phantom ~$156k of LINK on a $1,400 account). Root cause, proven with a
+  failing test: the market feed interned its symbol table in subscription
+  order (seeds first) while every other part interns the log's order, and
+  nothing translates — the exodus DOGEUSDT seed named a symbol the log
+  already carried as a runtime admission, so every feed id between the
+  seed block and DOGE's old position shifted by one and prices landed
+  under the wrong ids. The risk kernel refused everything (zero orders
+  reached the venue; `reconcile-clear` report-mode confirmed the ledger
+  and the venue agreed throughout) and putting the two-sleeve config back
+  stopped the storm instantly, isolating the trigger before the fix
+  existed. Fix `e3ac11bf`: `boot_subscriptions` now emits in the
+  canonical table order, with a test that rebuilds the exact broken boot.
+  Redeployed staged with the three-sleeve config restored
+  (`staged-ok commit=e3ac11bf`); verified: zero risk refusals over the
+  soak, heartbeat `strategies=["carry","long","exodus"] may_open=true`,
+  the exodus book written (empty — no fire yet) and routed to strategy 2,
+  and the seed collision itself latched correctly ("another strategy …
+  holding this name; leaving it alone symbol=DOGEUSDT", once).
+  Two pre-existing observations, not regressions: the sub-minimum
+  resize churn continues (~1/s, chipped separately), and the MAINNET
+  shadow engine now logs ~200 refusals/second because the funded
+  account's hand-traded equity ($479.22 at 15:50 UTC) sits below the
+  daily loss-guard floor — the guard is correct, the log volume is the
+  same unthrottled-refusal hygiene issue as the churn.
+
 - **2026-08-20 ~12:34 UTC — both LONG producers were down ~10 hours on the
   first live price-touch wake; fixed, redeployed, recovered.** The strategy
   host has been able to wake on a touched price level since the wave-3

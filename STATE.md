@@ -28,9 +28,9 @@ match; never append history to this file.
   honest 2024-negative era shape: `docs/research/research_findings.md`
   §the exodus short; promotion note in `strategy_program.md`.
 - **The engine owns the demo account, and the sleeves feed it.** First
-  deployed 2026-08-14 20:34 UTC; currently at `ff3ca996` (staged deploy
-  2026-08-20 ~12:31 UTC — the price-touch event-kind fix, CHANGELOG that
-  day). The 2026-08-19 ~22:49 deploy (`68b6a29e`) put carry_hold **v7** on
+  deployed 2026-08-14 20:34 UTC; currently at `e3ac11bf` (staged deploy
+  2026-08-20 ~15:5x UTC — the exodus sleeve plus the feed interning-order
+  fix its first boot exposed, CHANGELOG that day). The 2026-08-19 ~22:49 deploy (`68b6a29e`) put carry_hold **v7** on
   both CARRY producers: v6's registered rule byte-identical plus the pre-settlement
   exit read (`strategy_profile=v7 early_exit=1` — the early exit now fires
   on the venue's running rate up to 15 minutes before a dying print pays;
