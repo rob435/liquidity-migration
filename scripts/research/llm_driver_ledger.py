@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 BYBIT_PUBLIC = "https://api.bybit.com"
-PROMPT_VERSION = "driver-judgment-v2-rubric"
+PROMPT_VERSION = "driver-judgment-v3-scored"
 
 # Loose nominator: enough movers to give the discriminator something to
 # separate, few enough that every row gets judged.
@@ -103,9 +103,14 @@ of the time vs 33% below 1.2x (depth_ratio is provided); triggers after
 up a lot so it must pull back" is measurably the wrong prior here. Do not be
 contrarian by default.
 
-STEP 7 — verdict. will_hold_24h: from here, is the price more likely at or
-above the current level in 24h? Confidence in [0,1]. One falsifiable
-sentence of reasoning.
+STEP 7 — verdict. pump_quality_score is the headline: an integer 0-10 for
+"how attractive is holding this pump from here for the next 1-3 days" —
+0-2 avoid (beta, exhaustion, or squeeze already spent), 3-4 weak, 5-6
+unclear, 7-8 good (idiosyncratic, flow supportive, structure fresh), 9-10
+exceptional and rare. Also will_hold_24h (is the price more likely at or
+above this level in 24h), confidence in [0,1], and one falsifiable sentence.
+The score ranks pumps against each other; the desk sweeps thresholds on it
+later, so use the full range and do not cluster at 5.
 
 Reply with ONLY this JSON object, no other text:
 {"identity": "one sentence", "recognized": true/false,
@@ -114,8 +119,8 @@ Reply with ONLY this JSON object, no other text:
  "fresh_breakout|exhaustion_top|downtrend_bounce|range|unclear",
  "driver_kind": "listing|news|shill|fundamental|squeeze|market_beta|unknown",
  "driver_grounded": true/false, "idiosyncratic": true/false,
- "will_hold_24h": true/false, "confidence": 0.0-1.0,
- "reason": "one falsifiable sentence"}"""
+ "pump_quality_score": 0-10, "will_hold_24h": true/false,
+ "confidence": 0.0-1.0, "reason": "one falsifiable sentence"}"""
 
 
 def _http_json(url: str, *, payload: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
@@ -260,11 +265,34 @@ def judge(facts: dict[str, Any]) -> dict[str, Any] | None:
     return parsed
 
 
+RENOMINATION_HOURS = 12
+
+
+def _recently_nominated(path: Path, now: dt.datetime) -> set[str]:
+    """Symbols already nominated inside the suppression window: one pump, one
+    ledger row — hourly re-rows of the same move would only inflate n with
+    correlated points."""
+
+    if not path.exists():
+        return set()
+    cutoff = now - dt.timedelta(hours=RENOMINATION_HOURS)
+    recent: set[str] = set()
+    for line in path.open():
+        try:
+            row = json.loads(line)
+            if dt.datetime.fromisoformat(row["ts_utc"]) >= cutoff:
+                recent.add(str(row["facts"]["symbol"]))
+        except Exception:
+            continue
+    return recent
+
+
 def cmd_once(ledger_dir: Path) -> None:
     ledger_dir.mkdir(parents=True, exist_ok=True)
     path = ledger_dir / "ledger.jsonl"
     now = dt.datetime.now(dt.timezone.utc)
-    nominees = nominate()
+    recent = _recently_nominated(path, now)
+    nominees = [f for f in nominate() if f["symbol"] not in recent]
     with path.open("a") as fh:
         for facts in nominees:
             judgment = judge(facts)
@@ -276,7 +304,7 @@ def cmd_once(ledger_dir: Path) -> None:
             }
             fh.write(json.dumps(row) + "\n")
             verdict = (
-                f"{judgment.get('driver_kind')}/"
+                f"score={judgment.get('pump_quality_score')} {judgment.get('driver_kind')}/"
                 f"{'holds' if judgment.get('will_hold_24h') else 'fades'}@{judgment.get('confidence')}"
                 if judgment
                 else "unjudged"
@@ -324,6 +352,10 @@ def cmd_grade(ledger_dir: Path) -> None:
         if fwd is None:
             continue
         buckets.setdefault((version, kind), []).append(fwd)
+        score = judgment.get("pump_quality_score")
+        if isinstance(score, (int, float)):
+            band = "score 0-3" if score <= 3 else ("score 4-6" if score <= 6 else "score 7-10")
+            buckets.setdefault((version, band), []).append(fwd)
         graded += 1
     print(f"graded {graded} row(s) at the 72h horizon:")
     for (version, kind), vals in sorted(buckets.items(), key=lambda kv: (kv[0][0], -len(kv[1]))):

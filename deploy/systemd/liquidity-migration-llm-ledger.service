@@ -1,0 +1,30 @@
+[Unit]
+Description=liquidity-migration forward-only LLM driver-judgment ledger
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# ~12 nominations, each a few public reads plus one LLM call; the 4h timer
+# must never find a hung run still activating.
+TimeoutStartSec=600
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+# Only the LLM key. This unit reads public market data and holds no venue
+# credentials; it can nominate (without judging) even if the file is absent.
+EnvironmentFile=-/etc/liquidity-migration/llm-ledger.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger
+StateDirectory=liquidity-migration/llm-driver-ledger
+MemoryMax=512M
+# Research must not preempt the producers (Nice=5) or the owners (Nice=-5).
+Nice=10
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-llm-ledger.service main
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal

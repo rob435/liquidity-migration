@@ -85,6 +85,16 @@ case "$UNIT:$ENTRYPOINT" in
             --telegram
         )
         ;;
+    liquidity-migration-llm-ledger.service:main)
+        # Forward-only research: nominates movers and journals LLM driver
+        # judgments. Public market data only; no account, no orders.
+        COMMAND=(
+            /opt/liquidity-migration/.venv/bin/python
+            scripts/research/llm_driver_ledger.py
+            --once
+            --ledger-dir /var/lib/liquidity-migration/llm-driver-ledger
+        )
+        ;;
     *)
         echo "unregistered authorized runtime entrypoint: $UNIT:$ENTRYPOINT" >&2
         exit 2

@@ -11,7 +11,7 @@ unit shapes.
 
 ## Services
 
-Eleven unit files: nine services and the two liveness timers.
+Thirteen unit files: ten services, the two liveness timers, and the LLM-ledger timer.
 
 | Unit | Role |
 | --- | --- |
@@ -23,6 +23,7 @@ Eleven unit files: nine services and the two liveness timers.
 | `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
 | `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume — there is no close button) — the sole `getUpdates` consumer |
+| `liquidity-migration-llm-ledger.service` | Forward-only research: journals LLM driver judgments on live movers (public data, no account, no orders) — run by its 4h timer |
 
 The liveness services are invoked by their matching timers, and the engines own
 the accounts. Target producers and auxiliary services have private API, mainnet,
@@ -88,6 +89,7 @@ they are what trades.
 | --- | --- | --- |
 | `demo-liveness.timer` | `OnActiveSec=1min` | `OnUnitActiveSec=3min` |
 | `mainnet-liveness.timer` | `OnActiveSec=10min` | `OnUnitActiveSec=3min` |
+| `llm-ledger.timer` | `OnCalendar=*-*-* 00/4:15:00` | `Persistent=true` |
 
 The demo observer fires a minute after the timer arms; cold-start noise is
 handled by the watchdog's own startup grace (`--max-cycle-age-min 10`). Both

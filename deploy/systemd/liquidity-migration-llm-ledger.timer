@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the LLM driver-judgment ledger every 4 hours
+
+[Timer]
+# Calendar cadence so Persistent can backfill a missed run after downtime.
+# :15 sits clear of the 00:00 daily close and the fleet's 00:20 entry work.
+OnCalendar=*-*-* 00/4:15:00
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
