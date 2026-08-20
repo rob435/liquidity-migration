@@ -468,7 +468,7 @@ def describe_wedges(
 def _parser() -> Any:
     import argparse  # noqa: PLC0415 - only the CLI path needs it
 
-    from liquidity_migration.core.venue_realm import VenueRealm  # noqa: PLC0415
+    from liquidity_migration.core.venue_realm import VenueRealm
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--account-root", required=True)
@@ -513,14 +513,14 @@ def _parser() -> Any:
 
 
 def main(argv: Any = None) -> int:
-    import json  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-    import time  # noqa: PLC0415
+    import json
+    import sys
+    import time
 
-    from liquidity_migration.account.account_kernel import AccountExecutionKernel  # noqa: PLC0415
-    from liquidity_migration.venue.bybit import BybitPrivateClient, resolve_private_credentials  # noqa: PLC0415
-    from liquidity_migration.core.logging_setup import ensure_default_log_handler  # noqa: PLC0415
-    from liquidity_migration.core.venue_realm import VenueRealm, venue_realm  # noqa: PLC0415
+    from liquidity_migration.account.account_kernel import AccountExecutionKernel
+    from liquidity_migration.venue.bybit import BybitPrivateClient, resolve_private_credentials
+    from liquidity_migration.core.logging_setup import ensure_default_log_handler
+    from liquidity_migration.core.venue_realm import VenueRealm, venue_realm
 
     ensure_default_log_handler()
     args = _parser().parse_args(argv)

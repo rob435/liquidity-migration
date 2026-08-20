@@ -1021,7 +1021,7 @@ def _fetch_bybit_api_klines(
     last_error = ""
     for attempt in range(attempts):
         try:
-            with urlopen(url, timeout=config.timeout_seconds, context=context) as response:  # noqa: S310
+            with urlopen(url, timeout=config.timeout_seconds, context=context) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
             if int(payload.get("retCode", -1)) == 0:
                 rows = payload.get("result", {}).get("list", [])

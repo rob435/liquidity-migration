@@ -51,7 +51,7 @@ def test_daemon_cycle_receives_public_state_only(
 ) -> None:
     seen: dict[str, object] = {}
 
-    def cycle_runner(data_root, **kwargs):  # noqa: ANN001, ANN202
+    def cycle_runner(data_root, **kwargs):
         seen["kwargs"] = kwargs
         return _published_payload(
             Path(data_root),
@@ -154,14 +154,14 @@ def test_run_drains_one_cycle_and_tears_down_public_resources_in_order(
             events.append("ticker_close")
 
     class _KlineManager:
-        def start(self, *, shutdown_event) -> None:  # noqa: ANN001
+        def start(self, *, shutdown_event) -> None:
             assert not shutdown_event.is_set()
             events.append("kline_start")
 
-        def set_cycle_wake_event(self, _event) -> None:  # noqa: ANN001
+        def set_cycle_wake_event(self, _event) -> None:
             events.append("wake_hook")
 
-        def store(self):  # noqa: ANN201
+        def store(self):
             return None
 
         def stats(self) -> dict[str, bool]:
@@ -170,7 +170,7 @@ def test_run_drains_one_cycle_and_tears_down_public_resources_in_order(
         def stop(self) -> None:
             events.append("kline_stop")
 
-    def cycle_runner(data_root, **kwargs):  # noqa: ANN001, ANN202
+    def cycle_runner(data_root, **kwargs):
         assert data_root == tmp_path
         events.append("cycle")
         holder["daemon"].request_shutdown()
@@ -238,7 +238,7 @@ def test_invalid_long_startup_fails_before_any_resource_construction(
 ) -> None:
     resource_calls: list[str] = []
 
-    def forbidden(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+    def forbidden(*_args, **_kwargs):
         resource_calls.append("opened")
         raise AssertionError("invalid LONG startup opened a resource")
 

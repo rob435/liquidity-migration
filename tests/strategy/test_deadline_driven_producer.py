@@ -148,7 +148,7 @@ def _build_daemon(
     clock: VirtualClock,
     seen: list[dict] | None = None,
 ) -> LongNativeDemoDaemon:
-    def cycle_runner(data_root, **kwargs):  # noqa: ANN001, ANN202
+    def cycle_runner(data_root, **kwargs):
         if seen is not None:
             seen.append(dict(kwargs))
         demo = kwargs["demo_config"]
@@ -191,7 +191,7 @@ def test_run_one_cycle_adopts_and_clears_the_reported_deadline(tmp_path: Path) -
 
     original_runner = daemon._cycle_runner
 
-    def with_deadline(data_root, **kwargs):  # noqa: ANN001, ANN202
+    def with_deadline(data_root, **kwargs):
         payload = original_runner(data_root, **kwargs)
         payload["next_time_deadline_ts_ms"] = 2_000_000_123_456
         return payload
@@ -200,7 +200,7 @@ def test_run_one_cycle_adopts_and_clears_the_reported_deadline(tmp_path: Path) -
     daemon._run_one_cycle()
     assert daemon._next_wake_deadline_ts_ms == 2_000_000_123_456
 
-    def without_deadline(data_root, **kwargs):  # noqa: ANN001, ANN202
+    def without_deadline(data_root, **kwargs):
         payload = original_runner(data_root, **kwargs)
         payload["next_time_deadline_ts_ms"] = None
         return payload

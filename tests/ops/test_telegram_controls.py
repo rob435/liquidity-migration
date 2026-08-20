@@ -109,7 +109,7 @@ class FakeApi:
         self.sent: list[dict[str, object]] = []
         self.answered: list[tuple[str, str]] = []
 
-    def send_message(self, chat_id: str, text: str, *, keyboard=None) -> None:  # noqa: ANN001
+    def send_message(self, chat_id: str, text: str, *, keyboard=None) -> None:
         self.sent.append({"chat_id": chat_id, "text": text, "keyboard": keyboard})
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
@@ -243,7 +243,7 @@ def fleet_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return config, fleet, commands, resolved
 
 
-def test_pause_saves_the_original_override_and_stops_producers(fleet_env) -> None:  # noqa: ANN001
+def test_pause_saves_the_original_override_and_stops_producers(fleet_env) -> None:
     config, fleet, commands, _ = fleet_env
     config.host_sleeves_env.write_text("CONTINUOUS_SLEEVE=off\n# manual note\n", encoding="utf-8")
     note = fleet.pause("demo")
@@ -258,7 +258,7 @@ def test_pause_saves_the_original_override_and_stops_producers(fleet_env) -> Non
     assert "liquidity-migration-bybit-continuous-demo.service" not in stopped
 
 
-def test_second_pause_keeps_the_first_saved_copy(fleet_env) -> None:  # noqa: ANN001
+def test_second_pause_keeps_the_first_saved_copy(fleet_env) -> None:
     config, fleet, _, _ = fleet_env
     config.host_sleeves_env.write_text("# original\n", encoding="utf-8")
     fleet.pause("demo")
@@ -266,7 +266,7 @@ def test_second_pause_keeps_the_first_saved_copy(fleet_env) -> None:  # noqa: AN
     assert config.saved_sleeves_path.read_text(encoding="utf-8") == "# original\n"
 
 
-def test_resume_restores_the_saved_override_verbatim(fleet_env) -> None:  # noqa: ANN001
+def test_resume_restores_the_saved_override_verbatim(fleet_env) -> None:
     config, fleet, commands, _ = fleet_env
     config.host_sleeves_env.write_text("CONTINUOUS_SLEEVE=off\n", encoding="utf-8")
     fleet.pause("demo")
@@ -283,7 +283,7 @@ def test_resume_restores_the_saved_override_verbatim(fleet_env) -> None:  # noqa
     }
 
 
-def test_resume_after_pause_of_absent_file_deletes_the_override(fleet_env) -> None:  # noqa: ANN001
+def test_resume_after_pause_of_absent_file_deletes_the_override(fleet_env) -> None:
     config, fleet, _, _ = fleet_env
     fleet.pause("demo")
     assert config.host_sleeves_env.exists()
@@ -291,7 +291,7 @@ def test_resume_after_pause_of_absent_file_deletes_the_override(fleet_env) -> No
     assert not config.host_sleeves_env.exists()
 
 
-def test_mainnet_pause_and_resume_touch_only_mainnet_units(fleet_env) -> None:  # noqa: ANN001
+def test_mainnet_pause_and_resume_touch_only_mainnet_units(fleet_env) -> None:
     config, fleet, commands, _ = fleet_env
     fleet.pause("mainnet")
     fleet.resume("mainnet")

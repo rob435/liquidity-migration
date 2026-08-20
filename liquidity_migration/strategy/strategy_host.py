@@ -279,14 +279,14 @@ class StrategyHostDaemon:
     def _handle_ticker_message(self, message: dict[str, Any]) -> None:
         try:
             self._ticker_cache.on_ticker_event(message)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.exception("%s ticker cache crashed on event: %s", self._sleeve_label, exc)
         # Cache first, then the wake check: the cycle this may start reads the
         # cache, so the push must already be in it. Separately guarded so a
         # fault in the wake check can never cost the cache its update.
         try:
             self._check_price_wake_levels(message)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.exception("%s price wake check crashed on event: %s", self._sleeve_label, exc)
 
     def _check_price_wake_levels(self, message: Mapping[str, Any]) -> None:
@@ -580,7 +580,7 @@ class StrategyHostDaemon:
                 raise TypeError("cycle runner must return PublishedTargetCyclePayload")
             payload = result
             self._cycles_run += 1
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._cycle_errors += 1
             _logger.exception("%s cycle failed: %s", self._sleeve_label, exc)
         elapsed = time.monotonic() - cycle_started
@@ -595,7 +595,7 @@ class StrategyHostDaemon:
         if payload is not None:
             try:
                 print(self._format_cycle_summary(payload), flush=True)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.exception("failed to format cycle summary")
         _logger.debug("%s cycle complete elapsed=%.2fs", self._sleeve_label, elapsed)
         return payload
@@ -625,7 +625,7 @@ class StrategyHostDaemon:
         # Reconcile loop is the SINGLE writer of the counters (DAEM-004; see EventDemoDaemon).
         try:
             self._refresh_public_ticker_cache()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("%s public ticker seed failed (cycle falls back to REST): %s", self._sleeve_label, exc)
             return
         # Bail before opening the ticker WS if shutdown was requested while
@@ -634,7 +634,7 @@ class StrategyHostDaemon:
             return
         try:
             self._open_ticker_stream()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("%s ticker stream open after seed failed: %s", self._sleeve_label, exc)
             return
         # Close immediately if shutdown raced ahead of the open.
@@ -661,12 +661,12 @@ class StrategyHostDaemon:
             return
         try:
             stream = self._ticker_stream_factory(self.config)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("%s ticker WS stream failed to open; REST fallback: %s", self._sleeve_label, exc)
             return
         try:
             stream.subscribe_tickers(symbols, self._handle_ticker_message)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("%s ticker subscribe failed; REST fallback: %s", self._sleeve_label, exc)
             self._close_single_ticker_stream(stream)
             return
@@ -691,7 +691,7 @@ class StrategyHostDaemon:
         if manager is not None:
             try:
                 scoped = manager.universe_symbols()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _logger.warning("kline manager universe_symbols failed; using full ticker cache: %s", exc)
                 scoped = []
             if scoped:
@@ -710,7 +710,7 @@ class StrategyHostDaemon:
             return
         try:
             stream.close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("%s ticker stream close failed: %s", self._sleeve_label, exc)
 
     def _start_reconcile_thread(self) -> None:
@@ -737,7 +737,7 @@ class StrategyHostDaemon:
             try:
                 self._refresh_public_ticker_cache()
                 self._reconciles_total += 1
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._reconcile_errors += 1
                 _logger.warning("%s public ticker reconcile failed: %s", self._sleeve_label, exc)
                 continue
@@ -747,7 +747,7 @@ class StrategyHostDaemon:
             if self._ticker_stream is None and self._ticker_cache.symbol_count() > 0:
                 try:
                     self._open_ticker_stream()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     _logger.warning("%s ticker stream recovery-open failed: %s", self._sleeve_label, exc)
             self._check_ws_health()
 
@@ -820,7 +820,7 @@ class StrategyHostDaemon:
         if self._kline_stream_manager is not None:
             try:
                 self._kline_stream_manager.start(shutdown_event=self._shutdown)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _logger.exception("%s kline_stream_manager start failed: %s", self._sleeve_label, exc)
                 self._kline_stream_manager = None
             return
@@ -836,16 +836,16 @@ class StrategyHostDaemon:
                 self.demo_config,
                 self.data_root,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.exception("%s kline_stream_manager factory failed; degrading: %s", self._sleeve_label, exc)
             return
         try:
             manager.start(shutdown_event=self._shutdown)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.exception("%s kline_stream_manager.start failed; degrading: %s", self._sleeve_label, exc)
             try:
                 manager.stop()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             return
         self._kline_stream_manager = manager
@@ -857,7 +857,7 @@ class StrategyHostDaemon:
             return
         try:
             manager.stop()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("%s kline_stream_manager.stop failed: %s", self._sleeve_label, exc)
 
     # -- account-journal change wake ----------------------------------

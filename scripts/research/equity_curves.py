@@ -215,7 +215,7 @@ def _delisted_traded(out: Path, root: str) -> int | None:
         return None
     try:
         syms = set(pl.read_csv(tcsv[-1])["symbol"].unique().to_list())
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     recent: set[str] = set()
     for d in sorted(os.listdir(kroot))[-30:]:

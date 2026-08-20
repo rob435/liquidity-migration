@@ -125,7 +125,7 @@ def test_ticker_thread_safety_concurrent_update_and_read() -> None:
             barrier.wait()
             for i in range(500):
                 cache.on_ticker_event(_ws_message({"symbol": f"S{i % 5}USDT", "lastPrice": str(30000 + i)}))
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     def reader() -> None:
@@ -134,7 +134,7 @@ def test_ticker_thread_safety_concurrent_update_and_read() -> None:
             for _ in range(500):
                 rows = cache.snapshot_list()
                 assert all("symbol" in r for r in rows)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     threads = [threading.Thread(target=writer), threading.Thread(target=reader)]

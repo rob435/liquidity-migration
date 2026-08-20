@@ -129,18 +129,18 @@ class _BatchAdapter:
         self.silent_command_ids = silent_command_ids
         self.fail_batch_call = fail_batch_call
 
-    def prepare_submission(self, command, market):  # noqa: ANN001
+    def prepare_submission(self, command, market):
         return ()
 
-    def submit(self, command, market):  # noqa: ANN001
+    def submit(self, command, market):
         self.single_calls.append(command.command_id)
         return (self._ack(command),)
 
-    def submit_prepared(self, command, market):  # noqa: ANN001
+    def submit_prepared(self, command, market):
         self.single_calls.append(command.command_id)
         return (self._ack(command),)
 
-    def submit_prepared_batch(self, items):  # noqa: ANN001
+    def submit_prepared_batch(self, items):
         self.ordering.append("send")
         self.batch_calls.append([command.command_id for command, _ in items])
         if self.fail_batch_call and len(self.batch_calls) == self.fail_batch_call:
@@ -175,7 +175,7 @@ def test_batch_path_claims_once_barriers_once_and_sends_once(
     original_claim = kernel.record_submission_attempt_batch
     original_barrier = kernel.journal.barrier
 
-    def recording_claim(**kwargs):  # noqa: ANN003
+    def recording_claim(**kwargs):
         adapter.ordering.append("claim")
         return original_claim(**kwargs)
 
@@ -265,7 +265,7 @@ def test_adapter_batch_maps_rows_to_acks_and_definite_rejects(tmp_path: Path) ->
         def __init__(self) -> None:
             self.batch_requests: list[list[dict]] = []
 
-        def place_orders_batch(self, rows):  # noqa: ANN001
+        def place_orders_batch(self, rows):
             self.batch_requests.append([dict(row) for row in rows])
             merged = []
             for index, row in enumerate(rows):
@@ -393,7 +393,7 @@ def test_transient_row_code_stays_claimed_for_the_probe_ladder(tmp_path: Path) -
     class DemoClient:
         demo = True
 
-        def place_orders_batch(self, rows):  # noqa: ANN001
+        def place_orders_batch(self, rows):
             merged = []
             for index, row in enumerate(rows):
                 if index == 1:
@@ -439,10 +439,10 @@ def test_top_level_batch_reject_degrades_to_sequential_singles(tmp_path: Path) -
         def __init__(self) -> None:
             self.single_orders: list[dict] = []
 
-        def place_orders_batch(self, rows):  # noqa: ANN001
+        def place_orders_batch(self, rows):
             raise BybitRequestRejected("Bybit place_batch_order failed: bad envelope")
 
-        def place_order(self, **params):  # noqa: ANN003
+        def place_order(self, **params):
             self.single_orders.append(dict(params))
             return {"orderId": f"venue-{len(self.single_orders)}", "_response_time_ms": "2000"}
 

@@ -543,7 +543,7 @@ class _FakeResponse:
 def test_download_archive_bytes_rejects_truncated_body(monkeypatch: pytest.MonkeyPatch) -> None:
     # The server advertised 100 bytes but the socket closed mid-stream after 10. urlopen.read()
     # returns the short body WITHOUT raising; the size check must reject it as incomplete.
-    def fake_urlopen(url, **_kwargs):  # noqa: ANN001
+    def fake_urlopen(url, **_kwargs):
         return _FakeResponse(b"x" * 10, content_length=100)
 
     monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
@@ -554,7 +554,7 @@ def test_download_archive_bytes_rejects_truncated_body(monkeypatch: pytest.Monke
 def test_download_archive_bytes_accepts_matching_length(monkeypatch: pytest.MonkeyPatch) -> None:
     body = b"timestamp,symbol\n1.0,AAAUSDT\n"
 
-    def fake_urlopen(url, **_kwargs):  # noqa: ANN001
+    def fake_urlopen(url, **_kwargs):
         return _FakeResponse(body, content_length=len(body))
 
     monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
@@ -566,7 +566,7 @@ def test_download_archive_bytes_accepts_when_no_content_length(monkeypatch: pyte
     # check and read-time parse remain as later defenses).
     body = b"some bytes"
 
-    def fake_urlopen(url, **_kwargs):  # noqa: ANN001
+    def fake_urlopen(url, **_kwargs):
         return _FakeResponse(body, content_length=None)
 
     monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
@@ -582,7 +582,7 @@ def test_truncated_download_is_retried_then_succeeds(tmp_path: Path, monkeypatch
     )
     attempts = {"n": 0}
 
-    def fake_urlopen(url, **_kwargs):  # noqa: ANN001
+    def fake_urlopen(url, **_kwargs):
         attempts["n"] += 1
         if attempts["n"] == 1:
             return _FakeResponse(full[:5], content_length=len(full))  # truncated
@@ -607,7 +607,7 @@ def test_corrupt_gz_cache_is_unlinked_and_redownloaded(tmp_path: Path, monkeypat
     dest.write_bytes(b"\x1f\x8b corrupt not really gzip")
     good = gzip.compress(b"timestamp,symbol\n1.0,AAAUSDT\n")
 
-    def fake_download(_url, *, timeout_seconds):  # noqa: ANN001, ANN002, ANN003
+    def fake_download(_url, *, timeout_seconds):
         return good
 
     monkeypatch.setattr(archive_module, "download_archive_bytes", fake_download)
@@ -623,7 +623,7 @@ def test_valid_gz_cache_is_reserved_without_redownload(tmp_path: Path, monkeypat
     good = gzip.compress(b"timestamp,symbol\n1.0,AAAUSDT\n")
     dest.write_bytes(good)
 
-    def fail_download(_url, *, timeout_seconds):  # noqa: ANN001, ANN002, ANN003
+    def fail_download(_url, *, timeout_seconds):
         raise AssertionError("a valid cache hit must NOT re-download")
 
     monkeypatch.setattr(archive_module, "download_archive_bytes", fail_download)
@@ -635,7 +635,7 @@ def test_corrupt_zip_cache_is_unlinked_and_redownloaded(tmp_path: Path, monkeypa
     dest = tmp_path / "AAAUSDT2025-01-01.csv.zip"
     dest.write_bytes(b"PK not really a zip file")  # non-empty but not a valid zip container
 
-    def fake_download(_url, *, timeout_seconds):  # noqa: ANN001, ANN002, ANN003
+    def fake_download(_url, *, timeout_seconds):
         import io
 
         buf = io.BytesIO()
@@ -667,7 +667,7 @@ def test_scalar_1h_fastpath_failure_is_logged_before_fallback(
     # Force the scalar fast path to blow up so the fallback fires.
     import liquidity_migration.data.archive as am
 
-    def boom(*_a, **_k):  # noqa: ANN002, ANN003
+    def boom(*_a, **_k):
         raise RuntimeError("simulated scalar fast-path fault")
 
     monkeypatch.setattr(am, "_public_trade_text_handle", boom)
@@ -699,7 +699,7 @@ def test_vectorized_1h_fastpath_failure_is_logged_before_fallback(
 
     monkeypatch.setenv(am.ARCHIVE_VECTORIZE_1H_ENV, "1")
 
-    def boom(*_a, **_k):  # noqa: ANN002, ANN003
+    def boom(*_a, **_k):
         raise RuntimeError("simulated vectorized fast-path fault")
 
     monkeypatch.setattr(am, "_read_public_trade_archive_klines_1h_vectorized", boom)

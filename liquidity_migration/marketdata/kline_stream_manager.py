@@ -221,16 +221,16 @@ class KlineStreamManager:
         if self.pool is not None:
             try:
                 self.pool.close()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _logger.warning("pool.close failed: %s", exc)
         try:
             self._store.stop_flush_thread()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("store.stop_flush_thread failed: %s", exc)
         # One last flush so a clean restart picks up the latest state.
         try:
             self._store.flush_to_disk()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("final flush failed: %s", exc)
 
     def universe_symbols(self) -> list[str]:
@@ -271,7 +271,7 @@ class KlineStreamManager:
         if self.pool is not None and (additions or removals):
             try:
                 self.pool.update_subscriptions(new_universe)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _logger.exception("pool.update_subscriptions failed: %s", exc)
         # Bootstrap newly-added symbols. Passing _refresh_stop lets a SIGTERM
         # mid-refresh cancel the in-flight REST worker pool instead of orphaning it.
@@ -330,7 +330,7 @@ class KlineStreamManager:
             return
         try:
             self.pool.subscribe(sorted(symbols), self._on_bar)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.exception("pool.subscribe failed (continuing with REST fallback): %s", exc)
 
     def _on_bar(self, symbol: str, bar: dict[str, Any], confirmed: bool) -> None:
@@ -365,7 +365,7 @@ class KlineStreamManager:
             return list(self.universe_fetcher())
         try:
             rows = self.market_data.get_instruments_info()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._universe_refresh_errors += 1
             _logger.warning("universe fetch failed: %s", exc)
             return []
@@ -543,7 +543,7 @@ class KlineStreamManager:
         while not self._refresh_stop.wait(timeout=self.universe_refresh_interval_seconds):
             try:
                 self.force_refresh_universe()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._universe_refresh_errors += 1
                 _logger.exception("universe refresh failed: %s", exc)
 

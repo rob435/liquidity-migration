@@ -534,7 +534,7 @@ def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
         if callable(cancel):
             try:
                 cancel()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
     closer = None
     for name in ("exit", "close", "stop"):
@@ -548,7 +548,7 @@ def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
     def _run() -> None:
         try:
             closer()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logging.getLogger("liquidity_migration.venue.bybit").debug(
                 "ws close raised: %s",
                 exc,
@@ -905,7 +905,7 @@ class BybitKlineStreamPool:
                     symbol=slice_,
                     callback=callback,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 if _is_already_subscribed_error(exc):
                     # pybit still holds one of these topics in its callback
                     # directory and rejects the WHOLE frame, so retry a
@@ -947,7 +947,7 @@ class BybitKlineStreamPool:
         if callable(unsubscribe):
             try:
                 unsubscribe(topic=topic)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _logger_ws_klines.warning(
                     "kline unsubscribe failed conn=%d symbol=%s: %s",
                     state.index,
@@ -995,14 +995,14 @@ class BybitKlineStreamPool:
                     confirmed = bool(bar.get("confirm", False))
                     try:
                         on_bar(symbol, dict(bar), confirmed)
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         _logger_ws_klines.exception(
                             "on_bar callback raised conn=%d symbol=%s: %s",
                             state.index,
                             symbol,
                             exc,
                         )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 state.dropped_messages += 1
                 _logger_ws_klines.exception(
                     "kline pool callback crashed conn=%d: %s",
@@ -1033,7 +1033,7 @@ class BybitKlineStreamPool:
         while not self._watchdog_stop.wait(timeout=self.watchdog_interval_seconds):
             try:
                 self.check_stale_connections()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _logger_ws_klines.exception("watchdog tick failed: %s", exc)
 
     def check_stale_connections(self) -> int:
@@ -1124,7 +1124,7 @@ class BybitKlineStreamPool:
     ) -> None:
         try:
             _close_ws_client(old_client)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger_ws_klines.warning("close on reconnect failed conn=%d: %s", index, exc)
         try:
             new_client = self._websocket_factory(
@@ -1132,7 +1132,7 @@ class BybitKlineStreamPool:
                 demo=self.demo,
                 channel_type=self.category,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger_ws_klines.exception(
                 "kline reconnect failed to build new client conn=%d: %s; watchdog will retry on next tick",
                 index,
@@ -1152,7 +1152,7 @@ class BybitKlineStreamPool:
         _bind_frame_gate(new_client, new_state)
         try:
             subscribed = self._subscribe_client_chunks(new_state, slice_symbols)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger_ws_klines.exception(
                 "kline reconnect resubscribe failed conn=%d: %s; marking closed for retry",
                 index,
@@ -1196,7 +1196,7 @@ class BybitKlineStreamPool:
         for symbol in symbols:
             try:
                 unsubscribe(topic=f"kline.{self.interval_minutes}.{symbol}")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _logger_ws_klines.warning(
                     "kline stale unsubscribe failed symbol=%s: %s",
                     symbol,
@@ -1212,7 +1212,7 @@ class BybitKlineStreamPool:
             for state in self._connections:
                 try:
                     self._close_state(state)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     _logger_ws_klines.warning(
                         "close failed conn=%d: %s",
                         state.index,

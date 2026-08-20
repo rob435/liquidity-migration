@@ -100,7 +100,7 @@ class TickerCache:
                 try:
                     self._apply_ticker_update_locked(row)
                     applied += 1
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     self._stats.dropped_events += 1
                     _logger.warning("ticker_cache event drop: %s", exc)
             self._stats.events += 1

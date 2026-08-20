@@ -910,7 +910,7 @@ def _unit_states(units: list[str]) -> dict[str, str]:
                 timeout=10,
             )
             states[unit] = (out.stdout or out.stderr).strip() or "unknown"
-        except Exception:  # noqa: BLE001
+        except Exception:
             states[unit] = "unknown"
     return states
 
@@ -1020,14 +1020,14 @@ def _default_units_for_scope(account_scope: str) -> list[str]:
 def _ping_heartbeat(url: str) -> None:
     try:
         urllib.request.urlopen(url, timeout=10)  # noqa: S310 - operator-supplied URL
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 
 def _load_state(path: Path) -> dict[str, int]:
     try:
         return {str(k): int(v) for k, v in json.loads(path.read_text()).items()}
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {}
 
 
@@ -1049,7 +1049,7 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
     except Exception:  # noqa: BLE001 — a write error must not crash the watchdog
         try:
             tmp.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
@@ -1686,7 +1686,7 @@ def main() -> int:
             delivered = False
             try:
                 delivered = send_telegram_message(line, channel="alerts")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(f"(telegram send failed: {exc})")
             if not delivered:
                 telegram_send_failed = True
@@ -1710,7 +1710,7 @@ def main() -> int:
             delivered = False
             try:
                 delivered = send_telegram_message(line, channel="alerts")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(f"(telegram send failed: {exc})")
             if not delivered:
                 telegram_send_failed = True

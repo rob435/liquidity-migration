@@ -618,7 +618,7 @@ def test_callback_thread_safety_concurrent_inject_and_update() -> None:
                     if stop.is_set():
                         break
                     ws.inject_bar(symbol=f"S{i}USDT", confirmed=True)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     def rotator() -> None:
@@ -626,7 +626,7 @@ def test_callback_thread_safety_concurrent_inject_and_update() -> None:
             for _ in range(20):
                 pool.update_subscriptions({f"S{i}USDT" for i in range(5)})
                 time.sleep(0.001)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     threads = [

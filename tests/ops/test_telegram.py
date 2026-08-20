@@ -33,7 +33,7 @@ def _install_urlopen(monkeypatch: pytest.MonkeyPatch, handler) -> list[dict[str,
     """
     calls: list[dict[str, object]] = []
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+    def fake_urlopen(request, timeout=None):
         calls.append(
             {
                 "url": request.full_url,
@@ -199,7 +199,7 @@ def test_string_status_is_coerced_to_int(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_http_error_propagates_to_caller(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_credentials(monkeypatch, token="t", chat_id="c")
 
-    def raise_http_error(req):  # noqa: ANN001
+    def raise_http_error(req):
         raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", hdrs=None, fp=None)
 
     _install_urlopen(monkeypatch, raise_http_error)
@@ -211,7 +211,7 @@ def test_http_error_propagates_to_caller(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_url_error_propagates_to_caller(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_credentials(monkeypatch, token="t", chat_id="c")
 
-    def raise_url_error(req):  # noqa: ANN001
+    def raise_url_error(req):
         raise urllib.error.URLError("connection refused")
 
     _install_urlopen(monkeypatch, raise_url_error)
@@ -223,7 +223,7 @@ def test_url_error_propagates_to_caller(monkeypatch: pytest.MonkeyPatch) -> None
 def test_timeout_error_propagates_to_caller(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_credentials(monkeypatch, token="t", chat_id="c")
 
-    def raise_timeout(req):  # noqa: ANN001
+    def raise_timeout(req):
         raise TimeoutError("timed out")
 
     _install_urlopen(monkeypatch, raise_timeout)
@@ -313,7 +313,7 @@ def _set_credentials_a2(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
 
 
-def _http_error(code: int, *, hdrs, fp=None) -> urllib.error.HTTPError:  # noqa: ANN001
+def _http_error(code: int, *, hdrs, fp=None) -> urllib.error.HTTPError:
     return urllib.error.HTTPError("https://api.telegram.org/x", code, "err", hdrs=hdrs, fp=fp)
 
 
@@ -349,7 +349,7 @@ def test_nonfinite_retry_after_clamped_to_finite_default(
 
     calls = {"n": 0}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+    def fake_urlopen(request, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise _http_error(429, hdrs={"Retry-After": raw})
@@ -384,7 +384,7 @@ def test_finite_retry_after_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
 
     calls = {"n": 0}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+    def fake_urlopen(request, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise _http_error(429, hdrs={"Retry-After": "3"})
@@ -418,7 +418,7 @@ def test_429_retry_closes_leaked_error_response(monkeypatch: pytest.MonkeyPatch)
 
     calls = {"n": 0}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+    def fake_urlopen(request, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise err
@@ -440,7 +440,7 @@ def test_429_with_none_headers_does_not_raise_attribute_error(monkeypatch: pytes
 
     calls = {"n": 0}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+    def fake_urlopen(request, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise _http_error(429, hdrs=None)  # PRE-FIX: exc.headers.get(...) -> AttributeError
@@ -463,7 +463,7 @@ def test_429_retry_after_beyond_cap_propagates_without_sleeping(monkeypatch: pyt
     cfg = TelegramConfig(rate_limit_retry_cap_seconds=5.0)
     calls = {"n": 0}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+    def fake_urlopen(request, timeout=None):
         calls["n"] += 1
         raise _http_error(429, hdrs={"Retry-After": "30"})  # beyond the 5s cap
 
@@ -483,7 +483,7 @@ def test_429_retry_returns_false_on_non_2xx_retry(monkeypatch: pytest.MonkeyPatc
 
     calls = {"n": 0}
 
-    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+    def fake_urlopen(request, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise _http_error(429, hdrs={"Retry-After": "1"})

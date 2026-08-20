@@ -1368,12 +1368,12 @@ def account_exposure_labels(
     journal read, which is fine for CLI and offline callers.
     """
 
-    from liquidity_migration.account.account_kernel import (  # noqa: PLC0415
+    from liquidity_migration.account.account_kernel import (
         AccountJournalCursor,
         read_account_journal,
         reduce_account_events,
     )
-    from liquidity_migration.account.account_service import AccountIntentInbox  # noqa: PLC0415
+    from liquidity_migration.account.account_service import AccountIntentInbox
 
     account_path = getattr(route, "account_path", None)
     if not isinstance(account_path, Path):
