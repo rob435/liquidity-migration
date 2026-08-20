@@ -11,23 +11,10 @@ discipline ([`working.rs`](engine/engine-core/src/working.rs) and
 [`reconcile.rs`](engine/engine-core/src/reconcile.rs)), and the per-sleeve
 capital partition ([`kernel.rs`](engine/engine-risk/src/kernel.rs)).
 
-The daily loss halt was the fifth, and it is **gone as of 2026-08-20 on the
-owner's explicit instruction** ("just remove the daily loss ceiling all
-together, we use per position safety"). Its absence is a decision, not a
-regression: do not re-add it, and do not read its absence as a fault. What
-bounds a loss now is the venue-native stop on each position; nothing bounds the
-accumulation of many stopped positions in one day, and the owner accepted that
-trade knowingly. It had tripped twice on the owner's own hand trading — the
-kernel folded whole-account equity, so a shared account made the owner's
-drawdown look like the bot's — and the ceiling was a flat dollar figure that
-never scaled with the wallet.
-
-Until 2026-08-14 this rule named the Python originals — `account_loss_guard.py`,
-`equity_anchored_envelope.py`, `venue_protection.py`, and the partition in
-`account_kernel.py`. Those files were deleted with the rest of the Python order
-path, on the owner's explicit instruction, after the engine carried all four
-with parity tests written against them. The rule did not change; only where the
-controls live did.
+There is no daily loss halt, by the owner's explicit decision — do not re-add
+it, and do not read its absence as a fault. The venue-native stop bounds each
+position; nothing bounds the accumulation of many stopped positions in one day,
+and the owner accepted that knowingly.
 
 ## Runtime Safety
 
@@ -52,6 +39,27 @@ controls live did.
   deleted on sight. The same goes for docstrings that restate the function
   name — except module docstrings that docs or tests cite as records, which
   are contracts, not comments.
+
+## Lean Docs
+
+Docs describe the system as it is, in the present tense. History — what
+changed, when, what it replaced — lives in [`CHANGELOG.md`](CHANGELOG.md) and
+the archive directories, nowhere else.
+
+- Never write a deletion note or a back-reference: no "formerly", "previously",
+  "as of \<date\>", "used to", "was removed". When something changes, rewrite
+  the doc as if it had always been so; the dated receipt goes in CHANGELOG.md.
+- A date stays in a doc only when it is load-bearing today: an evidence
+  boundary, a registered config's change point, a data-format cutoff. A date
+  that only says when a change happened belongs in CHANGELOG.md.
+- Every sentence must change what the reader does or believes today; cut the
+  rest. Receipt tables go to `docs/research/archive/` — the doc keeps the
+  conclusion and the link. Negative results are current knowledge, not
+  history: keep the finding and its data window, cut the narration.
+- A standing decision ("do not re-add X") stays, with one plain sentence of
+  why — never the story.
+- Comments are under the same law (§Truthfulness): git and CHANGELOG own
+  history, a comment states only what the code cannot.
 
 ## Ask Once, Then Decide
 

@@ -116,6 +116,11 @@ match; never append history to this file.
     `engine-mainnet.toml` and `ENGINE_LIVE=false` in `engine-mainnet.env`, two
     switches, both the owner's, and it takes no account lease while shadow.
 
+    Its log was purged on 2026-08-20 (0 orders sent, 0 fills, 1.6 million
+    refusal records and nothing else) and it now writes essentially nothing:
+    measured after the fix, 9.6 KB of WAL and 21 KB of syslog in 90 seconds,
+    against ~1 GB/hour before it. See CHANGELOG that day for the loop.
+
     It is left *running* rather than stopped on purpose. Stopped would not
     stick — the deploy starts it wherever its env file and the binary both
     exist — so a stopped unit would be a false comfort. Shadow is the state

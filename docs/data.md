@@ -38,7 +38,7 @@ the survivorship hole it closes.
 - An *ordinary* Binance publication failure rolls back — trees quarantined, backups restored, a `prior_presence` invariant checked per dataset — then `marker_path.unlink(missing_ok=True)`: the root is intact and **no** marker is left. Retry. `.binance_vision_publish_incomplete.json` survives only a hard process kill or an *incomplete* rollback, where `RuntimeError("Binance publication failed and rollback was incomplete: ...")` is raised before the unlink (`binance_vision.py:1241-1276`, docstring `:1181-1185`). A present marker means one of those two; the second needs the backup root inspected, not just a retry. The next build refuses before any network access — read the marker's staging and backup paths and recover deliberately.
 - Publication runs inside the per-dataset `exclusive_file_lock`s, acquired in sorted dataset order with `stale_seconds=21_600` (`:1219-1227`, via `storage.dataset_lock_path`), so a build can legitimately appear to hang while blocked on a dataset lock. A concurrent publisher that already owns the marker is refused — "Binance build REFUSED: another publication owns {marker_path}" (`:1210-1215`) — and that loser deletes its own staging/backup without touching live data.
 - **Universe-shrink gate**, three refusals. Two fire before any download, off the discovery inventory: `historical_dropped_symbols` → "binance OOS build REFUSED: current daily inventory cannot replace missing monthly history for N persisted symbols" (`:1464-1470`, only when a daily tail is staged) and `dropped_symbols` → "binance OOS build REFUSED: combined archive universe (N symbols) shrank vs the persisted klines_1h (M symbols) — K symbols would be stranded" (`:1471-1478`). The third fires after staging: `missing_persisted` → "binance OOS build REFUSED: verified monthly-plus-daily staging lost N persisted symbols" (`:1553-1558`). `--allow-degraded` / `allow_degraded=True` is the only override (`:1359, :1632`) and `scripts/data/build_full_pit_binance.sh` never passes it. Separately, the staged `klines_1h` + `archive_trade_manifest` pair is verified from persisted Parquet, not in-memory inputs (`_verify_staged_binance_datasets`, `:1047-1052`), and re-verified against the live root after the rename (`after_publish`, `:1608-1614`).
-- The `bybit_render_1m` and `binance_vision_alt` plans and their fetchers are removed. Do not recreate them from old documents, and do not reuse numbers cited against `~/SHARED_DATA/bybit_render_1m/klines_1m` — they are not reproducible (provenance correction in `docs/research/archive/2026-08-01-settlement-sawtooth-program.md`).
+- Do not recreate the `bybit_render_1m` or `binance_vision_alt` plans and their fetchers from old documents, and do not reuse numbers cited against `~/SHARED_DATA/bybit_render_1m/klines_1m` — they are not reproducible (provenance correction in `docs/research/archive/2026-08-01-settlement-sawtooth-program.md`).
 - `bybit/klines_1m` is the supported 1-minute root, built by [`scripts/data/download_bybit_klines_1m.py`](../scripts/data/download_bybit_klines_1m.py). Same `date=/symbol=/part.parquet` layout and schema as `klines_1h`, fetched through `BybitMarketData.get_klines(..., "1", ...)` with `category=linear`. Resumable at (symbol, date), flushed every 14 days. A dataset *inside* `bybit_full_pit`. Bybit's v5 endpoint serves 1-minute klines back to at least 2021-06.
 
 ## Coverage census
@@ -76,9 +76,8 @@ fill price, fee, close and P&L come from acknowledgement/fill/P&L events — nev
 timestamp below, never from file-write time.
 
 Those top-level clocks cannot supply an execution-latency measurement. Every venue-sourced event is
-stamped `wall_ts_ns = max(local_receive_ts_ns, 1)` (the clamp sites in `account_kernel.py`; today
-only the one in `record_fill` survives — the rest went with the Python order path), so the top-level
-wall clock *is* the local-receive
+stamped `wall_ts_ns = max(local_receive_ts_ns, 1)` (the clamp in `record_fill`, `account_kernel.py`),
+so the top-level wall clock *is* the local-receive
 clock. Fill, acknowledgement, P&L, protection, order-status and venue-snapshot payloads carry their own
 clocks **inside the payload** — `exchange_ts_ns` plus `local_receive_ts_ns` (fill / pnl / protection /
 order_status / venue_snapshot) or `local_ack_ts_ns` (ack, ack_observation) — and latency and TCA are
@@ -119,19 +118,19 @@ from an independent journal clock on a locally-originated target event (`submit_
 `account_kernel.py`), so a
 row violating the second is a genuine defect.
 
-*Component* stop and take-profit prices derive from confirmed fill VWAP, never a decision reference price
-(the deleted Python protection engine's rule; the live venue-native stop discipline is the engine's —
-[`working.rs`](../engine/engine-core/src/working.rs) and
-[`reconcile.rs`](../engine/engine-core/src/reconcile.rs));
+*Component* stop and take-profit prices derive from confirmed fill VWAP, never a decision reference price;
 [`tests/strategy/test_account_strategy_state.py`](../tests/strategy/test_account_strategy_state.py) pins
-this. The account owner's venue-native entry stop is the other plane, anchored to the decision reference
-price ([`architecture.md`](architecture.md), *Venue-native protection*).
+this. The live venue-native stop discipline is the engine's
+([`working.rs`](../engine/engine-core/src/working.rs) and
+[`reconcile.rs`](../engine/engine-core/src/reconcile.rs)), and the account owner's venue-native entry stop
+is the other plane, anchored to the decision reference price ([`architecture.md`](architecture.md),
+*Venue-native protection*).
 
-Four legacy semantics for `entry_ts_ms` exist in archived roots: an actual fill time; in retired paper
-roots, a submit-time idealization; the planning/target-acceptance clock now exposed as
-`entry_target_ts_ms`; and 2026-05-25 WAVESUSDT rows from a retired path that decoded an order-link signal
-timestamp into that field, making the position look hours older than the venue fill. Do not merge those
-rows with current projections unlabelled.
+Archived roots carry four other meanings for `entry_ts_ms`: an actual fill time; in paper roots, a
+submit-time idealization; the planning/target-acceptance clock, exposed today as `entry_target_ts_ms`;
+and 2026-05-25 WAVESUSDT rows that decoded an order-link signal timestamp into that field, making the
+position look hours older than the venue fill. Do not merge those rows with current projections
+unlabelled.
 
 ## Point-in-time membership
 
@@ -202,10 +201,9 @@ archive klines *are* the declared membership source (Binance Vision); it refuses
 manifests, because deleting an uncovered row would make the check self-certifying. The routine Binance
 tail refresh performs exactly that rewrite — see *Refresh*.
 
-The LONG research runner always measures manifest/kline agreement and records `full_pit_universe_pass`,
-with no switch to disable it — the `require_full_pit_universe` strategy switch no longer exists and must
-not be recreated; a non-passing run can be a current-universe or data diagnostic, not a
-historical-universe performance claim. It also stamps, per run, a warning list
+The LONG research runner always measures manifest/kline agreement and records `full_pit_universe_pass`.
+There is no switch to disable it and none is to be added; a non-passing run can be a current-universe or
+data diagnostic, not a historical-universe performance claim. It also stamps, per run, a warning list
 ([`run_diagnostics.py`](../liquidity_migration/research/backtest/run_diagnostics.py) `RunWarning`: stable
 greppable `code`, `severity` in `info` < `warn` < `tainted`, one-sentence `message`, one-line `fix`; the
 PIT codes are `PIT_MANIFEST_EMPTY` and `PIT_SURVIVORSHIP`, both `tainted`), a data-integrity `run_label`,
@@ -269,16 +267,13 @@ data roots are never touched by a retry. `logs/<step>.log` is opened in **append
 
 Artifacts land in `reports/research-refresh/<run-id>/`: `manifest.json` (code/config/root/window
 identity), `events.jsonl` (append-only start/failure/success/resume ledger), `logs/`,
-`summary.<hash>.json`, `backtests/<venue>/`, `reconciliation/`. `summary.<hash>.json` is the run's
+`summary.<hash>.json`, `backtests/<venue>/`. `summary.<hash>.json` is the run's
 immutable card — a coverage snapshot per venue, one cell result per venue/sleeve (run label, window/date
 range, stats or summary, warnings, report path) and a sha256 plus byte size for every emitted artifact;
 the filename carries the first 16 hex of the payload sha256, and rewriting it with different bytes raises
 `run summary hash collision or changed immutable artifact` rather than overwriting (`:887-969`). Reusing
 a `--run-id` skips only a step whose exact command fingerprint succeeded and whose artifact still exists;
 changed windows, roots, source commits, or configuration are refused under an existing ID.
-
-The three-way demo/paper/backtest reconciliation tool and the `research-refresh reconcile` subcommand
-were removed with the paper fleet; the reports it produced remain under their dated run directories.
 
 ## Operational roots
 
@@ -291,8 +286,7 @@ directory", the private lock namespace, "private runtime tree contains a symlink
 root/leaf/lock-namespace checks, plus the uid/gid/mode rebinding. A symlinked account root or a
 convenience bind mount is not a legal layout. The engine alone mutates the demo account. The canonical journal
 owns lifecycle and accounting state, and Parquet views are rebuildable projections. Strategy `DATA_ROOT`
-directories hold signal inputs, caches and cycle telemetry — not position or P&L authority. (The retired
-paper route's roots and journals remain on disk; nothing routes to them.)
+directories hold signal inputs, caches and cycle telemetry — not position or P&L authority.
 
 Dataset and account roots use persistent `flock(2)` leaves: ownership is the kernel lock on the open file
 description, not the file's contents, and release or crash recovery never unlinks the leaf. **Never

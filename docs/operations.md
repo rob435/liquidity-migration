@@ -171,12 +171,11 @@ size, raise the multiple:
 | `RM_LONG_LEVERAGE` | 0.5 | LONG book ceiling, ×equity, worst case included (10 slots; entries scale up to 1.25× calm / 1.5× weekend). Each entry ≈ dial/18.75 of equity: 0.5 → ~2.7% per entry, 1.88 → ~10%. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 
-The two leverage dials may total at most 10.0. Past a total of 5 — the entry-leverage floor since
-2026-08-20 — the venue margin leverage the producers request rises with the dials —
-gross above `entry leverage × wallet` is physically unreachable — and the honest protection picture
-changes: the daily loss halt reads wallet equity, so it does see an open book's paper loss, but it only
-gets to act once per owner pass and a fast enough drawdown still meets the venue's liquidation engine
-first (at 10× gross, a ~10% adverse move is the wallet), and some symbols' own venue leverage limits
+The two leverage dials may total at most 10.0. Past a total of 5 — the entry-leverage floor — the venue
+margin leverage the producers request rises with the dials — gross above `entry leverage × wallet` is
+physically unreachable — and the honest protection picture changes: nothing account-level bounds the
+day, a fast enough drawdown meets the venue's liquidation engine (at 10× gross, a ~10% adverse move is
+the wallet), and some symbols' own venue leverage limits
 may bind. Account caps, the sleeve partition, margin ceilings, entry leverage and the equity floor are
 all derived from the dials and proved at render; a retired `RM_*` variable left in the env file is
 refused by name. `scripts/ops.sh real-money render-profile` turns the dials into the profile the kernel
@@ -223,16 +222,14 @@ Absolute pre-trade caps (component gross, account gross, initial margin, availab
 and the per-sleeve partition, enforced in the engine's risk kernel before any order leaves:
 [`kernel.rs`](../engine/engine-risk/src/kernel.rs). Caps rescale with observed
 equity: [`envelope.rs`](../engine/engine-risk/src/envelope.rs).
-The daily loss halt that used to sit here was removed 2026-08-20 on the
-owner's instruction: there is no account-level daily ceiling, and the
-per-position venue stop is the loss bound. Venue-native stop armed
+There is no account-level daily loss ceiling — the owner's standing decision;
+the per-position venue stop is the loss bound. Venue-native stop armed
 in the same `place_order` call and read back after create:
 [`working.rs`](../engine/engine-core/src/working.rs). One writer process per
 account — the engine holds the account lease
 ([`account_owner_lease.py`](../liquidity_migration/account/account_owner_lease.py) defines the
 protocol) — and journal ↔ venue reconciliation is the engine's own boot pass
-([`reconcile.rs`](../engine/engine-core/src/reconcile.rs); the Python
-`venue/account_reconcile.py` was deleted 2026-08-19). An independent watchdog
+([`reconcile.rs`](../engine/engine-core/src/reconcile.rs)). An independent watchdog
 (`liquidity-migration-mainnet-liveness.timer`) pages every 3 minutes holding no credential and no
 ordering edge. The mainnet client refuses to construct while `REAL_MONEY` is unset, and producers get
 no credentials and no arming switch in any realm — order authority is the engine's alone.
@@ -245,7 +242,7 @@ funded account. These hazards remain open:
 - **Ownership and position reads are narrow and fail open.** Both ask Bybit for `category=linear,
   settleCoin=USDT` only. A USDC-settled, inverse, spot or options order *or position* on the same UID
   is invisible: startup passes and the reconciler reports `healthy` with that exposure omitted, while
-  `totalEquity` does count it — so caps and the daily loss halt size against exposure the owner cannot
+  `totalEquity` does count it — so the caps size against exposure the owner cannot
   see or close. Keep the UID to USDT-linear by hand.
 - **One-way position mode only.** Hedge mode is unsupported and surfaces as
   `dual_side_position_not_supported`. Bybit's own liquidation and ADL orders carry no kernel
@@ -256,8 +253,7 @@ funded account. These hazards remain open:
   surfaces as a `Restart=always` loop rather than a preflight line.
 - **Wallet equity counts non-USDT collateral.** `totalEquity` is an account-wide USD aggregate, so on a
   mixed-collateral account the envelope scales off assets the strategy cannot post as USDT margin, and
-  a collateral drawdown alone can rescale the caps or trip the daily loss halt. Only right on a
-  USDT-only account.
+  a collateral drawdown alone can rescale the caps. Only right on a USDT-only account.
 - **Three funding shapes stop the owner permanently, outside the degrade path**: a linear settlement
   row in any currency but USDT; more than ~357 settlements/day (the 2,500-row epoch-replay page bound);
   and, off demo, a settlement row carrying nonzero `cashFlow`. Each is a `Restart=always` crash loop
@@ -302,8 +298,8 @@ plug already has in hand. It then watches the heartbeat until nothing is held or
 (default 300) runs out.
 
 The exits it produces are reduce-only, and reduce-only orders pass every gate the engine has: the
-boot latch exempts them, the risk kernel returns before its staleness and loss checks, and a book's
-expiry stops entries but never exits. A tripped loss guard does not block a flatten.
+boot latch exempts them, the risk kernel clamps a genuine exit to the position and returns before its
+staleness check, and a book's expiry stops entries but never exits.
 
 `--environment` is named explicitly and has no default; it accepts `demo` or `mainnet`. There is no
 `--symbol` or `--sleeve`: the zero book reaches the whole account, and a narrower close is an
@@ -330,7 +326,7 @@ Terminal states, which are also the exit codes:
 
 | Profile | Runs |
 | --- | --- |
-| `operational` | The demo engine (`liquidity-migration-engine.service`), the demo producers its toggles allow, the Telegram control panel, liveness. The only profile; `demo-operational` is rejected with a message naming its retirement, and a host marker still reading it self-heals on the next rollout. |
+| `operational` | The demo engine (`liquidity-migration-engine.service`), the demo producers its toggles allow, the Telegram control panel, liveness. The only profile; `demo-operational` is refused, and a host marker still carrying it self-heals on the next rollout. |
 
 [`deploy/sleeves.env`](../deploy/sleeves.env) is the repository ceiling; the host file
 `/etc/liquidity-migration/sleeves.env` may only narrow `on` to `off`.
@@ -398,9 +394,8 @@ status=N` names a failing deploy step.
 tracks every order it sent, and at boot it compares its log against what the venue actually holds
 ([`reconcile.rs`](../engine/engine-core/src/reconcile.rs)), repairs what it can — a missing stop is
 put back — and refuses to open on exposure the log cannot account for. What nothing clears
-automatically any more is a journal command from the deleted Python order path, or an order placed
-outside the engine: the Python owner's ~2 s reconciler pass went with that owner on 2026-08-14. For
-those, the operator reads venue truth and terminalizes the command by hand:
+automatically is an old journal command the engine never sent, or an order placed outside the engine.
+For those, the operator reads venue truth and terminalizes the command by hand:
 
 ```bash
 scripts/ops.sh wedged-command report
