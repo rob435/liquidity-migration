@@ -602,19 +602,19 @@ book. "Delete the Python one" never meant deleting that, and it did not.
 
 ### The funded engine, concretely
 
-**It is installed on the host and running in shadow**, since 2026-08-14. It
-has been watched reading the funded account (552445993) under the mainnet
-profile — reference $100, a real per-sleeve partition, and since the
-2026-08-20 re-render a $100 gross cap (it was $175) — and
-both mainnet producers write books it reads and routes. It has never sent an
-order and cannot: `shadow = true` in `engine-mainnet.toml` and
+**It is installed on the host and running in shadow**, since 2026-08-14. It has
+never sent an order and cannot: `shadow = true` in `engine-mainnet.toml` and
 `ENGINE_LIVE=false` in `engine-mainnet.env`, two switches, both the owner's,
-and a shadow engine takes no account lease.
+and a shadow engine takes no account lease. Delete
+`/etc/liquidity-migration/engine-mainnet.env` to keep it off for good — a
+stopped unit would not stick, because the deploy starts it wherever its env
+file and the binary both exist.
 
-It is left *running* rather than stopped on purpose. Stopped would not stick —
-the deploy starts it wherever its env file and the binary both exist — so a
-stopped unit is a false comfort. Shadow is the state that cannot trade. To keep
-it off for good, delete `/etc/liquidity-migration/engine-mainnet.env`.
+The account it reads, the caps it reads them under, and why it is left running
+rather than stopped are operational state, so they live in one place:
+[STATE.md](../STATE.md) §The fleet. Five sentences of this section were a
+verbatim copy of that one until 2026-08-20, and the copy is how a re-rendered
+mainnet cap stayed stale here after STATE.md was corrected.
 
 Getting there found a fault worth remembering: `account_identity` returned
 `realm: "demo"` as a hardcoded literal, with a comment explaining that the
