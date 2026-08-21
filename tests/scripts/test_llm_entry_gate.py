@@ -137,6 +137,16 @@ class TestGateRun:
         assert row["stop_loss_fraction"] == pytest.approx(0.15)
         assert book["valid_until_ms"] > book["decision_ts_ms"]
 
+    def test_the_book_carries_the_version_the_engine_requires(self, tmp_path: Path) -> None:
+        # The engine refuses a target book without a whole-number version
+        # ("target book is unreadable"), so a book missing it is a sleeve
+        # that can never trade.
+        from liquidity_migration.rules.engine_targets import TARGET_BOOK_VERSION
+
+        _run(tmp_path, [_event("AAAUSDT")], heartbeat=_heartbeat(tmp_path))
+        book = json.loads((tmp_path / "book.json").read_text())
+        assert book["version"] == TARGET_BOOK_VERSION
+
     def test_no_heartbeat_means_no_entry_and_says_so(self, tmp_path: Path) -> None:
         actions = _run(tmp_path, [_event("AAAUSDT")])
         assert [a["action"] for a in actions] == ["skip:no_equity_read"]

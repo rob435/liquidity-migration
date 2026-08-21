@@ -54,6 +54,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from liquidity_migration.rules.engine_targets import TARGET_BOOK_VERSION
+
 BYBIT_PUBLIC = "https://api.bybit.com"
 PROMPT_VERSION = "driver-judgment-v3-scored"
 
@@ -674,6 +676,8 @@ def gate_render_book(state: dict[str, Any], now_ms: int) -> dict[str, Any]:
         "source": GATE_SOURCE,
         "targets": rows,
         "valid_until_ms": now_ms + GATE_BOOK_VALID_MIN * 60_000,
+        # The engine refuses a book without a whole-number version.
+        "version": TARGET_BOOK_VERSION,
     }
 
 
