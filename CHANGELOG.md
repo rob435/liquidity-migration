@@ -16,6 +16,24 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 ~00:50 UTC — the LLM gate goes LIVE on demo: score ≥ 6 is an
+  entry (`5d4a3641`, staged `--stop-first`; owner decision, 0 scored days).**
+  The hourly ledger service writes a fourth engine sleeve (`llm_gate`, book
+  `llm-gate-demo.json`, identity `long_llm_gate_v1`; the host `engine.toml`
+  block appended by hand per its own header, backup kept). A judged trigger
+  at score ≥ 6 enters at the trigger-hour price: 5% of heartbeat equity ×
+  vol-parity weight, leverage 2, max 5 names, 7d cooldown, 3×ATR venue stop
+  on the row; exits run by public price hourly (decay 48h/1.5×, TP 4×, time
+  72h) because the writer holds no venue credentials — a fired venue stop is
+  inferred at the next hourly check, and the one accepted coarseness is a
+  single possible re-open between fire and check. Fail-closed everywhere;
+  `LLM_GATE_LIVE` arms, `LLM_GATE_DRAIN` zeroes. 19 new tests pin the gate
+  logic; the engine's template-order pin extends to the four-sleeve topology.
+  Verified live: engine watching strategy=3's book, fleet fully active, first
+  armed cycle refreshed a valid empty book — no backfilled entries, tonight's
+  pumps stay shadow rows under their 24h suppression. The forward record
+  starts here.
+
 - **2026-08-21 ~00:45 UTC — the shadow entry gate goes hourly with five
   detection windows (`56e60622`, staged `--stop-first`).** `--triggers` joins
   the ledger service: fresh pump events on the 1/2/4/12/24h rolling windows
