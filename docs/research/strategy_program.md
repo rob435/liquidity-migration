@@ -494,9 +494,15 @@ high, volume vs the coin's own 90d norm, vol-adjusted depth, listing age),
 then has a language model walk a fixed step-rubric — identity, beta check,
 leverage-vs-organic flow, structure, driver hypothesis, this repo's measured
 priors — and journal every step's answer BEFORE the outcome exists. Grading
-prints the 72h forward return by prompt version and judged driver kind, so a
-failed grade localizes to the step that failed; a rubric change is a new
-prompt version and grades separately. Forward-only by construction: a model
+prints the 72h forward return by prompt version, row type, and judged driver
+kind, so a failed grade localizes to the step that failed; a rubric change is
+a new prompt version and grades separately. Beside the mover rows, an hourly
+shadow entry gate journals fresh trigger events on the 1/2/4/12/24h rolling
+windows (each window's bar is the daily 2.5σ trigger scaled by √time; only
+the 24h window has ever been measured) with the trigger-hour price and a
+provisional would-enter at score ≥ 7 — the exact flow a live gate would run,
+pointed at the ledger instead of the order book. Wiring it into demo entries
+is an owner decision that waits on this record. Forward-only by construction: a model
 judged on historical pumps already knows how they ended. Armed by
 `DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible endpoint via
 `LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals nominations.

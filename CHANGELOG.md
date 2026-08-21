@@ -16,6 +16,20 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 ~00:45 UTC — the shadow entry gate goes hourly with five
+  detection windows (`56e60622`, staged `--stop-first`).** `--triggers` joins
+  the ledger service: fresh pump events on the 1/2/4/12/24h rolling windows
+  (vol-scaled bars, regime and ATR gates), judged and journaled with the
+  trigger-hour price and a provisional would-enter at score ≥ 7 — the live
+  gate's exact flow, pointed at the ledger. Timer hourly at :05. The first
+  armed scan judged 7 events across three window speeds and would enter
+  exactly one (PUMPFUN, score 7). Two deploy lessons paid for on the way: a
+  unit absent from the rollout stop lists blocks stop-first quiescence (the
+  first attempt failed there and the fleet self-recovered), and activation
+  disables every manifest unit then re-enables only the named ones — the
+  ledger units now sit in both lists, and the deploy-verify tests carry the
+  new green topology.
+
 - **2026-08-21 ~00:10 UTC — the LLM driver ledger runs on the fleet box
   (`b3a366ff`, staged `--stop-first`).** The judgment gained a fixed
   step-rubric, enriched public facts, a 0-10 score, and 12h re-nomination
