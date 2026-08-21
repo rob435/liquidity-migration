@@ -103,11 +103,11 @@ strategy's own chain (`gross_exposure / max_concurrent_positions × notional_mul
 It is a setter, not a cap — the name says so — and the loader accepts [0, 10].
 
 At the profile's 250,000 USDT capital reference the registered worst-case envelope is
-**234,375.00 USDT gross** and **46,875.00 USDT initial margin**: per-order 9.375% of
-equity (= 23,437.50) × 10 concurrent positions ÷ entry leverage 5. The 9.375% is 5% base
-slot × 1.25 worst-case BTC-vol scale × 1.5 weekend multiplier. Projected full-book initial
-margin is therefore 18.75% against the 50% ceiling. Runtime profile bytes override any
-number written here.
+**703,125.00 USDT gross** and **140,625.00 USDT initial margin**: per-order 28.125% of
+equity (= 70,312.50) × 10 concurrent positions ÷ entry leverage 5. The 28.125% is the 15%
+base slot × 1.25 worst-case BTC-vol scale × 1.5 weekend multiplier. Projected full-book
+initial margin is therefore 56.25% against the 100% ceiling. Runtime profile bytes override
+any number written here.
 
 **Exit.** Each target declares a 1.5×ATR14 stop and a 4.0×ATR14 take-profit; the account
 owner converts both to venue prices off the first attributable fill and places the stop.
@@ -168,8 +168,8 @@ not a fault.
 ratio); the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it (a
 name with fewer than 20 settlements of history fails open at full size); flow and whale are
 the ×0.5 halvings above — gross capped at 1.0, then
-`weight × sizing_equity × notional_multiplier` (0.5 — each sleeve sizes from half the account
-at 5x entry leverage, owner sizing directive). Sizing equity is anchored to the decision, not
+`weight × sizing_equity × notional_multiplier` (2.0 — each new carry name takes 20% of the
+sizing equity at 5x entry leverage, owner risk-on directive). Sizing equity is anchored to the decision, not
 the live mark: sizing off the live mark makes the day's target a function of the book's own
 unrealized P&L, and the book churns itself. A 5%-of-standing / $1 dead-band is the
 backstop; entries below $10 notional are skipped.
@@ -282,9 +282,9 @@ has lane-1 evidence (+16 bp/trade on confirming pumps, t 3.76, and negative
 book-level without a working discriminator); the judged gate and the shorter
 windows have none — the forward record is the experiment.
 
-**Sizing.** 5% of heartbeat equity × the vol-parity weight clamped to
-[0.25, 1.0], leverage 2, at most 5 concurrent names, $15 minimum, 7-day
-per-symbol cooldown after exit. No entry without a fresh heartbeat equity
+**Sizing.** Half of heartbeat equity (the owner's risk-on slot) × the
+vol-parity weight clamped to [0.25, 1.0], leverage 5, at most 5 concurrent
+names, $15 minimum, 7-day per-symbol cooldown after exit. No entry without a fresh heartbeat equity
 read; a name held by any sibling book is skipped (the engine would refuse the
 overlap anyway).
 

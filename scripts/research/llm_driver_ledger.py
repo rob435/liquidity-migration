@@ -558,8 +558,10 @@ GATE_SIBLING_BOOKS = (
 GATE_HEARTBEAT_PATH = "/var/lib/liquidity-migration-engine/heartbeat.json"
 GATE_MAX_CONCURRENT = 5
 GATE_COOLDOWN_H = 168
-GATE_SLOT_FRACTION = 0.05
-GATE_LEVERAGE = 2.0
+# Owner's risk-on sizing, 2026-08-21: each slot is half the account before
+# the vol-parity cut, margined at the account's 5x cap.
+GATE_SLOT_FRACTION = 0.50
+GATE_LEVERAGE = 5.0
 GATE_STOP_ATR_MULT = 3.0
 GATE_DECAY_H = 48
 GATE_DECAY_ATR_MULT = 1.5

@@ -103,7 +103,8 @@ fn the_committed_demo_profile_loads_unpartitioned_and_pinned() {
     let cfg = kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs(&sleeves))
         .expect("the shipped demo profile must load");
     assert_eq!(cfg.envelope.reference_usdt, 250_000.0);
-    assert_eq!(cfg.envelope.gross_notional_multiple, 2.0);
+    // 1,250,000 gross over the 250,000 reference: the 2026-08-21 risk-on dials.
+    assert_eq!(cfg.envelope.gross_notional_multiple, 5.0);
     assert_eq!(cfg.envelope.max_symbol_notional_usdt, 125_000.0);
     // No capital_reference block: the reference is pinned and never follows
     // the wallet.

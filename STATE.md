@@ -29,21 +29,30 @@ file.
   decision).** The hourly ledger service judges fresh 1/2/4/12/24h trigger
   events and publishes score ≥ 6 names as real entries to the engine's
   `llm_gate` sleeve (book `llm-gate-demo.json`, identity `long_llm_gate_v1`),
-  5% of equity per name, at most 5 names, v12-shaped exits on an hourly
+  half of equity per name before the vol-parity cut (floor a quarter of the
+  slot), leverage 5, at most 5 names, v12-shaped exits on an hourly
   clock with the 3×ATR venue stop underneath. `LLM_GATE_LIVE` in
   `/etc/liquidity-migration/llm-ledger.env` arms entries; `LLM_GATE_DRAIN=1`
   zeroes the book. Detail: `docs/trading_logic.md` §LLM GATE.
 
-- **Each sleeve sizes from HALF the account at 5x entry leverage, on both
-  surfaces.** Demo: `operational.demo.json` — carry multiplier 0.5, LONG 0.5
-  (exodus inherits carry's notional, so it halves too), all `entry_leverage`
-  5.0, account `max_leverage` 5.0. Mainnet: the ratio-dial defaults in
-  `real_money_profile.py` — carry 0.5x / long 0.5x of the wallet,
-  entry-leverage floor 5 — with `operational.mainnet.json` the render of those
-  defaults; every cap on that surface tracks live equity (no absolute dollar
-  caps exist there). The sleeve partition and the 0.35 stops are untouched by
-  these dials. Mainnet stays `shadow = true`, `ENGINE_LIVE=false`. The sizing
-  is a forward-record change point for all fill receipts.
+- **Demo sizes risk-on: every new entry is as large as the envelope admits
+  with both books priced full at worst case (owner directive).**
+  `operational.demo.json` — carry multiplier 2.0 (each new carry name takes
+  20% of the sizing equity; exodus inherits carry's notional), LONG 1.5
+  (~15% of equity per typical entry, 28% at the worst-case vol/weekend
+  scales), all `entry_leverage` 5.0, account `max_leverage` 5.0, gross caps
+  1,250,000. The gate sleeve sizes half of equity per name before its
+  vol-parity cut. Held components keep their fill-anchored size — the dials
+  reach new entries only. The binding ceiling is the envelope's own
+  invariant (planned worst-case margin ≤ the capital reference): true
+  50%-per-entry on carry+LONG together does not fit it. Mainnet is
+  untouched: the ratio-dial defaults in `real_money_profile.py` — carry
+  0.5x / long 0.5x of the wallet, entry-leverage floor 5 — with
+  `operational.mainnet.json` the render of those defaults; every cap on
+  that surface tracks live equity (no absolute dollar caps exist there).
+  The sleeve partition and the 0.35 stops are untouched by these dials.
+  Mainnet stays `shadow = true`, `ENGINE_LIVE=false`. The sizing is a
+  forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** It runs
   `e3ac11bf`, with carry_hold **v7** on both CARRY producers: v6's registered
   rule byte-identical plus the pre-settlement exit read (`strategy_profile=v7
@@ -271,13 +280,16 @@ L2 readiness and exact decision-book capture remain enabled.
 
 ## Risk envelope
 
-**Demo** (the 25× profile): capital reference 250,000 USDT, per-symbol notional
-125,000, component/account gross 500,000, initial margin 250,000. Entry leverage
-5× on every sleeve, account max leverage 5×, LONG notional multiplier 0.5 and
-CARRY multiplier 0.5 (per-name 0.10 and gross cap 1.0 come from the registered
-rule and multiply through, so the CARRY book tops out at half the sizing
-equity). Startup and authorization reject unknown profile fields, producer
-leverage above the owner cap, or registered envelopes outside the bound profile.
+**Demo** (risk-on): capital reference 250,000 USDT, per-symbol notional
+125,000, component/account gross 1,250,000, initial margin 250,000. Entry
+leverage 5× on every sleeve, account max leverage 5×, LONG notional multiplier
+1.5 and CARRY multiplier 2.0 (per-name 0.10 and gross cap 1.0 come from the
+registered rule and multiply through, so each new carry name takes 20% of the
+sizing equity and a full CARRY book is 2× it). The dials sit at the envelope's
+own ceiling: both books full at worst case plan exactly the initial-margin cap,
+which may not exceed the capital reference. Startup and authorization reject
+unknown profile fields, producer leverage above the owner cap, or registered
+envelopes outside the bound profile.
 
 **Real money**: the owner dials in the host `bybit-mainnet.env` are the
 authority, and the installed risk profile is the render of them.

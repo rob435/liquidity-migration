@@ -16,6 +16,25 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 ~10:30 UTC — demo goes risk-on: every new entry sized to the
+  envelope's ceiling (owner directive), staged `--stop-first`.** The owner
+  asked for each entry at roughly half the account, keeping every sleeve's
+  own sizing shape (a fixed multiplier, not per-trade renormalisation).
+  What the envelope admits: its invariant prices both producer books
+  simultaneously full at worst case (LONG at the 1.25 vol × 1.5 weekend
+  scales) and requires that planned margin fit the capital reference — true
+  50%-per-entry on carry+LONG together needs 2× that and does not fit. Set
+  to the ceiling instead: carry multiplier 0.5→2.0 (each new carry name 20%
+  of sizing equity, a 4× size-up; exodus inherits), LONG 0.5→1.5 (~15%
+  typical, 28% worst-case per name; margin-projection cap 0.5→1.0), gross
+  caps 500,000→1,250,000 (combined worst case 1,203,125 gross / 240,625
+  margin against the 250,000 cap), and the LLM gate — outside the profile
+  envelope, venue-margined — takes the full ask: slot 5%→50% of heartbeat
+  equity before the vol-parity cut, leverage 2→5. Held components keep
+  their fill-anchored size; the dials reach new entries only, so the books
+  grow as they turn over. Mainnet untouched. Sizing change point for all
+  fill receipts from this deploy.
+
 - **2026-08-21 ~09:30–09:50 UTC — stale sleeve claims stop locking other
   sleeves out of a name (`cccde3ca`, `85b76eb1`), and the LLM gate's book
   carries the version the engine requires (`5cbd4197`); three staged

@@ -25,13 +25,14 @@ def test_tracked_operational_profile_is_coherent_and_feeds_account_owner() -> No
     profile = load_operational_profile_bytes(data)
     policy = load_risk_policy_bytes(data)
 
-    # 5x since 2026-08-20 (owner: each sleeve sizes from half the account,
-    # levered 5x so three sleeves never fight for entry margin).
+    # Risk-on since 2026-08-21 (owner): each new entry sized as large as the
+    # envelope admits with both books priced full at worst case — carry 20%
+    # of equity per name, LONG ~15% typical — still levered 5x.
     assert profile.long.entry_leverage == 5.0
     assert profile.carry.entry_leverage == 5.0
     assert profile.hedge.entry_leverage == 5.0
-    assert profile.long.notional_multiplier == 0.5
-    assert profile.carry.notional_multiplier == 0.5
+    assert profile.long.notional_multiplier == 1.5
+    assert profile.carry.notional_multiplier == 2.0
     assert policy == profile.account_risk.to_policy()
 
 

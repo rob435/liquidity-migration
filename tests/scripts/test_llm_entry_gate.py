@@ -66,15 +66,16 @@ class TestExitReason:
 
 class TestSizing:
     def test_low_vol_name_gets_the_full_slot(self) -> None:
-        # 10% annualized vol -> weight capped at 1.0 -> 5% of equity.
-        assert ledger.gate_entry_notional(1000.0, 0.10 / 19.1049) == pytest.approx(50.0, rel=1e-3)
+        # 10% annualized vol -> weight capped at 1.0 -> 50% of equity
+        # (the owner's 2026-08-21 risk-on slot).
+        assert ledger.gate_entry_notional(1000.0, 0.10 / 19.1049) == pytest.approx(500.0, rel=1e-3)
 
     def test_high_vol_name_is_cut_to_the_floor(self) -> None:
         # 300% annualized vol -> weight 0.30/3.0 = 0.10 -> floored at 0.25.
-        assert ledger.gate_entry_notional(1000.0, 3.0 / 19.1049) == pytest.approx(12.5, rel=1e-3)
+        assert ledger.gate_entry_notional(1000.0, 3.0 / 19.1049) == pytest.approx(125.0, rel=1e-3)
 
     def test_missing_vol_takes_the_full_slot(self) -> None:
-        assert ledger.gate_entry_notional(1000.0, None) == pytest.approx(50.0)
+        assert ledger.gate_entry_notional(1000.0, None) == pytest.approx(500.0)
 
 
 def _heartbeat(tmp: Path, *, equity: float = 1500.0, age_s: float = 5.0) -> str:
