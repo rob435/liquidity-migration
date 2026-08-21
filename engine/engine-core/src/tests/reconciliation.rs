@@ -261,11 +261,134 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
     );
     let records = h.records.borrow();
     assert!(
-        records.iter().any(|r| matches!(
-            r,
-            WalRecord::Note { text, .. } if text.contains("dropped stale sleeve claims")
-        )),
-        "the drop must leave a receipt in the log"
+        records.iter().any(|r| matches!(r, WalRecord::ClaimsDropped { .. })),
+        "the drop must be durable in the log, not just in memory"
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
+    // The wedge the durable record exists for: boot drops the stale claim
+    // against a flat venue, the second sleeve enters the name, and the next
+    // boot replays the same old fills — with the symbol now held, a flat
+    // sweep can never fire again. Only the replayed drop keeps the new
+    // owner's name its own.
+    let previous = vec![
+        WalRecord::Names {
+            strategies: vec!["carry".to_string(), "probe".to_string()],
+            symbols: vec!["ZECUSDT".to_string()],
+        },
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: "eng-old-1".to_string(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 2.0,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: false,
+            },
+            wire_ns: 1,
+            arrival_mid: 0.0,
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                client_order_id: "eng-old-1".to_string(),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 2.0,
+                px: 100.0,
+                fee: 0.01,
+                is_maker: false,
+                venue_ts_ms: 1,
+                recv_ns: 2,
+            },
+        },
+    ];
+
+    // First boot: flat venue, the claim drops and the drop is written down.
+    let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
+    let saw = Rc::new(RefCell::new(Vec::new()));
+    let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw.clone() };
+    let (_engine, h) = build(
+        false,
+        allow_all(),
+        vec![Box::new(idle), Box::new(probe)],
+        &["ZECUSDT"],
+        &previous,
+    )
+    .await;
+
+    // The log the next boot replays: the old fills, everything the first
+    // boot wrote (the drop included), then the second sleeve's own entry.
+    let mut log = previous.clone();
+    log.extend(h.records.borrow().iter().cloned());
+    log.push(WalRecord::OrderSent {
+        request: OrderRequest {
+            client_order_id: "eng-new-1".to_string(),
+            strategy: StrategyId(1),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.5,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: false,
+        },
+        wire_ns: 3,
+        arrival_mid: 0.0,
+    });
+    log.push(WalRecord::OrderUpdate {
+        update: OrderUpdate::Fill {
+            client_order_id: "eng-new-1".to_string(),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.5,
+            px: 100.0,
+            fee: 0.01,
+            is_maker: false,
+            venue_ts_ms: 4,
+            recv_ns: 5,
+        },
+    });
+
+    // Second boot: the venue now holds the second sleeve's position, so a
+    // flat sweep cannot fire. The replayed drop is what keeps the old claim
+    // from coming back.
+    let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
+    let saw2 = Rc::new(RefCell::new(Vec::new()));
+    let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw2.clone() };
+    let (mut engine, _h) = build_with_venue_state(
+        false,
+        allow_all(),
+        vec![Box::new(idle), Box::new(probe)],
+        &["ZECUSDT"],
+        &log,
+        Vec::new(),
+        vec![engine_types::PositionView {
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.5,
+            entry_px: 100.0,
+            stop_attached: true,
+            leverage: None,
+        }],
+    )
+    .await;
+    let symbol = engine.market().table.get("ZECUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert!(!saw2.borrow().is_empty(), "the probe must have been asked something");
+    assert!(
+        saw2.borrow().iter().all(|foreign| !foreign),
+        "the position is the second sleeve's own; the old claim must not come back"
     );
 }
 

@@ -247,6 +247,18 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 id => format!(" for {id}"),
             }
         ),
+        WalRecord::ClaimsDropped { rows, .. } => format!(
+            "unclaimed  the venue held nothing in these, so the sleeve claims on them end: {}",
+            rows.iter()
+                .map(|row| format!(
+                    "{} {} {}",
+                    names.strategy(row.strategy),
+                    names.symbol(row.symbol),
+                    row.signed_qty
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         WalRecord::LatchCleared { note, restated_exposure, findings, .. } => format!(
             "cleared    an operator looked at the log: may-open resets, exposure restated \
              over {} symbol(s) ({note}){}",

@@ -63,6 +63,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::SegmentBase { .. } => "segment_base",
         WalRecord::RecoveredFill { .. } => "recovered_fill",
         WalRecord::LatchCleared { .. } => "latch_cleared",
+        WalRecord::ClaimsDropped { .. } => "claims_dropped",
     }
     .to_string()
 }

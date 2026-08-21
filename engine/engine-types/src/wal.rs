@@ -186,6 +186,19 @@ pub enum WalRecord {
         /// what was absorbed.
         findings: Vec<String>,
     },
+    /// Sleeve claims boot dropped because the venue held nothing in the
+    /// symbol: closes this log never got to charge (a venue stop firing with
+    /// no order id of ours, an inherited position wound down) leave a sleeve's
+    /// row standing forever, and the row locks every other sleeve out of the
+    /// name. Written durable so a later boot replays the drop instead of
+    /// rebuilding the residue from the old fills — by then another sleeve may
+    /// hold the symbol, and the venue no longer being flat would make the
+    /// residue undroppable.
+    ClaimsDropped {
+        wall_ts_ms: i64,
+        /// Exactly the rows as they stood when dropped, as the receipt.
+        rows: Vec<FilledTotal>,
+    },
     /// The first record of every log segment after the first: everything boot
     /// replay needs from the segments before this one, restated, so replaying
     /// this one segment recovers the same engine as replaying them all.

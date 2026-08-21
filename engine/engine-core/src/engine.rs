@@ -506,9 +506,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 claims = %words,
                 "dropping sleeve claims on symbols the venue holds nothing of"
             );
-            wal.append(&WalRecord::Note {
-                source: "engine".into(),
-                text: format!("dropped stale sleeve claims on flat symbols: {words}"),
+            // Durable, not a note: a later boot replays the drop instead of
+            // rebuilding the residue from the old fills — by then another
+            // sleeve may hold the symbol, and a venue no longer flat would
+            // make the residue undroppable.
+            wal.append(&WalRecord::ClaimsDropped {
+                wall_ts_ms: clock::wall_ms(),
+                rows: stale_claims
+                    .iter()
+                    .map(|(strategy, symbol, qty)| engine_types::FilledTotal {
+                        strategy: *strategy,
+                        symbol: *symbol,
+                        signed_qty: *qty,
+                    })
+                    .collect(),
             })?;
         }
 

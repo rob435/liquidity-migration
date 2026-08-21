@@ -80,6 +80,28 @@ impl Attribution {
                     };
                     me.note(strategy, *symbol, *side, *qty);
                 }
+                // Boot dropped these rows against a flat venue reading; the
+                // drop replays like everything else, or a restart would
+                // rebuild the residue from the old fills — and by then the
+                // symbol may be held by another sleeve, making it
+                // undroppable.
+                WalRecord::ClaimsDropped { rows, .. } => {
+                    for row in rows {
+                        me.filled.remove(&(row.strategy.0, row.symbol.0));
+                    }
+                }
+                // An operator restated the account (`engine reconcile-clear`)
+                // to the venue's own positions. A symbol that restatement
+                // reports flat is held by nobody, whatever the fills before
+                // it summed to — the claims on it die here, exactly as the
+                // exposure ledger's copy of this record is treated as "set".
+                WalRecord::LatchCleared { restated_exposure, .. } => {
+                    me.filled.retain(|(_, symbol), _| {
+                        restated_exposure
+                            .iter()
+                            .any(|row| row.symbol.0 == *symbol && row.signed_qty.abs() >= FLAT)
+                    });
+                }
                 // A rotation restated the whole table. Set, not add: at its
                 // place in a chain read these rows are exactly what the fills
                 // before it summed to, and in a fresh segment they are all
@@ -328,6 +350,60 @@ mod tests {
         let dropped = a.drop_where_flat(|symbol| symbol == BTC);
         assert_eq!(dropped, vec![(CARRY, BTC, 2.0)]);
         assert_eq!(a.signed(LONG, ETH), 3.0, "the held name is untouched");
+        assert!(a.held_by_another(CARRY, ETH));
+    }
+
+    #[test]
+    fn a_replayed_drop_keeps_the_residue_from_coming_back() {
+        // The wedge this record exists for: boot dropped the claim against a
+        // flat venue, the other sleeve entered the name, and the next boot
+        // replays the same old fills — with the symbol now held, a flat
+        // sweep can never fire again.
+        let log = vec![
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 2.0),
+            WalRecord::ClaimsDropped {
+                wall_ts_ms: 2,
+                rows: vec![engine_types::FilledTotal {
+                    strategy: CARRY,
+                    symbol: BTC,
+                    signed_qty: 2.0,
+                }],
+            },
+            sent("b", LONG, BTC),
+            fill("b", BTC, Side::Buy, 0.5),
+        ];
+        let a = Attribution::from_records(&log);
+        assert_eq!(a.signed(CARRY, BTC), 0.0, "the drop replays like everything else");
+        assert_eq!(a.signed(LONG, BTC), 0.5, "fills after the drop charge normally");
+        assert!(!a.held_by_another(LONG, BTC), "the residue must not lock the new owner out");
+    }
+
+    #[test]
+    fn an_operator_restatement_clears_claims_the_venue_reports_flat() {
+        // `engine reconcile-clear` restated the account to the venue's own
+        // positions. A symbol that restatement reports flat is nobody's,
+        // whatever the fills before it summed to; a symbol it still shows
+        // held keeps its claims.
+        let log = vec![
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 2.0),
+            sent("b", LONG, ETH),
+            fill("b", ETH, Side::Buy, 3.0),
+            WalRecord::LatchCleared {
+                wall_ts_ms: 2,
+                note: "operator looked".to_string(),
+                restated_exposure: vec![engine_types::SymbolTotal {
+                    symbol: ETH,
+                    signed_qty: 3.0,
+                }],
+                findings: Vec::new(),
+            },
+        ];
+        let a = Attribution::from_records(&log);
+        assert_eq!(a.signed(CARRY, BTC), 0.0, "flat in the restatement clears the claim");
+        assert!(!a.held_by_another(LONG, BTC));
+        assert_eq!(a.signed(LONG, ETH), 3.0, "held in the restatement keeps it");
         assert!(a.held_by_another(CARRY, ETH));
     }
 }
