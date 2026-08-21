@@ -56,7 +56,12 @@ file.
   may-open gate, and `engine reconcile-clear` is the deliberate operator act
   that gate waits for ([docs/engine.md](docs/engine.md) §Safety posture); a
   fresh finding latches again. The engine keeps an in-flight cover book and
-  rotates its WAL in segments.
+  rotates its WAL in segments. The who-opened-what ledger (fill attribution)
+  follows the venue: boot drops a sleeve's claim on any symbol the venue
+  reports flat (durable `ClaimsDropped` receipt in the WAL), and a
+  `reconcile-clear` restatement clears claims on the symbols it reports flat —
+  so a close the log never got to charge cannot lock other sleeves out of a
+  name.
 
   The demo engine runs `leverage_authority = "sole"` (set in the host's
   `/etc/liquidity-migration/engine.toml`, which staged deploys deliberately

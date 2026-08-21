@@ -16,6 +16,35 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 ~09:30–09:50 UTC — stale sleeve claims stop locking other
+  sleeves out of a name (`cccde3ca`, `85b76eb1`), and the LLM gate's book
+  carries the version the engine requires (`5cbd4197`); three staged
+  `--stop-first` deploys.** The engine's who-opened-what ledger (fill
+  attribution) kept a sleeve's claim on a symbol whenever a close never got
+  charged back — a venue stop firing with no order id of ours, or an
+  inherited pre-engine position wound down — and `held_by_another` then
+  refused every other sleeve the name for good. On demo, carry's residue
+  (ZECUSDT +1220, 1000PEPEUSDT +828.6, ACEUSDT −14,826.7, BMTUSDT −2,048.6,
+  EDENUSDT +716.8, all against a flat venue) had blocked the LONG book's ZEC
+  and 1000PEPE entries on every cycle since the sleeves went on. Boot now
+  drops every claim on a symbol the venue reports flat (skipping in-flight
+  orders) and writes a durable `ClaimsDropped` receipt that replays like
+  everything else — without the durable record, the first live fix wedged
+  within minutes: LONG entered ZEC/1000PEPE, the next boot rebuilt the
+  residue from the old fills, and the no-longer-flat venue made it
+  undroppable over LONG's own positions. The ledger also now honors the
+  operator's `reconcile-clear` the way the exposure ledger always has: a
+  symbol the restatement reports flat loses its claims at that record, which
+  retired the residue behind the 2026-08-20 clear. Verified live: the
+  09:28:24 boot dropped all five claims and LONG entered ZECUSDT (0.06) and
+  1000PEPEUSDT (12,400) at 09:29, both filled; the 09:47 boot after the
+  final deploy shows no ghost refusals. Separately, the gate writer's book
+  omitted the `version` field, so the engine refused every read ("target
+  book is unreadable") and the fourth sleeve could not trade — its 09:05
+  book naming ADAUSDT/BOMEUSDT was ignored. The book now carries the shared
+  `TARGET_BOOK_VERSION`; the first valid book lands with the 10:05 hourly
+  run.
+
 - **2026-08-21 ~00:50 UTC — the LLM gate goes LIVE on demo: score ≥ 6 is an
   entry (`5d4a3641`, staged `--stop-first`; owner decision, 0 scored days).**
   The hourly ledger service writes a fourth engine sleeve (`llm_gate`, book
