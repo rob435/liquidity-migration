@@ -63,6 +63,10 @@ pub enum DenyReason {
     StaleQuote { age_ns: u64, max_age_ns: u64 },
     /// Anything the kernel cannot positively classify. Fail closed.
     UnknownState { detail: String },
+    /// Read from the log, never written. No kernel produces this reason, and
+    /// the shape is frozen by the logs that already hold it: a frame the
+    /// reader cannot parse stops the engine at boot.
+    SymbolNotionalBreached { symbol: SymbolId, notional_usdt: f64, cap_usdt: f64 },
 }
 
 /// The kernel's answer. `Allow.qty` may be smaller than the intent's if a

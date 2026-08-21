@@ -16,6 +16,21 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 — deleting a refusal reason stopped the engine at boot.**
+  Removing the per-symbol cap took `SymbolNotionalBreached` out of
+  `DenyReason`, and the engine writes every refusal into its log whole. The
+  demo log holds those frames from when the cap was live, so boot replay hit
+  one, could not parse it, and failed closed — nine restarts in a minute, the
+  demo order path down while the funded engine (whose log never carried the
+  reason) ran on untouched. Positions kept their venue-native stops throughout.
+
+  The variant is back in the enum, read-only: no kernel constructs it, and the
+  cap itself is still gone. The lesson is the format, not the rule — a log
+  record is a frozen contract, and a name that has ever been written can never
+  be deleted from the reader. Pinned by a test carrying the exact bytes out of
+  the live log. Every other record kind and refusal reason in that log was
+  checked against the new code before redeploying.
+
 - **2026-08-21 — LONG's own flatten route closed, and the engine's answers
   made visible.** Not deployed. The same bug class as this morning's carry
   fix, on LONG's side of the seam, plus the four blind spots behind it.

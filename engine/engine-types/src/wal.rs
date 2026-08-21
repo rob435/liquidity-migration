@@ -332,3 +332,30 @@ pub trait Wal {
         Ok(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact bytes a live log already holds. A refusal is written whole,
+    /// so every reason the kernel has ever produced is frozen into the format
+    /// and the reader has to keep understanding it long after the rule that
+    /// produced it is gone.
+    #[test]
+    fn a_refusal_the_kernel_no_longer_produces_still_reads_back() {
+        let frame = r#"{"kind":"verdict","client_order_id":null,"verdict":{"Deny":{"reason":{"SymbolNotionalBreached":{"symbol":11,"notional_usdt":156255.2326,"cap_usdt":125000.0}}}}}"#;
+
+        let record: WalRecord = serde_json::from_str(frame).expect("an old refusal must still parse");
+
+        let WalRecord::Verdict { verdict, .. } = record else {
+            panic!("expected a verdict record");
+        };
+        let RiskVerdict::Deny { reason } = verdict else {
+            panic!("expected a denial");
+        };
+        let rendered = format!("{reason:?}");
+        assert!(rendered.contains("SymbolNotionalBreached"), "{rendered}");
+        assert!(rendered.contains("156255.2326"), "{rendered}");
+        assert!(rendered.contains("125000.0"), "{rendered}");
+    }
+}
