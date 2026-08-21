@@ -331,7 +331,7 @@ def cmd_once(ledger_dir: Path) -> None:
     print(f"{len(nominees)} nomination(s) appended to {path}")
 
 
-WOULD_ENTER_SCORE = 7
+WOULD_ENTER_SCORE = 6
 
 # Detection horizons in hours. The daily program measured only the 24h
 # window; the shorter horizons are untested and the ledger is where they
@@ -393,6 +393,7 @@ def cmd_triggers(ledger_dir: Path) -> None:
         return round(float(row.get("price24hPcnt") or 0.0), 4) if row else None
 
     fired = 0
+    judged_events: list[dict[str, Any]] = []
     with path.open("a") as fh:
         for rank, t in enumerate(usdt[:MAX_TURNOVER_RANK], start=1):
             symbol = str(t["symbol"])
@@ -487,6 +488,7 @@ def cmd_triggers(ledger_dir: Path) -> None:
                 "judgment": judgment,
             }
             fh.write(json.dumps(row) + "\n")
+            judged_events.append(row)
             fired += 1
             verdict = (
                 f"score={score} would_enter={'YES' if would_enter else 'no'}"
@@ -501,6 +503,279 @@ def cmd_triggers(ledger_dir: Path) -> None:
                 print("trigger row cap reached this run")
                 break
     print(f"{fired} trigger event(s) journaled")
+
+    prices: dict[str, float] = {}
+    for r in usdt:
+        try:
+            prices[str(r["symbol"])] = float(r.get("lastPrice") or 0.0)
+        except Exception:
+            continue
+    actions = gate_run(ledger_dir, judged_events, prices, now)
+    if actions:
+        with path.open("a") as fh:
+            for action in actions:
+                fh.write(
+                    json.dumps(
+                        {
+                            "ts_utc": now.isoformat(timespec="seconds"),
+                            "row_type": "gate_action",
+                            **action,
+                        }
+                    )
+                    + "\n"
+                )
+                print(f"GATE {action['action']} {action['symbol']}")
+
+
+# ---------------------------------------------------------------------------
+# The live entry gate (owner-directed 2026-08-21, demo fleet only).
+#
+# When LLM_GATE_LIVE is on, a would_enter trigger event becomes a real entry
+# target in this sleeve's own book (`long_llm_gate_v1`, engine strategy
+# "llm_gate"), sized from the engine heartbeat's equity. The ledger holds no
+# venue credentials, so exits are managed by PRICE against public tickers on
+# the hourly grid -- the venue-native wide stop declared on every entry row is
+# the always-armed backstop underneath. Every failure (no key, no heartbeat,
+# stale heartbeat, API down) fails closed to "no entry"; exits keep flowing.
+#
+# Known, accepted coarseness (demo money, owner call): a wide-stop fill is
+# inferred from price, so between the venue stop firing and the next hourly
+# check a standing target can re-open the position once at the same size and
+# stop. LLM_GATE_LIVE off stops entries but keeps managing exits;
+# LLM_GATE_DRAIN=1 zeroes the whole book now.
+# ---------------------------------------------------------------------------
+
+GATE_SOURCE = "long_llm_gate_v1"
+GATE_BOOK_PATH = "/var/lib/liquidity-migration/targets/llm-gate-demo.json"
+GATE_SIBLING_BOOKS = (
+    "/var/lib/liquidity-migration/targets/carry-demo.json",
+    "/var/lib/liquidity-migration/targets/long-demo.json",
+    "/var/lib/liquidity-migration/targets/exodus-demo.json",
+)
+GATE_HEARTBEAT_PATH = "/var/lib/liquidity-migration-engine/heartbeat.json"
+GATE_MAX_CONCURRENT = 5
+GATE_COOLDOWN_H = 168
+GATE_SLOT_FRACTION = 0.05
+GATE_LEVERAGE = 2.0
+GATE_STOP_ATR_MULT = 3.0
+GATE_DECAY_H = 48
+GATE_DECAY_ATR_MULT = 1.5
+GATE_TP_ATR_MULT = 4.0
+GATE_MAX_HOLD_H = 72
+GATE_MIN_NOTIONAL_USDT = 15.0
+GATE_BOOK_VALID_MIN = 75
+GATE_CLOSING_GRACE_H = 6
+GATE_HEARTBEAT_MAX_AGE_S = 180
+
+
+def _env_on(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "on", "true", "yes")
+
+
+def _load_json(path: str) -> Any:
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=1, sort_keys=True))
+    tmp.replace(path)
+
+
+def gate_read_equity(now_ms: int, heartbeat_path: str = GATE_HEARTBEAT_PATH) -> float | None:
+    """The engine heartbeat's equity, or None when missing or stale (no entry
+    without a live read -- the same gate the producers apply)."""
+
+    hb = _load_json(heartbeat_path)
+    if not isinstance(hb, dict):
+        return None
+    equity = hb.get("account_equity_usdt")
+    wall = hb.get("wall_ts_ms")
+    if not isinstance(equity, (int, float)) or equity <= 0.0:
+        return None
+    if not isinstance(wall, (int, float)) or now_ms - float(wall) > GATE_HEARTBEAT_MAX_AGE_S * 1000:
+        return None
+    return float(equity)
+
+
+def gate_sibling_symbols(paths: tuple[str, ...] = GATE_SIBLING_BOOKS) -> set[str]:
+    held: set[str] = set()
+    for p in paths:
+        book = _load_json(p)
+        if not isinstance(book, dict):
+            continue
+        for row in book.get("targets") or []:
+            try:
+                if abs(float(row.get("notional_usdt", 0.0))) > 0.0:
+                    held.add(str(row["symbol"]))
+            except Exception:
+                continue
+    return held
+
+
+def gate_entry_notional(equity: float, sigma_daily: float | None) -> float:
+    """v12's slot shape at half scale: 5% of equity times the vol-parity
+    weight clamped to [0.25, 1.0]."""
+
+    weight = 1.0
+    if isinstance(sigma_daily, (int, float)) and sigma_daily > 0.0:
+        vol_ann = float(sigma_daily) * math.sqrt(365.0)
+        weight = max(0.25, min(0.30 / max(vol_ann, 1e-9), 1.0))
+    return equity * GATE_SLOT_FRACTION * weight
+
+
+def gate_exit_reason(component: dict[str, Any], price: float | None, now_ms: int) -> str | None:
+    """First exit that applies, in the order the money cares about."""
+
+    entry_ts = int(component["entry_ts_ms"])
+    ref = float(component["trigger_price"])
+    atr = float(component["atr_pct"])
+    age_h = (now_ms - entry_ts) / 3_600_000
+    if price is not None and price > 0.0:
+        if price <= ref * (1.0 - GATE_STOP_ATR_MULT * atr):
+            return "wide_stop_assumed"
+        if age_h >= GATE_DECAY_H and price <= ref * (1.0 - GATE_DECAY_ATR_MULT * atr):
+            return "decayed_stop"
+        if price >= ref * (1.0 + GATE_TP_ATR_MULT * atr):
+            return "take_profit"
+    if age_h >= GATE_MAX_HOLD_H:
+        return "time_stop"
+    return None
+
+
+def gate_render_book(state: dict[str, Any], now_ms: int) -> dict[str, Any]:
+    rows = []
+    for symbol in sorted(state.get("held", {})):
+        c = state["held"][symbol]
+        rows.append(
+            {
+                "symbol": symbol,
+                "notional_usdt": round(float(c["notional_usdt"]), 2),
+                "leverage": GATE_LEVERAGE,
+                "stop_loss_fraction": round(GATE_STOP_ATR_MULT * float(c["atr_pct"]), 6),
+            }
+        )
+    for symbol in sorted(state.get("closing", {})):
+        c = state["closing"][symbol]
+        rows.append(
+            {
+                "symbol": symbol,
+                "notional_usdt": 0.0,
+                "leverage": GATE_LEVERAGE,
+                "stop_loss_fraction": round(GATE_STOP_ATR_MULT * float(c["atr_pct"]), 6),
+            }
+        )
+    return {
+        "decision_ts_ms": now_ms,
+        "source": GATE_SOURCE,
+        "targets": rows,
+        "valid_until_ms": now_ms + GATE_BOOK_VALID_MIN * 60_000,
+    }
+
+
+def gate_run(
+    ledger_dir: Path,
+    judged_events: list[dict[str, Any]],
+    prices: dict[str, float],
+    now: dt.datetime,
+    *,
+    book_path: str = GATE_BOOK_PATH,
+    heartbeat_path: str = GATE_HEARTBEAT_PATH,
+    sibling_paths: tuple[str, ...] = GATE_SIBLING_BOOKS,
+) -> list[dict[str, Any]]:
+    """One gate cycle: exits by price, entries from judged events, book out.
+    Returns action rows for the ledger."""
+
+    now_ms = int(now.timestamp() * 1000)
+    live = _env_on("LLM_GATE_LIVE")
+    drain = _env_on("LLM_GATE_DRAIN")
+    state_path = ledger_dir / "gate_state.json"
+    state = _load_json(str(state_path)) or {}
+    state.setdefault("held", {})
+    state.setdefault("closing", {})
+    state.setdefault("cooldown_until_ms", {})
+    if not live and not drain and not state["held"] and not state["closing"]:
+        return []
+
+    actions: list[dict[str, Any]] = []
+
+    def _close(symbol: str, reason: str) -> None:
+        c = state["held"].pop(symbol)
+        c["closed_ts_ms"] = now_ms
+        c["exit_reason"] = reason
+        state["closing"][symbol] = c
+        state["cooldown_until_ms"][symbol] = now_ms + GATE_COOLDOWN_H * 3_600_000
+        actions.append({"action": f"exit:{reason}", "symbol": symbol, "age_h": round((now_ms - int(c["entry_ts_ms"])) / 3_600_000, 1)})
+
+    if drain:
+        for symbol in list(state["held"]):
+            _close(symbol, "drain")
+    else:
+        for symbol in list(state["held"]):
+            reason = gate_exit_reason(state["held"][symbol], prices.get(symbol), now_ms)
+            if reason:
+                _close(symbol, reason)
+
+    for symbol in list(state["closing"]):
+        if now_ms - int(state["closing"][symbol].get("closed_ts_ms", now_ms)) > GATE_CLOSING_GRACE_H * 3_600_000:
+            del state["closing"][symbol]
+
+    if live and not drain:
+        equity = gate_read_equity(now_ms, heartbeat_path)
+        siblings = gate_sibling_symbols(sibling_paths)
+        for ev in judged_events:
+            if not ev.get("would_enter"):
+                continue
+            facts = ev["facts"]
+            symbol = str(facts["symbol"])
+            if len(state["held"]) >= GATE_MAX_CONCURRENT:
+                actions.append({"action": "skip:capacity", "symbol": symbol})
+                continue
+            if symbol in state["held"] or symbol in state["closing"]:
+                continue
+            if int(state["cooldown_until_ms"].get(symbol, 0)) > now_ms:
+                actions.append({"action": "skip:cooldown", "symbol": symbol})
+                continue
+            if symbol in siblings:
+                actions.append({"action": "skip:sibling_holds", "symbol": symbol})
+                continue
+            if equity is None:
+                actions.append({"action": "skip:no_equity_read", "symbol": symbol})
+                continue
+            atr = facts.get("atr_14d_pct")
+            price = facts.get("trigger_price")
+            if not isinstance(atr, (int, float)) or atr <= 0.0 or not isinstance(price, (int, float)) or price <= 0.0:
+                continue
+            notional = gate_entry_notional(equity, facts.get("sigma_daily_30d"))
+            if notional < GATE_MIN_NOTIONAL_USDT:
+                actions.append({"action": "skip:below_min_notional", "symbol": symbol})
+                continue
+            state["held"][symbol] = {
+                "entry_ts_ms": now_ms,
+                "trigger_price": float(price),
+                "atr_pct": float(atr),
+                "notional_usdt": round(notional, 2),
+                "score": (ev.get("judgment") or {}).get("pump_quality_score"),
+                "trigger_window_h": facts.get("trigger_window_h"),
+            }
+            actions.append(
+                {
+                    "action": "entry",
+                    "symbol": symbol,
+                    "notional_usdt": round(notional, 2),
+                    "stop_loss_fraction": round(GATE_STOP_ATR_MULT * float(atr), 6),
+                    "score": (ev.get("judgment") or {}).get("pump_quality_score"),
+                }
+            )
+
+    book = gate_render_book(state, now_ms)
+    _write_json_atomic(Path(book_path), book)
+    _write_json_atomic(state_path, state)
+    return actions
 
 
 def _forward_return(symbol: str, from_ms: int, hours: int) -> float | None:
@@ -534,6 +809,8 @@ def cmd_grade(ledger_dir: Path) -> None:
         row = json.loads(line)
         ts = dt.datetime.fromisoformat(row["ts_utc"])
         if ts > cutoff:
+            continue
+        if row.get("row_type") == "gate_action":
             continue
         judgment = row.get("judgment") or {}
         row_type = str(row.get("row_type", "mover"))

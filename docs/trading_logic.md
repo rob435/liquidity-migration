@@ -264,6 +264,46 @@ weeks exist to measure that gap. The all-name generalization (shorting settlemen
 carry never held) is measured-but-unrun and NOT part of this config. Evidence:
 [`research_findings.md`](research/research_findings.md) §1 (the exodus short row).
 
+## LLM GATE — `long_llm_gate_v1`
+
+> **Registered and deployed to demo 2026-08-21 by owner decision, with 0 scored
+> days** — a forward experiment trading real demo money from its first fire.
+> The fourth engine sleeve (`llm_gate`, its own `[[strategy]]` block — appended,
+> per the id discipline — book `llm-gate-demo.json`), written by
+> `liquidity-migration-llm-ledger.service`, which holds no venue credentials.
+
+**Signal.** The hourly trigger scan: a top-30-turnover name whose rolling
+1/2/4/12/24h move clears its vol-scaled bar (the daily 2.5σ trigger × √time)
+with range location ≥ 0.70, BTC-and-ETH regime on, ATR-14d ≤ 12%. Each event
+is judged by a language model walking the fixed step-rubric over enriched
+public facts; **a pump_quality_score ≥ 6 is an entry**, at the trigger-hour
+price, immediately. Everything below 6 stays ledger-only. Only the 24h window
+has lane-1 evidence (+16 bp/trade on confirming pumps, t 3.76, and negative
+book-level without a working discriminator); the judged gate and the shorter
+windows have none — the forward record is the experiment.
+
+**Sizing.** 5% of heartbeat equity × the vol-parity weight clamped to
+[0.25, 1.0], leverage 2, at most 5 concurrent names, $15 minimum, 7-day
+per-symbol cooldown after exit. No entry without a fresh heartbeat equity
+read; a name held by any sibling book is skipped (the engine would refuse the
+overlap anyway).
+
+**Exit.** v12's shape on an hourly clock: the entry row declares a 3×ATR-14d
+venue-native stop; the service then checks each held name's public price
+every hour — decayed stop at 1.5×ATR once 48h old, take-profit at 4×ATR,
+time stop at 72h — and publishes the zero target. The writer cannot see
+fills, so a fired venue stop is inferred from price on the next hourly check;
+between the fire and that check a standing target can re-open the position
+once at the same size and stop — an accepted coarseness of the
+no-credentials design.
+
+**Kill switches.** `LLM_GATE_LIVE` off in
+`/etc/liquidity-migration/llm-ledger.env`: no new entries, exits keep
+flowing. `LLM_GATE_DRAIN=1`: the book zeroes now. A dead service stops new
+entries within 75 minutes (book validity) while venue stops stay armed.
+Every judgment, entry, exit, and skip is journaled in the driver ledger
+(`row_type` trigger/gate_action).
+
 ## Shared machinery
 
 [`configs/operational.demo.json`](../configs/operational.demo.json) is the one editable

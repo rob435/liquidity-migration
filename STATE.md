@@ -25,6 +25,15 @@ file.
   Evidence and the honest 2024-negative era shape:
   `docs/research/research_findings.md` §1 (the exodus short row); promotion
   note in `strategy_program.md`.
+- **A fourth sleeve, the LLM GATE, is live on demo with 0 scored days (owner
+  decision).** The hourly ledger service judges fresh 1/2/4/12/24h trigger
+  events and publishes score ≥ 6 names as real entries to the engine's
+  `llm_gate` sleeve (book `llm-gate-demo.json`, identity `long_llm_gate_v1`),
+  5% of equity per name, at most 5 names, v12-shaped exits on an hourly
+  clock with the 3×ATR venue stop underneath. `LLM_GATE_LIVE` in
+  `/etc/liquidity-migration/llm-ledger.env` arms entries; `LLM_GATE_DRAIN=1`
+  zeroes the book. Detail: `docs/trading_logic.md` §LLM GATE.
+
 - **Each sleeve sizes from HALF the account at 5x entry leverage, on both
   surfaces.** Demo: `operational.demo.json` — carry multiplier 0.5, LONG 0.5
   (exodus inherits carry's notional, so it halves too), all `entry_leverage`

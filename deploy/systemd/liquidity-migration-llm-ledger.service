@@ -20,6 +20,8 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger
+# The live gate's book. Sibling books in the same directory are only read.
+ReadWritePaths=/var/lib/liquidity-migration/targets
 StateDirectory=liquidity-migration/llm-driver-ledger
 MemoryMax=512M
 # Research must not preempt the producers (Nice=5) or the owners (Nice=-5).

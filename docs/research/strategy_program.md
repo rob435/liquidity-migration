@@ -501,8 +501,13 @@ shadow entry gate journals fresh trigger events on the 1/2/4/12/24h rolling
 windows (each window's bar is the daily 2.5σ trigger scaled by √time; only
 the 24h window has ever been measured) with the trigger-hour price and a
 provisional would-enter at score ≥ 7 — the exact flow a live gate would run,
-pointed at the ledger instead of the order book. Wiring it into demo entries
-is an owner decision that waits on this record. Forward-only by construction: a model
+pointed at the ledger instead of the order book — and, since 2026-08-21, ALSO
+at the order book: the owner directed the gate live on demo at score ≥ 6 with
+0 scored days (`long_llm_gate_v1`, the engine's fourth sleeve; mechanics in
+`docs/trading_logic.md` §LLM GATE). The forward record now grades real fills
+beside the shadow rows; the registered lane-1 prior is that no mechanical
+gate on these events cleared the bar, so this rides entirely on the judged
+discriminator and the owner's decision. Forward-only by construction: a model
 judged on historical pumps already knows how they ended. Armed by
 `DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible endpoint via
 `LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals nominations.

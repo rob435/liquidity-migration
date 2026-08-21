@@ -136,3 +136,20 @@ rest_entries = false
 # Seed only; every real name arrives via the book. Must not overlap the
 # other sleeves' seeds (see above).
 symbols = ["DOGEUSDT"]
+
+[[strategy]]
+name = "target_book"
+sleeve = "llm_gate"
+# Written by liquidity-migration-llm-ledger.service (long_llm_gate_v1): a
+# judged intraday trigger at score >= 6 becomes an entry row here, sized off
+# the heartbeat's equity, with the wide stop declared on the row. The writer
+# holds no venue credentials and manages exits by public price on the hourly
+# grid; the venue-native stop is the backstop underneath. LLM_GATE_LIVE in
+# /etc/liquidity-migration/llm-ledger.env arms entries; LLM_GATE_DRAIN=1
+# zeroes the book now.
+book_path = "/var/lib/liquidity-migration/targets/llm-gate-demo.json"
+# Entries cross for the same reason LONG's do: the trigger is a move that
+# already happened.
+rest_entries = false
+# Seed only; must not overlap the other sleeves' seeds (see above).
+symbols = ["ENAUSDT"]
