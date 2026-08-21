@@ -16,6 +16,22 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 ~00:10 UTC — the LLM driver ledger runs on the fleet box
+  (`b3a366ff`, staged `--stop-first`).** The judgment gained a fixed
+  step-rubric, enriched public facts, a 0-10 score, and 12h re-nomination
+  suppression; the key moved from the owner's shell file to
+  `/etc/liquidity-migration/llm-ledger.env` (600 root) — it briefly sat in
+  `sleeves.env`, which `lm_parse_sleeve_environment` would have failed on the
+  next deploy (toggle-only schema), and was moved out before anything parsed
+  it. New guarded units `liquidity-migration-llm-ledger.service` + 4h
+  `Persistent` timer, installed by the staged deploy: verify
+  `commit=b3a366ff requested=b3a366ff`, both engines rebuilt, fleet back
+  (engine lease on 555899665, all three books read, LONG's 9 targets intact,
+  timers armed). First armed run judged 8 movers with scores 3-7 and split
+  drivers — PUMPFUN 7/fundamental/holds, ACE and ONG squeeze/fades — all on
+  the record before their outcomes. Ledger:
+  `/var/lib/liquidity-migration/llm-driver-ledger/ledger.jsonl`.
+
 - **2026-08-21 — the LONG v13 rework is measured and closed: v12 stands.**
   Owner-directed rework attempt of the LONG sleeve's entries and exits. 25
   cells over 2021→2026-08 through the registered kernel accounting, every
