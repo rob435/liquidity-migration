@@ -72,7 +72,7 @@ impl Strategy for Opener {
                     leverage: None,
                 });
             }
-            EngineEvent::IntentRefused { symbol, reduce_only } => {
+            EngineEvent::IntentRefused { symbol, reduce_only, .. } => {
                 self.refused.borrow_mut().push((*symbol, *reduce_only));
             }
             _ => {}

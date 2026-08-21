@@ -85,6 +85,24 @@ impl LedgerOfOrders {
                 );
             }
             WalRecord::OrderUpdate { update } => self.apply_update(update),
+            // A fill the private stream never delivered, read back from the
+            // venue's own history. It ends its order exactly like a delivered
+            // one: without this the working-order pass never retires a filled
+            // order and keeps cancelling something the venue has already
+            // finished with.
+            WalRecord::RecoveredFill {
+                client_order_id,
+                qty,
+                ..
+            } => {
+                if let Some(rec) = self.orders.get_mut(client_order_id.as_str()) {
+                    rec.acked = true;
+                    rec.filled_qty += qty;
+                    if rec.filled_qty + QTY_EPS >= rec.request.qty {
+                        rec.ending = Some(Ending::Filled);
+                    }
+                }
+            }
             WalRecord::Note { source, text } if source == "shadow" => {
                 if let Some(rest) = text.strip_prefix(NEVER_SENT_PREFIX) {
                     let id = rest.split_whitespace().next().unwrap_or_default();
@@ -273,6 +291,35 @@ mod tests {
         let ledger = LedgerOfOrders::from_records(&log);
         assert_eq!(ledger.in_flight_ids(), vec!["a"]);
         assert!(ledger.orders["a"].acked);
+    }
+
+    fn recovered(id: &str, qty: f64) -> WalRecord {
+        WalRecord::RecoveredFill {
+            exec_id: format!("e-{id}-{qty}"),
+            client_order_id: id.into(),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty,
+            px: 100.0,
+            fee: 0.0,
+            is_maker: false,
+            venue_ts_ms: 0,
+            recovered_wall_ts_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_fill_recovered_from_the_venues_history_ends_its_order_too() {
+        // The stream never delivered it, so nothing else can end the order —
+        // and an order that never ends is one the working-order pass keeps
+        // cancelling at a venue that finished with it long ago.
+        let ledger = LedgerOfOrders::from_records(&[sent("a", 1.0), recovered("a", 1.0)]);
+        assert!(ledger.in_flight_ids().is_empty());
+        assert_eq!(ledger.orders["a"].ending, Some(Ending::Filled));
+
+        // Partly recovered is still in flight, exactly like a partial fill.
+        let ledger = LedgerOfOrders::from_records(&[sent("a", 1.0), recovered("a", 0.4)]);
+        assert_eq!(ledger.in_flight_ids(), vec!["a"]);
     }
 
     #[test]

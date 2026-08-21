@@ -165,6 +165,14 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             }
         ),
         WalRecord::OrderUpdate { update } => format!("news       {}", update_words(update, names)),
+        WalRecord::StopSet {
+            symbol,
+            trigger_px,
+            wall_ts_ms,
+        } => format!(
+            "restopped  {} to {trigger_px} (at {wall_ts_ms})",
+            names.symbol(*symbol)
+        ),
         WalRecord::CancelSent {
             symbol,
             client_order_id,

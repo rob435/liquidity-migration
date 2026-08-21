@@ -14,11 +14,11 @@ a group below, so moving a grouped script never edits a unit file.
 | `deploy_everything.command` | **the owner, by double-click** | the whole redeploy in one click: stop the fleet (funded units included), install GitHub main, activate — which starts the funded fleet when `REAL_MONEY` is armed — and verify. No prompts; clicking it is the decision. |
 | `run_authorized_runtime.sh` | systemd | the wrapper every unit's `ExecStart` names; dispatches into `runtime/` |
 | `deploy_vps_live.sh` | you (via `ops.sh deploy`) / GitHub Actions | the deploy engine; modes are tabulated in [`docs/operations.md`](../docs/operations.md) |
-| `runtime/` | systemd, via the wrapper | three files: the LONG and CARRY event engines, and the fleet liveness check the two liveness timers run |
+| `runtime/` | systemd, via the wrapper | four files: the LONG and CARRY event engines, the fleet liveness check the two liveness timers run, and `notify_book_changes.py`, which the trade-notify timer runs to diff the target books |
 | `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, rollout readiness, flatten |
 | `maintain/` | you, one-shot | ledger reset, universe and instrument-rule freezes, the candidate-universe schema-4 to schema-5 converter, demo-rule probe and its projection, order-permission check, venue-accounting reconcile |
 | `data/` | you or the refresh timer | point-in-time data-root and panel builders, residual-momentum precompute, and the Binance positioning-metrics refresh (`refresh_binance_metrics.py`, feeds the panel's `--metrics-root` columns) |
-| `research/` | you, offline | scorers, equity curves, trade diagnostics, the passive-fill probe and the quote lab, the research-refresh workflow, and `daily_evidence_run.sh` (refresh → panel → forward ledger; status in `daily_run_status.json` beside the ledger; refuses a dirty checkout by the provenance rule) — run by hand: the owner's Mac runs no scheduler, and the dedicated research box does not exist yet |
+| `research/` | you, offline | scorers, equity curves, trade diagnostics, the passive-fill probe and the quote lab, the research-refresh workflow, and `daily_evidence_run.sh` (refresh → panel → forward ledger; status in `daily_run_status.json` beside the ledger; refuses a dirty checkout by the provenance rule) — run by hand: the owner's Mac runs no scheduler, and the dedicated research box does not exist yet. The one exception is `llm_driver_ledger.py`, which the hourly `llm-ledger.timer` runs on the fleet box and which writes the LONG sleeve's candidates file |
 | `devtools/` | `dev.sh` | `repo_doctor.py`, `run_with_stub.py` |
 | `git-hooks/` | git, on push | the tracked `pre-push` gate, which runs `dev.sh check` before anything leaves |
 

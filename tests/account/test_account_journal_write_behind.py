@@ -101,7 +101,6 @@ def _policy() -> AccountRiskPolicy:
     return AccountRiskPolicy(
         max_component_gross_notional_usdt=1_000.0,
         max_account_gross_notional_usdt=500.0,
-        max_symbol_notional_usdt=500.0,
         max_initial_margin_usdt=100.0,
         max_leverage=10.0,
     )

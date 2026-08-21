@@ -207,7 +207,6 @@ def _policy(*, tight: bool = False) -> AccountRiskPolicy:
     return AccountRiskPolicy(
         max_component_gross_notional_usdt=limit,
         max_account_gross_notional_usdt=limit,
-        max_symbol_notional_usdt=limit,
         max_initial_margin_usdt=0.1 if tight else 100.0,
         max_leverage=1.0 if tight else 10.0,
     )

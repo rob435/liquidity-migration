@@ -27,7 +27,7 @@ pub enum EngineEvent {
     /// a refused entry was never booked, and a refused exit has dropped
     /// every cover on the symbol. (An order the VENUE ends arrives as
     /// [`EngineEvent::Order`] news instead, with its id.)
-    IntentRefused { symbol: SymbolId, reduce_only: bool },
+    IntentRefused { symbol: SymbolId, reduce_only: bool, reason: String },
 }
 
 /// The strategy's window into the engine. Read market state, the account
@@ -179,9 +179,11 @@ pub trait Strategy {
             EngineEvent::Timer { id, now_ns } => self.on_timer(*id, *now_ns, ctx),
             EngineEvent::Order(update) => self.on_order(update, ctx),
             EngineEvent::Targets(book) => self.on_targets(book, ctx),
-            EngineEvent::IntentRefused { symbol, reduce_only } => {
-                self.on_intent_refused(*symbol, *reduce_only, ctx)
-            }
+            EngineEvent::IntentRefused {
+                symbol,
+                reduce_only,
+                reason,
+            } => self.on_intent_refused(*symbol, *reduce_only, reason, ctx),
         }
     }
 
@@ -207,9 +209,29 @@ pub trait Strategy {
     }
 
     /// An intent this strategy placed died inside the engine before it
-    /// became an order. See [`EngineEvent::IntentRefused`].
-    fn on_intent_refused(&mut self, symbol: SymbolId, reduce_only: bool, ctx: &mut dyn StrategyCtx) {
-        let _ = (symbol, reduce_only, ctx);
+    /// became an order, with the reason the engine logged. See
+    /// [`EngineEvent::IntentRefused`].
+    fn on_intent_refused(
+        &mut self,
+        symbol: SymbolId,
+        reduce_only: bool,
+        reason: &str,
+        ctx: &mut dyn StrategyCtx,
+    ) {
+        let _ = (symbol, reduce_only, reason, ctx);
+    }
+
+    /// Why this strategy is not opening each name it is asking for right
+    /// now, as (symbol name, reason) pairs, for the heartbeat.
+    ///
+    /// A target-book producer writes an absolute ask and learns what became
+    /// of it only through the engine's heartbeat; without this an entry the
+    /// kernel refused, or a size below the entry floor, is invisible to it,
+    /// and the ask squats on a capacity slot until the producer's own
+    /// deadline drops it. Refusals the kernel delivered and skips the
+    /// planner took both belong here. Empty by default.
+    fn entry_blockers(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
 
     /// Whether this strategy acts on [`EngineEvent::Targets`].

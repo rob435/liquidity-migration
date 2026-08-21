@@ -68,6 +68,7 @@ if [ "$ENVIRONMENT" = demo ]; then
     BOOKS=(
         /var/lib/liquidity-migration/targets/carry-demo.json
         /var/lib/liquidity-migration/targets/long-demo.json
+        /var/lib/liquidity-migration/targets/exodus-demo.json
     )
     LONG_STATE=/var/lib/liquidity-migration/targets/long-demo-state.json
 else
@@ -182,6 +183,7 @@ if [ -e "$LONG_STATE" ]; then
     printf 'cleared path=%s\n' "$LONG_STATE"
 fi
 
+left="$(held_symbols || true)"
 deadline=$(( $(date +%s) + WAIT_SECONDS ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 5

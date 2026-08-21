@@ -52,11 +52,11 @@
 //! it has a price and an instrument rule.
 
 use engine_types::{
-    Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy,
+    Action, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy,
     StrategyCtx, StrategyId, Subscription, SymbolId, TargetBook,
 };
 
-use super::plan::{plan, Held, PlanRules, Step, SymbolFacts, Target};
+use super::plan::{plan, Held, PlanRules, Skipped, Step, SymbolFacts, Target};
 use crate::params::Params;
 use crate::BuildError;
 
@@ -85,11 +85,18 @@ pub struct TargetBookFollower {
     /// note: something other than this plug closed them, and buying them back
     /// would undo it. Cleared per symbol when the book stops asking.
     closed_under_us: Vec<String>,
-    /// Entries the kernel refused for the book in hand. A refused order never
-    /// rests and never fills, so the reading stays flat and the book keeps
-    /// wanting it: without this the next quote asks again, forever. Entries
-    /// only — an exit is always retried. Cleared by the next book.
-    refused_entries: Vec<String>,
+    /// Entries the kernel refused for the book in hand, with the reason it
+    /// gave. A refused order never rests and never fills, so the reading
+    /// stays flat and the book keeps wanting it: without this the next quote
+    /// asks again, forever. Entries only — an exit is always retried.
+    /// Cleared by the next book.
+    refused_entries: Vec<(String, String)>,
+    /// Entry-blocking skips from the latest plan, with the skip's name: a
+    /// size below the entry floor, one the venue would round to nothing, a
+    /// price or instrument rule missing. The producer reads these through
+    /// the heartbeat, so an ask that can never fill is visible instead of
+    /// squatting on a slot. Rebuilt on every wake.
+    skipped_entries: Vec<(String, String)>,
     /// Which of the book's names were held last time `act` ran. Without it a
     /// position that *disappeared* cannot be told from one that was never
     /// there, and every unfilled entry would latch itself.
@@ -142,6 +149,7 @@ impl TargetBookFollower {
             complained: Vec::new(),
             closed_under_us: Vec::new(),
             refused_entries: Vec::new(),
+            skipped_entries: Vec::new(),
             was_held: Vec::new(),
             we_reduced: Vec::new(),
         })
@@ -238,8 +246,8 @@ impl TargetBookFollower {
         // An entry the kernel just refused is left out of this pass entirely,
         // the same way a foreign holding is: planning it again would only
         // produce the same refusal on the next quote. The next book clears it.
-        targets.retain(|target| !self.refused_entries.contains(&target.symbol));
-        held.retain(|symbol| !self.refused_entries.contains(symbol));
+        targets.retain(|target| !self.refused_entries.iter().any(|(name, _)| name == &target.symbol));
+        held.retain(|symbol| !self.refused_entries.iter().any(|(name, _)| name == symbol));
 
         // The latch lifts when the producer stops asking for the name, not
         // when the next book lands. See the module note: a producer writing
@@ -295,6 +303,24 @@ impl TargetBookFollower {
             ?skipped,
             "the book and what is held came out as this"
         );
+        // A skip on a name the book wants and nothing holds is an entry that
+        // cannot happen, published so the producer can tell "on its way"
+        // from "never going to fill". Skips on held names are resizes; they
+        // are the engine's own business.
+        self.skipped_entries.clear();
+        for skip in &skipped {
+            let (symbol, reason): (&String, &str) = match skip {
+                Skipped::BelowEntryFloor { symbol, .. } => (symbol, "below_entry_floor"),
+                Skipped::BelowVenueMinimum { symbol } => (symbol, "below_venue_minimum"),
+                Skipped::EntryWindowClosed { symbol } => (symbol, "entry_window_closed"),
+                Skipped::NoPrice { symbol } => (symbol, "no_price"),
+                Skipped::NoInstrumentRule { symbol } => (symbol, "no_instrument_rule"),
+                Skipped::TooSmallToBother { .. } => continue,
+            };
+            if wants(&targets, symbol) && !held.iter().any(|name| name == symbol) {
+                self.skipped_entries.push((symbol.clone(), reason.to_string()));
+            }
+        }
 
         let decided_ns = ctx.now_ns();
         let mut unreachable: Vec<String> = Vec::new();
@@ -311,7 +337,7 @@ impl TargetBookFollower {
             };
             // Routine and short-lived, so it is not a warning: the order is
             // out, and the next wake after the fill news will pick this up.
-            if busy.contains(&symbol) {
+            if busy.contains(&symbol) && !matches!(step, Step::Restop { .. }) {
                 tracing::debug!(
                     symbol = step.symbol(),
                     "an order of ours is still working here; leaving this step for the next wake"
@@ -333,6 +359,15 @@ impl TargetBookFollower {
                 && !self.we_reduced.iter().any(|name| name == step.symbol())
             {
                 self.we_reduced.push(step.symbol().to_string());
+            }
+            // Not an order: no size, no leverage, no working-order conflict.
+            // It goes out on its own and the loop moves on.
+            if let Step::Restop { stop_px, .. } = step {
+                ctx.emit(Action::SetStop {
+                    symbol,
+                    trigger_px: stop_px,
+                });
+                continue;
             }
             let intent = match step {
                 Step::Enter {
@@ -370,6 +405,8 @@ impl TargetBookFollower {
                     // it wait on a round trip would be the wrong trade.
                     leverage: None,
                 },
+                // Handled above, before this match: it is not an order.
+                Step::Restop { .. } => continue,
                 // A resize that adds is an opening order, and the risk kernel
                 // refuses one with no stop. The planner says whether this is
                 // one and where the stop belongs; a shrink carries none,
@@ -439,7 +476,13 @@ impl Strategy for TargetBookFollower {
     // order or refusal wake, which would re-emit into the queue being
     // drained — the next quote re-plans instead.
 
-    fn on_intent_refused(&mut self, symbol: SymbolId, reduce_only: bool, ctx: &mut dyn StrategyCtx) {
+    fn on_intent_refused(
+        &mut self,
+        symbol: SymbolId,
+        reduce_only: bool,
+        reason: &str,
+        ctx: &mut dyn StrategyCtx,
+    ) {
         // Exits are never held back. Only an entry latches, and only until
         // the next book.
         if reduce_only {
@@ -456,14 +499,25 @@ impl Strategy for TargetBookFollower {
             )
             .find(|name| ctx.symbol_id(name) == Some(symbol));
         if let Some(name) = named {
-            if !self.refused_entries.contains(&name) {
+            if !self.refused_entries.iter().any(|(seen, _)| seen == &name) {
                 tracing::warn!(
                     symbol = %name,
+                    reason,
                     "the kernel refused this entry; not asking again until the next book"
                 );
-                self.refused_entries.push(name);
+                self.refused_entries.push((name, reason.to_string()));
             }
         }
+    }
+
+    fn entry_blockers(&self) -> Vec<(String, String)> {
+        // Kernel refusals first, so the dedupe on the engine side keeps the
+        // stronger news when a planner skip says the same thing.
+        self.refused_entries
+            .iter()
+            .chain(self.skipped_entries.iter())
+            .cloned()
+            .collect()
     }
 
     fn on_targets(&mut self, book: &TargetBook, ctx: &mut dyn StrategyCtx) {
@@ -496,6 +550,7 @@ impl SymbolFacts for CtxFacts<'_> {
         let id = self.ctx.symbol_id(symbol)?;
         let position = self.ctx.position(id);
         let entry_px = position.as_ref().map(|p| p.entry_px).unwrap_or(0.0);
+        let stop_px = position.as_ref().map(|p| p.stop_px).unwrap_or(0.0);
         // What the reading shows, plus what the engine says was sent and has
         // not appeared in it yet. Without the second part the window between
         // a fill and the next reading looks flat, and the plug buys the same
@@ -516,6 +571,7 @@ impl SymbolFacts for CtxFacts<'_> {
             side: if signed > 0.0 { Side::Buy } else { Side::Sell },
             px,
             entry_px: if entry_px > 0.0 { entry_px } else { px },
+            stop_px,
         })
     }
 

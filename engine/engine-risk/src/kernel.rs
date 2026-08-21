@@ -12,7 +12,6 @@ pub struct Kernel {
     cfg: KernelConfig,
     envelope: Envelope,
     book: Book,
-    wall_ns: Option<u64>,
 }
 
 fn unknown(detail: impl Into<String>) -> DenyReason {
@@ -36,15 +35,7 @@ impl Kernel {
             cfg,
             envelope,
             book: Book::default(),
-            wall_ns: None,
         })
-    }
-
-    /// Venue wall-clock nanoseconds. The engine feeds this on every account
-    /// reading, and nothing here reads it back: every rule judges on engine
-    /// monotonic nanoseconds instead.
-    pub fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
-        self.wall_ns = Some(wall_ns);
     }
 
     /// A price the kernel may value exposure at. The engine feeds this from
@@ -100,12 +91,11 @@ impl Kernel {
         let view = ViewFacts::read(account, self.cfg.qty_tolerance)?;
         let ask_qty = read_intent_qty(intent)?;
 
-        // 3. A genuine exit passes the staleness and trip refusals: the
-        //    fleet lets risk-reducing orders flow under both BLOCKED and
-        //    TRIPPED (a trip's remedy IS exits), and the venue's own
-        //    reduce-only enforcement bounds an exit sized from an old
-        //    reading. Stale or tripped equity is NOT folded into the guard
-        //    or the envelope here — only entries observe.
+        // 3. A genuine exit passes the staleness refusal below: risk-reducing
+        //    orders flow while blind, and the venue's own reduce-only
+        //    enforcement bounds an exit sized from an old reading. Stale
+        //    equity is NOT folded into the envelope here — only entries
+        //    observe.
         let net_qty = view.net_qty(intent.symbol);
         let delta = signed(intent.side, ask_qty);
         let reduces = net_qty.abs() > self.cfg.qty_tolerance && delta * net_qty < 0.0;
@@ -142,8 +132,8 @@ impl Kernel {
 
         self.envelope.observe_equity(view.equity_usdt);
 
-        // 6. An unflagged reduction is judged as an entry from here on, but
-        //    must not cross through flat to the other side.
+        // An unflagged reduction is judged as an entry from here on, but must
+        // not cross through flat to the other side.
         if reduces && ask_qty > net_qty.abs() + self.cfg.qty_tolerance {
             return Err(unknown("intent crosses through flat to the other side"));
         }
@@ -157,12 +147,12 @@ impl Kernel {
         let (low_px, px) = self.entry_prices(intent, &view)?;
         let stop_fraction = read_stop(intent, low_px, px)?;
 
-        // 6. The book this order leaves, walked once so the envelope and the
-        //    account caps below can never disagree about what is on it.
+        // The book this order leaves, walked once so the envelope and the
+        // account caps below can never disagree about what is on it.
         let notional = ask_qty * px;
-        let projected = self.projected_book(intent, notional, stop_fraction, account, &view)?;
+        let projected = self.projected_book(notional, stop_fraction, account, &view)?;
 
-        // 7. The equity-anchored envelope.
+        // 6. The equity-anchored envelope.
         let allowance_usdt = self.envelope.allowance_usdt();
         if projected.worst_case_loss_usdt > allowance_usdt {
             return Err(DenyReason::EnvelopeBreached {
@@ -171,15 +161,15 @@ impl Kernel {
             });
         }
 
-        // 8. The account-wide capital caps.
-        self.account_caps(intent, notional, &projected, &view)?;
+        // 7. The account-wide capital caps.
+        self.account_caps(notional, &projected, &view)?;
 
-        // 9. The per-strategy capital partition.
+        // 8. The per-strategy capital partition.
         self.partition_qty(intent.strategy, ask_qty, px, &view)
     }
 
-    /// Gross notional per symbol and account-wide once this order is added,
-    /// plus the worst-case loss the envelope judges.
+    /// Account-wide gross notional once this order is added, plus the
+    /// worst-case loss the envelope judges.
     ///
     /// Nothing here nets this order against the position it lands on: a book
     /// that already holds 100 long and asks for 100 more short counts 200, not
@@ -187,7 +177,6 @@ impl Kernel {
     /// Python kernel's own gross figure is summed the same way.
     fn projected_book(
         &mut self,
-        intent: &Intent,
         notional: f64,
         stop_fraction: f64,
         account: &AccountView,
@@ -198,7 +187,7 @@ impl Kernel {
         // counted nowhere.
         let mut recent = self.book.fills_after(account.observed_ns);
         let mut projected = Projected::default();
-        projected.add(intent.symbol.0, notional);
+        projected.add(notional);
         projected.worst_case_loss_usdt = self
             .envelope
             .position_worst_case_usdt(notional, stop_fraction);
@@ -208,7 +197,7 @@ impl Kernel {
                 .ok_or_else(|| unknown("no price for a held symbol"))?;
             let effective_qty = qty + recent.remove(&symbol.0).unwrap_or(0.0);
             let held_usdt = effective_qty.abs() * held_px;
-            projected.add(symbol.0, held_usdt);
+            projected.add(held_usdt);
             projected.worst_case_loss_usdt +=
                 self.envelope.position_worst_case_usdt(held_usdt, 0.0);
         }
@@ -220,7 +209,7 @@ impl Kernel {
                 .price_for(SymbolId(symbol), view)
                 .ok_or_else(|| unknown("no price for a just-filled symbol"))?;
             let held_usdt = qty.abs() * held_px;
-            projected.add(symbol, held_usdt);
+            projected.add(held_usdt);
             projected.worst_case_loss_usdt +=
                 self.envelope.position_worst_case_usdt(held_usdt, 0.0);
         }
@@ -228,8 +217,8 @@ impl Kernel {
             .book
             .pending_notional_by_symbol(|symbol| self.price_for(symbol, view))
             .ok_or_else(|| unknown("no price for an in-flight symbol"))?;
-        for (symbol, pending_usdt) in in_flight {
-            projected.add(symbol, pending_usdt);
+        for (_symbol, pending_usdt) in in_flight {
+            projected.add(pending_usdt);
             projected.worst_case_loss_usdt +=
                 self.envelope.position_worst_case_usdt(pending_usdt, 0.0);
         }
@@ -249,26 +238,12 @@ impl Kernel {
     /// the last word on size.
     fn account_caps(
         &self,
-        intent: &Intent,
         notional: f64,
         projected: &Projected,
         view: &ViewFacts,
     ) -> Result<(), DenyReason> {
         let caps = &self.cfg.envelope;
         let scale = self.envelope.scale();
-
-        // Every symbol in the book, not only the one this order names: the
-        // Python kernel judges the whole projected book, so a name already
-        // over its cap stops new risk anywhere until it comes back down.
-        let cap_usdt = caps.max_symbol_notional_usdt * scale;
-        if let Some((symbol, notional_usdt)) = projected.worst_symbol_over(cap_usdt, intent.symbol.0)
-        {
-            return Err(DenyReason::SymbolNotionalBreached {
-                symbol: SymbolId(symbol),
-                notional_usdt,
-                cap_usdt,
-            });
-        }
 
         let cap_usdt = caps.max_component_gross_notional_usdt * scale;
         if projected.gross_usdt > cap_usdt {
@@ -375,18 +350,17 @@ impl RiskKernel for Kernel {
     ///
     /// 1. a view stamped after the decision — unknown state;
     /// 2. readability of the view and the intent — anything unreadable is
-    ///    [`DenyReason::UnknownState`] (the Python guard also puts "no
-    ///    reading" before its age check);
+    ///    [`DenyReason::UnknownState`], before the age check, so a genuine
+    ///    exit can still be sized from a stale-but-readable view;
     /// 3. exit or entry: a genuine exit is clamped to the position and stops
     ///    here — risk-reducing orders flow even under a stale reading;
     /// 4. entry freshness — too old is [`DenyReason::StaleAccountView`];
     /// 5. stop discipline — [`DenyReason::MissingStop`];
     /// 6. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
-    /// 7. the account-wide capital caps, smallest scope first: one symbol's
-    ///    gross ([`DenyReason::SymbolNotionalBreached`]), the whole book's
-    ///    gross ([`DenyReason::ComponentGrossBreached`]), the whole book's
-    ///    margin ([`DenyReason::InitialMarginBreached`]), and whether the
-    ///    account's spare margin funds the increase
+    /// 7. the account-wide capital caps, smallest scope first: the whole
+    ///    book's gross ([`DenyReason::ComponentGrossBreached`]), the whole
+    ///    book's margin ([`DenyReason::InitialMarginBreached`]), and whether
+    ///    the account's spare margin funds the increase
     ///    ([`DenyReason::AvailableMarginExhausted`]);
     /// 8. the per-strategy partition, which clamps before it refuses —
     ///    [`DenyReason::PartitionExhausted`].
@@ -433,10 +407,6 @@ impl RiskKernel for Kernel {
         Kernel::observe_price(self, symbol, px);
     }
 
-    fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
-        Kernel::observe_wall_clock_ns(self, wall_ns);
-    }
-
     fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
         Kernel::register_order(self, client_order_id, intent, approved_qty);
     }
@@ -472,39 +442,13 @@ fn read_stop(intent: &Intent, low_px: f64, high_px: f64) -> Result<f64, DenyReas
 /// The book once this order is added, as every cap below the envelope sees it.
 #[derive(Default)]
 struct Projected {
-    per_symbol: Vec<(u16, f64)>,
     gross_usdt: f64,
     worst_case_loss_usdt: f64,
 }
 
 impl Projected {
-    fn add(&mut self, symbol: u16, notional_usdt: f64) {
+    fn add(&mut self, notional_usdt: f64) {
         self.gross_usdt += notional_usdt;
-        match self.per_symbol.iter_mut().find(|(held, _)| *held == symbol) {
-            Some((_, running)) => *running += notional_usdt,
-            None => self.per_symbol.push((symbol, notional_usdt)),
-        }
-    }
-
-    /// The symbol to report as over a cap: the one this order names if it is
-    /// over, otherwise the lowest-numbered other symbol that is. Preferring
-    /// `asked` puts the name the caller can act on first, and falling back to
-    /// the lowest id keeps the answer the same on every run — the book is
-    /// assembled partly from hash maps, so "the first one found" is not.
-    fn worst_symbol_over(&self, cap_usdt: f64, asked: u16) -> Option<(u16, f64)> {
-        let mut over: Option<(u16, f64)> = None;
-        for (symbol, usdt) in &self.per_symbol {
-            if *usdt <= cap_usdt {
-                continue;
-            }
-            if *symbol == asked {
-                return Some((*symbol, *usdt));
-            }
-            if over.is_none_or(|(lowest, _)| *symbol < lowest) {
-                over = Some((*symbol, *usdt));
-            }
-        }
-        over
     }
 }
 

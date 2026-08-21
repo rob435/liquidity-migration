@@ -854,25 +854,6 @@ def run_archive_hourly_klines_api_download(
     return payload
 
 
-def _download_archive_hourly_group(
-    data_root: str | Path,
-    rows: list[dict[str, Any]],
-    missing_only: bool,
-    min_existing_bars: int,
-    discard_archives_after_success: bool,
-) -> list[dict[str, Any]]:
-    return [
-        _download_one_archive_hourly_kline(
-            data_root,
-            row,
-            missing_only=missing_only,
-            min_existing_bars=min_existing_bars,
-            discard_archives_after_success=discard_archives_after_success,
-        )
-        for row in rows
-    ]
-
-
 def _download_api_hourly_group(
     data_root: str | Path,
     rows: list[dict[str, Any]],

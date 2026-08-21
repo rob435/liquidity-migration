@@ -2211,6 +2211,20 @@ def test_no_path_means_no_book(tmp_path, monkeypatch) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+# NaN is not here on purpose: it never reached the file anyway, because the
+# finite-JSON writer refuses it. These two are the cases this guard decides.
+@pytest.mark.parametrize("equity", [0.0, -1.0])
+def test_an_unusable_equity_leaves_the_standing_book_alone(tmp_path, monkeypatch, equity) -> None:
+    # A failed owner-health read returns equity 0.0, and every notional would
+    # then render 0.0 -- which the engine reads as an explicit exit, before any
+    # validity window. Writing it would flatten the whole sleeve at market on a
+    # transient heartbeat gap, so nothing is written and the last book stands.
+    path = tmp_path / "carry_targets.json"
+    path.write_text('{"targets": "the standing book"}', encoding="utf-8")
+    _write_book(tmp_path, monkeypatch, sizing_equity_usdt=equity)
+    assert path.read_text(encoding="utf-8") == '{"targets": "the standing book"}'
+
+
 def test_an_empty_decision_writes_an_empty_book(tmp_path, monkeypatch) -> None:
     # Deciding cash is a decision and the engine must be able to act on it.
     book = json.loads(_write_book(tmp_path, monkeypatch, desired={}).read_text(encoding="utf-8"))

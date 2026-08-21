@@ -27,10 +27,10 @@ from liquidity_migration.account.account_intent_client import (
     completed_expired_entry_attempt_keys,
     unresolved_target_snapshot,
 )
-from liquidity_migration.account.account_owner_health import (
+from liquidity_migration.account.engine_account_health import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+    require_recent_engine_account,
 )
-from liquidity_migration.account.engine_account_health import require_recent_engine_account
 from liquidity_migration.account.entry_attempts import signal_scoped_entry_attempt_key
 from liquidity_migration.account.account_kernel import AccountJournalCursor, AccountJournalDigest
 from liquidity_migration.account.account_route import AccountRoute

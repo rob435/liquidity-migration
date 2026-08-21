@@ -74,7 +74,7 @@ fn venue_holdings() -> Vec<PositionView> {
             side: Side::Buy,
             qty: 7.0,
             entry_px: 100.0,
-            stop_attached: true,
+            stop_attached: true, stop_px: 0.0,
             leverage: None,
         },
         PositionView {
@@ -82,7 +82,7 @@ fn venue_holdings() -> Vec<PositionView> {
             side: Side::Buy,
             qty: 0.4,
             entry_px: 100.0,
-            stop_attached: true,
+            stop_attached: true, stop_px: 0.0,
             leverage: None,
         },
     ]
@@ -177,7 +177,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         side: Side::Buy,
         qty: 2.0,
         entry_px: 100.0,
-        stop_attached: true,
+        stop_attached: true, stop_px: 0.0,
         leverage: None
     }];
     let log = vec![

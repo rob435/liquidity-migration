@@ -1,6 +1,8 @@
-//! Fixtures shared by the parity tables. Every number here comes from the
-//! Python control or its tests; the source is named where it is not obvious.
-
+//! Fixtures shared by the risk tables. Each number's source is named where it
+//! is not obvious.
+//!
+//! Every test binary in this directory takes its own subset of these, so an
+//! unused-here helper is normal and the lint is off for the file.
 #![allow(dead_code)]
 
 use engine_risk::{EnvelopeConfig, KernelConfig, PartitionConfig, StrategyAllocation};
@@ -9,9 +11,8 @@ use engine_types::orders::{Intent, OrderKind, Side, StopSpec, TimeInForce};
 use engine_types::risk::{AccountView, PositionView};
 
 pub const SEC: u64 = 1_000_000_000;
-pub const DAY: u64 = 86_400 * SEC;
 
-/// Was account_loss_guard.py: DEFAULT_MAX_EQUITY_STALENESS_NS, deleted 2026-08-14.
+/// The kernel's `max_account_view_age_ns`, as both operational profiles set it.
 pub const MAX_VIEW_AGE_NS: u64 = 120 * SEC;
 /// deploy/account-execution-mainnet.env.template: DISASTER_STOP_FRACTION.
 pub const DISASTER_STOP_FRACTION: f64 = 0.35;
@@ -22,21 +23,15 @@ pub const MIN_ORDER_NOTIONAL_USDT: f64 = 1.0;
 
 pub const CARRY: StrategyId = StrategyId(0);
 pub const LONG: StrategyId = StrategyId(1);
-/// A third strategy no fixture partition names. The sleeve it was named for
-/// has since lost its claim on capital in the operational profiles, so read
-/// this as "a strategy with no share", not as a live sleeve.
+/// A strategy with no share: no fixture partition names it, which is what
+/// these tables use it to exercise. Not a live sleeve.
 pub const CONTINUOUS: StrategyId = StrategyId(2);
 pub const BUSDT: SymbolId = SymbolId(0);
 pub const CUSDT: SymbolId = SymbolId(1);
 
-/// Wall-clock nanoseconds at noon on a UTC day index, for the loss guard's day
-/// roll. Python takes the day from the equity reading's own timestamp.
-pub fn utc_noon(day_index: u64) -> u64 {
-    day_index * DAY + 12 * 3600 * SEC
-}
-
-/// The unpartitioned demo shape: configs/operational.demo.json, whose capital
-/// reference is fixed at 250_000 and whose gross cap is twice it.
+/// The unpartitioned shape: a fixed 250_000 capital reference and a gross cap
+/// twice it. The reference is the demo profile's; the multiple is this file's
+/// own, kept low so the partition tables reach their caps.
 pub fn demo_config() -> KernelConfig {
     KernelConfig {
         max_account_view_age_ns: MAX_VIEW_AGE_NS,
@@ -48,13 +43,11 @@ pub fn demo_config() -> KernelConfig {
             expand_dead_band_fraction: 0.05,
             gross_notional_multiple: 2.0,
             disaster_stop_fraction: DISASTER_STOP_FRACTION,
-            // The loosest legal setting: symbol and second gross ceiling both
-            // at the account gross cap, margin at what that gross funds. The
-            // demo profile is tighter (a 125_000 symbol cap), but these tables
+            // The loosest legal setting: the second gross ceiling at the
+            // account gross cap, margin at what that gross funds. These tables
             // are about the envelope and the partition, and a tighter cap here
             // would refuse their orders before the control under test ran.
             // tests/account_caps.rs sets each cap to the binding one instead.
-            max_symbol_notional_usdt: 500_000.0,
             max_component_gross_notional_usdt: 500_000.0,
             max_initial_margin_usdt: 250_000.0,
         },
@@ -67,8 +60,8 @@ pub fn demo_config() -> KernelConfig {
     }
 }
 
-/// The equity-anchored shape: configs/operational.mainnet.json's
-/// capital_reference block, at the demo reference the envelope tests use.
+/// The same shape with the envelope tracking equity, which is what the funded
+/// profile's `capital_reference` block turns on.
 pub fn equity_tracking_config() -> KernelConfig {
     let mut cfg = demo_config();
     cfg.envelope.tracks_equity = true;
@@ -83,7 +76,6 @@ pub fn partition_config() -> KernelConfig {
     cfg.envelope.gross_notional_multiple = 2.0;
     // The account caps move with the reference, or they would sit 500x above
     // the 1000 USDT of book this shape describes and never be reached.
-    cfg.envelope.max_symbol_notional_usdt = 1_000.0;
     cfg.envelope.max_component_gross_notional_usdt = 1_000.0;
     cfg.envelope.max_initial_margin_usdt = 500.0;
     cfg.partition = PartitionConfig {
@@ -130,6 +122,7 @@ pub fn position(
         side,
         qty,
         entry_px,
+        stop_px: 0.0,
         stop_attached,
         leverage: None
     }

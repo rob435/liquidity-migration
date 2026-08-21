@@ -135,7 +135,6 @@ fn the_margin_share_binds_independently_of_the_gross_share() {
     // the 500 USDT shape's numbers the account margin cap would refuse this
     // order before the margin share got to clamp it, and the test would be
     // watching the wrong control.
-    cfg.envelope.max_symbol_notional_usdt = 5_000.0;
     cfg.envelope.max_component_gross_notional_usdt = 5_000.0;
     cfg.envelope.max_initial_margin_usdt = 5_000.0;
     cfg.partition = PartitionConfig {

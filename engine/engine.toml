@@ -47,9 +47,8 @@ shadow = true
 # nanoseconds, and both null until an order has been through.
 # heartbeat_path = "var/engine-heartbeat.json"
 
-# The four capital controls. Nothing here has a default: every number is
-# written down, and the Python fleet's values are recorded in
-# engine-risk/PORT_NOTES.md.
+# The three capital controls. Nothing here has a default: every number is
+# written down, and what each one means is in engine-risk/PORT_NOTES.md.
 #
 # THE OTHER WAY. Instead of writing the caps out, point at the profile
 # document the Python fleet already reads, and the caps and the per-sleeve
@@ -86,15 +85,9 @@ floor_usdt = 100.0
 expand_dead_band_fraction = 0.05
 gross_notional_multiple = 2.0
 disaster_stop_fraction = 0.35
-# The account-wide caps. All three are sized against reference_usdt above and
-# move with it, so this file is at the same 100 USDT test scale as the rest.
+# The account-wide caps. Both are sized against reference_usdt above and move
+# with it, so this file is at the same 100 USDT test scale as the rest.
 #
-# Most gross notional on any one symbol. The one strategy below has a 100 USDT
-# gross share (50 capital x 2 leverage) and one symbol to spend it on, so at
-# this scale the symbol cap and that share bind in the same place. The mainnet
-# profile sets it to half the reference — 50 USDT here — which is the number to
-# copy once more than one symbol is traded.
-max_symbol_notional_usdt = 100.0
 # A second account-wide gross ceiling, at or below reference x
 # gross_notional_multiple. Both Python profiles ship it equal to that cap, so it
 # is equal here too and the envelope allowance is what binds.

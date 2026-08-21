@@ -47,6 +47,13 @@ Entry fires when price touches `signal_close × 0.99` (`sniper_retrace`), or fal
 at the 6-hour deadline while the signal is still fresh (`sniper_deadline_fallthru`). Ten
 concurrent positions, 7-day per-symbol cooldown.
 
+The regime gate reads BTC and ETH daily closes. Both anchor frames are always fetched for
+the join even when the frozen candidate artifact excludes the names — with either missing,
+both flags read false and every native entry stops — and a force-added anchor is dropped
+from candidacy, so the freeze still decides what may be traded. A pump the regime refuses
+is counted (`skipped_regime_btc_off` / `skipped_regime_eth_off`) instead of folding into
+the same no-signal count as a quiet day.
+
 **Sizing.** Base slot `gross_exposure / max_concurrent_positions` = 10% of equity, times the
 profile's `notional_multiplier`, times the BTC-vol scalar `clip(0.60 / btc_rv, 0.30, 1.25)`,
 times the vol-parity weight `max(min(0.30/vol_used, 3.0), 0.25)` (30d realized vol, 30%
@@ -79,18 +86,27 @@ Lane-1 evidence: simulated on the data that also chose the rule. The forward rec
 at the registering commit. Its identity `long_native_v12_wide_stop` is separate from v11a's
 because that string is a persisted account-journal key.
 
-**How v12 publishes.** The wide initial stop is a bigger `stop_loss_pct` in the entry
-target's metadata — the account owner derives the resting venue-native stop from it after the
-fill and never revises it. The 48-hour tightening is producer-side: each entry freezes its own
-decay contract in the same metadata (`stop_decay_after_ms`, `decayed_stop_loss_pct` =
-`fc_stop_time_decay_atr_mult × atr_14d_pct` off the signal-day ATR), and
-`_plan_time_stop_exits` publishes a zero target (journal reason `decayed_stop_loss`) once a
-filled position is past the decay age and the live price is at or below
-`entry_fill_price × (1 − decayed_stop_loss_pct)`. The contract is frozen per trade at entry,
-so a later profile change cannot rewrite a standing position's decay. The producer checks on
-its 60s cycle grid against the backtest's hourly intrabar lows — finer than the measurement —
-but the *exit* is a market order after the breach is seen, not a resting order at the level;
-the venue-native wide stop stays armed underneath. Profile selection is
+**How v12 publishes.** The wide initial stop is the entry's `stop_loss_fraction` in the
+book, which the engine turns into a venue-native stop attached to the position. Each entry
+also freezes its own decay contract (`stop_decay_after_ms`, `decayed_stop_loss_pct` =
+`fc_stop_time_decay_atr_mult × atr_14d_pct` off the signal-day ATR), frozen per trade at
+entry so a later profile change cannot rewrite a standing position's decay.
+
+**The tightening reaches the venue.** Past the decay age the book declares the narrower
+fraction, and the engine moves the position's venue-native stop in to match
+(`Step::Restop` → `Action::SetStop` → `POST /v5/position/trading-stop`). It only ever
+tightens: a declared stop further from the position than the one standing is refused, a
+move smaller than a tick is read as the venue's own rounding and ignored, and a position
+the venue holds no stop on is left to boot's repair rather than given one from a book. The
+move is journaled (`WalRecord::StopSet`) before the call, so a crash leaves the log
+claiming the tighter level and boot puts *that* back. Worth **+13 to +19 bp a trade**,
+measured across 26 of 30 era-and-window cells
+([receipts](research/archive/2026-08-21-llm-gate-window-lab.md)).
+
+`_plan_time_stop_exits` still publishes a zero target (journal reason `decayed_stop_loss`)
+when the producer sees the breach first on its 60s cycle — whichever of the two acts first
+ends the trade, and the venue's own stop is the one that survives the producer dying.
+Profile selection is
 `LONG_STRATEGY_PROFILE` (`v11a`/`v12`) in the unit environment → `--strategy-profile`; the
 planner plans exits across **both** registered identities, so components opened under v11a
 keep their published stop/TP/hold terms and drain normally (3-day max hold) while new entries
@@ -102,19 +118,61 @@ size as a fraction of equity when positive, replacing the derived slot; 0 keeps 
 strategy's own chain (`gross_exposure / max_concurrent_positions × notional_multiplier`).
 It is a setter, not a cap — the name says so — and the loader accepts [0, 10].
 
-At the profile's 250,000 USDT capital reference the registered worst-case envelope is
-**703,125.00 USDT gross** and **140,625.00 USDT initial margin**: per-order 28.125% of
-equity (= 70,312.50) × 10 concurrent positions ÷ entry leverage 5. The 28.125% is the 15%
-base slot × 1.25 worst-case BTC-vol scale × 1.5 weekend multiplier. Projected full-book
-initial margin is therefore 56.25% against the 100% ceiling. Runtime profile bytes override
-any number written here.
+**One entry runs from 2.25% to 56.25% of equity.** The chain is the 10% base slot × the
+3.0 multiplier × a BTC-volatility scale in [0.30, 1.25] × a per-name vol-parity weight in
+[0.25, 1.0] × 1.5 on a weekend.
 
-**Exit.** Each target declares a 1.5×ATR14 stop and a 4.0×ATR14 take-profit; the account
-owner converts both to venue prices off the first attributable fill and places the stop.
-Time stop at 3 days publishes a zero target.
+**Nothing caps a single name.** The account has no per-symbol ceiling: one name may hold a
+sleeve's whole gross share. What bounds one position is its own venue-native stop; what
+bounds the book is the account gross cap, the account margin cap, and — on the funded
+profile only — each sleeve's share.
+
+**On demo the account caps meet nothing either.** `operational.demo.json` declares no
+`capital_reference` block, so the envelope does not track equity: the reference stays pinned
+at 250,000 and the gross cap at 1,250,000 while the account holds a few thousand. The
+producer sizes off *observed* equity, so those caps sit orders of magnitude above anything
+it can ask for and never bind. On demo the venue-native stop is the only bound that acts.
+
+On the funded profile the reference tracks the wallet, so the ratios are real there: a full
+ten-slot book would be 562% gross against a 500% cap, and LONG's own share stops at 300% of
+the wallet. Nothing resizes to fit — the engine refuses each entry that would breach.
+Runtime profile bytes override any number here.
+
+**The engine works each standing position toward its ask.** The book's notional is frozen
+at entry, but the position is valued at mark: past the engine's 5%/$1 dead band it trims
+what ran up and adds to what fell back, and every add re-declares the venue stop from the
+position's average entry, so the stop walks down with each add. What the venue actually
+holds is written onto the record each cycle (`venue_qty`, `venue_avg_entry_px`), and every
+engine move is logged and counted (`engine_resized_symbols_json`).
+
+**A refused ask leaves the book.** The engine heartbeat carries `entry_blockers` — why each
+asked-for name is not being opened: kernel refusals (margin, latch, stale quote) and
+planner skips (entry floor, venue minimum, no price or instrument rule). An ask the engine
+has never confirmed and is refusing leaves the record the same cycle, which frees its slot;
+no cooldown starts, because the name never held. A confirmed holding under a refusal is
+exit business and stays. Both the drop and the skip are counted
+(`engine_blocked_asks`, `skipped_engine_blocked`).
+
+**The producer's record fails closed.** `long-demo-state.json` is the producer's only
+memory of what it asked for, and the engine reads the book as absolute — silence about a
+symbol means hold none of it. A record that exists but cannot be read back (torn JSON, an
+unknown version, one unreadable held row) fails the cycle loudly rather than reading as
+empty, which would market-close every open position at once and, written back, make a
+transient read failure permanent. Writes are fsynced before the rename. A missing file is
+the one honest empty: a producer that has never written a record holds nothing.
+
+**Exit.** Each target declares a venue-native ATR-scaled stop that narrows on the decay
+clock; the engine attaches it at entry and moves it in when the book's declared distance
+narrows. Time stop at 3 days publishes a zero target. **No take-profit**: graded on 5.5
+years of hourly triggers it is negative at every multiple tested, so nothing on the live
+path carries one ([receipts](research/archive/2026-08-21-llm-gate-window-lab.md)).
 
 **Limits.** The forward record is demo-only. The retained internal backtest result depends
-materially on take-profit winners, and the research runner does not abort when PIT membership
+materially on take-profit winners — **and the live path takes no take-profit**, so the
+graded rule and the running one differ in the term the result leans on. On the gate's
+hourly triggers a take-profit is measurably negative at every multiple, which is why the
+live path has none; whether the daily rule's dependence survives the same test is not
+established. The research runner also does not abort when PIT membership
 is incomplete — only an untainted run whose artifacts establish the population supports a
 historical-universe claim ([`data.md`](data.md)). The scoped run label carries a
 funding-coverage dimension as well as a PIT one, and funding downgrades it independently:
@@ -168,8 +226,8 @@ not a fault.
 ratio); the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it (a
 name with fewer than 20 settlements of history fails open at full size); flow and whale are
 the ×0.5 halvings above — gross capped at 1.0, then
-`weight × sizing_equity × notional_multiplier` (2.0 — each new carry name takes 20% of the
-sizing equity at 5x entry leverage, owner risk-on directive). Sizing equity is anchored to the decision, not
+`weight × sizing_equity × CARRY_NOTIONAL_MULTIPLIER` (3.0 — a name at full weight takes 30%
+of the sizing equity at 5x entry leverage; the dial overrides the profile's own value). Sizing equity is anchored to the decision, not
 the live mark: sizing off the live mark makes the day's target a function of the book's own
 unrealized P&L, and the book churns itself. A 5%-of-standing / $1 dead-band is the
 backstop; entries below $10 notional are skipped.
@@ -267,36 +325,49 @@ carry never held) is measured-but-unrun and NOT part of this config. Evidence:
 ## LLM GATE — judged entries inside the LONG sleeve
 
 > **Live on demo since 2026-08-21 by owner decision.** The hourly
-> `liquidity-migration-llm-ledger.service` judges fresh 1/2/4/12/24h trigger
+> `liquidity-migration-llm-ledger.service` judges fresh 4/12/24h trigger
 > events and publishes every **score ≥ 6** judgment to the LONG sleeve's
 > candidates file; the LONG producer takes those names as entries through its
 > own sizing, exits, and venue-native stops. One strategy, one book
 > (`long-demo.json`), one engine sleeve (`long`) — the ledger holds no venue
 > credentials and writes nothing but the candidates file and its own ledger.
 
-**Signal.** The hourly trigger scan: a top-30-turnover name whose rolling
-1/2/4/12/24h move clears its vol-scaled bar (the daily 2.5σ trigger × √time)
-with range location ≥ 0.70, BTC-and-ETH regime on, ATR-14d ≤ 12%. Each event
-is judged by a language model walking the fixed step-rubric over enriched
-public facts; **a pump_quality_score ≥ 6 is an entry candidate**, at the
-trigger-hour price. Everything below 6 stays ledger-only. Only the 24h
-window has lane-1 evidence (+16 bp/trade on confirming pumps, t 3.76, and
-negative book-level without a working discriminator); the judged gate and
-the shorter windows have none — the forward record is the experiment.
+**Signal.** The hourly trigger scan: a **top-10**-turnover name whose rolling
+4/12/24h move clears its vol-scaled bar (the daily 2.5σ trigger × √time) with
+range location ≥ 0.70, BTC-and-ETH regime on, ATR-14d ≤ 12%. Each event is
+judged by a language model walking the fixed step-rubric over enriched public
+facts; **a pump_quality_score ≥ 6 is an entry candidate**, at the trigger-hour
+price. Everything below 6 stays ledger-only.
+
+The window set and the rank depth are graded, on 5.5 years of hourly bars
+against the sleeve's own exit geometry
+([receipts](research/archive/2026-08-21-llm-gate-window-lab.md)): the 1h and 2h
+windows each have a significantly negative year and are not run; turnover rank
+is the strongest thing measured about these triggers, and depth 10 roughly
+doubles the edge per trade against depth 30 in every year. The judged gate
+itself has no lane-1 evidence — the model's contribution over the mechanical
+trigger is what the forward record is testing.
 
 **Entry path.** The LONG producer reads the candidates file each 60s cycle
 (`LONG_ENGINE_LLM_GATE_CANDIDATES_PATH` + `LONG_ENGINE_LLM_GATE_ENABLED=1`
 on the demo unit; mainnet sets neither, so the gate is inert there). A fresh
 judged event becomes a candidate in exactly the native shape: stop
-`fc_atr_stop_mult`×ATR (v12: 3×), decayed stop `1.5×`ATR after 48h,
-take-profit `4×`ATR, 3-day hold, and the same vol-parity position weight the
+`fc_atr_stop_mult`×ATR (v12: 3×), decayed stop `1.5×`ATR after 48h, 3-day
+hold, and the same vol-parity position weight the
 FC path computes — the judgment is the trigger and nothing else. From there
 the candidate shares every cut the native candidates face: per-cycle pacing,
 free slots, owner-health gate, 7-day per-symbol cooldown, fill-anchored
 sizing at the profile's LONG multiplier, and the engine's admission. A
 missing, stale, or malformed candidates file reads as "no signal"; a dead
-ledger service stops new gate entries within its 90-minute file validity
-while everything else runs on.
+ledger service stops new gate entries within the hour, and no signal is acted
+on more than an hour after the bar that made it — three clocks (file age,
+declared validity, trigger age) all held to the same hour.
+
+One asymmetry stands: the native FC path selects only from the frozen
+candidate population, while the gate builds candidates from the events file
+against the live ticker snapshot without that filter — so the gate can enter
+a listing that postdates the freeze, which the native path cannot touch until
+a re-freeze.
 
 **Kill switches.** `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit:
 no gate entries, native entries and all exits unaffected. Stopping
@@ -333,8 +404,8 @@ producers publish one target per symbol per sleeve, so nothing exercises that.
 function, not line): unknown or missing fields in any block (`_object`); any producer
 `entry_leverage` above `account_risk.max_leverage`; an account gross cap above
 `capital_reference_usdt × max_leverage`; an initial-margin cap above
-`capital_reference_usdt`; a symbol cap above the component cap, or a component cap above the
-account cap (`_validate_profile_envelopes`). A profile carrying a `continuous` block is
+`capital_reference_usdt`; a component cap above the account cap
+(`_validate_profile_envelopes`). A profile carrying a `continuous` block is
 refused by name. How large a book the sizing multipliers build is the owner's dial and is
 not refused at load — per-position risk is bounded by each position's own venue-native
 stop. The validator re-runs on the equity-rescaled profile, not only at load. Separately: a

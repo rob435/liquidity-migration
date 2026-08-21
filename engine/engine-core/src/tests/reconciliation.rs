@@ -370,7 +370,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
             side: Side::Buy,
             qty: 0.5,
             entry_px: 100.0,
-            stop_attached: true,
+            stop_attached: true, stop_px: 0.0,
             leverage: None,
         }],
     )

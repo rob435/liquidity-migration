@@ -186,11 +186,8 @@ fn the_scanner_would_notice_an_unknown_host() {
 
 #[test]
 fn the_one_file_rule_would_notice_a_host_in_another_file() {
-    // The other half of non-vacuity: a known-good host is still a failure if
-    // it is written somewhere other than the realm module. Checked against the
-    // same predicate the test above uses, on a path that is not the home file.
-    let elsewhere = Path::new("gateway.rs");
-    assert!(!elsewhere.file_name().is_some_and(|n| n == HOST_HOME));
+    // The other half of non-vacuity: the scanner really does see a host when
+    // one is planted, so the fence passing above means absence, not blindness.
     let planted = format!("\"https://{}\"", ["api", ".bybit", ".com"].concat());
     assert_eq!(hosts_in(&planted).len(), 1, "the planted host was not seen");
 }

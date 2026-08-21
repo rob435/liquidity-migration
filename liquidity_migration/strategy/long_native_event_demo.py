@@ -101,7 +101,10 @@ from liquidity_migration.rules.long_identity import (
     long_profile_display_name,
     long_trade_id,
 )
-from liquidity_migration.account.engine_account_health import engine_held_symbols
+from liquidity_migration.account.engine_account_health import (
+    EngineAccountReading,
+    require_recent_engine_account,
+)
 from liquidity_migration.strategy.strategy_planning import (
     TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     OwnerHealthReading,
@@ -150,6 +153,13 @@ LONG_BOOK_VALIDITY_MS = exact_duration_ms(hours=1)
 #: or a slow cycle cannot let a name back in early.
 _COOLDOWN_KEEP_MS = exact_duration_ms(days=1)
 
+#: The regime gate reads BTC and ETH daily closes, and both flags go false when
+#: either frame is missing -- every native entry would stop, silently. These
+#: two are always fetched for the regime join even when the frozen candidate
+#: artifact excludes them; a force-added anchor is dropped from candidacy so
+#: the freeze still decides what may be traded.
+ETH_REGIME_SYMBOL = "ETHUSDT"
+
 #: The LLM gate's judged entry candidates, written hourly by
 #: liquidity-migration-llm-ledger.service. Set both vars on a producer unit to
 #: turn judged score>=6 pump events into LONG entries through this sleeve's own
@@ -157,9 +167,14 @@ _COOLDOWN_KEEP_MS = exact_duration_ms(days=1)
 LLM_GATE_CANDIDATES_PATH_ENV = "LONG_ENGINE_LLM_GATE_CANDIDATES_PATH"
 LLM_GATE_ENABLED_ENV = "LONG_ENGINE_LLM_GATE_ENABLED"
 
-#: A candidates file older than its own validity is stale and is ignored; the
-#: ledger rewrites it every hour, so this only has to clear one missed run.
-_LLM_GATE_MAX_AGE_MS = exact_duration_ms(hours=2)
+#: A gate signal is dead an hour after the bar that made it. Three clocks can
+#: disagree -- when the file was written, what it says its own validity is, and
+#: when the trigger bar closed -- so all three are held to the same hour and the
+#: trigger clock is the one that decides. The ledger rewrites the file every
+#: hour, so a live signal is minutes old; anything approaching an hour means a
+#: run was missed, and a missed run is not a signal.
+_LLM_GATE_MAX_AGE_MS = exact_duration_ms(hours=1)
+_LLM_GATE_SIGNAL_MAX_AGE_MS = exact_duration_ms(hours=1)
 
 #: What the cycle reports when the book replaced the inbox. Nothing was
 #: published because nothing reads the inbox any more, and the summary fields
@@ -432,6 +447,15 @@ def run_long_native_demo_cycle(
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
             raise RuntimeError("long-native demo cycle found no current tradable symbols after universe filters")
+        # The regime join needs BTC and ETH daily closes whether or not either
+        # is a tradable candidate: with either frame missing, both regime
+        # flags read false and every native entry stops without a word. A
+        # force-added anchor is dropped from the feature frame below, so the
+        # frozen artifact still decides candidacy; one already inside the
+        # active set stays exactly as tradable as it was.
+        regime_anchors = [strategy.regime_symbol.upper(), ETH_REGIME_SYMBOL]
+        force_added_anchors = [symbol for symbol in regime_anchors if symbol not in set(symbols)]
+        kline_symbols = symbols + force_added_anchors
         mark_stage("universe")
 
         # A wake that exists to act fast must not spend its first seconds on
@@ -462,7 +486,7 @@ def run_long_native_demo_cycle(
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
         klines, kline_cache_stats = _download_recent_1h_klines(
-            symbols,
+            kline_symbols,
             start_ms=start_ms,
             end_ms=end_ms,
             launch_time_ms_by_symbol=_launch_time_ms_by_symbol(universe),
@@ -486,6 +510,35 @@ def run_long_native_demo_cycle(
                 .alias("date")
             )
         features = build_long_features(klines, config=strategy)
+        # The regime reading comes off the anchor rows before anything picks
+        # candidates: latest closed bar per anchor, and which anchors never
+        # arrived at all.
+        regime_btc_on: bool | None = None
+        regime_eth_on: bool | None = None
+        missing_regime_anchors: list[str] = []
+        if not features.is_empty():
+            for anchor in regime_anchors:
+                rows = features.filter(
+                    (pl.col("symbol") == anchor) & (pl.col("ts_ms") <= cycle_now_ms)
+                )
+                if rows.is_empty():
+                    missing_regime_anchors.append(anchor)
+                    continue
+                latest = rows.sort("ts_ms").tail(1)
+                if anchor == strategy.regime_symbol.upper():
+                    regime_btc_on = bool(latest["regime_on"][0])
+                if anchor == ETH_REGIME_SYMBOL:
+                    regime_eth_on = bool(latest["eth_regime_on"][0])
+            if missing_regime_anchors:
+                _LOGGER.warning(
+                    "LONG cycle: regime anchor(s) %s produced no closed bars; the regime "
+                    "gate reads them as off and blocks every native entry",
+                    ", ".join(missing_regime_anchors),
+                )
+        # A force-added anchor exists only to feed the regime join: drop its
+        # rows before universe ranking or candidate selection can see it.
+        if force_added_anchors and not features.is_empty():
+            features = features.filter(~pl.col("symbol").is_in(force_added_anchors))
         # Re-select in_universe on the latest bar to the top-N by 90d MEDIAN
         # turnover, the key the backtest ranks on. Keyed on the same
         # strategy.universe_size build_long_features used, so steady state is a
@@ -518,6 +571,8 @@ def run_long_native_demo_cycle(
         engine_book_path = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
         book_state: LongBookState | None = None
         book_state_path: Path | None = None
+        engine_reading: EngineAccountReading | None = None
+        engine_blocked_asks = 0
         if engine_book_path:
             book_state_path = long_book_state_path()
             if book_state_path is None:
@@ -526,6 +581,43 @@ def run_long_native_demo_cycle(
                     "a producer that writes a book must remember what it asked for"
                 )
             book_state = read_book_state(book_state_path)
+            try:
+                engine_reading = require_recent_engine_account(
+                    owner_environment, max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS
+                )
+            except (OSError, RuntimeError, ValueError):
+                # No heartbeat, a stale one, an unreadable one: no news about
+                # what is held and no news about refusals. The record below is
+                # left exactly as it stands.
+                engine_reading = None
+            if engine_reading is not None and engine_reading.entry_blockers:
+                # An ask the engine refuses never becomes a position, but it
+                # reserves a slot until its deadline -- unless it leaves the
+                # record now. Only names the engine has never confirmed go;
+                # a confirmed holding with a refusal is exit business, not
+                # entry bookkeeping. No cooldown: the name never held.
+                blocked_asks = {
+                    symbol: reason
+                    for symbol, reason in sorted(engine_reading.entry_blockers.items())
+                    if symbol in book_state.held and not book_state.held[symbol].seen_held
+                }
+                for symbol, reason in blocked_asks.items():
+                    _LOGGER.warning(
+                        "long book: %s was asked for but the engine will not open it (%s); "
+                        "the ask leaves the book",
+                        symbol,
+                        reason,
+                    )
+                if blocked_asks:
+                    engine_blocked_asks = len(blocked_asks)
+                    book_state = LongBookState(
+                        held={
+                            symbol: entry
+                            for symbol, entry in book_state.held.items()
+                            if symbol not in blocked_asks
+                        },
+                        left_at_ms=book_state.left_at_ms,
+                    )
             all_trades = book_state.as_trade_rows()
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
@@ -582,6 +674,24 @@ def run_long_native_demo_cycle(
                 if candidate["symbol"] not in gate_symbols
             ] + gate_candidates
             candidates = candidates[: max(demo.max_new_entries_per_cycle, 0)]
+        if engine_reading is not None and engine_reading.entry_blockers:
+            # An ask the engine is refusing right now is not re-asked this
+            # cycle: it would be dropped from the record again on the next
+            # one. Counted, so a standing refusal is visible instead of a
+            # candidate count that never becomes a position.
+            still_blocked = [
+                candidate
+                for candidate in candidates
+                if str(candidate.get("symbol") or "").upper() in engine_reading.entry_blockers
+            ]
+            if still_blocked:
+                skip_counts["engine_blocked"] = len(still_blocked)
+                blocked_symbols = {str(c.get("symbol") or "").upper() for c in still_blocked}
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if str(candidate.get("symbol") or "").upper() not in blocked_symbols
+                ]
         free_slots = max(
             strategy.max_concurrent_positions - _count_long_target_reservations(all_trades),
             0,
@@ -618,7 +728,8 @@ def run_long_native_demo_cycle(
             # this producer stopped asking for is simply absent, which the
             # engine reads as "hold none of it". Nothing is published to the
             # inbox, because nothing reads the inbox any more.
-            book_state = _advance_long_book_state(
+            asked_before = set(book_state.held)
+            book_state, engine_resized_symbols = _advance_long_book_state(
                 book_state,
                 exit_plans=exit_plans,
                 candidates=candidates,
@@ -629,8 +740,11 @@ def run_long_native_demo_cycle(
                 strategy_id=strategy_id,
                 now_ms=cycle_now_ms,
                 cooldown_days=int(strategy.cooldown_days),
-                held_symbols=engine_held_symbols(
-                    owner_environment, max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS
+                held_symbols=(
+                    engine_reading.held_symbols if engine_reading is not None else None
+                ),
+                venue_holdings=(
+                    engine_reading.holdings if engine_reading is not None else {}
                 ),
             )
             # The record is written first. A book the record does not back
@@ -646,7 +760,12 @@ def run_long_native_demo_cycle(
                     strategy_profile=str(strategy_id),
                 ),
             )
+            # Nothing reads the inbox in this mode, so "queued" counts what
+            # the book itself took in and let go: the summary line would
+            # otherwise read zero on every cycle for ever.
             publication = _EMPTY_PUBLICATION
+            published_exit_intents = len(asked_before - set(book_state.held))
+            published_entry_intents = len(set(book_state.held) - asked_before)
         else:
             publication = publish_exit_first_target_requests(
                 target_publisher,
@@ -655,8 +774,8 @@ def run_long_native_demo_cycle(
                 entry_intents=entry_target_intents,
                 created_ts_ns=cycle_now_ms * 1_000_000,
             )
-        published_exit_intents = len(publication.exit_requests)
-        published_entry_intents = len(entry_target_intents) if publication.entry_requests else 0
+            published_exit_intents = len(publication.exit_requests)
+            published_entry_intents = len(entry_target_intents) if publication.entry_requests else 0
         account_target_requests = {
             "exit_request_ids": list(publication.exit_request_ids),
             "exit_requests": [
@@ -737,6 +856,22 @@ def run_long_native_demo_cycle(
             "terminal_entry_attempt_suppressions": terminal_entry_suppressions,
             "account_owner_health_error": account_owner_health_error,
             "open_long_components": _count_open_long_positions(all_trades),
+            # The regime gate's two inputs, as the latest closed bars read
+            # them. Null when the anchor produced no closed bar at all -- the
+            # gate then reads it as off, and skipped_regime_* says what that
+            # cost.
+            "regime_btc_on": regime_btc_on,
+            "regime_eth_on": regime_eth_on,
+            "regime_anchors_missing_json": json.dumps(missing_regime_anchors),
+            # Book mode only: asks dropped because the engine refuses them,
+            # names the engine moved against the record, and how many targets
+            # the book now carries. Inbox mode publishes requests instead and
+            # leaves these null.
+            "engine_blocked_asks": engine_blocked_asks if book_state is not None else None,
+            "engine_resized_symbols_json": (
+                json.dumps(engine_resized_symbols) if book_state is not None else None
+            ),
+            "book_targets": len(book_state.held) if book_state is not None else None,
             # Null, not 0.0, when owner health is unavailable: a literal zero
             # reads as a -100% equity spike in every cycles-derived curve.
             "equity_usdt": equity_usdt if not account_owner_health_error else None,
@@ -991,6 +1126,7 @@ def _llm_gate_candidates(
         "llm_gate_no_live_price": 0,
         "llm_gate_bad_event": 0,
         "llm_gate_duplicate": 0,
+        "llm_gate_no_vol": 0,
     }
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1002,7 +1138,7 @@ def _llm_gate_candidates(
         if not symbol or trigger_ts_ms <= 0 or not 0.0 < atr_pct < 1.0 or score <= 0.0:
             skips["llm_gate_bad_event"] += 1
             continue
-        if now_ms - trigger_ts_ms > SIGNAL_FRESHNESS_MS:
+        if now_ms - trigger_ts_ms > _LLM_GATE_SIGNAL_MAX_AGE_MS:
             skips["llm_gate_stale"] += 1
             continue
         if symbol in open_symbols:
@@ -1018,11 +1154,19 @@ def _llm_gate_candidates(
         if symbol in seen:
             skips["llm_gate_duplicate"] += 1
             continue
-        seen.add(symbol)
         sigma_daily = _float(event.get("sigma_daily_30d"))
-        realized_vol = (
-            sigma_daily * math.sqrt(365.0) if sigma_daily > 0.0 else strategy.vol_floor_annual
-        )
+        if sigma_daily <= 0.0:
+            # No measured volatility, no entry. The vol-parity rule reads an
+            # absent reading as the floor, which is its CEILING weight, so a
+            # name we know least about would take the largest position in the
+            # book. The gate's own scan ranks on 24h turnover with no age
+            # filter, and the ledger needs 31 daily bars for sigma against 15
+            # for the ATR, so this is the ordinary state of a young listing —
+            # not a rare defensive case.
+            skips["llm_gate_no_vol"] += 1
+            continue
+        seen.add(symbol)
+        realized_vol = sigma_daily * math.sqrt(365.0)
         notional_weight = strategy.gross_exposure / max(strategy.max_concurrent_positions, 1)
         position_weight = _vol_parity_weight(
             realized_vol=realized_vol,
@@ -1110,6 +1254,11 @@ def _select_long_entry_candidates(
         "entry_delay": 0,
         "no_retrace_yet": 0,
         "no_live_price": 0,
+        # A pump that fired but the regime gate refused. Without these,
+        # regime-off and a quiet day land in the same no_signal count and a
+        # gate stuck off looks exactly like no signals anywhere.
+        "regime_btc_off": 0,
+        "regime_eth_off": 0,
     }
     if features.is_empty():
         skips["no_features"] = 1
@@ -1150,6 +1299,20 @@ def _select_long_entry_candidates(
             pattern, _stop_pct, _tp_pct, _hold_days = _classify_entry(row, strategy)
             if pattern == "fomo_chase":
                 fc_signal_count += 1
+                continue
+            # A row the regime gate refused, counted separately from a day
+            # with no pumps at all. The same triggers and gate order
+            # `detect_pattern_fomo_chase` checks, asked before its
+            # short-circuit: universe first, then the two regime flags.
+            pump = long_pump_family(row, strategy)
+            if not (pump["trigger_1d"] or pump["trigger_3d"] or pump["trigger_7d"]):
+                continue
+            if not row.get("in_universe"):
+                continue
+            if not row.get("regime_on"):
+                skips["regime_btc_off"] += 1
+            if not row.get("eth_regime_on"):
+                skips["regime_eth_off"] += 1
         if fc_signal_count == 0:
             continue
         if (now_ms - ts) > SIGNAL_FRESHNESS_MS:
@@ -1726,7 +1889,8 @@ def _advance_long_book_state(
     now_ms: int,
     cooldown_days: int,
     held_symbols: frozenset[str] | None,
-) -> LongBookState:
+    venue_holdings: Mapping[str, tuple[str, float, float]] | None = None,
+) -> tuple[LongBookState, list[str]]:
     """Move the record on by one cycle: drop what exited, add what entered.
 
     The sizing is the same expression `_long_entry_target_intents` uses, on
@@ -1734,6 +1898,15 @@ def _advance_long_book_state(
     a size would be a second strategy. A name already in the record keeps the
     notional it entered with; re-sizing every open name off today's equity each
     cycle is a different strategy, not a translation of this one.
+
+    The engine, though, works the standing position toward that ask at the
+    live mark: it trims what has run up and adds to what has fallen back
+    whenever the gap clears its dead band, and every add re-declares the
+    venue stop from the position's average entry, so the stop walks down
+    with each add. What the venue actually holds is recorded on the entry
+    (`venue_qty` / `venue_avg_entry_px`) and every engine move is returned
+    as a name in the second element, so the walk is news instead of
+    something nothing in Python knows about.
     """
 
     exited = {
@@ -1765,16 +1938,23 @@ def _advance_long_book_state(
     gone = exited | closed_elsewhere
 
     held = {}
+    engine_resized: list[str] = []
     for symbol, entry in state.held.items():
         if symbol in gone:
             continue
         # Confirmed once, remembered for good: an entry that fills and is later
         # closed must read differently from one that never filled at all.
-        held[symbol] = (
-            entry
-            if entry.seen_held or held_symbols is None or symbol not in held_symbols
-            else replace(entry, seen_held=True)
-        )
+        if not entry.seen_held and held_symbols is not None and symbol in held_symbols:
+            entry = replace(entry, seen_held=True)
+        if venue_holdings and entry.seen_held and symbol in venue_holdings:
+            entry = _reconcile_entry_with_venue(
+                entry,
+                venue_holdings[symbol],
+                mark=price_by_symbol.get(symbol, 0.0),
+                now_ms=now_ms,
+                engine_resized=engine_resized,
+            )
+        held[symbol] = entry
     left_at_ms = dict(state.left_at_ms)
     for symbol in gone:
         left_at_ms[symbol] = now_ms
@@ -1830,7 +2010,110 @@ def _advance_long_book_state(
     left_at_ms = {
         symbol: when for symbol, when in left_at_ms.items() if when >= horizon_ms
     }
-    return LongBookState(held=held, left_at_ms=left_at_ms)
+    return LongBookState(held=held, left_at_ms=left_at_ms), engine_resized
+
+
+def _reconcile_entry_with_venue(
+    entry: LongBookEntry,
+    venue: tuple[str, float, float],
+    *,
+    mark: float,
+    now_ms: int,
+    engine_resized: list[str],
+) -> LongBookEntry:
+    """Record what the venue actually holds against the ask, and log engine moves.
+
+    The ask's notional stays frozen -- that is the strategy. What is checked
+    here is the difference between this cycle's venue reading and last
+    cycle's: a size change means the engine trimmed or added around its dead
+    band, and a falling average entry price means it added and re-declared
+    the venue stop from the new average, so the stop walked down.
+    """
+
+    side, qty, venue_entry_px = venue
+    if qty <= 0.0:
+        return entry
+    if side and side != "long":
+        # One net position per symbol at the venue; a short under a long ask
+        # is somebody else's business sitting on this name.
+        _LOGGER.warning(
+            "long book: %s reads %s at the venue (%s contracts) under a long ask",
+            entry.symbol,
+            side,
+            qty,
+        )
+    previous_qty = entry.venue_qty
+    previous_entry_px = entry.venue_avg_entry_px
+    updated = replace(
+        entry,
+        venue_qty=qty,
+        venue_avg_entry_px=venue_entry_px,
+        venue_ts_ms=now_ms,
+    )
+    if previous_qty <= 0.0:
+        # First sighting: record it, say nothing unless the stop has already
+        # walked away from the price the ask was decided against.
+        if (
+            venue_entry_px > 0.0
+            and entry.entry_price > 0.0
+            and venue_entry_px < entry.entry_price * 0.99
+        ):
+            _LOGGER.warning(
+                "long book: %s holds %.10g at an average entry of %.10g against a "
+                "decision price of %.10g; the venue stop sits below that average",
+                entry.symbol,
+                qty,
+                venue_entry_px,
+                entry.entry_price,
+            )
+        return updated
+    if abs(qty - previous_qty) > 0.02 * max(previous_qty, 1e-12):
+        engine_resized.append(entry.symbol)
+        implied = (
+            f" (the ask implies {entry.notional_usdt / mark:.10g} at mark {mark:.10g})"
+            if mark > 0.0 and entry.notional_usdt > 0.0
+            else ""
+        )
+        _LOGGER.warning(
+            "long book: the engine moved %s at the venue: %.10g -> %.10g contracts%s",
+            entry.symbol,
+            previous_qty,
+            qty,
+            implied,
+        )
+    if (
+        previous_entry_px > 0.0
+        and venue_entry_px > 0.0
+        and abs(venue_entry_px - previous_entry_px) > 0.01 * previous_entry_px
+    ):
+        _LOGGER.warning(
+            "long book: %s average entry moved %.10g -> %.10g; the venue stop "
+            "re-anchored with it",
+            entry.symbol,
+            previous_entry_px,
+            venue_entry_px,
+        )
+    return updated
+
+
+def _long_stop_fraction_now(entry: LongBookEntry, *, now_ms: int) -> float:
+    """The stop distance this name is entitled to right now.
+
+    v12 narrows a held name's stop after `stop_decay_after_ms`. The engine
+    attaches a venue-native stop and re-reads this on every book, so the
+    narrower number has to be *declared* to become real -- a producer that goes
+    on declaring the opening distance leaves the venue holding it for the life
+    of the trade, and the narrower level then exists only as a rule this
+    process polls and takes to the grave with it.
+    """
+
+    if entry.stop_decay_after_ms <= 0 or not 0.0 < entry.decayed_stop_loss_pct < 1.0:
+        return entry.stop_loss_fraction
+    if entry.entered_ts_ms <= 0 or now_ms < entry.entered_ts_ms + entry.stop_decay_after_ms:
+        return entry.stop_loss_fraction
+    # Never wider than what it opened behind: the decay contract only tightens,
+    # and the engine refuses a loosening stop anyway.
+    return min(entry.stop_loss_fraction, entry.decayed_stop_loss_pct)
 
 
 def _long_engine_target_book(
@@ -1859,7 +2142,7 @@ def _long_engine_target_book(
             EngineTarget(
                 symbol=entry.symbol,
                 notional_usdt=entry.notional_usdt,
-                stop_loss_fraction=entry.stop_loss_fraction,
+                stop_loss_fraction=_long_stop_fraction_now(entry, now_ms=decision_ts_ms),
                 leverage=entry.leverage,
             )
             for entry in sorted(state.held.values(), key=lambda e: e.symbol)
@@ -1876,6 +2159,11 @@ def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:
     cycle = payload["cycle"]
     health_error = str(cycle.get("account_owner_health_error") or "")
     health = "healthy" if not health_error else f"blocked:{health_error[:120]}"
+
+    def _flag(value: Any) -> str:
+        return "?" if value is None else ("1" if value else "0")
+
+    blocked = cycle.get("engine_blocked_asks") or 0
     return (
         "long target producer "
         f"id={cycle.get('cycle_id', '')} mode={cycle.get('mode', '')} "
@@ -1883,6 +2171,9 @@ def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"features={cycle.get('feature_rows', 0)} candidates={cycle.get('entry_candidates', 0)} "
         f"targets=entry:{cycle.get('entry_targets_queued', 0)} "
         f"exit:{cycle.get('exit_targets_queued', 0)} "
+        f"book={cycle.get('book_targets') if cycle.get('book_targets') is not None else '-'} "
+        f"regime=btc:{_flag(cycle.get('regime_btc_on'))}/eth:{_flag(cycle.get('regime_eth_on'))} "
+        f"refused={blocked} "
         f"open_components={cycle.get('open_long_components', 0)} "
         f"equity=${_float(cycle.get('equity_usdt')):,.2f} owner={health} "
         f"elapsed={_float(cycle.get('cycle_elapsed_pre_persist_ms')):.0f}ms"

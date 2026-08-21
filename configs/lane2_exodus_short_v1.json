@@ -65,7 +65,7 @@
   },
   "known_weaknesses": [
     "regime concentration: the whole edge is 2025-26; 2024 is negative and 2021-23 flat. If the farmer crowd thins this pays fees for nothing, and nothing in the rule detects that - the kill decision is the owner's, informed by the weekly fire review",
-    "the premature tail is fat and real: 7.8% of fire-days, mean -111.5 bp, worst -945, and the measured answer to it is size and the account loss guard, NOT a stop - a stop was tested at eight levels and always lost more on clean-event whipsaw than it saved on the tail",
+    "the premature tail is fat and real: 7.8% of fire-days, mean -111.5 bp, worst -945, and the measured answer to it is size, NOT a stop - a stop was tested at eight levels and always lost more on clean-event whipsaw than it saved on the tail, and there is no account-level loss control underneath: nothing bounds a run of these",
     "no fill model: entries and covers are priced at 1m kline opens; the first live weeks exist precisely to measure that gap before any capital decision",
     "the all-name generalization (shorting settlement deaths the carry book never held) is measured-but-unrun as an opportunity scan and is NOT part of this config",
     "the trigger inherits every v7 weakness, including the ~55s rate-lock assumption and the ticker read's fail-open; a silent v7 regression silently halves this sleeve too",

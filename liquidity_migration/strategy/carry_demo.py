@@ -1741,9 +1741,21 @@ def _write_engine_target_book(
     was decided and nothing else: no order, no change to any decision, and no
     exception out of here — a book that cannot be written must never stop the
     sleeve that is trading.
+
+    An unusable sizing equity writes NOTHING. Every notional would render 0.0,
+    and the engine reads a zero notional as an explicit exit, before any
+    validity window — so a failed equity read would flatten the whole sleeve at
+    market. A read that failed is not a decision to hold nothing; the last book
+    stands until one can be sized.
     """
     path_text = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
     if not path_text:
+        return
+    if not sizing_equity_usdt > 0.0:
+        _logger.warning(
+            "sizing equity is %r; leaving the standing engine target book alone",
+            sizing_equity_usdt,
+        )
         return
     try:
         targets = [

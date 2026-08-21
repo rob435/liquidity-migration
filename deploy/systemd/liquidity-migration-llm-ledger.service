@@ -15,13 +15,13 @@ WorkingDirectory=/opt/liquidity-migration
 # credentials; it can nominate (without judging) even if the file is absent.
 EnvironmentFile=-/etc/liquidity-migration/llm-ledger.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-# The judged candidates file for the LONG sleeve is this unit's whole output
-# to the trading path; it writes nothing else there.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger
+# Sibling books here are only read. The judged candidates file for the LONG
+# sleeve is this unit's whole output to the trading path.
 ReadWritePaths=/var/lib/liquidity-migration/targets
 StateDirectory=liquidity-migration/llm-driver-ledger
 MemoryMax=512M

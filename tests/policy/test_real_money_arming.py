@@ -886,7 +886,6 @@ def test_the_engine_and_the_fleet_read_the_same_caps_from_the_same_file() -> Non
     assert profile.capital_reference_usdt == 100.0
     assert account.max_account_gross_notional_usdt == 500.0
     assert account.max_component_gross_notional_usdt == 500.0
-    assert account.max_symbol_notional_usdt == 50.0
     assert account.max_initial_margin_usdt == 100.0
     assert account.max_leverage == 5.0
     assert account.quantity_tolerance == 1e-12

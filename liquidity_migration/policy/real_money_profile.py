@@ -2,7 +2,9 @@
 
 Sizing lives in three env dials the producers read directly
 (``CARRY_NOTIONAL_MULTIPLIER``, ``LONG_NOTIONAL_MULTIPLIER``,
-``EXODUS_NOTIONAL_MULTIPLIER``, documented in ``deploy/bybit-mainnet.env.template``).
+``EXODUS_NOTIONAL_MULTIPLIER``). They sit in the file each producer unit loads:
+``bybit-demo.env`` on demo, ``deploy/account-execution-mainnet.env.template``
+on the funded fleet — never ``bybit-mainnet.env``, which no producer loads.
 This module only builds the account document: caps, partition, entry leverage,
 and each strategy's default multiplier. It is static — no dial math — so the
 committed ``configs/operational.mainnet.json`` is its exact output, held to that
@@ -121,10 +123,7 @@ def render_real_money_profile_json(
     """
 
     dials = RealMoneyDials() if dials is None else dials
-    if (
-        not math.isfinite(dials.carry_stop_loss_fraction)
-        or not 0.0 < dials.carry_stop_loss_fraction < 1.0
-    ):
+    if not 0.0 < dials.carry_stop_loss_fraction < 1.0:
         raise ValueError("RM_CARRY_STOP_LOSS_FRACTION must sit in (0, 1)")
     reference = float(capital_reference_usdt)
     if not math.isfinite(reference) or reference <= 0.0:
@@ -159,7 +158,6 @@ def render_real_money_profile_json(
         "account_risk": {
             "max_component_gross_notional_usdt": account_gross,
             "max_account_gross_notional_usdt": account_gross,
-            "max_symbol_notional_usdt": reference * 0.5,
             "max_initial_margin_usdt": margin_cap,
             "max_leverage": _ENTRY_LEVERAGE,
             "quantity_tolerance": 1e-12,

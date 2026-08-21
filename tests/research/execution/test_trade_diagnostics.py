@@ -150,7 +150,7 @@ def _journal(
             ),
         ],
         risk_snapshot=AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 1_050_000_000),
-        risk_policy=AccountRiskPolicy(1_000.0, 2_000.0, 2_000.0, 1_000.0, 10.0),
+        risk_policy=AccountRiskPolicy(1_000.0, 2_000.0, 1_000.0, 10.0),
         instrument_rules={
             "BUSDT": InstrumentRules(
                 "BUSDT",

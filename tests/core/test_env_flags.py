@@ -6,6 +6,7 @@ from liquidity_migration.core.env_flags import (
     FALSE_ENV_VALUES,
     TRUE_ENV_VALUES,
     env_flag,
+    env_positive_float,
     reject_ambiguous_flag,
 )
 
@@ -39,3 +40,32 @@ def test_reject_ambiguous_flag_passes_unset_true_and_false() -> None:
 def test_reject_ambiguous_flag_raises_for_unrecognised_value() -> None:
     with pytest.raises(RuntimeError, match="not a recognised boolean"):
         reject_ambiguous_flag("REAL_MONEY", environ={"REAL_MONEY": "maybe"})
+
+
+# --------------------------------------------------------------------------
+# env_positive_float reads the three live sizing dials
+# (CARRY_/LONG_/EXODUS_NOTIONAL_MULTIPLIER), so every way it can be wrong is a
+# way the fleet can trade a size nobody chose.
+# --------------------------------------------------------------------------
+
+
+def test_an_absent_dial_takes_the_committed_default() -> None:
+    assert env_positive_float("CARRY_NOTIONAL_MULTIPLIER", environ={}) is None
+
+
+def test_a_dial_is_read_as_its_number() -> None:
+    assert env_positive_float("X", environ={"X": " 3.0 "}) == 3.0
+
+
+def test_a_present_but_empty_dial_refuses_rather_than_reverting() -> None:
+    # The line is there, so somebody meant to set a size. Falling back to the
+    # committed default here is how a fleet trades 3.0 while its operator reads
+    # the file and believes the number they deleted.
+    with pytest.raises(ValueError, match="present but empty"):
+        env_positive_float("CARRY_NOTIONAL_MULTIPLIER", environ={"CARRY_NOTIONAL_MULTIPLIER": "  "})
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-2", "3x", ""])
+def test_a_dial_that_is_not_a_positive_finite_number_refuses(value: str) -> None:
+    with pytest.raises(ValueError):
+        env_positive_float("LONG_NOTIONAL_MULTIPLIER", environ={"LONG_NOTIONAL_MULTIPLIER": value})

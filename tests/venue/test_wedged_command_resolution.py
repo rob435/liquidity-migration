@@ -28,7 +28,7 @@ from liquidity_migration.venue.wedged_command_resolution import (
 from liquidity_migration.account.wedged_command_watch import DEFAULT_WEDGE_AFTER_NS
 
 RULES = {"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0, tick_size=0.1)}
-POLICY = AccountRiskPolicy(100_000.0, 100_000.0, 100_000.0, 100_000.0, 10.0)
+POLICY = AccountRiskPolicy(100_000.0, 100_000.0, 100_000.0, 10.0)
 
 
 def _market(price: float = 10.0, *, key: str = "book-1") -> MarketInputRef:

@@ -1,12 +1,17 @@
 //! The account-wide capital caps, against the same rules as the account-level
-//! checks in account_kernel.py: `symbol_notional_limit`,
-//! `component_gross_limit`, `initial_margin_limit`, and the pair
-//! `negative_available_margin` / `available_margin_limit`.
+//! checks in account_kernel.py: `component_gross_limit`,
+//! `initial_margin_limit`, and the pair `negative_available_margin` /
+//! `available_margin_limit`.
 //!
-//! The shape here is configs/operational.mainnet.json: a 100 USDT reference,
-//! 175 of account gross, 50 on any one symbol, 100 of margin, at leverage 2,
-//! partitioned carry 100 / long 75 by gross. Every cap is checked just under,
-//! just over, and after the capital reference has moved.
+//! The shape here is chosen so every cap binds in turn and none hides behind
+//! another: a 100 USDT reference, 175 of account gross, 100 of margin, at
+//! leverage 2, partitioned carry 100 / long 75 by gross. Each cap is checked
+//! just under, just over, and after the capital reference has moved. Fidelity
+//! to the shipped profiles is a different test's job — operational_profile.rs
+//! reads the real files.
+//!
+//! Nothing here bounds one symbol on its own. The sleeve's own gross share is
+//! what stops a single name, and section 1 holds that to be true.
 
 mod common;
 
@@ -17,7 +22,7 @@ use engine_types::risk::{AccountView, DenyReason, PositionView, RiskKernel, Risk
 
 const NOW: u64 = SEC;
 
-/// configs/operational.mainnet.json, key for key.
+/// The equity-anchored shape, at the numbers this file's boundaries need.
 fn mainnet_config() -> KernelConfig {
     KernelConfig {
         max_account_view_age_ns: MAX_VIEW_AGE_NS,
@@ -30,7 +35,6 @@ fn mainnet_config() -> KernelConfig {
             // 175 of account gross over a 100 reference.
             gross_notional_multiple: 1.75,
             disaster_stop_fraction: DISASTER_STOP_FRACTION,
-            max_symbol_notional_usdt: 50.0,
             max_component_gross_notional_usdt: 175.0,
             max_initial_margin_usdt: 100.0,
         },
@@ -86,98 +90,47 @@ fn view_with_available(
 }
 
 // --------------------------------------------------------------------------
-// 1. max_symbol_notional_usdt
+// 1. Nothing caps one symbol
 // --------------------------------------------------------------------------
 
 #[test]
-// account_kernel.py:3212. One strategy owns a symbol, so its own share is all
-// that stops it putting everything on one name; this is the cap that does.
-fn a_symbol_exactly_at_its_cap_is_allowed() {
+// One name may carry a sleeve's whole gross share. On this shape that is 100
+// USDT of book against a 100 USDT reference — the concentration the retired
+// per-symbol cap used to refuse at 50.
+fn one_symbol_may_carry_the_whole_sleeve_share() {
     let mut k = kernel(mainnet_config());
     assert_eq!(
-        k.assess(&buy(5.0), &flat(100.0, NOW)),
-        RiskVerdict::Allow { qty: 5.0 },
-        "50 USDT on one symbol is exactly the cap"
+        k.assess(&buy(10.0), &flat(100.0, NOW)),
+        RiskVerdict::Allow { qty: 10.0 }
     );
 }
 
 #[test]
-fn a_symbol_one_step_over_its_cap_is_refused() {
+// And the share is what bounds it: past CARRY's 100 the partition clamps,
+// which is a resize rather than a refusal.
+fn the_sleeve_share_is_what_bounds_one_symbol_now() {
     let mut k = kernel(mainnet_config());
-    match deny(k.assess(&buy(5.001), &flat(100.0, NOW))) {
-        DenyReason::SymbolNotionalBreached {
-            symbol,
-            notional_usdt,
-            cap_usdt,
-        } => {
-            assert_eq!(symbol, BUSDT, "the refusal names the symbol");
-            assert!((notional_usdt - 50.01).abs() < 1e-9, "got {notional_usdt}");
-            assert!((cap_usdt - 50.0).abs() < 1e-9, "got {cap_usdt}");
-        }
-        other => panic!("expected a symbol cap breach, got {other:?}"),
-    }
+    assert_eq!(
+        k.assess(&buy(11.0), &flat(100.0, NOW)),
+        RiskVerdict::Allow { qty: 10.0 },
+        "110 asked against a 100 gross share clamps to 100"
+    );
 }
 
 #[test]
-// The position already held counts: the cap is on the symbol, not the order.
-fn what_the_symbol_already_holds_counts_against_its_cap() {
+// What the symbol already holds is still counted — into the book's gross, not
+// into any ceiling of its own.
+fn what_a_symbol_already_holds_counts_only_toward_the_book() {
     let mut k = kernel(mainnet_config());
     let held = view(
         100.0,
-        vec![position(BUSDT, Side::Buy, 4.0, 10.0, true)],
+        vec![position(BUSDT, Side::Buy, 9.0, 10.0, true)],
         NOW,
     );
-    assert_eq!(
-        k.assess(&buy(1.0), &held),
-        RiskVerdict::Allow { qty: 1.0 },
-        "40 held plus 10 asked is exactly the 50 cap"
-    );
     assert!(matches!(
-        deny(k.assess(&buy(1.1), &held)),
-        DenyReason::SymbolNotionalBreached { .. }
+        deny(k.assess(&buy(9.0), &held)),
+        DenyReason::EnvelopeBreached { .. }
     ));
-}
-
-#[test]
-// account_kernel.py checks every symbol in the projected book, not only the
-// ones the batch names, so a symbol already over its cap stops new risk
-// anywhere until it is brought back.
-fn a_different_symbol_over_its_cap_refuses_the_entry_and_names_that_symbol() {
-    let mut k = kernel(mainnet_config());
-    let held = view(
-        100.0,
-        vec![position(CUSDT, Side::Buy, 6.0, 10.0, true)],
-        NOW,
-    );
-    match deny(k.assess(&buy(1.0), &held)) {
-        DenyReason::SymbolNotionalBreached {
-            symbol,
-            notional_usdt,
-            ..
-        } => {
-            assert_eq!(symbol, CUSDT, "the operator needs the symbol that is over");
-            assert!((notional_usdt - 60.0).abs() < 1e-9, "got {notional_usdt}");
-        }
-        other => panic!("expected a symbol cap breach, got {other:?}"),
-    }
-}
-
-#[test]
-// profile_at_capital_reference rescales max_symbol_notional_usdt with the
-// reference, so a wallet that doubles doubles what one symbol may carry.
-fn the_symbol_cap_follows_the_capital_reference() {
-    let mut small = kernel(mainnet_config());
-    assert!(matches!(
-        deny(small.assess(&buy(6.0), &flat(100.0, NOW))),
-        DenyReason::SymbolNotionalBreached { .. }
-    ));
-
-    let mut doubled = kernel(mainnet_config());
-    assert_eq!(
-        doubled.assess(&buy(6.0), &flat(200.0, NOW)),
-        RiskVerdict::Allow { qty: 6.0 },
-        "at a 200 reference the same 60 USDT sits inside a 100 cap"
-    );
 }
 
 // --------------------------------------------------------------------------
@@ -263,7 +216,6 @@ fn the_second_gross_ceiling_follows_the_capital_reference() {
 /// funds — otherwise the envelope allowance reaches the same book first.
 fn margin_capped_config() -> KernelConfig {
     let mut cfg = mainnet_config();
-    cfg.envelope.max_symbol_notional_usdt = 175.0;
     cfg.envelope.max_initial_margin_usdt = 40.0;
     cfg.partition.allocations = Vec::new();
     cfg
@@ -430,13 +382,16 @@ fn an_envelope_breach_is_reported_before_the_account_caps() {
 // The account caps refuse, as the Python kernel refuses the whole batch. The
 // partition clamps, so it stays the last word on size and comes after them.
 fn an_account_cap_is_reported_before_the_partition_clamps() {
-    let mut k = kernel(mainnet_config());
-    // LONG's share funds 75; this asks 60, which the share would allow whole
-    // and the 50 symbol cap will not.
-    let over = entry(LONG, BUSDT, Side::Buy, 6.0, 10.0, 6.5, NOW);
+    let mut cfg = mainnet_config();
+    // Below LONG's own 75 share, so the book's ceiling is reached first.
+    cfg.envelope.max_component_gross_notional_usdt = 60.0;
+    let mut k = kernel(cfg);
+    // LONG's share funds 75; this asks 70, which the share would allow whole
+    // and the book's 60 ceiling will not.
+    let over = entry(LONG, BUSDT, Side::Buy, 7.0, 10.0, 6.5, NOW);
     assert!(matches!(
         deny(k.assess(&over, &flat(100.0, NOW))),
-        DenyReason::SymbolNotionalBreached { .. }
+        DenyReason::ComponentGrossBreached { .. }
     ));
 }
 
@@ -445,7 +400,6 @@ fn an_account_cap_is_reported_before_the_partition_clamps() {
 // batch skips them all in account_kernel.py.
 fn an_exit_is_never_blocked_by_the_account_caps() {
     let mut cfg = mainnet_config();
-    cfg.envelope.max_symbol_notional_usdt = 1.0;
     cfg.envelope.max_component_gross_notional_usdt = 1.0;
     cfg.envelope.max_initial_margin_usdt = 1.0;
     // The partition's margin shares would not fit a 1 USDT account cap, and
@@ -471,14 +425,6 @@ fn an_exit_is_never_blocked_by_the_account_caps() {
 // operational_profile.py:296-299 and :416. Caps that do not nest describe a
 // book nobody can reach.
 fn a_config_whose_caps_do_not_nest_is_refused() {
-    let mut symbol_over_gross = mainnet_config();
-    symbol_over_gross.envelope.max_symbol_notional_usdt = 176.0;
-    assert!(Kernel::new(symbol_over_gross)
-        .err()
-        .expect("must refuse")
-        .detail
-        .contains("max_symbol_notional_usdt cannot exceed"));
-
     let mut gross_over_account = mainnet_config();
     gross_over_account.envelope.max_component_gross_notional_usdt = 176.0;
     assert!(Kernel::new(gross_over_account)
@@ -512,12 +458,10 @@ fn a_partition_whose_margin_shares_exceed_the_account_cap_is_refused() {
 #[test]
 fn a_cap_that_is_not_a_positive_number_is_refused() {
     for (name, mut cfg) in [
-        ("max_symbol_notional_usdt", mainnet_config()),
         ("max_component_gross_notional_usdt", mainnet_config()),
         ("max_initial_margin_usdt", mainnet_config()),
     ] {
         match name {
-            "max_symbol_notional_usdt" => cfg.envelope.max_symbol_notional_usdt = 0.0,
             "max_component_gross_notional_usdt" => {
                 cfg.envelope.max_component_gross_notional_usdt = f64::NAN
             }

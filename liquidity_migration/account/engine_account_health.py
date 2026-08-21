@@ -58,12 +58,18 @@ from liquidity_migration.core.artifact_snapshot import read_stable_file
 
 __all__ = [
     "ENGINE_HEARTBEAT_PATH_ENV",
+    "TARGET_PRODUCER_HEALTH_MAX_AGE_NS",
     "engine_held_symbols",
+    "engine_entry_blockers",
     "EngineAccountReading",
     "engine_heartbeat_path",
     "read_engine_account",
     "require_recent_engine_account",
 ]
+
+#: How old a venue reading a producer will size from. Tighter than the
+#: operator-facing watchdog: the engine refreshes this every few seconds.
+TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
 
 #: Override for the engine heartbeat this producer reads. The unit sets it when
 #: the engine writes somewhere other than the per-realm default below.
@@ -98,6 +104,14 @@ class EngineAccountReading:
     #: one that has not read the venue. That is not the same as holding nothing,
     #: and a producer must not act on it.
     held_symbols: frozenset[str] | None
+    #: What the venue says is held, by name: symbol -> (side, qty, entry_px).
+    #: Empty when the engine said nothing about positions; the side is the
+    #: venue's own "long"/"short" spelling.
+    holdings: Mapping[str, tuple[str, float, float]]
+    #: Why the engine is not opening each name a producer asked for, from the
+    #: same beat: symbol -> reason. Empty means nothing is blocked -- or that
+    #: an older engine, which publishes no such field, said nothing at all.
+    entry_blockers: Mapping[str, str]
 
 
 def engine_heartbeat_path(environment: str) -> Path:
@@ -164,12 +178,38 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     if not isinstance(realm, str) or not realm:
         raise ValueError("engine heartbeat carries no realm")
     held_symbols: frozenset[str] | None = None
+    holdings: dict[str, tuple[str, float, float]] = {}
     if isinstance(positions, list):
-        held_symbols = frozenset(
-            str(row.get("symbol") or "").upper()
-            for row in positions
-            if isinstance(row, Mapping) and str(row.get("symbol") or "")
-        )
+        named: set[str] = set()
+        for row in positions:
+            if not isinstance(row, Mapping):
+                continue
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            named.add(symbol)
+            qty = row.get("qty")
+            if not isinstance(qty, (int, float)):
+                continue
+            side = str(row.get("side") or "")
+            entry_px = row.get("entry_px")
+            holdings[symbol] = (
+                side,
+                float(qty),
+                float(entry_px) if isinstance(entry_px, (int, float)) else 0.0,
+            )
+        held_symbols = frozenset(named)
+
+    entry_blockers: dict[str, str] = {}
+    raw_blockers = payload.get("entry_blockers")
+    if isinstance(raw_blockers, list):
+        for row in raw_blockers:
+            if not isinstance(row, Mapping):
+                continue
+            symbol = str(row.get("symbol") or "").upper()
+            reason = str(row.get("reason") or "")
+            if symbol and reason:
+                entry_blockers[symbol] = reason
     return EngineAccountReading(
         equity_usdt=equity_usdt,
         available_usdt=available_usdt,
@@ -177,6 +217,8 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         account_user_id=account_user_id,
         realm=realm,
         held_symbols=held_symbols,
+        holdings=holdings,
+        entry_blockers=entry_blockers,
     )
 
 
@@ -234,3 +276,26 @@ def engine_held_symbols(
         # engine rewrites the heartbeat every few seconds, so a mid-read
         # replacement is ordinary not-knowing, not a crash.
         return None
+
+
+def engine_entry_blockers(
+    environment: str,
+    *,
+    max_age_ns: int,
+    path: str | Path | None = None,
+) -> dict[str, str]:
+    """Why the engine is not opening each asked-for name, or `{}` when it did not say.
+
+    Same not-knowing as :func:`engine_held_symbols`: no heartbeat, a stale
+    one, or an engine too old to publish the field all read as "no news",
+    which is not the same as "nothing is blocked".
+    """
+
+    try:
+        return dict(
+            require_recent_engine_account(
+                environment, max_age_ns=max_age_ns, path=path
+            ).entry_blockers
+        )
+    except (OSError, RuntimeError, ValueError):
+        return {}

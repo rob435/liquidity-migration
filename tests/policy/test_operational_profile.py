@@ -110,3 +110,16 @@ def test_profile_rejects_unknown_fields_instead_of_ignoring_typos() -> None:
 
     with pytest.raises(ValueError, match="unknown fields: entry_leverge"):
         load_operational_profile_bytes(_bytes(payload))
+
+
+def test_a_profile_still_carrying_the_retired_symbol_cap_is_refused() -> None:
+    """The key is gone from the schema, and the loader refuses a key it does
+    not read rather than ignoring it -- so an old profile still carrying the
+    retired per-symbol cap stops the fleet instead of starting with a cap
+    nobody enforces. The twin of the Rust check in
+    engine/engine-risk/tests/operational_profile.rs."""
+
+    payload = json.loads(PROFILE_PATH.read_bytes())
+    payload["account_risk"]["max_symbol_notional_usdt"] = 125_000.0
+    with pytest.raises(ValueError, match="max_symbol_notional_usdt"):
+        load_operational_profile_bytes(json.dumps(payload).encode())

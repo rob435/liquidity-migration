@@ -54,9 +54,7 @@ from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     REGISTERED_MAX_DEMO_RULE_AGE_HOURS,
     load_demo_rules,
 )
-from liquidity_migration.account.account_owner_health import (  # noqa: E402
-    validate_systemd_invocation_id,
-)
+from liquidity_migration.core.env_flags import validate_systemd_invocation_id  # noqa: E402
 from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes  # noqa: E402
 from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
 from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402

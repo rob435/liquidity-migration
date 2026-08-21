@@ -443,7 +443,7 @@ mod tests {
             side,
             qty,
             entry_px: 100.0,
-            stop_attached: true,
+            stop_attached: true, stop_px: 0.0,
             leverage: None
         }
     }

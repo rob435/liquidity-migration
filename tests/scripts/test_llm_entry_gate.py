@@ -55,7 +55,7 @@ class TestPublishGateCandidates:
         assert [e["symbol"] for e in published] == ["AAAUSDT"]
         row = json.loads((tmp_path / "candidates.json").read_text())
         assert row["decision_ts_ms"] == pytest.approx(int(time.time() * 1000), abs=5000)
-        assert row["valid_until_ms"] == row["decision_ts_ms"] + 90 * 60_000
+        assert row["valid_until_ms"] == row["decision_ts_ms"] + 60 * 60_000
         (event,) = row["events"]
         assert event["symbol"] == "AAAUSDT"
         assert event["score"] == 7
@@ -94,3 +94,110 @@ class TestPublishGateCandidates:
         _publish(tmp_path, [])
         row = json.loads((tmp_path / "candidates.json").read_text())
         assert row["events"] == []
+
+
+class TestTakerRatioDayMean:
+    """The one order-flow fact that graded era-stable. It is a MEAN of the
+    five-minute ratios, and the rubric's threshold is only meaningful against
+    that -- the day's aggregate ratio is a different, lower number."""
+
+    MIDNIGHT = 1_700_006_400_000  # some UTC midnight
+
+    def _rows(self, n: int, value: float = 1.0, *, start_offset_ms: int = 0):
+        base = self.MIDNIGHT - 86_400_000 + start_offset_ms
+        return [
+            {"timestamp": str(base + i * 300_000), "buySellRatio": str(value)}
+            for i in range(n)
+        ]
+
+    def test_a_whole_day_averages(self) -> None:
+        rows = self._rows(288, 1.5)
+        assert ledger.taker_ratio_day_mean(rows, self.MIDNIGHT) == 1.5
+
+    def test_it_is_the_mean_of_ratios_not_the_ratio_of_sums(self) -> None:
+        rows = self._rows(144, 2.0) + self._rows(144, 0.5, start_offset_ms=144 * 300_000)
+        # mean of ratios = 1.25; a ratio of equal-weight sums would be 1.0
+        assert ledger.taker_ratio_day_mean(rows, self.MIDNIGHT) == 1.25
+
+    def test_a_part_day_is_refused_rather_than_averaged(self) -> None:
+        assert ledger.taker_ratio_day_mean(self._rows(60, 3.0), self.MIDNIGHT) is None
+
+    def test_todays_own_buckets_are_not_counted(self) -> None:
+        # Rows stamped at or after midnight belong to the running day.
+        today = [
+            {"timestamp": str(self.MIDNIGHT + i * 300_000), "buySellRatio": "9.0"}
+            for i in range(288)
+        ]
+        assert ledger.taker_ratio_day_mean(today, self.MIDNIGHT) is None
+        mixed = self._rows(288, 1.2) + today
+        assert ledger.taker_ratio_day_mean(mixed, self.MIDNIGHT) == 1.2
+
+    def test_no_rows_is_a_null_not_an_error(self) -> None:
+        assert ledger.taker_ratio_day_mean([], self.MIDNIGHT) is None
+
+
+class TestEnrichLeverageFlowFacts:
+    """v6 fact set: the leverage-flow paths (OI 24h/48h, premium path) the
+    rubric's flow classification consumes. Every read stays optional."""
+
+    HOUR_MS = 3_600_000
+
+    @staticmethod
+    def _mock_http(monkeypatch: pytest.MonkeyPatch, routes: dict[str, object]) -> None:
+        def fake(url: str, **kwargs: object) -> object:
+            for fragment, value in routes.items():
+                if fragment in url:
+                    return value
+            return {"result": {"list": []}}
+
+        monkeypatch.setattr(ledger, "_http_json", fake)
+
+    def test_oi_paths_and_premium_path_are_attached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        oi_rows = [
+            {"timestamp": str(NOW_MS - (48 - j) * self.HOUR_MS), "openInterest": str(100 + j)}
+            for j in range(49)
+        ]
+        prem_rows = [[str(NOW_MS - (24 - j) * self.HOUR_MS), "0", "0", "0", "0.0005", "0"] for j in range(25)]
+        self._mock_http(
+            monkeypatch,
+            {
+                "open-interest": {"result": {"list": oi_rows}},
+                "premium-index-price-kline": {"result": {"list": prem_rows}},
+            },
+        )
+
+        facts = ledger.enrich("AAAUSDT", {"perp_premium_bp": 12.0})
+
+        assert facts["oi_change_24h_pct"] == pytest.approx(19.35, abs=0.01)
+        assert facts["oi_change_48h_pct"] == pytest.approx(48.0, abs=0.01)
+        assert facts["premium_bp_24h_ago"] == pytest.approx(5.0)
+        assert facts["premium_change_24h_bp"] == pytest.approx(7.0)
+
+    def test_a_short_oi_history_gives_24h_only_and_no_premium_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 30 hourly points: enough for the 24h change (25 needed), not for 48h.
+        oi_rows = [
+            {"timestamp": str(NOW_MS - (29 - j) * self.HOUR_MS), "openInterest": str(200 - j)}
+            for j in range(30)
+        ]
+        self._mock_http(
+            monkeypatch,
+            {
+                "open-interest": {"result": {"list": oi_rows}},
+                "premium-index-price-kline": {"result": {"list": []}},
+            },
+        )
+
+        facts = ledger.enrich("BBBUSDT", {"perp_premium_bp": -3.0})
+
+        assert "oi_change_48h_pct" not in facts
+        assert facts["oi_change_24h_pct"] == pytest.approx((171.0 / 195.0 - 1.0) * 100, abs=0.01)
+        assert "premium_bp_24h_ago" not in facts
+        assert "premium_change_24h_bp" not in facts
+
+
+def test_prompt_version_buckets_the_v6_fact_set() -> None:
+    """--grade buckets by PROMPT_VERSION: a fact-set change must land in a new
+    bucket, never rewrite v5's forward record."""
+    assert ledger.PROMPT_VERSION == "driver-judgment-v6-scored"

@@ -55,6 +55,15 @@ pub enum WalRecord {
         client_order_id: String,
         wire_ns: u64,
     },
+    /// A venue-native stop moved on a position, with no order involved.
+    /// Written before the call so a crash cannot forget where the stop was
+    /// meant to be: `intended_stops` folds this the same way it folds an
+    /// opening order's own stop, and boot's repair uses the result.
+    StopSet {
+        symbol: SymbolId,
+        trigger_px: f64,
+        wall_ts_ms: i64,
+    },
     /// An in-place reprice or resize on its way out.
     AmendSent {
         symbol: SymbolId,

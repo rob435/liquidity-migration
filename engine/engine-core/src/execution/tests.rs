@@ -72,13 +72,13 @@ fn paying_up_reads_adverse_whichever_way_round_the_trade_is() {
 /// rested, not a spread — and resting entries are what this fleet ships.
 #[test]
 fn the_effective_spread_is_twice_the_shortfall() {
-    // Not a coincidence and not a fudge: the shortfall is measured from the
-    // middle, and a spread has two sides of it.
-    for side in [Side::Buy, Side::Sell] {
-        let shortfall = arrival_shortfall_bps(side, 101.0, 100.0).unwrap();
-        let spread = effective_spread_bps(side, 101.0, 100.0).unwrap();
-        assert!((spread - 2.0 * shortfall).abs() < 1e-9);
-    }
+    // Hand-computed, not restated from the other function: 20_000 * s *
+    // (101 - 100) / 100 is 200 bps adverse for a buy and 200 the good way for
+    // a sell. Comparing it against `arrival_shortfall_bps * 2` would be the
+    // definition tested against itself.
+    assert!((effective_spread_bps(Side::Buy, 101.0, 100.0).unwrap() - 200.0).abs() < 1e-9);
+    assert!((effective_spread_bps(Side::Sell, 101.0, 100.0).unwrap() + 200.0).abs() < 1e-9);
+    assert!(effective_spread_bps(Side::Buy, 101.0, 0.0).is_none());
 }
 
 #[test]

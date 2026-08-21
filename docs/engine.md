@@ -29,7 +29,10 @@ both:
   symbol, the stop each carries, and how long it may be acted on. The engine
   follows it — diff against position, exits first, size, quantize, quote,
   attach stops — and every risk gate applies exactly as it does to any other
-  order.
+  order. The stop is not fixed for the life of a trade: a book that declares a
+  narrower distance than the venue is holding moves the venue's stop in, with
+  no order involved. It only ever tightens, and it keeps working after the
+  book's entry window has shut.
 
 The target book is written by
 [`engine_targets.py`](../liquidity_migration/rules/engine_targets.py),
@@ -470,13 +473,16 @@ To add one (Hyperliquid, MEXC), four steps in `engine-venue`:
 1. Write the adapter as a module in the crate and implement `VenueGateway` —
    nine required methods: `caps`, `account_identity`, `send_order`,
    `cancel_order`, `amend_order`, `set_stop`, `account_view`,
-   `instrument_rules`, `working_orders` (`add_symbol` and `set_leverage`
-   carry defaults, eleven in all) — stating the capabilities honestly. A
+   `instrument_rules`, `working_orders`; `add_symbol`, `set_leverage` and
+   `executions` carry defaults, twelve in all. Take `executions` seriously:
+   its default refuses, so an adapter that leaves it alone runs with fill-gap
+   recovery off — the engine falls back to today's behaviour silently. State
+   the capabilities honestly. A
    venue with no native position stop is not a broken venue; it is a venue
    where an entry carrying a stop is refused, because the risk kernel's
    every-entry-carries-a-stop rule would otherwise be silently unenforced.
 2. Add a variant to the `Venue` enum in `registry.rs` and delegate all
-   eleven methods to it. Dispatch is an enum, not `Box<dyn VenueGateway>`: the trait
+   twelve methods to it. Dispatch is an enum, not `Box<dyn VenueGateway>`: the trait
    uses `async fn`, which cannot be a trait object at all, and a closed enum
    keeps the whole set of venues visible in one place — which is what the
    fence below depends on.

@@ -132,7 +132,6 @@ def _policy() -> AccountRiskPolicy:
     return AccountRiskPolicy(
         max_component_gross_notional_usdt=1_000.0,
         max_account_gross_notional_usdt=500.0,
-        max_symbol_notional_usdt=500.0,
         max_initial_margin_usdt=100.0,
         max_leverage=10.0,
     )
@@ -236,7 +235,6 @@ def test_sign_flip_guard_compares_each_quantity_to_tolerance_not_their_product(
     policy = AccountRiskPolicy(
         max_component_gross_notional_usdt=1_000.0,
         max_account_gross_notional_usdt=1_000.0,
-        max_symbol_notional_usdt=1_000.0,
         max_initial_margin_usdt=1_000.0,
         max_leverage=10.0,
         quantity_tolerance=1e-6,
@@ -311,7 +309,6 @@ def test_risk_rejection_is_atomic_and_does_not_commit_targets(tmp_path: Path) ->
     tight = AccountRiskPolicy(
         max_component_gross_notional_usdt=10.0,
         max_account_gross_notional_usdt=10.0,
-        max_symbol_notional_usdt=10.0,
         max_initial_margin_usdt=1.0,
         max_leverage=10.0,
     )
@@ -1031,7 +1028,6 @@ def test_duplicate_batch_reuses_first_evaluation_when_snapshots_change(
         risk_policy=AccountRiskPolicy(
             max_component_gross_notional_usdt=1.0,
             max_account_gross_notional_usdt=1.0,
-            max_symbol_notional_usdt=1.0,
             max_initial_margin_usdt=1.0,
             max_leverage=1.0,
         ),
@@ -1640,7 +1636,6 @@ def test_account_risk_revalues_existing_components_at_current_market_input(tmp_p
     tight = AccountRiskPolicy(
         max_component_gross_notional_usdt=30.0,
         max_account_gross_notional_usdt=30.0,
-        max_symbol_notional_usdt=30.0,
         max_initial_margin_usdt=10.0,
         max_leverage=10.0,
     )
@@ -3675,7 +3670,6 @@ def test_large_multi_fill_order_reaches_filled_without_wedging_reconciliation(
     policy = AccountRiskPolicy(
         max_component_gross_notional_usdt=5_000.0,
         max_account_gross_notional_usdt=5_000.0,
-        max_symbol_notional_usdt=5_000.0,
         max_initial_margin_usdt=1_000.0,
         max_leverage=10.0,
     )
@@ -4365,7 +4359,6 @@ def test_free_margin_is_charged_the_batch_increase_not_the_whole_book(tmp_path: 
     policy = AccountRiskPolicy(
         max_component_gross_notional_usdt=10_000.0,
         max_account_gross_notional_usdt=10_000.0,
-        max_symbol_notional_usdt=10_000.0,
         max_initial_margin_usdt=2_500.0,
         max_leverage=2.0,
     )
@@ -4407,7 +4400,6 @@ def test_free_margin_still_refuses_a_batch_the_venue_cannot_fund(tmp_path: Path)
     policy = AccountRiskPolicy(
         max_component_gross_notional_usdt=10_000.0,
         max_account_gross_notional_usdt=10_000.0,
-        max_symbol_notional_usdt=10_000.0,
         max_initial_margin_usdt=10_000.0,
         max_leverage=2.0,
     )

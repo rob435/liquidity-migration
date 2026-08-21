@@ -59,7 +59,6 @@ const TOP_LEVEL_KEYS: &[&str] = &[
 const ACCOUNT_RISK_KEYS: &[&str] = &[
     "max_component_gross_notional_usdt",
     "max_account_gross_notional_usdt",
-    "max_symbol_notional_usdt",
     "max_initial_margin_usdt",
     "max_leverage",
     "quantity_tolerance",
@@ -271,7 +270,6 @@ pub fn kernel_config_from_profile(
         expand_dead_band_fraction,
         gross_notional_multiple,
         disaster_stop_fraction: inputs.disaster_stop_fraction,
-        max_symbol_notional_usdt: number(account, "max_symbol_notional_usdt", "account_risk")?,
         max_component_gross_notional_usdt: number(
             account,
             "max_component_gross_notional_usdt",

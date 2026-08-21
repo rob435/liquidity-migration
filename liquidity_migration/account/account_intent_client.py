@@ -355,9 +355,9 @@ def publish_exit_first_target_requests(
     so one symbol whose market data or instrument rules have gone missing (a
     delisting is the live precedent) wedges only its own request while every
     other exit still closes. Review probes showed a grouped all-flat request
-    fails owner admission as a unit in that state, retries out its budget,
-    and — on the loss-guard flatten — the republish latch then never fires,
-    leaving healthy positions open exactly when the loss ceiling is tripped.
+    fails owner admission as a unit in that state, retries out its budget, and
+    the republish latch then never fires — leaving healthy positions open at
+    exactly the moment something asked for all of them to close.
 
     ``group_exits=True`` opts into ONE all-flat request (the schema forbids
     mixing flat with nonzero, so the group is well-formed) for callers that

@@ -42,6 +42,9 @@ pub struct Held {
     /// price: anchoring on the entry is never looser than anchoring on a
     /// blend, and a stop that loosens when you add is not a stop.
     pub entry_px: f64,
+    /// Where the venue says the stop sits now. 0.0 means none is attached,
+    /// which the planner leaves to boot's repair rather than guessing at.
+    pub stop_px: f64,
 }
 
 impl Held {
@@ -79,14 +82,22 @@ pub enum Step {
         /// every addition rather than left at the size it was written for.
         stop_px: Option<f64>,
     },
+    /// Move the stop on a position that is otherwise staying as it is.
+    ///
+    /// A book's stop distance is not fixed for the life of a trade: a sleeve
+    /// that narrows its stop after some hours declares the narrower one, and
+    /// without this step the venue would go on holding the distance the
+    /// position opened at for ever. Only ever emitted to tighten.
+    Restop { symbol: String, stop_px: f64 },
 }
 
 impl Step {
     pub fn symbol(&self) -> &str {
         match self {
-            Step::Enter { symbol, .. } | Step::Exit { symbol, .. } | Step::Resize { symbol, .. } => {
-                symbol
-            }
+            Step::Enter { symbol, .. }
+            | Step::Exit { symbol, .. }
+            | Step::Resize { symbol, .. }
+            | Step::Restop { symbol, .. } => symbol,
         }
     }
 }
@@ -261,6 +272,13 @@ pub fn plan(
                     .max(rules.resize_floor_fraction * standing.abs())
                     .max(rule.min_notional);
                 if delta_usdt.abs() <= threshold {
+                    // Staying as it is in size does not mean staying as it is
+                    // in protection: the book's stop distance can narrow over
+                    // the life of a trade, and this is the only step that
+                    // makes that real at the venue.
+                    if let Some(step) = restop(symbol, target, &position, want_side, &rule) {
+                        exits.push(step);
+                    }
                     skipped.push(Skipped::TooSmallToBother {
                         symbol: symbol.to_string(),
                         delta_usdt,
@@ -304,6 +322,45 @@ pub fn plan(
     Plan { steps, skipped }
 }
 
+/// Move a held position's stop to what the book now asks for, or nothing.
+///
+/// Three things stop this firing. A position the venue holds no stop on is
+/// boot's repair to make, not the planner's — inventing one here from a book
+/// would place a stop the log never intended. A stop that would move *away*
+/// from the position is refused outright, because a stop that loosens is not
+/// a stop and the whole point of re-declaring is that the distance narrows.
+/// And a move smaller than a tick is the venue's own rounding read back, which
+/// would otherwise re-post on every quote for ever.
+fn restop(
+    symbol: &str,
+    target: &Target,
+    position: &Held,
+    want_side: Side,
+    rule: &InstrumentRule,
+) -> Option<Step> {
+    if !(position.stop_px > 0.0) || !(position.entry_px > 0.0) {
+        return None;
+    }
+    if !(target.stop_loss_fraction > 0.0) {
+        return None;
+    }
+    let wanted = stop_price(position.entry_px, want_side, target.stop_loss_fraction);
+    if !wanted.is_finite() || wanted <= 0.0 {
+        return None;
+    }
+    let tighter = match want_side {
+        Side::Buy => wanted > position.stop_px,
+        Side::Sell => wanted < position.stop_px,
+    };
+    if !tighter {
+        return None;
+    }
+    if (wanted - position.stop_px).abs() <= rule.tick_size.max(position.stop_px * 1e-6) {
+        return None;
+    }
+    Some(Step::Restop { symbol: symbol.to_string(), stop_px: wanted })
+}
+
 /// Where the stop sits for a position opened at `px`.
 fn stop_price(px: f64, side: Side, fraction: f64) -> f64 {
     match side {
@@ -318,7 +375,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[derive(Default)]
-    struct Facts {
+    pub(super) struct Facts {
         held: BTreeMap<String, Held>,
         px: BTreeMap<String, f64>,
         rules: BTreeMap<String, InstrumentRule>,
@@ -328,18 +385,29 @@ mod tests {
         InstrumentRule { tick_size: 0.01, qty_step: 0.1, min_qty: 0.1, min_notional: 5.0 };
 
     impl Facts {
-        fn with(symbol: &str, px: f64) -> Self {
+        pub(super) fn with(symbol: &str, px: f64) -> Self {
             let mut me = Facts::default();
             me.px.insert(symbol.into(), px);
             me.rules.insert(symbol.into(), RULE);
             me
         }
         fn holding(mut self, symbol: &str, qty: f64, side: Side, px: f64) -> Self {
-            self.held.insert(symbol.into(), Held { qty, side, px, entry_px: px });
+            self.held.insert(symbol.into(), Held { qty, side, px, entry_px: px, stop_px: 0.0 });
             self.px.insert(symbol.into(), px);
             self.rules.insert(symbol.into(), RULE);
             self
         }
+
+        pub(super) fn holding_behind(mut self, symbol: &str, px: f64, stop_px: f64) -> Self {
+            self.held.insert(
+                symbol.into(),
+                Held { qty: 1.0, side: Side::Buy, px, entry_px: px, stop_px },
+            );
+            self.px.insert(symbol.into(), px);
+            self.rules.insert(symbol.into(), RULE);
+            self
+        }
+
     }
 
     impl SymbolFacts for Facts {
@@ -478,7 +546,7 @@ mod tests {
         let mut facts = Facts::default();
         facts.held.insert(
             "A".into(),
-            Held { qty: 10.0, side: Side::Buy, px: 8.0, entry_px: 10.0 },
+            Held { qty: 10.0, side: Side::Buy, px: 8.0, entry_px: 10.0, stop_px: 0.0 },
         );
         facts.px.insert("A".into(), 8.0);
         facts.rules.insert("A".into(), RULE);
@@ -594,5 +662,108 @@ mod tests {
         facts.px.insert("A".into(), 10.0);
         let plan = plan_now(&[target("A", 100.0)], &[], &facts);
         assert!(matches!(plan.skipped[0], Skipped::NoInstrumentRule { .. }));
+    }
+}
+
+#[cfg(test)]
+mod restop_tests {
+    use super::*;
+
+    const RULE: InstrumentRule =
+        InstrumentRule { tick_size: 0.01, qty_step: 0.001, min_qty: 0.001, min_notional: 5.0 };
+
+    fn held(entry_px: f64, stop_px: f64) -> Held {
+        Held { qty: 1.0, side: Side::Buy, px: entry_px, entry_px, stop_px }
+    }
+
+    fn target(fraction: f64) -> Target {
+        Target { symbol: "A".into(), notional_usdt: 100.0, stop_loss_fraction: fraction }
+    }
+
+    #[test]
+    // v12's whole decay contract: 3xATR at entry, 1.5x after 48h. The book
+    // declares the narrower distance and the venue has to be told.
+    fn a_narrower_declared_stop_moves_the_venue_stop_in() {
+        let step = restop("A", &target(0.15), &held(100.0, 70.0), Side::Buy, &RULE)
+            .expect("a stop that narrowed must move");
+        match step {
+            Step::Restop { symbol, stop_px } => {
+                assert_eq!(symbol, "A");
+                assert!((stop_px - 85.0).abs() < 1e-9, "got {stop_px}");
+            }
+            other => panic!("expected a restop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // A stop that loosens is not a stop. Refused whatever the book says.
+    fn a_wider_declared_stop_is_refused() {
+        assert!(restop("A", &target(0.45), &held(100.0, 85.0), Side::Buy, &RULE).is_none());
+    }
+
+    #[test]
+    fn a_short_tightens_downward() {
+        let position = Held { qty: 1.0, side: Side::Sell, px: 100.0, entry_px: 100.0, stop_px: 130.0 };
+        match restop("A", &target(0.15), &position, Side::Sell, &RULE) {
+            Some(Step::Restop { stop_px, .. }) => assert!((stop_px - 115.0).abs() < 1e-9),
+            other => panic!("expected a restop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // The venue rounds to a tick, so the level read back is never exactly the
+    // level asked for. Without this the engine re-posts on every quote.
+    fn a_move_inside_one_tick_is_the_venues_own_rounding() {
+        assert!(restop("A", &target(0.30005), &held(100.0, 70.0), Side::Buy, &RULE).is_none());
+    }
+
+    #[test]
+    // An unprotected position is boot's repair to make. Inventing a stop from
+    // a book would place one the log never intended.
+    fn a_position_with_no_stop_is_left_to_boots_repair() {
+        assert!(restop("A", &target(0.15), &held(100.0, 0.0), Side::Buy, &RULE).is_none());
+    }
+
+}
+
+#[cfg(test)]
+mod restop_plan_tests {
+    use super::tests::*;
+    use super::*;
+
+    #[test]
+    // Held steady in size is exactly the case that used to produce no step at
+    // all, so the venue went on holding the distance the position opened at.
+    fn a_held_steady_position_whose_stop_narrowed_still_produces_a_step() {
+        let facts = Facts::with("A", 100.0).holding_behind("A", 100.0, 70.0);
+        let target = Target { symbol: "A".into(), notional_usdt: 100.0, stop_loss_fraction: 0.15 };
+        let plan = plan(&[target], &["A".into()], &facts, 0, 60 * 60 * 1000, PlanRules::FLEET);
+        let restop = plan
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                Step::Restop { stop_px, .. } => Some(*stop_px),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no restop in {:?}", plan.steps));
+        assert!((restop - 85.0).abs() < 1e-9, "got {restop}");
+        // And the size itself is still left alone.
+        assert!(plan.steps.iter().all(|s| !matches!(s, Step::Resize { .. })));
+    }
+
+    #[test]
+    // The entry window shutting is when this matters most: a producer that has
+    // stopped writing leaves a book whose entries are dead, and the position it
+    // opened is exactly the one whose stop still has to come in.
+    fn an_expired_book_still_moves_the_stop() {
+        let facts = Facts::with("A", 100.0).holding_behind("A", 100.0, 70.0);
+        let target = Target { symbol: "A".into(), notional_usdt: 100.0, stop_loss_fraction: 0.15 };
+        // now_ms is past valid_until_ms: entries are long closed.
+        let plan = plan(&[target], &["A".into()], &facts, 9_000_000, 1_000_000, PlanRules::FLEET);
+        assert!(
+            plan.steps.iter().any(|s| matches!(s, Step::Restop { .. })),
+            "steps: {:?}",
+            plan.steps
+        );
     }
 }

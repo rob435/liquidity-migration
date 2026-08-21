@@ -155,7 +155,7 @@ impl MockCtx {
                 side,
                 qty,
                 entry_px,
-                stop_attached: true,
+                stop_attached: true, stop_px: 0.0,
                 leverage: None
             },
         );
@@ -330,7 +330,16 @@ impl Harness {
     /// this after the refusal is journaled, so nothing is resting and the
     /// account reading is unchanged.
     pub fn refuse(&mut self, symbol: SymbolId, reduce_only: bool) {
-        self.deliver(EngineEvent::IntentRefused { symbol, reduce_only });
+        self.refuse_as(symbol, reduce_only, "test_refusal");
+    }
+
+    /// The same, with the reason the engine would have logged.
+    pub fn refuse_as(&mut self, symbol: SymbolId, reduce_only: bool, reason: &str) {
+        self.deliver(EngineEvent::IntentRefused {
+            symbol,
+            reduce_only,
+            reason: reason.to_string(),
+        });
     }
 
     pub fn feed_reset(&mut self) {

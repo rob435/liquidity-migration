@@ -148,8 +148,8 @@ def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
         detail = "not armed -- this is the switch that means 'trade my money'"
         fix = "set REAL_MONEY=true, by hand, when you intend to trade real capital"
     results.append(CheckResult("REAL_MONEY", armed, detail, fix))
-    # Both the mainnet owner and the mainnet liveness watchdog set
-    # TELEGRAM_ENABLED=1 and read this pair, so an empty one silences both.
+    # The mainnet liveness watchdog runs with --telegram and sends through this
+    # pair, so an empty one silences every funded alert.
     telegram = [
         key for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not values.get(key, "").strip()
     ]

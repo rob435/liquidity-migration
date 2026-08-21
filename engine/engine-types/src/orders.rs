@@ -159,6 +159,14 @@ pub enum Action {
         client_order_id: String,
         spec: AmendSpec,
     },
+    /// Move the venue-native stop on a position already held, without sending
+    /// an order. The stop covers the whole position and outlives the process
+    /// that asked for it, so a strategy whose stop distance narrows over the
+    /// life of a trade has no other way to make that real at the venue.
+    ///
+    /// The engine refuses one that would move a stop further from the
+    /// position than where it stands. A stop that loosens is not a stop.
+    SetStop { symbol: SymbolId, trigger_px: f64 },
 }
 
 impl Action {
@@ -170,13 +178,17 @@ impl Action {
             Action::Place(intent) => intent.reduce_only,
             Action::Cancel { .. } => true,
             Action::Amend { .. } => false,
+            // Only ever accepted when it tightens, so it can only cut risk.
+            Action::SetStop { .. } => true,
         }
     }
 
     pub fn symbol(&self) -> SymbolId {
         match self {
             Action::Place(intent) => intent.symbol,
-            Action::Cancel { symbol, .. } | Action::Amend { symbol, .. } => *symbol,
+            Action::Cancel { symbol, .. }
+            | Action::Amend { symbol, .. }
+            | Action::SetStop { symbol, .. } => *symbol,
         }
     }
 }

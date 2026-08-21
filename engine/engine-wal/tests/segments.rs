@@ -259,7 +259,6 @@ fn segment_size_counts_the_file_and_the_buffer() {
     // After a rotation the count restarts at the new segment's size.
     wal.rotate(&base("fresh")).unwrap();
     let after = wal.segment_size();
-    assert!(after < before_flush + 8 || after > 8, "sanity");
     assert_eq!(
         fs::metadata(dir.path().join("engine.wal.000002")).unwrap().len(),
         after,

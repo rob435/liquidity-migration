@@ -9,14 +9,6 @@ use engine_risk::{Kernel, KernelConfig};
 use engine_types::orders::Side;
 use engine_types::risk::{DenyReason, RiskKernel, RiskVerdict};
 
-/// The loss ceiling is off in these cases so that moving equity exercises the
-/// envelope rather than the guard.
-fn envelope_cfg() -> KernelConfig {
-    KernelConfig {
-        ..equity_tracking_config()
-    }
-}
-
 fn observe(kernel: &mut Kernel, equity: f64) -> RiskVerdict {
     let now = SEC;
     kernel.assess(
@@ -95,7 +87,7 @@ fn a_config_that_does_not_track_equity_keeps_its_fixed_reference() {
 #[test]
 // test_the_reference_follows_equity_down_immediately
 fn the_reference_follows_equity_down_immediately() {
-    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let start = kernel.capital_reference_usdt();
     observe(&mut kernel, start * 0.99);
     assert_eq!(kernel.capital_reference_usdt(), start * 0.99);
@@ -104,7 +96,7 @@ fn the_reference_follows_equity_down_immediately() {
 #[test]
 // test_expansion_waits_for_a_move_larger_than_the_dead_band
 fn expansion_waits_for_a_move_larger_than_the_dead_band() {
-    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let start = kernel.capital_reference_usdt();
 
     observe(&mut kernel, start * 1.02);
@@ -118,7 +110,7 @@ fn expansion_waits_for_a_move_larger_than_the_dead_band() {
 // test_unknown_equity_moves_nothing, and the same readings fail closed here
 fn unknown_equity_moves_nothing_and_refuses() {
     for equity in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+        let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
         let start = kernel.capital_reference_usdt();
         assert!(
             matches!(
@@ -136,7 +128,7 @@ fn unknown_equity_moves_nothing_and_refuses() {
 #[test]
 // test_the_floor_bounds_the_envelope_rather_than_collapsing_it
 fn the_floor_bounds_the_envelope_rather_than_collapsing_it() {
-    let mut cfg = envelope_cfg();
+    let mut cfg = equity_tracking_config();
     cfg.envelope.floor_usdt = 500.0;
     let mut kernel = Kernel::new(cfg).expect("config");
     observe(&mut kernel, 1.0);
@@ -146,7 +138,7 @@ fn the_floor_bounds_the_envelope_rather_than_collapsing_it() {
 #[test]
 // test_an_equity_fraction_can_hold_the_book_below_the_wallet
 fn an_equity_fraction_can_hold_the_book_below_the_wallet() {
-    let mut cfg = envelope_cfg();
+    let mut cfg = equity_tracking_config();
     cfg.envelope.equity_fraction = 0.25;
     let mut kernel = Kernel::new(cfg).expect("config");
     observe(&mut kernel, 10_000.0);
@@ -156,7 +148,7 @@ fn an_equity_fraction_can_hold_the_book_below_the_wallet() {
 #[test]
 // test_the_profile_refuses_an_unbounded_or_oversized_anchor
 fn the_config_refuses_an_unbounded_or_oversized_anchor() {
-    let mut zero_floor = envelope_cfg();
+    let mut zero_floor = equity_tracking_config();
     zero_floor.envelope.floor_usdt = 0.0;
     assert!(Kernel::new(zero_floor)
         .err()
@@ -164,7 +156,7 @@ fn the_config_refuses_an_unbounded_or_oversized_anchor() {
         .detail
         .contains("floor_usdt must be positive"));
 
-    let mut oversized = envelope_cfg();
+    let mut oversized = equity_tracking_config();
     oversized.envelope.equity_fraction = 1.5;
     assert!(Kernel::new(oversized)
         .err()
@@ -172,7 +164,7 @@ fn the_config_refuses_an_unbounded_or_oversized_anchor() {
         .detail
         .contains("equity_fraction cannot exceed 1"));
 
-    let mut no_stop_distance = envelope_cfg();
+    let mut no_stop_distance = equity_tracking_config();
     no_stop_distance.envelope.disaster_stop_fraction = 1.0;
     assert!(Kernel::new(no_stop_distance)
         .err()
@@ -188,7 +180,7 @@ fn the_config_refuses_an_unbounded_or_oversized_anchor() {
 
 #[test]
 fn a_book_exactly_at_the_allowance_is_allowed() {
-    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let now = SEC;
     // 500_000 notional * 0.35 = 175_000 = 250_000 * 2.0 * 0.35.
     let intent = entry(CARRY, BUSDT, Side::Buy, 50_000.0, 10.0, 9.0, now);
@@ -200,7 +192,7 @@ fn a_book_exactly_at_the_allowance_is_allowed() {
 
 #[test]
 fn a_book_one_step_over_the_allowance_is_refused() {
-    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let now = SEC;
     let intent = entry(CARRY, BUSDT, Side::Buy, 50_001.0, 10.0, 9.0, now);
     match kernel.assess(&intent, &flat(250_000.0, now)) {
@@ -220,7 +212,7 @@ fn a_book_one_step_over_the_allowance_is_refused() {
 
 #[test]
 fn the_positions_already_held_count_against_the_allowance() {
-    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let now = SEC;
     let held = view(
         250_000.0,
@@ -245,7 +237,7 @@ fn the_positions_already_held_count_against_the_allowance() {
 
 #[test]
 fn a_stop_wider_than_the_disaster_stop_is_charged_at_its_own_distance() {
-    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let now = SEC;
     // 400_000 notional: 140_000 at the 0.35 disaster stop, 200_000 at this
     // order's own stop half the entry price away.
@@ -270,7 +262,7 @@ fn a_stop_wider_than_the_disaster_stop_is_charged_at_its_own_distance() {
 
 #[test]
 fn the_allowance_follows_equity_down() {
-    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let now = SEC;
     let intent = entry(CARRY, BUSDT, Side::Buy, 50_000.0, 10.0, 9.0, now);
     assert_eq!(
@@ -292,7 +284,7 @@ fn the_allowance_follows_equity_down() {
 // test_an_exit_is_never_blocked_by_the_partition, same rule for the envelope:
 // a risk-reducing order bypasses the caps by design.
 fn an_exit_is_never_blocked_by_the_envelope() {
-    let mut kernel = Kernel::new(envelope_cfg()).expect("config");
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let now = SEC;
     let held = view(
         250_000.0,

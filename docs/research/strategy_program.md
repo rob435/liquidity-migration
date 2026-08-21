@@ -486,11 +486,32 @@ all on the pumps that do not; no mechanical trigger-time gate separates the
 two well enough. Full tables:
 [archive/2026-08-21-long-v13-rework-program.md](archive/2026-08-21-long-v13-rework-program.md).
 
+**Exit conditions on alternative data — closed 2026-08-21 (Lane 1).** The one
+untouched exit surface — mid-hold exits keyed on Bybit open interest, perp
+premium, settled-funding state, BTC shocks — was run through the registered
+kernel with a trade-for-trade harness identity check: OI exits are null
+(concurrent with price, not leading; ρ +0.35 over the hold converts into a
+worst-cell −0.21 bp/day t −1.65 rule), premium-collapse and funding-flip
+exits are significantly **harmful** (t −2.39 / −2.54), BTC shocks never cross
+a 3-day hold. **Divergences and the settlement clock — closed the same day**
+(atlas on all 18,986 held bars of the registered book): selling at any of 9
+divergence constructions yields 62–171 bp less per fire than holding to the
+deployed exit, the least-bad one (new-high on fading volume) still loses
+through the kernel (−1.06 bp/day t −2.66), cross-venue premium negativity is
+significantly worse than neighboring bars, and held pump names RISE through
+their settlements (+22.7 bp/4h) so carry's pre-settlement exit clock transfers
+as harm (−0.28 t −2.27). The deployed v12 exit stack stands as measured-optimal
+across ~200 price/turnover cells plus alternative-data states, divergences,
+and the settlement clock. Receipts:
+`~/SHARED_DATA/bybit_full_pit/reports/long_exit_altdata_2026-08-21/` and
+`.../long_exit_divergences_2026-08-21/`, ledger rows in `research_findings.md`.
+
 **Active forward experiment — the driver-judgment ledger**
 (`scripts/research/llm_driver_ledger.py`). Nominates live movers from public
 tickers, enriches each with the facts a judgment needs (funding, perp
-premium, open-interest change, BTC/ETH beta context, distance from the 30d
-high, volume vs the coin's own 90d norm, vol-adjusted depth, listing age),
+premium and its 24h path, open-interest change over 24h and 48h, BTC/ETH
+beta context, distance from the 30d high, volume vs the coin's own 90d norm,
+vol-adjusted depth, listing age),
 then has a language model walk a fixed step-rubric — identity, beta check,
 leverage-vs-organic flow, structure, driver hypothesis, this repo's measured
 priors — and journal every step's answer BEFORE the outcome exists. Grading
@@ -506,7 +527,9 @@ through that sleeve's own sizing, exits, and stops — one strategy, one book;
 mechanics in `docs/trading_logic.md` §LLM GATE. The forward record grades
 real fills beside the shadow rows; the registered lane-1 prior is that no
 mechanical gate on these events cleared the bar, so this rides entirely on
-the judged discriminator and the owner's decision. Forward-only by
+the judged discriminator and the owner's decision. The fact set is v6 as of
+2026-08-21 (leverage-flow paths added; the rubric states plainly that the
+desk measured no mechanical edge in them). Forward-only by
 construction: a model judged on historical pumps already knows how they
 ended. Armed by `DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible
 endpoint via `LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals

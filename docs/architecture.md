@@ -18,7 +18,8 @@ never call a venue client, mutate a ledger or reserve margin;
 [`strategy_runtime.py`](../liquidity_migration/account/strategy_runtime.py) converts all sleeve intents
 together into one atomic kernel batch.
 
-Eleven unit files in `deploy/systemd/` — nine services and the two liveness timers:
+The units live in `deploy/systemd/`; that directory's
+[README](../deploy/systemd/README.md) is the inventory. Who may touch a venue:
 
 | Role | Units | Mutates a venue |
 | --- | --- | --- |
@@ -27,6 +28,8 @@ Eleven unit files in `deploy/systemd/` — nine services and the two liveness ti
 | Target producers | `bybit-{long,carry}-{demo,mainnet}` | No |
 | Liveness | `demo-liveness`, `mainnet-liveness` (each with a `.timer`) | No credential, no ordering dependency on what it watches |
 | Owner controls | `telegram-controls` | No — pause/resume buttons, acting through `systemctl` and the sleeve toggles |
+| LLM ledger | `llm-ledger` (with a `.timer`) | No — no venue credential; it writes the LONG sleeve's candidates file |
+| Trade notifier | `trade-notify` (with a `.timer`) | No — it diffs the target books to the owner's DM |
 
 ```text
 market data -> strategy target -> durable inbox -> account kernel
@@ -179,13 +182,16 @@ Three read paths, not interchangeable.
    segments. Earlier payloads are unchecked, so neither is full integrity verification; both are valid
    only because every serving owner generation reconstructed the whole journal at startup.
 
-`require_recent_account_owner_health` matches the head's sequence, account id and state hash against a
-fresh health artifact, retrying a health/head/health triplet. `head_binding="exact"` (default) is what
-sizing consumers need, so capital evidence cannot predate a fill; `head_binding="allow_behind"` is for
-liveness consumers, whose on-disk health normally lags the head by one transaction. Health *ahead* of
-the journal, or equal-sequence state-hash disagreement, fails closed; staleness stays bounded by
-`max_age_ns`. `scripts/vps/check_deploy_rollout_readiness.py` adds two script-level modes that skip the
-binding entirely: `none` and `stopped-maintenance`.
+**Capital evidence is the engine's heartbeat, not the journal.**
+`require_recent_engine_account`
+([`engine_account_health.py`](../liquidity_migration/account/engine_account_health.py)) is what the
+producers size from ([`strategy_planning.py`](../liquidity_migration/strategy/strategy_planning.py))
+and what `scripts/vps/check_deploy_rollout_readiness.py` proves the account flat against. It refuses on
+three things: a heartbeat for the wrong realm, a reading stamped in the future, and a reading older
+than `max_age_ns`. The age is measured on the *reading's* venue wall stamp, not on when the file was
+written, so an engine whose loop keeps running while its venue reads fail goes stale exactly when its
+account knowledge does. `engine_held_symbols` wraps it and answers `None` for every kind of
+not-knowing, which a producer must read as "no news" rather than "holds nothing".
 
 ## Pre-trade gate
 
@@ -197,7 +203,6 @@ growth caps — nothing here may block an exit.
 | --- | --- |
 | Gross notional | `max_component_gross_notional_usdt`, `max_account_gross_notional_usdt` |
 | Initial margin | `max_initial_margin_usdt`, and observed `available_margin_usdt` |
-| Per-symbol notional | `max_symbol_notional_usdt` |
 | Leverage | `max_leverage`, plus the venue's per-symbol ceiling |
 | Sleeve partition (B3) | `sleeve_limits[sleeve]` gross and initial-margin shares |
 | Instrument rules | quantity step, min quantity, min notional, tick |

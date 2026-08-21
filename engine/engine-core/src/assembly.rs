@@ -265,7 +265,6 @@ struct EnvelopeSection {
     expand_dead_band_fraction: f64,
     gross_notional_multiple: f64,
     disaster_stop_fraction: f64,
-    max_symbol_notional_usdt: f64,
     max_component_gross_notional_usdt: f64,
     max_initial_margin_usdt: f64,
 }
@@ -292,7 +291,7 @@ fn default_qty_tolerance() -> f64 {
     1e-12
 }
 
-/// The four capital controls, from one of two places.
+/// The three capital controls, from one of two places.
 ///
 /// Either the caps are written out in `[risk]`, and each strategy's
 /// `capital_usdt` is its margin share of the partition; or `[risk]` names the
@@ -348,7 +347,6 @@ pub fn risk(
             expand_dead_band_fraction: parsed.envelope.expand_dead_band_fraction,
             gross_notional_multiple: parsed.envelope.gross_notional_multiple,
             disaster_stop_fraction: parsed.envelope.disaster_stop_fraction,
-            max_symbol_notional_usdt: parsed.envelope.max_symbol_notional_usdt,
             max_component_gross_notional_usdt: parsed.envelope.max_component_gross_notional_usdt,
             max_initial_margin_usdt: parsed.envelope.max_initial_margin_usdt,
         },
@@ -560,7 +558,6 @@ floor_usdt = 100.0
 expand_dead_band_fraction = 0.05
 gross_notional_multiple = 2.0
 disaster_stop_fraction = 0.35
-max_symbol_notional_usdt = 100.0
 max_component_gross_notional_usdt = 200.0
 max_initial_margin_usdt = 100.0
 "#;
@@ -579,7 +576,6 @@ max_initial_margin_usdt = 100.0
     // Guessing one would be a capital control nobody chose, so it is refused.
     fn a_risk_block_missing_a_capital_cap_is_refused() {
         for key in [
-            "max_symbol_notional_usdt",
             "max_component_gross_notional_usdt",
             "max_initial_margin_usdt",
         ] {

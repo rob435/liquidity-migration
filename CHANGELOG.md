@@ -16,6 +16,358 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 — LONG's own flatten route closed, and the engine's answers
+  made visible.** Not deployed. The same bug class as this morning's carry
+  fix, on LONG's side of the seam, plus the four blind spots behind it.
+
+  **An unreadable book-state file no longer reads as "hold nothing".**
+  `read_book_state` returned an empty record on any failure — torn JSON, an
+  unknown version, one bad row — and the engine reads the book as absolute,
+  so that empty record market-closed every LONG position at once, and the
+  producer wrote the empty record straight back before writing the book,
+  making a transient read failure permanent. A record that exists but cannot
+  be read back now fails the cycle loudly and the engine holds what it holds;
+  only a missing file starts from nothing. Writes fsync the temp file and the
+  directory around the rename.
+
+  **Refusals cross the heartbeat.** The engine now publishes `entry_blockers`
+  — per-symbol reasons why an ask is not being opened (kernel refusals with
+  their own reason text, planner skips like below-entry-floor and
+  below-venue-minimum). A never-confirmed ask the engine is refusing leaves
+  the record the same cycle instead of squatting on one of the ten slots for
+  its full three-day deadline; no cooldown starts, because the name never
+  held. Blocked candidates are skipped and counted rather than re-asked.
+
+  **The engine's trims and adds land in the record.** The ask stays frozen at
+  entry, but the venue's actual size and average entry price are written onto
+  each confirmed entry every cycle (`venue_qty`, `venue_avg_entry_px`), and a
+  move between readings is logged and counted — which is also where the stop
+  walking down with each averaging add becomes visible.
+
+  **Book-mode telemetry stops reading zero.** `entry_targets_queued` /
+  `exit_targets_queued` count what the book took in and let go, the summary
+  line carries `book=`, `regime=btc:x/eth:y`, and `refused=`.
+
+  **Regime anchors are always fetched.** BTCUSDT and ETHUSDT join the kline
+  fetch even when the frozen candidate artifact excludes them (a force-added
+  anchor is dropped from candidacy), their absence is named in the cycle row,
+  and pumps the regime refuses are counted separately from no-signal days.
+
+  Documented alongside: the gate/native frozen-universe asymmetry (the gate
+  can enter a post-freeze listing; the native path cannot) in
+  [`docs/trading_logic.md`](docs/trading_logic.md).
+
+- **2026-08-21 — twenty-one additional exit conditions tested, none kept.**
+  Searched for a second exit worth having, across every data root: price shape
+  (MFE give-back, stall-since-high, volume exhaustion), market-relative
+  (lagging BTC), the funding root (cumulative paid, rate spikes), the mark and
+  index roots (perp premium flipping negative), and Binance order flow. Six
+  years, 18,493 events, on the live configuration.
+
+  **The baseline wins.** The best overlay beats it by under 7 bp and is worse
+  than it in 2021 and 2022. Everything else costs, most of it heavily — the
+  MFE give-back ratchet, the most appealing rule on the list, is −292 bp a
+  trade. Same mechanism the take-profit showed: the return is a right tail and
+  a rule that caps a winner destroys more than it saves.
+
+  **BTC-relative was a two-era mirage.** Leading the table at +13 bp on
+  2021–22, firmly negative over six (−94 and −51). It joins the trailing stop
+  and the long/short ratios in the file of things that looked like alpha on a
+  slice. Full table in the receipt.
+
+  **The width is right too.** Controls at 2.5x, 2x and 1.5x ATR lose
+  monotonically (273, 224, 185 against 308), and the widest wins in five of six
+  years. So the decay contract's shape is the finding: **wide early, narrow
+  late** — a 1.5xATR stop from entry is the worst variant tested while the same
+  1.5x from 48 hours is worth +13 to +19 bp. v12's design was right; only its
+  plumbing was broken.
+
+  **And BTC-relative was a tighter stop in costume.** Against a control using
+  the same distance with BTC ignored: 257 vs 252 bp at -10%, 214 vs 205 at -5%.
+  The market adjustment contributes 5-9 bp out of 250; the rule was simply
+  stopping out earlier, which the width table already prices.
+
+  So the decayed stop was the whole of the available exit alpha, and it is now
+  real at the venue. A further exit idea should have to beat that table first.
+
+- **2026-08-21 — the gate learns who was buying.**
+  Not deployed. `binance_metrics_daily` carries what no Bybit root does: the
+  mean of a day's 288 five-minute taker buy/sell volume ratios. Graded on the
+  gate's own trigger population, pumps entering above a ratio of 1.07 — the
+  ones being lifted hardest at the ask — **win 41% of the time against 48%**,
+  with a median trade of −207 bp against −38 bp over five years. On the mean
+  the quieter ones lead in four of five years and on the hit rate in four of
+  five, but they are different exception years, so it is a caution and not a
+  rule. 2026 reverses the mean because a melt-up's right tail favoured the
+  aggressive names; the reversal survives trimming the top 1%, so it is a
+  regime effect rather than one trade.
+
+  `taker_buy_sell_ratio_1d` is now an enriched fact the rubric receives, stated
+  with its exception years rather than as a law. Deliberately not a gate:
+  the events Binance does not cover average +298 bp, *better* than the covered
+  ones, so filtering on coverage would throw away good trades. Fetched from
+  Binance's public metrics endpoint at `period=5m` and averaged — the day
+  aggregate is a different and lower number, and the threshold is only
+  meaningful against the mean. `taker_ratio_day_mean` is a pure function so
+  that choice is pinned by tests rather than buried in a network call.
+
+  **A second prior corrected.** The rubric's leverage-vs-organic step treated
+  open interest rising hard with a pump as fragile leverage-chasing. Measured,
+  the fastest-growing OI quartile is the **best** of the four (+702 bp). The
+  step now says so.
+
+  **Two findings refused.** Top-trader long/short and all-account long/short
+  both look superb pooled — the crowded-long quartile shows −448 bp at t −11.0.
+  Split by era, the effect is entirely 2025: 2022 is *better* crowded, 2024 is
+  identical. Neither is used, and the receipt records why. `PROMPT_VERSION`
+  bumped to v5; `--grade` buckets by it and both the rubric and the fact set
+  changed.
+
+- **2026-08-21 — the stop that narrows now narrows at the venue.**
+  Not deployed; a change point from the deploy that carries it. v12 declares a
+  3×ATR stop at entry and a 1.5×ATR stop from 48 hours, and only the first of
+  those was ever real. The engine attached a venue-native stop on an opening
+  order and on a growing resize, and a position holding steady in size produced
+  no step at all — so Bybit held the opening distance for the life of the trade
+  and the narrower level existed only as a rule the producer polled on its 60 s
+  cycle and took to the grave when it stopped. Graded at **+13 to +19 bp a
+  trade**, helping in 26 of 30 era-and-window cells and most in the recent era
+  (+20 to +57 bp in 2025–26).
+
+  **The producer declares it.** `_long_stop_fraction_now` renders the decayed
+  fraction into the book once a name is past its own frozen decay age, capped
+  so the contract can only tighten.
+
+  **The engine acts on it.** A new `Step::Restop` on a held-steady position
+  becomes `Action::SetStop`, which the engine sends as
+  `POST /v5/position/trading-stop` — the call boot's stop repair already made,
+  now reachable in flight. `PositionView` carries the venue's own `stopLoss`
+  price so the comparison is against what the venue kept rather than against
+  what the engine remembers asking for.
+
+  **Three things it refuses.** A declared stop further from the position than
+  the one standing (a stop that loosens is not a stop); a move smaller than one
+  tick, which is the venue's own rounding read back and would otherwise re-post
+  on every quote for ever; and a position the venue holds no stop on at all,
+  which is boot's repair to make from the log rather than the planner's to
+  invent from a book.
+
+  **It survives a restart.** `WalRecord::StopSet` is appended before the call
+  and folded by `intended_stops`, so a crash between the record and the ack
+  leaves the log claiming the tighter level and boot puts that one back — not
+  the distance the position opened at.
+
+  Six engine cases and five producer cases, each proved to fail with the
+  change backed out.
+
+- **2026-08-21 ~17:30 UTC — the driver ledger's fact set gains leverage-flow
+  paths (prompt v6).** The judged pumps' fact JSON now carries the OI path to
+  48h (`oi_change_48h_pct` beside the existing 24h), the premium path
+  (`premium_bp_24h_ago`, `premium_change_24h_bp`, off Bybit's hourly
+  premium-index kline), and STEP 3 of the rubric reads the paths — demand
+  arriving vs leaving at the same print. The rubric says plainly what the
+  desk measured: no mechanical edge in these fields (labs of 2026-08-21:
+  null as entry discriminator, harmful as exits), so they inform the flow
+  classification, not the score. `PROMPT_VERSION` → `driver-judgment-v6-scored`;
+  v5's forward rows keep grading in their own bucket. Not deployed — rides
+  the next llm-ledger sync.
+
+- **2026-08-21 — the LLM gate is graded, and narrowed on the numbers.**
+  Not deployed. The gate's mechanical trigger — the part without the model —
+  was rebuilt on 5.5 years of hourly Bybit bars and graded against the sleeve's
+  own exit geometry: ~70,000 events, entry at the bar *after* the trigger bar,
+  the repo's own 15.0 bp round trip. Full tables in
+  [`docs/research/archive/2026-08-21-llm-gate-window-lab.md`](docs/research/archive/2026-08-21-llm-gate-window-lab.md).
+  Four changes follow from it, all change points from the deploy that carries
+  them.
+
+  **The 1h and 2h windows are cut** (owner directive, and the measurement
+  agrees). Each carries a significantly negative year — 2022 at −175 bp a trade
+  (t −4.6) and −106 (t −2.7). 12h is the only window with none. The gate now
+  detects on 4/12/24h.
+
+  **The entry scan tightens from the top 30 by turnover to the top 10.**
+  Turnover rank is the strongest single thing measured about these triggers:
+  rank ≤ 10 earns 308 bp a trade against 154 for the full 30, monotone across
+  every quartile, and the tighter cut wins in every year including 2021, which
+  flips sign. The research scan stays at 30 — a narrower entry universe is not
+  a reason to look at less.
+
+  **A scam pump turns out to be a liquidity fact, not a shape one.** Every
+  shape discriminator tested against outcomes failed to separate: the vertical
+  one-candle pump, the turnover spike against the name's own norm, and how
+  often the symbol has already fired. What separates is how big the book is,
+  which is why the answer landed in the universe rule rather than in a shape
+  heuristic in the prompt. The rubric gains a scam-pump step that asks the
+  model for the one thing the tape cannot supply — what it knows about the
+  token — and reports `scam_pump_risk`, capped to a score of 3 when high.
+
+  **The rubric was telling the model something false.** Its priors step
+  asserted that triggers after 12:00 UTC confirm materially better than
+  00–06 UTC. Measured on this population 12–18 UTC is the *worst* block
+  (+112 bp) and 00–06 is better (+151). The claim is replaced by what the data
+  says: the hour predicts nothing usable. `PROMPT_VERSION` bumped to v4, since
+  `--grade` buckets by it and both the rubric and the fact set changed.
+
+  **Signal validity is an hour on all three clocks** (owner directive). The
+  published file's declared validity 90 → 60 minutes, the consumer's file-age
+  bound 2 h → 1 h, and the per-event bound now measures from the trigger bar at
+  1 h instead of borrowing the native path's 24 h. The measurement says the
+  edge decays *slowly* — 94% intact four hours after the trigger — so this is
+  not a decay bound; it is an operational one. The ledger republishes hourly,
+  so a file near an hour old means a run was missed, and a missed run is not a
+  signal. Both new tests fail with the old constants restored.
+
+  **Two things the grading says to leave alone.** The take-profit is negative
+  at every multiple tested (4×, 3×, 2× ATR), so its absence from the live path
+  is correct rather than a gap — the 4×ATR in the profile came from a
+  daily-signal backtest and cuts the tail these trades live on. And a trailing
+  stop, which looked like the best exit on 2025 alone, is worse than the plain
+  stop over the full history.
+
+- **2026-08-21 — the per-symbol cap is gone, by owner instruction.**
+  Not deployed. `max_symbol_notional_usdt` is removed from both halves: the
+  Rust kernel's check and `DenyReason::SymbolNotionalBreached`, the Python
+  kernel's `symbol_notional_limit` rejection, both loaders' schemas, both
+  shipped profiles, `engine.toml`, and the nesting proof that held it under
+  the component cap. The engine's `Projected` no longer tracks gross per
+  symbol at all — nothing else read it.
+
+  **What this changes.** One name may now hold a sleeve's entire gross share.
+  On the funded profile that is 300 USDT of LONG on a 100 USDT wallet, where
+  50 was the old ceiling — a 6× rise in how concentrated one position may be.
+  On demo it changes nothing measurable: `operational.demo.json` declares no
+  `capital_reference` block, so the reference is pinned at 250,000 and the old
+  125,000 symbol cap sat about ninety times above anything the producer could
+  ask for. What bounds one position is now its own venue-native stop, and what
+  bounds the book is the account gross cap, the account margin cap, and — on
+  the funded profile only — the sleeve shares.
+
+  **Removed, not defaulted.** Both loaders refuse a key they do not read, so a
+  profile still carrying the retired cap stops the process rather than booting
+  with a limit nobody enforces; a test on each side pins that. The five Rust
+  cases that proved the cap are deleted and replaced by three that prove its
+  absence — one name taking a whole sleeve share is now an `Allow`, and past
+  the share the partition clamps rather than refuses.
+
+- **2026-08-21 — a full-repo audit, and the seven real defects it found.**
+  Not deployed: everything below is in the working tree with
+  `scripts/dev.sh check` green (doctor ready, ruff clean, mypy 126 files,
+  **2,392** pytest, engine **739**). Four of the fixes change runtime
+  behaviour and are change points from the deploy that carries them.
+
+  **A failed equity read flattened the whole carry sleeve.**
+  `CarryCycleState.sizing_equity` returns 0.0 when the owner-health read
+  fails, `_write_engine_target_book` was called unconditionally, every
+  notional then rendered `0.0`, and `target_book/plan.rs` reads a zero
+  notional as an explicit exit — *before* the validity-window check. So any
+  engine restart, deploy, or venue-read stall longer than the 30 s freshness
+  bound made the next 60 s carry cycle publish a book that market-closed
+  every held name. The producer now writes nothing when it cannot size; the
+  last book stands. LONG and exodus were never exposed — they render stored
+  notionals. Regression test pinned, and proved to fail without the guard.
+
+  **One account reading paid for two sends.** `covers.rs::absorb` recomputed
+  the movement per record against a shared `view_at_send`, so two covers on
+  one symbol both claimed the same fill and `in_flight` read short of what was
+  still resting — the double-entry window the cover book exists to close, and
+  the opposite of its own stated contract ("record by record, by exactly the
+  amount shown"). The movement is now spent once per symbol, oldest first.
+  Two tests, both proved failing without the fix.
+
+  **A recovered fill never ended its order.** `LedgerOfOrders::apply` had no
+  `RecoveredFill` arm, so a fill read back from the venue's own history after
+  a stream gap left `ending` unset: the working-order pass kept supervising a
+  filled order and re-cancelling it at a venue that had finished with it, for
+  the life of the process. Both the replay path and the live recovery loop now
+  feed it. The kernel's partition reservation is still not drawn down by a
+  recovered fill — it self-heals at the next boot and errs toward refusing, so
+  it is left as a named follow-up.
+
+  **The funded sizing dials were inert.** The mainnet producer units
+  deliberately never load `bybit-mainnet.env` (it holds the key), which is
+  where 2026-08-21 put `CARRY_/LONG_/EXODUS_NOTIONAL_MULTIPLIER`. An owner
+  setting 1.0 there to start small would have passed preflight and traded 3.0.
+  The three dials move to `account-execution-mainnet.env.template`, the
+  no-secrets file those units do load. **The installed host file predates this
+  and does not carry the lines** — until it does, the funded fleet sizes from
+  the committed profile.
+
+  **The LLM gate would have sized an unmeasured name largest — latent, not
+  live.** In `_llm_gate_candidates` a missing `sigma_daily_30d` fell back to
+  `vol_floor_annual`, which is the vol-parity rule's *ceiling* weight, so the
+  name we knew least about would take the largest position in the book. The
+  shipped publisher cannot produce that row — `scan_triggers` skips any symbol
+  whose sigma is missing before it judges, and `judged_events` is filled only
+  inside that loop — so this was never reachable end to end. It is fixed
+  anyway, because the producer must not trust the file's shape: gate events
+  without a measured volatility are skipped (`llm_gate_no_vol`). Recorded
+  honestly as defence in depth rather than as a live defect.
+
+  **A regime-off run left the last hour's names tradeable.** `scan_triggers`
+  returned before publishing, so the previous run's candidates stood for the
+  rest of their 90 minutes and the LONG sleeve could keep entering under a
+  regime the ledger had just declared off. A failed regime read lands on the
+  same path. It now publishes an empty file either way.
+
+  **A demo flatten could not flatten.** `flatten_account.sh` wrote its zero
+  book to carry and long only; the exodus sleeve, live since 2026-08-20, was
+  never zeroed, so `ops.sh flatten --environment demo` left the shorts open and
+  timed out. Also fixed: `--wait-seconds 0` read an unbound `$left` under
+  `set -u`.
+
+  **The funded engine's heartbeat was unwatched.** The mainnet liveness unit
+  never loaded `engine-mainnet.env`, so `LIVENESS_ENGINE_HEARTBEAT_FILE` was
+  empty and the watchdog skipped its engine check entirely while reporting
+  green — against that template's own claim that it pages on a stale funded
+  heartbeat. It now loads the file the way the demo watchdog does.
+
+  **Residue of the removed capital controls, cleared.** The daily loss halt
+  left a dead axis behind it: `Kernel.wall_ns` written and never read, its
+  `observe_wall_clock_ns` on the kernel, the trait and two per-reading engine
+  call sites, `utc_noon`, a `tripped_kernel()` that walked a guard that no
+  longer exists, a test named for it that had become a weaker copy of the real
+  staleness test, and a no-op `envelope_cfg()` wrapper. `.env.example` still
+  shipped `RM_CARRY_LEVERAGE`, `RM_LONG_LEVERAGE` and `RM_DAILY_LOSS_FRACTION`
+  — three dials the render refuses by name, so copying the file failed the
+  funded preflight — while omitting 21 live variables including `ENGINE_LIVE`
+  and all three multipliers. `PORT_NOTES.md` lost its strikethrough deletion
+  note, its dead loss-guard rows, and an off-by-one in the evaluation order
+  that the removal had left; `kernel.rs` ran *three* different numberings of
+  one rule and now runs one. Two files still said "the four capital controls";
+  there are three.
+
+  **Dead code and false claims.** `account_owner_health.py` (412 lines) was the
+  deleted Python owner's health artifact: no writer, no production reader, and
+  its two live symbols re-homed — `TARGET_PRODUCER_HEALTH_MAX_AGE_NS` to
+  `engine_account_health.py`, which is what it actually bounds, and
+  `validate_systemd_invocation_id` back to `core/env_flags.py`, which defines
+  it. `architecture.md` described `require_recent_account_owner_health` as the
+  live sizing gate; nothing called it. STATE.md named an
+  `ACCOUNT_SHARED_LEVERAGE_AUTHORITY` env var and a
+  `--shared-leverage-authority` flag that exist nowhere, on a unit that was
+  deleted a week ago. Four vacuous tests repaired (a `||` that could not be
+  false, an identity asserted against its own definition, `"gateway.rs" !=
+  "realm.rs"`, and a spread test that restated the function under test), one
+  unused `serde` dependency dropped, five unreferenced functions deleted, and
+  `env_positive_float` — which reads all three live sizing dials and had **no
+  tests at all** — now refuses a present-but-empty dial as its docstring
+  always claimed, with tests.
+
+  **Numbers corrected against source**: the carry multiplier in
+  `trading_logic.md` (2.0 → 3.0), the LONG worst-case envelope (a full
+  multiplier step stale, and it no longer fits the account caps — stated
+  plainly rather than quietly), the fleet decide latency in STATE.md (83 ns
+  was the laptop's; the box is 721 ns), the unit inventory in two docs (11
+  services and 4 timers, not eleven files), `VenueGateway`'s method count
+  (twelve, and the omitted one is `executions`, whose default *refuses*, so an
+  adapter written from that list ships with fill recovery off), the funded
+  caps in `PORT_NOTES.md`, and `scripts/README.md`'s runtime inventory. A
+  registered config and a research doc both promised "the account loss guard
+  owns the tail" of the exodus short's measured 7.8%-of-fire-days,
+  −111.5 bp-mean premature tail. There is no such guard: the tail is
+  unbounded and now says so.
+
 - **2026-08-21 ~14:30 UTC — sizing collapses into three dials, and every
   strategy runs 3x on both fleets (owner directive).** The owner surface is
   now three env lines read directly by the producers:

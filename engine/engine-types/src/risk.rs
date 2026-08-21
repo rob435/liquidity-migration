@@ -11,6 +11,11 @@ pub struct PositionView {
     pub qty: f64,
     pub entry_px: f64,
     pub stop_attached: bool,
+    /// Where the venue says the stop sits, or 0.0 when there is none. The
+    /// venue is the only honest source for this: the engine's own memory of
+    /// what it asked for says nothing about what the venue kept.
+    #[serde(default)]
+    pub stop_px: f64,
     /// The leverage the venue itself reports on this position, when the row
     /// carries one. This is the venue's own answer, not our cache — it is
     /// what lets an engine with sole leverage authority VERIFY instead of
@@ -36,9 +41,6 @@ pub struct AccountView {
 pub enum DenyReason {
     /// The order would breach the equity-anchored envelope.
     EnvelopeBreached { worst_case_loss_usdt: f64, allowance_usdt: f64 },
-    /// One symbol would carry more gross notional than the account allows on
-    /// any single symbol.
-    SymbolNotionalBreached { symbol: SymbolId, notional_usdt: f64, cap_usdt: f64 },
     /// The whole book's gross notional, added up without letting one symbol's
     /// exposure cancel another's, breaches the account's second gross ceiling.
     ComponentGrossBreached { gross_usdt: f64, cap_usdt: f64 },
@@ -82,10 +84,6 @@ pub trait RiskKernel {
     fn on_update(&mut self, update: &OrderUpdate);
     /// Latest price for a symbol, for valuing exposure. Default: ignore.
     fn observe_price(&mut self, _symbol: SymbolId, _px: f64) {}
-    /// Wall time of the account reading being folded in — the READING's
-    /// clock, not "now". No shipped kernel reads it back today.
-    /// Default: ignore.
-    fn observe_wall_clock_ns(&mut self, _wall_ns: u64) {}
     /// Bind an engine-minted client order id to the intent it approved, so
     /// later fills can be attributed per strategy. Default: ignore.
     fn register_order(&mut self, _client_order_id: &str, _intent: &Intent, _approved_qty: f64) {}

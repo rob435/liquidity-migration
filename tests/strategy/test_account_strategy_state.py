@@ -80,7 +80,7 @@ def _submit(
             metadata=target_metadata,
         )],
         risk_snapshot=AccountRiskSnapshot(10_000.0, 9_000.0, "wallet", 3),
-        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 1_000.0, 10.0),
+        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 10.0),
         instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
     )
 
@@ -128,7 +128,6 @@ def _submit_group(
             kernel.clock.wall_time_ns(),
         ),
         risk_policy=AccountRiskPolicy(
-            10_000.0,
             10_000.0,
             10_000.0,
             10_000.0,
@@ -1489,7 +1488,7 @@ def _submit_two_symbol_entry_group(
         ],
         targets=targets,
         risk_snapshot=AccountRiskSnapshot(10_000.0, available_margin_usdt, "wallet", now_ns),
-        risk_policy=AccountRiskPolicy(10_000.0, 10_000.0, 10_000.0, 10_000.0, 10.0),
+        risk_policy=AccountRiskPolicy(10_000.0, 10_000.0, 10_000.0, 10.0),
         instrument_rules={
             "BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0),
             "CUSDT": InstrumentRules("CUSDT", 0.1, 0.1, 1.0),

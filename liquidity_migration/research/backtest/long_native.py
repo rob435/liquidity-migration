@@ -395,7 +395,6 @@ def run_long_native_research(
     replay_policy = AccountRiskPolicy(
         max_component_gross_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 10.0,
         max_account_gross_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 100.0,
-        max_symbol_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 10.0,
         max_initial_margin_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 100.0,
         max_leverage=max(float(cfg.execution_leverage), 1.0),
     )

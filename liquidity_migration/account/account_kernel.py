@@ -3207,9 +3207,6 @@ class AccountExecutionKernel:
                 continue
             if symbol not in prices or symbol not in instrument_rules:
                 continue
-            notional = abs(signed_qty) * prices[symbol]
-            if not risk_reducing_only and notional > risk_policy.max_symbol_notional_usdt:
-                rejections.append(_risk_rejection_key(batch_id, "symbol_notional_limit", symbol))
             rules = instrument_rules[symbol]
             quantized = quantized_down(signed_qty, rules.qty_step)
             if abs(quantized - signed_qty) > risk_policy.quantity_tolerance:

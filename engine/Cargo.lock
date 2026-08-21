@@ -219,7 +219,6 @@ name = "engine-risk"
 version = "0.1.0"
 dependencies = [
  "engine-types",
- "serde",
  "serde_json",
 ]
 

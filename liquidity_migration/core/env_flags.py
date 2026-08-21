@@ -54,18 +54,24 @@ def env_positive_float(
     """The named dial as a positive finite float, or None when unset.
 
     An empty or malformed value raises rather than falling back: an operator
-    who typed a line meant to change the number.
+    who typed a line meant to change the number, and a sizing dial that
+    silently reverts to the committed default is a size nobody chose. Same
+    rule as ``parse_real_money_dials`` applies to the ``RM_*`` surface.
     """
 
     source = os.environ if environ is None else environ
     raw = source.get(name)
-    if raw is None or not raw.strip():
+    if raw is None:
         return None
+    raw = raw.strip()
+    if not raw:
+        raise ValueError(f"{name} is present but empty; remove the line to take the default")
     try:
-        value = float(raw.strip())
+        value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number; got {raw!r}") from exc
-    if not value > 0.0 or value != value or value in (float("inf"),):
+    # NaN fails `> 0.0` on its own, so this is finiteness against the infinities.
+    if not value > 0.0 or value == float("inf"):
         raise ValueError(f"{name} must be finite and positive; got {raw!r}")
     return value
 

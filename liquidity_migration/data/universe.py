@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
 
 import polars as pl
 
@@ -167,15 +166,3 @@ def _empty_universe_table() -> pl.DataFrame:
             "symbol_type": pl.Series([], dtype=pl.String),
         }
     )
-
-
-def _age_filter_label(config: dict[str, Any]) -> str:
-    min_age = int(config.get("min_age_days") or 0)
-    max_age = int(config.get("max_age_days") or 0)
-    if min_age and max_age:
-        return f"{min_age}-{max_age} days"
-    if min_age:
-        return f">= {min_age} days"
-    if max_age:
-        return f"<= {max_age} days"
-    return "disabled"

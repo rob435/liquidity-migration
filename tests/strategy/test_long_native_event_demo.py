@@ -946,7 +946,7 @@ def _gate_event(
         "atr_pct": atr,
         "sigma_daily_30d": sigma,
         "turnover_rank": 4,
-        "trigger_window_h": 1,
+        "trigger_window_h": 4,
     }
 
 
@@ -988,6 +988,67 @@ class TestLlmGateCandidates:
         )
         assert cand["position_weight"] == pytest.approx(expected)
 
+    def test_an_event_with_no_measured_volatility_is_not_entered(self) -> None:
+        # The vol-parity rule reads an absent sigma as the floor, which is its
+        # CEILING weight -- so entering would put the largest position in the
+        # book on the name we know least about. The ledger needs 31 daily bars
+        # for sigma against 15 for the ATR, so a young listing publishes with
+        # one and not the other as a matter of course.
+        strategy = long_v12_profile()
+        now_ms = 1_700_000_100_000
+        candidates, skips = _llm_gate_candidates_for_test(
+            [_gate_event("YOUNGUSDT", sigma=0.0)], strategy=strategy, now_ms=now_ms
+        )
+        assert candidates == []
+        assert skips["llm_gate_no_vol"] == 1
+
+    def test_a_signal_older_than_an_hour_is_not_entered(self) -> None:
+        # The gate republishes every hour, so a live signal is minutes old. An
+        # hour-plus means a run was missed, and the pump it named has had an
+        # hour to resolve without us. Ninety minutes used to enter.
+        strategy = long_v12_profile()
+        now_ms = 1_700_000_100_000
+        fresh, fresh_skips = _llm_gate_candidates_for_test(
+            [_gate_event("AAAUSDT", trigger_ts_ms=now_ms - exact_duration_ms(minutes=59))],
+            strategy=strategy,
+            now_ms=now_ms,
+        )
+        assert [c["symbol"] for c in fresh] == ["AAAUSDT"]
+        assert fresh_skips["llm_gate_stale"] == 0
+
+        stale, stale_skips = _llm_gate_candidates_for_test(
+            [_gate_event("AAAUSDT", trigger_ts_ms=now_ms - exact_duration_ms(minutes=90))],
+            strategy=strategy,
+            now_ms=now_ms,
+        )
+        assert stale == []
+        assert stale_skips["llm_gate_stale"] == 1
+
+    def test_a_file_written_more_than_an_hour_ago_reads_as_no_signal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        from liquidity_migration.strategy.long_native_event_demo import (
+            LLM_GATE_CANDIDATES_PATH_ENV,
+            _read_llm_gate_events,
+        )
+
+        # No valid_until_ms at all: the file's own age is the only bound left,
+        # and it is an hour. Two hours used to read.
+        path = tmp_path / "candidates.json"
+        now_ms = 1_700_000_000_000
+        path.write_text(
+            _json.dumps(
+                {
+                    "decision_ts_ms": now_ms - exact_duration_ms(minutes=90),
+                    "events": [_gate_event()],
+                }
+            )
+        )
+        monkeypatch.setenv(LLM_GATE_CANDIDATES_PATH_ENV, str(path))
+        assert _read_llm_gate_events(now_ms=now_ms) == []
+
     def test_stale_open_cooled_and_unpriced_events_are_counted_not_entered(self) -> None:
         from liquidity_migration.strategy.long_native_event_demo import _llm_gate_candidates
 
@@ -1022,6 +1083,7 @@ class TestLlmGateCandidates:
             "llm_gate_no_live_price": 1,
             "llm_gate_bad_event": 1,
             "llm_gate_duplicate": 0,
+            "llm_gate_no_vol": 0,
         }
 
     def test_a_duplicate_symbol_is_collapsed_to_one_candidate(self) -> None:
@@ -1872,7 +1934,7 @@ def test_account_risk_rejected_exact_entry_attempt_is_not_republished(
             )
         ],
         risk_snapshot=AccountRiskSnapshot(10_000.0, 10_000.0, "wallet", 3),
-        risk_policy=AccountRiskPolicy(100.0, 100.0, 100.0, 100.0, 10.0),
+        risk_policy=AccountRiskPolicy(100.0, 100.0, 100.0, 10.0),
         instrument_rules={"AAAUSDT": InstrumentRules("AAAUSDT", 0.1, 0.1, 1.0)},
     )
     assert not result.accepted
@@ -2440,3 +2502,403 @@ def test_retiring_symbol_with_exposure_does_not_wedge_the_cycle(
             market_client=_PublicClient(),
             now_ms=now_ms,
         )
+
+
+# --------------------------------------------------------------------------- #
+# What the engine says back: refusals, venue truth, and the regime anchors     #
+# --------------------------------------------------------------------------- #
+
+
+def test_regime_blocked_pumps_count_separately_from_no_signal() -> None:
+    """A pump that fired but the regime gate refused used to land in the same
+    no_signal count as a quiet day, so a gate stuck off looked exactly like no
+    signals anywhere."""
+    strategy = long_v11a_profile()
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + 2 * MS_PER_HOUR
+    features = _build_features_with_fc_signal(
+        symbol="AAAUSDT", signal_ts_ms=signal_ts
+    ).with_columns(
+        [
+            pl.lit(False).alias("regime_on"),
+            pl.lit(False).alias("eth_regime_on"),
+        ]
+    )
+
+    candidates, skips = _select_long_entry_candidates(
+        features=features,
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"AAAUSDT": 98.5},
+        max_new_entries=5,
+    )
+
+    assert candidates == []
+    assert skips["no_signal"] == 1
+    assert skips["regime_btc_off"] == 1
+    assert skips["regime_eth_off"] == 1
+
+
+def test_regime_anchors_are_fetched_even_when_the_universe_lacks_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With BTC or ETH missing from the frame both regime flags read false and
+    every native entry stops without a word. The two anchors are fetched for
+    the regime join whatever the frozen artifact says, their absence is said
+    out loud, and a force-added anchor never becomes a candidate."""
+    candidate = _candidate("AAAUSDT")
+    _stub_cycle_dependencies(monkeypatch, candidates=[candidate])
+    fetched: list[list[str]] = []
+
+    def _capture_klines(symbols: list[str], *args: Any, **kwargs: Any) -> tuple[pl.DataFrame, dict[str, int]]:
+        fetched.append(list(symbols))
+        return pl.DataFrame(), {
+            "cache_rows": 0,
+            "fetched_rows": 0,
+            "store_rows": 0,
+            "store_symbols": 0,
+        }
+
+    def _features_without_anchors(klines: pl.DataFrame, config: Any = None) -> pl.DataFrame:
+        # The universe row arrived; the two regime anchors did not.
+        return pl.DataFrame(
+            {
+                "ts_ms": [1_700_000_000_000],
+                "symbol": ["AAAUSDT"],
+                "regime_on": [True],
+                "eth_regime_on": [True],
+            }
+        )
+
+    monkeypatch.setattr(lnd, "_download_recent_1h_klines", _capture_klines)
+    monkeypatch.setattr(lnd, "build_long_features", _features_without_anchors)
+
+    inbox = tmp_path / "account-inbox"
+    account_root = tmp_path / "account"
+    demo = LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(inbox),
+        account_execution_root=str(account_root),
+        ws_klines_enabled=False,
+    )
+    _write_owner_health(account_root, inbox, environment="demo")
+
+    payload = _run_cycle(tmp_path / "long", demo)
+
+    assert {"BTCUSDT", "ETHUSDT"} <= set(fetched[0]), "anchors are always fetched"
+    cycle = payload["cycle"]
+    assert cycle["regime_btc_on"] is None
+    assert json.loads(cycle["regime_anchors_missing_json"]) == ["BTCUSDT", "ETHUSDT"]
+    # The anchor rows themselves are gone from candidacy; only AAA was asked.
+    assert [c["symbol"] for c in payload["candidates"]] == ["AAAUSDT"]
+
+
+def _write_engine_heartbeat(
+    account_root: Path,
+    inbox_root: Path,
+    *,
+    environment: str = "demo",
+    equity_usdt: float = 10_000.0,
+    positions: list[dict[str, Any]] | None = None,
+    entry_blockers: list[dict[str, str]] | None = None,
+) -> None:
+    """The engine heartbeat, with the position and refusal arrays it renders."""
+    route = _ensure_owner_route(account_root, inbox_root, environment=environment)
+    heartbeat = account_root / "engine-heartbeat.json"
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "account_available_usdt": equity_usdt,
+        "account_equity_usdt": equity_usdt,
+        "account_observed_wall_ts_ms": time.time_ns() // 1_000_000,
+        "account_user_id": route.account_id,
+        "realm": environment,
+        "may_open": True,
+        "mode": "live",
+    }
+    if positions is not None:
+        payload["positions"] = positions
+    if entry_blockers is not None:
+        payload["entry_blockers"] = entry_blockers
+    heartbeat.write_text(json.dumps(payload))
+    os.environ["ENGINE_ACCOUNT_HEARTBEAT_FILE"] = str(heartbeat)
+
+
+def _book_mode_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    from liquidity_migration.strategy.long_book_state import LONG_BOOK_STATE_PATH_ENV
+
+    book = tmp_path / "targets" / "long-demo.json"
+    state = tmp_path / "targets" / "long-demo-state.json"
+    monkeypatch.setenv(lnd.ENGINE_TARGET_BOOK_PATH_ENV, str(book))
+    monkeypatch.setenv(LONG_BOOK_STATE_PATH_ENV, str(state))
+    return book, state
+
+
+def _book_demo_config(tmp_path: Path) -> LongNativeDemoCycleConfig:
+    return LongNativeDemoCycleConfig(
+        execution_environment="demo",
+        account_intent_inbox_root=str(tmp_path / "account-inbox"),
+        account_execution_root=str(tmp_path / "account"),
+        ws_klines_enabled=False,
+    )
+
+
+def test_book_mode_counts_what_the_book_took_in_and_let_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In book mode nothing is published to the inbox, so the queued counters
+    read what the book itself did. They used to be zero on every cycle for
+    ever, including the journald summary line."""
+    from liquidity_migration.strategy.long_book_state import (
+        LongBookEntry,
+        LongBookState,
+        read_book_state,
+        write_book_state,
+    )
+
+    _stub_cycle_dependencies(monkeypatch, candidates=[])
+    _book_mode_paths(tmp_path, monkeypatch)
+    account_root = tmp_path / "account"
+    _write_engine_heartbeat(account_root, tmp_path / "account-inbox")
+
+    now_ms = 1_700_000_300_000
+    expired = LongBookEntry(
+        trade_id="long-KAITOUSDT-1",
+        symbol="KAITOUSDT",
+        strategy_id="long_v11a_div_weekend_vol",
+        notional_usdt=500.0,
+        stop_loss_fraction=0.15,
+        leverage=2.0,
+        entered_ts_ms=now_ms - exact_duration_ms(days=4),
+        entry_price=10.0,
+        max_hold_deadline_ts_ms=now_ms - 1_000,
+        seen_held=True,
+    )
+    write_book_state(
+        tmp_path / "targets" / "long-demo-state.json",
+        LongBookState(held={"KAITOUSDT": expired}),
+    )
+
+    payload = run_long_native_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=_book_demo_config(tmp_path),
+        now_ms=now_ms,
+    )
+    cycle = payload["cycle"]
+
+    assert cycle["exit_targets_queued"] == 1, "the time stop left the book"
+    assert cycle["entry_targets_queued"] == 0
+    assert cycle["book_targets"] == 0
+    back = read_book_state(tmp_path / "targets" / "long-demo-state.json")
+    assert back.held == {}
+
+
+def test_book_mode_drops_a_never_held_ask_the_engine_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ask the kernel refused never becomes a position, but it reserved a
+    slot until its three-day deadline -- closed_elsewhere could not free it
+    because it never became seen_held. The refusal now crosses the heartbeat
+    and the ask leaves the record the same cycle, with no cooldown: the name
+    never held."""
+    from liquidity_migration.strategy.long_book_state import (
+        LongBookEntry,
+        LongBookState,
+        read_book_state,
+        write_book_state,
+    )
+
+    _stub_cycle_dependencies(monkeypatch, candidates=[])
+    _book_mode_paths(tmp_path, monkeypatch)
+    _write_engine_heartbeat(
+        tmp_path / "account",
+        tmp_path / "account-inbox",
+        positions=[],
+        entry_blockers=[
+            {"symbol": "KAITOUSDT", "reason": "AvailableMarginExhausted { available_usdt: 0.5 }"}
+        ],
+    )
+
+    now_ms = 1_700_000_300_000
+    pending = LongBookEntry(
+        trade_id="long-KAITOUSDT-1",
+        symbol="KAITOUSDT",
+        strategy_id="long_v11a_div_weekend_vol",
+        notional_usdt=500.0,
+        stop_loss_fraction=0.15,
+        leverage=2.0,
+        entered_ts_ms=now_ms - exact_duration_ms(hours=2),
+        entry_price=10.0,
+        max_hold_deadline_ts_ms=now_ms + exact_duration_ms(days=3),
+        seen_held=False,
+    )
+    state_path = tmp_path / "targets" / "long-demo-state.json"
+    write_book_state(state_path, LongBookState(held={"KAITOUSDT": pending}))
+
+    payload = run_long_native_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=_book_demo_config(tmp_path),
+        now_ms=now_ms,
+    )
+    cycle = payload["cycle"]
+
+    assert cycle["engine_blocked_asks"] == 1
+    back = read_book_state(state_path)
+    assert back.held == {}, "the refused ask left the record"
+    assert back.left_at_ms == {}, "no cooldown: the name never held"
+
+
+def test_book_mode_does_not_drop_a_confirmed_holding_the_engine_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocker on a name the engine HAS confirmed is exit business, not
+    entry bookkeeping: the holding stays in the record until its own exit or
+    a confirmed close says otherwise."""
+    from liquidity_migration.strategy.long_book_state import (
+        LongBookEntry,
+        LongBookState,
+        read_book_state,
+        write_book_state,
+    )
+
+    _stub_cycle_dependencies(monkeypatch, candidates=[])
+    _book_mode_paths(tmp_path, monkeypatch)
+    _write_engine_heartbeat(
+        tmp_path / "account",
+        tmp_path / "account-inbox",
+        positions=[{"symbol": "KAITOUSDT", "side": "long", "qty": 50.0, "entry_px": 10.0}],
+        entry_blockers=[{"symbol": "KAITOUSDT", "reason": "stale_quote"}],
+    )
+
+    now_ms = 1_700_000_300_000
+    held = LongBookEntry(
+        trade_id="long-KAITOUSDT-1",
+        symbol="KAITOUSDT",
+        strategy_id="long_v11a_div_weekend_vol",
+        notional_usdt=500.0,
+        stop_loss_fraction=0.15,
+        leverage=2.0,
+        entered_ts_ms=now_ms - exact_duration_ms(hours=2),
+        entry_price=10.0,
+        max_hold_deadline_ts_ms=now_ms + exact_duration_ms(days=3),
+        seen_held=True,
+    )
+    state_path = tmp_path / "targets" / "long-demo-state.json"
+    write_book_state(state_path, LongBookState(held={"KAITOUSDT": held}))
+
+    payload = run_long_native_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=_book_demo_config(tmp_path),
+        now_ms=now_ms,
+    )
+
+    assert payload["cycle"]["engine_blocked_asks"] == 0
+    back = read_book_state(state_path)
+    assert list(back.held) == ["KAITOUSDT"], "a confirmed holding is not an ask"
+    assert back.held["KAITOUSDT"].venue_qty == 50.0, "and its venue truth is recorded"
+
+
+def test_book_mode_skips_a_candidate_the_engine_is_refusing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-asking a standing refusal every cycle would write the ask into the
+    book only to drop it again on the next one. It is skipped and counted
+    instead, which frees the slot for a candidate that can actually fill."""
+    blocked = _candidate("AAAUSDT")
+    free = _candidate("BBBUSDT")
+    _stub_cycle_dependencies(monkeypatch, candidates=[blocked, free])
+    _book_mode_paths(tmp_path, monkeypatch)
+    _write_engine_heartbeat(
+        tmp_path / "account",
+        tmp_path / "account-inbox",
+        positions=[],
+        entry_blockers=[{"symbol": "AAAUSDT", "reason": "below_entry_floor"}],
+    )
+
+    payload = run_long_native_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=_book_demo_config(tmp_path),
+        now_ms=1_700_000_300_000,
+    )
+    cycle = payload["cycle"]
+
+    assert cycle["skipped_engine_blocked"] == 1
+    from liquidity_migration.strategy.long_book_state import read_book_state
+
+    back = read_book_state(tmp_path / "targets" / "long-demo-state.json")
+    assert sorted(back.held) == ["BBBUSDT"]
+    assert cycle["entry_targets_queued"] == 1
+
+
+class TestBookDeclaresTheDecayedStop:
+    """v12 narrows a held name's stop after 48h. The engine attaches a
+    venue-native stop from what the book declares, so the narrower distance is
+    only real once the book says it."""
+
+    @staticmethod
+    def _entry(**over: object) -> Any:
+        from liquidity_migration.strategy.long_book_state import LongBookEntry
+
+        base: dict[str, Any] = {
+            "trade_id": "long-AAAUSDT-1",
+            "symbol": "AAAUSDT",
+            "strategy_id": "long_native_active_v12",
+            "notional_usdt": 100.0,
+            "stop_loss_fraction": 0.30,
+            "leverage": 5.0,
+            "entered_ts_ms": 1_700_000_000_000,
+            "entry_price": 10.0,
+            "max_hold_deadline_ts_ms": 1_700_000_000_000 + exact_duration_ms(days=3),
+            "stop_decay_after_ms": exact_duration_ms(hours=48),
+            "decayed_stop_loss_pct": 0.15,
+        }
+        base.update(over)
+        return LongBookEntry(**base)  # type: ignore[arg-type]
+
+    def test_before_the_decay_deadline_the_book_declares_the_opening_stop(self) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import _long_stop_fraction_now
+
+        entry = self._entry()
+        at = entry.entered_ts_ms + exact_duration_ms(hours=47)
+        assert _long_stop_fraction_now(entry, now_ms=at) == 0.30
+
+    def test_after_the_decay_deadline_the_book_declares_the_narrower_stop(self) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import _long_stop_fraction_now
+
+        entry = self._entry()
+        at = entry.entered_ts_ms + exact_duration_ms(hours=49)
+        assert _long_stop_fraction_now(entry, now_ms=at) == 0.15
+
+    def test_a_trade_with_no_decay_contract_keeps_its_opening_stop(self) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import _long_stop_fraction_now
+
+        entry = self._entry(stop_decay_after_ms=0, decayed_stop_loss_pct=0.0)
+        at = entry.entered_ts_ms + exact_duration_ms(days=7)
+        assert _long_stop_fraction_now(entry, now_ms=at) == 0.30
+
+    def test_the_contract_can_only_tighten(self) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import _long_stop_fraction_now
+
+        # A record whose decayed number is WIDER than what it opened behind.
+        entry = self._entry(decayed_stop_loss_pct=0.50)
+        at = entry.entered_ts_ms + exact_duration_ms(hours=49)
+        assert _long_stop_fraction_now(entry, now_ms=at) == 0.30
+
+    def test_the_rendered_book_carries_the_narrower_stop(self) -> None:
+        import json as _json
+
+        from liquidity_migration.strategy.long_book_state import LongBookState
+        from liquidity_migration.strategy.long_native_event_demo import _long_engine_target_book
+
+        entry = self._entry()
+        state = LongBookState(held={entry.symbol: entry})
+        at = entry.entered_ts_ms + exact_duration_ms(hours=49)
+        book = _json.loads(
+            _long_engine_target_book(state, decision_ts_ms=at, strategy_profile="long_v12")
+        )
+        (target,) = book["targets"]
+        assert target["stop_loss_fraction"] == 0.15

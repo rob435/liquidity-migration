@@ -5,7 +5,6 @@
   "account_risk": {
     "max_component_gross_notional_usdt": 1250000.0,
     "max_account_gross_notional_usdt": 1250000.0,
-    "max_symbol_notional_usdt": 125000.0,
     "max_initial_margin_usdt": 250000.0,
     "max_leverage": 5.0,
     "quantity_tolerance": 1e-12

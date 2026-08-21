@@ -156,15 +156,17 @@ are what hold size.
 
 ### Dials
 
-Sizing is three dials in the fleet env file (`/etc/liquidity-migration/bybit-demo.env` for
-demo, `bybit-mainnet.env` for the funded fleet; both producer units read their file). Each
-entry = the strategy's base slot (10% of equity) × its multiplier. Omit a line and the
-committed profile's value applies; a malformed line refuses the producer's start rather
-than falling back.
+Sizing is three dials the producers read out of their own environment, so each one has to
+sit in a file that producer unit loads: `/etc/liquidity-migration/bybit-demo.env` on demo,
+and `account-execution-mainnet.env` on the funded fleet — **not** `bybit-mainnet.env`,
+which the funded producers never load because it holds the key. Each entry = the strategy's
+base slot (at most 10% of equity) × its multiplier. Omit a line and the committed profile's
+value applies; a malformed line refuses the producer's start rather than falling back.
+Editing one takes a restart of that producer unit, not a profile re-render.
 
 | Dial | Default | Meaning |
 | --- | --- | --- |
-| `CARRY_NOTIONAL_MULTIPLIER` | 3.0 | Each new carry name = 10% of equity × this. 3.0 → 30% per name. |
+| `CARRY_NOTIONAL_MULTIPLIER` | 3.0 | Each new carry name = at most 10% of equity × this, so 30% for a name at full weight; the depth, persistence, flow and whale terms only ever cut it. |
 | `LONG_NOTIONAL_MULTIPLIER` | 3.0 | Each LONG entry = 10% of equity × this, before LONG's own vol/weekend scaling (up to ~1.9× on top). |
 | `EXODUS_NOTIONAL_MULTIPLIER` | 3.0 | The exodus short's own multiplier; omit it and it inherits carry's. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
@@ -184,10 +186,10 @@ Two acts, both yours:
 1. **Write the one file.** On the VPS, edit `/etc/liquidity-migration/bybit-mainnet.env` (start from
    [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template)): paste
    `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` (contract trading only, **withdrawal disabled**,
-   IP-allowlisted to the VPS), set any dials you want off their defaults (the
-   three `*_NOTIONAL_MULTIPLIER` lines and `RM_CARRY_STOP_LOSS_FRACTION`), and set
-   `REAL_MONEY=true` — the whole arming decision, by your own hand. The live key never passes through
-   an agent session.
+   IP-allowlisted to the VPS), set `RM_CARRY_STOP_LOSS_FRACTION` if you want it off its default, and
+   set `REAL_MONEY=true` — the whole arming decision, by your own hand. The live key never passes
+   through an agent session. The three sizing dials go in `account-execution-mainnet.env` instead
+   (§Dials).
 2. **Start the fleet**: `scripts/ops.sh deploy --execute activate`.
 
 Activation derives everything else before anything starts: the route env installs from the committed
@@ -209,8 +211,8 @@ byte-identical to the render of the current dials.
 
 Before flipping the switch, confirm the funded account is flat by hand — the owner's startup check and
 the reconciler see USDT-settled linear only, so anything else on the account stays invisible to both
-(*Still unproven*). Start small: `RM_CARRY_LEVERAGE` and `RM_LONG_LEVERAGE` are the size controls, and
-the envelope and the watchdog thresholds are unexercised on a funded account until Tier 1 runs.
+(*Still unproven*). Start small: the three `*_NOTIONAL_MULTIPLIER` dials above are the size controls,
+and the envelope and the watchdog thresholds are unexercised on a funded account until Tier 1 runs.
 
 ### Capital controls in force
 
@@ -351,8 +353,11 @@ Turning a sleeve off stops new targets; it does not flatten an existing target o
 last targets stay standing in the journal, which is why a sleeve-off fleet still fails `rollout`'s flat
 proof. Turn the sleeve off, then flatten.
 
-Sizing lives in [`configs/operational.demo.json`](../configs/operational.demo.json): edit the repository
-copy, never the installed `/etc` copy, then reinstall. `pytest -q
+The three multipliers (§Dials) live in the fleet env file and **override** this file, so editing the
+JSON alone changes no size while a dial is set. What
+[`configs/operational.demo.json`](../configs/operational.demo.json) holds on its own is entry leverage,
+the per-cycle entry caps and the account envelope: edit the repository copy, never the installed `/etc`
+copy, then reinstall. `pytest -q
 tests/policy/test_operational_profile.py` runs the loader, which rejects unknown keys, non-finite
 values, producer leverage above the account maximum and envelopes that cannot fit the owner caps at
 `capital_reference_usdt`.

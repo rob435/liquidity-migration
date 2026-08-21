@@ -304,6 +304,9 @@ pub(crate) fn intended_stops(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
     for record in replayed {
         match record {
             WalRecord::OrderSent { request, .. } => note_intended_stop(&mut out, request),
+            WalRecord::StopSet { symbol, trigger_px, .. } => {
+                out.insert(symbol.0, *trigger_px);
+            }
             WalRecord::SegmentBase { intended_stops, .. } => {
                 out = intended_stops
                     .iter()
@@ -381,7 +384,7 @@ mod tests {
     }
 
     fn held(symbol: u16, side: Side, qty: f64, stop_attached: bool) -> PositionView {
-        PositionView { symbol: SymbolId(symbol), side, qty, entry_px: 100.0, stop_attached, leverage: None }
+        PositionView { symbol: SymbolId(symbol), side, qty, entry_px: 100.0, stop_px: 0.0, stop_attached, leverage: None }
     }
 
     /// Stands in for the engine's symbol table: BTCUSDT is subscribed, and

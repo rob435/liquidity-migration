@@ -384,10 +384,6 @@ class AccountConvergenceItem:
     # and the item ages against the normal grace like any other.
     resting_quote_active: bool = False
 
-    @property
-    def retry_budget_label(self) -> str:
-        return "persistent" if self.retry_limit is None else str(self.retry_limit)
-
 
 def _sync_data(fd: int) -> None:
     """Force this descriptor's data and length to the disk.

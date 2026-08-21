@@ -236,6 +236,57 @@ fn a_refused_exit_is_still_retried_on_the_next_quote() {
 }
 
 #[test]
+fn a_refused_entry_and_an_unfillable_size_are_published_for_the_producer() {
+    // The producer writes an absolute ask and learns what became of it only
+    // through the heartbeat. A kernel refusal and a below-the-floor skip are
+    // both "never going to fill as asked", and both must cross — with the
+    // kernel's own reason text, not just a flag.
+    let mut h = bench(&["KAITOUSDT", "COTIUSDT"], 10.0);
+
+    // COTI at $4 is under the $6 entry floor: planned, then skipped.
+    h.targets(book(vec![target("KAITOUSDT", 100.0), target("COTIUSDT", 4.0)]));
+    assert_eq!(h.drain().len(), 1, "only KAITO is enterable");
+
+    let blockers = h.strategy.entry_blockers();
+    assert_eq!(
+        blockers,
+        vec![("COTIUSDT".to_string(), "below_entry_floor".to_string())],
+        "the skip crosses with its name: {blockers:?}"
+    );
+
+    let symbol = h.ctx.id_of("KAITOUSDT");
+    h.refuse_as(symbol, false, "AvailableMarginExhausted { available_usdt: 0.5 }");
+    h.quote("KAITOUSDT", 9.5, 10.5);
+
+    let mut blockers = h.strategy.entry_blockers();
+    blockers.sort();
+    assert_eq!(
+        blockers,
+        vec![
+            (
+                "COTIUSDT".to_string(),
+                "below_entry_floor".to_string()
+            ),
+            (
+                "KAITOUSDT".to_string(),
+                "AvailableMarginExhausted { available_usdt: 0.5 }".to_string(),
+            ),
+        ],
+        "refusal and skip both cross, refusal with its reason: {blockers:?}"
+    );
+
+    // A new book clears the kernel latch; once COTI's ask clears the floor
+    // it stops being reported too.
+    h.targets(book(vec![target("KAITOUSDT", 100.0), target("COTIUSDT", 40.0)]));
+    h.drain();
+    assert!(
+        h.strategy.entry_blockers().is_empty(),
+        "nothing blocked any more: {:?}",
+        h.strategy.entry_blockers()
+    );
+}
+
+#[test]
 fn what_was_sent_is_remembered_until_the_reading_shows_it() {
     // The dangerous shape: the order has left the resting set (a filled one
     // is ended the moment the fill lands) and the account reading has not

@@ -190,7 +190,7 @@ fn a_symbol_that_goes_flat_forgets_its_leverage() {
         side: Side::Buy,
         qty: 1.0,
         entry_px: 100.0,
-        stop_attached: true,
+        stop_attached: true, stop_px: 0.0,
         leverage: None
     }];
     crate::engine::forget_leverage_where_flat(&mut at, &still_open);
@@ -540,7 +540,7 @@ async fn a_venue_row_contradicting_the_cache_evicts_the_trust() {
         side: Side::Buy,
         qty: 0.01,
         entry_px: 30_000.0,
-        stop_attached: true,
+        stop_attached: true, stop_px: 0.0,
         leverage: Some(5.0),
     }]);
     engine

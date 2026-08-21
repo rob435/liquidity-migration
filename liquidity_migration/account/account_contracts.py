@@ -169,7 +169,6 @@ class AccountRiskPolicy:
 
     max_component_gross_notional_usdt: float
     max_account_gross_notional_usdt: float
-    max_symbol_notional_usdt: float
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float = 1e-12

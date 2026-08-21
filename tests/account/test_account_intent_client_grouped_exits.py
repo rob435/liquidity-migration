@@ -223,7 +223,7 @@ def _submit_carry_batch(
             f"wallet:{batch}",
             kernel.clock.wall_time_ns(),
         ),
-        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 1_000.0, 10.0),
+        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 10.0),
         instrument_rules={
             symbol: InstrumentRules(symbol, 0.1, 0.1, 1.0) for symbol in quantities
         },

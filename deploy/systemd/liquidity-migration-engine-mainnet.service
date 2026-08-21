@@ -3,23 +3,11 @@ Description=liquidity-migration Rust execution engine on the FUNDED account (sha
 Wants=network-online.target
 After=network-online.target
 
-# NO `Conflicts=` with the Python mainnet owner, deliberately, and it is worth
-# saying why because the first draft of this file had one.
-#
-# The two cannot both *trade* this account, and nothing here is what stops
-# them: a live engine takes the account's kernel lease and refuses to start
-# while the owner holds it. That check knows the difference between a live
-# engine and a shadow one. A systemd conflict does not.
-#
-# And the difference is the whole plan. Step two of the handover is running
-# this engine in shadow *alongside* the Python owner, so their decisions can be
-# compared on the same books — a shadow engine takes no lease, sends nothing,
-# and is meant to coexist. A `Conflicts=` line would have stopped the funded
-# fleet the moment anyone started this unit to watch it, which is the one thing
-# this unit exists to make possible.
-#
-# The live handover is therefore explicit and manual: stop the Python owner,
-# then start this. Two commands, in that order, by someone who meant it.
+# NO `Conflicts=` with anything, deliberately. What stops two processes trading
+# this account is the account's kernel lease, which a LIVE engine takes and a
+# shadow one does not. That check knows the difference between the two; a
+# systemd conflict does not, and would stop the funded fleet the moment anyone
+# started this unit to watch it in shadow.
 
 [Service]
 Type=simple

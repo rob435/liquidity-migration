@@ -143,7 +143,8 @@ pub(crate) fn parse_positions(
             continue;
         };
         // Bybit writes "" or "0" when no stop is set on the position.
-        let stop_attached = opt_num_field(row, "stopLoss")?.is_some_and(|v| v > 0.0);
+        let stop_px = opt_num_field(row, "stopLoss")?.filter(|v| *v > 0.0);
+        let stop_attached = stop_px.is_some();
         // The leverage the venue says this position runs at. Zero or absent
         // reads as unknown (cross-margin rows can blank it), never as a fact.
         let leverage = opt_num_field(row, "leverage")?.filter(|v| *v > 0.0);
@@ -153,6 +154,7 @@ pub(crate) fn parse_positions(
             qty,
             entry_px: num_field(row, "avgPrice")?,
             stop_attached,
+            stop_px: stop_px.unwrap_or(0.0),
             leverage,
         });
     }

@@ -54,6 +54,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::OrderUpdate { .. } => "order_update",
         WalRecord::Markout { .. } => "markout",
         WalRecord::Names { .. } => "names",
+        WalRecord::StopSet { .. } => "stop_set",
         WalRecord::CancelSent { .. } => "cancel_sent",
         WalRecord::AmendSent { .. } => "amend_sent",
         WalRecord::LatencyLedger { .. } => "latency_ledger",

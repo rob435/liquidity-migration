@@ -179,7 +179,7 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
         side: Side::Buy,
         qty: 0.004,
         entry_px: 30_000.0,
-        stop_attached: true,
+        stop_attached: true, stop_px: 0.0,
         leverage: None
     }]);
     engine

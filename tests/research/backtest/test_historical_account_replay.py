@@ -121,7 +121,7 @@ def test_online_historical_session_returns_risk_feedback_before_next_decision(
     session = HistoricalAccountSession(
         tmp_path,
         account_id="online-account",
-        risk_policy=AccountRiskPolicy(10.0, 10.0, 10.0, 10.0, 10.0),
+        risk_policy=AccountRiskPolicy(10.0, 10.0, 10.0, 10.0),
         instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
         execution_config=ExecutionTwinConfig(
             fee_bps=0.0,
@@ -151,7 +151,7 @@ def test_online_historical_session_preserves_execution_rate_limit_state(
     session = HistoricalAccountSession(
         tmp_path,
         account_id="online-account",
-        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 1_000.0, 10.0),
+        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 10.0),
         instrument_rules={"BUSDT": InstrumentRules("BUSDT", 0.1, 0.1, 1.0)},
         execution_config=ExecutionTwinConfig(
             fee_bps=0.0,
@@ -195,7 +195,7 @@ def test_online_submit_decisions_builds_causal_cycle_and_feedback(tmp_path: Path
     session = HistoricalAccountSession(
         tmp_path,
         account_id="online-decisions",
-        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 1_000.0, 10.0),
+        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 10.0),
         instrument_rules=rules,
         execution_config=ExecutionTwinConfig(
             fee_bps=0.0,
@@ -228,7 +228,7 @@ def test_online_submit_request_preserves_published_batch_and_content_identity(
     session = HistoricalAccountSession(
         tmp_path,
         account_id="published-account",
-        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 1_000.0, 10.0),
+        risk_policy=AccountRiskPolicy(1_000.0, 1_000.0, 1_000.0, 10.0),
         instrument_rules=rules,
         execution_config=ExecutionTwinConfig(
             fee_bps=0.0,
@@ -310,7 +310,6 @@ def test_owner_convergence_fails_immediately_on_execution_rejection(
             1_000.0,
             1_000.0,
             1_000.0,
-            1_000.0,
             10.0,
         ),
         instrument_rules={
@@ -371,7 +370,6 @@ def test_owner_convergence_fails_immediately_on_execution_rejection(
     assert staged.aggregate_targets["BUSDT"] == pytest.approx(2.0)
     assert session.account_service is not None
     session.account_service.risk_policy = AccountRiskPolicy(
-        1.0,
         1.0,
         1.0,
         0.1,

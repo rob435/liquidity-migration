@@ -103,6 +103,15 @@ pub struct Facts<'a> {
     /// a restart would report every position closed and every producer would
     /// drop its whole book at once. The venue's answer cannot do that.
     pub holdings: &'a [(String, Side, f64, f64)],
+    /// Why each asked-for name is not being opened right now, as
+    /// (symbol, reason) pairs gathered from the strategies.
+    ///
+    /// Also read by the target producers, not telemetry: an ask the kernel
+    /// refused or a size below the entry floor never becomes a position, and
+    /// a producer that cannot tell that from "on its way" holds the slot for
+    /// its whole deadline. Empty is a real answer — everything asked for is
+    /// either held, being worked, or not blocked at all.
+    pub entry_blockers: &'a [(String, String)],
     /// What the fills have cost so far this run.
     ///
     /// Five numbers, and they answer the question the latency pair beside them
@@ -220,6 +229,7 @@ impl Heartbeat {
             ),
             ("decide_p50_ns", figure(facts.decide.count, facts.decide.p50_ns)),
             ("decide_p99_ns", figure(facts.decide.count, facts.decide.p99_ns)),
+            ("entry_blockers", blockers(facts.entry_blockers)),
             ("engine_version", quoted(ENGINE_VERSION)),
             ("fills", facts.costs.fills.to_string()),
             (
@@ -381,13 +391,32 @@ fn list(names: &[String]) -> String {
     format!("[{}]", names.join(", "))
 }
 
+/// Why the asked-for names are not being opened, as an array of objects.
+/// Empty is a real answer and means nothing is blocked -- not the same as the
+/// key being absent, which would mean an engine too old to say.
+fn blockers(rows: &[(String, String)]) -> String {
+    let items: Vec<String> = rows
+        .iter()
+        .map(|(symbol, reason)| {
+            format!(
+                "{{{}: {}, {}: {}}}",
+                quoted("symbol"),
+                quoted(symbol),
+                quoted("reason"),
+                quoted(reason)
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 24] = [
+    const KEYS: [&str; 25] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -395,6 +424,7 @@ mod tests {
         "decide_p50_ns",
         "decide_p99_ns",
         "engine_version",
+        "entry_blockers",
         "fill_all_in_arrival_bps",
         "fill_arrival_shortfall_bps",
         "fill_markout_1m_our_way_bps",
@@ -443,6 +473,7 @@ mod tests {
         // An engine that has not filled anything, which is what every test
         // that is not about fill costs means.
         static NOTHING_YET: std::sync::OnceLock<Costs> = std::sync::OnceLock::new();
+        static NO_BLOCKERS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
         Facts {
             costs: NOTHING_YET.get_or_init(Costs::default),
             shadow: true,
@@ -457,6 +488,7 @@ mod tests {
             // Two seconds old, on the engine's own monotonic clock.
             account_age_ns: Some(2_000_000_000),
             holdings: held,
+            entry_blockers: NO_BLOCKERS.get_or_init(Vec::new),
         }
     }
 
@@ -522,6 +554,54 @@ mod tests {
 
         assert_eq!(
             fields["positions"].as_array().map(Vec::len),
+            Some(0),
+            "present and empty, never absent"
+        );
+    }
+
+    #[test]
+    fn a_blocked_entry_is_published_with_its_reason() {
+        // An ask the kernel refused never becomes a position, and a producer
+        // that cannot tell that from "on its way" holds the slot for its
+        // whole deadline. The reason crosses so the producer's log says why,
+        // not just that.
+        let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
+        let names = vec!["target_book".to_string()];
+        let held = one_holding();
+        let blockers = vec![
+            ("KAITOUSDT".to_string(), "below_entry_floor".to_string()),
+            (
+                "SOMIUSDT".to_string(),
+                "AvailableMarginExhausted { additional_margin_usdt: 12.0, available_usdt: 0.5 }"
+                    .to_string(),
+            ),
+        ];
+        let mut facts = facts(&names, &held);
+        facts.entry_blockers = &blockers;
+
+        let fields = parsed(&beat.render(&facts, 1_755_000_000_000));
+
+        let rows = fields["entry_blockers"].as_array().expect("an array");
+        assert_eq!(rows.len(), 2, "one reason per blocked name");
+        assert_eq!(rows[0]["symbol"], "KAITOUSDT");
+        assert_eq!(rows[0]["reason"], "below_entry_floor");
+        assert_eq!(rows[1]["symbol"], "SOMIUSDT");
+        assert!(
+            rows[1]["reason"].as_str().unwrap_or("").contains("AvailableMargin"),
+            "the kernel's own reason text crosses: {}",
+            rows[1]["reason"]
+        );
+    }
+
+    #[test]
+    fn nothing_blocked_is_an_empty_array_and_not_a_missing_key() {
+        let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
+        let names = vec!["target_book".to_string()];
+
+        let fields = parsed(&beat.render(&facts(&names, &[]), 1_755_000_000_000));
+
+        assert_eq!(
+            fields["entry_blockers"].as_array().map(Vec::len),
             Some(0),
             "present and empty, never absent"
         );
@@ -765,6 +845,7 @@ mod fill_cost_tests {
             available_usdt: 100.0,
             account_age_ns: Some(1),
             holdings: &[],
+            entry_blockers: &[],
             costs,
         };
         let beat = Heartbeat::new("unused".into(), None, None);

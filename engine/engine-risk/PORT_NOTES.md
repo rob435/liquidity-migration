@@ -30,22 +30,16 @@ Fixed, and the first refusal wins:
 2. **readability** of the view and the intent — `UnknownState`; exits need
    this too, because the clamp sizes against the position rows;
 3. **exit or entry** — a genuine exit is clamped to the uncovered position and
-   stops here, *passing* the staleness and trip refusals below (ruled at
-   integration, 2026-08-14: a trip's remedy IS exits — the row in the table
-   below);
+   stops here, *passing* the staleness refusal below;
 4. **account view freshness**, entries only — older than
    `max_account_view_age_ns` is `StaleAccountView`;
-5. ~~account loss guard~~ — the halt was removed on 2026-08-20 by the owner's
-   instruction; its rows in the table below are kept as the record of what was
-   ported, not of what runs;
-6. **stop discipline** — `MissingStop`;
-7. **equity-anchored envelope** — `EnvelopeBreached`;
-8. **account-wide capital caps**, smallest scope first: one symbol's gross
-   (`SymbolNotionalBreached`), the whole book's gross
+5. **stop discipline** — `MissingStop`;
+6. **equity-anchored envelope** — `EnvelopeBreached`;
+7. **account-wide capital caps**, smallest scope first: the whole book's gross
    (`ComponentGrossBreached`), the whole book's margin
    (`InitialMarginBreached`), then whether the account's spare margin funds the
    increase (`AvailableMarginExhausted`);
-9. **per-strategy partition** — clamps, then `PartitionExhausted`.
+8. **per-strategy partition** — clamps, then `PartitionExhausted`.
 
 The account caps sit after the envelope because the envelope is the stricter
 form of the same idea — it charges a wide stop more than its notional — and
@@ -57,19 +51,14 @@ what the Python kernel does to a batch that breaches one.
 
 | Python rule | Rust rule | Simplified | Why the outcome holds |
 | --- | --- | --- | --- |
-| Loss guard `BLOCKED` when equity is missing, non-positive, or older than `max_equity_staleness_ns` | Step 1/2: `StaleAccountView` on age, `UnknownState` on an unreadable equity | One age bound (`max_account_view_age_ns`) covers what Python splits between the loss guard's equity staleness and the protection health chain | Both refuse new risk, and both let a genuine exit flow while blind (ruled 2026-08-14 — the `TRIPPED` row below) |
+| Loss guard `BLOCKED` when equity is missing, non-positive, or older than `max_equity_staleness_ns` | Step 1/2: `StaleAccountView` on age, `UnknownState` on an unreadable equity | One age bound (`max_account_view_age_ns`) covers what Python splits between the loss guard's equity staleness and the protection health chain | Both refuse new risk, and both let a genuine exit flow while blind |
 | Loss guard `now - equity_ts_ns` | `intent.decided_ns - account.observed_ns` | The engine has no wall clock on the hot path; both stamps are engine monotonic nanoseconds | Same quantity. An intent that sat around makes its own view look older, which only refuses more |
 | Loss guard "timestamp is in the future" `BLOCKED` | `UnknownState` | — | Same refusal; the Rust reason carries the detail string instead of a `BLOCKED` label |
-| Loss guard `TRIPPED` when `opening - equity >= max_daily_loss_usdt` | `LossGuardTripped { equity_usdt, floor_usdt }`, `floor = opening - ceiling`, latched | Reported as a floor rather than a loss | `loss >= ceiling` and `equity <= opening - ceiling` are the same test |
-| Anchor is the UTC day's opening equity, from `_utc_day(equity_ts_ns)` | `Kernel::observe_wall_clock_ns` supplies venue wall time; the day is `wall_ns / 86_400e9` | The monotonic clock in `AccountView` cannot name a UTC day, so the engine must hand one in | Same day boundary (Unix time has no leap seconds). With no wall clock ever supplied the anchor is set once and never re-anchors — the budget is spent, never refreshed |
-| `snapshot()` / `restore()` to `account_loss_guard.json`, so a restart cannot refresh the budget | `loss_guard_anchor()` / `restore_loss_guard()`, for the engine to put in its log | No file handling in the kernel | Same anchor, same trip, same restart behaviour; the caller owns durability |
-| `reset()` — operator only | `reset_loss_guard()` | — | Same |
-| On `TRIPPED` the owner loop publishes a flatten (`publish_loss_ceiling_flatten`); on `BLOCKED` risk-reducing orders still flow | A genuine reduce-only exit passes the staleness and trip refusals (classified before them); entries are refused | The kernel gates orders; it does not plan flattens | Faithful: a trip's remedy IS exits, and blocking the flatten would be strictness in the harmful direction. The exit is clamped to the last known position and the venue's reduce-only enforcement bounds a mis-size. A flagged exit that reduces nothing stays refused as unknown state. (Ruled at integration, 2026-08-14, replacing the build agent's stricter refuse-everything choice.) |
+| On `BLOCKED` risk-reducing orders still flow | A genuine reduce-only exit is classified before the staleness refusal and passes it; entries are refused | The kernel gates orders; it does not plan flattens | Blocking an exit would be strictness in the harmful direction. The exit is clamped to the last known position and the venue's reduce-only enforcement bounds a mis-size. A flagged exit that reduces nothing stays refused as unknown state |
 | Envelope: `target = max(equity * equity_fraction, floor_usdt)`; contract immediately, expand only past the dead band, hold on a missing/non-finite/non-positive reading | Same, in `envelope.rs`, including Python's `math.isclose(rel_tol=1e-12, abs_tol=1e-9)` no-op band | — | Line-for-line |
 | Envelope caps: `max_account_gross_notional_usdt = reference * multiple` | `allowance_usdt = reference * gross_notional_multiple * disaster_stop_fraction`, against a worst-case loss of `Σ notional * max(disaster_stop_fraction, that order's own stop distance)` | The Rust deny reason speaks in worst-case loss, not notional | With every position at the disaster stop the two are the same inequality scaled by `disaster_stop_fraction`. An order whose own stop is *wider* than the disaster stop is charged more — stricter |
 | The book judged is position + working orders, at one set of prices both sides | Account view positions + registered orders not yet filled + this order, all at `max(last traded/observed price, position entry price)` | — | Same projected book. Taking the higher price never under-values it |
 | `profile_at_capital_reference` rescales every cap when the reference moves | Partition shares are multiplied by `reference_now / reference_configured` | Only the caps this kernel owns are scaled | Same ratios follow the wallet |
-| `notional > max_symbol_notional_usdt` for every symbol of the projected book, entries only (`account_kernel.py:3206-3213`) | `SymbolNotionalBreached`, against every symbol in the projected book | Python's per-symbol figure nets the producers' rows first; the engine adds this order on top of what the symbol already holds and nets nothing | The un-netted figure is never the smaller one, so the engine refuses at least as early. The refusal names this order's symbol when that is the one over, otherwise the lowest-numbered other symbol — the book is assembled partly from hash maps, so "the first one found" would not be the same answer twice |
 | `component_gross > max_component_gross_notional_usdt`, entries only (`account_kernel.py:3121`) | `ComponentGrossBreached`, against the projected gross notional | Both Python sums are account-wide despite the name — `account_kernel.py:3147` says so itself. `component_gross` adds up the target rows; `account_gross` nets each symbol across rows first | The engine's gross is Python's larger figure. It never nets this order against the book, and while the account view does report one net position per symbol, the venue holds only one and the engine refuses two strategies on one symbol at boot, so there is no second row to net away |
 | `account_gross > max_account_gross_notional_usdt`, entries only (`account_kernel.py:3123`) | The envelope allowance, two rows above. **No separate gate** | — | A separate gate could not fire. `component_gross ≥ account_gross` by the triangle inequality, and the profile loader proves `component cap ≤ account cap` (`operational_profile.py:298`), so even in Python this test never refuses on its own. In Rust the envelope is stricter again: worst-case loss is at least gross × the disaster stop fraction, so any book over `reference × multiple` breaches the allowance first. Code here would be unreachable and its test could only pass vacuously |
 | `component_margin > max_initial_margin_usdt`, entries only (`account_kernel.py:3125`) | `InitialMarginBreached`: projected gross ÷ the account leverage | Python divides each row by that row's own requested leverage; the engine's `Intent` carries none, so one account-wide leverage stands in, as the partition's margin share already does | **Looser in one direction, and worth naming.** A row's requested leverage is proved ≤ the account maximum (`account_kernel.py:3073`), so Python's margin figure is never smaller than the engine's. They agree when every order runs at the account leverage, which is how both profiles are written (`entry_leverage` = `max_leverage` = 5.0 since 2026-08-20, 2.0 before). Below that the engine charges less margin than Python would. Separately: with both shipped profiles `max_initial_margin_usdt × max_leverage ≥ max_account_gross_notional_usdt`, so the envelope reaches the same book first and this cap binds only where an operator sets it below what the gross cap funds |
@@ -91,7 +80,7 @@ what the Python kernel does to a batch that breaches one.
 | Load-time proof that the caps nest: symbol ≤ component ≤ account (`operational_profile.py:296-299`), and account margin ≤ the capital reference (`:416`) | The same three comparisons in `EnvelopeConfig::validate` | — | Same refusals, and since 2026-08-14 `max_account_gross_notional_usdt ≤ reference × max_leverage` (`:409`) as well — it needs both the envelope and the partition, so it sits in `KernelConfig::validate`. It mattered once the engine started loading the fleet's own profile: a profile the Python loader refused would otherwise have been accepted here |
 | `below_min_qty` / `below_min_notional` from instrument rules, reduce-only exempt | `min_order_notional_usdt`, entries only | The kernel holds no instrument rules; `min_qty` and step rounding stay at the venue boundary | The notional floor is the one the clamp needs |
 | Reduction sized against the reconstructed position alone | An exit is clamped to the net position in the view; a `reduce_only` order that would not reduce is `UnknownState` | — | Same size, and a contradiction refuses instead of reaching the venue |
-| Journal receipts, protection revisions, epochs, operator state files | None | The engine's memory is its own append-only log | No decision depended on them. Two pieces of state outlive the process, and both now do so through the log: the loss-guard anchor rides a control-anchor record (durable on change, restored at boot), and recovered in-flight orders are re-registered with the kernel so the partition keeps charging them |
+| Journal receipts, protection revisions, epochs, operator state files | None | The engine's memory is its own append-only log | No decision depended on them. The one piece of state that outlives the process does so through the log: recovered in-flight orders are re-registered with the kernel, so the partition keeps charging them |
 
 Negative available margin is *not* a fault. Hand-trading a funded account makes
 it negative in ordinary operation, so the kernel reads it as a number, refuses
@@ -109,20 +98,18 @@ a capital control nobody chose.
 
 | Config field | Python source | Value |
 | --- | --- | --- |
-| `max_account_view_age_ns` | `account_loss_guard.DEFAULT_MAX_EQUITY_STALENESS_NS` | 120 s. Related: protection health age, 10 s default (`account_service.py`), floored at 4 s by the runtime |
-| `loss_guard.max_daily_loss_usdt` | `configs/operational.mainnet.json` | 10.0, which is 0.1 × the reference. Demo profile: unset |
+| `max_account_view_age_ns` | `[risk] max_account_view_age_s` in the engine's own TOML, not the profile | 120 s in both deployed templates |
 | `envelope.reference_usdt` | `capital_reference_usdt` | demo 250_000.0, mainnet 100.0 |
 | `envelope.tracks_equity` | `capital_reference.mode` | mainnet `account_equity`; the demo profile has no block, so its reference is fixed |
 | `envelope.equity_fraction` | `capital_reference.equity_fraction` | 1.0 |
 | `envelope.floor_usdt` | `capital_reference.floor_usdt` | 100.0 |
 | `envelope.expand_dead_band_fraction` | `capital_reference.expand_dead_band_fraction` | 0.05 |
-| `envelope.gross_notional_multiple` | `max_account_gross_notional_usdt / capital_reference_usdt` | demo 2.0, mainnet 1.0 — which is (0.5 carry + 0.5 long) |
+| `envelope.gross_notional_multiple` | `max_account_gross_notional_usdt / capital_reference_usdt` | 5.0 in both — the entry leverage, so the reference funds the whole cap |
 | `envelope.disaster_stop_fraction` | `DISASTER_STOP_FRACTION` in `deploy/account-execution-mainnet.env.template` → `--disaster-stop-fraction` → `fallback_stop_fraction`, required in (0, 1) with no default | 0.35, the same number as carry's `declared_stop_loss_fraction` |
-| `envelope.max_symbol_notional_usdt` | `account_risk.max_symbol_notional_usdt` | demo 125_000.0, mainnet 50.0 — half the reference in both |
-| `envelope.max_component_gross_notional_usdt` | `account_risk.max_component_gross_notional_usdt` | demo 500_000.0, mainnet 100.0 — equal to the account gross cap in both, so it never binds as shipped |
+| `envelope.max_component_gross_notional_usdt` | `account_risk.max_component_gross_notional_usdt` | demo 1_250_000.0, mainnet 500.0 — equal to the account gross cap in both, so it never binds as shipped |
 | `envelope.max_initial_margin_usdt` | `account_risk.max_initial_margin_usdt` | demo 250_000.0, mainnet 100.0 — the reference exactly in both |
 | `partition.leverage` | `account_risk.max_leverage` | 5.0 |
-| `partition.allocations` (mainnet) | `account_risk.sleeve_limits` | carry 50.0 gross / 50.0 margin; long 50.0 gross / 50.0 margin. The two margin shares sum to the 100.0 account margin cap exactly |
+| `partition.allocations` (mainnet) | `account_risk.sleeve_limits` | carry 200.0 gross / 40.0 margin; long 300.0 gross / 60.0 margin. Both pairs sum to the account caps exactly — 500.0 gross and 100.0 margin |
 | `partition.allocations` (demo) | none declared | empty — unpartitioned |
 | `partition.min_order_notional_usdt` | `InstrumentRules.min_notional`, per symbol from the venue | 1.0 in the partition tests |
 | `qty_tolerance` | `AccountRiskPolicy.quantity_tolerance` | 1e-12 |
@@ -138,9 +125,10 @@ comment above it, so the two implementations are checked against one table:
 - `tests/stops.rs` — the stop-attach discipline; the entry protection cases in
   `tests/account/test_account_kernel.py` are the twin
 - `tests/account_caps.rs` — the account-level checks in `account_kernel.py`:
-  `symbol_notional_limit`, `component_gross_limit`, `initial_margin_limit`, and
-  the pair `negative_available_margin` / `available_margin_limit`. Each cap is
-  checked just under, just over, and after the capital reference has moved
+  `component_gross_limit`, `initial_margin_limit`, and the pair
+  `negative_available_margin` / `available_margin_limit`. Each cap is checked
+  just under, just over, and after the capital reference has moved. Its first
+  section holds the opposite: that nothing bounds one symbol on its own
 - `tests/operational_profile.rs` — loads the repository's own
   `configs/operational.mainnet.json` and `configs/operational.demo.json`, the
   files the fleet installs, rather than a copy, so a cap that changes in the

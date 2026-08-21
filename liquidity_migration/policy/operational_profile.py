@@ -84,23 +84,15 @@ class SleeveLimitSettings:
 class AccountRiskSettings:
     max_component_gross_notional_usdt: float
     max_account_gross_notional_usdt: float
-    max_symbol_notional_usdt: float
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float
     sleeve_limits: tuple[SleeveLimitSettings, ...] = ()
 
-    def sleeve_limit(self, sleeve: str) -> SleeveLimitSettings | None:
-        for limit in self.sleeve_limits:
-            if limit.sleeve == sleeve:
-                return limit
-        return None
-
     def to_policy(self) -> AccountRiskPolicy:
         return AccountRiskPolicy(
             max_component_gross_notional_usdt=self.max_component_gross_notional_usdt,
             max_account_gross_notional_usdt=self.max_account_gross_notional_usdt,
-            max_symbol_notional_usdt=self.max_symbol_notional_usdt,
             max_initial_margin_usdt=self.max_initial_margin_usdt,
             max_leverage=self.max_leverage,
             quantity_tolerance=self.quantity_tolerance,
@@ -246,7 +238,6 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
     fields = {
         "max_component_gross_notional_usdt",
         "max_account_gross_notional_usdt",
-        "max_symbol_notional_usdt",
         "max_initial_margin_usdt",
         "max_leverage",
         "quantity_tolerance",
@@ -267,10 +258,6 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
             row["max_account_gross_notional_usdt"],
             label="account_risk.max_account_gross_notional_usdt",
         ),
-        max_symbol_notional_usdt=_positive_float(
-            row["max_symbol_notional_usdt"],
-            label="account_risk.max_symbol_notional_usdt",
-        ),
         max_initial_margin_usdt=_positive_float(
             row["max_initial_margin_usdt"],
             label="account_risk.max_initial_margin_usdt",
@@ -282,8 +269,6 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
             row["quantity_tolerance"], label="account_risk.quantity_tolerance"
         ),
     )
-    if settings.max_symbol_notional_usdt > settings.max_component_gross_notional_usdt:
-        raise ValueError("account_risk symbol cap cannot exceed the component cap")
     if settings.max_component_gross_notional_usdt > settings.max_account_gross_notional_usdt:
         raise ValueError("account_risk component cap cannot exceed the account cap")
     if row.get("sleeve_limits") is not None:
@@ -474,7 +459,6 @@ def profile_at_capital_reference(
         account_risk=AccountRiskSettings(
             max_component_gross_notional_usdt=risk.max_component_gross_notional_usdt * scale,
             max_account_gross_notional_usdt=risk.max_account_gross_notional_usdt * scale,
-            max_symbol_notional_usdt=risk.max_symbol_notional_usdt * scale,
             max_initial_margin_usdt=risk.max_initial_margin_usdt * scale,
             max_leverage=risk.max_leverage,
             quantity_tolerance=risk.quantity_tolerance,

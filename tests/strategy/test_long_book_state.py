@@ -8,6 +8,7 @@ the record reads back as the table they were written against.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from liquidity_migration.core._common import exact_duration_ms
 from liquidity_migration.strategy import long_native_event_demo as long_demo
 from liquidity_migration.strategy.long_book_state import (
+    BookStateError,
     LongBookEntry,
     LongBookState,
     read_book_state,
@@ -54,28 +56,51 @@ def test_a_written_record_reads_back_field_for_field(tmp_path: Path) -> None:
     assert back.left_at_ms == {"COTIUSDT": NOW_MS - 1_000}
 
 
-def test_an_unreadable_record_starts_from_nothing_rather_than_raising(tmp_path: Path) -> None:
-    """A producer that cannot read its own memory must still be able to run.
+def test_a_missing_file_starts_from_nothing_rather_than_raising(tmp_path: Path) -> None:
+    """The one honest empty: a producer that has never written a record
+    genuinely holds nothing yet."""
 
-    Asking for nothing is safe -- the engine holds what it holds. Raising would
-    stop the sleeve over a file that is only ever this producer's own note.
-    """
+    assert read_book_state(tmp_path / "absent.json") == LongBookState()
+
+
+def test_an_unreadable_record_raises_instead_of_reading_as_empty(tmp_path: Path) -> None:
+    """The engine reads the book as absolute, so silence about a symbol is an
+    instruction to hold none of it. A torn record read as empty would
+    market-close every open position at once -- and the old code wrote that
+    empty record straight back, making a transient read failure permanent.
+    Failing the cycle is the only safe answer; the engine holds what it holds."""
 
     path = tmp_path / "torn.json"
     path.write_text("{ this is not json")
 
-    assert read_book_state(path) == LongBookState()
-    assert read_book_state(tmp_path / "absent.json") == LongBookState()
+    with pytest.raises(BookStateError, match="malformed JSON"):
+        read_book_state(path)
 
 
-def test_a_version_this_reader_does_not_know_is_refused(tmp_path: Path) -> None:
+def test_an_unreadable_path_raises_rather_than_reading_as_empty(tmp_path: Path) -> None:
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+
+    with pytest.raises(BookStateError, match="unreadable"):
+        read_book_state(directory)
+
+
+def test_a_version_this_reader_does_not_know_fails_the_read(tmp_path: Path) -> None:
+    """A future writer's record must not be read as "hold nothing" -- that is
+    the same liquidation with a different trigger."""
+
     path = tmp_path / "future.json"
     path.write_text(json.dumps({"version": 99, "held": [{"symbol": "KAITOUSDT"}]}))
 
-    assert read_book_state(path).held == {}
+    with pytest.raises(BookStateError, match="version"):
+        read_book_state(path)
 
 
-def test_one_unreadable_row_does_not_take_the_others_with_it(tmp_path: Path) -> None:
+def test_one_unreadable_row_fails_the_whole_read(tmp_path: Path) -> None:
+    """Dropping the broken row would read as silence about that symbol, and
+    the engine answers silence by exiting it. The row's name may well be held;
+    the cycle fails instead and the engine keeps everything it has."""
+
     path = tmp_path / "mixed.json"
     good = _entry("KAITOUSDT")
     payload = {
@@ -98,8 +123,61 @@ def test_one_unreadable_row_does_not_take_the_others_with_it(tmp_path: Path) -> 
     }
     path.write_text(json.dumps(payload))
 
+    with pytest.raises(BookStateError, match="BROKENUSDT"):
+        read_book_state(path)
+
+
+def test_a_bad_cooldown_stamp_is_skipped_loudly_and_the_record_survives(
+    tmp_path: Path,
+) -> None:
+    """A cooldown stamp gates nothing but re-entry timing; it can be skipped
+    without risking a position. The rest of the record stays usable."""
+
+    path = tmp_path / "cooldown.json"
+    payload = {
+        "version": 1,
+        "held": [asdict(_entry("KAITOUSDT"))],
+        "left_at_ms": {"COTIUSDT": "not-a-number"},
+    }
+    path.write_text(json.dumps(payload))
+
     back = read_book_state(path)
     assert list(back.held) == ["KAITOUSDT"]
+    assert back.left_at_ms == {}
+
+
+def test_venue_truth_written_on_an_entry_reads_back(tmp_path: Path) -> None:
+    path = tmp_path / "venue.json"
+    state = LongBookState(
+        held={
+            "KAITOUSDT": _entry(
+                "KAITOUSDT",
+                seen_held=True,
+                venue_qty=12.5,
+                venue_avg_entry_px=9.8,
+                venue_ts_ms=NOW_MS,
+            )
+        }
+    )
+
+    write_book_state(path, state)
+
+    back = read_book_state(path)
+    assert back.held["KAITOUSDT"].venue_qty == 12.5
+    assert back.held["KAITOUSDT"].venue_avg_entry_px == 9.8
+
+
+def test_a_write_survives_being_read_back_from_a_fsynced_file(tmp_path: Path) -> None:
+    """The write is temp file, fsync, rename, directory fsync -- so a power
+    cut cannot leave half a record where a full one stood. The observable part
+    in a test is that the ordinary round trip is unchanged."""
+
+    path = tmp_path / "book-state.json"
+    state = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT")})
+
+    write_book_state(path, state)
+    assert not (tmp_path / ".book-state.json.tmp").exists(), "no temp file left behind"
+    assert read_book_state(path).held["KAITOUSDT"] == state.held["KAITOUSDT"]
 
 
 def test_the_record_reads_back_as_the_table_the_exit_planner_expects() -> None:
@@ -129,6 +207,24 @@ class _Demo:
 
 
 def _advance(state: LongBookState, **overrides: object) -> LongBookState:
+    kwargs: dict[str, object] = {
+        "exit_plans": [],
+        "candidates": [],
+        "demo": _Demo(),
+        "equity_usdt": 10_000.0,
+        "order_notional_pct_equity": 0.05,
+        "price_by_symbol": {"KAITOUSDT": 10.0},
+        "strategy_id": "long_v12",
+        "now_ms": NOW_MS,
+        "cooldown_days": 7,
+        "held_symbols": None,
+    }
+    kwargs.update(overrides)
+    after, _resized = long_demo._advance_long_book_state(state, **kwargs)  # type: ignore[arg-type]
+    return after
+
+
+def _advance_full(state: LongBookState, **overrides: object) -> tuple[LongBookState, list[str]]:
     kwargs: dict[str, object] = {
         "exit_plans": [],
         "candidates": [],
@@ -330,3 +426,100 @@ def test_being_confirmed_once_is_remembered_across_cycles() -> None:
 
     written_and_read = state.held["KAITOUSDT"]
     assert written_and_read.seen_held is True
+
+
+# ---- What the venue actually holds ----
+#
+# The engine works each standing position toward the ask at the live mark:
+# it trims what ran up and adds to what fell back once the gap clears its
+# dead band, and every add re-declares the venue stop from the position's
+# average entry, so the stop walks down. The ask stays frozen; the venue
+# truth is what gets recorded.
+
+
+def test_the_venue_reading_is_recorded_on_a_confirmed_entry() -> None:
+    before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT", seen_held=True)})
+
+    after, resized = _advance_full(
+        before,
+        held_symbols=frozenset({"KAITOUSDT"}),
+        venue_holdings={"KAITOUSDT": ("long", 50.0, 10.0)},
+    )
+
+    entry = after.held["KAITOUSDT"]
+    assert entry.venue_qty == 50.0
+    assert entry.venue_avg_entry_px == 10.0
+    assert entry.venue_ts_ms == NOW_MS
+    assert resized == [], "a first sighting records, it does not allege a resize"
+    # The ask itself is untouched: re-sizing open names off the mark would be
+    # a different strategy.
+    assert entry.notional_usdt == 120.0
+
+
+def test_an_engine_move_between_readings_is_reported() -> None:
+    from dataclasses import replace
+
+    before = LongBookState(
+        held={
+            "KAITOUSDT": replace(
+                _entry("KAITOUSDT", seen_held=True),
+                venue_qty=50.0,
+                venue_avg_entry_px=10.0,
+                venue_ts_ms=NOW_MS - 60_000,
+            )
+        }
+    )
+
+    after, resized = _advance_full(
+        before,
+        held_symbols=frozenset({"KAITOUSDT"}),
+        # The engine added ~6% more size than last cycle.
+        venue_holdings={"KAITOUSDT": ("long", 53.0, 9.5)},
+    )
+
+    assert resized == ["KAITOUSDT"]
+    assert after.held["KAITOUSDT"].venue_qty == 53.0
+
+
+def test_an_average_entry_that_walked_down_is_recorded() -> None:
+    """Adding to a falling long re-declares the stop from the venue's average
+    entry, so the stop walks down with each add. That walk is exactly what
+    the record has to show."""
+
+    from dataclasses import replace
+
+    before = LongBookState(
+        held={
+            "KAITOUSDT": replace(
+                _entry("KAITOUSDT", seen_held=True),
+                venue_qty=50.0,
+                venue_avg_entry_px=10.0,
+                venue_ts_ms=NOW_MS - 60_000,
+            )
+        }
+    )
+
+    after, resized = _advance_full(
+        before,
+        held_symbols=frozenset({"KAITOUSDT"}),
+        venue_holdings={"KAITOUSDT": ("long", 50.0, 9.4)},
+    )
+
+    assert resized == [], "same size, different average: an add-and-trim, not a resize"
+    assert after.held["KAITOUSDT"].venue_avg_entry_px == 9.4
+
+
+def test_an_unconfirmed_entry_is_not_reconciled_against_the_venue() -> None:
+    """The window between writing the book and the fill: there is nothing at
+    the venue yet, and inventing a reading would be worse than none."""
+
+    before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT", seen_held=False)})
+
+    after, resized = _advance_full(
+        before,
+        held_symbols=None,
+        venue_holdings={},
+    )
+
+    assert after.held["KAITOUSDT"].venue_qty == 0.0
+    assert resized == []

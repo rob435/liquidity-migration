@@ -37,6 +37,7 @@ as "holds nothing" would drop every open name at once.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -44,7 +45,11 @@ from typing import Any
 
 import polars as pl
 
+_LOGGER = logging.getLogger(__name__)
+
 __all__ = [
+    "BOOK_STATE_VERSION",
+    "BookStateError",
     "LONG_BOOK_STATE_PATH_ENV",
     "LongBookEntry",
     "LongBookState",
@@ -58,9 +63,15 @@ LONG_BOOK_STATE_PATH_ENV = "LONG_ENGINE_BOOK_STATE_PATH"
 
 #: Bumped when the shape changes in a way an older reader would misread. A
 #: version this module does not know is refused rather than guessed at, and a
-#: refused read starts from nothing -- which for a producer means asking for
-#: nothing, not asking for something wrong.
+#: refused read fails the cycle -- the engine holds what it holds -- because
+#: reading a record this producer cannot parse as "hold nothing" would
+#: market-close every open position at once.
 BOOK_STATE_VERSION = 1
+
+
+class BookStateError(RuntimeError):
+    """The record exists but cannot be read back as this producer's asking."""
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +106,14 @@ class LongBookEntry:
     atr_14d_pct: float = 0.0
     pattern: str = ""
     entry_reason: str = ""
+    #: What the venue actually holds, from the engine's heartbeat, the last
+    #: time this producer looked. The ask above stays frozen at entry; these
+    #: three move when the engine trims or adds around its dead band -- and a
+    #: falling average entry price is the venue stop walking down with each
+    #: add. Zero qty means never seen.
+    venue_qty: float = 0.0
+    venue_avg_entry_px: float = 0.0
+    venue_ts_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,31 +200,42 @@ def long_book_state_path() -> Path | None:
 
 
 def read_book_state(path: str | Path) -> LongBookState:
-    """Read the record, or start from nothing.
+    """Read the record, or refuse to act on it.
 
-    Every unreadable case starts from nothing rather than raising, because a
-    producer that cannot read its record must still be able to run: an empty
-    record means it asks for nothing this cycle, and the engine holds what it
-    holds. Raising would stop the sleeve instead, which is worse for a file
-    that is only ever this producer's own memory.
+    A missing file is the one case that starts from nothing: a fresh
+    producer genuinely holds nothing yet. Every file that exists but cannot
+    be read back -- an unreadable path, malformed JSON, a version this reader
+    does not know, one held row it cannot parse -- raises rather than reading
+    as empty. The engine reads the book as absolute, so silence about a
+    symbol is an instruction to hold none of it: an empty record here would
+    market-close every open position at once, and a transient read failure
+    would make that permanent on the very next write. The caller fails the
+    cycle instead; the engine holds what it holds.
     """
 
     resolved = Path(path)
     try:
         raw = resolved.read_text(encoding="utf-8")
-    except OSError:
+    except FileNotFoundError:
         return LongBookState()
+    except OSError as exc:
+        raise BookStateError(f"{resolved}: unreadable ({exc})") from exc
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return LongBookState()
-    if not isinstance(payload, dict) or payload.get("version") != BOOK_STATE_VERSION:
-        return LongBookState()
+    except json.JSONDecodeError as exc:
+        raise BookStateError(f"{resolved}: malformed JSON ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise BookStateError(f"{resolved}: payload is {type(payload).__name__}, not an object")
+    version = payload.get("version")
+    if version != BOOK_STATE_VERSION:
+        raise BookStateError(
+            f"{resolved}: version {version!r}, and this reader only knows {BOOK_STATE_VERSION}"
+        )
 
     held: dict[str, LongBookEntry] = {}
-    for row in payload.get("held") or []:
+    for index, row in enumerate(payload.get("held") or []):
         if not isinstance(row, dict):
-            continue
+            raise BookStateError(f"{resolved}: held row {index} is not an object")
         try:
             entry = LongBookEntry(
                 trade_id=str(row["trade_id"]),
@@ -224,11 +254,17 @@ def read_book_state(path: str | Path) -> LongBookState:
                 atr_14d_pct=float(row.get("atr_14d_pct") or 0.0),
                 pattern=str(row.get("pattern") or ""),
                 entry_reason=str(row.get("entry_reason") or ""),
+                venue_qty=float(row.get("venue_qty") or 0.0),
+                venue_avg_entry_px=float(row.get("venue_avg_entry_px") or 0.0),
+                venue_ts_ms=int(row.get("venue_ts_ms") or 0),
             )
-        except (KeyError, TypeError, ValueError):
-            # One unreadable row is dropped rather than taking the file with
-            # it: the other names are still this producer's own asking.
-            continue
+        except (KeyError, TypeError, ValueError) as exc:
+            # One row this producer cannot parse means it cannot say whether
+            # it holds that name -- and the engine reads "not named" as
+            # "hold none". Failing the cycle is the only honest answer.
+            raise BookStateError(
+                f"{resolved}: held row {index} ({row.get('symbol')!r}) unreadable: {exc}"
+            ) from exc
         held[entry.symbol] = entry
 
     left_at_ms: dict[str, int] = {}
@@ -236,12 +272,26 @@ def read_book_state(path: str | Path) -> LongBookState:
         try:
             left_at_ms[str(symbol).upper()] = int(when)
         except (TypeError, ValueError):
+            # Only gates a cooldown, never a holding: skip it loudly and
+            # keep the rest of the record usable.
+            _LOGGER.warning(
+                "long book state %s: cooldown stamp for %s is %r; skipping it",
+                resolved,
+                symbol,
+                when,
+            )
             continue
     return LongBookState(held=held, left_at_ms=left_at_ms)
 
 
 def write_book_state(path: str | Path, state: LongBookState) -> None:
-    """Write the record so a reader never sees half of it."""
+    """Write the record so no reader sees half of it and no restart finds less than was decided.
+
+    Temp file, fsync, rename, then an fsync of the directory: this file is
+    the producer's only memory of what it asked for, and a record lost to a
+    power cut reads (per :func:`read_book_state`) as a cycle failure with the
+    engine holding what it holds -- recoverable, but not silently.
+    """
 
     resolved = Path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -251,5 +301,13 @@ def write_book_state(path: str | Path, state: LongBookState) -> None:
         "left_at_ms": dict(sorted(state.left_at_ms.items())),
     }
     tmp = resolved.with_name(f".{resolved.name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, resolved)
+    dir_fd = os.open(resolved.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)

@@ -148,6 +148,12 @@ impl CoverBook {
     /// exactly what the reading absorbed, and only what it has not yet shown
     /// stays covered.
     pub fn absorb(&mut self, account: &AccountView) {
+        // One reading is one fact, so its movement is spent ONCE across a
+        // symbol's covers, oldest first. Measuring every record against its own
+        // baseline independently lets two sends on one symbol both claim the
+        // same fill, which leaves `in_flight` short of what is still resting —
+        // the double-entry window this book exists to close.
+        let mut unspent: std::collections::HashMap<SymbolId, f64> = Default::default();
         self.records.retain_mut(|record| {
             let now = view_signed(account, record.symbol);
             let moved = now - record.view_at_send;
@@ -155,8 +161,20 @@ impl CoverBook {
                 return true;
             }
             if moved.signum() == record.sent.signum() {
-                let eaten = moved.abs().min(record.sent.abs());
+                let left = unspent.entry(record.symbol).or_insert(moved);
+                // Same sign or nothing: an exhausted budget is a positive zero,
+                // whose `signum()` is 1.0, and `min` against it still yields 0.
+                let available = if left.signum() == moved.signum() {
+                    moved.abs().min(left.abs())
+                } else {
+                    0.0
+                };
+                let eaten = available.min(record.sent.abs());
                 record.sent -= eaten * record.sent.signum();
+                *left -= eaten * left.signum();
+                // Rebased even when it ate nothing: this reading is accounted
+                // for, and re-measuring against the old baseline next time
+                // would let the same movement pay for this record too.
                 record.view_at_send = now;
                 record.sent.abs() > QTY_EPS
             } else {
@@ -191,7 +209,7 @@ mod tests {
                     side: if *signed >= 0.0 { Side::Buy } else { Side::Sell },
                     qty: signed.abs(),
                     entry_px: 10.0,
-                    stop_attached: true,
+                    stop_attached: true, stop_px: 0.0,
                     leverage: None,
                 })
                 .collect(),
@@ -293,6 +311,35 @@ mod tests {
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
         book.intent_refused(CARRY, KAITO, false);
         assert_eq!(book.in_flight(CARRY, KAITO), 10.0, "the earlier send stays covered");
+    }
+
+    #[test]
+    fn one_readings_movement_cannot_pay_for_two_sends_on_one_symbol() {
+        // Both covers went out against the same flat reading. The reading then
+        // shows +10 — the first send filled, the second is still resting. If
+        // each record measured that movement from its own baseline, both would
+        // claim it and in_flight would read 0 while 5 is live at the venue,
+        // which is the send-it-twice window.
+        let mut book = CoverBook::default();
+        book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
+        book.register(CARRY, KAITO, Side::Buy, 5.0, &flat());
+        book.absorb(&reading(&[(KAITO, 10.0)]));
+        assert_eq!(book.in_flight(CARRY, KAITO), 5.0, "the second send is still resting");
+
+        // And the next reading absorbs it, once.
+        book.absorb(&reading(&[(KAITO, 15.0)]));
+        assert_eq!(book.in_flight(CARRY, KAITO), 0.0);
+    }
+
+    #[test]
+    fn a_partial_catch_up_is_shared_across_the_covers_oldest_first() {
+        // +12 of 15 shown: the older cover is paid in full, the newer keeps
+        // the 3 the reading has still not shown.
+        let mut book = CoverBook::default();
+        book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
+        book.register(CARRY, KAITO, Side::Buy, 5.0, &flat());
+        book.absorb(&reading(&[(KAITO, 12.0)]));
+        assert_eq!(book.in_flight(CARRY, KAITO), 3.0);
     }
 
     #[test]

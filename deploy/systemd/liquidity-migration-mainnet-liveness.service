@@ -20,6 +20,12 @@ EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
 # credential file. The watchdog reads state and pages; it holds no trading
 # authority, so the keys and the arming switch are stripped straight back out.
 EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
+# The funded engine's file, for LIVENESS_ENGINE_HEARTBEAT_FILE. Without it the
+# variable is unset and the engine check is skipped entirely, so the funded
+# engine's heartbeat goes unwatched while everything else here still reports
+# green. Leading `-`: a host not running the funded engine has no such file,
+# and a watchdog that will not start is the one failure nothing else reports.
+EnvironmentFile=-/etc/liquidity-migration/engine-mainnet.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1

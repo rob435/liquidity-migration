@@ -1,9 +1,10 @@
 # Notifications and alerting
 
-Two chat lines, plus one listener. The liveness watchdog is the only reporter: it pages when the
-fleet stops looking healthy, and its view of the engine is the heartbeat file the engine rewrites every
-few seconds — the engine itself sends nothing to Telegram (both engine units strip the bot token).
-Nothing reports fills, and there is no hourly digest (§The hourly digest). The
+Two chat lines, two reporters, one listener. The liveness watchdog pages when the fleet stops looking
+healthy, and its view of the engine is the heartbeat file the engine rewrites every few seconds;
+`trade-notify` diffs the target books and sends every sleeve's entries and exits to the owner's DM. The
+engines send nothing themselves (both units strip the bot token). **Nothing reports fills** — the books
+say what was asked for, not what happened — and there is no hourly digest (§The hourly digest). The
 listener is the control panel (§Owner control buttons): the one component that reads the chat, and it
 posts the panel and its action results.
 

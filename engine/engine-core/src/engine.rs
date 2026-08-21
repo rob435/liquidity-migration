@@ -188,8 +188,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// per order for nothing. What makes the cache safe is forgetting a symbol
     /// the moment the account reading shows it flat: the owner trades this
     /// account by hand, and a symbol that has been closed and reopened may
-    /// have been set to anything in between. The same rule the Python fleet
-    /// runs under `--shared-leverage-authority`.
+    /// have been set to anything in between.
     ///
     /// Under SOLE authority (an account this engine exclusively leases and
     /// nobody hand-trades) the forgetting stops: what this engine set stays
@@ -396,9 +395,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
 
         let account = venue.account_view().await?;
-        // A wall clock before the first evaluation. No control reads it back
-        // today.
-        risk.observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
 
         // Fills the venue saw and this log never heard: a stop that fired
         // during a deploy window, an execution inside a private-stream gap.
@@ -1178,10 +1174,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // A cover the fresh reading has caught up with is released, so the
         // strategies woken after this read one truthful in-flight number.
         self.covers.absorb(&self.account);
-        // A wall clock, refreshed with each account reading. No control reads
-        // it back today.
-        self.risk
-            .observe_wall_clock_ns((clock::wall_ms() as u64).saturating_mul(1_000_000));
     }
 
     /// Under sole leverage authority: hold what we set against what the venue
@@ -1426,6 +1418,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             orders_sent,
             account,
             market,
+            strategies,
             ..
         } = self;
         let Some(heartbeat) = heartbeat.as_mut() else {
@@ -1434,6 +1427,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !heartbeat.due(now_ns) {
             return;
         }
+        // Why each asked-for name is not being opened, straight from the
+        // strategies. A target producer learns what became of its ask only
+        // through this file, and an ask the engine refuses or cannot size is
+        // the difference between "on its way" and "squatting on a slot".
+        // One reason per symbol: the first strategy that names one wins, and
+        // a kernel refusal outranks a planner skip because the follower
+        // reports refusals first.
+        let mut blockers: Vec<(String, String)> = Vec::new();
+        for strategy in strategies.iter() {
+            for (symbol, reason) in strategy.entry_blockers() {
+                if !blockers.iter().any(|(seen, _)| seen == &symbol) {
+                    blockers.push((symbol, reason));
+                }
+            }
+        }
+        blockers.sort_by(|a, b| a.0.cmp(&b.0));
         // Named, because the producers that read this file know symbols by
         // name and nothing else. Flat rows are dropped the way every other
         // reader of this view drops them: flat is not a holding.
@@ -1471,6 +1480,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 account_age_ns: (account.observed_ns != 0)
                     .then(|| now_ns.saturating_sub(account.observed_ns)),
                 holdings: &holdings,
+                entry_blockers: &blockers,
                 costs: &costs,
             },
         );
@@ -1525,6 +1535,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.working
                         .amended(&client_order_id, spec.px, taken, clock::now_ns());
                 }
+                Action::SetStop { symbol, trigger_px } => {
+                    self.process_set_stop(symbol, trigger_px).await?;
+                }
             }
         }
         if adding_dropped > 0 {
@@ -1575,7 +1588,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 text: format!("intent {} refused: {what} is not a finite number", intent.tag),
             })?;
             tracing::error!(tag = %intent.tag, what, "intent carries an unreal number");
-            self.tell_refused(&intent);
+            self.tell_refused(&intent, "unreal_number");
             return Ok(());
         }
 
@@ -1604,7 +1617,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tag = %intent.tag,
                 "refused: this engine is not opening new positions after what boot found"
             );
-            self.tell_refused(&intent);
+            self.tell_refused(&intent, "engine_latched");
             return Ok(());
         }
 
@@ -1647,7 +1660,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     never_quoted = quote_ns == 0,
                     "refused: the quote this entry was decided against is too old to open on"
                 );
-                self.tell_refused(&intent);
+                self.tell_refused(&intent, "stale_quote");
                 return Ok(());
             }
         }
@@ -1673,7 +1686,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     verdict,
                 })?;
                 tracing::info!(tag = %intent.tag, reason, "risk refused the order");
-                self.tell_refused(&intent);
+                self.tell_refused(&intent, &reason);
                 return Ok(());
             }
         };
@@ -1919,6 +1932,59 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// True means the change went through: the venue took it, or shadow mode
     /// deliberately skipped the wire. False means the resting order is
     /// untouched, and whoever asked has to ask again.
+    /// Move a held position's venue-native stop, with no order involved.
+    ///
+    /// The record goes down before the call, as an opening order's does: a
+    /// crash between the two must leave the log claiming the tighter stop, so
+    /// boot's repair puts that one back rather than the distance the position
+    /// opened at. A failed call is logged and dropped -- the old stop is still
+    /// standing, the position is still covered, and the next wake asks again.
+    async fn process_set_stop(
+        &mut self,
+        symbol: SymbolId,
+        trigger_px: f64,
+    ) -> Result<(), EngineError> {
+        self.wal.append(&WalRecord::StopSet {
+            symbol,
+            trigger_px,
+            wall_ts_ms: clock::wall_ms(),
+        })?;
+        if self.shadow {
+            tracing::info!(
+                symbol = self.market.table.name(symbol),
+                trigger_px,
+                "shadow: this position's stop would be moved"
+            );
+            return Ok(());
+        }
+        match self.venue.set_stop(symbol, trigger_px).await {
+            Ok(()) => {
+                tracing::info!(
+                    symbol = self.market.table.name(symbol),
+                    trigger_px,
+                    "moved this position's stop in"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    symbol = self.market.table.name(symbol),
+                    trigger_px,
+                    error = %e,
+                    "could not move this position's stop; the one it opened behind still stands"
+                );
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!(
+                        "stop on {} not moved to {trigger_px}: {e}",
+                        self.market.table.name(symbol)
+                    ),
+                })?;
+                Ok(())
+            }
+        }
+    }
+
     async fn process_cancel(
         &mut self,
         symbol: SymbolId,
@@ -2131,6 +2197,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 return;
             }
             self.recovered_exec_ids.insert(exec.exec_id);
+            self.orders.apply(&record);
             reconcile::note_fill(&mut self.logged_exposure, symbol, exec.side, exec.qty);
             // Through the order that produced it, exactly like a delivered
             // fill; one with no order of ours is charged to nobody.
@@ -2299,7 +2366,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             source: "engine".into(),
             text: format!("{client_order_id} not sent ({}): {why}", intent.tag),
         })?;
-        self.tell_refused(intent);
+        self.tell_refused(intent, why);
         Ok(())
     }
 
@@ -2307,7 +2374,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// engine, then tell the strategy. A refused exit means the covers
     /// describe exposure the account reading says is not there, and left
     /// standing they would re-plan the same doomed exit on every quote.
-    fn tell_refused(&mut self, intent: &Intent) {
+    fn tell_refused(&mut self, intent: &Intent, reason: &str) {
         // Bookkeeping first, so the strategy woken below already reads the
         // truthful in-flight number. A refused exit drops every cover on the
         // symbol; a refused entry has none to drop, because covers are booked
@@ -2317,6 +2384,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let event = EngineEvent::IntentRefused {
             symbol: intent.symbol,
             reduce_only: intent.reduce_only,
+            reason: reason.to_string(),
         };
         let now = clock::now_ns();
         let Engine {

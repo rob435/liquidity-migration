@@ -158,7 +158,6 @@ def load_risk_policy_bytes(data: bytes) -> AccountRiskPolicy:
     return AccountRiskPolicy(
         max_component_gross_notional_usdt=float(payload["max_component_gross_notional_usdt"]),
         max_account_gross_notional_usdt=float(payload["max_account_gross_notional_usdt"]),
-        max_symbol_notional_usdt=float(payload["max_symbol_notional_usdt"]),
         max_initial_margin_usdt=float(payload["max_initial_margin_usdt"]),
         max_leverage=float(payload["max_leverage"]),
         quantity_tolerance=float(payload.get("quantity_tolerance") or 1e-12),

@@ -55,7 +55,9 @@ from pathlib import Path
 from typing import Any
 
 BYBIT_PUBLIC = "https://api.bybit.com"
-PROMPT_VERSION = "driver-judgment-v3-scored"
+#: Binance publishes who was aggressive; Bybit does not. Public, no key.
+BINANCE_PUBLIC = "https://fapi.binance.com"
+PROMPT_VERSION = "driver-judgment-v6-scored"
 
 # Loose nominator: enough movers to give the discriminator something to
 # separate, few enough that every row gets judged.
@@ -63,9 +65,18 @@ MIN_MOVE_24H = 0.10
 MAX_TURNOVER_RANK = 30
 NOMINEES_MAX = 12
 
-# The rubric the model executes. Authored once by the stronger model; the
-# numbers in the priors step are this repo's own measurements
-# (docs/research/archive/2026-08-21-long-v13-rework-program.md), not folklore.
+# How deep the ENTRY scan goes, which is not how deep the research scan goes.
+# Turnover rank is the strongest single thing measured about these triggers:
+# graded over 5.5 years, rank 1-5 earns 433 bp a trade, 1-10 earns 308, and
+# the full 30 earns 154. The cut beats the wider one in every year. Thin books
+# are where the fake pumps are, and no shape feature -- one-bar share, turnover
+# spike, how often the name has fired before -- separated them.
+TRIGGER_TURNOVER_RANK_MAX = 10
+
+# The rubric the model executes. Every number in the priors step is this
+# repo's own measurement, not folklore: the depth figure from the daily v13
+# program, the rest graded on 5.5 years of these hourly triggers. Bump
+# PROMPT_VERSION with any edit here -- `--grade` buckets by it.
 METHODOLOGY = """You are judging one crypto perpetual pump for a systematic desk.
 Walk these steps IN ORDER and report every step's answer in the JSON schema
 below. Be concrete; a step you cannot ground must say so and lower the final
@@ -81,13 +92,19 @@ same window (provided). A move mostly explained by the market is not
 idiosyncratic, whatever the headline number says. Use idio_move_24h as the
 rough market-adjusted move.
 
-STEP 3 — leverage vs organic. Read funding_rate, perp_premium_bp, and
-oi_change_24h_pct together: premium and funding spiking positive with OI
-sharply up means leverage is chasing (fragile, liquidation-prone in both
-directions); flat premium with strong turnover and modest OI growth means
-spot-led organic buying (stickier); OI DOWN on a pump means a short squeeze
-(tends to fade once the shorts are cleared). Classify: leverage_chase |
-spot_led | short_squeeze | mixed | unclear.
+STEP 3 — leverage vs organic. Read funding_rate, perp_premium_bp,
+premium_change_24h_bp, oi_change_24h_pct and oi_change_48h_pct together and
+classify: leverage_chase | spot_led | short_squeeze | mixed | unclear. Flat
+premium with strong turnover and modest OI growth is spot-led organic buying.
+OI DOWN on a pump is a short squeeze and tends to fade once the shorts are
+cleared. But do NOT mark a pump down for open interest rising hard: measured
+on this desk the fastest-growing OI quartile is the BEST of the four, so
+"leverage is chasing, therefore fragile" is the wrong inference here even
+though it is the usual one. The PATHS matter as much as the levels: a premium
+rising into the pump (positive premium_change_24h_bp) is demand still
+arriving; a collapsing premium at the same print is demand leaving. Use these
+fields to classify the flow honestly — this desk has NOT measured a mechanical
+edge in them, so they inform your classification, not the score directly.
 
 STEP 4 — structure. dist_from_30d_high_pct near zero means this pump is
 breaking to new highs (a fresh move, or the exhaustion top of an old one —
@@ -103,13 +120,35 @@ confidence at 0.6.
 
 STEP 6 — priors (measured on this desk; override your instincts with them):
 pumps at >=1.5x the coin's vol-adjusted bar confirmed their daily close 66%
-of the time vs 33% below 1.2x (depth_ratio is provided); triggers after
-12:00 UTC confirm materially better than 00-06 UTC; where price sits in the
-24h range predicts nothing; and on these names crowding CONTINUES — "it is
-up a lot so it must pull back" is measurably the wrong prior here. Do not be
-contrarian by default.
+of the time vs 33% below 1.2x (depth_ratio is provided);
+taker_buy_sell_ratio_1d above about 1.07 marks a pump being lifted hardest at
+the ask, and those work LESS OFTEN -- 41% of them ended up against 48% of the
+quieter ones, median -207 bp against -38 bp, across five years. Treat a high
+ratio as a reason for care rather than as confirmation. It is a caution and not
+a rule: the quieter ones were better on average in four of the five years and
+won more often in four of the five, but the exception years are different ones,
+and in a hard melt-up the aggressively-bought names ran the furthest of all;
+the hour of day
+predicts nothing usable, so do not reason from it; sitting at the very top of
+the range is slightly WORSE than sitting at three-quarters of it; and on these
+names crowding CONTINUES — "it is up a lot so it must pull back" is measurably
+the wrong prior here. Do not be contrarian by default. A deeper move is worth
+more on average and wins less often: the edge is in the tail, so do not mark a
+pump down for having run far.
 
-STEP 7 — verdict. pump_quality_score is the headline: an integer 0-10 for
+STEP 7 — scam pump. Some of these are manufactured: a thin book walked up by
+one desk, a fresh listing with almost no float, a name whose whole history is
+pump-and-collapse. The tape cannot tell you this — every mechanical shape
+measure was tested against outcomes and none separated a manufactured pump
+from a real one, so the ONLY edge here is what you know about the token
+itself. Ask: is this a name with real usage and a real holder base, or a
+vehicle? Has it done this before and given it all back? Is the 24h turnover
+large in absolute terms, or is a big percentage move sitting on a small book?
+Set scam_pump_risk to low | medium | high, and say which of those three
+questions decided it. High means the score must be 3 or below whatever else
+looks good.
+
+STEP 8 — verdict. pump_quality_score is the headline: an integer 0-10 for
 "how attractive is holding this pump from here for the next 1-3 days" —
 0-2 avoid (beta, exhaustion, or squeeze already spent), 3-4 weak, 5-6
 unclear, 7-8 good (idiosyncratic, flow supportive, structure fresh), 9-10
@@ -120,6 +159,7 @@ later, so use the full range and do not cluster at 5.
 
 Reply with ONLY this JSON object, no other text:
 {"identity": "one sentence", "recognized": true/false,
+ "scam_pump_risk": "low|medium|high", "scam_pump_reason": "one sentence",
  "beta_share": "none|partial|mostly_market", "flow_type":
  "leverage_chase|spot_led|short_squeeze|mixed|unclear", "structure":
  "fresh_breakout|exhaustion_top|downtrend_bounce|range|unclear",
@@ -141,6 +181,25 @@ def _http_json(url: str, *, payload: dict[str, Any] | None = None, headers: dict
 
 def _result_list(body: Any) -> list[Any]:
     return (body.get("result") or {}).get("list") or []
+
+
+def taker_ratio_day_mean(rows: list[dict[str, Any]], midnight_ms: int) -> float | None:
+    """Mean of the five-minute taker buy/sell ratios over the last completed day.
+
+    The MEAN of ratios, not the ratio of the day's sums -- those are different
+    numbers and the mean sits above the aggregate, so the threshold the rubric
+    quotes is only meaningful against this one. A day the venue served in part
+    is refused rather than averaged: a handful of buckets is not a day.
+    """
+
+    day = [
+        float(row["buySellRatio"])
+        for row in rows
+        if midnight_ms - 86_400_000 <= int(row["timestamp"]) < midnight_ms
+    ]
+    if len(day) < 200:
+        return None
+    return round(statistics.fmean(day), 3)
 
 
 def enrich(symbol: str, facts: dict[str, Any]) -> dict[str, Any]:
@@ -184,14 +243,65 @@ def enrich(symbol: str, facts: dict[str, Any]) -> dict[str, Any]:
         oi = _result_list(
             _http_json(
                 f"{BYBIT_PUBLIC}/v5/market/open-interest?category=linear&symbol={symbol}"
-                "&intervalTime=1h&limit=25"
+                "&intervalTime=1h&limit=49"
             )
         )
-        if len(oi) >= 2:
+        if len(oi) >= 25:
             oi.sort(key=lambda r: int(r["timestamp"]))
-            first, last = float(oi[0]["openInterest"]), float(oi[-1]["openInterest"])
-            if first > 0:
-                facts["oi_change_24h_pct"] = round((last / first - 1.0) * 100, 2)
+            last = float(oi[-1]["openInterest"])
+            first24 = float(oi[-25]["openInterest"])
+            if first24 > 0:
+                facts["oi_change_24h_pct"] = round((last / first24 - 1.0) * 100, 2)
+            if len(oi) >= 49:
+                first48 = float(oi[0]["openInterest"])
+                if first48 > 0:
+                    facts["oi_change_48h_pct"] = round((last / first48 - 1.0) * 100, 2)
+    except Exception:
+        pass
+    try:
+        # The premium's own path, not just its level: the rubric classifies
+        # leverage vs organic flow, and a premium that is rising into a pump
+        # reads differently from one that is collapsing even at the same
+        # print. Hourly premium-index kline closes; [4] is the close.
+        pk = _result_list(
+            _http_json(
+                f"{BYBIT_PUBLIC}/v5/market/premium-index-price-kline"
+                f"?category=linear&symbol={symbol}&interval=60&limit=25"
+            )
+        )
+        if len(pk) >= 25:
+            pk.sort(key=lambda r: int(r[0]))
+            px24 = float(pk[-25][4])
+            if px24 != 0.0:
+                facts["premium_bp_24h_ago"] = round(px24 * 10_000, 1)
+                now_bp = facts.get("perp_premium_bp")
+                if now_bp is not None:
+                    facts["premium_change_24h_bp"] = round(float(now_bp) - px24 * 10_000, 1)
+    except Exception:
+        pass
+    try:
+        # Binance's taker buy volume over taker sell volume. Bybit publishes no
+        # equivalent, and the ticker symbols agree often enough to be worth
+        # asking -- a name Binance does not list simply stays null, which is
+        # what every other optional fact does.
+        #
+        # The MEAN of the five-minute ratios over the last completed UTC day,
+        # not the day aggregate. Those are different numbers -- a mean of
+        # ratios sits above a ratio of sums -- and the mean is the one the
+        # threshold in the rubric was measured on.
+        rows = _http_json(
+            f"{BINANCE_PUBLIC}/futures/data/takerlongshortRatio"
+            f"?symbol={symbol}&period=5m&limit=500"
+        )
+        midnight_ms = int(
+            dt.datetime.now(dt.timezone.utc)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+            * 1000
+        )
+        mean = taker_ratio_day_mean(rows, midnight_ms)
+        if mean is not None:
+            facts["taker_buy_sell_ratio_1d"] = mean
     except Exception:
         pass
     try:
@@ -333,12 +443,13 @@ def cmd_once(ledger_dir: Path) -> None:
 
 WOULD_ENTER_SCORE = 6
 
-# Detection horizons in hours. The daily program measured only the 24h
-# window; the shorter horizons are untested and the ledger is where they
-# earn or lose a record. A window's bar is the daily 2.5-sigma trigger
+# Detection horizons in hours. A window's bar is the daily 2.5-sigma trigger
 # scaled by sqrt(h/24), the same variance scaling the registered 3d/7d
 # triggers use in the other direction.
-TRIGGER_WINDOWS_H = (1, 2, 4, 12, 24)
+#
+# Nothing below 4h: graded on 5.5 years of hourly bars, the 1h and 2h windows
+# each have a significantly negative year and 12h has none.
+TRIGGER_WINDOWS_H = (4, 12, 24)
 TRIGGER_ROWS_MAX = 10
 
 
@@ -378,7 +489,13 @@ def cmd_triggers(ledger_dir: Path) -> None:
     btc_on = _daily_regime_on("BTCUSDT")
     eth_on = _daily_regime_on("ETHUSDT")
     if not (btc_on and eth_on):
-        print(f"regime off (btc={btc_on} eth={eth_on}); no triggers scanned")
+        # Say so in the file too. Returning here without publishing would leave
+        # the previous run's candidates standing for the rest of their 90
+        # minutes, so the LONG sleeve would keep entering under a regime this
+        # run has just declared off. A failed regime read (None) lands here as
+        # well, and fails closed the same way.
+        publish_gate_candidates([])
+        print(f"regime off (btc={btc_on} eth={eth_on}); no triggers scanned, candidates cleared")
         return
     recent = _recently_nominated(path, now, hours=TRIGGER_SUPPRESSION_HOURS, row_type="trigger")
 
@@ -395,7 +512,7 @@ def cmd_triggers(ledger_dir: Path) -> None:
     fired = 0
     judged_events: list[dict[str, Any]] = []
     with path.open("a") as fh:
-        for rank, t in enumerate(usdt[:MAX_TURNOVER_RANK], start=1):
+        for rank, t in enumerate(usdt[:TRIGGER_TURNOVER_RANK_MAX], start=1):
             symbol = str(t["symbol"])
             if symbol in recent:
                 continue
@@ -515,12 +632,14 @@ def cmd_triggers(ledger_dir: Path) -> None:
 # Every score >= 6 trigger event is published to the LONG sleeve's candidates
 # file; the LONG producer reads it each cycle and takes entries through its
 # own sizing, exits, and venue-native stops. This script stays
-# credential-free and order-free: a failed write or an empty judgment list
-# publishes nothing, and the LONG side treats "no file" as "no signal".
+# credential-free and order-free. Every run that reaches a verdict publishes,
+# including the empty verdict: a fresh file saying "no candidates" is what
+# stops the previous run's names being entered for the rest of their validity.
+# The LONG side treats a missing or stale file as "no signal".
 # ---------------------------------------------------------------------------
 
 GATE_CANDIDATES_PATH = "/var/lib/liquidity-migration/targets/llm-gate-candidates.json"
-GATE_CANDIDATES_VALID_MIN = 90
+GATE_CANDIDATES_VALID_MIN = 60
 
 
 def _write_json_atomic(path: Path, payload: Any) -> None:

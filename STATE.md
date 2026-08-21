@@ -26,8 +26,9 @@ file.
   `docs/research/research_findings.md` §1 (the exodus short row); promotion
   note in `strategy_program.md`.
 - **The LLM GATE is an entry source inside the LONG sleeve (owner decision,
-  live on demo).** The hourly ledger service judges fresh 1/2/4/12/24h trigger
-  events and publishes score ≥ 6 names to the LONG candidates file
+  live on demo).** The hourly ledger service judges fresh 4/12/24h trigger
+  events on top-10-turnover names and publishes score ≥ 6 names to the LONG
+  candidates file
   (`llm-gate-candidates.json`); the LONG producer takes them as ordinary LONG
   entries — same book (`long-demo.json`), same engine sleeve (`long`), same
   vol-scaled sizing at the profile multiplier, same v12 exits and venue-native
@@ -38,10 +39,12 @@ file.
 - **Every strategy runs the same 3x multiplier, set from one dial bank (owner
   directive, both fleets).** Sizing is three env dials read directly by the
   producers — `CARRY_NOTIONAL_MULTIPLIER`, `LONG_NOTIONAL_MULTIPLIER`,
-  `EXODUS_NOTIONAL_MULTIPLIER` — each entry = the strategy's base slot
-  (10% of equity) × its multiplier; all three sit at **3.0** (~30% of equity
-  per name, before LONG's own vol/weekend scaling), in both fleet env files,
-  with the committed profiles carrying the same defaults. There is no
+  `EXODUS_NOTIONAL_MULTIPLIER` — each entry = the strategy's base slot (at
+  most 10% of equity) × its multiplier; all three sit at **3.0** (~30% of
+  equity per name, before LONG's own vol/weekend scaling). On demo the dials
+  are in `bybit-demo.env`; on the funded fleet the committed profile's own
+  multipliers are what apply (see Risk envelope §Real money). Both profiles
+  carry 3.0, so the two agree today. There is no
   book-level margin ceiling in the way: what bounds a loss is the
   venue-native stop on each position. Held components keep their
   fill-anchored size — the dials reach new entries only. The mainnet account
@@ -152,15 +155,16 @@ file.
   The funding arrived by hand, outside the bot — not independently confirmed
   beyond the health read. The funded engine is **shadow** either way; money in
   the account changes what the producers publish, not what can trade.
-- **There is no daily loss halt.** The whole control is out of the tree —
-  `loss_guard.rs`, `LossGuardConfig`, the `LossGuardTripped` refusal, the
-  `max_daily_loss_usdt` profile key and the `RM_DAILY_LOSS_FRACTION` dial. A
-  profile that still carries the key is refused by name at start-up rather than
-  silently ignored, and a host env that still carries the dial fails the render.
-  **What bounds a loss now is the venue-native stop on each position. Nothing
-  bounds the accumulation of many stopped positions in one day** — the owner
-  accepted that knowingly. Its absence is a decision, not a fault: do not
-  re-add it ([AGENTS.md](AGENTS.md)).
+- **There is no daily loss halt, by the owner's decision.** What bounds a loss
+  is the venue-native stop on each position; **nothing bounds the accumulation
+  of many stopped positions in one day**, and the owner accepted that knowingly.
+  On LONG that stop is not fixed for the life of a trade: past a name's own
+  decay age the book declares the narrower distance and the engine moves the
+  venue's stop in to match. It only ever tightens, and it survives the
+  producer dying.
+  A profile carrying a `max_daily_loss_usdt` key, or an env file carrying an
+  `RM_DAILY_LOSS_FRACTION` dial, is refused by name rather than ignored. Do not
+  re-add the control ([AGENTS.md](AGENTS.md)).
 - **Real money is armed**, and the owner hand-trades the same venue account.
 - **The bot and the owner keep separate books on one account.** Venue exposure
   above what the bot owns, and venue orders the bot did not place, are recorded
@@ -170,13 +174,11 @@ file.
   down to flat. A symbol carrying foreign exposure is still swept for its stop;
   skipping it would age its freshness out and re-block the account on `native
   protection health is stale`.
-- **Shared leverage authority is on for mainnet**: the mainnet owner unit
-  carries `Environment=ACCOUNT_SHARED_LEVERAGE_AUTHORITY=1` →
-  `--shared-leverage-authority`, so a symbol that goes flat forgets its cached
-  leverage and its next entry pays one `set_leverage` round trip (188–194 ms) —
-  the cost of not sizing against a leverage somebody else changed. Demo is
-  unaffected: the variable is unset there and unset means off. A venue value that
-  contradicts the cache still drops it under either setting.
+- **The funded engine runs `leverage_authority = "shared"`**, so a symbol that
+  goes flat forgets its cached leverage and its next entry pays one
+  `set_leverage` round trip — the cost of not sizing against a leverage the
+  owner changed by hand. A venue value that contradicts the cache drops it under
+  either setting.
 - **A `-21 USDT` available margin is the owner trading by hand, read correctly**,
   not a fault.
 - **The safety stop covers the owner's hand-placed size.** The manager only
@@ -237,7 +239,7 @@ file.
 
 The live order path is the Rust engine's; the honest latency contract and the
 measured table are [docs/engine.md](docs/engine.md). The short version, measured
-on the fleet: **83 ns** to decide, **~2.7 ms** decision to bytes-on-wire (the
+on the fleet: **721 ns** to decide, **~2.7 ms** decision to bytes-on-wire (the
 fsync-dominated software chain), and live against the venue (n=67): **179 ms
 median decision→acknowledgment, 512 ms p90, 1013 ms worst** (at n=67 the tail
 figure is the worst of the sample, not an estimated p99). Leverage pre-arm takes
@@ -258,26 +260,21 @@ leverage-needing entry, where paying that round trip cost ~169 ms median.
 
 ## Topology
 
-Nine units on and active: the demo engine (the account owner, LIVE), the
+Seven daemons run continuously: the demo engine (the account owner, LIVE), the
 mainnet engine (shadow), demo LONG and CARRY producers, mainnet LONG and CARRY
-producers, the Telegram controls daemon, and the demo and mainnet liveness
-timers. The host carries exactly the eleven unit files in `deploy/systemd/` and
-nothing else. Paper is retired whole; demo is the only practice book.
-
-| Kind | Units |
-| --- | --- |
-| Account owners (engines) | demo (LIVE), mainnet (shadow) |
-| Target producers | demo × LONG/CARRY, mainnet × LONG/CARRY |
-| Always-on daemon | Telegram controls |
-| Timers | demo liveness, mainnet liveness (both active) |
+producers, and the Telegram controls. Four timers drive four oneshots beside
+them — demo liveness, mainnet liveness, the LLM ledger, and the trade notifier.
+The host carries exactly the unit files in `deploy/systemd/` and nothing else;
+[the inventory is that directory's README](deploy/systemd/README.md). Paper is
+retired whole; demo is the only practice book.
 
 Bulk collectors are removed and raw account-market persistence is disabled. Live
 L2 readiness and exact decision-book capture remain enabled.
 
 ## Risk envelope
 
-**Demo** (risk-on): capital reference 250,000 USDT, per-symbol notional
-125,000, component/account gross 1,250,000, initial margin 250,000. Entry
+**Demo** (risk-on): capital reference 250,000 USDT, component/account gross
+1,250,000, initial margin 250,000. No per-symbol ceiling. Entry
 leverage 5× on every sleeve, account max leverage 5×, LONG notional multiplier
 3.0 and CARRY multiplier 3.0 (per-name 0.10 and gross cap 1.0 come from the
 registered rule and multiply through, so each new carry name takes 30% of the
@@ -286,12 +283,16 @@ reject unknown profile fields and producer leverage above the owner cap; how
 large a book the multipliers build is the owner's dial, bounded per position
 by each venue-native stop.
 
-**Real money**: sizing is the same three `*_NOTIONAL_MULTIPLIER` env dials
-as demo, in `/etc/liquidity-migration/bybit-mainnet.env` (all at 3.0).
+**Real money**: the funded fleet sizes from the committed profile's own
+multipliers (all 3.0), **not from a dial**. The three `*_NOTIONAL_MULTIPLIER`
+names belong in `account-execution-mainnet.env`, the no-secrets file the two
+mainnet producer units load; they do not load `bybit-mainnet.env`, which holds
+the key. The installed host file does not carry the lines yet, so setting a
+funded multiplier is not yet possible — say the number in the profile instead.
 `RM_CARRY_STOP_LOSS_FRACTION` (**0.35**) is the protection dial and is the
 owner's own. The account document (`configs/operational.mainnet.json`) is
 static: entry leverage 5×, gross cap = wallet × 5 split carry 200/long 300,
-margin cap = wallet, symbol cap half the wallet — every cap a ratio of the
+margin cap = wallet, and no per-symbol ceiling — every cap a ratio of the
 equity-tracked reference, proved at load and re-proved on each rebase. A
 book the dials build past those caps is refused per entry by the engine's
 runtime admission; a retired `RM_*` line in an env file is refused by name.

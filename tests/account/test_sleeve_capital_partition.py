@@ -99,7 +99,6 @@ def _policy(*, partitioned: bool = True) -> AccountRiskPolicy:
     return AccountRiskPolicy(
         max_component_gross_notional_usdt=1_000.0,
         max_account_gross_notional_usdt=1_000.0,
-        max_symbol_notional_usdt=1_000.0,
         max_initial_margin_usdt=500.0,
         max_leverage=10.0,
         sleeve_limits=(
@@ -218,7 +217,6 @@ def test_the_margin_share_binds_independently_of_the_gross_share(tmp_path: Path)
     policy = AccountRiskPolicy(
         max_component_gross_notional_usdt=10_000.0,
         max_account_gross_notional_usdt=10_000.0,
-        max_symbol_notional_usdt=10_000.0,
         max_initial_margin_usdt=10_000.0,
         max_leverage=10.0,
         sleeve_limits=(SleeveCapitalLimit("carry", 5_000.0, 100.0),),
@@ -247,7 +245,6 @@ def test_an_exit_is_never_blocked_by_the_partition(tmp_path: Path) -> None:
     tightened = AccountRiskPolicy(
         max_component_gross_notional_usdt=1_000.0,
         max_account_gross_notional_usdt=1_000.0,
-        max_symbol_notional_usdt=1_000.0,
         max_initial_margin_usdt=500.0,
         max_leverage=10.0,
         sleeve_limits=(SleeveCapitalLimit("carry", 1.0, 1.0),),
@@ -441,7 +438,6 @@ def test_a_sleeve_over_its_share_cannot_veto_another_sleeve_shrinking(
     contracted = AccountRiskPolicy(
         max_component_gross_notional_usdt=1_000.0,
         max_account_gross_notional_usdt=1_000.0,
-        max_symbol_notional_usdt=1_000.0,
         max_initial_margin_usdt=500.0,
         max_leverage=10.0,
         sleeve_limits=(
@@ -470,7 +466,6 @@ def test_a_sleeve_over_its_share_still_cannot_grow(tmp_path: Path) -> None:
     contracted = AccountRiskPolicy(
         max_component_gross_notional_usdt=1_000.0,
         max_account_gross_notional_usdt=1_000.0,
-        max_symbol_notional_usdt=1_000.0,
         max_initial_margin_usdt=500.0,
         max_leverage=10.0,
         sleeve_limits=(SleeveCapitalLimit("carry", 400.0, 200.0),),

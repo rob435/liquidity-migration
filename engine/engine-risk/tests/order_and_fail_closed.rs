@@ -91,20 +91,7 @@ fn a_stale_reading_still_lets_a_genuine_exit_through() {
 }
 
 fn kernel() -> Kernel {
-    let mut kernel = Kernel::new(demo_config()).expect("config");
-    kernel.observe_wall_clock_ns(utc_noon(20_664));
-    kernel
-}
-
-/// Walk the guard onto a trip: anchor at 250_000, then breach the 1_000
-/// ceiling.
-fn tripped_kernel() -> Kernel {
-    let mut kernel = kernel();
-    let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC);
-    kernel.assess(&intent, &flat(250_000.0, SEC));
-    let second = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, 2 * SEC);
-    kernel.assess(&second, &flat(249_000.0, 2 * SEC));
-    kernel
+    Kernel::new(demo_config()).expect("config")
 }
 
 fn deny_reason(verdict: RiskVerdict) -> DenyReason {
@@ -119,21 +106,8 @@ fn deny_reason(verdict: RiskVerdict) -> DenyReason {
 // --------------------------------------------------------------------------
 
 #[test]
-fn staleness_is_reported_before_a_tripped_loss_guard() {
-    let mut kernel = tripped_kernel();
-    let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW);
-    let stale = flat(249_000.0, NOW - 121 * SEC);
-    assert!(matches!(
-        deny_reason(kernel.assess(&intent, &stale)),
-        DenyReason::StaleAccountView { .. }
-    ));
-}
-
-#[test]
-// Matches the Python guard's own order: "no account equity reading yet"
-// precedes the age check (account_loss_guard.py evaluates readability
-// first). Readability must also come first here so a genuine exit can be
-// sized from a stale-but-readable view.
+// Readability is judged before age, so a genuine exit can still be sized from
+// a stale-but-readable view.
 fn an_unreadable_equity_is_reported_even_when_the_view_is_also_stale() {
     let mut kernel = kernel();
     let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW);

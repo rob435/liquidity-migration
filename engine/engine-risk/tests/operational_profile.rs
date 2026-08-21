@@ -46,7 +46,6 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     // 2026-08-21: a static document — entry leverage 5x, gross cap = what the
     // reference funds at that leverage, multipliers living in the env dials.
     assert_eq!(cfg.envelope.reference_usdt, 100.0);
-    assert_eq!(cfg.envelope.max_symbol_notional_usdt, 50.0);
     assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 500.0);
     assert_eq!(cfg.envelope.max_initial_margin_usdt, 100.0);
     assert_eq!(cfg.partition.leverage, 5.0);
@@ -105,7 +104,6 @@ fn the_committed_demo_profile_loads_unpartitioned_and_pinned() {
     assert_eq!(cfg.envelope.reference_usdt, 250_000.0);
     // 1,250,000 gross over the 250,000 reference: the 2026-08-21 risk-on dials.
     assert_eq!(cfg.envelope.gross_notional_multiple, 5.0);
-    assert_eq!(cfg.envelope.max_symbol_notional_usdt, 125_000.0);
     // No capital_reference block: the reference is pinned and never follows
     // the wallet.
     assert!(!cfg.envelope.tracks_equity);
@@ -180,12 +178,29 @@ fn some_other_json_document_is_not_an_operational_profile() {
 #[test]
 fn a_profile_whose_caps_do_not_nest_is_refused_at_load() {
     // The load-time proof is the kernel's own validate(), reached from here.
-    // A symbol cap above the account gross cap describes a book nobody can
-    // reach, and the outer cap would never bind.
+    // A second gross ceiling above the account gross cap describes a book
+    // nobody can reach, and the outer cap would never bind.
     let sleeves = both_sleeves();
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
-    doc["account_risk"]["max_symbol_notional_usdt"] = serde_json::json!(1_000.0);
+    doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(1_000.0);
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
+    assert!(
+        err.to_string().contains("max_component_gross_notional_usdt"),
+        "{err}"
+    );
+}
+
+#[test]
+// The key is gone from the schema, and profile.rs refuses a key it does not
+// read rather than ignoring it — so an old profile still carrying the retired
+// per-symbol cap stops the engine instead of booting with a cap nobody
+// enforces.
+fn a_profile_still_carrying_the_retired_symbol_cap_is_refused() {
+    let sleeves = both_sleeves();
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    doc["account_risk"]["max_symbol_notional_usdt"] = serde_json::json!(50.0);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
     assert!(err.to_string().contains("max_symbol_notional_usdt"), "{err}");
 }
