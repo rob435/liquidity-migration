@@ -1215,6 +1215,9 @@ verify_topology() {
     if systemctl cat liquidity-migration-llm-ledger.timer >/dev/null 2>&1; then
         verify_unit on liquidity-migration-llm-ledger.timer "LLM ledger timer is not active"
     fi
+    if systemctl cat liquidity-migration-trade-notify.timer >/dev/null 2>&1; then
+        verify_unit on liquidity-migration-trade-notify.timer "trade notify timer is not active"
+    fi
     # Same tolerance, one condition wider: the manifest installs the engine's
     # unit file on every host, so the fragment alone would demand a running
     # engine on a box that has never built one. Where the engine really is
@@ -1425,6 +1428,7 @@ activate_mode() {
     systemctl enable --now liquidity-migration-demo-liveness.timer
     systemctl enable --now liquidity-migration-telegram-controls.service
     systemctl enable --now liquidity-migration-llm-ledger.timer
+    systemctl enable --now liquidity-migration-trade-notify.timer
     if mainnet_armed; then
         start_mainnet_fleet
     fi
@@ -1762,6 +1766,8 @@ ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-mainnet-liveness.timer
     liquidity-migration-llm-ledger.timer
     liquidity-migration-llm-ledger.service
+    liquidity-migration-trade-notify.timer
+    liquidity-migration-trade-notify.service
     liquidity-migration-bybit-long-demo.service
     liquidity-migration-bybit-long-mainnet.service
     liquidity-migration-bybit-carry-demo.service

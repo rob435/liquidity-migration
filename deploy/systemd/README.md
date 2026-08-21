@@ -11,7 +11,7 @@ unit shapes.
 
 ## Services
 
-Thirteen unit files: ten services, the two liveness timers, and the LLM-ledger timer.
+Fifteen unit files: eleven services and four timers (two liveness, the LLM ledger, the trade notifier).
 
 | Unit | Role |
 | --- | --- |
@@ -23,7 +23,8 @@ Thirteen unit files: ten services, the two liveness timers, and the LLM-ledger t
 | `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
 | `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume — there is no close button) — the sole `getUpdates` consumer |
-| `liquidity-migration-llm-ledger.service` | Forward-only research: journals LLM driver judgments on live movers and fresh 1/2/4/12/24h trigger events (public data, no account, no orders) — run by its hourly timer |
+| `liquidity-migration-llm-ledger.service` | LLM driver judgments on movers and trigger events, and the live gate's book (`long_llm_gate_v1`) — run by its hourly timer |
+| `liquidity-migration-trade-notify.service` | Diffs the target books and sends every sleeve's entries and exits to the owner's DM — run by its 5-minute timer |
 
 The liveness services are invoked by their matching timers, and the engines own
 the accounts. Target producers and auxiliary services have private API, mainnet,
@@ -90,6 +91,7 @@ they are what trades.
 | `demo-liveness.timer` | `OnActiveSec=1min` | `OnUnitActiveSec=3min` |
 | `mainnet-liveness.timer` | `OnActiveSec=10min` | `OnUnitActiveSec=3min` |
 | `llm-ledger.timer` | `OnCalendar=*-*-* *:05:00` | `Persistent=true` |
+| `trade-notify.timer` | `OnCalendar=*-*-* *:0/5:30` | `Persistent=true` |
 
 The demo observer fires a minute after the timer arms; cold-start noise is
 handled by the watchdog's own startup grace (`--max-cycle-age-min 10`). Both

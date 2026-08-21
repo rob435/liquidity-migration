@@ -1,0 +1,32 @@
+[Unit]
+Description=liquidity-migration trade updates: book entries and exits to the owner's DM
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Three file reads and a handful of Telegram sends; the 5-minute timer must
+# never find a hung run still activating.
+TimeoutStartSec=120
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+# The Telegram token rides in the venue env file; the venue credentials are
+# stripped right back out -- this unit talks to the phone, never the account.
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
+Environment=TELEGRAM_ENABLED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+StateDirectory=liquidity-migration/book-notify
+ReadWritePaths=/var/lib/liquidity-migration/book-notify
+MemoryMax=256M
+# An observer must not preempt the producers (Nice=5) or the owners (Nice=-5).
+Nice=10
+ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-trade-notify.service main
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal

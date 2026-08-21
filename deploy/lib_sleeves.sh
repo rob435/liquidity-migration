@@ -10,7 +10,7 @@ LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}
 
 # These units keep their whole workload argv in run_authorized_runtime.sh, so a
 # drop-in or alternate fragment cannot replace it after the commit is reviewed.
-LM_AUTHORIZED_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-telegram-controls.service liquidity-migration-llm-ledger.service"
+LM_AUTHORIZED_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-telegram-controls.service liquidity-migration-llm-ledger.service liquidity-migration-trade-notify.service"
 
 lm_parse_sleeve_environment() {
     _lpe_file="$1"

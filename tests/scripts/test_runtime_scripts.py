@@ -1463,7 +1463,8 @@ def _verify_harness(
 _VERIFY_GREEN = (
         "liquidity-migration-demo-liveness.timer "
     "liquidity-migration-telegram-controls.service "
-    "liquidity-migration-llm-ledger.timer"
+    "liquidity-migration-llm-ledger.timer "
+    "liquidity-migration-trade-notify.timer"
 )
 
 
@@ -1512,11 +1513,12 @@ def test_verify_reports_every_mismatch_with_a_unit_table_not_just_the_first() ->
         "verify-mismatch liveness timer is not active",
         "verify-mismatch telegram controls daemon is not active",
         "verify-mismatch LLM ledger timer is not active",
+        "verify-mismatch trade notify timer is not active",
         "verify-mismatch liquidity-migration-demo-liveness.service is failed",
         "verify-mismatch demo order permission verification failed",
     ):
         assert finding in combined, finding
-    assert "found 5 mismatch(es)" in combined
+    assert "found 6 mismatch(es)" in combined
     assert "verify-ok" not in combined
     # The table is printed before the verdict, so it survives the failure.
     assert combined.index("verify-units") < combined.index("fail:topology verification")

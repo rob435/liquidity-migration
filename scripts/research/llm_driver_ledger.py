@@ -691,45 +691,34 @@ def gate_action_message(action: dict[str, Any]) -> str | None:
     if kind == "entry":
         stop_pct = float(action.get("stop_loss_fraction", 0.0)) * 100
         return (
-            f"LLM gate entry: {symbol} ${action.get('notional_usdt')} "
+            f"LONG entry (LLM gate): {symbol} ${action.get('notional_usdt')} "
             f"(score {action.get('score')}, stop {stop_pct:.1f}% below)"
         )
     if kind.startswith("exit:"):
         reason = kind.split(":", 1)[1]
         age = action.get("age_h")
         age_txt = f" after {age}h" if age is not None else ""
-        return f"LLM gate exit ({reason}): {symbol}{age_txt}"
+        return f"LONG exit (LLM gate, {reason}): {symbol}{age_txt}"
     return None
 
 
 def notify_gate_actions(actions: list[dict[str, Any]]) -> None:
     """Best-effort phone line: a Telegram failure never touches the cycle.
 
-    Trade updates go to their own bot when TRADE_TELEGRAM_BOT_TOKEN and
-    TRADE_TELEGRAM_CHAT_ID are set (the gate's env file); otherwise the
-    fleet's bot carries them. The fleet bot is the debugging line -- the
-    split is the owner's, and the dedicated pair is how it is expressed.
+    Trade updates ride the main line — the owner's DM with the bot; the
+    group chat is the debugging line and belongs to the watchdog.
     """
 
     try:
-        from liquidity_migration.ops.telegram import TelegramConfig, send_telegram_message
+        from liquidity_migration.ops.telegram import send_telegram_message
     except Exception:
         return
-    config = None
-    if os.environ.get("TRADE_TELEGRAM_BOT_TOKEN", "").strip():
-        config = TelegramConfig(
-            token_env="TRADE_TELEGRAM_BOT_TOKEN",
-            chat_id_env="TRADE_TELEGRAM_CHAT_ID",
-            alert_chat_id_env="TRADE_TELEGRAM_CHAT_ID",
-        )
     for action in actions:
         text = gate_action_message(action)
         if text is None:
             continue
         try:
-            send_telegram_message(
-                text, config=config, enabled=_env_on("TELEGRAM_ENABLED"), channel="main"
-            )
+            send_telegram_message(text, enabled=_env_on("TELEGRAM_ENABLED"), channel="main")
         except Exception:
             continue
 

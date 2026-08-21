@@ -85,6 +85,13 @@ case "$UNIT:$ENTRYPOINT" in
             --telegram
         )
         ;;
+    liquidity-migration-trade-notify.service:main)
+        # Read-only book differ; sends trade updates to the owner's DM.
+        COMMAND=(
+            /opt/liquidity-migration/.venv/bin/python
+            scripts/runtime/notify_book_changes.py
+        )
+        ;;
     liquidity-migration-llm-ledger.service:main)
         # Forward-only research: nominates movers and journals LLM driver
         # judgments. Public market data only; no account, no orders.

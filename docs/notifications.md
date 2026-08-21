@@ -28,12 +28,15 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope | alerts |
 | `telegram-controls` | on | control panel + action results; **also listens** | main |
 | `engine` / `engine-mainnet` | off — the unit strips the token | nothing; the engine's live signal is its heartbeat file, which the watchdog reads | — |
-| `llm-ledger` | on | LLM gate entries and exits (target decisions, not fills) | the trade bot when `TRADE_TELEGRAM_BOT_TOKEN`/`TRADE_TELEGRAM_CHAT_ID` are set in `llm-ledger.env`, else main |
+| `llm-ledger` | on | LONG (LLM gate) entries and exits, with score and stop (target decisions, not fills) | main |
+| `trade-notify` | on | every sleeve's entries and exits from the target books (carry, LONG, exodus), 5-minute diff | main |
 | every producer | off or unset | nothing | — |
 
-Producers publish targets and never notify (the LLM gate's ledger service is
-the one exception: its entry and exit decisions go to the main line). A
-producer that goes quiet is the watchdog's problem.
+Producers publish targets and never notify; the phone's trading story comes
+from the two notifier units above, reading the books the producers publish.
+The main line is the owner's DM with the bot; the alerts line is the group,
+and it belongs to the watchdog. A producer that goes quiet is the watchdog's
+problem.
 
 ## Owner control buttons
 
