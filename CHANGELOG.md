@@ -45,6 +45,20 @@ edit STATE.md to match.
   `TARGET_BOOK_VERSION`; the first valid book lands with the 10:05 hourly
   run.
 
+- **2026-08-21 ~11:00 UTC — gate entries and exits reach the phone
+  (`95dd2776`, staged `--stop-first`).** The fleet had never reported a trade
+  to Telegram (watchdog pages and the control panel were the whole phone);
+  the gate's ledger service now sends its entry and exit decisions to the
+  main line — target decisions, honestly labeled, not fills. The unit borrows
+  the token from `bybit-demo.env` and strips the venue credentials; a
+  Telegram failure never touches the trading cycle. Pipe proven end-to-end
+  with a catch-up message for the two standing gate targets (ADAUSDT $35.69,
+  BOMEUSDT $18.75, both score 6). Their FILLS are a separate open question —
+  the engine follows both symbols and reads the book (targets=2) but logs no
+  sends and no refusals; under investigation in the parallel session that
+  fixed the book-version defect and the boot claim wedges (`cccde3ca` …
+  `9a839cfd`).
+
 - **2026-08-21 ~00:50 UTC — the LLM gate goes LIVE on demo: score ≥ 6 is an
   entry (`5d4a3641`, staged `--stop-first`; owner decision, 0 scored days).**
   The hourly ledger service writes a fourth engine sleeve (`llm_gate`, book
