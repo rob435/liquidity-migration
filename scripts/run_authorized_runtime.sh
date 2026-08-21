@@ -92,6 +92,7 @@ case "$UNIT:$ENTRYPOINT" in
             /opt/liquidity-migration/.venv/bin/python
             scripts/research/llm_driver_ledger.py
             --once
+            --triggers
             --ledger-dir /var/lib/liquidity-migration/llm-driver-ledger
         )
         ;;

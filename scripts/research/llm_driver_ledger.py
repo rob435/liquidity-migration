@@ -16,9 +16,15 @@ So this script does exactly two things, and never trades:
            and volume anomaly, listing age), ask the model to walk a fixed
            methodology, and append facts + judgment to a JSONL ledger,
            timestamped, before the outcome exists.
+  --triggers  the shadow entry gate, run hourly: detect fresh intraday
+           deep-trigger events (rolling 24h window, the 2.5-sigma family,
+           regime and ATR gates approximated from public data), judge each,
+           and journal the would-be entry with its trigger-hour price and a
+           provisional would_enter at score >= 7. The same flow a live gate
+           would run, pointed at the ledger instead of the order book.
   --grade  for ledger rows at least 3 days old, fetch what actually happened
-           (public klines) and print forward return by prompt version and
-           judged driver kind.
+           (public klines) and print forward return by prompt version, row
+           type, and judged driver kind.
 
 The methodology prompt is a rubric authored by the stronger model and
 executed by the cheap one; each step reports its own field so a failed
@@ -150,7 +156,15 @@ def enrich(symbol: str, facts: dict[str, Any]) -> dict[str, Any]:
         rows.sort(key=lambda r: int(r[0]))
         closes = [float(r[4]) for r in rows[:-1]]  # completed days only
         highs = [float(r[2]) for r in rows[:-1]]
+        lows = [float(r[3]) for r in rows[:-1]]
         turnovers = [float(r[6]) for r in rows[:-1]]
+        if len(closes) >= 15:
+            trs = [
+                max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+                for i in range(len(closes) - 14, len(closes))
+            ]
+            if closes[-1] > 0:
+                facts["atr_14d_pct"] = round(sum(trs) / len(trs) / closes[-1], 4)
         if len(closes) >= 31:
             rets = [math.log(closes[i] / closes[i - 1]) for i in range(len(closes) - 30, len(closes))]
             sigma = statistics.pstdev(rets)
@@ -266,20 +280,23 @@ def judge(facts: dict[str, Any]) -> dict[str, Any] | None:
 
 
 RENOMINATION_HOURS = 12
+TRIGGER_SUPPRESSION_HOURS = 24
 
 
-def _recently_nominated(path: Path, now: dt.datetime) -> set[str]:
-    """Symbols already nominated inside the suppression window: one pump, one
-    ledger row — hourly re-rows of the same move would only inflate n with
+def _recently_nominated(path: Path, now: dt.datetime, *, hours: int, row_type: str | None = None) -> set[str]:
+    """Symbols already journaled inside the suppression window: one pump, one
+    ledger row — re-rows of the same move would only inflate n with
     correlated points."""
 
     if not path.exists():
         return set()
-    cutoff = now - dt.timedelta(hours=RENOMINATION_HOURS)
+    cutoff = now - dt.timedelta(hours=hours)
     recent: set[str] = set()
     for line in path.open():
         try:
             row = json.loads(line)
+            if row_type is not None and row.get("row_type", "mover") != row_type:
+                continue
             if dt.datetime.fromisoformat(row["ts_utc"]) >= cutoff:
                 recent.add(str(row["facts"]["symbol"]))
         except Exception:
@@ -291,7 +308,7 @@ def cmd_once(ledger_dir: Path) -> None:
     ledger_dir.mkdir(parents=True, exist_ok=True)
     path = ledger_dir / "ledger.jsonl"
     now = dt.datetime.now(dt.timezone.utc)
-    recent = _recently_nominated(path, now)
+    recent = _recently_nominated(path, now, hours=RENOMINATION_HOURS, row_type="mover")
     nominees = [f for f in nominate() if f["symbol"] not in recent]
     with path.open("a") as fh:
         for facts in nominees:
@@ -299,6 +316,7 @@ def cmd_once(ledger_dir: Path) -> None:
             row = {
                 "ts_utc": now.isoformat(timespec="seconds"),
                 "prompt_version": PROMPT_VERSION,
+                "row_type": "mover",
                 "facts": facts,
                 "judgment": judgment,
             }
@@ -311,6 +329,178 @@ def cmd_once(ledger_dir: Path) -> None:
             )
             print(f"{facts['symbol']:<14} +{facts['move_24h']:.0%}  {verdict}")
     print(f"{len(nominees)} nomination(s) appended to {path}")
+
+
+WOULD_ENTER_SCORE = 7
+
+# Detection horizons in hours. The daily program measured only the 24h
+# window; the shorter horizons are untested and the ledger is where they
+# earn or lose a record. A window's bar is the daily 2.5-sigma trigger
+# scaled by sqrt(h/24), the same variance scaling the registered 3d/7d
+# triggers use in the other direction.
+TRIGGER_WINDOWS_H = (1, 2, 4, 12, 24)
+TRIGGER_ROWS_MAX = 10
+
+
+def _completed_hourly(symbol: str, limit: int = 26) -> list[list[Any]]:
+    rows = _result_list(
+        _http_json(
+            f"{BYBIT_PUBLIC}/v5/market/kline?category=linear&symbol={symbol}&interval=60&limit={limit}"
+        )
+    )
+    rows.sort(key=lambda r: int(r[0]))
+    now_ms = dt.datetime.now(dt.timezone.utc).timestamp() * 1000
+    return [r for r in rows if int(r[0]) + 3_600_000 <= now_ms]
+
+
+def _daily_regime_on(symbol: str) -> bool | None:
+    rows = _result_list(
+        _http_json(f"{BYBIT_PUBLIC}/v5/market/kline?category=linear&symbol={symbol}&interval=D&limit=32")
+    )
+    rows.sort(key=lambda r: int(r[0]))
+    closes = [float(r[4]) for r in rows[:-1]]
+    if len(closes) < 31:
+        return None
+    sma = sum(closes[-30:]) / 30.0
+    return closes[-1] > sma
+
+
+def cmd_triggers(ledger_dir: Path) -> None:
+    """The shadow entry gate: the exact flow a live gate would run, pointed at
+    the ledger. Universe and regime gates are public-data approximations of
+    the registered daily rule; the promotion math re-derives on the journaled
+    candidates, so an approximate nominator only costs coverage, never truth.
+    """
+
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    path = ledger_dir / "ledger.jsonl"
+    now = dt.datetime.now(dt.timezone.utc)
+    btc_on = _daily_regime_on("BTCUSDT")
+    eth_on = _daily_regime_on("ETHUSDT")
+    if not (btc_on and eth_on):
+        print(f"regime off (btc={btc_on} eth={eth_on}); no triggers scanned")
+        return
+    recent = _recently_nominated(path, now, hours=TRIGGER_SUPPRESSION_HOURS, row_type="trigger")
+
+    body = _http_json(f"{BYBIT_PUBLIC}/v5/market/tickers?category=linear")
+    rows = _result_list(body)
+    usdt = [r for r in rows if str(r.get("symbol", "")).endswith("USDT")]
+    by_symbol = {str(r["symbol"]): r for r in usdt}
+    usdt.sort(key=lambda r: -float(r.get("turnover24h") or 0.0))
+
+    def _move_of(symbol: str) -> float | None:
+        row = by_symbol.get(symbol)
+        return round(float(row.get("price24hPcnt") or 0.0), 4) if row else None
+
+    fired = 0
+    with path.open("a") as fh:
+        for rank, t in enumerate(usdt[:MAX_TURNOVER_RANK], start=1):
+            symbol = str(t["symbol"])
+            if symbol in recent:
+                continue
+            try:
+                hourly = _completed_hourly(symbol)
+            except Exception:
+                continue
+            if len(hourly) < 25:
+                continue
+            closes = [float(r[4]) for r in hourly]
+            all_highs = [float(r[2]) for r in hourly]
+            all_lows = [float(r[3]) for r in hourly]
+            trigger_close = closes[-1]
+            if trigger_close <= 0:
+                continue
+            window_stats: dict[int, tuple[float, float]] = {}
+            for h in TRIGGER_WINDOWS_H:
+                base = closes[-1 - h]
+                if base <= 0:
+                    continue
+                ret_h = math.log(trigger_close / base)
+                hi = max(all_highs[-h:])
+                lo = min(all_lows[-h:])
+                loc_h = (trigger_close - lo) / (hi - lo) if hi > lo else 0.5
+                window_stats[h] = (ret_h, loc_h)
+            if not any(
+                ret > 0.0 and loc >= 0.70 for ret, loc in window_stats.values()
+            ):
+                continue
+            roll_ret = window_stats.get(24, (0.0, 0.5))[0]
+            facts: dict[str, Any] = {
+                "symbol": symbol,
+                "move_24h": round(math.expm1(roll_ret), 4),
+                "turnover_24h_usdt": round(float(t.get("turnover24h") or 0.0), 0),
+                "turnover_rank": rank,
+                "last_price": trigger_close,
+                "trigger_price": trigger_close,
+                "trigger_bar_end_utc": dt.datetime.fromtimestamp(
+                    (int(hourly[-1][0]) + 3_600_000) / 1000, tz=dt.timezone.utc
+                ).isoformat(timespec="seconds"),
+                "funding_rate": float(t.get("fundingRate") or 0.0),
+                "btc_move_24h": _move_of("BTCUSDT"),
+                "eth_move_24h": _move_of("ETHUSDT"),
+                "hour_utc": now.hour,
+            }
+            mark = float(t.get("markPrice") or 0.0)
+            index = float(t.get("indexPrice") or 0.0)
+            if index > 0:
+                facts["perp_premium_bp"] = round((mark / index - 1.0) * 10_000, 1)
+            if facts["btc_move_24h"] is not None:
+                facts["idio_move_24h"] = round(facts["move_24h"] - facts["btc_move_24h"], 4)
+            facts = enrich(symbol, facts)
+            sigma = facts.get("sigma_daily_30d")
+            # enrich derives depth from move_24h == the rolling return here, so
+            # the depth gate and the judged fact agree by construction.
+            depth = facts.get("depth_ratio")
+            atr_pct = facts.get("atr_14d_pct")
+            if not isinstance(sigma, float) or sigma <= 0.0:
+                continue
+            if not isinstance(atr_pct, float) or atr_pct <= 0.0 or atr_pct > 0.12:
+                continue
+            windows_fired = []
+            for h in TRIGGER_WINDOWS_H:
+                stats = window_stats.get(h)
+                if stats is None:
+                    continue
+                ret_h, loc_h = stats
+                bar_h = 2.5 * sigma * math.sqrt(h / 24.0)
+                if bar_h > 0 and loc_h >= 0.70 and ret_h / bar_h >= 1.0:
+                    windows_fired.append(h)
+                    facts[f"move_{h}h"] = round(math.expm1(ret_h), 4)
+                    facts[f"depth_{h}h"] = round(ret_h / bar_h, 2)
+            if not windows_fired:
+                continue
+            fastest = min(windows_fired)
+            facts["windows_fired_h"] = windows_fired
+            facts["trigger_window_h"] = fastest
+            facts["range_location"] = round(window_stats[fastest][1], 3)
+            depth = facts.get(f"depth_{fastest}h")
+            judgment = judge(facts)
+            score = (judgment or {}).get("pump_quality_score")
+            would_enter = isinstance(score, (int, float)) and score >= WOULD_ENTER_SCORE
+            row = {
+                "ts_utc": now.isoformat(timespec="seconds"),
+                "prompt_version": PROMPT_VERSION,
+                "row_type": "trigger",
+                "would_enter": bool(would_enter),
+                "would_enter_score_min": WOULD_ENTER_SCORE,
+                "facts": facts,
+                "judgment": judgment,
+            }
+            fh.write(json.dumps(row) + "\n")
+            fired += 1
+            verdict = (
+                f"score={score} would_enter={'YES' if would_enter else 'no'}"
+                if judgment
+                else "unjudged"
+            )
+            print(
+                f"TRIGGER {symbol:<14} {facts['trigger_window_h']}h window "
+                f"+{facts[f'move_{fastest}h']:.0%} depth={depth}  {verdict}"
+            )
+            if fired >= TRIGGER_ROWS_MAX:
+                print("trigger row cap reached this run")
+                break
+    print(f"{fired} trigger event(s) journaled")
 
 
 def _forward_return(symbol: str, from_ms: int, hours: int) -> float | None:
@@ -346,7 +536,8 @@ def cmd_grade(ledger_dir: Path) -> None:
         if ts > cutoff:
             continue
         judgment = row.get("judgment") or {}
-        kind = str(judgment.get("driver_kind", "unjudged"))
+        row_type = str(row.get("row_type", "mover"))
+        kind = f"{row_type}:{judgment.get('driver_kind', 'unjudged')}"
         version = str(row.get("prompt_version", "?"))
         fwd = _forward_return(row["facts"]["symbol"], int(ts.timestamp() * 1000), 72)
         if fwd is None:
@@ -355,7 +546,7 @@ def cmd_grade(ledger_dir: Path) -> None:
         score = judgment.get("pump_quality_score")
         if isinstance(score, (int, float)):
             band = "score 0-3" if score <= 3 else ("score 4-6" if score <= 6 else "score 7-10")
-            buckets.setdefault((version, band), []).append(fwd)
+            buckets.setdefault((version, f"{row_type}:{band}"), []).append(fwd)
         graded += 1
     print(f"graded {graded} row(s) at the 72h horizon:")
     for (version, kind), vals in sorted(buckets.items(), key=lambda kv: (kv[0][0], -len(kv[1]))):
@@ -367,6 +558,7 @@ def cmd_grade(ledger_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--once", action="store_true", help="nominate, enrich, and judge current movers")
+    parser.add_argument("--triggers", action="store_true", help="shadow entry gate: judge fresh intraday trigger events")
     parser.add_argument("--grade", action="store_true", help="grade rows at least 3 days old")
     parser.add_argument(
         "--ledger-dir",
@@ -377,10 +569,12 @@ def main() -> None:
     ledger_dir = Path(args.ledger_dir).expanduser()
     if args.once:
         cmd_once(ledger_dir)
-    elif args.grade:
+    if args.triggers:
+        cmd_triggers(ledger_dir)
+    if args.grade:
         cmd_grade(ledger_dir)
-    else:
-        parser.error("pass --once or --grade")
+    if not (args.once or args.triggers or args.grade):
+        parser.error("pass --once, --triggers, or --grade")
 
 
 if __name__ == "__main__":
