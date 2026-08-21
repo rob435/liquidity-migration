@@ -1,15 +1,17 @@
-"""Render the real-money operational profile from one env file of dials.
+"""Render the real-money operational profile.
 
-The owner surface is two numbers: a leverage multiple per sleeve. Everything
-else in the profile — the account caps, the sleeve partition, margin ceilings,
-the daily loss halt, stops — is derived from them here and still walks the
-full load-time proof. A retired dial left in the env file is refused by name;
-nothing is silently ignored.
+Sizing lives in three env dials the producers read directly
+(``CARRY_NOTIONAL_MULTIPLIER``, ``LONG_NOTIONAL_MULTIPLIER``,
+``EXODUS_NOTIONAL_MULTIPLIER``, documented in ``deploy/bybit-mainnet.env.template``).
+This module only builds the account document: caps, partition, entry leverage,
+and each strategy's default multiplier. It is static — no dial math — so the
+committed ``configs/operational.mainnet.json`` is its exact output, held to that
+by a test.
 
-The dials are ratios, never money: the capital reference tracks observed venue
-equity, so the wallet answers "how much" and these answer "in what proportion".
-``configs/operational.mainnet.json`` is the render of the defaults below, held
-to that by a test.
+The capital reference tracks observed venue equity, so every cap below is a
+ratio of the wallet and the declared 100 USDT scale is only a floor. The one
+live dial here is ``RM_CARRY_STOP_LOSS_FRACTION``; any other ``RM_*`` line in
+an env file is refused by name.
 """
 
 from __future__ import annotations
@@ -28,60 +30,29 @@ from liquidity_migration.policy.operational_profile import (
 
 __all__ = [
     "REAL_MONEY_DIAL_PREFIX",
-    "MAX_REAL_MONEY_LEVERAGE",
     "RealMoneyDials",
     "dial_environment_keys",
-    "long_worst_case_upscale",
     "parse_real_money_dials",
     "render_real_money_profile",
     "render_real_money_profile_json",
 ]
 
-#: Every dial is one environment variable named ``RM_<FIELD>`` in upper case.
+#: Every dial this module reads is one environment variable named
+#: ``RM_<FIELD>`` in upper case.
 REAL_MONEY_DIAL_PREFIX = "RM_"
 
-#: Ceiling on total account gross, as a multiple of the wallet: the two
-#: sleeve dials may sum to at most 10.0. Owner's dial, owner's risk — but be
-#: clear what protects the book up there: the envelope reads observed equity
-#: and each position's venue-native stop bounds that position, while an open
-#: position's drawdown meets the venue's liquidation engine first. At 10x
-#: gross a ~10% adverse move on the book is the wallet.
-MAX_REAL_MONEY_LEVERAGE = 10.0
-
-# Derived constants, not dials. Fixed on purpose: none of them is a sizing
-# decision, and every one is still enforced.
-# 5.0 since 2026-08-20 (owner sizing directive, matching the demo fleet):
-# a margin knob, so entries never fight for room; the envelope and the
-# per-position venue stops are what actually bound the book.
-_ENTRY_LEVERAGE = 5.0  # venue margin leverage floor requested per order
+# Fixed constants, not dials.
+_ENTRY_LEVERAGE = 5.0  # venue margin leverage requested per order
 _EQUITY_FLOOR_USDT = 100.0  # reference floor against unreadable balances
 _EXPAND_DEAD_BAND_FRACTION = 0.05  # envelope expands only past this band
-_SYMBOL_NOTIONAL_FRACTION = 0.5  # largest single-symbol position
 _CARRY_MAX_NEW_ENTRIES_PER_CYCLE = 10
 _LONG_MAX_NEW_ENTRIES_PER_CYCLE = 5
 
 
 @dataclass(frozen=True, slots=True)
 class RealMoneyDials:
-    """Owner-facing dials: one leverage multiple per sleeve, two protections.
+    """The one live dial on this surface: the carry disaster-stop distance."""
 
-    Each leverage dial is the most that sleeve's book can reach, as a multiple
-    of account equity, with the strategy's own worst-case upscaling
-    (volatility and weekend size multipliers) already inside the number.
-    Together they may total at most 10.0; past a total of 5 (the entry-leverage
-    floor) the venue margin leverage the producers request rises with the dials,
-    and the venue's liquidation engine becomes the binding backstop on an open
-    book.
-    """
-
-    #: Carry book ceiling, x equity. Each name takes up to one tenth of the
-    #: dial: at 0.5 a name is up to 5% of equity and the book up to 50%.
-    #: 0.5 since 2026-08-20 (owner: each sleeve sizes from half the account).
-    carry_leverage: float = 0.5
-    #: LONG book ceiling, x equity, across its 10 slots with the vol/weekend
-    #: upscaling included. Each entry is the dial / 18.75 of equity nominally.
-    #: 0.5 since 2026-08-20, same directive.
-    long_leverage: float = 0.5
     #: Venue-native disaster-stop distance on carry entries, armed with the
     #: entry. Wide on purpose: the funding-normalisation exit is the intended
     #: exit; this only covers the case where nothing local is running.
@@ -94,17 +65,8 @@ def dial_environment_keys() -> tuple[str, ...]:
     return tuple(f"{REAL_MONEY_DIAL_PREFIX}{field.name.upper()}" for field in fields(RealMoneyDials))
 
 
-def long_worst_case_upscale() -> float:
-    """The LONG strategy's own worst-case size upscaling over a nominal entry."""
-
-    from liquidity_migration.rules.long_native import long_v11a_profile
-
-    strategy = long_v11a_profile()
-    return float(strategy.vol_target_max_scale) * max(1.0, float(strategy.weekend_size_mult))
-
-
 def parse_real_money_dials(environment: Mapping[str, str]) -> RealMoneyDials:
-    """Read the dials out of one environment mapping.
+    """Read the dial out of one environment mapping.
 
     An absent variable takes the committed default; a present but unparseable
     one raises rather than silently falling back to it, and a retired ``RM_*``
@@ -122,8 +84,8 @@ def parse_real_money_dials(environment: Mapping[str, str]) -> RealMoneyDials:
         raise ValueError(
             "retired real-money dial(s) in the env file: "
             + ", ".join(retired)
-            + "; sizing is now RM_CARRY_LEVERAGE and RM_LONG_LEVERAGE only - "
-            "delete the old lines"
+            + "; sizing is now CARRY_NOTIONAL_MULTIPLIER, LONG_NOTIONAL_MULTIPLIER, "
+            "and EXODUS_NOTIONAL_MULTIPLIER in the fleet env files - delete the old lines"
         )
     values: dict[str, Any] = {}
     for key, name in known.items():
@@ -142,29 +104,6 @@ def parse_real_money_dials(environment: Mapping[str, str]) -> RealMoneyDials:
     return RealMoneyDials(**values)
 
 
-def _validate_dials(dials: RealMoneyDials) -> None:
-    """Refuse a dial pair before it can produce a profile."""
-
-    for name, value in (
-        ("carry_leverage", dials.carry_leverage),
-        ("long_leverage", dials.long_leverage),
-    ):
-        if not math.isfinite(value) or value <= 0.0:
-            raise ValueError(
-                f"{REAL_MONEY_DIAL_PREFIX}{name.upper()} must be finite and positive; "
-                "mute a sleeve with its sleeves.env toggle, not a zero dial"
-            )
-    total = dials.carry_leverage + dials.long_leverage
-    if total > MAX_REAL_MONEY_LEVERAGE + 1e-12:
-        raise ValueError(
-            f"RM_CARRY_LEVERAGE + RM_LONG_LEVERAGE ({total:g}) cannot exceed "
-            f"{MAX_REAL_MONEY_LEVERAGE:g}: that much of the wallet is the ceiling "
-            "on a funded account"
-        )
-    if not math.isfinite(dials.carry_stop_loss_fraction) or not 0.0 < dials.carry_stop_loss_fraction < 1.0:
-        raise ValueError("RM_CARRY_STOP_LOSS_FRACTION must sit in (0, 1)")
-
-
 def render_real_money_profile_json(
     dials: RealMoneyDials | None = None,
     *,
@@ -172,58 +111,36 @@ def render_real_money_profile_json(
 ) -> dict[str, Any]:
     """Build the profile document. ``capital_reference_usdt`` is only a scale.
 
-    It is the starting scale for the load-time proof, not a limit:
-    ``capital_reference.mode = account_equity`` makes the runtime reference
-    track the wallet, and every number below is a ratio of it.
+    The declared number sizes the caps in the instant before the first equity
+    read; at the floor those caps are the smallest the runtime can ever hold.
 
-    The default is the equity FLOOR, not some larger invented figure. The scale
-    cancels out the moment the wallet is read, so the only thing the declared
-    number can ever do is size the caps in the instant before that read — and at
-    the floor those caps are the smallest the runtime can ever hold. A bigger
-    declared scale can only ever be wrong in the expensive direction: the funded
-    account ran with a declared 2,500 against an observed 355, which is a 7x
-    envelope for anything served before the first rebase.
+    The multipliers below are defaults, not ceilings: the producers' env dials
+    override them per fleet without touching this file. The account caps are
+    what bounds the BOOK; a book the dials build past them is refused per
+    entry by the engine's runtime admission, never silently resized.
     """
 
     dials = RealMoneyDials() if dials is None else dials
-    _validate_dials(dials)
+    if (
+        not math.isfinite(dials.carry_stop_loss_fraction)
+        or not 0.0 < dials.carry_stop_loss_fraction < 1.0
+    ):
+        raise ValueError("RM_CARRY_STOP_LOSS_FRACTION must sit in (0, 1)")
     reference = float(capital_reference_usdt)
     if not math.isfinite(reference) or reference <= 0.0:
         raise ValueError("capital_reference_usdt must be finite and positive")
     if _EQUITY_FLOOR_USDT > reference:
         raise ValueError("the equity floor cannot exceed the declared capital reference")
 
-    # The account cap is exactly what the two sleeves need: sleeve cap =
-    # account cap x share = the dial itself.
-    account_multiple = dials.carry_leverage + dials.long_leverage
-    account_gross = reference * account_multiple
-    margin_cap = reference  # margin above the wallet is the venue's business
-
-    leverage = max(_ENTRY_LEVERAGE, account_multiple)
-
-    upscale = long_worst_case_upscale()
-    long_multiplier = dials.long_leverage / upscale
-
-    # The single-symbol cap must admit each producer's own worst single
-    # position, so at high dials it scales with them (never past the account
-    # cap; the 0.5 floor keeps the historical bound at modest dials).
-    from liquidity_migration.rules.long_native import long_v11a_profile
-    from liquidity_migration.strategy.carry_demo import load_carry_config
-
-    long_strategy = long_v11a_profile()
-    long_single = dials.long_leverage * (
-        float(long_strategy.gross_exposure)
-        / max(int(long_strategy.max_concurrent_positions), 1)
-    )
-    carry_single = dials.carry_leverage * float(load_carry_config().per_name_cap)
-    symbol_fraction = min(
-        account_multiple,
-        max(_SYMBOL_NOTIONAL_FRACTION, long_single + 1e-9, carry_single + 1e-9),
-    )
+    # The gross cap is what the reference funds at entry leverage — reachable,
+    # so no load-time proof can call it scenery — and the margin cap is the
+    # wallet itself: margin above the wallet is the venue's business.
+    account_gross = reference * _ENTRY_LEVERAGE
+    margin_cap = reference
 
     def _share(gross_share: float) -> dict[str, float]:
         # The same fraction of *each* account cap, so the shares sum inside the
-        # account at any leverage.
+        # account exactly.
         return {
             "max_gross_notional_usdt": account_gross * gross_share,
             "max_initial_margin_usdt": margin_cap * gross_share,
@@ -242,28 +159,28 @@ def render_real_money_profile_json(
         "account_risk": {
             "max_component_gross_notional_usdt": account_gross,
             "max_account_gross_notional_usdt": account_gross,
-            "max_symbol_notional_usdt": reference * symbol_fraction,
+            "max_symbol_notional_usdt": reference * 0.5,
             "max_initial_margin_usdt": margin_cap,
-            "max_leverage": leverage,
+            "max_leverage": _ENTRY_LEVERAGE,
             "quantity_tolerance": 1e-12,
             "sleeve_limits": {
-                "carry": _share(dials.carry_leverage / account_multiple),
-                "long": _share(dials.long_leverage / account_multiple),
+                "carry": _share(0.4),
+                "long": _share(0.6),
             },
         },
         "long": {
-            "notional_multiplier": long_multiplier,
-            "entry_leverage": leverage,
+            "notional_multiplier": 3.0,
+            "entry_leverage": _ENTRY_LEVERAGE,
             "order_notional_pct_equity": 0.0,
             "max_new_entries_per_cycle": _LONG_MAX_NEW_ENTRIES_PER_CYCLE,
         },
         "carry": {
-            "notional_multiplier": dials.carry_leverage,
-            "entry_leverage": leverage,
+            "notional_multiplier": 3.0,
+            "entry_leverage": _ENTRY_LEVERAGE,
             "declared_stop_loss_fraction": dials.carry_stop_loss_fraction,
             "max_new_entries_per_cycle": _CARRY_MAX_NEW_ENTRIES_PER_CYCLE,
         },
-        "hedge": {"entry_leverage": leverage},
+        "hedge": {"entry_leverage": _ENTRY_LEVERAGE},
     }
 
 

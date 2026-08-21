@@ -584,6 +584,10 @@ class CarryDemoCycleConfig:
     early_exit_enabled: bool = False
     # --- sizing (operational profile carry block) ---
     notional_multiplier: float = 1.0
+    #: The EXODUS SHORT's own multiplier; None inherits ``notional_multiplier``
+    #: (the historical behavior). The ``EXODUS_NOTIONAL_MULTIPLIER`` env dial
+    #: sets it from the fleet env file.
+    exodus_notional_multiplier: float | None = None
     entry_leverage: float = 2.0
     declared_stop_loss_fraction: float = 0.35
     max_new_entries_per_cycle: int = 10
@@ -636,6 +640,11 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
         )
     if not math.isfinite(config.notional_multiplier) or config.notional_multiplier <= 0.0:
         raise ValueError("notional_multiplier must be positive")
+    if config.exodus_notional_multiplier is not None and (
+        not math.isfinite(config.exodus_notional_multiplier)
+        or config.exodus_notional_multiplier <= 0.0
+    ):
+        raise ValueError("exodus_notional_multiplier must be positive")
     if not math.isfinite(config.entry_leverage) or config.entry_leverage <= 0.0:
         raise ValueError("entry_leverage must be positive")
     if not 0.0 < config.declared_stop_loss_fraction < 1.0:
@@ -2621,7 +2630,11 @@ def run_carry_demo_cycle(
             root=root,
             fires=presettle_fire_details,
             sizing_equity_usdt=exodus_sizing_equity,
-            notional_multiplier=float(demo.notional_multiplier),
+            notional_multiplier=float(
+                demo.exodus_notional_multiplier
+                if demo.exodus_notional_multiplier is not None
+                else demo.notional_multiplier
+            ),
             entry_leverage=float(demo.entry_leverage),
             now_ms=cycle_now_ms,
         )
@@ -2742,6 +2755,11 @@ def run_carry_demo_cycle(
             "operational_profile_sha256": demo.operational_profile_sha256,
             "replay_days": demo.replay_days,
             "notional_multiplier": demo.notional_multiplier,
+            "exodus_notional_multiplier": (
+                demo.exodus_notional_multiplier
+                if demo.exodus_notional_multiplier is not None
+                else demo.notional_multiplier
+            ),
             "entry_leverage": demo.entry_leverage,
             "declared_stop_loss_fraction": demo.declared_stop_loss_fraction,
             "max_new_entries_per_cycle": demo.max_new_entries_per_cycle,

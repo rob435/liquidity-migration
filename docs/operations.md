@@ -156,27 +156,26 @@ are what hold size.
 
 ### Dials
 
-One file: [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template) →
-`/etc/liquidity-migration/bybit-mainnet.env`. Three dials, all optional (omitting one takes the
-committed default), all ratios of wallet equity. Sizing is one leverage multiple per sleeve — want more
-size, raise the multiple:
+Sizing is three dials in the fleet env file (`/etc/liquidity-migration/bybit-demo.env` for
+demo, `bybit-mainnet.env` for the funded fleet; both producer units read their file). Each
+entry = the strategy's base slot (10% of equity) × its multiplier. Omit a line and the
+committed profile's value applies; a malformed line refuses the producer's start rather
+than falling back.
 
 | Dial | Default | Meaning |
 | --- | --- | --- |
-| `RM_CARRY_LEVERAGE` | 0.5 | Carry book ceiling, ×equity. Each name takes up to a tenth of the dial: 0.5 → names up to 5% of equity, book up to 50%. |
-| `RM_LONG_LEVERAGE` | 0.5 | LONG book ceiling, ×equity, worst case included (10 slots; entries scale up to 1.25× calm / 1.5× weekend). Each entry ≈ dial/18.75 of equity: 0.5 → ~2.7% per entry, 1.88 → ~10%. |
+| `CARRY_NOTIONAL_MULTIPLIER` | 3.0 | Each new carry name = 10% of equity × this. 3.0 → 30% per name. |
+| `LONG_NOTIONAL_MULTIPLIER` | 3.0 | Each LONG entry = 10% of equity × this, before LONG's own vol/weekend scaling (up to ~1.9× on top). |
+| `EXODUS_NOTIONAL_MULTIPLIER` | 3.0 | The exodus short's own multiplier; omit it and it inherits carry's. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 
-The two leverage dials may total at most 10.0. Past a total of 5 — the entry-leverage floor — the
-venue margin leverage the producers request rises with the dials — gross above `entry leverage ×
-wallet` is physically unreachable — and the honest protection picture changes: nothing account-level
-bounds the day, a fast enough drawdown meets the venue's liquidation engine (at 10× gross, a ~10%
-adverse move is the wallet), and some symbols' own venue leverage limits may bind. Account caps, the
-sleeve partition, margin ceilings, entry leverage and the equity floor are
-all derived from the dials and proved at render; a retired `RM_*` variable left in the env file is
-refused by name. `scripts/ops.sh real-money render-profile` turns the dials into the profile the kernel
-enforces; a pair that cannot produce a loadable profile is refused there, naming the dial to move,
-instead of at start-up over a funded account.
+The BOOK ceiling is separate and lives in `configs/operational.mainnet.json` (gross cap =
+wallet × 5 at entry leverage 5, split between the sleeves): a book the multipliers build
+past it is refused per entry by the engine's runtime admission, never resized. Very high
+multipliers can also exceed some symbols' own venue leverage limits. A retired `RM_*`
+variable left in an env file is refused by name;
+`scripts/ops.sh real-money render-profile` re-renders the account document after a change
+to it.
 
 ### Arming (owner-executed)
 
@@ -185,7 +184,8 @@ Two acts, both yours:
 1. **Write the one file.** On the VPS, edit `/etc/liquidity-migration/bybit-mainnet.env` (start from
    [`deploy/bybit-mainnet.env.template`](../deploy/bybit-mainnet.env.template)): paste
    `BYBIT_REAL_API_KEY` / `BYBIT_REAL_API_SECRET` (contract trading only, **withdrawal disabled**,
-   IP-allowlisted to the VPS), set any `RM_*` dials you want off their defaults, and set
+   IP-allowlisted to the VPS), set any dials you want off their defaults (the
+   three `*_NOTIONAL_MULTIPLIER` lines and `RM_CARRY_STOP_LOSS_FRACTION`), and set
    `REAL_MONEY=true` — the whole arming decision, by your own hand. The live key never passes through
    an agent session.
 2. **Start the fleet**: `scripts/ops.sh deploy --execute activate`.

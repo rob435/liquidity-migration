@@ -46,6 +46,30 @@ def reject_ambiguous_flag(name: str, *, environ: Mapping[str, str] | None = None
     )
 
 
+def env_positive_float(
+    name: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> float | None:
+    """The named dial as a positive finite float, or None when unset.
+
+    An empty or malformed value raises rather than falling back: an operator
+    who typed a line meant to change the number.
+    """
+
+    source = os.environ if environ is None else environ
+    raw = source.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number; got {raw!r}") from exc
+    if not value > 0.0 or value != value or value in (float("inf"),):
+        raise ValueError(f"{name} must be finite and positive; got {raw!r}")
+    return value
+
+
 def validate_systemd_invocation_id(value: object, *, label: str = "systemd INVOCATION_ID") -> str:
     """Return one canonical non-zero systemd invocation identifier."""
 

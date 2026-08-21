@@ -272,6 +272,11 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
 
         operational_profile = load_operational_profile(args.operational_profile_file)
     long_settings = operational_profile.long if operational_profile else None
+    # The env dial wins over the profile: it is the owner's one-line risk-on
+    # control and ships in the fleet env files beside the credentials.
+    from liquidity_migration.core.env_flags import env_positive_float
+
+    long_multiplier_dial = env_positive_float("LONG_NOTIONAL_MULTIPLIER")
 
     # ws_klines_* defaults read off a throwaway default instance: on a slots
     # dataclass a class-level field access yields the member_descriptor, not
@@ -282,7 +287,11 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
         lookback_days=args.lookback_days,
         workers=args.workers,
         notional_multiplier=(
-            long_settings.notional_multiplier if long_settings else args.notional_multiplier
+            long_multiplier_dial
+            if long_multiplier_dial is not None
+            else (
+                long_settings.notional_multiplier if long_settings else args.notional_multiplier
+            )
         ),
         entry_leverage=(long_settings.entry_leverage if long_settings else args.entry_leverage),
         order_notional_pct_equity=(
@@ -380,6 +389,12 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
     # carry block is the only runtime sizing source, hence required here.
     operational_profile = load_operational_profile(args.risk_policy_file)
     carry_settings = operational_profile.carry
+    # The env dials win over the profile: they are the owner's one-line
+    # risk-on controls and ship in the fleet env files beside the credentials.
+    from liquidity_migration.core.env_flags import env_positive_float
+
+    carry_multiplier_dial = env_positive_float("CARRY_NOTIONAL_MULTIPLIER")
+    exodus_multiplier_dial = env_positive_float("EXODUS_NOTIONAL_MULTIPLIER")
     carry_demo_config = CarryDemoCycleConfig(
         execution_environment=args.execution_environment,
         account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
@@ -387,7 +402,12 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         candidate_universe_file=getattr(args, "candidate_universe_file", ""),
         strategy_profile=args.strategy_profile,
         early_exit_enabled=getattr(args, "early_exit_enabled", False),
-        notional_multiplier=carry_settings.notional_multiplier,
+        notional_multiplier=(
+            carry_multiplier_dial
+            if carry_multiplier_dial is not None
+            else carry_settings.notional_multiplier
+        ),
+        exodus_notional_multiplier=exodus_multiplier_dial,
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,
         max_new_entries_per_cycle=carry_settings.max_new_entries_per_cycle,

@@ -43,18 +43,18 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
 
     // Every assertion below is the literal number in the file. If the owner
     // changes a cap, this test is where the engine finds out.
-    // 2026-08-20 owner sizing directive: each sleeve half the wallet
-    // (dials 0.5/0.5), venue entry leverage floored at 5.
+    // 2026-08-21: a static document — entry leverage 5x, gross cap = what the
+    // reference funds at that leverage, multipliers living in the env dials.
     assert_eq!(cfg.envelope.reference_usdt, 100.0);
     assert_eq!(cfg.envelope.max_symbol_notional_usdt, 50.0);
-    assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 100.0);
+    assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 500.0);
     assert_eq!(cfg.envelope.max_initial_margin_usdt, 100.0);
     assert_eq!(cfg.partition.leverage, 5.0);
     assert_eq!(cfg.qty_tolerance, 1e-12);
 
-    // 100 of gross against a 100 reference: the two half-wallet sleeves.
-    assert_eq!(cfg.envelope.gross_notional_multiple, 1.0);
-    assert_eq!(cfg.envelope.account_gross_cap_usdt(), 100.0);
+    // 500 of gross against a 100 reference: exactly what leverage 5 funds.
+    assert_eq!(cfg.envelope.gross_notional_multiple, 5.0);
+    assert_eq!(cfg.envelope.account_gross_cap_usdt(), 500.0);
 
     // The funded account's reference follows the wallet, floored at 100.
     assert!(cfg.envelope.tracks_equity);
@@ -64,11 +64,11 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
 
     // The partition, in strategy order.
     let carry = cfg.partition.share(CARRY).expect("carry has a share");
-    assert_eq!(carry.max_gross_notional_usdt, 50.0);
-    assert_eq!(carry.max_initial_margin_usdt, 50.0);
+    assert_eq!(carry.max_gross_notional_usdt, 200.0);
+    assert_eq!(carry.max_initial_margin_usdt, 40.0);
     let long = cfg.partition.share(LONG).expect("long has a share");
-    assert_eq!(long.max_gross_notional_usdt, 50.0);
-    assert_eq!(long.max_initial_margin_usdt, 50.0);
+    assert_eq!(long.max_gross_notional_usdt, 300.0);
+    assert_eq!(long.max_initial_margin_usdt, 60.0);
 }
 
 #[test]
@@ -195,8 +195,9 @@ fn a_partition_that_oversubscribes_the_account_is_refused_at_load() {
     let sleeves = both_sleeves();
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    // Carry at 400 leaves long's 300 overshooting the 500 account cap.
     doc["account_risk"]["sleeve_limits"]["carry"]["max_gross_notional_usdt"] =
-        serde_json::json!(200.0);
+        serde_json::json!(400.0);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
     assert!(err.to_string().contains("above the account gross"), "{err}");
 }
@@ -240,15 +241,16 @@ fn a_gross_cap_no_amount_of_margin_could_fund_is_refused() {
 
 #[test]
 fn the_shipped_mainnet_profile_sits_inside_what_its_capital_can_fund() {
-    // 100 of book against 100 of reference at leverage 5, which funds 500.
-    // Stated because it is the margin the check above leaves, and a change to
-    // the dials that ate it would otherwise show up only as a refusal to boot.
+    // 500 of book against a 100 of reference at leverage 5, which funds
+    // exactly that. The full book posts 100 of margin — the declared margin
+    // cap to the last decimal — so a change that ate the headroom would
+    // otherwise show up only as a refusal to boot.
     let sleeves = both_sleeves();
     let cfg = kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs(&sleeves))
         .unwrap();
     let reachable = cfg.envelope.reference_usdt * cfg.partition.leverage;
     assert_eq!(reachable, 500.0);
-    assert_eq!(cfg.envelope.account_gross_cap_usdt(), 100.0);
+    assert_eq!(cfg.envelope.account_gross_cap_usdt(), 500.0);
 }
 
 #[test]

@@ -47,12 +47,12 @@ Entry fires when price touches `signal_close × 0.99` (`sniper_retrace`), or fal
 at the 6-hour deadline while the signal is still fresh (`sniper_deadline_fallthru`). Ten
 concurrent positions, 7-day per-symbol cooldown.
 
-**Sizing.** Base slot `gross_exposure / max_concurrent_positions` = 10% of equity, times
-`notional_multiplier` 0.5, times the BTC-vol scalar `clip(0.60 / btc_rv, 0.30, 1.25)`,
+**Sizing.** Base slot `gross_exposure / max_concurrent_positions` = 10% of equity, times the
+profile's `notional_multiplier`, times the BTC-vol scalar `clip(0.60 / btc_rv, 0.30, 1.25)`,
 times the vol-parity weight `max(min(0.30/vol_used, 3.0), 0.25)` (30d realized vol, 30%
 annual floor, 30% position-weight cap), times 1.5 on weekend entries. Entry leverage 5
-changes margin only, never quantity. Five new entries per cycle maximum; the producer
-refuses to run if projected full-book initial margin exceeds 50% of equity.
+changes margin only, never quantity. Five new entries per cycle maximum; how large a
+multiplier runs is the owner's dial in the operational profile.
 
 ### `LongV12WideStop` — registered 2026-08-01, deployed 2026-08-03
 

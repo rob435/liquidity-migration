@@ -16,6 +16,28 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 ~14:30 UTC — sizing collapses into three dials, and every
+  strategy runs 3x on both fleets (owner directive).** The owner surface is
+  now three env lines read directly by the producers:
+  `CARRY_NOTIONAL_MULTIPLIER`, `LONG_NOTIONAL_MULTIPLIER`,
+  `EXODUS_NOTIONAL_MULTIPLIER` — each entry = the strategy's base slot
+  (10% of equity) × its multiplier, all three at **3.0** (~30% of equity per
+  name) in both fleet env files and as the committed profile defaults. The
+  exodus short gets its own dial where it previously inherited carry's
+  number. What retired with this change: the `RM_CARRY_LEVERAGE` /
+  `RM_LONG_LEVERAGE` dials and their render math (the worst-case-upscale and
+  ÷18.75 indirections), `MAX_REAL_MONEY_LEVERAGE`, and the dial-driven
+  account document — `operational.mainnet.json` is static now: entry
+  leverage back at the 5× floor, gross cap wallet × 5 split carry/long
+  200/300, margin cap wallet, every cap a ratio of tracked equity. A book
+  the dials build past those caps is refused per entry by the engine's
+  runtime admission; an old `RM_*` leverage line in a host env file fails
+  the preflight by name. Demo multipliers were already at 3.0 from the same
+  day's earlier step (2.0→5.0→3.0 carry, 1.5→5.0→3.0 LONG); mainnet still
+  trades nothing (`shadow = true`, `ENGINE_LIVE=false`), so its change lands
+  on shadow books. Held components keep their fill-anchored size; demo fill
+  receipts grade forward from each deploy today.
+
 - **2026-08-21 — the LLM gate joins the LONG sleeve, and the sizing dials go
   to a true ~50% per entry (owner directive). Deployed as `ead58921`,
   staged `--profile operational --stop-first`: verify-ok, both engine

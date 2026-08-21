@@ -9,31 +9,31 @@
     "expand_dead_band_fraction": 0.05
   },
   "account_risk": {
-    "max_component_gross_notional_usdt": 100.0,
-    "max_account_gross_notional_usdt": 100.0,
+    "max_component_gross_notional_usdt": 500.0,
+    "max_account_gross_notional_usdt": 500.0,
     "max_symbol_notional_usdt": 50.0,
     "max_initial_margin_usdt": 100.0,
     "max_leverage": 5.0,
     "quantity_tolerance": 1e-12,
     "sleeve_limits": {
       "carry": {
-        "max_gross_notional_usdt": 50.0,
-        "max_initial_margin_usdt": 50.0
+        "max_gross_notional_usdt": 200.0,
+        "max_initial_margin_usdt": 40.0
       },
       "long": {
-        "max_gross_notional_usdt": 50.0,
-        "max_initial_margin_usdt": 50.0
+        "max_gross_notional_usdt": 300.0,
+        "max_initial_margin_usdt": 60.0
       }
     }
   },
   "long": {
-    "notional_multiplier": 0.26666666666666666,
+    "notional_multiplier": 3.0,
     "entry_leverage": 5.0,
     "order_notional_pct_equity": 0.0,
     "max_new_entries_per_cycle": 5
   },
   "carry": {
-    "notional_multiplier": 0.5,
+    "notional_multiplier": 3.0,
     "entry_leverage": 5.0,
     "declared_stop_loss_fraction": 0.35,
     "max_new_entries_per_cycle": 10

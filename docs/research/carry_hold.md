@@ -330,7 +330,8 @@ The battery was measured at registration, before the funding correction. Where
    below. Ledger row and method:
    [`research_findings.md`](research_findings.md) §2; report in
    `~/SHARED_DATA/bybit_full_pit/reports/carry_hold_exit_grid_2026-08-07/`.
-   Sizing: weight × owner equity × profile multiplier 2.0, per-name 0.10, gross
+   Sizing: weight × owner equity × the profile's carry multiplier, per-name
+   0.10, gross
    cap 1.0, entry leverage 5, under the engine risk kernel's caps. **The equity
    in that product is the equity as of the decision, not the live mark** —
    sizing off the live mark makes the day's targets a function of the book's own
