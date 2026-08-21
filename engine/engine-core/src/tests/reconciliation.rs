@@ -167,6 +167,108 @@ async fn a_clear_resets_the_memory_not_the_check() {
     );
 }
 
+/// Asks whether somebody else is holding its symbol, and writes down every
+/// answer.
+struct ForeignProbe {
+    symbol: String,
+    saw: Rc<RefCell<Vec<bool>>>,
+}
+
+impl Strategy for ForeignProbe {
+    fn name(&self) -> &str {
+        "probe"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        if let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event {
+            self.saw.borrow_mut().push(ctx.foreign_position(*symbol));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
+    // A previous run's log: the first sleeve bought ZEC, and the close never
+    // made the log — a venue stop fired inside a stream gap, say. The venue
+    // is flat now. The leftover claim must not keep the second sleeve out of
+    // the name forever.
+    let previous = vec![
+        WalRecord::Names {
+            strategies: vec!["carry".to_string(), "probe".to_string()],
+            symbols: vec!["ZECUSDT".to_string()],
+        },
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: "eng-old-1".to_string(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 2.0,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: false,
+            },
+            wire_ns: 1,
+            arrival_mid: 0.0,
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                client_order_id: "eng-old-1".to_string(),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 2.0,
+                px: 100.0,
+                fee: 0.01,
+                is_maker: false,
+                venue_ts_ms: 1,
+                recv_ns: 2,
+            },
+        },
+    ];
+    // Strategy 0 answers to the old log's "carry"; the probe is strategy 1.
+    let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
+    let saw = Rc::new(RefCell::new(Vec::new()));
+    let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw.clone() };
+    let (mut engine, h) = build(
+        false,
+        allow_all(),
+        vec![Box::new(idle), Box::new(probe)],
+        &["ZECUSDT"],
+        &previous,
+    )
+    .await;
+    let symbol = engine.market().table.get("ZECUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert!(!saw.borrow().is_empty(), "the probe must have been asked something");
+    assert!(
+        saw.borrow().iter().all(|foreign| !foreign),
+        "a flat symbol is nobody's; the stale claim must not survive boot"
+    );
+    let records = h.records.borrow();
+    assert!(
+        records.iter().any(|r| matches!(
+            r,
+            WalRecord::Note { text, .. } if text.contains("dropped stale sleeve claims")
+        )),
+        "the drop must leave a receipt in the log"
+    );
+}
+
 #[tokio::test]
 async fn a_latch_from_an_earlier_boot_survives_the_restart() {
     // The whole point of writing it down. A restart that cleared the latch

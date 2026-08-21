@@ -151,6 +151,35 @@ impl Attribution {
             .unwrap_or(0.0)
     }
 
+    /// Drop every row in the symbols the caller says are flat, returning
+    /// what was dropped, sorted.
+    ///
+    /// The account reading is the only word on how much is actually there
+    /// (module note above). A row surviving in a symbol the venue holds
+    /// nothing of is a close this log never got to charge — a venue stop
+    /// firing under our position, or an inherited position wound down — and
+    /// left in place it keeps [`Attribution::held_by_another`] claiming a
+    /// holding that does not exist, locking every other sleeve out of the
+    /// name for good. The caller decides what "flat" means; boot asks it
+    /// with the venue reading reconcile just judged, skipping symbols with
+    /// an order still in flight.
+    pub fn drop_where_flat(
+        &mut self,
+        flat: impl Fn(SymbolId) -> bool,
+    ) -> Vec<(StrategyId, SymbolId, f64)> {
+        let mut dropped: Vec<(StrategyId, SymbolId, f64)> = Vec::new();
+        self.filled.retain(|(strategy, symbol), qty| {
+            if flat(SymbolId(*symbol)) {
+                dropped.push((StrategyId(*strategy), SymbolId(*symbol), *qty));
+                false
+            } else {
+                true
+            }
+        });
+        dropped.sort_by_key(|(strategy, symbol, _)| (strategy.0, symbol.0));
+        dropped
+    }
+
     /// Whether a strategy other than this one is holding this symbol.
     ///
     /// The question a plug needs answered before it acts on a name. It is
@@ -271,5 +300,34 @@ mod tests {
             fill("a", ETH, Side::Buy, 0.5),
         ]);
         assert_eq!(a.signed(LONG, ETH), 2.0);
+    }
+
+    #[test]
+    fn a_flat_symbol_loses_its_stale_claim() {
+        // The residue case: carry bought, the position later closed by a
+        // fill this log never charged (a venue stop, a hand close), and the
+        // leftover row keeps every other sleeve out of the name.
+        let mut a =
+            Attribution::from_records(&[sent("a", CARRY, BTC), fill("a", BTC, Side::Buy, 2.0)]);
+        assert!(a.held_by_another(LONG, BTC), "the residue blocks the other sleeve");
+
+        let dropped = a.drop_where_flat(|symbol| symbol == BTC);
+        assert_eq!(dropped, vec![(CARRY, BTC, 2.0)], "the receipt says what was dropped");
+        assert!(!a.held_by_another(LONG, BTC), "flat cleared the claim");
+        assert_eq!(a.signed(CARRY, BTC), 0.0);
+    }
+
+    #[test]
+    fn a_held_symbol_keeps_its_claim() {
+        let mut a = Attribution::from_records(&[
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 2.0),
+            sent("b", LONG, ETH),
+            fill("b", ETH, Side::Buy, 3.0),
+        ]);
+        let dropped = a.drop_where_flat(|symbol| symbol == BTC);
+        assert_eq!(dropped, vec![(CARRY, BTC, 2.0)]);
+        assert_eq!(a.signed(LONG, ETH), 3.0, "the held name is untouched");
+        assert!(a.held_by_another(CARRY, ETH));
     }
 }

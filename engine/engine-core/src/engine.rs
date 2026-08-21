@@ -417,7 +417,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut orders = LedgerOfOrders::from_records(effective);
         // Same records, same join: a restart must not forget whose
         // position is whose, or the other sleeve trades straight into it.
-        let attribution = Attribution::from_records(effective);
+        let mut attribution = Attribution::from_records(effective);
         // Seeded by the same scans reconcile trusts and kept live from here
         // on, because a rotation restates them into the new segment's first
         // record and must say exactly what a replay would have said.
@@ -468,6 +468,49 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             orders.apply(&ended);
         }
         let recovered = orders.in_flight().len();
+
+        // A sleeve's claim on a symbol the venue holds nothing of is a close
+        // this log never got to charge (a venue stop firing, an inherited
+        // position wound down), and it would lock every other sleeve out of
+        // the name for good. The venue reading is the authority on what is
+        // held, so flat clears the claim; a symbol with an order still in
+        // flight is left alone.
+        let in_flight_symbols: std::collections::HashSet<SymbolId> = orders
+            .in_flight()
+            .iter()
+            .map(|order| order.request.symbol)
+            .collect();
+        let stale_claims = attribution.drop_where_flat(|symbol| {
+            !in_flight_symbols.contains(&symbol)
+                && !account
+                    .positions
+                    .iter()
+                    .any(|p| p.symbol == symbol && p.qty > 0.0)
+        });
+        if !stale_claims.is_empty() {
+            let words = stale_claims
+                .iter()
+                .map(|(strategy, symbol, qty)| {
+                    format!(
+                        "{} {} {qty}",
+                        names
+                            .get(strategy.0 as usize)
+                            .map(String::as_str)
+                            .unwrap_or("unknown"),
+                        market.table.name(*symbol)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                claims = %words,
+                "dropping sleeve claims on symbols the venue holds nothing of"
+            );
+            wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!("dropped stale sleeve claims on flat symbols: {words}"),
+            })?;
+        }
 
         let mut registry = OrderRegistry::new(format!("eng-{boot_ms}-"));
         for order in orders.in_flight() {

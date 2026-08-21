@@ -63,17 +63,43 @@ fn previous_log() -> Vec<WalRecord> {
     ]
 }
 
+/// What the venue holds after [`previous_log`]'s fills: the closed order's 2
+/// BTC (plus the stranger's 5) and eng-b's partial 0.4 ETH. Boot reads this;
+/// a venue reported flat would rightly clear the sleeves' claims instead of
+/// carrying them.
+fn venue_holdings() -> Vec<PositionView> {
+    vec![
+        PositionView {
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 7.0,
+            entry_px: 100.0,
+            stop_attached: true,
+            leverage: None,
+        },
+        PositionView {
+            symbol: SymbolId(1),
+            side: Side::Buy,
+            qty: 0.4,
+            entry_px: 100.0,
+            stop_attached: true,
+            leverage: None,
+        },
+    ]
+}
+
 #[tokio::test]
 async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
     let working = vec![still_working("eng-b", "ETHUSDT", 1.0)];
-    let (engine_a, _) = build_with_venue_orders(
+    let (engine_a, _) = build_with_venue_state(
         true,
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT", "ETHUSDT"],
         &previous_log(),
         working.clone(),
+        venue_holdings(),
     )
     .await;
     let base = engine_a.rotation_base(7);
@@ -123,13 +149,14 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     // The equivalence itself: an engine booted from the restatement alone is
     // the engine booted from the whole old log.
     let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (engine_b, _) = build_with_venue_orders(
+    let (engine_b, _) = build_with_venue_state(
         true,
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT", "ETHUSDT"],
         std::slice::from_ref(&base),
         working,
+        venue_holdings(),
     )
     .await;
     assert_eq!(engine_b.in_flight_ids(), engine_a.in_flight_ids());

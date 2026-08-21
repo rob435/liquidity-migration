@@ -773,6 +773,53 @@ async fn build_with(
     build_inner(settings, verdict, strategies, symbols, replayed, working, false).await
 }
 
+/// The same, with the venue already holding positions when boot reads it —
+/// the shape of every restart on an account that was trading.
+async fn build_with_venue_state(
+    shadow: bool,
+    verdict: RiskVerdict,
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+    replayed: &[WalRecord],
+    working: Vec<VenueOrder>,
+    held: Vec<engine_types::PositionView>,
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    let tape = tape();
+    let (wal, records) = MockWal::new(tape.clone());
+    let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
+    venue.working = working;
+    venue.account_readings.borrow_mut().push_back(held);
+    let cancels = venue.cancels.clone();
+    let amends = venue.amends.clone();
+    let leverages = venue.leverages.clone();
+    let account_readings = venue.account_readings.clone();
+    let (risk, risk_saw) = MockRisk::with(verdict);
+    let engine = Engine::boot(
+        &settings(shadow),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        strategies,
+        replayed,
+    )
+    .await
+    .expect("boot");
+    (
+        engine,
+        Harness {
+            tape,
+            records,
+            sends,
+            cancels,
+            amends,
+            risk_saw,
+            leverages,
+            account_readings,
+        },
+    )
+}
+
 async fn build_inner(
     settings: &EngineSection,
     verdict: RiskVerdict,
