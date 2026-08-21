@@ -13,7 +13,7 @@ use std::error::Error;
 use std::path::Path;
 
 use engine_types::{AccountIdentity, Strategy, VenueGateway};
-use engine_venue::lease::{self, AccountLease, LeaseError, LeaseHolder};
+use engine_venue::lease::{self, AccountLease, LeaseError};
 use engine_venue::Venue;
 
 use crate::assembly;
@@ -25,23 +25,17 @@ use crate::engine::Engine;
 /// side spells its own roles the same way — `ledger_reset`, and so on.
 const LEASE_ROLE: &str = "engine";
 
-pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
+pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let loaded = config::load(config_path)?;
-    let mut settings = loaded.config.engine.clone();
-    if live {
-        settings.shadow = false;
-    }
+    let settings = loaded.config.engine.clone();
     tracing::info!(
         config = %config_path.display(),
         hash = %loaded.sha256,
-        shadow = settings.shadow,
         venue = %settings.venue,
         strategies = loaded.config.strategies.len(),
         "starting"
     );
-    if !settings.shadow {
-        tracing::warn!("live: orders will be sent, and the risk kernel gates every one of them");
-    }
+    tracing::warn!("orders will be sent, and the risk kernel gates every one of them");
 
     // Building a strategy is reading its config block: no clock, no socket,
     // no decision. Nothing below has happened yet when the lease is taken.
@@ -78,7 +72,7 @@ pub async fn run(config_path: &Path, live: bool) -> Result<(), Box<dyn Error>> {
 
     // Held for the whole run. Dropped at the end of this function, and by the
     // kernel if the process dies first.
-    let claimed = single_writer(&mut venue, settings.shadow).await?;
+    let claimed = single_writer(&mut venue).await?;
 
     let mut market_feed = assembly::market_feed(&assembly::boot_subscriptions(&symbols, &wanted));
     let mut order_feed = assembly::order_feed(venue.realm(), symbols)?;
@@ -128,43 +122,10 @@ struct Claim {
 /// rather than each holding a lock the other has never heard of. See
 /// `engine_venue::lease`.
 ///
-/// Live: take it before the engine boots, and refuse to start if somebody
-/// already has it. Shadow: never take it. A shadow run sends nothing, and a
-/// shadow run that held the lease would be locking out the writer that does.
-/// It reports what it found instead.
-async fn single_writer(venue: &mut Venue, shadow: bool) -> Result<Claim, Box<dyn Error>> {
-    if shadow {
-        // Information only, so nothing here stops the run: a shadow engine
-        // that cannot reach the venue still has a log to write and a loop to
-        // exercise.
-        match venue.account_identity().await {
-            Ok(who) => {
-                match lease::probe(&who.realm, &who.user_id) {
-                    Ok(LeaseHolder::Free) => tracing::info!(
-                        account = %who.user_id,
-                        realm = %who.realm,
-                        "shadow: nothing holds this account; a live engine could start"
-                    ),
-                    Ok(LeaseHolder::Held { note }) => tracing::info!(
-                        account = %who.user_id,
-                        realm = %who.realm,
-                        holder = note.as_deref().unwrap_or("no note"),
-                        "shadow: something already holds this account"
-                    ),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "shadow: cannot tell who holds this account")
-                    }
-                }
-                return Ok(Claim { lease: None, account: Some(who) });
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "shadow: cannot ask the venue whose account this is");
-                return Ok(Claim { lease: None, account: None });
-            }
-        }
-    }
-
-    // Live from here. Not knowing whose account this is means not knowing
+/// Take it before the engine boots, and refuse to start if somebody already
+/// has it.
+async fn single_writer(venue: &mut Venue) -> Result<Claim, Box<dyn Error>> {
+    // Not knowing whose account this is means not knowing
     // which lock to take, which means not knowing who would be stepped on.
     let who = venue.account_identity().await?;
     match lease::acquire(&who.realm, &who.user_id, LEASE_ROLE) {

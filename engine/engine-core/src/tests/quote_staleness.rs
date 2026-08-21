@@ -106,7 +106,7 @@ fn feed_with_stamp(recv_ns: u64) -> ScriptFeed {
 /// Settings with a quote bound tight enough to test against a hand-aged
 /// stamp, and everything else as the bench has it.
 fn tight(max_quote_age_ms: u64) -> EngineSection {
-    EngineSection { max_quote_age_ms, ..settings(false) }
+    EngineSection { max_quote_age_ms, ..settings() }
 }
 
 /// The engine's clock origin is the process's first call; make sure enough
@@ -137,7 +137,7 @@ fn stale_quote_denials(records: &Rc<RefCell<Vec<WalRecord>>>) -> Vec<(u64, u64)>
 async fn an_entry_against_a_fresh_quote_passes() {
     let (opener, refused) = Opener::new(&["BTCUSDT"], "BTCUSDT", false);
     let (mut engine, h) =
-        build(false, allow_all(), vec![Box::new(opener)], &["BTCUSDT"], &[]).await;
+        build(allow_all(), vec![Box::new(opener)], &["BTCUSDT"], &[]).await;
     let mut feed = feed_with_stamp(clock::now_ns());
     engine
         .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
@@ -216,9 +216,7 @@ async fn a_symbol_that_never_quoted_is_refused_for_entries() {
     // though every quote on the tape is fresh: the absence of a price is the
     // stalest price there is.
     let (opener, refused) = Opener::new(&["BTCUSDT", "ETHUSDT"], "ETHUSDT", false);
-    let (mut engine, h) = build(
-        false,
-        allow_all(),
+    let (mut engine, h) = build(allow_all(),
         vec![Box::new(opener)],
         &["BTCUSDT", "ETHUSDT"],
         &[],

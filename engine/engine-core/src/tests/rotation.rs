@@ -93,7 +93,6 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
     let working = vec![still_working("eng-b", "ETHUSDT", 1.0)];
     let (engine_a, _) = build_with_venue_state(
-        true,
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT", "ETHUSDT"],
@@ -150,7 +149,6 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     // the engine booted from the whole old log.
     let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
     let (engine_b, _) = build_with_venue_state(
-        true,
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT", "ETHUSDT"],
@@ -209,7 +207,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         let (risk, _) = MockRisk::with(allow_all());
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
         let engine = Engine::boot(
-            &settings(true),
+            &settings(),
             "0000000000000000",
             wal,
             risk,
@@ -233,7 +231,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         let (risk, _) = MockRisk::with(allow_all());
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
         let _engine = Engine::boot(
-            &settings(true),
+            &settings(),
             "0000000000000000",
             wal,
             risk,
@@ -259,7 +257,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         let (risk, _) = MockRisk::with(allow_all());
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
         let _engine = Engine::boot(
-            &settings(true),
+            &settings(),
             "0000000000000000",
             wal,
             risk,
@@ -294,9 +292,7 @@ async fn a_torn_rotation_on_disk_boots_from_the_old_segment() {
 
         // A real restatement, then the crash: the new segment loses its tail.
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
-        let (engine, _) = build_with_venue_orders(
-            true,
-            allow_all(),
+        let (engine, _) = build_with_venue_orders(allow_all(),
             vec![Box::new(buyer)],
             &["BTCUSDT", "ETHUSDT"],
             &previous_log(),

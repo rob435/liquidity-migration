@@ -135,7 +135,6 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         // Wide, so a long low-rate bench never has its later orders refused
         // against the stamps of its own generated quotes.
         max_quote_age_ms: 600_000,
-        shadow: false,
         // Shared, the default: the bench's orders carry no leverage, so the
         // authority mode never comes up — this just keeps the bench honest
         // about what a default config runs.

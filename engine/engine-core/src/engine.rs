@@ -241,7 +241,6 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// the other half of that dedup: a fill the stream DID deliver near a
     /// gap's edge must not come back as recovered.
     recent_fills: std::collections::VecDeque<(String, i64, f64)>,
-    shadow: bool,
     group_flush: Duration,
     refresh_after_ns: u64,
     /// Rotate the log once the current segment passes this, checked on the
@@ -305,15 +304,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             config_sha256: config_sha256.to_string(),
             wall_ts_ms: boot_ms,
         })?;
-        // The Boot record has no room for the mode, and a reader of the log
-        // needs it: the records look the same either way.
         wal.append(&WalRecord::Note {
             source: "engine".into(),
-            text: if settings.shadow {
-                "shadow: orders are worked out and written down, never sent".to_string()
-            } else {
-                "live: orders are sent, each one gated by the risk kernel".to_string()
-            },
+            text: "live: orders are sent, each one gated by the risk kernel".to_string(),
         })?;
 
         let mut market = MarketState::default();
@@ -438,7 +431,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             &account,
             &market.table,
             &rules,
-            settings.shadow,
         )
         .await?;
 
@@ -598,7 +590,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             fills: Fills::default(),
             targets: TargetBooks::new(Vec::new()),
             heartbeat: None,
-            shadow: settings.shadow,
             leverage_authority: settings.leverage_authority,
             group_flush: Duration::from_millis(settings.group_flush_ms.max(1)),
             refresh_after_ns: settings.account_view_max_age_ms.saturating_mul(1_000_000) / 2,
@@ -743,7 +734,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         account: &AccountView,
         table: &SymbolTable,
         rules: &[Option<InstrumentRule>],
-        shadow: bool,
     ) -> Result<(bool, Vec<String>), EngineError> {
         let latched = replayed.iter().rev().find_map(|record| match record {
             WalRecord::Reconciled { may_open, .. } => Some(*may_open),
@@ -788,14 +778,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // Putting it back is the one repair the engine can make from evidence
         // rather than from a guess.
         for (symbol, trigger_px) in found.stop_repairs() {
-            if shadow {
-                tracing::warn!(
-                    symbol = table.name(symbol),
-                    trigger_px,
-                    "shadow: this position has no stop and would be given one"
-                );
-                continue;
-            }
             match venue.set_stop(symbol, trigger_px).await {
                 Ok(()) => tracing::info!(
                     symbol = table.name(symbol),
@@ -868,10 +850,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub fn account(&self) -> &AccountView {
         &self.account
-    }
-
-    pub fn shadow(&self) -> bool {
-        self.shadow
     }
 
     /// Run until shutdown resolves or the market feed closes.
@@ -1270,10 +1248,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // order path's p99. Sole authority only: under shared authority the
         // cache is wiped for flat symbols on every account reading, so an
         // arm here would be forgotten before it could ever be used and
-        // re-sent on every book. Shadow never mutates the real account. A
-        // failed arm is a warning, not a refusal — the order path still
-        // confirms inline before anything is sent.
-        if self.leverage_authority == crate::config::LeverageAuthority::Sole && !self.shadow {
+        // re-sent on every book. A failed arm is a warning, not a refusal —
+        // the order path still confirms inline before anything is sent.
+        if self.leverage_authority == crate::config::LeverageAuthority::Sole {
             for target in &book.targets {
                 let Some(id) = self.market.table.get(&target.symbol) else {
                     continue;
@@ -1413,7 +1390,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             fills,
             names,
             may_open,
-            shadow,
             events_seen,
             orders_sent,
             account,
@@ -1466,7 +1442,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         heartbeat.write(
             now_ns,
             &heartbeat::Facts {
-                shadow: *shadow,
                 may_open: *may_open,
                 market_events: *events_seen,
                 orders_sent: *orders_sent,
@@ -1776,9 +1751,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // the engine saying it is about to put one on the wire.
         //
         // Entries only. An exit at the wrong leverage is still an exit, and
-        // making it wait on a round trip would be the wrong trade. Shadow runs
-        // send nothing, so there is nothing to set.
-        if !self.shadow && !intent.reduce_only {
+        // making it wait on a round trip would be the wrong trade.
+        if !intent.reduce_only {
             if let Some(want) = intent.leverage {
                 if let Err(reason) = self.ensure_leverage(request.symbol, want).await {
                     return self.refuse(&client_order_id, &intent, &reason);
@@ -1787,10 +1761,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
 
         // Durable before the wire. Everything above this line can be lost by
-        // a crash without consequence; everything below it cannot. In shadow
-        // nothing reaches the wire, so no fsync — and no barrier BETWEEN the
-        // order record and its "no send" note, which once let a crash leave
-        // a durable order with no note: a phantom in-flight on replay.
+        // a crash without consequence; everything below it cannot.
         let sent_record = WalRecord::OrderSent {
             request: request.clone(),
             wire_ns: clock::now_ns(),
@@ -1802,9 +1773,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             arrival_mid: self.decision_mid(request.symbol),
         };
         self.wal.append(&sent_record)?;
-        if !self.shadow {
-            self.wal.barrier()?;
-        }
+        self.wal.barrier()?;
         self.ledger
             .record(Segment::Durable, clock::now_ns().saturating_sub(decided_ns));
         self.orders.apply(&sent_record);
@@ -1814,12 +1783,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.registry.own(&client_order_id, intent.strategy);
         // The engine's own note of what just went out, at the size that
         // actually went — strategies read it back as `ctx.in_flight`, so the
-        // window between a fill and the next account reading cannot look
-        // flat. Booked in shadow too, on purpose: a shadow order never fills
-        // and never sends news, so without a cover a follower would re-send
-        // the same pretend entry on every quote. A shadow cover is released
-        // the same ways a live one is — a refused exit, or the reading
-        // moving — just never by fill news.
+        // window between a fill and the next account reading cannot look flat.
         self.covers.register(
             intent.strategy,
             request.symbol,
@@ -1827,16 +1791,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             qty,
             &self.account,
         );
-        // A shadow order can never fill or be cancelled, so a reservation
-        // booked for it could never be released: it would sit in the
-        // kernel's pending book for the run's life and lean on every later
-        // verdict — the drift the funded shadow run showed. The verdict
-        // above was already judged by the same code a live run uses;
-        // registration only shapes the NEXT assessment, and for that the
-        // truthful picture of a shadow run is that nothing is in flight.
-        if !self.shadow {
-            self.risk.register_order(&client_order_id, &intent, qty);
-        }
+        self.risk.register_order(&client_order_id, &intent, qty);
         self.orders_sent += 1;
 
         // Start working it from the price that is actually resting — the
@@ -1848,24 +1803,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .take_on(&client_order_id, request.symbol, policy, state);
         }
 
-        let update = if self.shadow {
-            let note = WalRecord::Note {
-                source: "shadow".into(),
-                text: format!(
-                    "{}{client_order_id} would have been {:?} {} {} ({})",
-                    inflight::NEVER_SENT_PREFIX,
-                    request.side,
-                    request.qty,
-                    self.market.table.name(request.symbol),
-                    intent.tag
-                ),
-            };
-            self.wal.append(&note)?;
-            self.orders.apply(&note);
-            self.ledger
-                .record(Segment::Wire, clock::now_ns().saturating_sub(decided_ns));
-            None
-        } else {
+        let update = {
             let send_started_ns = clock::now_ns();
             let reply = self.venue.send_order(&request).await;
             let returned_ns = clock::now_ns();
@@ -1929,9 +1867,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// recorded: the latency ledger measures the order path, and mixing a
     /// barrier-free cancel into "out the door" would flatter that number.
     ///
-    /// True means the change went through: the venue took it, or shadow mode
-    /// deliberately skipped the wire. False means the resting order is
-    /// untouched, and whoever asked has to ask again.
+    /// True means the venue took the change. False means the resting order
+    /// is untouched, and whoever asked has to ask again.
     /// Move a held position's venue-native stop, with no order involved.
     ///
     /// The record goes down before the call, as an opening order's does: a
@@ -1949,14 +1886,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             trigger_px,
             wall_ts_ms: clock::wall_ms(),
         })?;
-        if self.shadow {
-            tracing::info!(
-                symbol = self.market.table.name(symbol),
-                trigger_px,
-                "shadow: this position's stop would be moved"
-            );
-            return Ok(());
-        }
         match self.venue.set_stop(symbol, trigger_px).await {
             Ok(()) => {
                 tracing::info!(
@@ -1996,22 +1925,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             client_order_id: client_order_id.to_string(),
             wire_ns: clock::now_ns(),
         })?;
-
-        if self.shadow {
-            // The never-sent marker is read back as an ending for the order
-            // id that follows it, so these words name the cancel and not the
-            // order it would have pulled: that order's fate is whatever the
-            // log already says it is.
-            self.wal.append(&WalRecord::Note {
-                source: "shadow".into(),
-                text: format!(
-                    "{}cancel of {client_order_id} on {}",
-                    inflight::NEVER_SENT_PREFIX,
-                    self.market.table.name(symbol)
-                ),
-            })?;
-            return Ok(true);
-        }
 
         match self.venue.cancel_order(symbol, client_order_id).await {
             Ok(()) => Ok(true),
@@ -2098,20 +2011,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             spec,
             wire_ns: clock::now_ns(),
         })?;
-        if grows && !self.shadow {
+        if grows {
             self.wal.barrier()?;
-        }
-
-        if self.shadow {
-            self.wal.append(&WalRecord::Note {
-                source: "shadow".into(),
-                text: format!(
-                    "{}amend of {client_order_id} on {}",
-                    inflight::NEVER_SENT_PREFIX,
-                    self.market.table.name(symbol)
-                ),
-            })?;
-            return Ok(true);
         }
 
         match self.venue.amend_order(symbol, client_order_id, spec).await {

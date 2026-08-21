@@ -190,37 +190,32 @@ def _engine_command(tmp_path: Path, **environment: str) -> subprocess.CompletedP
     )
 
 
-def test_the_engine_stays_in_shadow_unless_the_host_file_plainly_says_otherwise(
-    tmp_path: Path,
-) -> None:
-    """Shadow computes and sends nothing. The host's environment file can say
-    "live" and can say nothing else: the argv is committed here.
+def test_the_engine_command_carries_no_live_switch(tmp_path: Path) -> None:
+    """REAL_MONEY is the only toggle, so the argv is committed here.
+
+    A stale ``ENGINE_LIVE`` left in a host environment file must change
+    nothing at all -- neither turning the engine on nor holding it back.
     """
 
-    shadow = _engine_command(tmp_path, ENGINE_CONFIG_FILE="/etc/liquidity-migration/engine.toml")
-    assert shadow.returncode == 0, shadow.stdout + shadow.stderr
-    assert shadow.stdout.split() == [
+    expected = [
         "/opt/liquidity-migration-engine/bin/engine",
         "run",
         "--config",
         "/etc/liquidity-migration/engine.toml",
     ]
+    plain = _engine_command(tmp_path, ENGINE_CONFIG_FILE="/etc/liquidity-migration/engine.toml")
+    assert plain.returncode == 0, plain.stdout + plain.stderr
+    assert plain.stdout.split() == expected
 
-    for off in ("false", "0", "no", "off", "", "maybe", "1 --live"):
-        result = _engine_command(tmp_path, ENGINE_CONFIG_FILE="/etc/engine.toml", ENGINE_LIVE=off)
-        assert result.returncode == 0, off
-        assert "--live" not in result.stdout, off
-
-    for on in ("true", "TRUE", "1", "yes", "YES", "on", "On"):
-        result = _engine_command(tmp_path, ENGINE_CONFIG_FILE="/etc/engine.toml", ENGINE_LIVE=on)
-        assert result.returncode == 0, on
-        assert result.stdout.split()[-1] == "--live", on
-
-    # No config, no run: an engine started against a defaulted relative path
-    # would read whatever engine.toml happened to be beside it.
-    missing = _engine_command(tmp_path)
-    assert missing.returncode != 0
-    assert "ENGINE_CONFIG_FILE is required" in missing.stderr
+    for stale in ("false", "0", "no", "off", "", "true", "TRUE", "1", "yes", "on", "On"):
+        result = _engine_command(
+            tmp_path,
+            ENGINE_CONFIG_FILE="/etc/liquidity-migration/engine.toml",
+            ENGINE_LIVE=stale,
+        )
+        assert result.returncode == 0, stale
+        assert result.stdout.split() == expected, stale
+        assert "--live" not in result.stdout, stale
 
 
 def test_persistent_demo_workers_have_small_box_memory_limits() -> None:
@@ -1865,9 +1860,10 @@ def test_the_engines_heartbeat_reaches_the_fleets_watchdog() -> None:
     )
     assert template[variable].startswith(writable + "/"), template[variable]
 
-    # The switch and the config path the unit's wrapper needs are here too.
+    # The config path the unit's wrapper needs is here too. There is no live
+    # switch in this file: REAL_MONEY is the only toggle.
     assert template["ENGINE_CONFIG_FILE"].startswith("/")
-    assert template["ENGINE_LIVE"] == "false"
+    assert "ENGINE_LIVE" not in template
 
 
 def test_verify_asks_for_the_engine_only_where_the_engine_is_installed(

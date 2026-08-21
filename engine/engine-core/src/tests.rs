@@ -687,7 +687,7 @@ impl Strategy for Ticker {
 
 // ------------------------------------------------------------------ helpers
 
-fn settings(shadow: bool) -> EngineSection {
+fn settings() -> EngineSection {
     EngineSection {
         wal_path: "unused-in-mocks.wal".into(),
         // Named but unused: these tests hand the engine a mock venue
@@ -699,7 +699,6 @@ fn settings(shadow: bool) -> EngineSection {
         // Wide enough that no scripted quote in these tests ever counts as
         // stale; the staleness tests tighten it themselves.
         max_quote_age_ms: 60_000,
-        shadow,
         // Shared is the default and what almost every test means; the sole-
         // authority tests build their settings through `settings_sole`.
         leverage_authority: crate::config::LeverageAuthority::Shared,
@@ -710,10 +709,10 @@ fn settings(shadow: bool) -> EngineSection {
     }
 }
 
-fn settings_sole(shadow: bool) -> EngineSection {
+fn settings_sole() -> EngineSection {
     EngineSection {
         leverage_authority: crate::config::LeverageAuthority::Sole,
-        ..settings(shadow)
+        ..settings()
     }
 }
 
@@ -741,26 +740,24 @@ async fn build_with_refusing_leverage(
 }
 
 async fn build(
-    shadow: bool,
     verdict: RiskVerdict,
     strategies: Vec<Box<dyn Strategy>>,
     symbols: &[&str],
     replayed: &[WalRecord],
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
-    build_with_venue_orders(shadow, verdict, strategies, symbols, replayed, Vec::new()).await
+    build_with_venue_orders(verdict, strategies, symbols, replayed, Vec::new()).await
 }
 
 /// The same, with the venue already working some orders — which is how a boot
 /// finds out somebody else is on the account.
 async fn build_with_venue_orders(
-    shadow: bool,
     verdict: RiskVerdict,
     strategies: Vec<Box<dyn Strategy>>,
     symbols: &[&str],
     replayed: &[WalRecord],
     working: Vec<VenueOrder>,
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
-    build_with(&settings(shadow), verdict, strategies, symbols, replayed, working).await
+    build_with(&settings(), verdict, strategies, symbols, replayed, working).await
 }
 
 /// The same again, on settings the test chose — a quicker tick, say.
@@ -778,7 +775,6 @@ async fn build_with(
 /// The same, with the venue already holding positions when boot reads it —
 /// the shape of every restart on an account that was trading.
 async fn build_with_venue_state(
-    shadow: bool,
     verdict: RiskVerdict,
     strategies: Vec<Box<dyn Strategy>>,
     symbols: &[&str],
@@ -797,7 +793,7 @@ async fn build_with_venue_state(
     let account_readings = venue.account_readings.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
     let engine = Engine::boot(
-        &settings(shadow),
+        &settings(),
         "0000000000000000",
         wal,
         risk,

@@ -1,13 +1,12 @@
 [Unit]
-Description=liquidity-migration Rust execution engine on the FUNDED account (shadow unless the owner turns it on)
+Description=liquidity-migration Rust execution engine on the FUNDED account (runs only while REAL_MONEY is armed)
 Wants=network-online.target
 After=network-online.target
 
 # NO `Conflicts=` with anything, deliberately. What stops two processes trading
-# this account is the account's kernel lease, which a LIVE engine takes and a
-# shadow one does not. That check knows the difference between the two; a
-# systemd conflict does not, and would stop the funded fleet the moment anyone
-# started this unit to watch it in shadow.
+# this account is the account's kernel lease, which this engine takes at boot.
+# A systemd conflict knows nothing about that lease and would stop the funded
+# fleet the moment anyone started this unit.
 
 [Service]
 Type=simple
@@ -32,10 +31,9 @@ EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
 # own realm's pair (BYBIT_REAL_API_KEY / BYBIT_REAL_API_SECRET), and a demo key
 # cannot authenticate mainnet whatever is in the environment.
 
-# Config path, heartbeat path, and the shadow/live switch.
-# deploy/engine.mainnet.env.template is the copy to fill in. Shadow unless this
-# file says otherwise, and the config has to agree — the flag can only turn
-# shadow off, never on.
+# Config path and heartbeat path; deploy/engine.mainnet.env.template is the
+# copy to fill in. No live switch lives here: REAL_MONEY in the credential
+# file is what decides whether this unit runs at all.
 EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
 
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-engine-mainnet.service main

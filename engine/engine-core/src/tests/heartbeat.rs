@@ -68,8 +68,8 @@ impl tracing::field::Visit for Said {
 
 /// A tick every few milliseconds, so a test does not sit through the shipping
 /// quarter-second.
-fn quick_tick(shadow: bool) -> EngineSection {
-    let mut settings = settings(shadow);
+fn quick_tick() -> EngineSection {
+    let mut settings = settings();
     settings.group_flush_ms = 5;
     settings
 }
@@ -100,7 +100,7 @@ async fn a_running_engine_leaves_a_heartbeat_saying_how_it_is() {
     let path = temp_path("heartbeat-running");
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build_with(
-        &quick_tick(false),
+        &quick_tick(),
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
@@ -143,31 +143,6 @@ async fn a_running_engine_leaves_a_heartbeat_saying_how_it_is() {
     assert!((0..60_000).contains(&age_ms), "the stamp is not a live wall clock: {age_ms}ms old");
 }
 
-#[tokio::test]
-async fn a_shadow_engine_says_shadow() {
-    let path = temp_path("heartbeat-shadow");
-    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, _h) = build_with(
-        &quick_tick(true),
-        allow_all(),
-        vec![Box::new(buyer)],
-        &["BTCUSDT"],
-        &[],
-        Vec::new(),
-    )
-    .await;
-    engine.write_heartbeat(every_tick(path.path()));
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 1, false),
-            &mut ScriptOrderFeed::empty(),
-            tokio::time::sleep(Duration::from_millis(40)),
-        )
-        .await
-        .unwrap();
-    assert_eq!(heartbeat_at(path.path())["mode"], "shadow");
-}
 
 #[tokio::test]
 async fn an_engine_latched_out_of_opening_says_so_in_its_heartbeat() {
@@ -177,7 +152,7 @@ async fn an_engine_latched_out_of_opening_says_so_in_its_heartbeat() {
     let path = temp_path("heartbeat-latched");
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build_with(
-        &quick_tick(false),
+        &quick_tick(),
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
@@ -213,7 +188,7 @@ async fn a_heartbeat_that_cannot_be_written_does_not_stop_the_engine() {
     let path = nowhere.path().join("no-such-directory").join("beat.json");
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build_with(
-        &quick_tick(false),
+        &quick_tick(),
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
@@ -253,7 +228,7 @@ async fn no_heartbeat_configured_writes_nothing_and_says_nothing() {
     // the test above proves these ears can hear a heartbeat complaining.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, _h) = build_with(
-        &quick_tick(false),
+        &quick_tick(),
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
@@ -283,7 +258,7 @@ async fn no_heartbeat_configured_writes_nothing_and_says_nothing() {
 fn no_configured_path_means_no_heartbeat_writer_at_all() {
     // The other half of staying quiet: nothing is built, so nothing can be
     // said and no file can appear.
-    let mut named = settings(true);
+    let mut named = settings();
     assert!(crate::assembly::heartbeat(&named, None, None).is_none());
     named.heartbeat_path = Some("var/engine-heartbeat.json".into());
     let built = crate::assembly::heartbeat(&named, None, None).expect("a path means a heartbeat");

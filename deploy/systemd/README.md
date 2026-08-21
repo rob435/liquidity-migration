@@ -16,7 +16,7 @@ Fifteen unit files: eleven services and four timers (two liveness, the LLM ledge
 | Unit | Role |
 | --- | --- |
 | `liquidity-migration-engine.service` | The Rust execution engine — sole Bybit **demo** mutator, on the fleet's demo account (555899665, `bybit-demo.env`); holds that account's single-writer lease — see below |
-| `liquidity-migration-engine-mainnet.service` | The Rust engine on the **funded** account — runs in shadow and sends nothing until the owner turns it live |
+| `liquidity-migration-engine-mainnet.service` | The Rust engine on the **funded** account — runs only while `REAL_MONEY` is armed |
 | `liquidity-migration-bybit-long-demo.service` | LONG target producer |
 | `liquidity-migration-bybit-carry-demo.service` | CARRY target producer |
 | `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers; both start when `REAL_MONEY` is armed, sized by the installed risk profile |
@@ -74,8 +74,8 @@ What the engine does with an account is [`../../docs/engine.md`](../../docs/engi
 `liquidity-migration-engine-mainnet.service` has the same shape on the funded
 account: gated by `/etc/liquidity-migration/engine-mainnet.env` plus the
 binary, started through `start_mainnet_fleet` when `REAL_MONEY=true` in
-`/etc/liquidity-migration/bybit-mainnet.env` — the single arming switch — and
-in shadow until the owner's own config says otherwise. See the Real-money
+`/etc/liquidity-migration/bybit-mainnet.env` — the single arming switch, and
+the whole of what decides whether the funded engine trades. See the Real-money
 section of [`../../docs/operations.md`](../../docs/operations.md).
 
 Neither engine unit is in `LM_AUTHORIZED_UNITS`

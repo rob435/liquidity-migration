@@ -8,7 +8,7 @@ use super::*;
 #[tokio::test]
 async fn a_quiet_account_leaves_the_engine_free_to_trade() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -30,9 +30,7 @@ async fn an_order_this_engine_never_placed_stops_it_opening() {
     // Another writer on the account makes every number the kernel works from
     // measure somebody else's trading as well as its own.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build_with_venue_orders(
-        false,
-        allow_all(),
+    let (mut engine, h) = build_with_venue_orders(allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &[],
@@ -69,9 +67,7 @@ async fn a_hand_trade_in_a_symbol_nobody_here_trades_does_not_stop_it() {
     // The owner trades this account by hand. Stopping for an order in a
     // symbol no strategy can even address would mean stopping most days.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build_with_venue_orders(
-        false,
-        allow_all(),
+    let (mut engine, h) = build_with_venue_orders(allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &[],
@@ -110,7 +106,7 @@ async fn an_operators_clear_resets_the_latch() {
     ];
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) =
-        build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
+        build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -141,9 +137,7 @@ async fn a_clear_resets_the_memory_not_the_check() {
         },
     ];
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build_with_venue_orders(
-        false,
-        allow_all(),
+    let (mut engine, h) = build_with_venue_orders(allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &earlier,
@@ -236,9 +230,7 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
     let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
     let saw = Rc::new(RefCell::new(Vec::new()));
     let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw.clone() };
-    let (mut engine, h) = build(
-        false,
-        allow_all(),
+    let (mut engine, h) = build(allow_all(),
         vec![Box::new(idle), Box::new(probe)],
         &["ZECUSDT"],
         &previous,
@@ -311,9 +303,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
     let saw = Rc::new(RefCell::new(Vec::new()));
     let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw.clone() };
-    let (_engine, h) = build(
-        false,
-        allow_all(),
+    let (_engine, h) = build(allow_all(),
         vec![Box::new(idle), Box::new(probe)],
         &["ZECUSDT"],
         &previous,
@@ -359,7 +349,6 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     let saw2 = Rc::new(RefCell::new(Vec::new()));
     let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw2.clone() };
     let (mut engine, _h) = build_with_venue_state(
-        false,
         allow_all(),
         vec![Box::new(idle), Box::new(probe)],
         &["ZECUSDT"],
@@ -405,7 +394,7 @@ async fn a_latch_from_an_earlier_boot_survives_the_restart() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     // The venue is quiet now: whatever it was has gone. The latch still holds.
     let (mut engine, h) =
-        build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
+        build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(

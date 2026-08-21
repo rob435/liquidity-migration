@@ -70,9 +70,6 @@ pub struct EngineSection {
     /// way, because the absence of a price is the stalest price there is.
     #[serde(default = "default_max_quote_age_ms")]
     pub max_quote_age_ms: u64,
-    /// True: compute and log orders, send nothing.
-    #[serde(default = "default_shadow")]
-    pub shadow: bool,
     /// Who else can change leverage on this account.
     ///
     /// `"shared"` (the default, and the behavior every config before this key
@@ -167,10 +164,6 @@ fn default_max_quote_age_ms() -> u64 {
     30_000
 }
 
-fn default_shadow() -> bool {
-    true
-}
-
 /// A config file plus the hash that goes in the log's Boot record.
 #[derive(Clone, Debug)]
 pub struct LoadedConfig {
@@ -235,7 +228,6 @@ symbols = ["BTCUSDT"]
             cfg.engine.max_quote_age_ms, 30_000,
             "a config written before the quote bound existed must still boot, bounded"
         );
-        assert!(cfg.engine.shadow, "shadow is the default");
         assert_eq!(
             cfg.engine.leverage_authority,
             LeverageAuthority::Shared,

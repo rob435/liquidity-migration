@@ -18,15 +18,6 @@ venue = "bybit_demo"
 
 wal_path = "/var/lib/liquidity-migration-engine/engine.wal"
 
-# Compute and log orders, send nothing.
-#
-# Turning this off is what makes the demo fleet trade again. There is no
-# Python owner behind it any more: with `shadow = true` the producers publish
-# books, the engine reads them and works out every order, and none of them are
-# sent. That is the right state to watch first and the wrong state to leave it
-# in, because a shadow engine and a stopped fleet look identical from outside.
-shadow = true
-
 # One line of JSON, rewritten every few seconds. Two readers, both load-bearing:
 # scripts/runtime/check_fleet_liveness.py pages on stale, unreadable, or
 # latched; and BOTH PRODUCERS size from `account_equity_usdt` in it. Leave this

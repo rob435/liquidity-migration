@@ -8,7 +8,7 @@ use super::*;
 #[tokio::test]
 async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let mut feed = ScriptFeed::quotes(symbol, 1, true);
     let mut orders = ScriptOrderFeed::empty();
@@ -55,7 +55,7 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
 #[tokio::test]
 async fn the_verdict_record_names_the_order_it_approved() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -80,61 +80,12 @@ async fn the_verdict_record_names_the_order_it_approved() {
 }
 
 #[tokio::test]
-async fn shadow_mode_sends_nothing_and_says_so() {
-    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build(true, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
-    assert!(engine.shadow());
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 1, true),
-            &mut ScriptOrderFeed::empty(),
-            std::future::pending::<()>(),
-        )
-        .await
-        .unwrap();
-
-    assert!(h.sends.borrow().is_empty(), "no order left the box");
-    assert!(
-        !h.tape
-            .borrow()
-            .iter()
-            .any(|s| matches!(s, Step::Send(_))),
-        "the gateway was never called"
-    );
-    let notes: Vec<String> = h
-        .records
-        .borrow()
-        .iter()
-        .filter_map(|r| match r {
-            WalRecord::Note { source, text } if source == "shadow" => Some(text.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(notes.len(), 1, "one note per skipped send");
-    assert!(notes[0].contains("no send"), "{}", notes[0]);
-    // No order fsync in shadow: nothing leaves the box, so durability buys
-    // nothing — and a barrier BETWEEN the order record and its "no send"
-    // note opened a crash window where replay reported a phantom in-flight
-    // order on a run that never sent anything. The two records travel
-    // together, and the only fsync is the final shutdown one.
-    assert!(
-        only_the_shutdown_barrier(&h.tape),
-        "shadow mode paid for an order fsync"
-    );
-    assert_eq!(appends(&h.tape).iter().filter(|k| *k == "order_sent").count(), 1);
-    assert!(engine.in_flight_ids().is_empty(), "nothing ever left the box");
-    let replayed = crate::replay::describe(&h.records.borrow(), false);
-    assert!(replayed.in_flight.is_empty(), "and the log reads back that way");
-}
-
-#[tokio::test]
 async fn a_refusal_stops_before_the_order_is_written() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let deny = RiskVerdict::Deny {
         reason: DenyReason::MissingStop,
     };
-    let (mut engine, h) = build(false, deny, vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(deny, vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -161,7 +112,7 @@ async fn a_refusal_stops_before_the_order_is_written() {
 async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     // 0.0004 rounds down to nothing at a step of 0.001.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.0004);
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -198,7 +149,7 @@ async fn the_newest_control_anchor_in_the_log_is_restored_at_boot() {
     let (risk, _seen) = MockRisk::with(allow_all());
     let restored = risk.restored.clone();
     let engine = Engine::boot(
-        &settings(true),
+        &settings(),
         "0000000000000000",
         wal,
         risk,
@@ -240,7 +191,7 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
     let (risk, _seen) = MockRisk::with(allow_all());
     let registered = risk.registered.clone();
     let engine = Engine::boot(
-        &settings(true),
+        &settings(),
         "0000000000000000",
         wal,
         risk,
@@ -269,9 +220,7 @@ async fn symbol_ids_survive_a_restart_in_the_log_order() {
         symbols: vec!["ETHUSDT".into(), "HOMEUSDT".into(), "BTCUSDT".into()],
     }];
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (engine, _h) = build(
-        false,
-        allow_all(),
+    let (engine, _h) = build(allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &replayed,
@@ -291,43 +240,6 @@ async fn symbol_ids_survive_a_restart_in_the_log_order() {
     );
 }
 
-#[tokio::test]
-async fn a_shadow_order_reserves_nothing_with_the_kernel() {
-    // A shadow order can never fill or be cancelled, so a reservation for
-    // it could never be released: a long shadow run would lean on every
-    // later verdict with exposure that does not exist.
-    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let tape = tape();
-    let (wal, _records) = MockWal::new(tape.clone());
-    let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
-    let (risk, _seen) = MockRisk::with(allow_all());
-    let registered = risk.registered.clone();
-    let mut engine = Engine::boot(
-        &settings(true),
-        "0000000000000000",
-        wal,
-        risk,
-        venue,
-        vec![Box::new(buyer)],
-        &[],
-    )
-    .await
-    .expect("boot");
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 1, true),
-            &mut ScriptOrderFeed::empty(),
-            std::future::pending::<()>(),
-        )
-        .await
-        .unwrap();
-    assert!(sends.borrow().is_empty(), "shadow sends nothing");
-    assert!(
-        registered.borrow().is_empty(),
-        "and reserves nothing: there is no fill coming to release it"
-    );
-}
 
 #[tokio::test]
 async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
@@ -357,7 +269,7 @@ async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
     let (risk, _seen) = MockRisk::with(allow_all());
     let registered = risk.registered.clone();
     let engine = Engine::boot(
-        &settings(true),
+        &settings(),
         "0000000000000000",
         wal,
         risk,
@@ -404,7 +316,7 @@ fn minting_skips_an_id_the_log_already_knows() {
 #[tokio::test]
 async fn a_changed_control_anchor_is_written_and_made_durable() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build(true, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     engine.risk.anchor_script.push_back("{\"day\":1}".to_string());
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
@@ -438,7 +350,7 @@ async fn a_clean_shutdown_forces_its_tail_to_disk() {
     // updates and ledger line: completed orders reading back as in flight
     // is the conservative direction, but it is still a lie in the audit.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -517,7 +429,7 @@ async fn a_flooded_wake_drops_entries_but_never_exits() {
     // de-risking order queued behind the flood must still get out, or the
     // strategy is stranded holding a position it believes it exited.
     let burst = BurstEmitter { symbol: "BTCUSDT".into(), entries: 68, exits: 2, fired: false };
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -585,7 +497,7 @@ async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
     // log must record what was actually sent — so the stop comes off at
     // request build, not just at the venue boundary.
     let exiter = SloppyExiter { symbol: "BTCUSDT".into(), sent: false };
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(exiter)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(exiter)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -614,7 +526,7 @@ async fn an_intent_with_an_unreal_number_never_reaches_the_log() {
     // frame unreadable and stop the next boot's replay. The refusal must
     // come before any log write.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, f64::NAN);
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -651,7 +563,7 @@ async fn an_order_under_the_minimum_value_is_refused() {
     venue.rules[0].1.min_notional = 1_000_000.0;
     let (risk, _seen) = MockRisk::with(allow_all());
     let mut engine = Engine::boot(
-        &settings(false),
+        &settings(),
         "0",
         wal,
         risk,
@@ -685,7 +597,7 @@ async fn a_send_with_no_answer_leaves_the_order_in_flight() {
     venue.reply = Some(VenueError::Transport("connection reset".into()));
     let (risk, risk_saw) = MockRisk::with(allow_all());
     let mut engine = Engine::boot(
-        &settings(false),
+        &settings(),
         "0",
         wal,
         risk,
@@ -723,7 +635,7 @@ async fn a_rejected_order_is_over() {
     });
     let (risk, risk_saw) = MockRisk::with(allow_all());
     let mut engine = Engine::boot(
-        &settings(false),
+        &settings(),
         "0",
         wal,
         risk,
@@ -797,9 +709,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
     ];
 
     let (buyer, heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (mut engine, h) = build_with_venue_orders(
-        false,
-        allow_all(),
+    let (mut engine, h) = build_with_venue_orders(allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &replayed,
@@ -852,9 +762,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
 async fn timers_fire_for_the_strategy_that_armed_them() {
     let (one, fired_one) = Ticker::new("BTCUSDT", 11, 3_000_000);
     let (two, fired_two) = Ticker::new("ETHUSDT", 22, 5_000_000);
-    let (mut engine, _h) = build(
-        false,
-        allow_all(),
+    let (mut engine, _h) = build(allow_all(),
         vec![Box::new(one), Box::new(two)],
         &["BTCUSDT", "ETHUSDT"],
         &[],
@@ -905,9 +813,7 @@ async fn timers_fire_for_the_strategy_that_armed_them() {
 async fn a_market_message_only_reaches_the_strategies_that_asked_for_it() {
     let (btc_buyer, btc_heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (eth_buyer, eth_heard) = Buyer::new("ETHUSDT", 1, 0.01);
-    let (mut engine, h) = build(
-        false,
-        allow_all(),
+    let (mut engine, h) = build(allow_all(),
         vec![Box::new(btc_buyer), Box::new(eth_buyer)],
         &["BTCUSDT", "ETHUSDT"],
         &[],
@@ -936,7 +842,7 @@ async fn the_group_flush_tick_pushes_the_log_out() {
     let (wal, _records) = MockWal::new(tape.clone());
     let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
     let (risk, _seen) = MockRisk::with(allow_all());
-    let mut small_flush = settings(false);
+    let mut small_flush = settings();
     small_flush.group_flush_ms = 5;
     let mut engine = Engine::boot(&small_flush, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
         .await
@@ -962,7 +868,7 @@ async fn the_account_reading_is_refreshed_before_it_goes_stale() {
     let (wal, _records) = MockWal::new(tape.clone());
     let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
     let (risk, _seen) = MockRisk::with(allow_all());
-    let mut quick = settings(false);
+    let mut quick = settings();
     quick.group_flush_ms = 5;
     quick.account_view_max_age_ms = 20; // refreshed at half of this
     let mut engine = Engine::boot(&quick, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
@@ -989,7 +895,7 @@ async fn the_account_reading_is_refreshed_before_it_goes_stale() {
 #[tokio::test]
 async fn boot_reads_the_rules_and_the_account_before_anything_else() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (_engine, h) = build(true, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (_engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let steps = h.tape.borrow().clone();
     assert_eq!(steps[0], Step::Append("boot".into()));
     assert_eq!(steps[1], Step::Append("note".into()), "which mode it is in");

@@ -8,7 +8,7 @@ use super::*;
 #[tokio::test]
 async fn an_entry_asked_to_be_worked_rests_at_the_touch_instead_of_crossing() {
     let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, WorkPolicy::default());
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -37,7 +37,7 @@ async fn a_spread_too_thin_to_pay_for_still_sends_the_market_order() {
     // maker floor, so the order goes out exactly as it did before any of this
     // existed.
     let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, WorkPolicy::default());
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -92,9 +92,7 @@ async fn an_exit_is_sent_as_written_even_when_it_asks_to_be_worked() {
         }
     }
 
-    let (mut engine, h) = build(
-        false,
-        allow_all(),
+    let (mut engine, h) = build(allow_all(),
         vec![Box::new(Exiter { sent: false })],
         &["BTCUSDT"],
         &[],
@@ -131,7 +129,7 @@ async fn the_group_flush_tick_walks_a_resting_entry_after_the_market() {
     let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
     let amends = venue.amends.clone();
     let (risk, _seen) = MockRisk::with(allow_all());
-    let mut fast = settings(false);
+    let mut fast = settings();
     fast.group_flush_ms = 5;
     let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
         .await
@@ -177,7 +175,7 @@ async fn repricing_a_resting_entry_never_costs_an_fsync() {
     let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
     let amends = venue.amends.clone();
     let (risk, _seen) = MockRisk::with(allow_all());
-    let mut fast = settings(false);
+    let mut fast = settings();
     fast.group_flush_ms = 5;
     let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
         .await

@@ -11,7 +11,7 @@ async fn the_order_record_carries_the_midpoint_it_will_be_judged_against() {
     // what the difference was worth: by the time a rested entry fills, the
     // price it was decided against is gone.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let mut feed = ScriptFeed::quotes(symbol, 1, true);
     engine
@@ -59,9 +59,7 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
     ];
 
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (mut engine, _h) = build(
-        false,
-        allow_all(),
+    let (mut engine, _h) = build(allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &replayed,
@@ -106,7 +104,7 @@ async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
     // would put another person's execution in our own numbers.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let (mut engine, _h) =
-        build(false, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+        build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
@@ -146,7 +144,7 @@ async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
     let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT", "ETHUSDT"]);
     let (risk, _saw) = MockRisk::with(allow_all());
     let engine = Engine::boot_as(
-        &settings(true),
+        &settings(),
         "0",
         wal,
         risk,
@@ -174,7 +172,7 @@ async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
 async fn a_sleeve_with_no_name_of_its_own_keeps_the_plugs() {
     // The fallback, and the reason `boot` can stay a one-liner over `boot_as`.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (_engine, h) = build(true, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (_engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let said = h
         .records
         .borrow()

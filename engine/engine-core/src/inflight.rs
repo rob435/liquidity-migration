@@ -12,10 +12,10 @@ use engine_types::{OrderRequest, OrderUpdate, StrategyId, WalRecord};
 
 const QTY_EPS: f64 = 1e-9;
 
-/// How the engine's shadow-mode note starts. In shadow mode the order record
-/// and its fsync happen exactly as they would live — only the send is
-/// skipped — so without this marker a shadow log would read back as a run
-/// that abandoned every order it ever wrote.
+/// How a never-sent order's note starts. Read from the log, never written:
+/// no run skips the send now. The marker cannot be deleted because the logs
+/// that already hold it would otherwise read back as runs that abandoned
+/// every order they ever wrote.
 pub const NEVER_SENT_PREFIX: &str = "no send: ";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,7 +23,7 @@ pub enum Ending {
     Rejected { code: i64, reason: String },
     Cancelled,
     Filled,
-    /// Written down in shadow mode and never sent.
+    /// Written down and never sent. Only ever read from an older log.
     NeverSent,
 }
 

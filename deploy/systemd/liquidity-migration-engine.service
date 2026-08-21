@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration Rust execution engine on the fleet's demo account (shadow unless turned on)
+Description=liquidity-migration Rust execution engine on the fleet's demo account
 Wants=network-online.target
 # No edge to the producers, in either direction. They write books on their own
 # clock and read this engine's heartbeat for the equity they size from; both
@@ -36,8 +36,8 @@ WorkingDirectory=/var/lib/liquidity-migration-engine
 # by accident.
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
-# Config path, heartbeat path, and the shadow/live switch. deploy/engine.env.template
-# is the copy to fill in. The engine is shadow unless this file says otherwise.
+# Config path and heartbeat path. deploy/engine.env.template is the copy to
+# fill in.
 EnvironmentFile=/etc/liquidity-migration/engine.env
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-engine.service main
 Restart=always

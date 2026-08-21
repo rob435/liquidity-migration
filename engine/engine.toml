@@ -23,9 +23,6 @@ group_flush_ms = 250
 # this number). The risk kernel's own staleness bound is the separate
 # [risk] max_account_view_age_s below — tighten that one for protection.
 account_view_max_age_ms = 5000
-# Compute and log orders, send nothing. `--live` flips this; the risk kernel
-# still gates every send either way.
-shadow = true
 # Where the research system writes its target book. Left out, as it is here,
 # means no watcher runs at all — which is "no decision", not an empty book: a
 # follower plug holds whatever it holds.
@@ -38,7 +35,7 @@ shadow = true
 # position per symbol and no note of who asked for it.
 # target_book_path = "var/targets/carry.json"
 # Where to write the heartbeat file: one line of JSON, rewritten every few
-# seconds, saying when it was written, live or shadow, whose account it is on,
+# seconds, saying when it was written, whose account it is on,
 # whether it is still allowed to open positions, and what it has seen and sent.
 # It decides nothing — whether any of that is alarming is the fleet watchdog's
 # job. Left out, as it is here, means no file is written and nothing is said

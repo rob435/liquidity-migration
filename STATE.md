@@ -50,7 +50,7 @@ file.
   fill-anchored size — the dials reach new entries only. The mainnet account
   document (`operational.mainnet.json`) is static: entry leverage 5, gross
   cap wallet × 5 split between the sleeves, every cap a ratio of tracked
-  equity. Mainnet stays `shadow = true`, `ENGINE_LIVE=false`. The sizing is
+  equity. The sizing is
   a forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** It runs
   `e3ac11bf`, with carry_hold **v7** on both CARRY producers: v6's registered
@@ -100,27 +100,23 @@ file.
   Live, carry wants $141.09 of HOMEUSDT against about $137 held, and the engine
   correctly does nothing — $4.09 is inside the 5% dead band.
 
-  **The engine is LIVE on the demo account** (`ENGINE_LIVE=true`, and it holds
-  the single-writer lease `bybit-demo-user-555899665.lock`). It is *shadow* in
-  `engine.toml`; the env flag is what turns that off, and only ever off.
+  **The engine is LIVE on the demo account**, holding the single-writer lease
+  `bybit-demo-user-555899665.lock`.
+
+  **`REAL_MONEY` in `/etc/liquidity-migration/bybit-mainnet.env` is the only
+  toggle.** Armed, the funded units start and the funded engine sends orders
+  and takes that account's lease; unset, they do not start at all. The engine
+  carries no second switch of its own — there is no shadow mode and no live
+  flag, and a stale `ENGINE_LIVE` left in a host file does nothing. To keep the
+  funded fleet off for good, delete
+  `/etc/liquidity-migration/engine-mainnet.env`.
 
   What is not done, plainly:
 
-  - **The funded engine runs in shadow and has never sent an order.** Its
-    config and env file are on the host, both mainnet producers write books,
-    and it has been watched reading the funded account (552445993) under the
-    mainnet profile — reference $100 and a $100 gross cap. It sends nothing: `shadow = true` in `engine-mainnet.toml` and
-    `ENGINE_LIVE=false` in `engine-mainnet.env`, two switches, both the
-    owner's, and it takes no account lease while shadow.
-
-    It writes essentially nothing: 9.6 KB of WAL and 21 KB of syslog in 90
-    seconds.
-
-    It is left *running* rather than stopped on purpose. Stopped would not
-    stick — the deploy starts it wherever its env file and the binary both
-    exist — so a stopped unit would be a false comfort. Shadow is the state
-    that cannot trade. To keep it off for good, delete
-    `/etc/liquidity-migration/engine-mainnet.env`.
+  - **The funded engine has not yet been watched trading.** Its config and env
+    file are on the host, both mainnet producers write books, and it has been
+    watched reading the funded account (552445993) under the mainnet profile —
+    reference $100 tracking equity, gross at five times it.
 
   - **There is no hourly Telegram digest.** Pause, resume and `ops.sh flatten`
     work, on the engine's own path.
@@ -151,8 +147,8 @@ file.
 - **It holds money: the owner-health read shows equity 541.26 USDT** (read
   2026-08-19 19:24 UTC), and the mainnet CARRY producer sizes its book off it.
   The funding arrived by hand, outside the bot — not independently confirmed
-  beyond the health read. The funded engine is **shadow** either way; money in
-  the account changes what the producers publish, not what can trade.
+  beyond the health read. Money in the account changes what the producers
+  publish and, through the tracked reference, every cap with it.
 - **There is no daily loss halt, by the owner's decision.** What bounds a loss
   is the venue-native stop on each position; **nothing bounds the accumulation
   of many stopped positions in one day**, and the owner accepted that knowingly.
@@ -259,7 +255,7 @@ leverage-needing entry, where paying that round trip cost ~169 ms median.
 ## Topology
 
 Seven daemons run continuously: the demo engine (the account owner, LIVE), the
-mainnet engine (shadow), demo LONG and CARRY producers, mainnet LONG and CARRY
+mainnet engine, demo LONG and CARRY producers, mainnet LONG and CARRY
 producers, and the Telegram controls. Four timers drive four oneshots beside
 them — demo liveness, mainnet liveness, the LLM ledger, and the trade notifier.
 The host carries exactly the unit files in `deploy/systemd/` and nothing else;
@@ -379,7 +375,7 @@ fills grade under LONG v12's config id beside the native entries. The same
 day, sizing collapses into three env dials on both fleets (the RM leverage
 dials and their render math retire; mainnet's account document goes static
 at entry leverage 5) — mainnet has no funded fills to grade yet, so that
-lands on the shadow books. The v6 whale halving makes the carry
+lands on the funded books. The v6 whale halving makes the carry
 producers read one non-Bybit input (Binance top-trader EODs, public endpoint,
 fail-open under the registered 48h freshness clause). Full statements in
 [docs/research/strategy_program.md](docs/research/strategy_program.md).
@@ -389,8 +385,7 @@ fail-open under the registered 48h freshness clause). Full statements in
 The funded account has no performance record yet: its first night (2026-08-04)
 legitimately decided cash, and the first honest maker-share grade waits on funded
 `is_maker` receipts from a non-empty book. The engine records those receipts —
-what is still missing is funded fills: the funded engine runs in shadow and
-sends nothing. Demo fill economics
+what is still missing is funded fills. Demo fill economics
 are not evidence — demo fills simulate without queue position, and the demo
 realm's matching engine holds phantom internal liquidity its published book does
 not show.

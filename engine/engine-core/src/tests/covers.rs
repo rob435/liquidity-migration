@@ -127,7 +127,7 @@ async fn a_send_is_covered_at_its_quantized_size_until_the_reading_shows_it() {
     // clamp: the engine knows the real size before the wire.
     let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.0105, false)]);
     let (mut engine, _h) =
-        build(false, allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -157,7 +157,7 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
     // dropping the whole record here was the old double-entry window.
     let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.01, false)]);
     let (mut engine, h) =
-        build(false, allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
 
     // First: the send happens (quote, place, inline ack), then the feed ends.
@@ -216,7 +216,7 @@ async fn a_refused_entry_frees_the_symbol_and_leaves_older_covers_alone() {
         vec![(0.01, false), (f64::NAN, false)],
     );
     let (mut engine, _h) =
-        build(false, allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -245,7 +245,7 @@ async fn a_refused_exit_drops_every_cover_for_its_symbol() {
         vec![(0.01, false), (f64::NAN, true)],
     );
     let (mut engine, _h) =
-        build(false, allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -271,7 +271,7 @@ async fn a_cancel_releases_only_the_unfilled_remainder() {
     // account reading shows it.
     let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.01, false)]);
     let (mut engine, h) =
-        build(false, allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -334,7 +334,7 @@ async fn a_reject_releases_the_whole_send() {
     });
     let (risk, _saw) = MockRisk::with(allow_all());
     let mut engine = Engine::boot(
-        &settings(false),
+        &settings(),
         "0",
         wal,
         risk,
@@ -361,31 +361,3 @@ async fn a_reject_releases_the_whole_send() {
     );
 }
 
-#[tokio::test]
-async fn a_shadow_send_is_covered_too_so_a_follower_does_not_resend() {
-    // A shadow order never fills and never sends news, so the reading never
-    // shows it. If shadow sends were not covered, a follower would read the
-    // symbol as flat on every quote and re-send the same pretend entry each
-    // time — a shadow log full of one decision. The cover keeps a shadow run
-    // deciding the way a live one does; a refused exit or the reading moving
-    // are what release it, exactly as live.
-    let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.01, false)]);
-    let (mut engine, h) =
-        build(true, allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 2, true),
-            &mut ScriptOrderFeed::empty(),
-            std::future::pending::<()>(),
-        )
-        .await
-        .unwrap();
-
-    assert!(h.sends.borrow().is_empty(), "nothing left the box");
-    let last_quote = read_at(&seen, "quote");
-    assert!(
-        close(last_quote, 0.010),
-        "the pretend send is covered exactly like a live one, got {last_quote}"
-    );
-}

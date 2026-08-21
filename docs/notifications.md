@@ -134,7 +134,7 @@ for a host with no engine on it. **Both fleets provision it today**, from `engin
 | --- | --- | --- |
 | `engine_heartbeat_stale` | CRITICAL | it stopped being written, so the engine is dead or stuck — or it is dated in the future, so its age cannot be judged at all |
 | `engine_account_view_stale` | CRITICAL | the engine is alive and writing beats but has stopped hearing what the account holds, so its idea of the position is guesswork. Also fires if the reading is stamped *after* the beat carrying it, which means the arithmetic is wrong rather than the account being old |
-| `engine_heartbeat_latched` | CRITICAL live, WARNING in shadow | the engine has latched itself out of opening new positions. It is alive, its heartbeat is healthy, every other check is green, and it opens nothing. Nothing else reports this — a person has to read the engine's log |
+| `engine_heartbeat_latched` | CRITICAL | the engine has latched itself out of opening new positions. It is alive, its heartbeat is healthy, every other check is green, and it opens nothing. Nothing else reports this — a person has to read the engine's log |
 | `engine_heartbeat_unreadable` | CRITICAL | missing, empty, half-written, missing a field this check reads, or in a mode this checker does not know. The engine's state is then unknown |
 
 **Two ages, two clocks, and only one of them can race.** How old the *beat* is has to be measured
@@ -145,15 +145,15 @@ How old the *account view* is needs no such care: the engine stamps both the bea
 carries, off one clock in one process, so `account_observed_wall_ts_ms` subtracted from `wall_ts_ms` is
 the engine's own arithmetic and this box's clock never enters it.
 
-An absent account reading is not a fault. A shadow run may never ask the venue anything and a live one
-has not asked yet in its first moments; paging on that would make every boot an alert. It is reported as
-absent rather than filled in with a default, so it can never read as fresh.
+An absent account reading is not a fault: the engine has not asked yet in its first moments, and paging
+on that would make every boot an alert. It is reported as absent rather than filled in with a default, so
+it can never read as fresh.
 
-Every message names the mode, because a latch means something different when the engine was in shadow
-and sending nothing anyway. The mode is a word — `live` or `shadow` — and an unrecognised one is refused
-rather than guessed at. The account number, the lease path and the process id are optional: a shadow run
-may hold no lease and may never have asked the venue who it is. Anything else the engine writes is
-ignored.
+Every message names the mode, which the engine always writes as `live`. The checker still accepts the
+older `shadow` too, because a beat written before a restart can outlive the run that wrote it, and an
+unrecognised word is refused rather than guessed at. The account number, the lease path and the process
+id are optional: an engine that has not yet reached the venue may carry none of them. Anything else the
+engine writes is ignored.
 
 ### What is not watched
 

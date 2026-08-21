@@ -53,7 +53,6 @@ pub const DEFAULT_EVERY: Duration = Duration::from_secs(5);
 #[derive(Copy, Clone, Debug)]
 pub struct Facts<'a> {
     /// True: orders are worked out and written down, never sent.
-    pub shadow: bool,
     /// False means boot found orders or exposure the log could not account
     /// for, and this engine will not open anything new until somebody looks.
     /// It is the field to read first: an engine in that state answers every
@@ -260,7 +259,7 @@ impl Heartbeat {
             ),
             ("market_events", facts.market_events.to_string()),
             ("may_open", facts.may_open.to_string()),
-            ("mode", quoted(if facts.shadow { "shadow" } else { "live" })),
+            ("mode", quoted("live")),
             ("orders_sent", facts.orders_sent.to_string()),
             ("pid", std::process::id().to_string()),
             ("realm", or_null(self.account.as_ref().map(|a| quoted(&a.realm)))),
@@ -476,7 +475,6 @@ mod tests {
         static NO_BLOCKERS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
         Facts {
             costs: NOTHING_YET.get_or_init(Costs::default),
-            shadow: true,
             may_open: true,
             market_events: 1234,
             orders_sent: 7,
@@ -677,18 +675,12 @@ mod tests {
     }
 
     #[test]
-    fn it_says_shadow_in_shadow_and_live_when_live() {
+    fn it_always_says_live() {
         let names = vec!["touch_sniper".to_string()];
         let held = one_holding();
         let beat = on_the_demo_account("unused.json".into());
 
-        let mut in_shadow = facts(&names, &held);
-        in_shadow.shadow = true;
-        assert_eq!(parsed(&beat.render(&in_shadow, 1))["mode"], "shadow");
-
-        let mut sending = facts(&names, &held);
-        sending.shadow = false;
-        assert_eq!(parsed(&beat.render(&sending, 1))["mode"], "live");
+        assert_eq!(parsed(&beat.render(&facts(&names, &held), 1))["mode"], "live");
     }
 
     #[test]
@@ -834,7 +826,6 @@ mod fill_cost_tests {
 
     fn beat_with(costs: &Costs) -> serde_json::Value {
         let facts = Facts {
-            shadow: true,
             may_open: true,
             market_events: 1,
             orders_sent: 1,

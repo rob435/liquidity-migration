@@ -192,14 +192,12 @@ parallel and integrate by type-check.
 
   Nothing has ever been sent to the funded account. The path exists, is fenced,
   and is tested; it has not been exercised.
-- **Shadow mode is the default.** The engine computes intents and logs them;
-  it only sends orders when started with an explicit live flag, and the risk
-  kernel still gates every send. A shadow order is judged by the same kernel
-  and then released at once rather than reserved — it can never fill, so a
-  held reservation would lean on every later verdict for the length of the
-  run. And a shadow book flip produces exits the kernel refuses, because the
-  real account holds nothing to reduce: a long shadow run's denial lines on
-  flips are that, not a fault.
+- **The engine sends orders, and the risk kernel gates every one.** It carries
+  no mode of its own: whether the funded fleet runs at all is `REAL_MONEY` in
+  the host credential file, and nothing else. Logs written before that was the
+  only toggle still hold never-sent markers, and the reader keeps understanding
+  them (`inflight.rs`) — a name that has been written cannot be dropped from
+  the reader.
 - **The log recovers the fills its stream never delivered, and the may-open
   latch has a keyed door.** The private stream forgets: a stop firing during a
   deploy window or an execution inside a reconnect gap would otherwise leave
@@ -236,10 +234,9 @@ parallel and integrate by type-check.
   account number, same open flags, same re-proof after the lock that the file
   locked is still the file at that path. A lease that differed in any one of
   those would protect nothing: two processes would hold two different locks
-  and each would believe it was alone. A live engine takes it before it boots
-  and refuses to start if somebody has it, naming the holder. A shadow engine
-  only looks, because a shadow run holding the lease would lock out the writer
-  that does. There is no heartbeat and no expiry — the kernel drops the lock
+  and each would believe it was alone. The engine takes it before it boots
+  and refuses to start if somebody has it, naming the holder. There is no
+  heartbeat and no expiry — the kernel drops the lock
   when the holder dies, which is the only expiry that cannot be wrong. The log
   file is claimed the same way, so two engines cannot share one log either.
 
@@ -516,7 +513,7 @@ express an endpoint.
 | Stop verify, repair, and a durable breach latch | Done. A position missing its stop gets back the one the log says it was opened behind; exposure the log cannot account for latches the engine out of opening |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | Done, by feeding the fleet's own watchdog rather than growing a second one. The engine writes a heartbeat file; `check_fleet_liveness.py` reads it and pages on stale, unreadable, or latched. Off unless a path is configured |
-| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file. Deployed and running in shadow; **it has never sent an order** — see below |
+| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file — the only toggle there is. **It has not yet been watched trading** — see below |
 | Saying what the fills cost | Done. `is_maker` kept from the venue, `M0` written on every send, arrival shortfall / effective spread / fee / all-in derived, and the signed markout at 1s/15s/1m/5m written when its horizon comes due. `engine fills --wal PATH` is the read; five of the numbers are in the heartbeat |
 | Saying what its own ids mean | Done. Strategy and symbol ids are positions, so the log records both tables — at boot and again whenever a book names a new symbol |
 | A strategy reading its own position | Done. `my_position` is that strategy's own fills, moving the instant one arrives. The account reading beside it lags seconds and, on a two-sleeve account, is the sum of both |
@@ -528,16 +525,15 @@ express an endpoint.
 **Evidence.** Nothing above has ever run against real money. The mainnet path
 exists, is fenced, and is tested; it has never carried an order. A capability
 that has not been exercised is a claim, and the only thing that turns it into a
-fact is running it — in shadow first, against the account, for long enough to
-watch it.
+fact is running it against the account, for long enough to watch it.
 
 **The engine is the account owner, in the repository and on the host.** It
 reads the venue, writes `account_equity_usdt` into its heartbeat, both
 producers size from that equity, both write an absolute target book, and the
 engine reads each book, routes it to its own sleeve, and takes on symbols the
 books name that no config listed. It is **live on the demo account** and holds
-that account's single-writer lease. The funded engine runs in **shadow** and
-has never sent an order.
+that account's single-writer lease. The funded engine has not yet been watched
+trading.
 
 - **The producers size from the engine.** They read `account_equity_usdt` and
   `account_observed_wall_ts_ms` out of the heartbeat and plan every entry as
@@ -563,10 +559,9 @@ Two operator capabilities sit beside the engine, one built and one owed:
 
 ### The funded engine, concretely
 
-**It is installed on the host and running in shadow.** It has never sent an
-order and cannot: `shadow = true` in `engine-mainnet.toml` and
-`ENGINE_LIVE=false` in `engine-mainnet.env`, two switches, both the owner's,
-and a shadow engine takes no account lease. Delete
+**It is installed on the host, and `REAL_MONEY` is the only thing that decides
+whether it runs.** Armed, the unit starts, the engine sends orders and takes the
+funded account's single-writer lease. Unset, the unit does not start. Delete
 `/etc/liquidity-migration/engine-mainnet.env` to keep it off for good — a
 stopped unit would not stick, because the deploy starts it wherever its env
 file and the binary both exist.
@@ -579,32 +574,32 @@ The pieces, all in `deploy/`:
 
 | File | What it is |
 | --- | --- |
-| `systemd/liquidity-migration-engine-mainnet.service` | The unit. Deliberately does **not** conflict with anything else on the box: what stops two *live* writers is the kernel lease, which knows the difference between shadow and live; a systemd conflict does not |
+| `systemd/liquidity-migration-engine-mainnet.service` | The unit. Deliberately does **not** conflict with anything else on the box: what stops two writers is the kernel lease; a systemd conflict does not |
 | `engine.mainnet.toml.template` | The engine's config: `venue = "bybit_mainnet"`, capital limits loaded from `configs/operational.mainnet.json` itself, one block per sleeve with its own book path |
-| `engine.mainnet.env.template` | Unit settings: which config, shadow or live, where the heartbeat goes |
+| `engine.mainnet.env.template` | Unit settings: which config, where the heartbeat goes |
 
-Both templates ship with `shadow = true` and `ENGINE_LIVE=false`, and both have
-to say otherwise before anything is sent — the flag can only turn shadow off,
-never on.
+Neither template carries a live switch. `REAL_MONEY=true` in
+`/etc/liquidity-migration/bybit-mainnet.env`, set by the owner's own hand, is
+the whole of what arms the funded fleet.
 
 Each sleeve must be given names the other does not trade: the engine refuses a
 config where two strategies claim one symbol, because the venue holds one
 position per symbol and keeps no note of who asked for it.
 
-**What is left is evidence, and only time produces it.** Watch the shadow run
-against a funded account that is not near-empty, long enough to see what it
-would have done and what it would have cost — `engine fills` off its log is the
-reading that answers the second half. Only then, if it has earned it:
-`ENGINE_LIVE=true` and `shadow = false`, by someone who meant it. Reversible
-the same way. **That step is the owner's and nobody else's.**
+**What is left is evidence, and only time produces it.** Run it against a
+funded account that is not near-empty, long enough to see what it does and what
+it costs — `engine fills` off its log is the reading that answers the second
+half. Arming it is `REAL_MONEY=true` in the host credential file, by someone
+who meant it, and unsetting it is the way back. **That step is the owner's and
+nobody else's.**
 
 ## What the engine does not do
 
 - No carry or continuous *decision* inside the engine — a carry decision is a
   batch over ninety days of funding and bars, so it stays in research and
   reaches the engine as a target book.
-- No funded trading. The mainnet path is built, fenced, deployed and running
-  in shadow; it has never sent an order.
+- No funded record yet. The mainnet path is built, fenced and deployed; it has
+  not been watched trading.
 - No market impact measurement. `engine fills` anchors on the top of book,
   which is the only book the engine carries. Walking a depth-50 book is the
   Python half's job and stays there.

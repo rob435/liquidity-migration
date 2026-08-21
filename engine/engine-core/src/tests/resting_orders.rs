@@ -82,9 +82,7 @@ impl Strategy for Amender {
 
 #[tokio::test]
 async fn a_cancel_is_written_down_and_reaches_the_venue_without_an_fsync() {
-    let (mut engine, h) = build(
-        false,
-        allow_all(),
+    let (mut engine, h) = build(allow_all(),
         vec![Box::new(Canceller::new("BTCUSDT", "eng-old-1"))],
         &["BTCUSDT"],
         &[],
@@ -133,44 +131,6 @@ async fn a_cancel_is_written_down_and_reaches_the_venue_without_an_fsync() {
     );
 }
 
-#[tokio::test]
-async fn shadow_mode_writes_the_cancel_down_and_sends_nothing() {
-    let (mut engine, h) = build(
-        true,
-        allow_all(),
-        vec![Box::new(Canceller::new("BTCUSDT", "eng-old-1"))],
-        &["BTCUSDT"],
-        &[],
-    )
-    .await;
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 1, true),
-            &mut ScriptOrderFeed::empty(),
-            std::future::pending::<()>(),
-        )
-        .await
-        .unwrap();
-
-    assert!(h.cancels.borrow().is_empty(), "the gateway was never called");
-    assert!(
-        !h.tape.borrow().iter().any(|s| matches!(s, Step::Cancel(_))),
-        "nothing left the box"
-    );
-    assert!(
-        appends(&h.tape).contains(&"cancel_sent".to_string()),
-        "the record is written exactly as it would be live"
-    );
-    let note = note_saying(&h.records, "no send");
-    assert!(note.contains("cancel of eng-old-1"), "{note}");
-    // The never-sent marker ends the order it names, so a shadow cancel must
-    // not name the order it would have pulled.
-    assert!(
-        !note.starts_with("no send: eng-old-1"),
-        "the note reads back as an ending for the order itself: {note}"
-    );
-}
 
 /// Fires a burst of entries with cancels behind them, all in one wake.
 struct MixedBurst {
@@ -232,7 +192,7 @@ async fn a_flooded_wake_drops_entries_but_never_cancels() {
         cancels: 3,
         fired: false,
     };
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -274,7 +234,7 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
         fired: false,
     };
     let mut engine = Engine::boot(
-        &settings(false),
+        &settings(),
         "0",
         wal,
         risk,
@@ -315,9 +275,7 @@ async fn an_amend_reaches_the_venue_where_it_can_be_honoured() {
         order: "eng-old-1".into(),
         fired: false,
     };
-    let (mut engine, h) = build(
-        false,
-        allow_all(),
+    let (mut engine, h) = build(allow_all(),
         vec![Box::new(amender)],
         &["BTCUSDT"],
         &[],
@@ -397,7 +355,7 @@ async fn an_amend_that_raises_the_size_is_durable_before_it_goes_out() {
         qty: 99.0,
         fired: false,
     };
-    let (mut engine, h) = build(false, allow_all(), vec![Box::new(grower)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(grower)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -435,7 +393,7 @@ async fn an_entry_carrying_a_stop_is_refused_where_the_venue_keeps_none() {
     venue.caps.native_position_stop = false;
     let (risk, _seen) = MockRisk::with(allow_all());
     let mut engine = Engine::boot(
-        &settings(false),
+        &settings(),
         "0",
         wal,
         risk,
@@ -596,9 +554,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
 
     let (one, seen_one) = Watcher::new("BTCUSDT");
     let (two, seen_two) = Watcher::new("BTCUSDT");
-    let (mut engine, _h) = build_with_venue_orders(
-        false,
-        allow_all(),
+    let (mut engine, _h) = build_with_venue_orders(allow_all(),
         vec![Box::new(one), Box::new(two)],
         &["BTCUSDT"],
         &replayed,
@@ -635,9 +591,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
 #[tokio::test]
 async fn an_order_this_strategy_placed_is_in_its_book_until_it_ends() {
     let (watcher, seen) = Watcher::buying("BTCUSDT", 0.01);
-    let (mut engine, h) = build(
-        false,
-        allow_all(),
+    let (mut engine, h) = build(allow_all(),
         vec![Box::new(watcher)],
         &["BTCUSDT"],
         &[],
@@ -675,7 +629,7 @@ async fn an_order_the_log_has_ended_leaves_the_strategys_book() {
     });
     let (risk, _seen) = MockRisk::with(allow_all());
     let mut engine = Engine::boot(
-        &settings(false),
+        &settings(),
         "0",
         wal,
         risk,

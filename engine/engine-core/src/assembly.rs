@@ -229,7 +229,7 @@ pub fn target_books(
 ///
 /// `account` and `lease_path` are what the run has already learned: whose
 /// account these credentials open, and the lock file this process holds. A
-/// shadow run holds no lease, and a run that cannot reach the venue never
+/// a run that cannot reach the venue never
 /// learns the account; both are written into the file as null.
 pub fn heartbeat(
     settings: &EngineSection,
@@ -807,7 +807,6 @@ disaster_stop_fraction = 0.35
             wal_rotate_mb: 256,
             account_view_max_age_ms: 5_000,
             max_quote_age_ms: 30_000,
-            shadow: true,
             leverage_authority: crate::config::LeverageAuthority::default(),
             target_book_path: engine_level_book.map(PathBuf::from),
             heartbeat_path: None,
@@ -1035,7 +1034,6 @@ mod deployed_templates {
     async fn the_demo_template_assembles_whole() {
         let config = assemble("engine.demo.toml.template", "operational.demo.json");
         assert_eq!(config.engine.venue, "bybit_demo");
-        assert!(config.engine.shadow, "a template must never ship live");
         assert!(
             config.engine.heartbeat_path.is_some(),
             "both producers size from the equity in the heartbeat; without a path \
@@ -1047,7 +1045,6 @@ mod deployed_templates {
     async fn the_mainnet_template_assembles_whole() {
         let config = assemble("engine.mainnet.toml.template", "operational.mainnet.json");
         assert_eq!(config.engine.venue, "bybit_mainnet");
-        assert!(config.engine.shadow, "a template must never ship live");
     }
 
     #[test]

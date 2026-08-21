@@ -16,8 +16,8 @@ use engine_core::runner;
 const USAGE: &str = "\
 engine — the execution loop
 
-  engine run --config engine.toml [--live]
-      Run the engine. Shadow (compute and log, send nothing) unless --live.
+  engine run --config engine.toml
+      Run the engine. It sends orders; REAL_MONEY gates the funded venue.
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
                [--wal PATH] [--fills]
@@ -69,8 +69,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
     match command {
         "run" => {
             let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
-            let live = args.iter().any(|a| a == "--live");
-            runtime()?.block_on(runner::run(&config, live))
+            runtime()?.block_on(runner::run(&config))
         }
         "bench" => {
             let mut options = BenchOptions::default();

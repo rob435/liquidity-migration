@@ -37,12 +37,6 @@ case "$UNIT:$ENTRYPOINT" in
             run
             --config "${ENGINE_CONFIG_FILE:?ENGINE_CONFIG_FILE is required}"
         )
-        # Shadow computes and sends nothing, and is what the config already
-        # says. The flag only ever turns shadow off; a config that says
-        # `shadow = false` is live whatever this variable holds.
-        case "${ENGINE_LIVE:-}" in
-            on|ON|On|1|true|TRUE|True|yes|YES|Yes) COMMAND+=(--live) ;;
-        esac
         ;;
     liquidity-migration-engine-mainnet.service:main)
         # The same binary and the same command line as the demo engine above.
@@ -59,9 +53,6 @@ case "$UNIT:$ENTRYPOINT" in
             run
             --config "${ENGINE_CONFIG_FILE:?ENGINE_CONFIG_FILE is required}"
         )
-        case "${ENGINE_LIVE:-}" in
-            on|ON|On|1|true|TRUE|True|yes|YES|Yes) COMMAND+=(--live) ;;
-        esac
         ;;
     liquidity-migration-demo-liveness.service:main)
         COMMAND=(

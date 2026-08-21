@@ -16,6 +16,30 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-22 — one toggle: `REAL_MONEY`, and nothing else.** Owner
+  instruction. Shadow mode and `ENGINE_LIVE` are gone from the engine, the
+  runtime wrapper, both unit files, both config templates and `.env.example`.
+  The engine sends orders; whether the funded fleet runs at all is
+  `REAL_MONEY=true` in the host credential file, set by the owner's own hand.
+  A stale `ENGINE_LIVE` left in a host env file now does nothing, and a stale
+  `shadow = true` in a host TOML is an unknown key the loader ignores — pinned
+  by a test on the wrapper's exact argv.
+
+  **The log reader keeps the mode it can no longer produce.** The funded WAL is
+  143 MB written entirely under shadow, and the demo log carries a shadow era
+  too. `inflight.rs` still reads the never-sent marker, so those runs read back
+  as runs that never sent rather than runs that abandoned every order they
+  wrote. Same rule as this morning's refusal reason: a name that has been
+  written into the log cannot be dropped from the reader.
+
+  Five tests of the removed mode went with it, each having a live counterpart
+  that already covered the real path; the heartbeat now always says `live`,
+  and the watchdog still accepts the older word because a beat can outlive the
+  run that wrote it.
+
+  **What this changes operationally:** the funded engine sends orders from the
+  deploy that carries it. It had never sent one before.
+
 - **2026-08-21 — the sleeve partition is lifted on the funded account, by
   owner instruction.** `sleeve_limits` leaves
   `configs/operational.mainnet.json` and the renderer that must match it, so

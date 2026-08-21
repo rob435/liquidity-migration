@@ -17,14 +17,8 @@ venue = "bybit_mainnet"
 
 wal_path = "/var/lib/liquidity-migration-engine-mainnet/engine.wal"
 
-# Compute and log orders, send nothing. LEAVE THIS TRUE until a shadow run
-# against this account has been watched for long enough to trust. The env
-# file's live flag can only turn shadow off, never on, so both have to agree
-# before anything is sent.
-shadow = true
-
 # One line of JSON, rewritten every few seconds, saying when it was written,
-# live or shadow, whose account it is on, whether it is still allowed to open
+# whose account it is on, whether it is still allowed to open
 # positions, and what it has seen and sent. scripts/runtime/check_fleet_liveness.py
 # reads it and pages on stale, unreadable, or latched.
 heartbeat_path = "/var/lib/liquidity-migration-engine-mainnet/heartbeat.json"

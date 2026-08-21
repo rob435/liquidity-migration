@@ -24,7 +24,7 @@ The units live in `deploy/systemd/`; that directory's
 | Role | Units | Mutates a venue |
 | --- | --- | --- |
 | Execution engine, demo | `engine` | Yes — the Rust engine is the sole Bybit demo mutator and holds the account's single-writer lease |
-| Execution engine, mainnet | `engine-mainnet` | Not while shadow — it sends nothing until the owner turns it live |
+| Execution engine, mainnet | `engine-mainnet` | Yes, whenever `REAL_MONEY` is armed |
 | Target producers | `bybit-{long,carry}-{demo,mainnet}` | No |
 | Liveness | `demo-liveness`, `mainnet-liveness` (each with a `.timer`) | No credential, no ordering dependency on what it watches |
 | Owner controls | `telegram-controls` | No — pause/resume buttons, acting through `systemctl` and the sleeve toggles |
