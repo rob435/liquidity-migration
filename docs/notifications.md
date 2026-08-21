@@ -28,7 +28,7 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope | alerts |
 | `telegram-controls` | on | control panel + action results; **also listens** | main |
 | `engine` / `engine-mainnet` | off — the unit strips the token | nothing; the engine's live signal is its heartbeat file, which the watchdog reads | — |
-| `llm-ledger` | on | LLM gate entries and exits (target decisions, not fills) | main |
+| `llm-ledger` | on | LLM gate entries and exits (target decisions, not fills) | the trade bot when `TRADE_TELEGRAM_BOT_TOKEN`/`TRADE_TELEGRAM_CHAT_ID` are set in `llm-ledger.env`, else main |
 | every producer | off or unset | nothing | — |
 
 Producers publish targets and never notify (the LLM gate's ledger service is

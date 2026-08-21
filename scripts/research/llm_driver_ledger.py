@@ -703,18 +703,33 @@ def gate_action_message(action: dict[str, Any]) -> str | None:
 
 
 def notify_gate_actions(actions: list[dict[str, Any]]) -> None:
-    """Best-effort phone line: a Telegram failure never touches the cycle."""
+    """Best-effort phone line: a Telegram failure never touches the cycle.
+
+    Trade updates go to their own bot when TRADE_TELEGRAM_BOT_TOKEN and
+    TRADE_TELEGRAM_CHAT_ID are set (the gate's env file); otherwise the
+    fleet's bot carries them. The fleet bot is the debugging line -- the
+    split is the owner's, and the dedicated pair is how it is expressed.
+    """
 
     try:
-        from liquidity_migration.ops.telegram import send_telegram_message
+        from liquidity_migration.ops.telegram import TelegramConfig, send_telegram_message
     except Exception:
         return
+    config = None
+    if os.environ.get("TRADE_TELEGRAM_BOT_TOKEN", "").strip():
+        config = TelegramConfig(
+            token_env="TRADE_TELEGRAM_BOT_TOKEN",
+            chat_id_env="TRADE_TELEGRAM_CHAT_ID",
+            alert_chat_id_env="TRADE_TELEGRAM_CHAT_ID",
+        )
     for action in actions:
         text = gate_action_message(action)
         if text is None:
             continue
         try:
-            send_telegram_message(text, enabled=_env_on("TELEGRAM_ENABLED"), channel="main")
+            send_telegram_message(
+                text, config=config, enabled=_env_on("TELEGRAM_ENABLED"), channel="main"
+            )
         except Exception:
             continue
 
