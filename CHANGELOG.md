@@ -16,6 +16,31 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 22:00 UTC — the day's whole batch is live: `5b1c7414`.**
+  Deployed staged `--profile operational --stop-first` (required while real
+  money is armed). `verify-ok commit=5b1c7414 profile=operational
+  mainnet=armed`; both engine binaries rebuilt at that commit, all four
+  producers, both liveness timers, the ledger and notify timers and the
+  control panel active and enabled.
+
+  Carried: the per-symbol cap removal, the venue-side decayed stop, the gate's
+  4/12/24h windows with the top-10-turnover entry scan and one-hour validity,
+  the v5 rubric with scam-pump scoring and taker flow, LONG's closed flatten
+  route, and the audit's seven fixes.
+
+  **The funded fleet's single-name concentration changes with it.** With
+  `max_symbol_notional_usdt` gone from `configs/operational.mainnet.json`, what
+  bounds one name on the funded account is its sleeve's partition — 300 USDT
+  for LONG, 200 for carry — where it was 50. The envelope and the margin
+  ceiling are unchanged and still bind first; the partition is the dial if that
+  ceiling wants lowering.
+
+  Health at nine minutes: no errors, no panics, no restarts, heartbeat at ~5 s.
+  The engine's refused-resize churn — 88,150 refusals in the 100 minutes before
+  the deploy, about 880 a minute — is one 424-refusal burst as the first book
+  is applied and then six clean minutes, which is `entry_blockers` doing what
+  it was built for.
+
 - **2026-08-21 — deleting a refusal reason stopped the engine at boot.**
   Removing the per-symbol cap took `SymbolNotionalBreached` out of
   `DenyReason`, and the engine writes every refusal into its log whole. The
@@ -32,7 +57,7 @@ edit STATE.md to match.
   checked against the new code before redeploying.
 
 - **2026-08-21 — LONG's own flatten route closed, and the engine's answers
-  made visible.** Not deployed. The same bug class as this morning's carry
+  made visible.** Deployed in `5b1c7414`. The same bug class as this morning's carry
   fix, on LONG's side of the seam, plus the four blind spots behind it.
 
   **An unreadable book-state file no longer reads as "hold nothing".**
@@ -106,7 +131,7 @@ edit STATE.md to match.
   real at the venue. A further exit idea should have to beat that table first.
 
 - **2026-08-21 — the gate learns who was buying.**
-  Not deployed. `binance_metrics_daily` carries what no Bybit root does: the
+  Deployed in `5b1c7414`. `binance_metrics_daily` carries what no Bybit root does: the
   mean of a day's 288 five-minute taker buy/sell volume ratios. Graded on the
   gate's own trigger population, pumps entering above a ratio of 1.07 — the
   ones being lifted hardest at the ask — **win 41% of the time against 48%**,
@@ -139,7 +164,7 @@ edit STATE.md to match.
   changed.
 
 - **2026-08-21 — the stop that narrows now narrows at the venue.**
-  Not deployed; a change point from the deploy that carries it. v12 declares a
+  Deployed in `5b1c7414`, which is its change point. v12 declares a
   3×ATR stop at entry and a 1.5×ATR stop from 48 hours, and only the first of
   those was ever real. The engine attached a venue-native stop on an opening
   order and on a growing resize, and a position holding steady in size produced
@@ -184,11 +209,11 @@ edit STATE.md to match.
   desk measured: no mechanical edge in these fields (labs of 2026-08-21:
   null as entry discriminator, harmful as exits), so they inform the flow
   classification, not the score. `PROMPT_VERSION` → `driver-judgment-v6-scored`;
-  v5's forward rows keep grading in their own bucket. Not deployed — rides
-  the next llm-ledger sync.
+  v5's forward rows keep grading in their own bucket. Deployed in `5b1c7414`;
+  it takes effect on the next llm-ledger sync.
 
 - **2026-08-21 — the LLM gate is graded, and narrowed on the numbers.**
-  Not deployed. The gate's mechanical trigger — the part without the model —
+  Deployed in `5b1c7414`. The gate's mechanical trigger — the part without the model —
   was rebuilt on 5.5 years of hourly Bybit bars and graded against the sleeve's
   own exit geometry: ~70,000 events, entry at the bar *after* the trigger bar,
   the repo's own 15.0 bp round trip. Full tables in
@@ -241,7 +266,7 @@ edit STATE.md to match.
   stop over the full history.
 
 - **2026-08-21 — the per-symbol cap is gone, by owner instruction.**
-  Not deployed. `max_symbol_notional_usdt` is removed from both halves: the
+  Deployed in `5b1c7414`. `max_symbol_notional_usdt` is removed from both halves: the
   Rust kernel's check and `DenyReason::SymbolNotionalBreached`, the Python
   kernel's `symbol_notional_limit` rejection, both loaders' schemas, both
   shipped profiles, `engine.toml`, and the nesting proof that held it under
@@ -266,7 +291,7 @@ edit STATE.md to match.
   the share the partition clamps rather than refuses.
 
 - **2026-08-21 — a full-repo audit, and the seven real defects it found.**
-  Not deployed: everything below is in the working tree with
+  Deployed in `5b1c7414`; everything below shipped with
   `scripts/dev.sh check` green (doctor ready, ruff clean, mypy 126 files,
   **2,392** pytest, engine **739**). Four of the fixes change runtime
   behaviour and are change points from the deploy that carries them.
