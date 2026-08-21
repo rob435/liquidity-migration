@@ -119,7 +119,6 @@ class AccountRiskSettings:
 class LongOperationalSettings:
     notional_multiplier: float
     entry_leverage: float
-    max_projected_initial_margin_pct_equity: float
     order_notional_pct_equity: float
     max_new_entries_per_cycle: int
 
@@ -299,17 +298,10 @@ def _parse_long(value: object) -> LongOperationalSettings:
     fields = {
         "notional_multiplier",
         "entry_leverage",
-        "max_projected_initial_margin_pct_equity",
         "order_notional_pct_equity",
         "max_new_entries_per_cycle",
     }
     row = _object(value, label="operational profile long", fields=fields)
-    margin_fraction = _positive_float(
-        row["max_projected_initial_margin_pct_equity"],
-        label="long.max_projected_initial_margin_pct_equity",
-    )
-    if margin_fraction > 1.0:
-        raise ValueError("long.max_projected_initial_margin_pct_equity cannot exceed 1")
     order_cap = _positive_float(
         row["order_notional_pct_equity"],
         label="long.order_notional_pct_equity",
@@ -324,7 +316,6 @@ def _parse_long(value: object) -> LongOperationalSettings:
         entry_leverage=_positive_float(
             row["entry_leverage"], label="long.entry_leverage"
         ),
-        max_projected_initial_margin_pct_equity=margin_fraction,
         order_notional_pct_equity=order_cap,
         max_new_entries_per_cycle=_positive_int(
             row["max_new_entries_per_cycle"],
@@ -375,7 +366,14 @@ def _parse_hedge(value: object) -> HedgeOperationalSettings:
 
 
 def _validate_profile_envelopes(profile: OperationalProfile) -> None:
-    """Reject producer settings that the paired account policy cannot accept."""
+    """Refuse structurally impossible profiles, before any sizing opinion.
+
+    What remains here is arithmetic self-consistency: a producer may not ask
+    for leverage the account forbids, and the account caps must nest inside
+    what the capital reference could fund. How large a book the multipliers
+    build is the owner's dial, not a load-time refusal — per-position risk is
+    bounded by each position's own venue-native stop.
+    """
 
     risk = profile.account_risk
     # Dials may pin a cap exactly at its bound (gross cap = reference * max
@@ -407,91 +405,6 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
         raise ValueError(
             "account_risk initial-margin cap exceeds capital_reference_usdt"
         )
-
-    # Imported lazily to keep the shared account-policy loader out of strategy
-    # import cycles; these are the real sizing constants, not copies of them.
-    from liquidity_migration.rules.long_native import long_v11a_profile
-    from liquidity_migration.strategy.long_native_event_demo import (
-        LongNativeDemoCycleConfig,
-        projected_long_initial_margin_pct_equity,
-    )
-
-    long_config = LongNativeDemoCycleConfig(
-        notional_multiplier=profile.long.notional_multiplier,
-        entry_leverage=profile.long.entry_leverage,
-        max_projected_initial_margin_pct_equity=(
-            profile.long.max_projected_initial_margin_pct_equity
-        ),
-        order_notional_pct_equity=profile.long.order_notional_pct_equity,
-        max_new_entries_per_cycle=profile.long.max_new_entries_per_cycle,
-    )
-    long_strategy = long_v11a_profile()
-    long_projection = projected_long_initial_margin_pct_equity(long_config, long_strategy)
-    long_single = (
-        profile.capital_reference_usdt
-        * long_projection["worst_case_order_notional_pct_equity"]
-    )
-    long_gross = long_single * long_strategy.max_concurrent_positions
-    long_margin = long_gross / profile.long.entry_leverage
-    if (
-        long_projection["full_book_initial_margin_pct_equity"]
-        > profile.long.max_projected_initial_margin_pct_equity + 1e-12
-    ):
-        raise ValueError(
-            "long full-book margin projection exceeds its configured equity cap"
-        )
-
-    # CARRY worst case from the registered rule constants the producer loads.
-    from liquidity_migration.strategy.carry_demo import load_carry_config
-
-    carry_rule = load_carry_config()
-    carry_single = (
-        profile.capital_reference_usdt
-        * float(carry_rule.per_name_cap)
-        * profile.carry.notional_multiplier
-    )
-    carry_gross = (
-        profile.capital_reference_usdt
-        * float(carry_rule.gross_cap)
-        * profile.carry.notional_multiplier
-    )
-    carry_margin = carry_gross / profile.carry.entry_leverage
-
-    if max(long_single, carry_single) > risk.max_symbol_notional_usdt + tolerance:
-        raise ValueError("producer symbol envelope exceeds account_risk symbol cap")
-    combined_gross = long_gross + carry_gross
-    if combined_gross > risk.max_component_gross_notional_usdt + tolerance:
-        raise ValueError("combined producer envelope exceeds account_risk component cap")
-    if combined_gross > risk.max_account_gross_notional_usdt + tolerance:
-        raise ValueError("combined producer envelope exceeds account_risk account cap")
-    if long_margin + carry_margin > risk.max_initial_margin_usdt + tolerance:
-        raise ValueError("combined producer margin envelope exceeds account_risk margin cap")
-
-    # When partitioned, each producer must fit its own share, not just the total.
-    if risk.sleeve_limits:
-        producer_envelopes = {
-            "long": (long_gross, long_margin),
-            "carry": (carry_gross, carry_margin),
-        }
-        for sleeve, (sleeve_gross, sleeve_margin) in sorted(producer_envelopes.items()):
-            limit = risk.sleeve_limit(sleeve)
-            if limit is None:
-                # An unpartitioned sleeve is refused at runtime, so a nonzero
-                # envelope for it is a config that can only produce rejections.
-                if sleeve_gross > tolerance:
-                    raise ValueError(
-                        f"producer sleeve {sleeve!r} has an envelope but no sleeve_limits share; "
-                        "give it a share or shrink it to zero"
-                    )
-                continue
-            if sleeve_gross > limit.max_gross_notional_usdt + tolerance:
-                raise ValueError(
-                    f"producer sleeve {sleeve!r} gross envelope exceeds its sleeve_limits share"
-                )
-            if sleeve_margin > limit.max_initial_margin_usdt + tolerance:
-                raise ValueError(
-                    f"producer sleeve {sleeve!r} margin envelope exceeds its sleeve_limits share"
-                )
 
 
 def _parse_capital_reference(value: object) -> CapitalReferenceSettings:

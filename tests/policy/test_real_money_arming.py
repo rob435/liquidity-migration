@@ -141,9 +141,6 @@ def test_the_leverage_dials_speak_in_entry_sizes() -> None:
     config = LongNativeDemoCycleConfig(
         notional_multiplier=profile.long.notional_multiplier,
         entry_leverage=profile.long.entry_leverage,
-        max_projected_initial_margin_pct_equity=(
-            profile.long.max_projected_initial_margin_pct_equity
-        ),
         order_notional_pct_equity=profile.long.order_notional_pct_equity,
         max_new_entries_per_cycle=profile.long.max_new_entries_per_cycle,
     )

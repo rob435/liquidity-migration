@@ -25,32 +25,29 @@ file.
   Evidence and the honest 2024-negative era shape:
   `docs/research/research_findings.md` §1 (the exodus short row); promotion
   note in `strategy_program.md`.
-- **A fourth sleeve, the LLM GATE, is live on demo with 0 scored days (owner
-  decision).** The hourly ledger service judges fresh 1/2/4/12/24h trigger
-  events and publishes score ≥ 6 names as real entries to the engine's
-  `llm_gate` sleeve (book `llm-gate-demo.json`, identity `long_llm_gate_v1`),
-  half of equity per name before the vol-parity cut (floor a quarter of the
-  slot), leverage 5, at most 5 names, v12-shaped exits on an hourly
-  clock with the 3×ATR venue stop underneath. `LLM_GATE_LIVE` in
-  `/etc/liquidity-migration/llm-ledger.env` arms entries; `LLM_GATE_DRAIN=1`
-  zeroes the book. Detail: `docs/trading_logic.md` §LLM GATE.
+- **The LLM GATE is an entry source inside the LONG sleeve (owner decision,
+  live on demo).** The hourly ledger service judges fresh 1/2/4/12/24h trigger
+  events and publishes score ≥ 6 names to the LONG candidates file
+  (`llm-gate-candidates.json`); the LONG producer takes them as ordinary LONG
+  entries — same book (`long-demo.json`), same engine sleeve (`long`), same
+  vol-scaled sizing at the profile multiplier, same v12 exits and venue-native
+  stops. The ledger holds no venue credentials. Kill switches:
+  `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit, or stop
+  `llm-ledger.timer`. Detail: `docs/trading_logic.md` §LLM GATE.
 
-- **Demo sizes risk-on: every new entry is as large as the envelope admits
-  with both books priced full at worst case (owner directive).**
-  `operational.demo.json` — carry multiplier 2.0 (each new carry name takes
-  20% of the sizing equity; exodus inherits carry's notional), LONG 1.5
-  (~15% of equity per typical entry, 28% at the worst-case vol/weekend
-  scales), all `entry_leverage` 5.0, account `max_leverage` 5.0, gross caps
-  1,250,000. The gate sleeve sizes half of equity per name before its
-  vol-parity cut. Held components keep their fill-anchored size — the dials
-  reach new entries only. The binding ceiling is the envelope's own
-  invariant (planned worst-case margin ≤ the capital reference): true
-  50%-per-entry on carry+LONG together does not fit it. Mainnet is
+- **Demo sizes risk-on: a fixed ~50%-of-equity entry on both sleeves (owner
+  directive).** `operational.demo.json` — carry multiplier 5.0 (each new carry
+  name takes 50% of the sizing equity; exodus inherits carry's notional),
+  LONG 5.0 (~50% of equity per typical entry after its own vol/weekend
+  scaling), all `entry_leverage` 5.0, account `max_leverage` 5.0, gross caps
+  1,250,000. There is no book-level margin ceiling in the way: the sizing
+  multipliers scale each strategy's own weights, and what bounds a loss is
+  the venue-native stop on each position. Held components keep their
+  fill-anchored size — the dials reach new entries only. Mainnet is
   untouched: the ratio-dial defaults in `real_money_profile.py` — carry
   0.5x / long 0.5x of the wallet, entry-leverage floor 5 — with
   `operational.mainnet.json` the render of those defaults; every cap on
   that surface tracks live equity (no absolute dollar caps exist there).
-  The sleeve partition and the 0.35 stops are untouched by these dials.
   Mainnet stays `shadow = true`, `ENGINE_LIVE=false`. The sizing is a
   forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** It runs
@@ -283,13 +280,12 @@ L2 readiness and exact decision-book capture remain enabled.
 **Demo** (risk-on): capital reference 250,000 USDT, per-symbol notional
 125,000, component/account gross 1,250,000, initial margin 250,000. Entry
 leverage 5× on every sleeve, account max leverage 5×, LONG notional multiplier
-1.5 and CARRY multiplier 2.0 (per-name 0.10 and gross cap 1.0 come from the
-registered rule and multiply through, so each new carry name takes 20% of the
-sizing equity and a full CARRY book is 2× it). The dials sit at the envelope's
-own ceiling: both books full at worst case plan exactly the initial-margin cap,
-which may not exceed the capital reference. Startup and authorization reject
-unknown profile fields, producer leverage above the owner cap, or registered
-envelopes outside the bound profile.
+5.0 and CARRY multiplier 5.0 (per-name 0.10 and gross cap 1.0 come from the
+registered rule and multiply through, so each new carry name takes 50% of the
+sizing equity and a full CARRY book is 5× it). Startup and authorization
+reject unknown profile fields and producer leverage above the owner cap; how
+large a book the multipliers build is the owner's dial, bounded per position
+by each venue-native stop.
 
 **Real money**: the owner dials in the host `bybit-mainnet.env` are the
 authority, and the installed risk profile is the render of them.
@@ -378,7 +374,12 @@ config id; graded from engine exit fills against the settled-print
 counterfactual; rollback dial is `v6`), LONG
 v12 wide-stop (2026-08-03), and the entry execution recipes
 (quote-first entries, touch-sized windows, and the replay-selected resting recipe,
-all 2026-08-04 — deployed with `f85371e`). The v6 whale halving makes the carry
+all 2026-08-04 — deployed with `f85371e`). 2026-08-21 adds two sizing change
+points on demo: the multipliers move to a fixed ~50%-of-equity entry on both
+sleeves (carry 2.0→5.0, LONG 1.5→5.0; fill receipts grade forward from that
+deploy), and the LLM gate's judged entries move inside the LONG sleeve — same
+book and identity from then on, so their fills grade under LONG v12's config
+id beside the native entries. The v6 whale halving makes the carry
 producers read one non-Bybit input (Binance top-trader EODs, public endpoint,
 fail-open under the registered 48h freshness clause). Full statements in
 [docs/research/strategy_program.md](docs/research/strategy_program.md).

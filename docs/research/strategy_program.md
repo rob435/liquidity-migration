@@ -497,22 +497,20 @@ priors — and journal every step's answer BEFORE the outcome exists. Grading
 prints the 72h forward return by prompt version, row type, and judged driver
 kind, so a failed grade localizes to the step that failed; a rubric change is
 a new prompt version and grades separately. Beside the mover rows, an hourly
-shadow entry gate journals fresh trigger events on the 1/2/4/12/24h rolling
-windows (each window's bar is the daily 2.5σ trigger scaled by √time; only
-the 24h window has ever been measured) with the trigger-hour price and a
-provisional would-enter at score ≥ 7 — the exact flow a live gate would run,
-pointed at the ledger instead of the order book — and, since 2026-08-21, ALSO
-at the order book: the owner directed the gate live on demo at score ≥ 6 with
-0 scored days (`long_llm_gate_v1`, the engine's fourth sleeve; mechanics in
-`docs/trading_logic.md` §LLM GATE). The forward record now grades real fills
-beside the shadow rows; the registered lane-1 prior is that no mechanical
-gate on these events cleared the bar, so this rides entirely on the judged
-discriminator and the owner's decision. Forward-only by construction: a model
-judged on historical pumps already knows how they ended. Armed by
-`DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible endpoint via
-`LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals nominations.
-It trades nothing and has no capital claim; whether a graded discriminator
-ever becomes an entry gate is a later, separate registration.
+scan journals fresh trigger events on the 1/2/4/12/24h rolling windows (each
+window's bar is the daily 2.5σ trigger scaled by √time; only the 24h window
+has ever been measured) with the trigger-hour price and a would-enter at
+score ≥ 6. Since 2026-08-21 those judged events ARE LONG entries: each
+score ≥ 6 event is published to the LONG sleeve's candidates file and enters
+through that sleeve's own sizing, exits, and stops — one strategy, one book;
+mechanics in `docs/trading_logic.md` §LLM GATE. The forward record grades
+real fills beside the shadow rows; the registered lane-1 prior is that no
+mechanical gate on these events cleared the bar, so this rides entirely on
+the judged discriminator and the owner's decision. Forward-only by
+construction: a model judged on historical pumps already knows how they
+ended. Armed by `DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible
+endpoint via `LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals
+nominations.
 
 ### 10. Genuinely open
 

@@ -140,7 +140,7 @@ def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
         ]
     )
     assert args.notional_multiplier == 1.0
-    assert args.max_projected_initial_margin_pct_equity == 0.5
+    assert args.order_notional_pct_equity == 0.0
 
 
 # --------------------------------------------------------------------------- #

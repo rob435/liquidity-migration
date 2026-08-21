@@ -5,8 +5,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# ~12 nominations, each a few public reads plus one LLM call; the 4h timer
-# must never find a hung run still activating.
+# ~12 nominations, each a few public reads plus one LLM call; the hourly
+# timer must never find a hung run still activating.
 TimeoutStartSec=600
 User=root
 Group=root
@@ -14,18 +14,14 @@ WorkingDirectory=/opt/liquidity-migration
 # Only the LLM key. This unit reads public market data and holds no venue
 # credentials; it can nominate (without judging) even if the file is absent.
 EnvironmentFile=-/etc/liquidity-migration/llm-ledger.env
-# The Telegram token rides in the venue env file; the venue credentials are
-# stripped right back out -- this unit talks to the phone, never the account.
-EnvironmentFile=-/etc/liquidity-migration/bybit-demo.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
-Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
+# The judged candidates file for the LONG sleeve is this unit's whole output
+# to the trading path; it writes nothing else there.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger
-# The live gate's book. Sibling books in the same directory are only read.
 ReadWritePaths=/var/lib/liquidity-migration/targets
 StateDirectory=liquidity-migration/llm-driver-ledger
 MemoryMax=512M

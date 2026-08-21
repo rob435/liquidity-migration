@@ -285,11 +285,6 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
             long_settings.notional_multiplier if long_settings else args.notional_multiplier
         ),
         entry_leverage=(long_settings.entry_leverage if long_settings else args.entry_leverage),
-        max_projected_initial_margin_pct_equity=(
-            long_settings.max_projected_initial_margin_pct_equity
-            if long_settings
-            else args.max_projected_initial_margin_pct_equity
-        ),
         order_notional_pct_equity=(
             long_settings.order_notional_pct_equity
             if long_settings

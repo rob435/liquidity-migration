@@ -28,7 +28,7 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope | alerts |
 | `telegram-controls` | on | control panel + action results; **also listens** | main |
 | `engine` / `engine-mainnet` | off — the unit strips the token | nothing; the engine's live signal is its heartbeat file, which the watchdog reads | — |
-| `llm-ledger` | on | LONG (LLM gate) entries and exits, with score and stop (target decisions, not fills) | main |
+| `llm-ledger` | off — the unit reads no Telegram env | nothing; its judged candidates are read by the LONG producer, and the trades they become page as LONG entries/exits | — |
 | `trade-notify` | on | every sleeve's entries and exits from the target books (carry, LONG, exodus), 5-minute diff | main |
 | every producer | off or unset | nothing | — |
 

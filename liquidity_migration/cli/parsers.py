@@ -222,12 +222,6 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     )
     long_demo.add_argument("--entry-leverage", type=float, default=demo_defaults.entry_leverage)
     long_demo.add_argument(
-        "--max-projected-initial-margin-pct-equity",
-        type=float,
-        default=demo_defaults.max_projected_initial_margin_pct_equity,
-        help="Reject configs whose worst-case full-book initial margin exceeds this equity fraction.",
-    )
-    long_demo.add_argument(
         "--order-notional-pct-equity",
         type=float,
         default=demo_defaults.order_notional_pct_equity,

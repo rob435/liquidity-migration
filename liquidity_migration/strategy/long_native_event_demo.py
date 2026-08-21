@@ -25,8 +25,8 @@ Operating model
   producer-planned exit checked at cycle cadence, one grid-convention step from
   the research engine's intrabar low.
 - Per-position notional defaults to the 1x research sizing. Levered demo sizing
-  is explicit opt-in and is rejected if projected full-book initial margin
-  exceeds the configured safety ceiling.
+  is explicit opt-in through the operational profile's multiplier dials; the
+  multiplier scales the strategy's own weights and nothing else.
 - At 3 days the cycle publishes a zero component target for the time-stop.
 - Planning reads only the canonical account projection.
 """
@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Mapping
@@ -46,6 +47,7 @@ from typing import Any
 import polars as pl
 
 from liquidity_migration.core._common import MS_PER_DAY, exact_duration_ms, is_weekend_ms
+from liquidity_migration.core.env_flags import env_flag
 from liquidity_migration.account.account_intent_client import (
     ExitFirstPublication,
     publish_exit_first_target_requests,
@@ -148,6 +150,17 @@ LONG_BOOK_VALIDITY_MS = exact_duration_ms(hours=1)
 #: or a slow cycle cannot let a name back in early.
 _COOLDOWN_KEEP_MS = exact_duration_ms(days=1)
 
+#: The LLM gate's judged entry candidates, written hourly by
+#: liquidity-migration-llm-ledger.service. Set both vars on a producer unit to
+#: turn judged score>=6 pump events into LONG entries through this sleeve's own
+#: sizing, exits, and stops; unset (mainnet default) means the gate is inert.
+LLM_GATE_CANDIDATES_PATH_ENV = "LONG_ENGINE_LLM_GATE_CANDIDATES_PATH"
+LLM_GATE_ENABLED_ENV = "LONG_ENGINE_LLM_GATE_ENABLED"
+
+#: A candidates file older than its own validity is stale and is ignored; the
+#: ledger rewrites it every hour, so this only has to clear one missed run.
+_LLM_GATE_MAX_AGE_MS = exact_duration_ms(hours=2)
+
 #: What the cycle reports when the book replaced the inbox. Nothing was
 #: published because nothing reads the inbox any more, and the summary fields
 #: that counted publications say zero rather than going missing.
@@ -187,7 +200,6 @@ class LongNativeDemoCycleConfig:
     #: SETS each entry's equity fraction outright (it is not a cap on the
     #: derived value); 0 keeps the strategy's own sizing chain.
     order_notional_pct_equity: float = 0.0
-    max_projected_initial_margin_pct_equity: float = 0.50
     wallet_balance_fraction: float = 1.0
     max_new_entries_per_cycle: int = 5
     # SHA-256 of the shared operational profile when runtime sizing came from
@@ -253,25 +265,8 @@ def _validate_long_demo_config(
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
     if config.entry_leverage <= 0.0:
         raise ValueError("entry_leverage must be positive")
-    if not 0.0 < config.max_projected_initial_margin_pct_equity <= 1.0:
-        raise ValueError("max_projected_initial_margin_pct_equity must be in (0, 1]")
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
-    margin_projection = projected_long_initial_margin_pct_equity(
-        config,
-        strategy,
-    )
-    if (
-        margin_projection["full_book_initial_margin_pct_equity"]
-        > config.max_projected_initial_margin_pct_equity + 1e-12
-    ):
-        raise ValueError(
-            "projected full-book initial margin "
-            f"{margin_projection['full_book_initial_margin_pct_equity']:.2%} exceeds "
-            "max_projected_initial_margin_pct_equity "
-            f"{config.max_projected_initial_margin_pct_equity:.2%}; lower notional_multiplier, "
-            "lower vol_target_max_scale/max_concurrent_positions, or explicitly choose a safe cap"
-        )
     execution_environment(config.execution_environment)
     has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
     has_account_execution_root = bool(str(config.account_execution_root or "").strip())
@@ -297,30 +292,6 @@ def target_long_order_notional_pct_equity(
         return demo_config.order_notional_pct_equity
     base = strategy_config.gross_exposure / max(strategy_config.max_concurrent_positions, 1)
     return base * demo_config.notional_multiplier
-
-
-def projected_long_initial_margin_pct_equity(
-    demo_config: LongNativeDemoCycleConfig,
-    strategy_config: LongNativeConfig,
-) -> dict[str, float]:
-    per_order_notional_pct = target_long_order_notional_pct_equity(demo_config, strategy_config)
-    worst_case_vol_scale = float(strategy_config.vol_target_max_scale)
-    # Include the maximum weekend and volatility weights in the initial-margin bound.
-    worst_case_weekend_mult = max(1.0, float(strategy_config.weekend_size_mult))
-    worst_case_position_weight = 1.0
-    worst_case_order_notional_pct = (
-        per_order_notional_pct * worst_case_vol_scale * worst_case_weekend_mult * worst_case_position_weight
-    )
-    full_book_positions = max(int(strategy_config.max_concurrent_positions), 0)
-    cycle_entries = min(max(int(demo_config.max_new_entries_per_cycle), 0), full_book_positions)
-    leverage = max(float(demo_config.entry_leverage), 1e-12)
-    return {
-        "per_order_notional_pct_equity": per_order_notional_pct,
-        "worst_case_vol_target_scale": worst_case_vol_scale,
-        "worst_case_order_notional_pct_equity": worst_case_order_notional_pct,
-        "cycle_initial_margin_pct_equity": worst_case_order_notional_pct * cycle_entries / leverage,
-        "full_book_initial_margin_pct_equity": worst_case_order_notional_pct * full_book_positions / leverage,
-    }
 
 
 def _compute_long_order_sizing(
@@ -556,7 +527,6 @@ def run_long_native_demo_cycle(
                 )
             book_state = read_book_state(book_state_path)
             all_trades = book_state.as_trade_rows()
-        margin_projection = projected_long_initial_margin_pct_equity(demo, strategy)
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
         )
@@ -589,6 +559,29 @@ def run_long_native_demo_cycle(
             funnel_observer=funnel_observer,
             retrace_watch=retrace_watch,
         )
+        gate_events = _read_llm_gate_events(now_ms=cycle_now_ms)
+        llm_gate_event_count = len(gate_events)
+        if gate_events and env_flag(LLM_GATE_ENABLED_ENV):
+            # The judged gate is an entry source inside this sleeve, not a
+            # second strategy: its events become candidates in the native
+            # shape and share every cut below. Native candidates keep their
+            # order; the per-cycle pacing cap then applies to the union.
+            gate_candidates, gate_skips = _llm_gate_candidates(
+                gate_events,
+                strategy=strategy,
+                price_by_symbol=price_by_symbol,
+                open_symbols=set(_column_values(_long_target_reservations(all_trades), "symbol")),
+                cooldown_until=_cooldown_until_long(all_trades, cooldown_days=strategy.cooldown_days),
+                now_ms=cycle_now_ms,
+            )
+            skip_counts.update(gate_skips)
+            gate_symbols = {candidate["symbol"] for candidate in gate_candidates}
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate["symbol"] not in gate_symbols
+            ] + gate_candidates
+            candidates = candidates[: max(demo.max_new_entries_per_cycle, 0)]
         free_slots = max(
             strategy.max_concurrent_positions - _count_long_target_reservations(all_trades),
             0,
@@ -748,9 +741,7 @@ def run_long_native_demo_cycle(
             # reads as a -100% equity spike in every cycles-derived curve.
             "equity_usdt": equity_usdt if not account_owner_health_error else None,
             "order_notional_pct_equity": order_notional_pct_equity,
-            "projected_full_book_initial_margin_pct_equity": margin_projection["full_book_initial_margin_pct_equity"],
-            "projected_cycle_initial_margin_pct_equity": margin_projection["cycle_initial_margin_pct_equity"],
-            "max_projected_initial_margin_pct_equity": demo.max_projected_initial_margin_pct_equity,
+            "llm_gate_events": llm_gate_event_count,
             "entry_leverage": demo.entry_leverage,
             "notional_multiplier": demo.notional_multiplier,
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
@@ -939,6 +930,151 @@ def _cooldown_until_long(trades: pl.DataFrame, *, cooldown_days: int) -> dict[st
         .with_columns((pl.col("last_exit_ts_ms") + cooldown_ms).alias("cooldown_until_ms"))
     )
     return {str(row["symbol"]): int(row["cooldown_until_ms"]) for row in grouped.to_dicts()}
+
+
+def _read_llm_gate_events(*, now_ms: int) -> list[dict[str, Any]]:
+    """Fresh judged events from the LLM gate's candidates file, or [].
+
+    Absent file (the ledger has not run yet), stale file, or malformed row all
+    read as "no signal this cycle" — the same fail-closed-to-no-entry every
+    other input here takes. A missing file is the steady state before the
+    hourly writer's first run, so it stays quiet.
+    """
+
+    path = os.environ.get(LLM_GATE_CANDIDATES_PATH_ENV, "").strip()
+    if not path:
+        return []
+    try:
+        with open(path) as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return []
+    except Exception:
+        _LOGGER.warning("llm gate: unreadable candidates file %s; ignoring it this cycle", path)
+        return []
+    if not isinstance(payload, dict):
+        _LOGGER.warning("llm gate: candidates file %s is not an object; ignoring it", path)
+        return []
+    decision_ts = _float(payload.get("decision_ts_ms"))
+    valid_until = _float(payload.get("valid_until_ms"))
+    if decision_ts <= 0.0 or now_ms - decision_ts > _LLM_GATE_MAX_AGE_MS:
+        return []
+    if 0.0 < valid_until < now_ms:
+        return []
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return []
+    return [row for row in events if isinstance(row, dict)]
+
+
+def _llm_gate_candidates(
+    events: list[dict[str, Any]],
+    *,
+    strategy: LongNativeConfig,
+    price_by_symbol: dict[str, float],
+    open_symbols: set[Any],
+    cooldown_until: dict[str, int],
+    now_ms: int,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Turn judged score>=6 pump events into candidates in the native shape.
+
+    The judgment is the entry trigger and nothing else: stop, take-profit,
+    hold clock, decay contract, and the vol-parity position weight all come
+    from the same strategy constants the FC path uses, so a gate entry is
+    indistinguishable from any other LONG entry downstream of selection.
+    """
+
+    skips = {
+        "llm_gate_stale": 0,
+        "llm_gate_already_open": 0,
+        "llm_gate_cooldown": 0,
+        "llm_gate_no_live_price": 0,
+        "llm_gate_bad_event": 0,
+        "llm_gate_duplicate": 0,
+    }
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in events:
+        symbol = str(event.get("symbol") or "").upper()
+        score = _float(event.get("score"))
+        trigger_ts_ms = int(_float(event.get("trigger_ts_ms")))
+        atr_pct = _float(event.get("atr_pct"))
+        if not symbol or trigger_ts_ms <= 0 or not 0.0 < atr_pct < 1.0 or score <= 0.0:
+            skips["llm_gate_bad_event"] += 1
+            continue
+        if now_ms - trigger_ts_ms > SIGNAL_FRESHNESS_MS:
+            skips["llm_gate_stale"] += 1
+            continue
+        if symbol in open_symbols:
+            skips["llm_gate_already_open"] += 1
+            continue
+        if cooldown_until.get(symbol, 0) > now_ms:
+            skips["llm_gate_cooldown"] += 1
+            continue
+        live_price = price_by_symbol.get(symbol, 0.0)
+        if live_price <= 0.0:
+            skips["llm_gate_no_live_price"] += 1
+            continue
+        if symbol in seen:
+            skips["llm_gate_duplicate"] += 1
+            continue
+        seen.add(symbol)
+        sigma_daily = _float(event.get("sigma_daily_30d"))
+        realized_vol = (
+            sigma_daily * math.sqrt(365.0) if sigma_daily > 0.0 else strategy.vol_floor_annual
+        )
+        notional_weight = strategy.gross_exposure / max(strategy.max_concurrent_positions, 1)
+        position_weight = _vol_parity_weight(
+            realized_vol=realized_vol,
+            vol_floor=strategy.vol_floor_annual,
+            max_position_weight=strategy.max_position_weight,
+            notional_weight=notional_weight,
+        )
+        if strategy.weekend_size_mult != 1.0 and is_weekend_ms(now_ms):
+            position_weight = position_weight * strategy.weekend_size_mult
+        candidate = {
+            "trade_id": long_trade_id(symbol=symbol, signal_ts_ms=trigger_ts_ms),
+            "symbol": symbol,
+            "side": "long",
+            "pattern": "llm_gate",
+            "signal_ts_ms": trigger_ts_ms,
+            "signal_close": _float(event.get("trigger_price")),
+            "live_price": live_price,
+            "retrace_threshold": _float(event.get("trigger_price")),
+            "first_entry_check_ts_ms": trigger_ts_ms,
+            "sniper_deadline_ms": now_ms,
+            "entry_reason": "llm_gate_score",
+            "entry_ready_ts_ms": now_ms,
+            "stop_loss_pct": atr_pct * strategy.fc_atr_stop_mult,
+            "take_profit_pct": atr_pct * strategy.fc_atr_tp_mult,
+            "max_hold_days": int(strategy.fc_max_hold_days),
+            "atr_14d_pct": atr_pct,
+            **(
+                {
+                    "stop_decay_after_ms": exact_duration_ms(
+                        hours=strategy.fc_stop_time_decay_hours
+                    ),
+                    "decayed_stop_loss_pct": (
+                        strategy.fc_stop_time_decay_atr_mult * atr_pct
+                    ),
+                }
+                if strategy.fc_stop_time_decay_hours > 0
+                and strategy.fc_stop_time_decay_atr_mult > 0.0
+                else {}
+            ),
+            "realized_vol": realized_vol,
+            "position_weight": position_weight,
+            "candidate_score": score,
+            "today_volume_rank": _float(event.get("turnover_rank")) or 1e9,
+            "entry_policy": "llm_gate_judged",
+            "entry_quality_tier": f"score_{score:g}",
+            "entry_rule": (
+                f"LLM gate pump_quality_score >= 6 "
+                f"(score {score:g}, {event.get('trigger_window_h') or '?'}h window)"
+            ),
+        }
+        candidates.append(candidate)
+    return candidates, skips
 
 
 def _select_long_entry_candidates(

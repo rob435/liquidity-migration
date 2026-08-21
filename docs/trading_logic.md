@@ -264,45 +264,45 @@ weeks exist to measure that gap. The all-name generalization (shorting settlemen
 carry never held) is measured-but-unrun and NOT part of this config. Evidence:
 [`research_findings.md`](research/research_findings.md) §1 (the exodus short row).
 
-## LLM GATE — `long_llm_gate_v1`
+## LLM GATE — judged entries inside the LONG sleeve
 
-> **Registered and deployed to demo 2026-08-21 by owner decision, with 0 scored
-> days** — a forward experiment trading real demo money from its first fire.
-> The fourth engine sleeve (`llm_gate`, its own `[[strategy]]` block — appended,
-> per the id discipline — book `llm-gate-demo.json`), written by
-> `liquidity-migration-llm-ledger.service`, which holds no venue credentials.
+> **Live on demo since 2026-08-21 by owner decision.** The hourly
+> `liquidity-migration-llm-ledger.service` judges fresh 1/2/4/12/24h trigger
+> events and publishes every **score ≥ 6** judgment to the LONG sleeve's
+> candidates file; the LONG producer takes those names as entries through its
+> own sizing, exits, and venue-native stops. One strategy, one book
+> (`long-demo.json`), one engine sleeve (`long`) — the ledger holds no venue
+> credentials and writes nothing but the candidates file and its own ledger.
 
 **Signal.** The hourly trigger scan: a top-30-turnover name whose rolling
 1/2/4/12/24h move clears its vol-scaled bar (the daily 2.5σ trigger × √time)
 with range location ≥ 0.70, BTC-and-ETH regime on, ATR-14d ≤ 12%. Each event
 is judged by a language model walking the fixed step-rubric over enriched
-public facts; **a pump_quality_score ≥ 6 is an entry**, at the trigger-hour
-price, immediately. Everything below 6 stays ledger-only. Only the 24h window
-has lane-1 evidence (+16 bp/trade on confirming pumps, t 3.76, and negative
-book-level without a working discriminator); the judged gate and the shorter
-windows have none — the forward record is the experiment.
+public facts; **a pump_quality_score ≥ 6 is an entry candidate**, at the
+trigger-hour price. Everything below 6 stays ledger-only. Only the 24h
+window has lane-1 evidence (+16 bp/trade on confirming pumps, t 3.76, and
+negative book-level without a working discriminator); the judged gate and
+the shorter windows have none — the forward record is the experiment.
 
-**Sizing.** Half of heartbeat equity (the owner's risk-on slot) × the
-vol-parity weight clamped to [0.25, 1.0], leverage 5, at most 5 concurrent
-names, $15 minimum, 7-day per-symbol cooldown after exit. No entry without a fresh heartbeat equity
-read; a name held by any sibling book is skipped (the engine would refuse the
-overlap anyway).
+**Entry path.** The LONG producer reads the candidates file each 60s cycle
+(`LONG_ENGINE_LLM_GATE_CANDIDATES_PATH` + `LONG_ENGINE_LLM_GATE_ENABLED=1`
+on the demo unit; mainnet sets neither, so the gate is inert there). A fresh
+judged event becomes a candidate in exactly the native shape: stop
+`fc_atr_stop_mult`×ATR (v12: 3×), decayed stop `1.5×`ATR after 48h,
+take-profit `4×`ATR, 3-day hold, and the same vol-parity position weight the
+FC path computes — the judgment is the trigger and nothing else. From there
+the candidate shares every cut the native candidates face: per-cycle pacing,
+free slots, owner-health gate, 7-day per-symbol cooldown, fill-anchored
+sizing at the profile's LONG multiplier, and the engine's admission. A
+missing, stale, or malformed candidates file reads as "no signal"; a dead
+ledger service stops new gate entries within its 90-minute file validity
+while everything else runs on.
 
-**Exit.** v12's shape on an hourly clock: the entry row declares a 3×ATR-14d
-venue-native stop; the service then checks each held name's public price
-every hour — decayed stop at 1.5×ATR once 48h old, take-profit at 4×ATR,
-time stop at 72h — and publishes the zero target. The writer cannot see
-fills, so a fired venue stop is inferred from price on the next hourly check;
-between the fire and that check a standing target can re-open the position
-once at the same size and stop — an accepted coarseness of the
-no-credentials design.
-
-**Kill switches.** `LLM_GATE_LIVE` off in
-`/etc/liquidity-migration/llm-ledger.env`: no new entries, exits keep
-flowing. `LLM_GATE_DRAIN=1`: the book zeroes now. A dead service stops new
-entries within 75 minutes (book validity) while venue stops stay armed.
-Every judgment, entry, exit, and skip is journaled in the driver ledger
-(`row_type` trigger/gate_action).
+**Kill switches.** `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit:
+no gate entries, native entries and all exits unaffected. Stopping
+`llm-ledger.timer`: the candidates file ages out and gate entries stop on
+their own. Every judgment and publication is journaled in the driver ledger
+(`row_type` trigger).
 
 ## Shared machinery
 
@@ -334,15 +334,12 @@ function, not line): unknown or missing fields in any block (`_object`); any pro
 `entry_leverage` above `account_risk.max_leverage`; an account gross cap above
 `capital_reference_usdt × max_leverage`; an initial-margin cap above
 `capital_reference_usdt`; a symbol cap above the component cap, or a component cap above the
-account cap; a LONG full-book margin projection above its own
-`max_projected_initial_margin_pct_equity`; and any registered LONG/CARRY envelope —
-per-symbol, combined gross, combined margin — outside the account caps
-(`_validate_profile_envelopes`). A profile carrying a `continuous` block is refused by name.
-When `sleeve_limits` is declared (`_parse_sleeve_limits`), each producer envelope must also
-fit its own share, and a sleeve with a non-zero envelope but no share is refused. The
-validator re-runs on the equity-rescaled profile, not only at load. Separately: a normal risk
-or venue-rule rejection when live account state differs from the validation reference is a
-safety decision, not configuration drift — do not "fix" it by raising caps.
+account cap (`_validate_profile_envelopes`). A profile carrying a `continuous` block is
+refused by name. How large a book the sizing multipliers build is the owner's dial and is
+not refused at load — per-position risk is bounded by each position's own venue-native
+stop. The validator re-runs on the equity-rescaled profile, not only at load. Separately: a
+normal risk or venue-rule rejection when live account state differs from the validation
+reference is a safety decision, not configuration drift — do not "fix" it by raising caps.
 
 `PARTITIONABLE_SLEEVES` in `policy/operational_profile.py` is `("carry", "hedge", "long")`
 and both operational profiles carry a `hedge` block — an empty seat, so adding a hedge needs

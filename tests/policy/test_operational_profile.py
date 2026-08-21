@@ -25,14 +25,14 @@ def test_tracked_operational_profile_is_coherent_and_feeds_account_owner() -> No
     profile = load_operational_profile_bytes(data)
     policy = load_risk_policy_bytes(data)
 
-    # Risk-on since 2026-08-21 (owner): each new entry sized as large as the
-    # envelope admits with both books priced full at worst case — carry 20%
-    # of equity per name, LONG ~15% typical — still levered 5x.
+    # Risk-on since 2026-08-21 (owner): a fixed ~50%-of-equity entry on both
+    # sleeves — carry's per-name weight 0.10 x 5.0, LONG's base slot 0.10 x
+    # 5.0 before its own vol/weekend scaling — still levered 5x.
     assert profile.long.entry_leverage == 5.0
     assert profile.carry.entry_leverage == 5.0
     assert profile.hedge.entry_leverage == 5.0
-    assert profile.long.notional_multiplier == 1.5
-    assert profile.carry.notional_multiplier == 2.0
+    assert profile.long.notional_multiplier == 5.0
+    assert profile.carry.notional_multiplier == 5.0
     assert policy == profile.account_risk.to_policy()
 
 
@@ -47,14 +47,21 @@ def test_profile_rejects_producer_leverage_above_owner_cap(producer: str) -> Non
         load_operational_profile_bytes(_bytes(payload))
 
 
-def test_profile_rejects_a_10x_producer_exposure_envelope() -> None:
+def test_a_10x_producer_exposure_envelope_loads_without_a_refusal() -> None:
+    """Book size is the owner's dial, not a load-time refusal.
+
+    The multiplier scales the strategy's own weights; per-position risk is
+    bounded by each position's venue-native stop, so no envelope projection
+    stands between the dial and the producer any more.
+    """
+
     payload = _payload()
     carry = payload["carry"]
     assert isinstance(carry, dict)
     carry["notional_multiplier"] = 10.0
 
-    with pytest.raises(ValueError, match="envelope exceeds"):
-        load_operational_profile_bytes(_bytes(payload))
+    profile = load_operational_profile_bytes(_bytes(payload))
+    assert profile.carry.notional_multiplier == 10.0
 
 
 def test_profile_refuses_a_retired_sleeve_block() -> None:

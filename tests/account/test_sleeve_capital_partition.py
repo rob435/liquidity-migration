@@ -361,20 +361,32 @@ def test_margin_shares_that_sum_above_the_margin_cap_are_refused() -> None:
         _load(document)
 
 
-def test_a_producer_sized_outside_its_share_is_refused_at_load_time() -> None:
-    """Better a refusal here than a fleet that rejects every entry at runtime."""
+def test_a_producer_sized_outside_its_share_loads_and_is_bounded_at_runtime() -> None:
+    """The load-time envelope projection is gone; book size is the owner's dial.
+
+    What still governs a partitioned account is the engine's own admission
+    (kernel.rs): a sleeve drawing past its share is refused there, per entry,
+    against live account state.
+    """
 
     document = _mainnet_document()
     document["account_risk"]["sleeve_limits"]["carry"]["max_gross_notional_usdt"] = 1.0
-    with pytest.raises(ValueError, match="'carry' gross envelope exceeds its sleeve_limits"):
-        _load(document)
+    profile = _load(document)
+    assert profile.carry.notional_multiplier > 0.0
 
 
-def test_a_funded_sleeve_with_no_share_is_refused() -> None:
+def test_a_funded_sleeve_with_no_share_loads_partition_parsing_only() -> None:
+    """Share coverage is no longer cross-checked against producer envelopes.
+
+    The rendered mainnet profile always names both funded sleeves; if a hand
+    made profile drops one, the engine's runtime partition is what refuses
+    that sleeve's spending.
+    """
+
     document = _mainnet_document()
     del document["account_risk"]["sleeve_limits"]["long"]
-    with pytest.raises(ValueError, match="'long' has an envelope but no sleeve_limits share"):
-        _load(document)
+    profile = _load(document)
+    assert {limit.sleeve for limit in profile.account_risk.sleeve_limits} == {"carry"}
 
 
 def test_an_unknown_sleeve_name_is_refused() -> None:

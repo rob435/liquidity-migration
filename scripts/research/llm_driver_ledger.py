@@ -10,21 +10,21 @@ knows how every historical pump ended.
 
 So this script does exactly two things, and never trades:
 
-  --once   nominate current movers from Bybit public tickers (loose quant
-           nominator), enrich each with the public facts a judgment needs
-           (funding, perp premium, open-interest change, beta context, range
-           and volume anomaly, listing age), ask the model to walk a fixed
-           methodology, and append facts + judgment to a JSONL ledger,
-           timestamped, before the outcome exists.
-  --triggers  the shadow entry gate, run hourly: detect fresh intraday
-           deep-trigger events (rolling 24h window, the 2.5-sigma family,
-           regime and ATR gates approximated from public data), judge each,
-           and journal the would-be entry with its trigger-hour price and a
-           provisional would_enter at score >= 7. The same flow a live gate
-           would run, pointed at the ledger instead of the order book.
-  --grade  for ledger rows at least 3 days old, fetch what actually happened
-           (public klines) and print forward return by prompt version, row
-           type, and judged driver kind.
+  --once     nominate current movers from Bybit public tickers (loose quant
+             nominator), enrich each with the public facts a judgment needs
+             (funding, perp premium, open-interest change, beta context, range
+             and volume anomaly, listing age), ask the model to walk a fixed
+             methodology, and append facts + judgment to a JSONL ledger,
+             timestamped, before the outcome exists.
+  --triggers run hourly: detect fresh intraday deep-trigger events (rolling
+             24h window, the 2.5-sigma family, regime and ATR gates
+             approximated from public data), judge each, journal the event,
+             and publish every score >= 6 judgment to the LONG sleeve's
+             candidates file. The LONG producer owns everything after that —
+             sizing, exits, stops; this script holds no venue credentials.
+  --grade    for ledger rows at least 3 days old, fetch what actually happened
+             (public klines) and print forward return by prompt version, row
+             type, and judged driver kind.
 
 The methodology prompt is a rubric authored by the stronger model and
 executed by the cheap one; each step reports its own field so a failed
@@ -53,8 +53,6 @@ import sys
 import urllib.request
 from pathlib import Path
 from typing import Any
-
-from liquidity_migration.rules.engine_targets import TARGET_BOOK_VERSION
 
 BYBIT_PUBLIC = "https://api.bybit.com"
 PROMPT_VERSION = "driver-judgment-v3-scored"
@@ -506,83 +504,23 @@ def cmd_triggers(ledger_dir: Path) -> None:
                 break
     print(f"{fired} trigger event(s) journaled")
 
-    prices: dict[str, float] = {}
-    for r in usdt:
-        try:
-            prices[str(r["symbol"])] = float(r.get("lastPrice") or 0.0)
-        except Exception:
-            continue
-    actions = gate_run(ledger_dir, judged_events, prices, now)
-    notify_gate_actions(actions)
-    if actions:
-        with path.open("a") as fh:
-            for action in actions:
-                fh.write(
-                    json.dumps(
-                        {
-                            "ts_utc": now.isoformat(timespec="seconds"),
-                            "row_type": "gate_action",
-                            **action,
-                        }
-                    )
-                    + "\n"
-                )
-                print(f"GATE {action['action']} {action['symbol']}")
+    published = publish_gate_candidates(judged_events)
+    for event in published:
+        print(f"GATE candidate {event['symbol']:<14} score={event['score']}")
 
 
 # ---------------------------------------------------------------------------
-# The live entry gate (owner-directed 2026-08-21, demo fleet only).
+# The candidates file (owner-directed integration, demo fleet only).
 #
-# When LLM_GATE_LIVE is on, a would_enter trigger event becomes a real entry
-# target in this sleeve's own book (`long_llm_gate_v1`, engine strategy
-# "llm_gate"), sized from the engine heartbeat's equity. The ledger holds no
-# venue credentials, so exits are managed by PRICE against public tickers on
-# the hourly grid -- the venue-native wide stop declared on every entry row is
-# the always-armed backstop underneath. Every failure (no key, no heartbeat,
-# stale heartbeat, API down) fails closed to "no entry"; exits keep flowing.
-#
-# Known, accepted coarseness (demo money, owner call): a wide-stop fill is
-# inferred from price, so between the venue stop firing and the next hourly
-# check a standing target can re-open the position once at the same size and
-# stop. LLM_GATE_LIVE off stops entries but keeps managing exits;
-# LLM_GATE_DRAIN=1 zeroes the whole book now.
+# Every score >= 6 trigger event is published to the LONG sleeve's candidates
+# file; the LONG producer reads it each cycle and takes entries through its
+# own sizing, exits, and venue-native stops. This script stays
+# credential-free and order-free: a failed write or an empty judgment list
+# publishes nothing, and the LONG side treats "no file" as "no signal".
 # ---------------------------------------------------------------------------
 
-GATE_SOURCE = "long_llm_gate_v1"
-GATE_BOOK_PATH = "/var/lib/liquidity-migration/targets/llm-gate-demo.json"
-GATE_SIBLING_BOOKS = (
-    "/var/lib/liquidity-migration/targets/carry-demo.json",
-    "/var/lib/liquidity-migration/targets/long-demo.json",
-    "/var/lib/liquidity-migration/targets/exodus-demo.json",
-)
-GATE_HEARTBEAT_PATH = "/var/lib/liquidity-migration-engine/heartbeat.json"
-GATE_MAX_CONCURRENT = 5
-GATE_COOLDOWN_H = 168
-# Owner's risk-on sizing, 2026-08-21: each slot is half the account before
-# the vol-parity cut, margined at the account's 5x cap.
-GATE_SLOT_FRACTION = 0.50
-GATE_LEVERAGE = 5.0
-GATE_STOP_ATR_MULT = 3.0
-GATE_DECAY_H = 48
-GATE_DECAY_ATR_MULT = 1.5
-GATE_TP_ATR_MULT = 4.0
-GATE_MAX_HOLD_H = 72
-GATE_MIN_NOTIONAL_USDT = 15.0
-GATE_BOOK_VALID_MIN = 75
-GATE_CLOSING_GRACE_H = 6
-GATE_HEARTBEAT_MAX_AGE_S = 180
-
-
-def _env_on(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in ("1", "on", "true", "yes")
-
-
-def _load_json(path: str) -> Any:
-    try:
-        with open(path) as fh:
-            return json.load(fh)
-    except Exception:
-        return None
+GATE_CANDIDATES_PATH = "/var/lib/liquidity-migration/targets/llm-gate-candidates.json"
+GATE_CANDIDATES_VALID_MIN = 90
 
 
 def _write_json_atomic(path: Path, payload: Any) -> None:
@@ -591,239 +529,53 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
-def gate_read_equity(now_ms: int, heartbeat_path: str = GATE_HEARTBEAT_PATH) -> float | None:
-    """The engine heartbeat's equity, or None when missing or stale (no entry
-    without a live read -- the same gate the producers apply)."""
+def publish_gate_candidates(
+    judged_events: list[dict[str, Any]],
+    *,
+    path: str = GATE_CANDIDATES_PATH,
+) -> list[dict[str, Any]]:
+    """Write the would_enter events the LONG sleeve may enter, and return them."""
 
-    hb = _load_json(heartbeat_path)
-    if not isinstance(hb, dict):
-        return None
-    equity = hb.get("account_equity_usdt")
-    wall = hb.get("wall_ts_ms")
-    if not isinstance(equity, (int, float)) or equity <= 0.0:
-        return None
-    if not isinstance(wall, (int, float)) or now_ms - float(wall) > GATE_HEARTBEAT_MAX_AGE_S * 1000:
-        return None
-    return float(equity)
-
-
-def gate_sibling_symbols(paths: tuple[str, ...] = GATE_SIBLING_BOOKS) -> set[str]:
-    held: set[str] = set()
-    for p in paths:
-        book = _load_json(p)
-        if not isinstance(book, dict):
+    now = dt.datetime.now(dt.timezone.utc)
+    now_ms = int(now.timestamp() * 1000)
+    events: list[dict[str, Any]] = []
+    for ev in judged_events:
+        if not ev.get("would_enter"):
             continue
-        for row in book.get("targets") or []:
-            try:
-                if abs(float(row.get("notional_usdt", 0.0))) > 0.0:
-                    held.add(str(row["symbol"]))
-            except Exception:
-                continue
-    return held
-
-
-def gate_entry_notional(equity: float, sigma_daily: float | None) -> float:
-    """v12's slot shape at half scale: 5% of equity times the vol-parity
-    weight clamped to [0.25, 1.0]."""
-
-    weight = 1.0
-    if isinstance(sigma_daily, (int, float)) and sigma_daily > 0.0:
-        vol_ann = float(sigma_daily) * math.sqrt(365.0)
-        weight = max(0.25, min(0.30 / max(vol_ann, 1e-9), 1.0))
-    return equity * GATE_SLOT_FRACTION * weight
-
-
-def gate_exit_reason(component: dict[str, Any], price: float | None, now_ms: int) -> str | None:
-    """First exit that applies, in the order the money cares about."""
-
-    entry_ts = int(component["entry_ts_ms"])
-    ref = float(component["trigger_price"])
-    atr = float(component["atr_pct"])
-    age_h = (now_ms - entry_ts) / 3_600_000
-    if price is not None and price > 0.0:
-        if price <= ref * (1.0 - GATE_STOP_ATR_MULT * atr):
-            return "wide_stop_assumed"
-        if age_h >= GATE_DECAY_H and price <= ref * (1.0 - GATE_DECAY_ATR_MULT * atr):
-            return "decayed_stop"
-        if price >= ref * (1.0 + GATE_TP_ATR_MULT * atr):
-            return "take_profit"
-    if age_h >= GATE_MAX_HOLD_H:
-        return "time_stop"
-    return None
-
-
-def gate_render_book(state: dict[str, Any], now_ms: int) -> dict[str, Any]:
-    rows = []
-    for symbol in sorted(state.get("held", {})):
-        c = state["held"][symbol]
-        rows.append(
-            {
-                "symbol": symbol,
-                "notional_usdt": round(float(c["notional_usdt"]), 2),
-                "leverage": GATE_LEVERAGE,
-                "stop_loss_fraction": round(GATE_STOP_ATR_MULT * float(c["atr_pct"]), 6),
-            }
-        )
-    for symbol in sorted(state.get("closing", {})):
-        c = state["closing"][symbol]
-        rows.append(
-            {
-                "symbol": symbol,
-                "notional_usdt": 0.0,
-                "leverage": GATE_LEVERAGE,
-                "stop_loss_fraction": round(GATE_STOP_ATR_MULT * float(c["atr_pct"]), 6),
-            }
-        )
-    return {
-        "decision_ts_ms": now_ms,
-        "source": GATE_SOURCE,
-        "targets": rows,
-        "valid_until_ms": now_ms + GATE_BOOK_VALID_MIN * 60_000,
-        # The engine refuses a book without a whole-number version.
-        "version": TARGET_BOOK_VERSION,
-    }
-
-
-def gate_action_message(action: dict[str, Any]) -> str | None:
-    """The Telegram line for one gate action. Entries and exits only —
-    skips are ledger detail, not phone material."""
-
-    kind = str(action.get("action", ""))
-    symbol = action.get("symbol", "?")
-    if kind == "entry":
-        stop_pct = float(action.get("stop_loss_fraction", 0.0)) * 100
-        return (
-            f"LONG entry (LLM gate): {symbol} ${action.get('notional_usdt')} "
-            f"(score {action.get('score')}, stop {stop_pct:.1f}% below)"
-        )
-    if kind.startswith("exit:"):
-        reason = kind.split(":", 1)[1]
-        age = action.get("age_h")
-        age_txt = f" after {age}h" if age is not None else ""
-        return f"LONG exit (LLM gate, {reason}): {symbol}{age_txt}"
-    return None
-
-
-def notify_gate_actions(actions: list[dict[str, Any]]) -> None:
-    """Best-effort phone line: a Telegram failure never touches the cycle.
-
-    Trade updates ride the main line — the owner's DM with the bot; the
-    group chat is the debugging line and belongs to the watchdog.
-    """
-
-    try:
-        from liquidity_migration.ops.telegram import send_telegram_message
-    except Exception:
-        return
-    for action in actions:
-        text = gate_action_message(action)
-        if text is None:
+        facts = ev.get("facts") or {}
+        atr = facts.get("atr_14d_pct")
+        price = facts.get("trigger_price")
+        if not isinstance(atr, (int, float)) or atr <= 0.0:
+            continue
+        if not isinstance(price, (int, float)) or price <= 0.0:
             continue
         try:
-            send_telegram_message(text, enabled=_env_on("TELEGRAM_ENABLED"), channel="main")
+            trigger_ts_ms = int(
+                dt.datetime.fromisoformat(str(facts["trigger_bar_end_utc"]))
+                .timestamp()
+                * 1000
+            )
         except Exception:
-            continue
-
-
-def gate_run(
-    ledger_dir: Path,
-    judged_events: list[dict[str, Any]],
-    prices: dict[str, float],
-    now: dt.datetime,
-    *,
-    book_path: str = GATE_BOOK_PATH,
-    heartbeat_path: str = GATE_HEARTBEAT_PATH,
-    sibling_paths: tuple[str, ...] = GATE_SIBLING_BOOKS,
-) -> list[dict[str, Any]]:
-    """One gate cycle: exits by price, entries from judged events, book out.
-    Returns action rows for the ledger."""
-
-    now_ms = int(now.timestamp() * 1000)
-    live = _env_on("LLM_GATE_LIVE")
-    drain = _env_on("LLM_GATE_DRAIN")
-    state_path = ledger_dir / "gate_state.json"
-    state = _load_json(str(state_path)) or {}
-    state.setdefault("held", {})
-    state.setdefault("closing", {})
-    state.setdefault("cooldown_until_ms", {})
-    if not live and not drain and not state["held"] and not state["closing"]:
-        return []
-
-    actions: list[dict[str, Any]] = []
-
-    def _close(symbol: str, reason: str) -> None:
-        c = state["held"].pop(symbol)
-        c["closed_ts_ms"] = now_ms
-        c["exit_reason"] = reason
-        state["closing"][symbol] = c
-        state["cooldown_until_ms"][symbol] = now_ms + GATE_COOLDOWN_H * 3_600_000
-        actions.append({"action": f"exit:{reason}", "symbol": symbol, "age_h": round((now_ms - int(c["entry_ts_ms"])) / 3_600_000, 1)})
-
-    if drain:
-        for symbol in list(state["held"]):
-            _close(symbol, "drain")
-    else:
-        for symbol in list(state["held"]):
-            reason = gate_exit_reason(state["held"][symbol], prices.get(symbol), now_ms)
-            if reason:
-                _close(symbol, reason)
-
-    for symbol in list(state["closing"]):
-        if now_ms - int(state["closing"][symbol].get("closed_ts_ms", now_ms)) > GATE_CLOSING_GRACE_H * 3_600_000:
-            del state["closing"][symbol]
-
-    if live and not drain:
-        equity = gate_read_equity(now_ms, heartbeat_path)
-        siblings = gate_sibling_symbols(sibling_paths)
-        for ev in judged_events:
-            if not ev.get("would_enter"):
-                continue
-            facts = ev["facts"]
-            symbol = str(facts["symbol"])
-            if len(state["held"]) >= GATE_MAX_CONCURRENT:
-                actions.append({"action": "skip:capacity", "symbol": symbol})
-                continue
-            if symbol in state["held"] or symbol in state["closing"]:
-                continue
-            if int(state["cooldown_until_ms"].get(symbol, 0)) > now_ms:
-                actions.append({"action": "skip:cooldown", "symbol": symbol})
-                continue
-            if symbol in siblings:
-                actions.append({"action": "skip:sibling_holds", "symbol": symbol})
-                continue
-            if equity is None:
-                actions.append({"action": "skip:no_equity_read", "symbol": symbol})
-                continue
-            atr = facts.get("atr_14d_pct")
-            price = facts.get("trigger_price")
-            if not isinstance(atr, (int, float)) or atr <= 0.0 or not isinstance(price, (int, float)) or price <= 0.0:
-                continue
-            notional = gate_entry_notional(equity, facts.get("sigma_daily_30d"))
-            if notional < GATE_MIN_NOTIONAL_USDT:
-                actions.append({"action": "skip:below_min_notional", "symbol": symbol})
-                continue
-            state["held"][symbol] = {
-                "entry_ts_ms": now_ms,
+            trigger_ts_ms = now_ms
+        events.append(
+            {
+                "symbol": str(facts.get("symbol", "")).upper(),
+                "score": (ev.get("judgment") or {}).get("pump_quality_score"),
+                "trigger_ts_ms": trigger_ts_ms,
                 "trigger_price": float(price),
                 "atr_pct": float(atr),
-                "notional_usdt": round(notional, 2),
-                "score": (ev.get("judgment") or {}).get("pump_quality_score"),
+                "sigma_daily_30d": facts.get("sigma_daily_30d"),
+                "turnover_rank": facts.get("turnover_rank"),
                 "trigger_window_h": facts.get("trigger_window_h"),
             }
-            actions.append(
-                {
-                    "action": "entry",
-                    "symbol": symbol,
-                    "notional_usdt": round(notional, 2),
-                    "stop_loss_fraction": round(GATE_STOP_ATR_MULT * float(atr), 6),
-                    "score": (ev.get("judgment") or {}).get("pump_quality_score"),
-                }
-            )
-
-    book = gate_render_book(state, now_ms)
-    _write_json_atomic(Path(book_path), book)
-    _write_json_atomic(state_path, state)
-    return actions
+        )
+    payload = {
+        "decision_ts_ms": now_ms,
+        "valid_until_ms": now_ms + GATE_CANDIDATES_VALID_MIN * 60_000,
+        "events": events,
+    }
+    _write_json_atomic(Path(path), payload)
+    return events
 
 
 def _forward_return(symbol: str, from_ms: int, hours: int) -> float | None:
@@ -883,7 +635,7 @@ def cmd_grade(ledger_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--once", action="store_true", help="nominate, enrich, and judge current movers")
-    parser.add_argument("--triggers", action="store_true", help="shadow entry gate: judge fresh intraday trigger events")
+    parser.add_argument("--triggers", action="store_true", help="judge fresh intraday trigger events; publish score >= 6 to the LONG sleeve's candidates file")
     parser.add_argument("--grade", action="store_true", help="grade rows at least 3 days old")
     parser.add_argument(
         "--ledger-dir",

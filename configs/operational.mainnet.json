@@ -29,7 +29,6 @@
   "long": {
     "notional_multiplier": 0.26666666666666666,
     "entry_leverage": 5.0,
-    "max_projected_initial_margin_pct_equity": 0.100000001,
     "order_notional_pct_equity": 0.0,
     "max_new_entries_per_cycle": 5
   },

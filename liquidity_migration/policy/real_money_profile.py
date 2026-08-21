@@ -203,10 +203,6 @@ def render_real_money_profile_json(
 
     upscale = long_worst_case_upscale()
     long_multiplier = dials.long_leverage / upscale
-    # The producer's own refusal sits exactly at the dial: a worst-case full
-    # book posts dial / entry-leverage of equity as margin (headroom for the
-    # multiplier round-trip above).
-    long_margin_cap = min(1.0, dials.long_leverage / leverage + 1e-9)
 
     # The single-symbol cap must admit each producer's own worst single
     # position, so at high dials it scales with them (never past the account
@@ -258,7 +254,6 @@ def render_real_money_profile_json(
         "long": {
             "notional_multiplier": long_multiplier,
             "entry_leverage": leverage,
-            "max_projected_initial_margin_pct_equity": long_margin_cap,
             "order_notional_pct_equity": 0.0,
             "max_new_entries_per_cycle": _LONG_MAX_NEW_ENTRIES_PER_CYCLE,
         },

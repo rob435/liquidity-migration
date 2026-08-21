@@ -7,9 +7,9 @@ symbol with size is an entry; a zeroed or vanished symbol is an exit. Sizing
 wiggles are the producers' housekeeping and stay off the phone.
 
 Messages go to the main line (the owner's DM with the bot); the group is the
-debugging line and gets nothing from here. The LLM gate's book is excluded:
-its own service already sends richer messages (score, stop) for the same
-events, and one event must not page twice.
+debugging line and gets nothing from here. The LONG book's entries cover the
+LLM gate's judged candidates too — they enter through that sleeve, so one
+event pages once.
 
 First run on an empty state baselines silently. An unreadable book keeps its
 previous state — a producer mid-write must not read as a mass exit.

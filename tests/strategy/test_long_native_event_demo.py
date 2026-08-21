@@ -49,7 +49,6 @@ from liquidity_migration.strategy.long_native_event_demo import (
     _validate_long_demo_config,
     _vol_parity_weight,
     format_long_demo_cycle_summary,
-    projected_long_initial_margin_pct_equity,
     run_long_native_demo_cycle,
     target_long_order_notional_pct_equity,
 )
@@ -94,32 +93,21 @@ def test_demo_default_notional_multiplier_is_research_1x() -> None:
     )
 
 
-def test_projected_margin_guard_rejects_unsafe_levered_full_book() -> None:
-    strategy = long_v11a_profile()
-    unsafe = LongNativeDemoCycleConfig(notional_multiplier=10.0)
-    projection = projected_long_initial_margin_pct_equity(unsafe, strategy)
-    # The worst case also folds the 1.5x weekend tilt (and the <=1.0
-    # vol-parity weight), so the projection is 1.25 * 1.5 = 1.875, not 1.25.
-    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(1.875)
-    with pytest.raises(ValueError, match="projected full-book initial margin"):
-        _validate_long_demo_config(unsafe, strategy)
+def test_a_large_levered_multiplier_validates_without_a_margin_refusal() -> None:
+    """Sizing is the owner's dial: no load-time projection refuses it.
 
+    Per-position risk is bounded by each position's own venue-native stop;
+    there is no book-level margin ceiling to trip.
+    """
 
-def test_projected_margin_guard_allows_explicit_safe_levered_demo() -> None:
     strategy = long_v11a_profile()
-    # The 4x config projects exactly 0.50 without the tilt; with the 1.5x
-    # weekend tilt is modeled it projects 0.75 and is correctly rejected. A 2x
-    # config (0.10*2*1.25*1.5 = 0.375) is the new headroom-respecting "safe" case.
-    safe = LongNativeDemoCycleConfig(
-        notional_multiplier=2.0,
-        max_projected_initial_margin_pct_equity=0.50,
+    big = LongNativeDemoCycleConfig(
+        notional_multiplier=10.0,
         execution_environment="demo",
         account_intent_inbox_root="inbox",
         account_execution_root="account",
     )
-    projection = projected_long_initial_margin_pct_equity(safe, strategy)
-    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.375)
-    _validate_long_demo_config(safe, strategy)
+    _validate_long_demo_config(big, strategy)
 
 
 @pytest.mark.parametrize("missing_root", [None, "", "   "])
@@ -940,84 +928,194 @@ def test_median_universe_selection_noop_without_median_column() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# The projected-IM guard models the live worst-case per-position notional      #
+# The LLM gate's judged events enter as candidates in the native shape         #
 # --------------------------------------------------------------------------- #
-def test_guard_now_rejects_promoted_4x_config_that_used_to_pass() -> None:
-    """gross_exposure=1.0, max_concurrent_positions=10, entry_leverage=10 with
-    notional_multiplier=4.0 projects exactly 0.50 full-book IM without the weekend
-    tilt and 0.75 with it, so modeling the 1.5x tilt must reject it.
-    """
-    strategy = long_v11a_profile()
-    assert strategy.gross_exposure == pytest.approx(1.0)
-    assert strategy.max_concurrent_positions == 10
-    assert strategy.weekend_size_mult == pytest.approx(1.5)
+def _gate_event(
+    symbol: str = "PUMPUSDT",
+    *,
+    trigger_ts_ms: int = 1_700_000_000_000,
+    atr: float = 0.05,
+    sigma: float = 0.03,
+    score: float = 7,
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "score": score,
+        "trigger_ts_ms": trigger_ts_ms,
+        "trigger_price": 10.0,
+        "atr_pct": atr,
+        "sigma_daily_30d": sigma,
+        "turnover_rank": 4,
+        "trigger_window_h": 1,
+    }
 
-    demo = LongNativeDemoCycleConfig(
-        notional_multiplier=4.0,
-        entry_leverage=10.0,
-        max_projected_initial_margin_pct_equity=0.50,
+
+class TestLlmGateCandidates:
+    def test_a_judged_event_becomes_a_candidate_with_the_v12_risk_contract(self) -> None:
+        strategy = long_v12_profile()
+        now_ms = 1_700_000_100_000
+        candidates, skips = _llm_gate_candidates_for_test(
+            [_gate_event()], strategy=strategy, now_ms=now_ms
+        )
+        assert skips == {k: 0 for k in skips}
+        (cand,) = candidates
+        assert cand["symbol"] == "PUMPUSDT"
+        assert cand["pattern"] == "llm_gate"
+        # Stop, take-profit, hold clock, and decay contract are the strategy's
+        # own constants applied to the event's ATR — identical to an FC entry.
+        assert cand["stop_loss_pct"] == pytest.approx(0.05 * strategy.fc_atr_stop_mult)
+        assert cand["take_profit_pct"] == pytest.approx(0.05 * strategy.fc_atr_tp_mult)
+        assert cand["max_hold_days"] == strategy.fc_max_hold_days
+        assert cand["stop_decay_after_ms"] == exact_duration_ms(
+            hours=strategy.fc_stop_time_decay_hours
+        )
+        assert cand["decayed_stop_loss_pct"] == pytest.approx(
+            strategy.fc_stop_time_decay_atr_mult * 0.05
+        )
+
+    def test_the_position_weight_is_the_strategy_vol_parity_weight(self) -> None:
+        strategy = long_v12_profile()
+        now_ms = 1_700_000_100_000
+        candidates, _skips = _llm_gate_candidates_for_test(
+            [_gate_event()], strategy=strategy, now_ms=now_ms
+        )
+        (cand,) = candidates
+        expected = _vol_parity_weight(
+            realized_vol=0.03 * math.sqrt(365.0),
+            vol_floor=strategy.vol_floor_annual,
+            max_position_weight=strategy.max_position_weight,
+            notional_weight=strategy.gross_exposure / strategy.max_concurrent_positions,
+        )
+        assert cand["position_weight"] == pytest.approx(expected)
+
+    def test_stale_open_cooled_and_unpriced_events_are_counted_not_entered(self) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import _llm_gate_candidates
+
+        strategy = long_v12_profile()
+        now_ms = 1_700_000_100_000
+        stale_ts = now_ms - exact_duration_ms(hours=25)
+        events = [
+            _gate_event("STALEUSDT", trigger_ts_ms=stale_ts),
+            _gate_event("OPENUSDT"),
+            _gate_event("COOLEDUSDT"),
+            _gate_event("NOPRICEUSDT"),
+            _gate_event("BADUSDT", atr=0.0),
+        ]
+        price_by_symbol = {
+            "OPENUSDT": 9.0,
+            "COOLEDUSDT": 9.0,
+            "NOPRICEUSDT": 0.0,
+        }
+        candidates, skips = _llm_gate_candidates(
+            events,
+            strategy=strategy,
+            price_by_symbol=price_by_symbol,
+            open_symbols={"OPENUSDT"},
+            cooldown_until={"COOLEDUSDT": now_ms + exact_duration_ms(days=1)},
+            now_ms=now_ms,
+        )
+        assert candidates == []
+        assert skips == {
+            "llm_gate_stale": 1,
+            "llm_gate_already_open": 1,
+            "llm_gate_cooldown": 1,
+            "llm_gate_no_live_price": 1,
+            "llm_gate_bad_event": 1,
+            "llm_gate_duplicate": 0,
+        }
+
+    def test_a_duplicate_symbol_is_collapsed_to_one_candidate(self) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import _llm_gate_candidates
+
+        strategy = long_v12_profile()
+        now_ms = 1_700_000_100_000
+        candidates, skips = _llm_gate_candidates(
+            [_gate_event(), _gate_event()],
+            strategy=strategy,
+            price_by_symbol={"PUMPUSDT": 9.0},
+            open_symbols=set(),
+            cooldown_until={},
+            now_ms=now_ms,
+        )
+        assert len(candidates) == 1
+        assert skips["llm_gate_duplicate"] == 1
+
+
+def _llm_gate_candidates_for_test(events, *, strategy, now_ms):
+    from liquidity_migration.strategy.long_native_event_demo import _llm_gate_candidates
+
+    return _llm_gate_candidates(
+        events,
+        strategy=strategy,
+        price_by_symbol={e["symbol"]: 9.0 for e in events},
+        open_symbols=set(),
+        cooldown_until={},
+        now_ms=now_ms,
     )
-    projection = projected_long_initial_margin_pct_equity(demo, strategy)
-
-    # base per-position = 1.0/10 = 0.10; * mult 4 = 0.40; * vol-scale 1.25 = 0.50
-    # (the OLD worst-case order notional). The fix adds * 1.5 weekend tilt = 0.75.
-    assert projection["worst_case_order_notional_pct_equity"] == pytest.approx(0.75)
-    # full book = 0.75 * 10 positions / 10x leverage = 0.75 (was 0.50).
-    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.75)
-
-    # The guard rejects what an untilted projection puts at exactly 0.50.
-    with pytest.raises(ValueError, match="projected full-book initial margin"):
-        _validate_long_demo_config(demo, strategy)
 
 
-def test_guard_models_weekend_and_unit_position_weight_factors() -> None:
-    """Worst-case order notional = per_order * vol_scale * weekend_mult * 1.0; each
-    factor is pinned so a regression that drops the weekend tilt fails here.
-    """
-    strategy = long_v11a_profile()
-    demo = LongNativeDemoCycleConfig(notional_multiplier=4.0, entry_leverage=10.0)
-    projection = projected_long_initial_margin_pct_equity(demo, strategy)
+class TestReadLlmGateEvents:
+    def test_no_path_configured_reads_as_no_signal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import _read_llm_gate_events
 
-    per_order = projection["per_order_notional_pct_equity"]
-    vol_scale = projection["worst_case_vol_target_scale"]
-    worst_case = projection["worst_case_order_notional_pct_equity"]
-    assert per_order == pytest.approx(0.40)
-    assert vol_scale == pytest.approx(1.25)
-    # weekend_size_mult=1.5, max vol-parity weight=1.0 -> factor 1.5 over the old model.
-    assert worst_case == pytest.approx(per_order * vol_scale * 1.5)
+        monkeypatch.delenv("LONG_ENGINE_LLM_GATE_CANDIDATES_PATH", raising=False)
+        assert _read_llm_gate_events(now_ms=1) == []
 
+    def test_missing_file_reads_as_no_signal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import _read_llm_gate_events
 
-def test_weekend_mult_one_low_multiplier_still_passes() -> None:
-    """A config with weekend_size_mult=1.0 and a low multiplier is below the ceiling and
-    still accepted -- the guard only tightens where the book is actually levered up.
-    """
-    strategy = replace(long_v11a_profile(), weekend_size_mult=1.0)
-    demo = LongNativeDemoCycleConfig(
-        notional_multiplier=2.0,
-        entry_leverage=10.0,
-        max_projected_initial_margin_pct_equity=0.50,
-        execution_environment="demo",
-        account_intent_inbox_root="inbox",
-        account_execution_root="account",
-    )
-    projection = projected_long_initial_margin_pct_equity(demo, strategy)
+        monkeypatch.setenv(
+            "LONG_ENGINE_LLM_GATE_CANDIDATES_PATH", str(tmp_path / "absent.json")
+        )
+        assert _read_llm_gate_events(now_ms=1) == []
 
-    # weekend_mult=1.0 -> no extra factor: 0.10 * 2 * 1.25 = 0.25 worst-case order;
-    # full book = 0.25 * 10 / 10 = 0.25, well under 0.50.
-    assert projection["worst_case_order_notional_pct_equity"] == pytest.approx(0.25)
-    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.25)
-    _validate_long_demo_config(demo, strategy)  # must not raise
+    def test_a_fresh_file_yields_its_events(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import json as _json
 
+        from liquidity_migration.strategy.long_native_event_demo import (
+            LLM_GATE_CANDIDATES_PATH_ENV,
+            _read_llm_gate_events,
+        )
 
-def test_weekend_mult_below_one_does_not_relax_guard() -> None:
-    """A weekend tilt < 1.0 sizes DOWN, but the max(1.0, ...) floor keeps the worst-case
-    projection at or above the no-tilt baseline.
-    """
-    strategy = replace(long_v11a_profile(), weekend_size_mult=0.5)
-    demo = LongNativeDemoCycleConfig(notional_multiplier=4.0, entry_leverage=10.0)
-    projection = projected_long_initial_margin_pct_equity(demo, strategy)
-    # floor at 1.0 -> worst case stays 0.40 * 1.25 = 0.50, not 0.25.
-    assert projection["worst_case_order_notional_pct_equity"] == pytest.approx(0.50)
+        path = tmp_path / "candidates.json"
+        now_ms = 1_700_000_000_000
+        payload = {
+            "decision_ts_ms": now_ms - 60_000,
+            "valid_until_ms": now_ms + 3_600_000,
+            "events": [_gate_event()],
+        }
+        path.write_text(_json.dumps(payload))
+        monkeypatch.setenv(LLM_GATE_CANDIDATES_PATH_ENV, str(path))
+        assert _read_llm_gate_events(now_ms=now_ms) == [_gate_event()]
+
+    def test_a_stale_or_expired_file_reads_as_no_signal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import json as _json
+
+        from liquidity_migration.strategy.long_native_event_demo import (
+            LLM_GATE_CANDIDATES_PATH_ENV,
+            _read_llm_gate_events,
+        )
+
+        path = tmp_path / "candidates.json"
+        payload = {
+            "decision_ts_ms": 1_690_000_000_000,
+            "valid_until_ms": 1_690_000_000_000 + 3_600_000,
+            "events": [_gate_event()],
+        }
+        path.write_text(_json.dumps(payload))
+        monkeypatch.setenv(LLM_GATE_CANDIDATES_PATH_ENV, str(path))
+        assert _read_llm_gate_events(now_ms=1_700_000_000_000) == []
+
+    def test_a_malformed_file_reads_as_no_signal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from liquidity_migration.strategy.long_native_event_demo import (
+            LLM_GATE_CANDIDATES_PATH_ENV,
+            _read_llm_gate_events,
+        )
+
+        path = tmp_path / "candidates.json"
+        path.write_text("{not json")
+        monkeypatch.setenv(LLM_GATE_CANDIDATES_PATH_ENV, str(path))
+        assert _read_llm_gate_events(now_ms=1_700_000_000_000) == []
 
 
 # --------------------------------------------------------------------------- #

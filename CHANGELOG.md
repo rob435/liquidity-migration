@@ -16,6 +16,30 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 — the LLM gate joins the LONG sleeve, and the sizing dials go
+  to a true ~50% per entry (owner directive).** The gate stops being its own
+  strategy: the hourly ledger service now publishes score ≥ 6 judgments to a
+  candidates file, and the LONG producer enters them as ordinary LONG
+  entries — same book (`long-demo.json`), same engine sleeve, same vol-scaled
+  sizing, same v12 exits and venue-native stops. The separate `llm_gate`
+  sleeve, its book, `LLM_GATE_LIVE`/`LLM_GATE_DRAIN`, and the gate's own
+  exit-by-price machinery are gone; its two small open positions (ADAUSDT,
+  BOMEUSDT) were drained flat through the old path before the switch. The
+  kill switches are `LONG_ENGINE_LLM_GATE_ENABLED` on the demo LONG unit and
+  `llm-ledger.timer` itself. With the merge, the load-time sizing guards came
+  out: the LONG full-book margin-projection refusal and the registered
+  LONG/CARRY envelope checks in `operational_profile.py` (the checks that
+  capped the previous sizing step), and the dead
+  `max_projected_initial_margin_pct_equity` field with them. What still
+  bounds a position is its own venue-native stop; the engine's runtime
+  admission (envelope, caps, partition) is untouched. Multipliers to match
+  the ask: carry 2.0→5.0 (50% of sizing equity per new name; exodus
+  inherits), LONG 1.5→5.0 (~50% typical after its own vol/weekend scaling).
+  Mainnet untouched — same code, but its rendered profile and dials are
+  unchanged and its engine stays shadow. Sizing change point for all demo
+  fill receipts from this deploy; gate fills grade under LONG v12's config
+  id from here.
+
 - **2026-08-21 ~10:30 UTC — demo goes risk-on: every new entry sized to the
   envelope's ceiling (owner directive), staged `--stop-first`.** The owner
   asked for each entry at roughly half the account, keeping every sleeve's

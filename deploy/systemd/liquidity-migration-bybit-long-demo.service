@@ -45,6 +45,12 @@ Environment=LONG_STRATEGY_PROFILE=v12
 # checkout: the deploy proves that tree clean at every exact-commit step.
 Environment=LONG_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/long-demo.json
 Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/long-demo-state.json
+# The LLM gate's judged candidates (written hourly by the llm-ledger service)
+# enter through THIS sleeve: same book, same sizing, same exits. Both lines
+# are the kill switch -- set ENABLED=0 (or stop the llm-ledger timer) and the
+# gate stops contributing entries while everything else runs on.
+Environment=LONG_ENGINE_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/targets/llm-gate-candidates.json
+Environment=LONG_ENGINE_LLM_GATE_ENABLED=1
 ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-long-demo.service main
 Restart=always
 RestartSec=30
