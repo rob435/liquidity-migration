@@ -28,9 +28,12 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope | alerts |
 | `telegram-controls` | on | control panel + action results; **also listens** | main |
 | `engine` / `engine-mainnet` | off — the unit strips the token | nothing; the engine's live signal is its heartbeat file, which the watchdog reads | — |
+| `llm-ledger` | on | LLM gate entries and exits (target decisions, not fills) | main |
 | every producer | off or unset | nothing | — |
 
-Producers publish targets and never notify. A producer that goes quiet is the watchdog's problem.
+Producers publish targets and never notify (the LLM gate's ledger service is
+the one exception: its entry and exit decisions go to the main line). A
+producer that goes quiet is the watchdog's problem.
 
 ## Owner control buttons
 

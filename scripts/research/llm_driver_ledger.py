@@ -513,6 +513,7 @@ def cmd_triggers(ledger_dir: Path) -> None:
         except Exception:
             continue
     actions = gate_run(ledger_dir, judged_events, prices, now)
+    notify_gate_actions(actions)
     if actions:
         with path.open("a") as fh:
             for action in actions:
@@ -679,6 +680,43 @@ def gate_render_book(state: dict[str, Any], now_ms: int) -> dict[str, Any]:
         # The engine refuses a book without a whole-number version.
         "version": TARGET_BOOK_VERSION,
     }
+
+
+def gate_action_message(action: dict[str, Any]) -> str | None:
+    """The Telegram line for one gate action. Entries and exits only —
+    skips are ledger detail, not phone material."""
+
+    kind = str(action.get("action", ""))
+    symbol = action.get("symbol", "?")
+    if kind == "entry":
+        stop_pct = float(action.get("stop_loss_fraction", 0.0)) * 100
+        return (
+            f"LLM gate entry: {symbol} ${action.get('notional_usdt')} "
+            f"(score {action.get('score')}, stop {stop_pct:.1f}% below)"
+        )
+    if kind.startswith("exit:"):
+        reason = kind.split(":", 1)[1]
+        age = action.get("age_h")
+        age_txt = f" after {age}h" if age is not None else ""
+        return f"LLM gate exit ({reason}): {symbol}{age_txt}"
+    return None
+
+
+def notify_gate_actions(actions: list[dict[str, Any]]) -> None:
+    """Best-effort phone line: a Telegram failure never touches the cycle."""
+
+    try:
+        from liquidity_migration.ops.telegram import send_telegram_message
+    except Exception:
+        return
+    for action in actions:
+        text = gate_action_message(action)
+        if text is None:
+            continue
+        try:
+            send_telegram_message(text, enabled=_env_on("TELEGRAM_ENABLED"), channel="main")
+        except Exception:
+            continue
 
 
 def gate_run(

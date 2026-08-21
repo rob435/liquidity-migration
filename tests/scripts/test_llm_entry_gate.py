@@ -213,3 +213,18 @@ class TestGateRun:
             heartbeat=_heartbeat(tmp_path),
         )
         assert [(a["action"], a["symbol"]) for a in actions] == [("entry", "BBBUSDT")]
+
+
+class TestActionMessages:
+    def test_an_entry_reads_like_a_trade_line(self) -> None:
+        msg = ledger.gate_action_message(
+            {"action": "entry", "symbol": "ADAUSDT", "notional_usdt": 35.69, "score": 6, "stop_loss_fraction": 0.1281}
+        )
+        assert msg == "LLM gate entry: ADAUSDT $35.69 (score 6, stop 12.8% below)"
+
+    def test_an_exit_names_its_reason_and_age(self) -> None:
+        msg = ledger.gate_action_message({"action": "exit:take_profit", "symbol": "BOMEUSDT", "age_h": 26.0})
+        assert msg == "LLM gate exit (take_profit): BOMEUSDT after 26.0h"
+
+    def test_skips_stay_off_the_phone(self) -> None:
+        assert ledger.gate_action_message({"action": "skip:cooldown", "symbol": "X"}) is None
