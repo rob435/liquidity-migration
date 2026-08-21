@@ -16,6 +16,33 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-21 — the sleeve partition is lifted on the funded account, by
+  owner instruction.** `sleeve_limits` leaves
+  `configs/operational.mainnet.json` and the renderer that must match it, so
+  neither fleet is partitioned now and both engines boot `sleeves=0`. Carry
+  and LONG had 200/40 and 300/60 USDT of the account's 500/100; they now draw
+  on one shared envelope and either can spend the lot.
+
+  **The control is not removed, the shares are.** Absent `sleeve_limits` is
+  the profile format's own supported "one shared envelope" — demo has always
+  run that way — so `kernel.rs` still enforces a partition wherever one is
+  declared, and `DenyReason::PartitionExhausted` keeps being written and read.
+  An empty `{}` is still refused, because that reads as partitioned and
+  behaves as everything-refused. The partition's own proofs moved onto a
+  document that declares shares, in both suites.
+
+  What bounds a funded sleeve now: account gross 500, initial margin 100,
+  leverage 5, available margin, the equity-anchored envelope, and the
+  venue-native stop on each position.
+
+  Also on the host: the quote-forge poll loop orphaned since 2026-08-04 is
+  killed — it waited on `pgrep -f scripts/sweep.py`, which matched its own
+  command line, so it could never finish. Truncated syslog (390 MB, almost
+  all of it the refused-resize churn fixed earlier today) and its rotation,
+  the failed-login record, and the journal; disk 43% to 41%. The quote-lab
+  tapes and the cargo caches were left alone again, on the keep-decisions
+  already on file.
+
 - **2026-08-21 22:00 UTC — the day's whole batch is live: `5b1c7414`.**
   Deployed staged `--profile operational --stop-first` (required while real
   money is armed). `verify-ok commit=5b1c7414 profile=operational

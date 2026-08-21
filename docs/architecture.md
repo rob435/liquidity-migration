@@ -212,7 +212,9 @@ growth caps — nothing here may block an exit.
 profile declares `sleeve_limits`, each sleeve is also held to its own share, priced at the same
 reference prices as the prior book so the comparison isolates this batch's quantity change. A sleeve the
 partition does not name gets nothing (`unpartitioned_sleeve`); an untouched, non-growing sleeve is
-skipped, so a sleeve over its share cannot veto another's de-risking.
+skipped, so a sleeve over its share cannot veto another's de-risking. **Neither committed profile
+declares shares**, so on both fleets this control passes everything and one sleeve may consume the whole
+envelope — that is the owner's instruction, and the account-wide caps above are what bind.
 
 **Equity-anchored envelope**
 ([`envelope.rs`](../engine/engine-risk/src/envelope.rs)). The profile

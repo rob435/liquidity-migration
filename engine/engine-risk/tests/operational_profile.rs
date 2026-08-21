@@ -35,6 +35,18 @@ fn repo_config(name: &str) -> String {
         .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()))
 }
 
+/// The funded profile with a partition added. Neither committed profile
+/// carries one, so the partition's own proofs need a document that does.
+fn partitioned_mainnet() -> serde_json::Value {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    doc["account_risk"]["sleeve_limits"] = serde_json::json!({
+        "carry": {"max_gross_notional_usdt": 200.0, "max_initial_margin_usdt": 40.0},
+        "long": {"max_gross_notional_usdt": 300.0, "max_initial_margin_usdt": 60.0},
+    });
+    doc
+}
+
 #[test]
 fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     let sleeves = both_sleeves();
@@ -61,24 +73,20 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     assert_eq!(cfg.envelope.floor_usdt, 100.0);
     assert_eq!(cfg.envelope.expand_dead_band_fraction, 0.05);
 
-    // The partition, in strategy order.
-    let carry = cfg.partition.share(CARRY).expect("carry has a share");
-    assert_eq!(carry.max_gross_notional_usdt, 200.0);
-    assert_eq!(carry.max_initial_margin_usdt, 40.0);
-    let long = cfg.partition.share(LONG).expect("long has a share");
-    assert_eq!(long.max_gross_notional_usdt, 300.0);
-    assert_eq!(long.max_initial_margin_usdt, 60.0);
+    // No sleeve_limits: both sleeves draw on one shared envelope, and the
+    // account caps above are the whole of what bounds either of them.
+    assert!(cfg.partition.allocations.is_empty());
 }
 
 #[test]
-fn the_mainnet_partition_exactly_fills_the_account_and_no_more() {
+fn a_partition_can_exactly_fill_the_account_and_no_more() {
     // Worth stating on its own: the two shares sum to the account caps to the
     // last decimal place. That is what makes the margin comparison in
     // PartitionConfig::validate a real check rather than one with slack in it,
     // and it is the property that broke once when the proof compared against
     // gross divided by leverage instead of the declared margin cap.
     let sleeves = both_sleeves();
-    let cfg = kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs(&sleeves))
+    let cfg = kernel_config_from_profile(&partitioned_mainnet().to_string(), &inputs(&sleeves))
         .unwrap();
     let gross: f64 = cfg
         .partition
@@ -146,11 +154,8 @@ fn a_sleeve_the_engine_does_not_run_is_refused() {
     // A share earmarked for something that is not running would make the sums
     // that prove the partition fits count capital nobody can spend.
     let only_carry = vec![("carry", CARRY)];
-    let err = kernel_config_from_profile(
-        &repo_config("operational.mainnet.json"),
-        &inputs(&only_carry),
-    )
-    .expect_err("a share for an absent sleeve was accepted");
+    let err = kernel_config_from_profile(&partitioned_mainnet().to_string(), &inputs(&only_carry))
+        .expect_err("a share for an absent sleeve was accepted");
     assert!(err.to_string().contains("long"), "{err}");
 }
 
@@ -208,8 +213,7 @@ fn a_profile_still_carrying_the_retired_symbol_cap_is_refused() {
 #[test]
 fn a_partition_that_oversubscribes_the_account_is_refused_at_load() {
     let sleeves = both_sleeves();
-    let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    let mut doc = partitioned_mainnet();
     // Carry at 400 leaves long's 300 overshooting the 500 account cap.
     doc["account_risk"]["sleeve_limits"]["carry"]["max_gross_notional_usdt"] =
         serde_json::json!(400.0);
@@ -219,10 +223,10 @@ fn a_partition_that_oversubscribes_the_account_is_refused_at_load() {
 
 #[test]
 fn the_two_profiles_are_not_accidentally_the_same_shape() {
-    // The demo profile is pinned and unpartitioned; the mainnet one follows
-    // the wallet and is split between the sleeves. If a change ever made them
-    // load identically, the funded account would be running under demo
-    // limits, and every other assertion here would still pass.
+    // The demo profile is pinned; the funded one follows the wallet. Both are
+    // unpartitioned. If a change ever made them load identically, the funded
+    // account would be running under demo limits, and every other assertion
+    // here would still pass.
     let sleeves = both_sleeves();
     let demo = kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs(&sleeves))
         .unwrap();
@@ -231,7 +235,7 @@ fn the_two_profiles_are_not_accidentally_the_same_shape() {
             .unwrap();
     assert_ne!(demo, main);
     assert!(!demo.envelope.tracks_equity && main.envelope.tracks_equity);
-    assert!(demo.partition.allocations.is_empty() && !main.partition.allocations.is_empty());
+    assert!(demo.partition.allocations.is_empty() && main.partition.allocations.is_empty());
     assert!(
         main.envelope.account_gross_cap_usdt() < demo.envelope.account_gross_cap_usdt(),
         "the funded account should be the smaller book of the two"
@@ -282,8 +286,7 @@ fn a_profile_whose_numbers_do_not_survive_a_round_trip_still_loads() {
     // back as 112.99999999999999, just *under* the number the profile stated,
     // which is the direction that gets a profile refused.
     let sleeves = both_sleeves();
-    let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    let mut doc = partitioned_mainnet();
     doc["account_risk"]["max_account_gross_notional_usdt"] = serde_json::json!(113.0);
     doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(113.0);
     // The sleeve shares have to fit inside the smaller account too.

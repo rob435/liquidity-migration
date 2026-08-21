@@ -294,20 +294,34 @@ def _mainnet_document(**risk_overrides: object) -> dict:
     return payload
 
 
+def _partitioned_document(**risk_overrides: object) -> dict:
+    """The funded document with a partition added.
+
+    Neither committed profile carries one, so the partition's own proofs need
+    a document that does.
+    """
+
+    payload = _mainnet_document(**risk_overrides)
+    payload["account_risk"]["sleeve_limits"] = {
+        "carry": {"max_gross_notional_usdt": 200.0, "max_initial_margin_usdt": 40.0},
+        "long": {"max_gross_notional_usdt": 300.0, "max_initial_margin_usdt": 60.0},
+    }
+    return payload
+
+
 def _load(document: dict):
     return load_operational_profile_bytes(json.dumps(document).encode("utf-8"))
 
 
-def test_the_funded_profile_gives_the_retired_sleeve_no_capital(tmp_path: Path) -> None:
-    """CONTINUOUS is retired, so the funded partition must not name it.
+def test_a_sleeve_the_partition_does_not_name_gets_no_capital(tmp_path: Path) -> None:
+    """A partition is a closed list: a sleeve it does not name may not spend.
 
     The kernel enforces shares by sleeve name against the policy it is handed,
-    so this drives the real committed mainnet profile rather than a synthetic
-    one: an entry for the dead sleeve has to come back refused, while CARRY
-    keeps its own share.
+    so an entry for a sleeve outside the partition comes back refused while
+    CARRY keeps its own share.
     """
 
-    profile = _load(_mainnet_document())
+    profile = _load(_partitioned_document())
     policy = profile.account_risk.to_policy()
     assert {limit.sleeve for limit in policy.sleeve_limits} == {"carry", "long"}
 
@@ -331,16 +345,20 @@ def test_the_funded_profile_gives_the_retired_sleeve_no_capital(tmp_path: Path) 
     assert live.accepted, live.rejection_keys
 
 
-def test_the_committed_mainnet_profile_proves(tmp_path: Path) -> None:
+def test_the_committed_mainnet_profile_stays_unpartitioned(tmp_path: Path) -> None:
+    """One shared envelope on the funded account, by owner instruction.
+
+    What bounds a sleeve is the account's own gross and margin caps, the
+    equity-anchored envelope, and the venue-native stop -- not a share.
+    """
+
     profile = _load(_mainnet_document())
-    assert {limit.sleeve for limit in profile.account_risk.sleeve_limits} == {
-        "carry",
-        "long",
-    }
+    assert profile.account_risk.sleeve_limits == ()
+    assert profile.account_risk.to_policy().sleeve_limits == ()
 
 
 def test_shares_that_sum_above_the_account_cap_are_not_a_partition() -> None:
-    document = _mainnet_document()
+    document = _partitioned_document()
     shares = document["account_risk"]["sleeve_limits"]
     shares["carry"]["max_gross_notional_usdt"] = document["account_risk"][
         "max_account_gross_notional_usdt"
@@ -350,7 +368,7 @@ def test_shares_that_sum_above_the_account_cap_are_not_a_partition() -> None:
 
 
 def test_margin_shares_that_sum_above_the_margin_cap_are_refused() -> None:
-    document = _mainnet_document()
+    document = _partitioned_document()
     document["account_risk"]["sleeve_limits"]["carry"]["max_initial_margin_usdt"] = (
         document["account_risk"]["max_initial_margin_usdt"]
     )
@@ -366,7 +384,7 @@ def test_a_producer_sized_outside_its_share_loads_and_is_bounded_at_runtime() ->
     against live account state.
     """
 
-    document = _mainnet_document()
+    document = _partitioned_document()
     document["account_risk"]["sleeve_limits"]["carry"]["max_gross_notional_usdt"] = 1.0
     profile = _load(document)
     assert profile.carry.notional_multiplier > 0.0
@@ -380,14 +398,14 @@ def test_a_funded_sleeve_with_no_share_loads_partition_parsing_only() -> None:
     that sleeve's spending.
     """
 
-    document = _mainnet_document()
+    document = _partitioned_document()
     del document["account_risk"]["sleeve_limits"]["long"]
     profile = _load(document)
     assert {limit.sleeve for limit in profile.account_risk.sleeve_limits} == {"carry"}
 
 
 def test_an_unknown_sleeve_name_is_refused() -> None:
-    document = _mainnet_document()
+    document = _partitioned_document()
     document["account_risk"]["sleeve_limits"]["carrry"] = {
         "max_gross_notional_usdt": 1.0,
         "max_initial_margin_usdt": 1.0,
@@ -397,7 +415,7 @@ def test_an_unknown_sleeve_name_is_refused() -> None:
 
 
 def test_an_empty_partition_is_refused_rather_than_silently_refusing_everything() -> None:
-    document = _mainnet_document()
+    document = _partitioned_document()
     document["account_risk"]["sleeve_limits"] = {}
     with pytest.raises(ValueError, match="must name at least one sleeve"):
         _load(document)

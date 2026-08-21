@@ -13,17 +13,7 @@
     "max_account_gross_notional_usdt": 500.0,
     "max_initial_margin_usdt": 100.0,
     "max_leverage": 5.0,
-    "quantity_tolerance": 1e-12,
-    "sleeve_limits": {
-      "carry": {
-        "max_gross_notional_usdt": 200.0,
-        "max_initial_margin_usdt": 40.0
-      },
-      "long": {
-        "max_gross_notional_usdt": 300.0,
-        "max_initial_margin_usdt": 60.0
-      }
-    }
+    "quantity_tolerance": 1e-12
   },
   "long": {
     "notional_multiplier": 3.0,

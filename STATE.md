@@ -109,8 +109,7 @@ file.
   - **The funded engine runs in shadow and has never sent an order.** Its
     config and env file are on the host, both mainnet producers write books,
     and it has been watched reading the funded account (552445993) under the
-    mainnet profile — reference $100, a real per-sleeve partition, and a $100
-    gross cap. It sends nothing: `shadow = true` in `engine-mainnet.toml` and
+    mainnet profile — reference $100 and a $100 gross cap. It sends nothing: `shadow = true` in `engine-mainnet.toml` and
     `ENGINE_LIVE=false` in `engine-mainnet.env`, two switches, both the
     owner's, and it takes no account lease while shadow.
 
@@ -126,15 +125,14 @@ file.
   - **There is no hourly Telegram digest.** Pause, resume and `ops.sh flatten`
     work, on the engine's own path.
 
-  - **`operational.demo.json` carries no `sleeve_limits`**, so there is no
-    per-sleeve capital partition on demo: every sleeve draws on the
-    account-wide caps and any one can spend the lot. The engine logs
-    `sleeves=0` at boot, against `sleeves=2` on mainnet. It is left alone
-    deliberately: demo's `capital_reference_usdt` is 250,000 against an account
-    holding about $1,400, so every cap in that profile is already far above
-    anything the account can reach and a partition drawn from it would never
-    bind. Making it mean something is a retune of the reference, which is a
-    dial the owner sets.
+  - **Neither profile carries `sleeve_limits`**, so there is no per-sleeve
+    capital partition on either fleet: every sleeve draws on the account-wide
+    caps and any one can spend the lot. Both engines log `sleeves=0` at boot.
+    What bounds a sleeve is the account's gross and margin caps, the
+    equity-anchored envelope, and the venue-native stop on each position. The
+    partition machinery is still in the kernel and still enforced whenever a
+    profile declares shares — it is the shares that are gone, by owner
+    instruction.
 
 - **The engine binary is built in an isolated clone at `/opt/engine-build`** —
   never the deployed checkout the fleet runs from — with its own toolchain

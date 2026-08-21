@@ -640,6 +640,31 @@ disaster_stop_fraction = 0.35
         ))
     }
 
+    /// The funded profile with a partition added, written where a `[risk]`
+    /// block can point at it. Neither committed profile carries one, so the
+    /// sleeve-to-strategy proofs need a document that does. `tag` keeps
+    /// parallel tests off each other's file.
+    fn partitioned_profile_risk(tag: &str) -> toml::Table {
+        let raw = std::fs::read_to_string("../../configs/operational.mainnet.json")
+            .expect("the funded profile must be readable");
+        let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        doc["account_risk"]["sleeve_limits"] = serde_json::json!({
+            "carry": {"max_gross_notional_usdt": 200.0, "max_initial_margin_usdt": 40.0},
+            "long": {"max_gross_notional_usdt": 300.0, "max_initial_margin_usdt": 60.0},
+        });
+        let path = std::env::temp_dir().join(format!("engine-partitioned-{tag}.json"));
+        std::fs::write(&path, doc.to_string()).expect("the temp profile must be writable");
+        risk_block(&format!(
+            r#"
+operational_profile_path = "{}"
+max_account_view_age_s = 120
+min_order_notional_usdt = 1.0
+disaster_stop_fraction = 0.35
+"#,
+            path.display()
+        ))
+    }
+
     /// `Kernel` has no Debug, so `expect_err` cannot be used on these.
     fn refusal(result: Result<Kernel, Box<dyn Error>>, what: &str) -> String {
         match result {
@@ -699,7 +724,7 @@ disaster_stop_fraction = 0.35
             sleeve_strategy("long", "ETHUSDT"),
             sleeve_strategy("hedge", "SOLUSDT"),
         ];
-        let err = refusal(risk(&profile_risk("operational.mainnet.json"), &sleeves), "an unfunded sleeve was accepted");
+        let err = refusal(risk(&partitioned_profile_risk("unfunded"), &sleeves), "an unfunded sleeve was accepted");
         assert!(err.to_string().contains("hedge"), "{err}");
     }
 
@@ -709,7 +734,7 @@ disaster_stop_fraction = 0.35
         // partition fits inside the account, so leaving it out would make the
         // sleeves that are running look smaller than they are.
         let err = refusal(risk(
-            &profile_risk("operational.mainnet.json"),
+            &partitioned_profile_risk("no-strategy"),
             &[sleeve_strategy("carry", "BTCUSDT")],
         ), "a profile naming a sleeve nobody runs was accepted");
         assert!(err.to_string().contains("long"), "{err}");

@@ -216,8 +216,8 @@ and the envelope and the watchdog thresholds are unexercised on a funded account
 
 ### Capital controls in force
 
-Absolute pre-trade caps (component gross, account gross, initial margin, available margin, leverage)
-and the per-sleeve partition, enforced in the engine's risk kernel before any order leaves:
+Absolute pre-trade caps (component gross, account gross, initial margin, available margin, leverage),
+enforced in the engine's risk kernel before any order leaves:
 [`kernel.rs`](../engine/engine-risk/src/kernel.rs). Caps rescale with observed
 equity: [`envelope.rs`](../engine/engine-risk/src/envelope.rs).
 There is no account-level daily loss ceiling — the owner's standing decision;

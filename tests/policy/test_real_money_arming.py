@@ -145,15 +145,12 @@ def test_a_retired_dial_is_refused_by_name() -> None:
         )
 
 
-def test_the_static_partition_sums_exactly_inside_both_account_caps() -> None:
+def test_the_render_partitions_nothing() -> None:
     _data, profile = render_real_money_profile()
     risk = profile.account_risk
-    assert sum(limit.max_gross_notional_usdt for limit in risk.sleeve_limits) == (
-        risk.max_account_gross_notional_usdt
-    )
-    assert sum(limit.max_initial_margin_usdt for limit in risk.sleeve_limits) == (
-        risk.max_initial_margin_usdt
-    )
+    assert risk.sleeve_limits == ()
+    assert risk.max_account_gross_notional_usdt == 500.0
+    assert risk.max_initial_margin_usdt == 100.0
     # Entry leverage is a plain 5x floor again: no dial math moves it.
     assert risk.max_leverage == 5.0
 
@@ -318,7 +315,7 @@ def test_render_profile_writes_one_private_artifact(tmp_path: Path) -> None:
     assert code == 0
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     profile = load_operational_profile_bytes(output.read_bytes())
-    assert profile.account_risk.sleeve_limits
+    assert profile.account_risk.sleeve_limits == ()
     # It reads the dials out of the credential file and writes none of it back.
     assert "BYBIT" not in output.read_text(encoding="utf-8")
 
@@ -873,9 +870,6 @@ def test_the_engine_and_the_fleet_read_the_same_caps_from_the_same_file() -> Non
     loader ever reads the file differently, one of the two suites goes red and
     names the field.
 
-    Repeating decimals are written out in full on purpose: the two sleeve
-    margin shares sum to the account margin cap to the last place, and that
-    exactness is what makes the partition proof bind instead of leaving slack.
     """
 
     profile = load_operational_profile_bytes(
@@ -906,11 +900,6 @@ def test_the_engine_and_the_fleet_read_the_same_caps_from_the_same_file() -> Non
     assert reference.floor_usdt == 100.0
     assert reference.expand_dead_band_fraction == 0.05
 
-    shares = {limit.sleeve: limit for limit in account.sleeve_limits}
-    assert shares["carry"].max_gross_notional_usdt == 200.0
-    assert shares["carry"].max_initial_margin_usdt == 40.0
-    assert shares["long"].max_gross_notional_usdt == 300.0
-    assert shares["long"].max_initial_margin_usdt == 60.0
-
-    assert sum(s.max_gross_notional_usdt for s in shares.values()) == 500.0
-    assert sum(s.max_initial_margin_usdt for s in shares.values()) == 100.0
+    # No partition: both sleeves draw on one shared envelope, and the account
+    # caps above are the whole of what bounds either of them.
+    assert account.sleeve_limits == ()

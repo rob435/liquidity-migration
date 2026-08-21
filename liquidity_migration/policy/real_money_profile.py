@@ -137,14 +137,6 @@ def render_real_money_profile_json(
     account_gross = reference * _ENTRY_LEVERAGE
     margin_cap = reference
 
-    def _share(gross_share: float) -> dict[str, float]:
-        # The same fraction of *each* account cap, so the shares sum inside the
-        # account exactly.
-        return {
-            "max_gross_notional_usdt": account_gross * gross_share,
-            "max_initial_margin_usdt": margin_cap * gross_share,
-        }
-
     return {
         "schema_version": OPERATIONAL_PROFILE_SCHEMA_VERSION,
         "kind": OPERATIONAL_PROFILE_KIND,
@@ -161,10 +153,6 @@ def render_real_money_profile_json(
             "max_initial_margin_usdt": margin_cap,
             "max_leverage": _ENTRY_LEVERAGE,
             "quantity_tolerance": 1e-12,
-            "sleeve_limits": {
-                "carry": _share(0.4),
-                "long": _share(0.6),
-            },
         },
         "long": {
             "notional_multiplier": 3.0,

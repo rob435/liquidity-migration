@@ -195,9 +195,12 @@ def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 "adjust the dial the message names, then re-run preflight",
             )
         ]
-    shares = ", ".join(
-        f"{limit.sleeve} {limit.max_gross_notional_usdt / profile.capital_reference_usdt:.2f}x"
-        for limit in profile.account_risk.sleeve_limits
+    shares = (
+        ", ".join(
+            f"{limit.sleeve} {limit.max_gross_notional_usdt / profile.capital_reference_usdt:.2f}x"
+            for limit in profile.account_risk.sleeve_limits
+        )
+        or "none, one shared envelope"
     )
     return [
         CheckResult(

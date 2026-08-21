@@ -383,9 +383,10 @@ sizing surface. Caps are a fraction of observed wallet equity
 contraction immediate, expansion behind a dead band, unknown equity moves nothing);
 the per-sleeve partition is the engine's
 ([`kernel.rs`](../engine/engine-risk/src/kernel.rs), fed from the profile's
-`sleeve_limits` — and note the demo profile declares no `sleeve_limits`, so on
-the demo account there is no per-sleeve fence; the Python partition in
-`account_kernel.py` survives in the tree but nothing on the order path runs it).
+`sleeve_limits` — and neither committed profile declares any, so on both
+accounts there is no per-sleeve fence and one sleeve may spend the account's
+whole envelope; the Python partition in `account_kernel.py` survives in the
+tree but nothing on the order path runs it).
 There is no daily loss ceiling: the owner's standing decision is per-position safety, so the
 venue-native stop on each position is what bounds a loss.
 
