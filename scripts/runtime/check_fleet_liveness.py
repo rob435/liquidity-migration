@@ -888,6 +888,50 @@ def select_alerts_to_send(
     return to_send, sorted(resolved_keys), new_state
 
 
+#: Telegram refuses a message over 4096 characters. Split well below it — the
+#: cost of a second message is one notification, the cost of a refused one is
+#: the whole run's alerts.
+_TELEGRAM_CHUNK_CHARS = 3500
+
+
+def format_alert_digest(
+    to_send: list[Alert], resolved: list[str], *, scope_name: str, ts: str
+) -> list[str]:
+    """One run's alerts and clears as the messages to send — usually just one.
+
+    A fleet going down trips six checks at once and clears all six together.
+    One message per key made a routine restart twenty-eight notifications, so
+    nobody read any of them. Every key still appears, with its own severity and
+    its own `ref`, in one message per run.
+    """
+    if not to_send and not resolved:
+        return []
+    worst = max((_SEVERITY_RANK.get(a.severity, 0) for a in to_send), default=0)
+    icon = {2: "🚨", 1: "⚠️"}.get(worst, "✅")
+    header = f"{icon} {scope_name} fleet · {ts}"
+    if len(to_send) > 1:
+        header += f" · {len(to_send)} alerts"
+
+    blocks: list[str] = []
+    for alert in to_send:
+        mark = "🚨" if alert.severity == CRITICAL else "⚠️"
+        blocks.append(f"{mark} {alert.severity} {alert.telegram_line}\nref {alert.key}")
+    if resolved:
+        blocks.append("✅ cleared: " + ", ".join(resolved))
+
+    messages: list[str] = []
+    current = header
+    for block in blocks:
+        candidate = f"{current}\n\n{block}"
+        if len(candidate) > _TELEGRAM_CHUNK_CHARS and current != header:
+            messages.append(current)
+            current = f"{header}\n\n{block}"
+        else:
+            current = candidate
+    messages.append(current)
+    return messages
+
+
 # I/O at the edges
 def _now_ms() -> int:
     return int(datetime.now(UTC).timestamp() * 1000)
@@ -1657,55 +1701,42 @@ def main() -> int:
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     scope_name = "mainnet" if mainnet else "demo"
     telegram_send_failed = False
+    # Full technical detail goes to stdout/journald for debugging; the Telegram
+    # alerts channel gets the plain headline plus the stable key (the "ref") so
+    # the owner can hand the alert over verbatim.
     for alert in to_send:
-        # Full technical detail goes to stdout/journald for debugging; the
-        # Telegram alerts channel gets the plain headline plus the stable key
-        # (the "ref") so the owner can hand the alert over verbatim.
         print(f"[{alert.severity}] liquidity-migration {ts} {alert.key}: {alert.message}")
-        icon = "🚨" if alert.severity == CRITICAL else "⚠️"
-        line = (
-            f"{icon} {alert.severity} · {scope_name} fleet · {ts}\n"
-            f"{alert.telegram_line}\n"
-            f"ref {alert.key}"
-        )
-        if args.telegram:
+    for key in resolved:
+        print(f"✅ {scope_name} fleet · {ts} · cleared: {key}")
+
+    if args.telegram:
+        for message in format_alert_digest(to_send, resolved, scope_name=scope_name, ts=ts):
             delivered = False
             try:
-                delivered = send_telegram_message(line, channel="alerts")
+                delivered = send_telegram_message(message, channel="alerts")
             except Exception as exc:
                 print(f"(telegram send failed: {exc})")
             if not delivered:
                 telegram_send_failed = True
                 print("(telegram send returned False — TELEGRAM_* env missing or API non-2xx; will retry next run)")
-                # Revert cooldown stamp and severity marker so an undelivered
-                # alert advances neither and the next run retries it.
-                if alert.key in state:
-                    new_state[alert.key] = state[alert.key]
+                break
+
+    if telegram_send_failed:
+        # Nothing in this run reached the phone, so nothing in it may advance:
+        # revert every cooldown stamp and severity marker the run set, and mark
+        # every cleared key for another attempt.
+        for alert in to_send:
+            for key in (alert.key, f"{_SEV_PREFIX}{alert.key}"):
+                if key in state:
+                    new_state[key] = state[key]
                 else:
-                    new_state.pop(alert.key, None)
-                sev_key = f"{_SEV_PREFIX}{alert.key}"
-                if sev_key in state:
-                    new_state[sev_key] = state[sev_key]
-                else:
-                    new_state.pop(sev_key, None)
-    for key in resolved:
-        line = f"✅ {scope_name} fleet · {ts} · cleared: {key}"
-        print(line)
-        retry_key = f"{_RESOLVED_PREFIX}{key}"
-        if args.telegram:
-            delivered = False
-            try:
-                delivered = send_telegram_message(line, channel="alerts")
-            except Exception as exc:
-                print(f"(telegram send failed: {exc})")
-            if not delivered:
-                telegram_send_failed = True
-                # Retry under a separate namespace so it cannot arm alert cooldown.
-                new_state[retry_key] = now_ms
-                print("(telegram send returned False — resolved note will retry next run)")
-                continue
-        # Delivered: clear the retry marker so the note isn't re-sent forever.
-        new_state.pop(retry_key, None)
+                    new_state.pop(key, None)
+        for key in resolved:
+            # A separate namespace, so a retry cannot arm an alert cooldown.
+            new_state[f"{_RESOLVED_PREFIX}{key}"] = now_ms
+    else:
+        for key in resolved:
+            new_state.pop(f"{_RESOLVED_PREFIX}{key}", None)
     # Saved after the sends so an undelivered alert's cooldown stays unset.
     _save_state(state_file, new_state)
 

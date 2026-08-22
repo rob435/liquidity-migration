@@ -2355,3 +2355,119 @@ def test_engine_heartbeat_is_aged_against_a_clock_read_after_the_file(tmp_path, 
 
     assert M.main() == 0
     assert "engine_heartbeat_stale" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# One run, one message
+# --------------------------------------------------------------------------
+
+
+def _digest_argv(state_file) -> list[str]:
+    return [
+        "check_fleet_liveness.py",
+        "--telegram",
+        "--long-root",
+        "",
+        "--state-file",
+        str(state_file),
+    ]
+
+
+def test_a_whole_run_is_one_message_not_one_per_alert(tmp_path, monkeypatch) -> None:
+    """A fleet going down trips every check at once, and clears them together.
+
+    One message per key made a routine restart twenty-eight notifications, so
+    nobody read any of them. Every key must still be in there, with its own
+    severity and its own ref.
+    """
+    state_file = tmp_path / "state.json"
+    sent: list[str] = []
+    _stub_account_authority(monkeypatch)
+
+    units = ["a.timer", "b.timer", "c.timer"]
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: units)
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
+    monkeypatch.setattr("sys.argv", _digest_argv(state_file))
+
+    monkeypatch.setattr(M, "_unit_states", lambda _units: dict.fromkeys(units, "inactive"))
+    assert M.main() == 0
+    assert len(sent) == 1, f"three alerts must be one message, got {len(sent)}: {sent}"
+    for unit in units:
+        assert f"ref unit:{unit}" in sent[0]
+    assert "3 alerts" in sent[0]
+
+    # And the three of them clear together in one message too.
+    sent.clear()
+    monkeypatch.setattr(M, "_unit_states", lambda _units: dict.fromkeys(units, "active"))
+    monkeypatch.setattr("sys.argv", _digest_argv(state_file))
+    assert M.main() == 0
+    assert len(sent) == 1, f"three clears must be one message, got {len(sent)}: {sent}"
+    for unit in units:
+        assert f"unit:{unit}" in sent[0]
+    assert sent[0].startswith("✅")
+
+
+def test_a_quiet_run_sends_nothing_at_all(tmp_path, monkeypatch) -> None:
+    """The digest must not turn a silent watchdog into a heartbeat message."""
+    state_file = tmp_path / "state.json"
+    sent: list[str] = []
+    _stub_account_authority(monkeypatch)
+
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["ok.timer"])
+    monkeypatch.setattr(M, "_unit_states", lambda _units: {"ok.timer": "active"})
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
+    monkeypatch.setattr("sys.argv", _digest_argv(state_file))
+
+    assert M.main() == 0
+    assert sent == []
+
+
+def test_a_failed_digest_leaves_every_key_to_retry(tmp_path, monkeypatch) -> None:
+    """Nothing in the run reached the phone, so nothing in it may advance."""
+    state_file = tmp_path / "state.json"
+    _stub_account_authority(monkeypatch)
+
+    units = ["a.timer", "b.timer"]
+    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: units)
+    monkeypatch.setattr(M, "_unit_states", lambda _units: dict.fromkeys(units, "inactive"))
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: False)
+    monkeypatch.setattr("sys.argv", _digest_argv(state_file))
+
+    assert M.main() == 0
+    state = json.loads(state_file.read_text())
+    for unit in units:
+        assert f"unit:{unit}" not in state, "an undelivered alert must not arm its own cooldown"
+
+    # Delivery comes back: both are sent, still as one message.
+    sent: list[str] = []
+    monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
+    monkeypatch.setattr("sys.argv", _digest_argv(state_file))
+    assert M.main() == 0
+    assert len(sent) == 1
+    for unit in units:
+        assert f"ref unit:{unit}" in sent[0]
+
+
+def test_the_digest_splits_before_telegram_would_refuse_it() -> None:
+    """A refused message loses the whole run's alerts, so it is split first."""
+    many = [
+        M.Alert(key=f"unit:filler-{i}.timer", severity=M.CRITICAL, message="x", headline="y " * 60)
+        for i in range(40)
+    ]
+    messages = M.format_alert_digest(many, [], scope_name="demo", ts="2026-08-22 08:44 UTC")
+    assert len(messages) > 1
+    assert all(len(m) <= M._TELEGRAM_CHUNK_CHARS for m in messages)
+    # Every key survives the split, and every part says which fleet it is.
+    joined = "\n".join(messages)
+    for alert in many:
+        assert f"ref {alert.key}" in joined
+    assert all(m.startswith("🚨 demo fleet") for m in messages)
+
+
+def test_a_single_alert_still_reads_as_one_alert() -> None:
+    """The common case must not gain a count or a second line of chrome."""
+    one = [M.Alert(key="engine_heartbeat_stale", severity=M.CRITICAL, message="x", headline="engine is dead")]
+    (message,) = M.format_alert_digest(one, [], scope_name="mainnet", ts="2026-08-22 08:44 UTC")
+    assert "alerts" not in message
+    assert "engine is dead" in message
+    assert "ref engine_heartbeat_stale" in message

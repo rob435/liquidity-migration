@@ -16,6 +16,34 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-22 — one watchdog run is one Telegram message.** A routine fleet
+  restart was sending **28 messages**. The engine going down trips
+  `unit:…engine.service` and `engine_heartbeat_stale`; the two producers going
+  down trip their own `unit:` keys and, ten minutes later, their
+  `liveness:…-event` keys. Six keys per fleet, one per message, then six more
+  when each cleared, and two watchdogs doing it independently. Measured on the
+  08:44–09:15 window: 16 alerts and 12 cleared notes for one deploy.
+
+  The run's alerts and its cleared keys now go out as one message, every key
+  still carrying its own severity and its own `ref`. The header takes the worst
+  severity in the batch and counts the alerts when there is more than one; a
+  batch too long for Telegram is split, each part headed the same way. The same
+  restart is now four messages per fleet, and a healthy run still sends nothing
+  at all. Full per-alert detail still goes to the journal, unchanged.
+
+  Delivery is now all-or-nothing per run: an undelivered message reverts every
+  cooldown stamp and severity marker it carried and marks every cleared key for
+  another attempt, so the next run retries the whole run rather than a
+  half-sent one.
+
+  **What was not touched.** The producer `liveness:` alert still fires on a
+  stopped unit that already alerted, nine minutes behind it, and is still the
+  one genuine duplicate left — one line in a digest now rather than a message
+  of its own. Suppressing it while its unit is already alerting would cost the
+  owner an alert they may want, so that is the owner's call, not this change's.
+  Trade updates (9 in the last day) and the control panel (replies only) were
+  never the noise and are unchanged.
+
 - **2026-08-22 — the deploy's receipt.** `staged --profile operational
   --stop-first`, commit `9d2c646e`. Both engines and all four producers are up,
   `mainnet=armed`, nothing latched: demo `may_open` true on eleven positions

@@ -10,9 +10,10 @@ posts the panel and its action results.
 
 **The main line** (`TELEGRAM_CHAT_ID`) carries the control panel and its action results. **The alerts
 line** (`TELEGRAM_ALERT_CHAT_ID`) carries
-watchdog pages and their cleared notes. Each alert is a plain one-line headline plus a stable `ref
-<key>`; paste the whole message to Claude to hand the problem over. The full technical detail stays in
-the watchdog's journal (`journalctl -u liquidity-migration-demo-liveness`).
+watchdog pages and their cleared notes, one message per watchdog run however many checks tripped. Each
+alert in it is a plain one-line headline plus a stable `ref <key>`; paste the whole message to Claude to
+hand the problem over. The full technical detail stays in the watchdog's journal
+(`journalctl -u liquidity-migration-demo-liveness`).
 
 An empty `TELEGRAM_ALERT_CHAT_ID` sends alerts to the main chat instead — nothing goes silent while the
 second chat is not set up. To split the lines: create a Telegram group, add the bot to it, send any
@@ -174,11 +175,18 @@ Mainnet's receipt genuinely does gate the funded owner, so that one is CRITICAL.
 ### How an alert behaves
 
 A new condition alerts immediately. A persisting one re-alerts at most once per cooldown. A cleared one
-sends a one-line resolved note. An escalation from `WARNING` to `CRITICAL` **bypasses the cooldown** —
+is named in a resolved note. An escalation from `WARNING` to `CRITICAL` **bypasses the cooldown** —
 severity going up is new information.
 
-An undelivered alert advances neither its cooldown nor its last-sent severity, so the next run retries
-it, escalation intact. Cooldown state is saved after the sends for exactly this reason.
+**One run is one message.** A fleet going down trips several checks at once and clears them all
+together, so the run's alerts and its cleared keys go out as a single message — every key still carrying
+its own severity and its own `ref`. The header takes the worst severity in the batch and counts the
+alerts when there is more than one. A batch too long for Telegram is split, each part headed the same
+way. Nothing is sent at all on a run with neither an alert nor a clear.
+
+An undelivered message advances nothing: every cooldown stamp and last-sent severity in it is reverted
+and every cleared key is marked for another attempt, so the next run retries the whole run, escalation
+intact. Cooldown state is saved after the send for exactly this reason.
 
 ### The dead-man's switch
 
@@ -197,8 +205,9 @@ without a URL a total host loss is silent. **No URL is provisioned by default.**
   check cannot clear, it is broken — fix or retire it, do not let it run.
 - No watchdog alert but something looks wrong → check `TELEGRAM_*` on the watchdog unit; both channels
   share the same credentials and a bad token silences both at once.
-- Alert storm after a restart → the per-check startup grace should absorb it; if a slow bootstrap
-  overlaps the cycle-age bound it resolves itself, and the resolved notes will say so.
+- Alert storm after a restart → the per-check startup grace should absorb most of it, and what is left
+  arrives as one message per run rather than one per check; if a slow bootstrap overlaps the cycle-age
+  bound it resolves itself, and the resolved note will say so.
 - Mainnet pages come from the Telegram pair inside `/etc/liquidity-migration/bybit-mainnet.env`; the
   watchdog unit strips the API keys and `REAL_MONEY` straight back out, so it can page but holds no
   trading authority.
