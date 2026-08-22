@@ -1897,9 +1897,11 @@ def _engine_alerts(path: Path, *, max_age_seconds: float = 60.0, now_ms: int = E
 
 
 def test_engine_heartbeat_fresh_and_healthy_is_silent(tmp_path) -> None:
-    """Shadow is not a fault on its own — running an engine that sends nothing is
-    a normal thing to do — so only the age and the latch may page here. The
-    keys this check never reads must not page either.
+    """Only the age and the latch may page here, and the keys this check never
+    reads must not page either.
+
+    No engine writes `shadow` any more; a beat carrying it is one an older
+    engine left behind, and it is judged rather than alarmed on.
     """
     assert _engine_alerts(_write_engine_heartbeat(tmp_path / "live.json")) == []
     assert _engine_alerts(_write_engine_heartbeat(tmp_path / "shadow.json", mode="shadow")) == []
@@ -1909,9 +1911,9 @@ def test_engine_heartbeat_fresh_and_healthy_is_silent(tmp_path) -> None:
 
 
 def test_engine_heartbeat_needs_no_account_lease_or_pid(tmp_path) -> None:
-    """A shadow run may hold no lease and may never have asked the venue who it
-    is. Requiring either would turn an ordinary shadow engine into a permanent
-    page, so they are printed when present and left out when not.
+    """An engine that has not reached the venue holds no lease and knows no
+    account number. Requiring either would page on its first beats, so they are
+    printed when present and left out when not.
     """
     anonymous = _write_engine_heartbeat(
         tmp_path / "anonymous.json",
@@ -1939,7 +1941,8 @@ def test_engine_heartbeat_needs_no_account_lease_or_pid(tmp_path) -> None:
 
 def test_engine_heartbeat_unknown_mode_is_read_as_unreadable_not_guessed(tmp_path) -> None:
     """A mode this checker has never heard of is where a guess is worst: reading
-    it as live overstates what is at risk, reading it as shadow hides a real one.
+    it as live overstates what is at risk, reading it as one that sent nothing
+    hides a real one.
     """
     unknown = _write_engine_heartbeat(tmp_path / "unknown_mode.json", mode="rehearsal")
     alerts = _engine_alerts(unknown)
@@ -1991,8 +1994,9 @@ def test_engine_heartbeat_future_dated_pages_instead_of_reading_as_fresh(tmp_pat
 
 def test_engine_heartbeat_latched_pages_and_says_what_it_means(tmp_path) -> None:
     """An engine that has latched itself out of opening positions is alive,
-    writing healthy heartbeats, and green on every other check here. Live it is
-    critical; in shadow nothing was reaching the venue anyway.
+    writing healthy heartbeats, and green on every other check here. That is
+    critical for a live beat, and only a warning for an old `shadow` one, which
+    was reaching the venue with nothing.
     """
     latched = _write_engine_heartbeat(tmp_path / "latched.json", may_open=False)
     alerts = _engine_alerts(latched)
@@ -2262,10 +2266,9 @@ def test_engine_account_view_bound_cannot_be_tightened_below_the_floor(tmp_path)
 
 
 def test_engine_account_view_is_not_faulted_for_being_absent(tmp_path) -> None:
-    """A shadow run may never ask the venue anything, and a live one has not
-    asked yet in its first moments. Neither is a fault, and paging on it would
-    turn every boot into an alert — the same self-inflicted noise this whole
-    change is removing. What an absent reading must never do is read as fresh.
+    """An engine has not asked the venue anything in its first moments. That is
+    not a fault, and paging on it would turn every boot into an alert. What an
+    absent reading must never do is read as fresh.
     """
     for mode in ("live", "shadow"):
         absent = _write_engine_heartbeat(

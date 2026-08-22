@@ -30,9 +30,9 @@ Environment=CARRY_STRATEGY_PROFILE=v7
 Environment=CARRY_EARLY_EXIT=1
 # Where this producer writes the book the funded engine follows. Must match the
 # carry sleeve's `book_path` in /etc/liquidity-migration/engine-mainnet.toml,
-# and nothing checks that agreement for you. Writing a book is not trading: the
-# engine reads it, and the engine is shadow until its own two switches say
-# otherwise.
+# and nothing checks that agreement for you. Writing a book is not trading, but
+# the engine that reads it sends: REAL_MONEY in bybit-mainnet.env is the only
+# thing between this book and a real order.
 Environment=CARRY_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/carry-mainnet.json
 # The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
 Environment=LOOKBACK_DAYS=90

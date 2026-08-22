@@ -14,9 +14,11 @@ file.
 
 - **AUTOMATED TRADING IS ON, on both fleets.** Both engines, all four
   producers, the Telegram controls and every timer are active and enabled, and
-  `REAL_MONEY` is armed. There is no sleeve override on the host — the
-  `sleeves.env` file that used to hold one is gone — so a deploy brings the
-  whole fleet back up.
+  `REAL_MONEY` is armed. `deploy/sleeves.env` carries `LONG_SLEEVE=on` and
+  `CARRY_SLEEVE=on`, and no host override at
+  `/etc/liquidity-migration/sleeves.env` narrows them, so a deploy brings the
+  whole fleet up. That host file is how a sleeve is held down — it can only
+  turn one off, never on — and the Telegram pause button writes it.
 
   The funded account holds no position and about four cents of equity, so what
   is at risk there today is nothing; the demo account carries the open book.
@@ -63,7 +65,7 @@ file.
   equity. The sizing is
   a forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** It runs
-  `e3ac11bf`, with carry_hold **v7** on both CARRY producers: v6's registered
+  `9d2c646e`, with carry_hold **v7** on both CARRY producers: v6's registered
   rule byte-identical plus the pre-settlement exit read (`strategy_profile=v7
   early_exit=1` — the early exit fires on the venue's running rate up to 15
   minutes before a dying print pays; settled-print fallback kept).
@@ -99,16 +101,14 @@ file.
 
   - the engine reads the venue and writes `account_equity_usdt` into its
     heartbeat;
-  - both producers size from that equity (`carry … equity=$1,412.58 err=none`,
-    `long … equity=$1,412.57 owner=healthy`);
+  - both producers size from that equity;
   - both write an absolute target book —
     `/var/lib/liquidity-migration/targets/{carry,long}-demo.json`;
   - the engine reads each book, routes it to its own sleeve, and takes on
-    symbols the books name that no config listed (`following a symbol a book
-    named symbol=HOMEUSDT`).
+    symbols the books name that no config listed.
 
-  Live, carry wants $141.09 of HOMEUSDT against about $137 held, and the engine
-  correctly does nothing — $4.09 is inside the 5% dead band.
+  A book within the 5% dead band of what is held moves nothing, which is why a
+  running engine sending no order is the ordinary case rather than a fault.
 
   **The engine is LIVE on the demo account**, holding the single-writer lease
   `bybit-demo-user-555899665.lock`.

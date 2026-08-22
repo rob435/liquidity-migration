@@ -536,6 +536,9 @@ def evaluate_notification_delivery(
 # The engine writes this small JSON file every few seconds and nothing else
 # reads it, so the watchdog is the only thing that can notice it stopped.
 ENGINE_MODE_LIVE = "live"
+# No engine writes this any more — the shadow mode is gone and every beat says
+# `live`. It stays readable because a beat outlives the run that wrote it, so a
+# file left by an older engine must still be judged rather than alarmed on.
 ENGINE_MODE_SHADOW = "shadow"
 ENGINE_MODES = (ENGINE_MODE_LIVE, ENGINE_MODE_SHADOW)
 
@@ -559,8 +562,8 @@ class EngineHeartbeat:
     may_open: bool
     market_events: int
     orders_sent: int
-    #: A shadow run may never have asked the venue who it is, so both of these
-    #: can be absent from an ordinary healthy heartbeat.
+    #: An engine that has not yet reached the venue has nothing to say here,
+    #: so both of these can be absent from an ordinary healthy heartbeat.
     account_user_id: str | None
     pid: int | None
     #: When the venue reading this beat carries was taken, on the same clock as
@@ -636,10 +639,10 @@ def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
     # Every field the decision rests on is required: a heartbeat missing one of
     # them is a different contract from the one built against, and saying so
     # beats half-trusting the rest of the document. The account number, the
-    # process id, and the lease path are not in here — a shadow run may hold no
-    # lease and may never have asked the venue who it is, so requiring either
-    # would turn an ordinary shadow engine into a permanent page. Everything
-    # else the engine writes is ignored.
+    # process id, and the lease path are not in here — an engine that has not
+    # reached the venue yet holds no lease and knows no account number, so
+    # requiring either would turn its first beats into a page. Everything else
+    # the engine writes is ignored.
     wrong: list[str] = []
     for field, expected in (
         ("wall_ts_ms", int),
@@ -689,10 +692,9 @@ def evaluate_engine_heartbeat(
 ) -> list[Alert]:
     """Report an engine that stopped writing, and one that stopped opening positions.
 
-    Being in shadow mode is not an alert by itself — running an engine that
-    sends nothing is a normal thing to do — but every message names the mode,
-    because both conditions mean something different when nothing was going to
-    reach the venue anyway.
+    Every message names the mode. A beat still carrying the retired `shadow`
+    was written by an engine that reached the venue with nothing, so both
+    conditions mean less on one of those than on a live beat.
     """
     alerts: list[Alert] = []
     age_seconds = (now_ms - heartbeat.wall_ts_ms) / 1000.0

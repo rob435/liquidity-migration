@@ -45,7 +45,16 @@ edit STATE.md to match.
   Also corrected in STATE.md: it said automated trading was off, both engines
   and all four producers stopped behind `LONG_SLEEVE=off` / `CARRY_SLEEVE=off`
   in `/etc/liquidity-migration/sleeves.env`. That file does not exist and the
-  whole fleet was running, armed.
+  whole fleet was running, armed. Its engine commit and its pinned equity
+  figures were stale too.
+
+  And the same sweep through the tree, for the two things the host files had
+  wrong. The funded carry unit still told a reader "the engine is shadow until
+  its own two switches say otherwise" — it has one switch and no shadow, so the
+  line now says `REAL_MONEY` is all that stands between that book and a real
+  order. `check_fleet_liveness.py` still explained several of its own choices
+  by shadow runs that no longer happen; it keeps reading the retired word,
+  because a beat outlives the run that wrote it, and now says that instead.
 
 - **2026-08-22 — the per-sleeve capital partition is removed, and the two
   defects the audit left standing are fixed.** By owner instruction, on the
