@@ -7,7 +7,7 @@ use engine_types::{
     AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce,
     VenueError, VenueGateway,
 };
-use engine_venue::{BybitGateway, Credentials, VenueRealm};
+use engine_venue::{BybitGateway, VenueRealm};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use support::{Recorded, TestServer};
@@ -18,7 +18,8 @@ const SECRET: &str = "demoSecret00000000000000000001";
 fn gateway(server: &TestServer) -> BybitGateway {
     BybitGateway::for_test(
         &server.base_url(),
-        Credentials::new(VenueRealm::Demo, KEY, SECRET),
+        VenueRealm::Demo,
+        VenueRealm::Demo.credentials_for_test(KEY, SECRET),
         vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
     )
 }

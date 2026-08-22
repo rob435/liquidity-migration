@@ -224,6 +224,18 @@ impl OrderRegistry {
         self.owner.get(client_order_id).copied()
     }
 
+    /// Build the boot prefix from a wall-clock stamp.
+    ///
+    /// The millisecond is dropped here, and this is the only place it is: an
+    /// id's stamp has to fit Lighter's 48-bit client order index, which an
+    /// absolute millisecond stamp plus a usable counter does not. See
+    /// `venues/lighter/order_index.rs`. Without it the venue hands back an id
+    /// the engine never minted, and every Lighter fill is charged to nobody
+    /// while every resting order of ours reads as a stranger's.
+    pub fn boot_prefix(boot_ms: i64) -> String {
+        format!("eng-{}-", boot_ms - boot_ms.rem_euclid(1_000))
+    }
+
     /// Did this engine mint the id during this boot?
     pub fn is_ours(&self, client_order_id: &str) -> bool {
         client_order_id.starts_with(&self.boot_prefix)
@@ -238,6 +250,28 @@ impl OrderRegistry {
 mod tests {
     use super::*;
     use engine_types::{OrderAck, OrderKind, Side, SymbolId};
+
+    #[test]
+    fn a_minted_id_carries_no_millisecond_of_its_own() {
+        // Driven through the same function the engine boots with, so a change
+        // there is a failure here. Lighter's client order index is 48 bits,
+        // which an absolute millisecond stamp plus a usable counter does not
+        // fit; without the rounding the venue hands back an id this engine
+        // never minted, silently.
+        for boot_ms in [1_762_000_000_123i64, 1_762_000_000_999, 1_762_000_000_000, 1] {
+            let registry = OrderRegistry::new(OrderRegistry::boot_prefix(boot_ms));
+            let mut n = 0u64;
+            let id = crate::engine::mint_unused(registry.prefix(), &mut n, |_| false);
+            let stamp: i64 = id
+                .strip_prefix("eng-")
+                .and_then(|rest| rest.split('-').next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("{id} is not an engine id"));
+            assert_eq!(stamp % 1_000, 0, "{id} carries a millisecond");
+            assert_eq!(stamp, boot_ms - boot_ms.rem_euclid(1_000));
+            assert!(registry.is_ours(&id));
+        }
+    }
 
     fn request(id: &str, qty: f64) -> OrderRequest {
         OrderRequest {

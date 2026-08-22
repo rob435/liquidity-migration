@@ -108,17 +108,9 @@ pub enum LeverageAuthority {
 #[derive(Clone, Debug, Deserialize)]
 pub struct StrategyConfig {
     pub name: String,
-    /// This strategy's margin share of the partition, written here.
-    ///
-    /// Absent when `[risk]` names an operational profile — there the sleeve
-    /// shares come from the profile, and a second number here would be a
-    /// second answer to the same question. `assembly::risk` requires exactly
-    /// one of the two and says which is missing.
-    #[serde(default)]
-    pub capital_usdt: Option<f64>,
-    /// Which sleeve in the operational profile this block is. Defaults to
-    /// `name`, which is right whenever the strategy is named after its sleeve.
-    /// Only read in profile mode.
+    /// What this block is called in the log's id table, the heartbeat and the
+    /// cost report. Defaults to `name`, which is right whenever the strategy
+    /// is named after its sleeve — and is not, when two blocks run one plug.
     #[serde(default)]
     pub sleeve: Option<String>,
     /// Where the producer writes this strategy's target book.
@@ -134,7 +126,7 @@ pub struct StrategyConfig {
 }
 
 impl StrategyConfig {
-    /// The sleeve name this block answers to in an operational profile.
+    /// The name this block goes by.
     pub fn sleeve_name(&self) -> &str {
         self.sleeve.as_deref().unwrap_or(&self.name)
     }
@@ -211,7 +203,7 @@ max_symbols = 4
 
 [[strategy]]
 name = "quote_taker"
-capital_usdt = 250.0
+sleeve = "quotes"
 every_nth_quote = 20
 symbols = ["BTCUSDT"]
 "#;
@@ -253,7 +245,7 @@ symbols = ["BTCUSDT"]
         assert_eq!(cfg.risk.get("max_symbols").unwrap().as_integer(), Some(4));
         let s = &cfg.strategies[0];
         assert_eq!(s.name, "quote_taker");
-        assert_eq!(s.capital_usdt, Some(250.0));
+        assert_eq!(s.sleeve_name(), "quotes");
         assert_eq!(s.params.get("every_nth_quote").unwrap().as_integer(), Some(20));
         assert!(s.params.get("name").is_none(), "name is not a param");
     }

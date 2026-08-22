@@ -16,6 +16,176 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-22 — the per-sleeve capital partition is removed, and the two
+  defects the audit left standing are fixed.** By owner instruction, on the
+  finding that the partition did not survive a restart: boot re-registered only
+  orders still in flight, so a sleeve holding a filled position showed zero used
+  share and was handed its whole allocation again. Rather than repair a control
+  the owner had already emptied of shares, the control goes.
+
+  **What is gone.** `PartitionConfig`, `StrategyAllocation` and the clamp step
+  in `kernel.rs`; the kernel's per-strategy fill accounting in `exposure.rs`;
+  `sleeve_limits` in both profile loaders; `capital_usdt` on a `[[strategy]]`
+  block; `min_order_notional_usdt`, which only the clamp read; and the Python
+  half in `account_kernel.py`. `account_risk.max_leverage` stays and is now
+  `KernelConfig::leverage` — the account caps and the reachability proof both
+  need it. A profile that still declares `sleeve_limits` is **refused at load by
+  both loaders** rather than read and ignored, so nobody can believe two sleeves
+  are fenced when nothing fences them. `DenyReason::PartitionExhausted` stays in
+  the enum, read from old logs and never written; a name the log holds cannot be
+  deleted without stopping the next boot.
+
+  `sleeve = "..."` on a strategy block stays. It is what the log's id table, the
+  heartbeat and the cost report call that block, and two blocks answering to one
+  name is still refused — in `assembly::strategies` now, where the names are.
+
+  **A host config edit comes with this deploy.** `min_order_notional_usdt` is no
+  longer a key, and `[risk]` refuses one it does not read, so the line must come
+  out of `/etc/liquidity-migration/engine.toml` and
+  `/etc/liquidity-migration/engine-mainnet.toml` or the engine will not start.
+  No deploy writes those files.
+
+  **A fill recovered after a private-stream gap now reaches the risk kernel.**
+  It fed the order ledger, the exposure sum and the attribution ledger and
+  stopped there. The kernel reserves an order's size when it approves it and
+  only a fill releases the reservation, so a recovered fill left the position
+  counted twice — once as a reservation nothing ever ended, once in the account
+  view — and every later entry was judged against the sum. Pre-existing.
+
+  **The log refuses a record it cannot read back.** An `f64` that is not a
+  number serialises to `null`, the append reported success, and the reader —
+  which refuses rather than truncates, because bytes that pass their checksum
+  are real data — could then not open the log at all, at the next boot, for
+  good. Venue-sourced numbers were never screened. `append` now reads the frame
+  back before framing it and refuses instead, leaving nothing behind, not even a
+  sequence number. Pre-existing.
+
+  993 engine tests, 2403 Python tests, ruff, mypy and clippy clean. Both new
+  guards were proved to fail without their fix.
+
+- **2026-08-22 — audit of the multi-venue work, and the fixes it found.** A
+  twenty-auditor sweep over the change set and the engine, each finding
+  adversarially verified against source. Ninety candidates, fifty-eight
+  survived, twenty-two were refuted as already-handled or misread.
+
+  **The one that reached the funded account.** `engine-types::quantize` divided
+  a price by its tick and floored the result: `0.3 / 0.1` is 2.9999999999999996
+  in binary floating point, so a buy at 0.3 on a 0.1 tick came back **0.2**, a
+  whole tick below where the strategy put it, and a size of 0.3 on a 0.1 step
+  came back 0.2 — a third less than the risk kernel approved. Both new venues
+  had written the same arithmetic independently. One `shave_dust` in
+  `engine-types`, used by all three, and tests at each site proved to fail
+  without it. Pre-existing, on every Bybit order whose price or size landed on
+  one of the affected values.
+
+  **Fixed in the new work.** Lighter's paced resync held its timer inside the
+  future the engine's `select!` drops every loop turn, so after the first reset
+  it never fired again and no fill would ever have arrived; a failed stop
+  reported the already-live entry as rejected; the stop carried a fill bound at
+  its own trigger (so it could not fill through a gap) and an expiry an
+  immediate-or-cancel may not carry; the fill history read one page of 100 and
+  returned it as complete; a trade's side defaulted to "we bought" when a field
+  could not be read; a maker fill was charged the taker's fee; the stop price
+  was decided by magnitude rather than by the market's decimals. Hyperliquid
+  amended orders with the time-in-force hard-coded to `Gtc`, silently stripping
+  post-only from a resting quote; only four order statuses were routed, so
+  every other ending left the order in flight for the run; the "keep the tighter
+  of two stops" merge was a no-op; a foreign client id had a 1-in-256 chance of
+  reading as ours; assets the venue spells `kPEPE` were advertised and then
+  refused by every order, stop and exit. Both feeds sent a keep-alive and never
+  waited for the reply, so a half-open socket was never noticed. Lighter's feed
+  read every book message as a snapshot, publishing a price nobody was quoting.
+  A mis-pasted key was echoed verbatim into the log by two credential parsers.
+  Moving a stop cancelled the standing one before placing its replacement.
+
+  **Tests that could not fail.** The credential-collision check omitted Lighter
+  and the compiler said so as an unused import; the signed-field-order test
+  asserted 12 of 16 fields with three of the rest zero; the lease's
+  canonical-path test matched its own source text; two switch tests accepted
+  any credentials error, which on any box without venue keys is every venue;
+  the Poseidon sponge test compared overlapping windows; the curve round trip
+  never asserted the one value `decode` computes; the signer-address test
+  asserted no address. Each now bites, and the credential check walks
+  `KNOWN_VENUES` so a new venue cannot fall out of it.
+
+  Boot ids now carry a whole-second stamp: Lighter's client order index is 48
+  bits, which an absolute millisecond stamp plus a usable counter does not fit,
+  and without it the venue handed back an id the engine never minted.
+
+  1010 engine tests, 2423 Python tests, ruff, mypy and clippy clean. **Still
+  true: nothing has been sent to any venue but Bybit.** Two limits are now
+  written down rather than implied — Lighter cannot open a position (no
+  leverage transaction, and the engine refuses an entry naming a leverage it
+  cannot set), and an engine cannot boot on Variational at all (no account to
+  read, and inventing an empty one would give the envelope a number to judge
+  real positions against).
+
+- **2026-08-22 — three more venues: Hyperliquid, Lighter and Variational, behind
+  one switch.** `venue` in `engine.toml` already named an adapter; it now names
+  one of seven (four venues, their realms), and that one name decides the
+  gateway, the private order stream AND the public market feed together, so a
+  config cannot half-switch — send orders to one venue and price them off
+  another's book. `runner.rs` parses it once and hands the same value to all
+  three constructors. **Nothing has been sent to any venue but Bybit.**
+
+  `engine-venue` is now four peer directories under `src/venues/`, one per
+  venue, each holding its own realm table, signing and REST shapes. What was
+  shared came out: the `REAL_MONEY` law is stated once in `arming.rs` and every
+  venue's realm table asks it rather than restating it, and the pooled HTTPS
+  client and the JSON field readers are shared too. The law now covers all
+  four — a real-money realm refuses to build unarmed, a practice realm refuses
+  to build armed — and every realm of every venue reads its own credential
+  variables, disjoint from all the others.
+
+  **The fence grew with it and immediately caught two real leaks.** It now
+  requires every venue host to be written in that venue's own `realm.rs` and
+  scans `engine-marketdata` as well; that crate had been holding
+  Bybit's public stream URL and a fixture-provenance comment naming the same
+  host. Both now come from the realm table. A venue directory the fence does
+  not know about fails the suite, so a fifth venue cannot arrive unfenced.
+
+  **Hyperliquid** signs an EIP-712 phantom agent over a keccak of the
+  msgpack-encoded action; the msgpack encoder is written by hand because map
+  order is part of the signature. Pinned against the venue's own published
+  vectors — the action hash and both mainnet and testnet signatures match byte
+  for byte. It has no market order, so a market intent becomes an
+  immediate-or-cancel limit priced through the book; it keeps no stop on the
+  position row, so an entry carries its stop as a second order in the same
+  signed action and `account_view` reads the open orders to answer whether a
+  position is protected. **Its funding is HOURLY and quoted hourly** — Bybit
+  quotes an eight-hour settlement, so a carry number carried across without
+  scaling is out by a factor of eight.
+
+  **Lighter** does not sign a request, it signs a transaction: a fixed list of
+  integers hashed with Poseidon2 and signed with Schnorr over the ECgFp5
+  curve. That stack has no equivalent in any Rust crate, so it is ported here
+  — Goldilocks, the quintic extension, the width-12 permutation, the scalar
+  field, the curve, the signature — and every layer is pinned against vectors
+  generated by running the venue's own Go reference. The permutation was
+  wrong once and the vectors found it: the round-constant row that looks
+  unused is folded into the last partial round, on every lane. The signing
+  nonce is derived from the key and message rather than sampled, which the
+  reference does not do and which removes the repeated-nonce failure entirely.
+
+  **Variational publishes no trading API.** Their documentation says it is
+  still in development and not available to any users. The adapter is built to
+  the same shape with its market-statistics read real and every order path
+  refusing with the reason; it reports no instrument rules, so the engine's own
+  "no rule, nothing can be sent" refusal would stop an order before the
+  gateway's did. There is no account read either, so an engine pointed at it
+  stops at boot rather than invent an equity of zero for the envelope and the
+  partition to judge against; the market feed is usable on its own.
+
+  Also: `AccountIdentity` and the heartbeat now carry `venue`, and the
+  single-writer lease is named by it — two venues can hand out the same account
+  number and they are not the same account. Bybit's lease path and note are
+  unchanged, because the Python fleet shares that lock.
+  `engine venue-key --config engine.toml` prints what a host signs as, so it
+  can be registered at the venue. Credential variables are in `.env.example`;
+  `deploy/venue-credentials.env.template` is the host file.
+
+  1001 engine tests green. Detail: [docs/engine.md](docs/engine.md) §The venues.
+
 - **2026-08-22 — the book closed positions the owner opened by hand, and it
   no longer can. Automated trading stopped.** A target book is absolute:
   silence about a symbol means hold none of it. The follower gathered what to

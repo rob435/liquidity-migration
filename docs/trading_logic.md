@@ -385,18 +385,14 @@ their own. Every judgment and publication is journaled in the driver ledger
 [`configs/operational.demo.json`](../configs/operational.demo.json) is the one editable
 sizing surface. Caps are a fraction of observed wallet equity
 ([`envelope.rs`](../engine/engine-risk/src/envelope.rs):
-contraction immediate, expansion behind a dead band, unknown equity moves nothing);
-the per-sleeve partition is the engine's
-([`kernel.rs`](../engine/engine-risk/src/kernel.rs), fed from the profile's
-`sleeve_limits` — and neither committed profile declares any, so on both
-accounts there is no per-sleeve fence and one sleeve may spend the account's
-whole envelope; the Python partition in `account_kernel.py` survives in the
-tree but nothing on the order path runs it).
+contraction immediate, expansion behind a dead band, unknown equity moves nothing).
+Every cap is account-wide: no sleeve holds a private share, so one sleeve may
+spend the account's whole envelope.
 There is no daily loss ceiling: the owner's standing decision is per-position safety, so the
 venue-native stop on each position is what bounds a loss.
 
 **The venue stop is exchange-native, one Full-position stop per symbol.** The
-installer is the engine ([`gateway.rs`](../engine/engine-venue/src/gateway.rs)
+installer is the engine ([`gateway.rs`](../engine/engine-venue/src/venues/bybit/gateway.rs)
 posts `tpslMode: "Full"` with the stop;
 [`reconcile.rs`](../engine/engine-core/src/reconcile.rs) and
 [`working.rs`](../engine/engine-core/src/working.rs) keep it true), taking one

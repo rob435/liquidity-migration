@@ -55,21 +55,17 @@ leverage_authority = "sole"
 # The engine loads configs/operational.demo.json itself, so a cap tightened
 # there tightens for the producers and the engine at once.
 #
-# READ THIS BEFORE TRUSTING THE PARTITION: operational.demo.json carries no
-# `sleeve_limits` block. An empty partition is legal and means there is no
-# per-sleeve share at all -- both sleeves draw on the account-wide caps and
-# either one can spend the lot. That is the demo profile as it stands, not
-# something this file can fix. Add `sleeve_limits` there if you want the two
-# sleeves fenced from each other.
+# THERE IS NO PER-SLEEVE SHARE. Every sleeve draws on the account-wide caps and
+# any one of them can spend the lot; what bounds a loss is the venue-native stop
+# on each position.
 #
 # Nothing else may be written in this block. An [risk.envelope] section or a
 # stray `leverage` beside the profile path is refused at boot.
 [risk]
 operational_profile_path = "/opt/liquidity-migration/configs/operational.demo.json"
 
-# The three numbers the profile does not carry.
+# The two numbers the profile does not carry.
 disaster_stop_fraction = 0.35
-min_order_notional_usdt = 1.0
 max_account_view_age_s = 120
 
 # ---------------------------------------------------------------------------

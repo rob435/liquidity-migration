@@ -445,3 +445,83 @@ fn a_log_that_does_not_exist_yet_can_still_be_claimed() {
     assert_eq!(fs::metadata(&path).unwrap().len(), 0);
     drop(held);
 }
+
+#[test]
+fn a_number_that_is_not_a_number_is_refused_instead_of_bricking_the_log() {
+    // The venue's own fields are not screened before they reach a record, and
+    // an f64 that is not a number is written as `null`. The reader refuses a
+    // frame it cannot turn back into a record — deleting real bytes is not its
+    // call — so one such record would make the whole log unopenable at the next
+    // boot, for good, on a live account.
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    wal.append(&note("before")).unwrap();
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let err = wal
+            .append(&WalRecord::OrderUpdate {
+                update: OrderUpdate::Fill {
+                    client_order_id: "eng-1-1".to_string(),
+                    symbol: SymbolId(3),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    px: bad,
+                    fee: 0.1,
+                    is_maker: false,
+                    venue_ts_ms: 1_770_000_000_000,
+                    recv_ns: 7,
+                },
+            })
+            .expect_err("a record nothing can read back must not be written");
+        assert!(
+            err.to_string().contains("does not read back"),
+            "{bad}: {err}"
+        );
+    }
+    wal.append(&note("after")).unwrap();
+    wal.barrier().unwrap();
+    drop(wal);
+
+    // The log still opens, and holds exactly the two good records — the refused
+    // ones left nothing behind, not even a sequence number.
+    let (wal, read_back) = WalWriter::open(&path).unwrap();
+    let records: Vec<WalRecord> = read_back.into_iter().map(|(_, r)| r).collect();
+    assert_eq!(records, vec![note("before"), note("after")]);
+    assert_eq!(wal.next_seq(), 3);
+}
+
+#[test]
+fn an_absent_optional_number_is_still_written() {
+    // `null` in a payload is not proof of a number that is not a number: every
+    // absent Option writes one. If the check could not tell them apart, every
+    // denied intent (its client order id is None) would stop the engine.
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let records = vec![
+        WalRecord::Verdict {
+            client_order_id: None,
+            verdict: RiskVerdict::Deny {
+                reason: DenyReason::MissingStop,
+            },
+        },
+        WalRecord::Markout {
+            client_order_id: "eng-1-1".to_string(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(3),
+            fill_ts_ms: 1_770_000_000_000,
+            horizon_ms: 60_000,
+            mid: None,
+            signed_markout_bps: None,
+            actual_horizon_ms: 60_250,
+            notional_usdt: 12.5,
+        },
+    ];
+    write_records(&path, &records);
+
+    let (_wal, read_back) = WalWriter::open(&path).unwrap();
+    assert_eq!(
+        read_back.into_iter().map(|(_, r)| r).collect::<Vec<_>>(),
+        records
+    );
+}

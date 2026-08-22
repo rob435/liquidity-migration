@@ -52,7 +52,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         .iter()
         .flat_map(|s| s.subscriptions())
         .collect::<Vec<_>>();
-    let risk = assembly::risk(&loaded.config.risk, &loaded.config.strategies)?;
+    let risk = assembly::risk(&loaded.config.risk)?;
     // Checked here, while the strategies are still in hand and before the
     // account lease is taken: a config that wires a book to the wrong plug is
     // a mistake to make at the door, not after claiming an account.
@@ -68,14 +68,19 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let (wal, replayed) = assembly::wal(&settings.wal_path)?;
     let symbols = assembly::symbol_order(&replayed, &wanted);
 
-    let mut venue = assembly::venue(&settings.venue, symbols.clone())?;
+    // The switch, turned once. All three of the venue's parts are built from
+    // this one value, so a config cannot half-switch — send orders to one
+    // venue and price them off another's book.
+    let chosen = assembly::venue_name(&settings.venue)?;
+    let mut venue = assembly::venue(chosen, symbols.clone())?;
 
     // Held for the whole run. Dropped at the end of this function, and by the
     // kernel if the process dies first.
     let claimed = single_writer(&mut venue).await?;
 
-    let mut market_feed = assembly::market_feed(&assembly::boot_subscriptions(&symbols, &wanted));
-    let mut order_feed = assembly::order_feed(venue.realm(), symbols)?;
+    let mut market_feed =
+        assembly::market_feed(chosen, &assembly::boot_subscriptions(&symbols, &wanted));
+    let mut order_feed = assembly::order_feed(chosen, symbols)?;
 
     let mut engine = Engine::boot_as(
         &settings,
@@ -128,9 +133,10 @@ async fn single_writer(venue: &mut Venue) -> Result<Claim, Box<dyn Error>> {
     // Not knowing whose account this is means not knowing
     // which lock to take, which means not knowing who would be stepped on.
     let who = venue.account_identity().await?;
-    match lease::acquire(&who.realm, &who.user_id, LEASE_ROLE) {
+    match lease::acquire(&who.venue, &who.realm, &who.user_id, LEASE_ROLE) {
         Ok(lease) => {
             tracing::info!(
+                venue = %who.venue,
                 account = %who.user_id,
                 realm = %who.realm,
                 lease = %lease.path().display(),

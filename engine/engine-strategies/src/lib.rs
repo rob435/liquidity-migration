@@ -101,17 +101,16 @@ impl std::error::Error for BuildError {}
 /// Build one strategy from its name and its parameter table.
 ///
 /// `strategy_id` is the engine's own index for this plug, assigned at boot in
-/// config order; every intent the plug emits carries it, which is how the risk
-/// kernel keeps each plug inside its own slice of capital.
+/// config order; every intent the plug emits carries it, which is how the log
+/// says whose position is whose.
 ///
-/// The research system emits flat blocks in this shape. The engine core
-/// keeps `name` and `capital_usdt` for itself and hands everything else to
+/// The research system emits flat blocks in this shape. The engine core keeps
+/// `name`, `sleeve` and `book_path` for itself and hands everything else to
 /// this function as the parameter table:
 ///
 /// ```toml
 /// [[strategy]]
 /// name = "touch_sniper"
-/// capital_usdt = 50.0     # margin share of the partition (engine's, not yours)
 /// symbol = "BTCUSDT"      # venue symbol
 /// side = "buy"            # "buy" or "sell"
 /// trigger_px = 61000.0    # the level to watch
@@ -128,7 +127,6 @@ impl std::error::Error for BuildError {}
 /// ```toml
 /// [[strategy]]
 /// name = "target_book"
-/// capital_usdt = 200.0
 /// symbols = ["KAITOUSDT", "COTIUSDT"]
 /// ```
 pub fn build_strategy(

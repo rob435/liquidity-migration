@@ -16,16 +16,17 @@ use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
 use serde_json::{Map, Value};
 
-use crate::clock::mono_ns;
+use crate::mono_ns;
 use crate::creds::Credentials;
 use crate::fmt::venue_num;
-use crate::parse::{
+use crate::http::percent_encode;
+use super::parse::{
     parse_executions, parse_instruments, parse_order_ack, parse_positions, parse_wallet,
     parse_working_orders, venue_result,
 };
-use crate::realm::VenueRealm;
-use crate::rest::RestClient;
-use crate::CATEGORY;
+use super::realm::VenueRealm;
+use super::rest::RestClient;
+use super::CATEGORY;
 
 const PATH_TIME: &str = "/v5/market/time";
 const PATH_ORDER_CREATE: &str = "/v5/order/create";
@@ -64,8 +65,8 @@ impl BybitGateway {
     /// `symbols` is the engine's symbol table in `SymbolId` order — position
     /// `i` is the name of `SymbolId(i)`.
     pub fn new(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
-        let creds = Credentials::from_env(realm)?;
-        let built = Self::build(realm.rest_base(), creds, symbols);
+        let creds = realm.credentials()?;
+        let built = Self::build(realm, realm.rest_base(), creds, symbols);
         // The Python fleet reads the resolved endpoint back and compares it to
         // the realm it asked for (`bybit._require_realm_endpoint`), because
         // there the transport picks its own host from a separate argument.
@@ -89,18 +90,27 @@ impl BybitGateway {
     /// could name a real venue. `tests/venue_fence.rs` is what stops that:
     /// no venue host may be written anywhere outside `realm.rs`, test files
     /// included.
-    pub fn for_test(base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
-        Self::build(base_url, creds, symbols)
+    pub fn for_test(
+        base_url: &str,
+        realm: VenueRealm,
+        creds: Credentials,
+        symbols: Vec<Symbol>,
+    ) -> Self {
+        Self::build(realm, base_url, creds, symbols)
     }
 
-    /// Which account this gateway addresses. Taken from the credentials, so it
-    /// is the realm that will actually sign, not one recorded alongside them.
+    /// Which account this gateway addresses: the realm it was built for, and
+    /// the one whose credentials it signs with.
     pub fn realm(&self) -> VenueRealm {
         self.realm
     }
 
-    fn build(base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
-        let realm = creds.realm();
+    fn build(
+        realm: VenueRealm,
+        base_url: &str,
+        creds: Credentials,
+        symbols: Vec<Symbol>,
+    ) -> Self {
         let ids = symbols
             .iter()
             .enumerate()
@@ -329,6 +339,7 @@ impl VenueGateway for BybitGateway {
         })?;
 
         Ok(AccountIdentity {
+            venue: crate::lease::VENUE_BYBIT.to_string(),
             user_id,
             // Which realm this gateway was built for, not a reading and not
             // a guess. Both halves that read a realm depend on it: the
@@ -499,21 +510,6 @@ fn tif_str(tif: TimeInForce) -> &'static str {
     }
 }
 
-/// Cursors come back with characters that mean something in a query string,
-/// and the signature covers the query exactly as sent.
-fn percent_encode(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
 /// The realm's name as everything outside this crate spells it: the lease
 /// file, the heartbeat, and the environment the target producers check their
 /// own against.
@@ -551,13 +547,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cursors_are_escaped_for_the_query_string() {
-        assert_eq!(percent_encode("next%3D"), "next%253D");
-        assert_eq!(percent_encode("a b&c=d"), "a%20b%26c%3Dd");
-        assert_eq!(percent_encode("plain-Cursor_1.0~"), "plain-Cursor_1.0~");
-    }
-
-    #[test]
     fn sides_and_time_in_force_use_the_venue_spelling() {
         assert_eq!(side_str(Side::Buy), "Buy");
         assert_eq!(side_str(Side::Sell), "Sell");
@@ -570,7 +559,8 @@ mod tests {
     fn an_unknown_symbol_id_cannot_become_a_request() {
         let gw = BybitGateway::for_test(
             "http://127.0.0.1:1",
-            Credentials::new(VenueRealm::Demo, "k", "s"),
+            VenueRealm::Demo,
+            VenueRealm::Demo.credentials_for_test("k", "s"),
             vec!["BTCUSDT".to_string()],
         );
         assert!(gw.name_of(SymbolId(0)).is_ok());
@@ -581,7 +571,8 @@ mod tests {
     fn added_symbols_keep_their_position_as_the_id() {
         let mut gw = BybitGateway::for_test(
             "http://127.0.0.1:1",
-            Credentials::new(VenueRealm::Demo, "k", "s"),
+            VenueRealm::Demo,
+            VenueRealm::Demo.credentials_for_test("k", "s"),
             vec!["BTCUSDT".to_string()],
         );
         assert_eq!(gw.add_symbol("ETHUSDT"), SymbolId(1));

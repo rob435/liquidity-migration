@@ -37,10 +37,11 @@ pub async fn run(config_path: &Path, note: &str, execute: bool) -> Result<(), Bo
     let (mut wal, replayed) = assembly::wal(&settings.wal_path)?;
 
     let names = LogNames::of_log(&replayed);
-    let mut venue = assembly::venue(&settings.venue, names.symbols.clone())?;
+    let chosen = assembly::venue_name(&settings.venue)?;
+    let mut venue = assembly::venue(chosen, names.symbols.clone())?;
     let who = venue.account_identity().await?;
     println!("log     {}", settings.wal_path.display());
-    println!("account {} ({})", who.user_id, who.realm);
+    println!("account {} on {} ({})", who.user_id, who.venue, who.realm);
 
     let latched = replayed.iter().rev().find_map(|record| match record {
         WalRecord::Reconciled { may_open, .. } => Some(*may_open),

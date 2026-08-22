@@ -327,7 +327,7 @@ impl<'de> Visitor<'de> for NumVisitor {
 mod tests {
     use super::*;
 
-    // Captured from wss://stream.bybit.com/v5/public/linear on 2026-08-13.
+    // Captured from the venue's public linear stream on 2026-08-13.
     const OB_SNAPSHOT: &str = r#"{"topic":"orderbook.1.BTCUSDT","ts":1786659828109,"type":"snapshot","data":{"s":"BTCUSDT","b":[["63561.5","1.776"]],"a":[["63561.6","4.848"]],"u":31398762,"seq":764144453970},"cts":1786659828107}"#;
     const TK_SNAPSHOT: &str = r#"{"topic":"tickers.BTCUSDT","type":"snapshot","data":{"symbol":"BTCUSDT","tickDirection":"ZeroPlusTick","price24hPcnt":"0.001455","lastPrice":"63561.60","prevPrice24h":"63469.20","highPrice24h":"63994.40","lowPrice24h":"62810.50","prevPrice1h":"63413.60","markPrice":"63560.80","indexPrice":"63585.51","openInterest":"59972.256","openInterestValue":"3811884569.16","turnover24h":"3515096831.9640","volume24h":"55362.9100","fundingIntervalHour":"8","fundingCap":"0.005","singleOpenInterest":"29986.128","singleOpenInterestValue":"1905942284.58","nextFundingTime":"1786665600000","fundingRate":"0.00005013","bid1Price":"63561.50","bid1Size":"1.760","ask1Price":"63561.60","ask1Size":"4.690","preOpenPrice":"","preQty":"","curPreListingPhase":""},"cs":764144442982,"ts":1786659827683}"#;
     const TK_DELTA: &str = r#"{"topic":"tickers.BTCUSDT","type":"delta","data":{"symbol":"BTCUSDT","indexPrice":"63585.74"},"cs":764144450620,"ts":1786659827983}"#;

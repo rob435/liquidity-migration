@@ -489,7 +489,7 @@ async fn flat_spell_leverage_calls(section: EngineSection) -> usize {
 
 #[tokio::test]
 async fn sole_authority_does_not_repay_leverage_after_a_flat_spell() {
-    let mut section = settings_sole();
+    let section = settings_sole();
     assert_eq!(
         flat_spell_leverage_calls(section).await,
         1,
@@ -501,7 +501,7 @@ async fn sole_authority_does_not_repay_leverage_after_a_flat_spell() {
 async fn shared_authority_still_reconfirms_after_a_flat_spell() {
     // The default is untouched: a hand may have retuned the symbol while it
     // sat flat, so the entry from flat confirms with the venue again.
-    let mut section = settings();
+    let section = settings();
     assert_eq!(flat_spell_leverage_calls(section).await, 2);
 }
 
@@ -511,7 +511,7 @@ async fn a_venue_row_contradicting_the_cache_evicts_the_trust() {
     // row is the check: a held position running at a leverage this engine
     // never set means somebody else writes here — say so, drop the trust,
     // and confirm inline again on the next entry.
-    let mut section = settings_sole();
+    let section = settings_sole();
     let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
     let (mut engine, h) =
         build_with(&section, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[], Vec::new())
@@ -577,7 +577,7 @@ async fn a_book_arrival_pre_arms_leverage_before_any_entry() {
     let path = temp_path("book-pre-arm");
     std::fs::write(&path, BOOK_JSON).expect("writes the book");
     let (listener, heard) = BookListener::new("BTCUSDT");
-    let mut section = settings_sole();
+    let section = settings_sole();
     let (mut engine, h) =
         build_with(&section, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[], Vec::new())
             .await;

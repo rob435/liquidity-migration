@@ -128,14 +128,12 @@ file.
   - **There is no hourly Telegram digest.** Pause, resume and `ops.sh flatten`
     work, on the engine's own path.
 
-  - **Neither profile carries `sleeve_limits`**, so there is no per-sleeve
-    capital partition on either fleet: every sleeve draws on the account-wide
-    caps and any one can spend the lot. Both engines log `sleeves=0` at boot.
-    What bounds a sleeve is the account's gross and margin caps, the
-    equity-anchored envelope, and the venue-native stop on each position. The
-    partition machinery is still in the kernel and still enforced whenever a
-    profile declares shares — it is the shares that are gone, by owner
-    instruction.
+  - **There is no per-sleeve capital share, on either fleet or in either
+    half of the system.** Every sleeve draws on the account-wide caps and any
+    one can spend the lot. What bounds a sleeve is the account's gross and
+    margin caps, the equity-anchored envelope, and the venue-native stop on
+    each position. A profile that declares `sleeve_limits` is refused at load
+    by both loaders rather than read and ignored.
 
 - **The engine binary is built in an isolated clone at `/opt/engine-build`** —
   never the deployed checkout the fleet runs from — with its own toolchain
@@ -213,6 +211,33 @@ file.
 
 ### Execution and market data
 
+- **The engine trades four venues, and one name in `engine.toml` picks which.**
+  The demo engine runs `venue = "bybit_demo"` and the funded one
+  `venue = "bybit_mainnet"`; the other names are
+  `hyperliquid_testnet`, `hyperliquid_mainnet`,
+  `lighter_testnet`, `lighter_mainnet`, `variational_mainnet`. That one name
+  decides the gateway, the private order stream and the public market feed
+  together, so a config cannot send orders to one venue and price them off
+  another's book. **Nothing has ever been sent to any venue but Bybit** — the
+  three new adapters are built, fenced and tested, and no order has left the
+  box for any of them. Lighter also cannot open a position yet: it has no
+  leverage transaction here, and the engine refuses an entry naming a leverage
+  it cannot set. `REAL_MONEY` is still the single arming switch, and it
+  reaches every venue that reads a credential — which is every one but
+  Variational, whose adapter authenticates nothing because the venue publishes
+  nothing to authenticate against.
+- **What differs between the venues changes decisions, not just addresses.**
+  Hyperliquid pays funding **hourly** and quotes the hourly rate; Bybit quotes
+  its next eight-hourly settlement, so a carry number carried across without
+  scaling is out by a factor of eight. Only Bybit keeps a stop on the position
+  row — Hyperliquid and Lighter keep it as a separate reduce-only trigger
+  order, so "is this position protected" is answered from the open orders.
+  Lighter's fills arrive by paced resync from the venue's execution history
+  rather than by live stream, because its account channel does not carry the
+  engine's own order ids. Variational publishes no trading API at all, and no
+  account read either, so an engine cannot boot on it — its market feed is
+  usable on its own.
+  [docs/engine.md](docs/engine.md) §The venues.
 - **The engine says what its fills cost.** It keeps `is_maker` from the venue's
   execution row and writes the midpoint an order was decided against onto the
   order's own log record, so arrival shortfall, effective spread, fee and all-in
@@ -304,8 +329,8 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
   `REAL_MONEY=true` in the root-owned
   `/etc/liquidity-migration/bybit-mainnet.env`, beside the live key. A git commit
   can never arm; activation still walks the full preflight, and every
-  capital-preservation control (envelope, native stops, partition,
-  single-writer lease, reconciliation) gates the start.
+  capital-preservation control (envelope, native stops, single-writer lease,
+  reconciliation) gates the start.
 - **The funded account must stay in one-way position mode** (see Now — a
   venue-side switch to hedge mode would reject every fleet order).
 - **A guarded rollout proves the account venue-flat**; the proof binds on

@@ -159,9 +159,9 @@ parallel and integrate by type-check.
 | --- | --- |
 | `engine-types` | every shared type and trait: events, intents, orders, log records, the `Strategy` trait, and the capability traits (`Wal`, `VenueGateway`, `RiskKernel`) |
 | `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
-| `engine-marketdata` | Bybit public WebSocket: subscribe, sequence-check, parse once into flat per-symbol state, stamp arrival time |
-| `engine-venue` | the venue gateway, demo or funded by realm: HMAC signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and wallet reads, the realm's private WebSocket for order/fill updates |
-| `engine-risk` | the capital controls: equity-anchored envelope, per-strategy capital partition, stop-attach discipline. Fail-closed |
+| `engine-marketdata` | every venue's public feed: subscribe or poll, sequence-check, parse once into flat per-symbol state, stamp arrival time. One enum, built from the same venue name as the gateway |
+| `engine-venue` | four venue adapters, one directory each, practice or funded by realm: each venue's own signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and balance reads, and the realm's private order stream |
+| `engine-risk` | the capital controls: equity-anchored envelope, account-wide caps, stop-attach discipline. Fail-closed |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
 | `engine-strategies` | the plugs: a registry from name + TOML to a boxed `Strategy` |
 
@@ -181,14 +181,13 @@ parallel and integrate by type-check.
   - A typo stops the engine. `REAL_MONEY=ture` is not "off"; it is a mistake in
     the one line that decides whether this is real.
 
-  The structural half is checked against the source: the four venue hosts may
-  be written in exactly one file, `realm.rs`. That closes the door a mainnet
-  address opens the moment it exists anywhere — the test-only constructor takes
-  a hostname, and no test, benchmark or module can spell one.
-
-  `engine-marketdata` holds `wss://stream.bybit.com/v5/public/linear`
-  separately, because Bybit serves demo public data from the mainnet stream. It
-  is unauthenticated and read-only.
+  The structural half is checked against the source: every venue host may be
+  written in exactly one file, that venue's own `realm.rs`. That closes the
+  door a real-money address opens the moment it exists anywhere — each
+  gateway's test-only constructor takes a hostname, and no test, benchmark or
+  module can spell one. The scan reads `engine-marketdata` too, which needs
+  hosts for public prices and no credential to use them; it takes them from the
+  realm tables instead of writing its own.
 
   Nothing has ever been sent to the funded account. The path exists, is fenced,
   and is tested; it has not been exercised.
@@ -222,16 +221,19 @@ parallel and integrate by type-check.
     The next boot still runs the same comparison and latches again on
     anything that stands — the clear resets the memory, never the check.
 - **The capital controls are the kernel's, and unknown state refuses the
-  order.** The equity-anchored envelope, the per-strategy capital partition
-  and the stop-attach discipline live in `engine-risk`, each with
-  table-driven tests over its decision semantics. Read those tests and
+  order.** The equity-anchored envelope and the stop-attach discipline live in
+  `engine-risk`, each with table-driven tests over its decision semantics.
+  Every cap is account-wide: no sleeve holds a private share, so any one of
+  them can spend the lot. Read those tests and
   `engine-risk/PORT_NOTES.md` together: the notes carry every rule, its
   defaults, and every place this kernel is deliberately stricter.
 - **One writer per account.** The engine takes the fleet's own lease: one
   kernel `flock` per venue account, at
-  `/run/lock/liquidity-migration/bybit-{realm}-user-{userID}.lock`, joined
+  `/run/lock/liquidity-migration/{venue}-{realm}-user-{account}.lock`, joined
   exactly — same directory, same name from the venue's own authenticated
-  account number, same open flags, same re-proof after the lock that the file
+  account (Bybit's and Lighter's account number, Hyperliquid's wallet address,
+  and Bybit's spelling is byte-for-byte the Python fleet's because the two
+  share that file), same open flags, same re-proof after the lock that the file
   locked is still the file at that path. A lease that differed in any one of
   those would protect nothing: two processes would hold two different locks
   and each would believe it was alone. The engine takes it before it boots
@@ -367,10 +369,10 @@ Boot is the one moment the two pictures can be compared:
 - An order both agree is working is adopted and keeps being charged to the
   strategy that placed it.
 - An order the log says is working and the venue has never heard of ended
-  while the engine was down. Its ending is written into the log and its claim
-  on the strategy's capital share is released — no update for it will ever
-  arrive, and left "in flight" it would charge the partition on every future
-  boot and hold the one-order-per-symbol gate closed against its symbol,
+  while the engine was down. Its ending is written into the log and the
+  reservation it holds against the account caps is released — no update for it
+  will ever arrive, and left "in flight" it would charge those caps on every
+  future boot and hold the one-order-per-symbol gate closed against its symbol,
   exits included. Nothing is re-sent.
 - An order the log never placed is reported. If it is in a symbol a strategy
   here trades, the engine stops opening; if it is in a symbol no strategy can
@@ -448,54 +450,123 @@ reading and a stale quote alike, and cancels and amends of protective orders
 are never gated: taking risk off must not wait for the market data to come
 back.
 
-## Adding a venue
+## The venues
 
-Venues differ in kind, not just in address, so a venue states what it can do
-rather than the engine assuming. `VenueCaps` declares five things — whether
-the venue holds a position-level stop the engine can set, whether a resting
-order can be amended in place, whether post-only is honoured, whether orders
-batch, whether the engine may set a symbol's margin leverage — and the
-engine refuses an action a venue cannot honour instead of
-quietly substituting a different one. Cancel-and-replace is not an amend: it
-is a new order at the back of the queue at a fresh price, and a strategy that
-asked to move a quote would never learn it had been given something else.
+Four are compiled in, and one name in `engine.toml` picks between them:
 
-The engine picks its venue by name: `[engine] venue = "bybit_demo"` in
-`engine.toml`, resolved once in `engine-venue/src/registry.rs`. Leaving the
-key out means the Bybit demo account. An unknown name is refused at boot, by
-name, listing what the binary knows — never defaulted to a venue nobody chose.
+| `venue =` | What it is | Real money |
+| --- | --- | --- |
+| `bybit_demo` | Bybit's practice account | no |
+| `bybit_mainnet` | Bybit's funded account | **yes** |
+| `hyperliquid_testnet` | Hyperliquid's testnet | no |
+| `hyperliquid_mainnet` | Hyperliquid's funded account | **yes** |
+| `lighter_testnet` | Lighter's testnet rollup | no |
+| `lighter_mainnet` | Lighter's funded account | **yes** |
+| `variational_mainnet` | Variational, read-only | no orders possible |
 
-To add one (Hyperliquid, MEXC), four steps in `engine-venue`:
+**One name decides three things**: the gateway that sends orders, the private
+stream that reports what happened to them, and the public feed the strategies
+price against. `runner.rs` parses the name once and hands the same value to all
+three constructors, so a config cannot half-switch — send orders to one venue
+and price them off another's book. An unknown name is refused at boot, by name,
+listing what the binary knows.
 
-1. Write the adapter as a module in the crate and implement `VenueGateway` —
-   nine required methods: `caps`, `account_identity`, `send_order`,
-   `cancel_order`, `amend_order`, `set_stop`, `account_view`,
-   `instrument_rules`, `working_orders`; `add_symbol`, `set_leverage` and
-   `executions` carry defaults, twelve in all. Take `executions` seriously:
-   its default refuses, so an adapter that leaves it alone runs with fill-gap
-   recovery off — the engine falls back to today's behaviour silently. State
-   the capabilities honestly. A
-   venue with no native position stop is not a broken venue; it is a venue
-   where an entry carrying a stop is refused, because the risk kernel's
-   every-entry-carries-a-stop rule would otherwise be silently unenforced.
-2. Add a variant to the `Venue` enum in `registry.rs` and delegate all
-   twelve methods to it. Dispatch is an enum, not `Box<dyn VenueGateway>`: the trait
-   uses `async fn`, which cannot be a trait object at all, and a closed enum
-   keeps the whole set of venues visible in one place — which is what the
-   fence below depends on.
-3. Add the name to `KNOWN_VENUES` and to the `by_name` match. Nothing in
-   `engine-core` changes: the loop is generic over the gateway type, and
+A name is not an address. Every host any adapter knows is written in that
+venue's own `src/venues/<venue>/realm.rs` and nowhere else, and
+`engine-venue/tests/venue_fence.rs` reads the whole tree back — including the
+market-data crate — to prove it. So no edit to `engine.toml` can point the
+engine at an endpoint nobody compiled in.
+
+`REAL_MONEY` is the one arming switch: a real-money realm refuses to build
+without it, a practice realm refuses to build with it, and the rule is stated
+once in `engine-venue/src/arming.rs` rather than restated per venue. Each realm
+reads its own credential variables, disjoint across every realm of every venue,
+and a test walks `KNOWN_VENUES` to prove no two share one.
+
+The check runs at the credential read, so it reaches every realm that reads a
+credential — every one but Variational, which authenticates nothing because
+there is nothing there to authenticate against. Its realm still reports itself
+as real money, and the moment a trading API arrives it reads credentials
+through the same path and is armed like the rest.
+
+### What differs between them, where it changes a decision
+
+Venues differ in kind, not just in address, so each states what it can do
+rather than the engine assuming. `VenueCaps` declares five things — position
+stop, amend in place, post-only, batching, leverage — and the engine refuses an
+action a venue cannot honour instead of quietly substituting a different one.
+Cancel-and-replace is not an amend: it is a new order at the back of the queue
+at a fresh price, and a strategy that asked to move a quote would never learn
+it had been given something else.
+
+- **Funding periods differ.** Bybit quotes the rate for its next eight-hourly
+  settlement. Hyperliquid pays **hourly** and quotes the hourly rate. A carry
+  number carried between them without scaling is out by a factor of eight.
+  Each feed reports what its venue states and converts nothing;
+  `Ticker::next_funding_ms` says when the next one lands. **Lighter's public
+  socket carries no funding at all** — no mark price, no index, no rate — so
+  that feed emits no ticker rather than an invented zero, and a carry sleeve
+  cannot be run from it.
+- **Lighter cannot open a position today.** It has no leverage transaction in
+  this adapter, and the engine refuses an entry that names a leverage it cannot
+  set — the margin posted would not be the margin the position was sized at.
+  The target-book follower names one on every entry, so an engine on Lighter
+  reads the market, protects and exits what it holds, and opens nothing.
+- **A few Hyperliquid assets cannot be subscribed.** The venue spells `kPEPE`,
+  `kBONK` and their kin with a lower-case prefix, and every symbol reaching the
+  engine is upper-cased by the Python fleet's own books. The gateway folds the
+  case and will trade them; the public feed names the coin in its subscription
+  and cannot recover the venue's spelling, so it gets no book for them.
+- **Only Bybit keeps a stop on the position.** Hyperliquid and Lighter keep it
+  as a separate reduce-only trigger order, so "is this position protected" is
+  answered by reading the open orders, and a position with no such order comes
+  back unprotected — which is what makes the risk kernel's every-entry-carries-
+  a-stop rule mean the same thing on all three.
+- **Only Bybit has a market order.** Hyperliquid takes an immediate-or-cancel
+  limit priced through the book; Lighter takes a market order type whose price
+  field bounds the fill.
+- **Hyperliquid signs with a wallet key, Lighter with a curve key.** Neither is
+  an HMAC secret. Hyperliquid's is an API wallet the account approved, which
+  cannot withdraw; Lighter's is a private key registered against one of the
+  account's API key slots. `engine venue-key --config engine.toml` prints what
+  the host signs as, so it can be registered at the venue.
+- **Lighter's fills arrive by resync, not by stream.** Its account channel
+  names a fill by the venue's own order id, not by the client order index the
+  engine minted, so a live fill cannot be attributed to the strategy that
+  caused it. Its feed paces the engine's existing resync instead and the fills
+  come from the venue's execution history, which does carry the ids. Fills are
+  seconds late there, not milliseconds.
+- **Variational cannot trade at all, and an engine cannot run on it.** The
+  venue publishes market statistics and no trading API — no orders, and no
+  account either. `account_view` therefore returns an error rather than a
+  fabricated empty account, and the engine stops at boot on it: an equity of
+  zero invented here would be a number the envelope and the partition judge
+  real positions against. Its market feed works on its own, through
+  `MarketFeeds`, without an engine. The order paths refuse with the reason, and
+  it reports no instrument rules, so the engine's own "no rule, nothing can be
+  sent" refusal would stop an order before the gateway's did.
+
+### Adding a fifth
+
+Five steps, all in `engine-venue`:
+
+1. A directory under `src/venues/`, with `realm.rs` holding its hosts,
+   credential variable names, and whether each realm is real money. That file
+   is the only place its hosts may appear.
+2. Implement `VenueGateway` — nine required methods; `add_symbol`,
+   `set_leverage` and `executions` carry defaults, twelve in all. Take
+   `executions` seriously: its default refuses, so an adapter that leaves it
+   alone runs with fill-gap recovery off. State the capabilities honestly.
+3. A variant in `Venue`, `OrderFeeds` (`engine-venue/src/registry.rs`) and
+   `MarketFeeds` (`engine-marketdata/src/feeds.rs`), and a name in
+   `VenueName`. Dispatch is an enum, not `Box<dyn VenueGateway>`: the trait
+   uses `async fn`, which cannot be a trait object, and a closed enum keeps
+   the whole set visible in one place.
+4. A row in `venue_hosts()` in `tests/venue_fence.rs`. The fence fails if a
+   venue directory exists that it does not know about, so this cannot be
+   forgotten silently.
+5. Nothing in `engine-core`. The loop is generic over the gateway type, and
    `assembly.rs` already asks for a venue by name.
-4. Nothing for the fence. `engine-venue/tests/venue_fence.rs` walks the whole crate, so a
-   new module is scanned the moment it exists, and a host that is not a demo
-   host turns the suite red wherever it is written. A companion test refuses
-   a venue *name* that reads like real money; the scan is the real fence and
-   that one is the cheap second check.
-
-A name selects a compiled-in adapter and cannot introduce an endpoint, which
-is why config may choose the venue at all. Whether an adapter may touch real
-money is that adapter's own decision, made in its own crate: the trait cannot
-express an endpoint.
 
 ## What the engine does
 

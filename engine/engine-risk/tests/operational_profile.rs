@@ -9,22 +9,15 @@
 use std::path::PathBuf;
 
 use engine_risk::{kernel_config_from_profile, ProfileInputs};
-use engine_types::ids::StrategyId;
 
 mod common;
-use common::{CARRY, DISASTER_STOP_FRACTION, LONG, MAX_VIEW_AGE_NS, MIN_ORDER_NOTIONAL_USDT};
+use common::{DISASTER_STOP_FRACTION, MAX_VIEW_AGE_NS};
 
-fn inputs<'a>(sleeves: &'a [(&'a str, StrategyId)]) -> ProfileInputs<'a> {
+fn inputs() -> ProfileInputs {
     ProfileInputs {
         disaster_stop_fraction: DISASTER_STOP_FRACTION,
-        min_order_notional_usdt: MIN_ORDER_NOTIONAL_USDT,
         max_account_view_age_ns: MAX_VIEW_AGE_NS,
-        sleeves,
     }
-}
-
-fn both_sleeves() -> Vec<(&'static str, StrategyId)> {
-    vec![("carry", CARRY), ("long", LONG)]
 }
 
 fn repo_config(name: &str) -> String {
@@ -35,22 +28,9 @@ fn repo_config(name: &str) -> String {
         .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()))
 }
 
-/// The funded profile with a partition added. Neither committed profile
-/// carries one, so the partition's own proofs need a document that does.
-fn partitioned_mainnet() -> serde_json::Value {
-    let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
-    doc["account_risk"]["sleeve_limits"] = serde_json::json!({
-        "carry": {"max_gross_notional_usdt": 200.0, "max_initial_margin_usdt": 40.0},
-        "long": {"max_gross_notional_usdt": 300.0, "max_initial_margin_usdt": 60.0},
-    });
-    doc
-}
-
 #[test]
 fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
-    let sleeves = both_sleeves();
-    let cfg = kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs(&sleeves))
+    let cfg = kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs())
         .expect("the shipped mainnet profile must load");
 
     // Every assertion below is the literal number in the file. If the owner
@@ -60,7 +40,7 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     assert_eq!(cfg.envelope.reference_usdt, 100.0);
     assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 500.0);
     assert_eq!(cfg.envelope.max_initial_margin_usdt, 100.0);
-    assert_eq!(cfg.partition.leverage, 5.0);
+    assert_eq!(cfg.leverage, 5.0);
     assert_eq!(cfg.qty_tolerance, 1e-12);
 
     // 500 of gross against a 100 reference: exactly what leverage 5 funds.
@@ -72,42 +52,11 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     assert_eq!(cfg.envelope.equity_fraction, 1.0);
     assert_eq!(cfg.envelope.floor_usdt, 100.0);
     assert_eq!(cfg.envelope.expand_dead_band_fraction, 0.05);
-
-    // No sleeve_limits: both sleeves draw on one shared envelope, and the
-    // account caps above are the whole of what bounds either of them.
-    assert!(cfg.partition.allocations.is_empty());
 }
 
 #[test]
-fn a_partition_can_exactly_fill_the_account_and_no_more() {
-    // Worth stating on its own: the two shares sum to the account caps to the
-    // last decimal place. That is what makes the margin comparison in
-    // PartitionConfig::validate a real check rather than one with slack in it,
-    // and it is the property that broke once when the proof compared against
-    // gross divided by leverage instead of the declared margin cap.
-    let sleeves = both_sleeves();
-    let cfg = kernel_config_from_profile(&partitioned_mainnet().to_string(), &inputs(&sleeves))
-        .unwrap();
-    let gross: f64 = cfg
-        .partition
-        .allocations
-        .iter()
-        .map(|s| s.max_gross_notional_usdt)
-        .sum();
-    let margin: f64 = cfg
-        .partition
-        .allocations
-        .iter()
-        .map(|s| s.max_initial_margin_usdt)
-        .sum();
-    assert_eq!(gross, cfg.envelope.account_gross_cap_usdt());
-    assert_eq!(margin, cfg.envelope.max_initial_margin_usdt);
-}
-
-#[test]
-fn the_committed_demo_profile_loads_unpartitioned_and_pinned() {
-    let sleeves = both_sleeves();
-    let cfg = kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs(&sleeves))
+fn the_committed_demo_profile_loads_pinned() {
+    let cfg = kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs())
         .expect("the shipped demo profile must load");
     assert_eq!(cfg.envelope.reference_usdt, 250_000.0);
     // 1,250,000 gross over the 250,000 reference: the 2026-08-21 risk-on dials.
@@ -115,17 +64,14 @@ fn the_committed_demo_profile_loads_unpartitioned_and_pinned() {
     // No capital_reference block: the reference is pinned and never follows
     // the wallet.
     assert!(!cfg.envelope.tracks_equity);
-    // No sleeve_limits: the account caps alone bind.
-    assert!(cfg.partition.allocations.is_empty());
 }
 
 #[test]
 fn a_cap_the_engine_does_not_read_is_refused_rather_than_ignored() {
-    let sleeves = both_sleeves();
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
     doc["account_risk"]["max_overnight_notional_usdt"] = serde_json::json!(25.0);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves))
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs())
         .expect_err("an unread cap was accepted");
     assert!(
         err.to_string().contains("max_overnight_notional_usdt"),
@@ -140,41 +86,45 @@ fn the_retired_daily_loss_ceiling_is_refused_rather_than_ignored() {
     // that moment, so the dangerous outcome is not refusal — it is an engine
     // that reads the key, ignores it, and lets the operator believe a ceiling
     // is still in force. Refusal names the key and stops the start.
-    let sleeves = both_sleeves();
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
     doc["account_risk"]["max_daily_loss_usdt"] = serde_json::json!(25.0);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves))
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs())
         .expect_err("a retired ceiling was accepted");
     assert!(err.to_string().contains("max_daily_loss_usdt"), "{err}");
 }
 
 #[test]
-fn a_sleeve_the_engine_does_not_run_is_refused() {
-    // A share earmarked for something that is not running would make the sums
-    // that prove the partition fits count capital nobody can spend.
-    let only_carry = vec![("carry", CARRY)];
-    let err = kernel_config_from_profile(&partitioned_mainnet().to_string(), &inputs(&only_carry))
-        .expect_err("a share for an absent sleeve was accepted");
-    assert!(err.to_string().contains("long"), "{err}");
+fn a_profile_still_declaring_sleeve_shares_is_refused_rather_than_ignored() {
+    // The per-sleeve capital partition is gone. A profile that still carves
+    // the account into shares would otherwise boot an engine that reads the
+    // shares, enforces none of them, and lets the operator believe two sleeves
+    // are fenced from each other.
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    doc["account_risk"]["sleeve_limits"] = serde_json::json!({
+        "carry": {"max_gross_notional_usdt": 200.0, "max_initial_margin_usdt": 40.0},
+        "long": {"max_gross_notional_usdt": 300.0, "max_initial_margin_usdt": 60.0},
+    });
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs())
+        .expect_err("declared sleeve shares were accepted");
+    assert!(err.to_string().contains("sleeve_limits"), "{err}");
 }
 
 #[test]
 fn a_profile_from_the_future_is_refused() {
-    let sleeves = both_sleeves();
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
     doc["schema_version"] = serde_json::json!(2);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(err.to_string().contains("schema_version"), "{err}");
 }
 
 #[test]
 fn some_other_json_document_is_not_an_operational_profile() {
-    let sleeves = both_sleeves();
     let err = kernel_config_from_profile(
         r#"{"schema_version": 1, "kind": "something_else"}"#,
-        &inputs(&sleeves),
+        &inputs(),
     )
     .unwrap_err();
     assert!(err.to_string().contains("not an operational profile"), "{err}");
@@ -185,11 +135,10 @@ fn a_profile_whose_caps_do_not_nest_is_refused_at_load() {
     // The load-time proof is the kernel's own validate(), reached from here.
     // A second gross ceiling above the account gross cap describes a book
     // nobody can reach, and the outer cap would never bind.
-    let sleeves = both_sleeves();
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
     doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(1_000.0);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(
         err.to_string().contains("max_component_gross_notional_usdt"),
         "{err}"
@@ -202,40 +151,25 @@ fn a_profile_whose_caps_do_not_nest_is_refused_at_load() {
 // per-symbol cap stops the engine instead of booting with a cap nobody
 // enforces.
 fn a_profile_still_carrying_the_retired_symbol_cap_is_refused() {
-    let sleeves = both_sleeves();
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
     doc["account_risk"]["max_symbol_notional_usdt"] = serde_json::json!(50.0);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(err.to_string().contains("max_symbol_notional_usdt"), "{err}");
 }
 
 #[test]
-fn a_partition_that_oversubscribes_the_account_is_refused_at_load() {
-    let sleeves = both_sleeves();
-    let mut doc = partitioned_mainnet();
-    // Carry at 400 leaves long's 300 overshooting the 500 account cap.
-    doc["account_risk"]["sleeve_limits"]["carry"]["max_gross_notional_usdt"] =
-        serde_json::json!(400.0);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
-    assert!(err.to_string().contains("above the account gross"), "{err}");
-}
-
-#[test]
 fn the_two_profiles_are_not_accidentally_the_same_shape() {
-    // The demo profile is pinned; the funded one follows the wallet. Both are
-    // unpartitioned. If a change ever made them load identically, the funded
-    // account would be running under demo limits, and every other assertion
-    // here would still pass.
-    let sleeves = both_sleeves();
-    let demo = kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs(&sleeves))
+    // The demo profile is pinned; the funded one follows the wallet. If a
+    // change ever made them load identically, the funded account would be
+    // running under demo limits, and every other assertion here would still
+    // pass.
+    let demo = kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs())
         .unwrap();
     let main =
-        kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs(&sleeves))
-            .unwrap();
+        kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs()).unwrap();
     assert_ne!(demo, main);
     assert!(!demo.envelope.tracks_equity && main.envelope.tracks_equity);
-    assert!(demo.partition.allocations.is_empty() && main.partition.allocations.is_empty());
     assert!(
         main.envelope.account_gross_cap_usdt() < demo.envelope.account_gross_cap_usdt(),
         "the funded account should be the smaller book of the two"
@@ -248,13 +182,12 @@ fn a_gross_cap_no_amount_of_margin_could_fund_is_refused() {
     // not run. Gross above the whole capital reference times leverage is book
     // nobody can reach, so a cap set up there is scenery -- an operator
     // tightening it would watch nothing change.
-    let sleeves = both_sleeves();
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
     // 100 of reference at leverage 5 funds 500 of book. Ask for 501.
     doc["account_risk"]["max_account_gross_notional_usdt"] = serde_json::json!(501.0);
     doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(501.0);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves)).unwrap_err();
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(err.to_string().contains("cannot be reached"), "{err}");
 }
 
@@ -264,10 +197,9 @@ fn the_shipped_mainnet_profile_sits_inside_what_its_capital_can_fund() {
     // exactly that. The full book posts 100 of margin — the declared margin
     // cap to the last decimal — so a change that ate the headroom would
     // otherwise show up only as a refusal to boot.
-    let sleeves = both_sleeves();
-    let cfg = kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs(&sleeves))
-        .unwrap();
-    let reachable = cfg.envelope.reference_usdt * cfg.partition.leverage;
+    let cfg =
+        kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs()).unwrap();
+    let reachable = cfg.envelope.reference_usdt * cfg.leverage;
     assert_eq!(reachable, 500.0);
     assert_eq!(cfg.envelope.account_gross_cap_usdt(), 500.0);
 }
@@ -285,16 +217,11 @@ fn a_profile_whose_numbers_do_not_survive_a_round_trip_still_loads() {
     // two files in the repository never showed this; 100 * (113/100) comes
     // back as 112.99999999999999, just *under* the number the profile stated,
     // which is the direction that gets a profile refused.
-    let sleeves = both_sleeves();
-    let mut doc = partitioned_mainnet();
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
     doc["account_risk"]["max_account_gross_notional_usdt"] = serde_json::json!(113.0);
     doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(113.0);
-    // The sleeve shares have to fit inside the smaller account too.
-    doc["account_risk"]["sleeve_limits"]["carry"]["max_gross_notional_usdt"] =
-        serde_json::json!(60.0);
-    doc["account_risk"]["sleeve_limits"]["long"]["max_gross_notional_usdt"] =
-        serde_json::json!(49.0);
-    let cfg = kernel_config_from_profile(&doc.to_string(), &inputs(&sleeves))
+    let cfg = kernel_config_from_profile(&doc.to_string(), &inputs())
         .expect("a profile that states one cap twice must load");
     assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 113.0);
     // And the rebuild really is lossy, which is what makes the tolerance real

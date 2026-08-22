@@ -31,7 +31,14 @@ use crate::state::{Applied, FeedState, ResyncReason};
 
 /// Public market data for USDT/USDC perpetuals. No credentials: the demo
 /// account trades against these same prices.
-pub const BYBIT_PUBLIC_LINEAR_URL: &str = "wss://stream.bybit.com/v5/public/linear";
+///
+/// Read from the venue crate's realm table rather than written here. Every
+/// venue host this engine knows lives in exactly one file per venue, and
+/// `engine-venue`'s own fence reads those files back to prove it — a host
+/// spelled out in this crate would be one the fence never sees.
+pub fn bybit_public_linear_url() -> &'static str {
+    engine_venue::VenueRealm::Demo.public_ws()
+}
 
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
@@ -99,7 +106,7 @@ impl BybitPublicFeed {
     /// Build the feed against the public linear stream. Nothing is dialled
     /// until the first `next_event`.
     pub fn new(subs: &[Subscription]) -> Self {
-        Self::with_url(BYBIT_PUBLIC_LINEAR_URL, subs)
+        Self::with_url(bybit_public_linear_url(), subs)
     }
 
     pub fn with_url(url: impl Into<String>, subs: &[Subscription]) -> Self {
@@ -538,11 +545,17 @@ mod tests {
     }
 
     #[test]
-    fn the_feed_dials_the_public_stream_and_nothing_else() {
+    fn the_feed_dials_the_realm_tables_public_stream_and_nothing_else() {
+        // The literal is pinned in `engine-venue`'s own fence, which is the
+        // one place a venue host may be written down. What this crate has to
+        // promise is only that it reads it from there — a host spelled out
+        // here would be one the fence never sees.
         assert_eq!(
-            BYBIT_PUBLIC_LINEAR_URL,
-            "wss://stream.bybit.com/v5/public/linear"
+            bybit_public_linear_url(),
+            engine_venue::VenueRealm::Demo.public_ws()
         );
+        assert!(bybit_public_linear_url().starts_with("wss://"));
+        assert!(bybit_public_linear_url().ends_with("/v5/public/linear"));
     }
 
     #[test]

@@ -34,6 +34,12 @@ engine — the execution loop
       the price on the screen when its order left, and where the market went
       afterwards. Per sleeve and symbol.
 
+  engine venue-key --config engine.toml
+      What this host signs as at the config's venue, so it can be registered
+      there: an API wallet's address on Hyperliquid, a public key on Lighter.
+      Reads the host's credentials and touches no network. Never prints a
+      secret.
+
   engine reconcile-clear --config engine.toml [--note TEXT] [--execute]
       The deliberate look the may-open latch waits for. Stop the engine
       first (this takes the log's own lock). Shows the standing findings;
@@ -99,6 +105,30 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
                 "  the fsync is inside \"write it down\"; \"venue answers\" is a local socket,\n  \
                  so the real venue's ~175ms round trip is not in these numbers."
             );
+            Ok(())
+        }
+        "venue-key" => {
+            let path = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+            let loaded = engine_core::config::load(&path)?;
+            let chosen = engine_core::assembly::venue_name(&loaded.config.engine.venue)?;
+            // No symbols: nothing here sends anything, and the table is only
+            // needed to build a request.
+            let venue = engine_core::assembly::venue(chosen, Vec::new())?;
+            println!("venue   {chosen}");
+            println!("realm   {}", chosen.realm());
+            match venue.signing_identity() {
+                Some(identity) => {
+                    println!("signs as {identity}");
+                    println!(
+                        "\n  register this at the venue against the account in the credential \n  \
+                         file, or every order this host sends will be refused."
+                    );
+                }
+                None => println!(
+                    "\n  this venue needs nothing registered: it authenticates with the key \n  \
+                     itself, or not at all."
+                ),
+            }
             Ok(())
         }
         "replay" => {

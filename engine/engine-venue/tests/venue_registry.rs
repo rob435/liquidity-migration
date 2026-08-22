@@ -10,13 +10,14 @@ mod support;
 use engine_types::{
     AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, VenueGateway,
 };
-use engine_venue::{BybitGateway, Credentials, Venue, VenueRealm, BYBIT_DEMO};
+use engine_venue::{BybitGateway, Venue, VenueRealm, BYBIT_DEMO};
 use support::TestServer;
 
 fn adapter(server: &TestServer) -> BybitGateway {
     BybitGateway::for_test(
         &server.base_url(),
-        Credentials::new(VenueRealm::Demo, "demoKey000000000001", "demoSecret00000000000000000001"),
+        VenueRealm::Demo,
+        VenueRealm::Demo.credentials_for_test("demoKey000000000001", "demoSecret00000000000000000001"),
         vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
     )
 }
@@ -115,5 +116,5 @@ async fn the_chosen_venue_puts_the_same_bytes_on_the_wire_as_the_adapter() {
 #[tokio::test]
 async fn a_built_venue_knows_the_name_it_was_chosen_by() {
     let server = TestServer::start(|request, _| answer(&request.path)).await;
-    assert_eq!(Venue::Bybit(adapter(&server)).name(), BYBIT_DEMO);
+    assert_eq!(Venue::Bybit(adapter(&server)).name().as_str(), BYBIT_DEMO);
 }

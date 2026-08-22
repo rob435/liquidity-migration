@@ -145,10 +145,9 @@ def test_a_retired_dial_is_refused_by_name() -> None:
         )
 
 
-def test_the_render_partitions_nothing() -> None:
+def test_the_render_states_the_account_caps_and_nothing_per_sleeve() -> None:
     _data, profile = render_real_money_profile()
     risk = profile.account_risk
-    assert risk.sleeve_limits == ()
     assert risk.max_account_gross_notional_usdt == 500.0
     assert risk.max_initial_margin_usdt == 100.0
     # Entry leverage is a plain 5x floor again: no dial math moves it.
@@ -314,8 +313,7 @@ def test_render_profile_writes_one_private_artifact(tmp_path: Path) -> None:
     )
     assert code == 0
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
-    profile = load_operational_profile_bytes(output.read_bytes())
-    assert profile.account_risk.sleeve_limits == ()
+    load_operational_profile_bytes(output.read_bytes())
     # It reads the dials out of the credential file and writes none of it back.
     assert "BYBIT" not in output.read_text(encoding="utf-8")
 
@@ -900,6 +898,3 @@ def test_the_engine_and_the_fleet_read_the_same_caps_from_the_same_file() -> Non
     assert reference.floor_usdt == 100.0
     assert reference.expand_dead_band_fraction == 0.05
 
-    # No partition: both sleeves draw on one shared envelope, and the account
-    # caps above are the whole of what bounds either of them.
-    assert account.sleeve_limits == ()

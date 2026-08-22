@@ -38,10 +38,35 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// a lock.
 pub const LEASE_DIRECTORY: &str = "/run/lock/liquidity-migration";
 
-/// Bybit's practice account.
+/// Bybit's practice account. Spelled without the venue because this string is
+/// a contract with the Python fleet, which has written it since before there
+/// was a second venue.
 pub const REALM_DEMO: &str = "demo";
-/// The funded account. Naming it is not reaching it — see the module note.
+/// Bybit's funded account. Naming it is not reaching it — see the module note.
 pub const REALM_MAINNET: &str = "mainnet";
+
+/// The venue name in a Bybit lease's path and note. Python writes this
+/// literal; the engine must write the same one or the two would name two
+/// different files for one account.
+pub const VENUE_BYBIT: &str = "bybit";
+
+/// Every realm a lease may be taken for.
+///
+/// The three venues that came after Bybit qualify their realm names with the
+/// venue. That is not decoration: a realm string travels in the engine's
+/// heartbeat, and the Python producers block every entry when it does not
+/// match the environment they were told to size from. Two venues both calling
+/// a realm `mainnet` would let one venue's heartbeat pass the other's check.
+pub const KNOWN_REALMS: &[&str] = &[
+    REALM_DEMO,
+    REALM_MAINNET,
+    "hyperliquid_testnet",
+    "hyperliquid_mainnet",
+    "lighter_testnet",
+    "lighter_mainnet",
+    "variational_testnet",
+    "variational_mainnet",
+];
 
 /// Owner read and write, the mode Python's own lease creates the file with.
 /// Only used when the file does not exist yet; an existing file keeps the
@@ -160,50 +185,64 @@ impl std::error::Error for LeaseError {
 /// The inputs are normalized here as well as in [`acquire`], so a caller that
 /// only wants to *name* the path — an operator message, a test — gets the
 /// same string the lock itself uses.
-pub fn canonical_path(realm: &str, user_id: &str) -> PathBuf {
+pub fn canonical_path(venue: &str, realm: &str, user_id: &str) -> PathBuf {
     let realm = realm_text(realm).unwrap_or(realm);
-    let user_id = account_id_text(user_id).unwrap_or_else(|| user_id.to_string());
-    Path::new(LEASE_DIRECTORY).join(format!("bybit-{realm}-user-{user_id}.lock"))
+    let user_id = account_key_text(user_id).unwrap_or_else(|| user_id.to_string());
+    let venue = venue.trim().to_ascii_lowercase();
+    Path::new(LEASE_DIRECTORY).join(format!("{venue}-{realm}-user-{user_id}.lock"))
 }
 
 /// Become the one writer for this venue account, or fail saying who already
 /// is. The lease is held until the returned value is dropped or the process
 /// dies.
-pub fn acquire(realm: &str, user_id: &str, role: &str) -> Result<AccountLease, LeaseError> {
+pub fn acquire(
+    venue: &str,
+    realm: &str,
+    user_id: &str,
+    role: &str,
+) -> Result<AccountLease, LeaseError> {
     let Some(realm) = realm_text(realm) else {
         return Err(LeaseError::UnknownRealm { given: realm.to_string() });
     };
-    let Some(id) = account_id_text(user_id) else {
+    let Some(id) = account_key_text(user_id) else {
         return Err(LeaseError::UnknownUserId { given: user_id.to_string() });
     };
-    acquire_at_for(&canonical_path(realm, &id), realm, role, Some(id.as_str()))
+    let venue = venue.trim().to_ascii_lowercase();
+    acquire_at_for(
+        &canonical_path(&venue, realm, &id),
+        &venue,
+        realm,
+        role,
+        Some(id.as_str()),
+    )
 }
 
 /// Take the lease at a path of the caller's choosing. Tests only — the live
 /// path is [`acquire`], which is this with the canonical path filled in.
 pub fn acquire_at(path: &Path, realm: &str, role: &str) -> Result<AccountLease, LeaseError> {
-    acquire_at_for(path, realm, role, None)
+    acquire_at_for(path, VENUE_BYBIT, realm, role, None)
 }
 
 fn acquire_at_for(
     path: &Path,
+    venue: &str,
     realm: &str,
     role: &str,
     user_id: Option<&str>,
 ) -> Result<AccountLease, LeaseError> {
-    acquire_at_with(path, realm, role, user_id, || {})
+    acquire_at_with(path, venue, realm, role, user_id, || {})
 }
 
 /// Whether anyone holds this account's lease right now, without taking it.
 /// For a shadow run, which must never lock the live writer out.
-pub fn probe(realm: &str, user_id: &str) -> Result<LeaseHolder, LeaseError> {
+pub fn probe(venue: &str, realm: &str, user_id: &str) -> Result<LeaseHolder, LeaseError> {
     let Some(realm) = realm_text(realm) else {
         return Err(LeaseError::UnknownRealm { given: realm.to_string() });
     };
-    let Some(id) = account_id_text(user_id) else {
+    let Some(id) = account_key_text(user_id) else {
         return Err(LeaseError::UnknownUserId { given: user_id.to_string() });
     };
-    probe_at(&canonical_path(realm, &id))
+    probe_at(&canonical_path(venue, realm, &id))
 }
 
 /// Whether anyone holds the lease at this path.
@@ -251,6 +290,7 @@ pub fn probe_at(path: &Path) -> Result<LeaseHolder, LeaseError> {
 /// window is as short as two syscalls.
 fn acquire_at_with(
     path: &Path,
+    venue: &str,
     realm: &str,
     role: &str,
     user_id: Option<&str>,
@@ -320,7 +360,7 @@ fn acquire_at_with(
         return Err(LeaseError::Replaced { path: lease.path.clone() });
     }
 
-    write_note(fd, &note(realm, role, user_id)).map_err(|source| LeaseError::Io {
+    write_note(fd, &note(venue, realm, role, user_id)).map_err(|source| LeaseError::Io {
         path: lease.path.clone(),
         doing: "write the note into",
         source,
@@ -343,7 +383,7 @@ fn acquire_at_with(
 /// and the file name plus `user_id` already say which account this is.
 /// `role` is the addition worth having — Python's note cannot tell you which
 /// of its own processes is holding, and this one can.
-fn note(realm: &str, role: &str, user_id: Option<&str>) -> String {
+fn note(venue: &str, realm: &str, role: &str, user_id: Option<&str>) -> String {
     let mut fields: Vec<(&str, String)> = vec![
         ("environment", quoted(realm)),
         ("pid", std::process::id().to_string()),
@@ -353,10 +393,13 @@ fn note(realm: &str, role: &str, user_id: Option<&str>) -> String {
     if let Some(user_id) = user_id {
         fields.push(("user_id", quoted(user_id)));
     }
-    // Python writes `venue` for demo and leaves it out otherwise. Copied
-    // rather than reasoned about: matching the file it writes is the point.
-    if realm == REALM_DEMO {
-        fields.push(("venue", quoted("bybit")));
+    // Python writes `venue` for Bybit demo and leaves it out otherwise; that
+    // shape is kept so a demo note reads identically whichever side wrote it.
+    // Every other venue names itself, because with four of them a note that
+    // does not say which venue does not say which account either. The note is
+    // read by people, not by the lock — the flock is what excludes.
+    if realm == REALM_DEMO || venue != VENUE_BYBIT {
+        fields.push(("venue", quoted(venue)));
     }
     fields.sort_by_key(|(key, _)| *key);
     let body: Vec<String> = fields
@@ -379,22 +422,50 @@ fn wall_ns() -> u128 {
         .unwrap_or(0)
 }
 
-/// `demo` or `mainnet`, however it was spelled and spaced. Anything else is
-/// `None` — there is no default realm, because a wrong one is either two
+/// One of the realms below, however it was spelled and spaced. Anything else
+/// is `None` — there is no default realm, because a wrong one is either two
 /// accounts sharing a lock or one account holding two.
 fn realm_text(raw: &str) -> Option<&'static str> {
     let trimmed = raw.trim();
-    if trimmed.eq_ignore_ascii_case(REALM_DEMO) {
-        Some(REALM_DEMO)
-    } else if trimmed.eq_ignore_ascii_case(REALM_MAINNET) {
-        Some(REALM_MAINNET)
-    } else {
-        None
-    }
+    KNOWN_REALMS
+        .iter()
+        .find(|known| trimmed.eq_ignore_ascii_case(known))
+        .copied()
 }
 
-/// A venue account id as the lease path spells it: decimal digits, no leading
-/// zeros, always above zero. `None` for anything else.
+/// A venue account id as the lease path spells it, for any of the four
+/// venues.
+///
+/// Bybit and Lighter number their accounts, and a numeric id keeps Python's
+/// exact normalization so the two systems name one file. Hyperliquid's
+/// "account" is a wallet address, which is not a number at all — so anything
+/// that is not all digits is accepted as a lowercase token instead, and
+/// refused if it carries a character that has no business in a file name.
+///
+/// Both branches are total functions of the input, which is what matters: two
+/// processes handed the same id land on the same path, whichever branch they
+/// take.
+pub fn account_key_text(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let digits = trimmed.strip_prefix('+').unwrap_or(trimmed);
+    if digits.bytes().all(|b| b.is_ascii_digit()) {
+        return account_id_text(trimmed);
+    }
+    let token = trimmed.to_ascii_lowercase();
+    let shaped = token
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        && token
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    shaped.then_some(token)
+}
+
+/// The numeric half: decimal digits, no leading zeros, always above zero.
 ///
 /// Python reaches the same string by `str(int(user_id))`, and its own check on
 /// the canonical path is `user_id.isdigit() and int(user_id) > 0`. Working on
@@ -598,11 +669,11 @@ mod tests {
         // Hardcoded, both sides. If either system changes how it spells this,
         // the two stop sharing a lock and nothing else would say so.
         assert_eq!(
-            canonical_path("demo", "6039967"),
+            canonical_path(VENUE_BYBIT, "demo", "6039967"),
             PathBuf::from("/run/lock/liquidity-migration/bybit-demo-user-6039967.lock")
         );
         assert_eq!(
-            canonical_path("mainnet", "112233"),
+            canonical_path(VENUE_BYBIT, "mainnet", "112233"),
             PathBuf::from("/run/lock/liquidity-migration/bybit-mainnet-user-112233.lock")
         );
     }
@@ -612,8 +683,8 @@ mod tests {
         // Python reaches the file name through `str(int(user_id))`, so a
         // padded or spaced id lands on the same file rather than a second one.
         assert_eq!(
-            canonical_path(" DEMO ", " 0006039967 "),
-            canonical_path("demo", "6039967")
+            canonical_path(VENUE_BYBIT, " DEMO ", " 0006039967 "),
+            canonical_path(VENUE_BYBIT, "demo", "6039967")
         );
     }
 
@@ -661,7 +732,7 @@ mod tests {
         // is unlinked and a different one takes its name before the lock
         // lands, so the lock ends up on an inode no other process will ever
         // open.
-        let taken = acquire_at_with(&path, "demo", "engine", None, move || {
+        let taken = acquire_at_with(&path, VENUE_BYBIT, "demo", "engine", None, move || {
             std::fs::remove_file(&replaced).unwrap();
             std::fs::write(&replaced, b"someone else's file\n").unwrap();
         });
@@ -712,25 +783,71 @@ mod tests {
     }
 
     #[test]
-    fn a_user_id_that_is_not_a_positive_whole_number_is_refused() {
+    fn a_user_id_that_cannot_name_a_file_is_refused() {
         // Through the production entry point, and all before it touches a
         // disk — none of these reach /run/lock.
-        for bad in ["", "  ", "abc", "0", "0000", "-1", "-0", "12.0", "1e3", "1 2", "٣"] {
-            let refused = acquire(REALM_DEMO, bad, "engine");
+        for bad in ["", "  ", "0", "0000", "-1", "-0", "12.0", "1 2", "٣", "../etc"] {
+            let refused = acquire(VENUE_BYBIT, REALM_DEMO, bad, "engine");
             assert!(
                 matches!(refused, Err(LeaseError::UnknownUserId { .. })),
                 "{bad:?} was accepted as an account id: {refused:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_numeric_account_still_normalizes_exactly_the_way_python_does() {
+        // Bybit's ids are numbers and the file name is shared with Python, so
+        // this branch may not move however many venues arrive later.
         assert_eq!(account_id_text("6039967").as_deref(), Some("6039967"));
         assert_eq!(account_id_text(" 0042 ").as_deref(), Some("42"));
         assert_eq!(account_id_text("+7").as_deref(), Some("7"));
+        for not_a_number in ["", "abc", "0", "12.0", "1e3"] {
+            assert!(account_id_text(not_a_number).is_none(), "{not_a_number:?}");
+        }
+        // The general key agrees with it on every number, which is what keeps
+        // one Bybit account on one file whichever function named it.
+        for number in ["6039967", " 0042 ", "+7"] {
+            assert_eq!(account_key_text(number), account_id_text(number), "{number:?}");
+        }
+    }
+
+    #[test]
+    fn a_wallet_address_is_an_account_name_too() {
+        // Hyperliquid's account is an address, not a number. Case is folded so
+        // the same wallet written two ways is one lock and not two.
+        let mixed = "0xAbC1230000000000000000000000000000000001";
+        let lower = mixed.to_ascii_lowercase();
+        assert_eq!(account_key_text(mixed).as_deref(), Some(lower.as_str()));
+        assert_eq!(account_key_text(mixed), account_key_text(&lower));
+        assert!(
+            account_id_text(mixed).is_none(),
+            "the numeric reader must not accept an address; Bybit uses it to \
+             refuse a reply that is not about a numbered account"
+        );
+    }
+
+    #[test]
+    fn two_venues_with_one_account_number_are_two_locks() {
+        // The reason the venue is in the path at all: account 1 on one venue
+        // and account 1 on another have nothing to do with each other, and a
+        // shared lock would stop one engine because the other was running.
+        assert_ne!(
+            canonical_path(VENUE_BYBIT, REALM_MAINNET, "1"),
+            canonical_path("lighter", "lighter_mainnet", "1")
+        );
+        assert_eq!(
+            canonical_path("hyperliquid", "hyperliquid_mainnet", "0xab01"),
+            PathBuf::from(
+                "/run/lock/liquidity-migration/hyperliquid-hyperliquid_mainnet-user-0xab01.lock"
+            )
+        );
     }
 
     #[test]
     fn an_unknown_realm_is_refused() {
         for bad in ["", "testnet", "paper", "live", "demo-2", "main"] {
-            let refused = acquire(bad, "6039967", "engine");
+            let refused = acquire(VENUE_BYBIT, bad, "6039967", "engine");
             assert!(
                 matches!(refused, Err(LeaseError::UnknownRealm { .. })),
                 "{bad:?} was accepted as a realm: {refused:?}"
@@ -843,13 +960,20 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lease.rs"),
         )
         .unwrap();
-        let body = source
-            .split("pub fn acquire(realm: &str, user_id: &str, role: &str)")
+        // Only the half above `#[cfg(test)]`. Searching the whole file lets
+        // this test match its own source and pass whatever `acquire` does,
+        // which is what it did.
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a production half");
+        let body = production
+            .split("pub fn acquire(\n")
             .nth(1)
             .expect("acquire is not spelled the way this test looks for it");
         let body = &body[..body.find("\n}").expect("acquire has no end")];
         assert!(
-            body.contains("&canonical_path(realm, &id)"),
+            body.contains("canonical_path(&venue, realm, &id)"),
             "acquire builds its path some other way: {body}"
         );
     }
@@ -859,7 +983,7 @@ mod tests {
         // The live Python holders put `user_id` in the note. A lease found
         // stuck should say which account it is holding without the reader
         // having to parse the file name.
-        let written = note(REALM_DEMO, "engine", Some("579580669"));
+        let written = note(VENUE_BYBIT, REALM_DEMO, "engine", Some("579580669"));
         assert!(written.contains("\"user_id\": \"579580669\""), "{written}");
         // Sorted keys, the way Python's json.dumps(sort_keys=True) writes it.
         let keys: Vec<&str> = written

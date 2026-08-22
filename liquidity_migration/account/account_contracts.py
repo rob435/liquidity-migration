@@ -146,24 +146,6 @@ class AccountRiskSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class SleeveCapitalLimit:
-    """One sleeve's private share of the account envelope.
-
-    ``max_component_gross_notional_usdt`` bounds every sleeve's exposure
-    together, so without a partition one sleeve can consume the whole envelope
-    and leave the others unable to enter.
-
-    Declared as a tuple on the policy rather than a mapping so the policy stays
-    a frozen, hashable, ``asdict``-serializable value recorded verbatim in the
-    journal's risk decision.
-    """
-
-    sleeve: str
-    max_gross_notional_usdt: float
-    max_initial_margin_usdt: float
-
-
-@dataclass(frozen=True, slots=True)
 class AccountRiskPolicy:
     """Explicit absolute limits; no hidden resize floor or implicit leverage."""
 
@@ -172,10 +154,6 @@ class AccountRiskPolicy:
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float = 1e-12
-    #: Per-sleeve partition of the account envelope. Empty means unpartitioned.
-    #: Non-empty partitions the envelope *and* refuses any sleeve it does not
-    #: name.
-    sleeve_limits: tuple[SleeveCapitalLimit, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

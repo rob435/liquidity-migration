@@ -14,16 +14,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from liquidity_migration.account.account_contracts import AccountRiskPolicy, SleeveCapitalLimit
+from liquidity_migration.account.account_contracts import AccountRiskPolicy
 from liquidity_migration.core.artifact_snapshot import StableFileSnapshot, read_stable_file
 
 
 OPERATIONAL_PROFILE_SCHEMA_VERSION = 1
 OPERATIONAL_PROFILE_KIND = "liquidity_migration_operational_profile"
-
-#: The sleeves a partition may name. Closed, so a typo cannot create a partition
-#: nothing spends while the real sleeve stays unlisted and refused.
-PARTITIONABLE_SLEEVES: tuple[str, ...] = ("carry", "hedge", "long")
 
 
 def _object(
@@ -72,22 +68,12 @@ def _positive_int(value: object, *, label: str) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class SleeveLimitSettings:
-    """One sleeve's declared share of the account envelope."""
-
-    sleeve: str
-    max_gross_notional_usdt: float
-    max_initial_margin_usdt: float
-
-
-@dataclass(frozen=True, slots=True)
 class AccountRiskSettings:
     max_component_gross_notional_usdt: float
     max_account_gross_notional_usdt: float
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float
-    sleeve_limits: tuple[SleeveLimitSettings, ...] = ()
 
     def to_policy(self) -> AccountRiskPolicy:
         return AccountRiskPolicy(
@@ -96,14 +82,6 @@ class AccountRiskSettings:
             max_initial_margin_usdt=self.max_initial_margin_usdt,
             max_leverage=self.max_leverage,
             quantity_tolerance=self.quantity_tolerance,
-            sleeve_limits=tuple(
-                SleeveCapitalLimit(
-                    sleeve=limit.sleeve,
-                    max_gross_notional_usdt=limit.max_gross_notional_usdt,
-                    max_initial_margin_usdt=limit.max_initial_margin_usdt,
-                )
-                for limit in self.sleeve_limits
-            ),
         )
 
 
@@ -180,60 +158,6 @@ class OperationalProfile:
     capital_reference: CapitalReferenceSettings = CapitalReferenceSettings()
 
 
-def _parse_sleeve_limits(value: object, *, risk: AccountRiskSettings) -> tuple[SleeveLimitSettings, ...]:
-    """Parse and prove a genuine partition of the account envelope.
-
-    The shares must sum inside the account caps; overlapping shares would still
-    let one sleeve crowd another out at the account limit.
-    """
-
-    if not isinstance(value, Mapping):
-        raise ValueError("operational profile sleeve_limits must be a JSON object")
-    unknown = sorted(set(value) - set(PARTITIONABLE_SLEEVES))
-    if unknown:
-        raise ValueError(
-            "operational profile sleeve_limits names unknown sleeves: " + ", ".join(unknown)
-        )
-    if not value:
-        # An empty object reads as "partitioned" but behaves as "everything
-        # refused".
-        raise ValueError("operational profile sleeve_limits must name at least one sleeve")
-    limits: list[SleeveLimitSettings] = []
-    for sleeve in PARTITIONABLE_SLEEVES:
-        if sleeve not in value:
-            continue
-        row = _object(
-            value[sleeve],
-            label=f"operational profile sleeve_limits.{sleeve}",
-            fields={"max_gross_notional_usdt", "max_initial_margin_usdt"},
-        )
-        limits.append(
-            SleeveLimitSettings(
-                sleeve=sleeve,
-                max_gross_notional_usdt=_positive_float(
-                    row["max_gross_notional_usdt"],
-                    label=f"sleeve_limits.{sleeve}.max_gross_notional_usdt",
-                ),
-                max_initial_margin_usdt=_positive_float(
-                    row["max_initial_margin_usdt"],
-                    label=f"sleeve_limits.{sleeve}.max_initial_margin_usdt",
-                ),
-            )
-        )
-    tolerance = max(1e-9, risk.max_account_gross_notional_usdt * 1e-12)
-    total_gross = math.fsum(limit.max_gross_notional_usdt for limit in limits)
-    total_margin = math.fsum(limit.max_initial_margin_usdt for limit in limits)
-    if total_gross > risk.max_account_gross_notional_usdt + tolerance:
-        raise ValueError(
-            "sleeve_limits gross shares sum above account_risk.max_account_gross_notional_usdt"
-        )
-    if total_margin > risk.max_initial_margin_usdt + tolerance:
-        raise ValueError(
-            "sleeve_limits margin shares sum above account_risk.max_initial_margin_usdt"
-        )
-    return tuple(limits)
-
-
 def _parse_account_risk(value: object) -> AccountRiskSettings:
     fields = {
         "max_component_gross_notional_usdt",
@@ -242,13 +166,7 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         "max_leverage",
         "quantity_tolerance",
     }
-    row = _object(
-        value,
-        label="operational profile account_risk",
-        fields=fields,
-        # Absent ``sleeve_limits`` means one shared, unpartitioned envelope.
-        optional=frozenset({"sleeve_limits"}),
-    )
+    row = _object(value, label="operational profile account_risk", fields=fields)
     settings = AccountRiskSettings(
         max_component_gross_notional_usdt=_positive_float(
             row["max_component_gross_notional_usdt"],
@@ -271,11 +189,6 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
     )
     if settings.max_component_gross_notional_usdt > settings.max_account_gross_notional_usdt:
         raise ValueError("account_risk component cap cannot exceed the account cap")
-    if row.get("sleeve_limits") is not None:
-        settings = replace(
-            settings,
-            sleeve_limits=_parse_sleeve_limits(row["sleeve_limits"], risk=settings),
-        )
     return settings
 
 
@@ -462,16 +375,6 @@ def profile_at_capital_reference(
             max_initial_margin_usdt=risk.max_initial_margin_usdt * scale,
             max_leverage=risk.max_leverage,
             quantity_tolerance=risk.quantity_tolerance,
-            # Shares are ratios of the reference like the caps they partition,
-            # so they rescale with them.
-            sleeve_limits=tuple(
-                SleeveLimitSettings(
-                    sleeve=limit.sleeve,
-                    max_gross_notional_usdt=limit.max_gross_notional_usdt * scale,
-                    max_initial_margin_usdt=limit.max_initial_margin_usdt * scale,
-                )
-                for limit in risk.sleeve_limits
-            ),
         ),
     )
     _validate_profile_envelopes(rescaled)

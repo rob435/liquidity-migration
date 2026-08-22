@@ -195,13 +195,6 @@ def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 "adjust the dial the message names, then re-run preflight",
             )
         ]
-    shares = (
-        ", ".join(
-            f"{limit.sleeve} {limit.max_gross_notional_usdt / profile.capital_reference_usdt:.2f}x"
-            for limit in profile.account_risk.sleeve_limits
-        )
-        or "none, one shared envelope"
-    )
     return [
         CheckResult(
             "dials",
@@ -210,7 +203,7 @@ def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 f"{declared} set explicitly, rest defaulted; "
                 f"leverage {profile.account_risk.max_leverage:g}, "
                 f"gross {profile.account_risk.max_account_gross_notional_usdt / profile.capital_reference_usdt:g}x "
-                f"equity, partition {shares}"
+                f"equity, one shared envelope"
             ),
         )
     ]
@@ -591,10 +584,6 @@ def _render(args: argparse.Namespace) -> int:
         "gross_multiple_of_equity": (
             profile.account_risk.max_account_gross_notional_usdt / profile.capital_reference_usdt
         ),
-        "sleeve_shares_of_equity": {
-            limit.sleeve: limit.max_gross_notional_usdt / profile.capital_reference_usdt
-            for limit in profile.account_risk.sleeve_limits
-        },
     }
     print(json.dumps(summary, sort_keys=True, indent=2))
     return 0

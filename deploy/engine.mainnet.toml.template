@@ -62,25 +62,25 @@ leverage_authority = "shared"
 [risk]
 operational_profile_path = "/opt/liquidity-migration/configs/operational.mainnet.json"
 
-# The three numbers the profile does not carry.
+# The two numbers the profile does not carry.
 #
 # How far a position may move against it before its stop ends it. Same value as
 # DISASTER_STOP_FRACTION in the Python owner's env file — keep them equal or
 # the two halves are sizing worst-case loss differently.
 disaster_stop_fraction = 0.35
-# An order smaller than this after the partition clamp is refused, not sent.
-min_order_notional_usdt = 1.0
 # An account reading older than this is not evidence about the account now.
 max_account_view_age_s = 120
 
 # ---------------------------------------------------------------------------
 # The two sleeves
 # ---------------------------------------------------------------------------
-# Each takes its capital share from the profile's sleeve of the same name, and
-# reads its own book. Books are routed, not broadcast: each one reaches its own
-# sleeve and no other. That is what stops two followers on one account acting
+# Each reads its own book. Books are routed, not broadcast: each one reaches its
+# own sleeve and no other. That is what stops two followers on one account acting
 # on each other's decisions — the venue holds one position per symbol and keeps
 # no note of who asked for it.
+#
+# There is no per-sleeve capital share. Both draw on the account-wide caps and
+# either can spend the lot.
 #
 # `symbols` is the universe each sleeve starts with. A name a book mentions
 # that is not listed here is taken on while the engine runs, so this list is a

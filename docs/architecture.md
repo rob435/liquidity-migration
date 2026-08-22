@@ -205,17 +205,12 @@ growth caps — nothing here may block an exit.
 | Gross notional | `max_component_gross_notional_usdt`, `max_account_gross_notional_usdt` |
 | Initial margin | `max_initial_margin_usdt`, and observed `available_margin_usdt` |
 | Leverage | `max_leverage`, plus the venue's per-symbol ceiling |
-| Sleeve partition (B3) | `sleeve_limits[sleeve]` gross and initial-margin shares |
 | Instrument rules | quantity step, min quantity, min notional, tick |
 | Inputs | missing market input, stale component revision, non-positive equity, unavailable capital snapshot |
 
-**B3 sleeve partition.** Account-wide caps alone let one sleeve consume the whole envelope. When the
-profile declares `sleeve_limits`, each sleeve is also held to its own share, priced at the same
-reference prices as the prior book so the comparison isolates this batch's quantity change. A sleeve the
-partition does not name gets nothing (`unpartitioned_sleeve`); an untouched, non-growing sleeve is
-skipped, so a sleeve over its share cannot veto another's de-risking. **Neither committed profile
-declares shares**, so on both fleets this control passes everything and one sleeve may consume the whole
-envelope — that is the owner's instruction, and the account-wide caps above are what bind.
+**No sleeve holds a private share of the account.** Every cap above is account-wide, so one sleeve can
+consume the whole envelope — the owner's instruction. A profile that declares `sleeve_limits` is refused
+at load rather than read and ignored. What bounds a single loss is the venue-native stop on the position.
 
 **Equity-anchored envelope**
 ([`envelope.rs`](../engine/engine-risk/src/envelope.rs)). The profile

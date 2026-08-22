@@ -86,19 +86,22 @@ def test_profile_refuses_a_retired_sleeve_block() -> None:
         load_operational_profile_bytes(_bytes(payload))
 
 
-def test_a_retired_sleeve_cannot_claim_a_share_of_the_partition() -> None:
-    """A sleeve_limits share for the dead sleeve is refused, not honoured."""
+def test_a_profile_still_declaring_sleeve_shares_is_refused() -> None:
+    """There is no per-sleeve capital share, so a document claiming one is wrong.
+
+    Loading it and ignoring the shares would leave an operator believing two
+    sleeves are fenced from each other when nothing fences them.
+    """
 
     payload = _payload()
     risk = payload["account_risk"]
     assert isinstance(risk, dict)
     risk["sleeve_limits"] = {
         "carry": {"max_gross_notional_usdt": 250_000.0, "max_initial_margin_usdt": 125_000.0},
-        "continuous": {"max_gross_notional_usdt": 10_000.0, "max_initial_margin_usdt": 5_000.0},
         "long": {"max_gross_notional_usdt": 234_375.0, "max_initial_margin_usdt": 117_187.5},
     }
 
-    with pytest.raises(ValueError, match="names unknown sleeves: continuous"):
+    with pytest.raises(ValueError, match="unknown fields: sleeve_limits"):
         load_operational_profile_bytes(_bytes(payload))
 
 

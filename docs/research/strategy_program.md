@@ -538,9 +538,9 @@ nominations.
 ### 10. Genuinely open
 
 - **Per-symbol coordination between the two sleeves.** They collide on 11
-  name-days in 5.5 years; the per-sleeve capital partition in `account_kernel.py`
-  budgets each sleeve separately and does not see combined per-symbol exposure.
-  Small, but it is the only genuine coupling between them.
+  name-days in 5.5 years, and nothing sizes them against each other on a name —
+  the caps are account-wide and per-symbol exposure is not one of them. Small,
+  but it is the only genuine coupling between them.
 
 ## Priors from the 2026-07-21 reset
 

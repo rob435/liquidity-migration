@@ -18,7 +18,7 @@ allowed to know.
 | `research/panels/` | Causal point-in-time math: panel in, score out — feature panel, risk model, residual momentum, cross-venue substrate | |
 | `research/backtest/` | Every sleeve's historical equity engine and chart writers, replaying the registered rules from `rules/` | The rules themselves — that is `rules/` |
 | `research/execution/` | Measurement of what actually happened: trade diagnostics, the measured cost model, the passive-fill probe, venue accounting, and the quote lab | |
-| `policy/` | The dials: operational sizing profile, execution config, real-money profile and arming, systemd environment reading | The capital-preservation controls — the equity-anchored envelope and the per-sleeve partition live in the engine (`engine/engine-risk/`) |
+| `policy/` | The dials: operational sizing profile, execution config, real-money profile and arming, systemd environment reading | The capital-preservation controls — the equity-anchored envelope and the stop discipline — live in the engine (`engine/engine-risk/`) |
 | `ops/` | The operator surface in both directions: Telegram and notifications, the destructive reset path and its archive, epoch reset, maintenance lock | |
 | `cli/` | `python -m liquidity_migration` — `commands.py` and its argparse builders in `parsers.py` | |
 | `runtime/` | Empty; kept as the import order's named sink | |

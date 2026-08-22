@@ -511,7 +511,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })?;
         }
 
-        let mut registry = OrderRegistry::new(format!("eng-{boot_ms}-"));
+        // Nothing is lost by the rounding `boot_prefix` does: the stamp only
+        // separates one boot's ids from another's, and `mint_unused` already
+        // refuses any id the replayed log has seen.
+        let mut registry = OrderRegistry::new(OrderRegistry::boot_prefix(boot_ms));
         for order in orders.in_flight() {
             registry.own(&order.request.client_order_id, order.request.strategy);
             // The kernel's partition must keep charging last boot's working
@@ -2105,6 +2108,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if let Some(sid) = self.orders.owner_of(&exec.client_order_id) {
                 self.attribution.note(sid, symbol, exec.side, exec.qty);
             }
+            // The kernel reserved this order's size when it approved it, and
+            // only a fill releases the reservation. Skipping it here leaves the
+            // position counted twice — once as a reservation that never ends,
+            // once in the account view — and every later entry judged against
+            // the sum.
+            self.risk.on_update(&OrderUpdate::Fill {
+                client_order_id: exec.client_order_id.clone(),
+                symbol,
+                side: exec.side,
+                qty: exec.qty,
+                px: exec.px,
+                fee: exec.fee,
+                is_maker: exec.is_maker,
+                venue_ts_ms: exec.venue_ts_ms,
+                // The engine's own clock, not the venue's: `recv_ns` is what
+                // the kernel compares against the account view's stamp, and the
+                // two must come from one clock.
+                recv_ns: clock::now_ns(),
+            });
             recovered += 1;
         }
         if recovered > 0 {

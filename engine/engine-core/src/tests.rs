@@ -16,7 +16,7 @@ use engine_types::{
     MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote,
     RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription,
     Symbol, SymbolId, TimerId, VenueCaps, VenueError, VenueGateway, Wal, WalError, WalRecord,
-    WorkPolicy, VenueOrder,};
+    WorkPolicy, VenueExecution, VenueOrder,};
 
 use crate::bench::{self, BenchOptions};
 use crate::clock;
@@ -225,6 +225,10 @@ struct MockVenue {
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Make set_leverage refuse, so a test can watch the order not go.
     leverage_refuses: bool,
+    /// What the venue's execution history reports. `None` — the default —
+    /// is a venue that cannot serve one at all, which is what every test that
+    /// does not care about gap recovery wants.
+    executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
 }
 
 impl MockVenue {
@@ -257,6 +261,7 @@ impl MockVenue {
                 account_readings: Rc::new(RefCell::new(VecDeque::new())),
                 leverages: Rc::new(RefCell::new(Vec::new())),
                 leverage_refuses: false,
+                executions: Rc::new(RefCell::new(None)),
             },
             sends,
         )
@@ -270,6 +275,7 @@ impl VenueGateway for MockVenue {
 
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
         Ok(AccountIdentity {
+            venue: "mock".to_string(),
             user_id: "7000001".to_string(),
             realm: "demo".to_string(),
         })
@@ -294,6 +300,19 @@ impl VenueGateway for MockVenue {
             venue_order_id: format!("v-{}", req.client_order_id),
             ack_ns: clock::now_ns(),
         })
+    }
+
+    async fn executions(
+        &mut self,
+        _start_ms: i64,
+        _end_ms: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
+        match self.executions.borrow().as_ref() {
+            Some(execs) => Ok(execs.clone()),
+            None => Err(VenueError::BadRequest(
+                "this venue cannot list its execution history".to_string(),
+            )),
+        }
     }
 
     async fn cancel_order(&mut self, symbol: SymbolId, id: &str) -> Result<(), VenueError> {
@@ -727,6 +746,8 @@ struct Harness {
     /// Positions the venue's next account readings will report; see
     /// `MockVenue::account_readings`.
     account_readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
+    /// The venue's execution history; see `MockVenue::executions`.
+    executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
 }
 
 /// The same as `build_with`, with a venue that refuses every set_leverage.
@@ -791,6 +812,7 @@ async fn build_with_venue_state(
     let amends = venue.amends.clone();
     let leverages = venue.leverages.clone();
     let account_readings = venue.account_readings.clone();
+    let executions = venue.executions.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
     let engine = Engine::boot(
         &settings(),
@@ -814,6 +836,7 @@ async fn build_with_venue_state(
             risk_saw,
             leverages,
             account_readings,
+            executions,
         },
     )
 }
@@ -836,6 +859,7 @@ async fn build_inner(
     let amends = venue.amends.clone();
     let leverages = venue.leverages.clone();
     let account_readings = venue.account_readings.clone();
+    let executions = venue.executions.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
     let engine = Engine::boot(
         settings,
@@ -859,6 +883,7 @@ async fn build_inner(
             risk_saw,
             leverages,
             account_readings,
+            executions,
         },
     )
 }
@@ -905,3 +930,4 @@ mod worked_entries;
 mod reconciliation;
 mod heartbeat;
 mod fill_costs;
+mod gap_recovery;

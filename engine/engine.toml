@@ -1,20 +1,48 @@
 # The engine's config. There is still no venue address in here on purpose:
 # `venue` below is a name, not an address. It picks one of the adapters
 # compiled into the venue crate, and every host that crate knows is written in
-# one file — its own test reads the crate source back and fails the build if a
-# host appears anywhere else. So no edit to this file can point the engine at
-# an endpoint nobody compiled in.
+# one file per venue — its own test reads the crate source back and fails the
+# build if a host appears anywhere else. So no edit to this file can point the
+# engine at an endpoint nobody compiled in.
 #
-# One of the names is `bybit_mainnet`, the funded account. Typing it here is
-# not permission to trade it: that gateway refuses to build unless REAL_MONEY
-# is armed in the host's credential file, by the owner. The most a wrong name
-# in this file can do is stop the engine starting.
+# Some of the names are funded accounts. Typing one here is not permission to
+# trade it: those gateways refuse to build unless REAL_MONEY is armed in the
+# host's credential file, by the owner. The most a wrong name in this file can
+# do is stop the engine starting.
 
 [engine]
 wal_path = "engine.wal"
-# Which venue adapter to run: `bybit_demo` or `bybit_mainnet`. Leave the line
-# out and it means the demo account, so a config written before the key
-# existed still says what it said.
+# WHICH VENUE. One name, and it decides all three of that venue's parts: the
+# gateway that sends orders, the private stream that reports what happened to
+# them, and the public feed the strategies price against. A config cannot
+# half-switch.
+#
+#   bybit_demo           Bybit's practice account. Play money, real matching.
+#   bybit_mainnet        Bybit's funded account. REAL MONEY.
+#   hyperliquid_testnet  Hyperliquid's testnet.
+#   hyperliquid_mainnet  Hyperliquid's funded account. REAL MONEY.
+#   lighter_testnet      Lighter's testnet rollup.
+#   lighter_mainnet      Lighter's funded account. REAL MONEY.
+#   variational_mainnet  Variational. READ-ONLY, and not runnable: the venue
+#                        publishes no trading API and no account read, so the
+#                        engine stops at boot. Its market feed works on its
+#                        own. The name exists so the adapter is wired for the
+#                        day a trading API arrives.
+#
+# Each name reads its own credential variables — see .env.example — and none
+# of them can authenticate another venue. Leave the line out and it means the
+# Bybit demo account, so a config written before the key existed still says
+# what it said.
+#
+# WHAT DIFFERS BETWEEN THEM, where it changes a decision:
+#   - Bybit quotes funding for its next eight-hourly settlement. Hyperliquid
+#     pays HOURLY and quotes the hourly rate. A carry number carried between
+#     the two without scaling is out by a factor of eight.
+#   - Hyperliquid and Lighter keep a stop as a separate reduce-only trigger
+#     order, not as a field on the position, so a position with no such order
+#     reads as unprotected and holds new risk back.
+#   - Lighter cannot amend in place here, and cannot set leverage; it says so
+#     in its caps and the engine works with that rather than around it.
 venue = "bybit_demo"
 # How often buffered log bytes are pushed to the OS. Order records do not
 # wait for this — they are forced to disk before the order goes out.
@@ -44,38 +72,32 @@ account_view_max_age_ms = 5000
 # nanoseconds, and both null until an order has been through.
 # heartbeat_path = "var/engine-heartbeat.json"
 
-# The three capital controls. Nothing here has a default: every number is
+# The two capital controls. Nothing here has a default: every number is
 # written down, and what each one means is in engine-risk/PORT_NOTES.md.
 #
 # THE OTHER WAY. Instead of writing the caps out, point at the profile
-# document the Python fleet already reads, and the caps and the per-sleeve
-# shares both come from it:
+# document the Python fleet already reads, and the caps come from it:
 #
 #   [risk]
 #   operational_profile_path = "configs/operational.mainnet.json"
 #   max_account_view_age_s = 120
-#   min_order_notional_usdt = 1.0
 #   disaster_stop_fraction = 0.35
 #
-# Those last three are the only numbers the profile does not carry. Nothing
-# else may be written beside them — an [risk.envelope] block or a stray
-# `leverage` is refused, because one document decides the caps or two of them
-# disagree in a way nobody notices until it matters. Each [[strategy]] then
-# drops its `capital_usdt` and takes its share from the profile's sleeve of the
-# same name (or `sleeve = "..."` to say which one).
+# Those last two are the only numbers the profile does not carry. Nothing else
+# may be written beside them — an [risk.envelope] block or a stray `leverage`
+# is refused, because one document decides the caps or two of them disagree in
+# a way nobody notices until it matters.
 #
 # This is what a funded engine uses, so that tightening a cap tightens it for
 # the fleet and the engine at once.
 [risk]
 max_account_view_age_s = 120
-# Account leverage: turns each strategy's capital into its gross share.
+# Account leverage: turns the book's gross notional into the margin it commits.
 leverage = 2.0
-# An order smaller than this after the partition clamp is refused, not sent.
-min_order_notional_usdt = 1.0
 
 [risk.envelope]
 tracks_equity = true
-# The reference the strategy capitals below were sized against.
+# The reference every cap below is sized against.
 reference_usdt = 100.0
 equity_fraction = 1.0
 floor_usdt = 100.0
@@ -93,13 +115,12 @@ max_component_gross_notional_usdt = 200.0
 # reference exactly.
 max_initial_margin_usdt = 100.0
 
-# One block per strategy — the plug seam. `name` and `capital_usdt` are the
-# engine's (capital_usdt is this strategy's margin share of the partition;
-# its gross share is capital times leverage). Every other key belongs to the
-# strategy and is handed over as written.
+# One block per strategy — the plug seam. `name` and `sleeve` are the engine's:
+# `sleeve` is what the log, the heartbeat and the cost report call this block,
+# and defaults to `name`. Every other key belongs to the strategy and is handed
+# over as written.
 [[strategy]]
 name = "touch_sniper"
-capital_usdt = 50.0
 symbol = "BTCUSDT"
 side = "buy"
 trigger_px = 60000.0

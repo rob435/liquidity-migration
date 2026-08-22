@@ -121,6 +121,31 @@ impl WalWriter {
     }
 }
 
+/// A frame the log could not read back is not a frame.
+///
+/// An `f64` that is not a number is written as `null` — serde_json's own answer
+/// for one — and then no reader can turn that record back into a record.
+/// Nothing else this log holds can do that, so a payload with no `null` in it
+/// needs no check; one with a `null` in it may be an absent `Option` and may be
+/// a number that is not a number, and reading it back is the only way to tell.
+///
+/// It matters because the reader refuses rather than truncates: bytes that pass
+/// their checksum are real data, and deleting them is not the log's call. So one
+/// such record makes the whole log unopenable, at the next boot, for good.
+fn reads_back(payload: &[u8]) -> Result<(), WalError> {
+    if !payload.windows(4).any(|window| window == b"null") {
+        return Ok(());
+    }
+    serde_json::from_slice::<WalRecord>(payload)
+        .map(|_: WalRecord| ())
+        .map_err(|e| {
+            WalError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("this record does not read back, so it is not written: {e}"),
+            ))
+        })
+}
+
 impl Wal for WalWriter {
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError> {
         let start = self.buf.len();
@@ -129,6 +154,11 @@ impl Wal for WalWriter {
             // A half-written record must not become a frame.
             self.buf.truncate(start);
             return Err(WalError::Io(io::Error::new(io::ErrorKind::InvalidData, e)));
+        }
+
+        if let Err(e) = reads_back(&self.buf[start + FRAME_HEADER_LEN..]) {
+            self.buf.truncate(start);
+            return Err(e);
         }
 
         let payload = &self.buf[start + FRAME_HEADER_LEN..];
@@ -209,6 +239,7 @@ impl Wal for WalWriter {
         frame.extend_from_slice(&[0u8; FRAME_HEADER_LEN]);
         serde_json::to_writer(&mut frame, base)
             .map_err(|e| WalError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+        reads_back(&frame[FRAME_HEADER_LEN..])?;
         let payload = &frame[FRAME_HEADER_LEN..];
         let payload_len = payload.len() as u32;
         let crc = crc32c::crc32c(payload);

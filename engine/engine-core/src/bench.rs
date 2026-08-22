@@ -522,6 +522,7 @@ impl VenueGateway for HttpVenue {
     /// has to exist.
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
         Ok(AccountIdentity {
+            venue: "mock".to_string(),
             user_id: "7000001".to_string(),
             realm: "demo".to_string(),
         })

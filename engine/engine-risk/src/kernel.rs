@@ -1,6 +1,6 @@
 //! The gate. Fixed evaluation order, documented on [`Kernel::assess`].
 
-use engine_types::ids::{StrategyId, SymbolId};
+use engine_types::ids::SymbolId;
 use engine_types::orders::{Intent, OrderKind, OrderUpdate, Side};
 use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};
 
@@ -45,9 +45,8 @@ impl Kernel {
     }
 
     /// Bind an approved intent to the client order id the engine minted for it,
-    /// before the order is sent. Unregistered orders are invisible to the
-    /// partition until their fills arrive, and those fills are then charged to
-    /// every strategy.
+    /// before the order is sent. An unregistered order is exposure nothing has
+    /// reserved: it is invisible to every cap until its fill arrives.
     pub fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
         let quoted = match intent.kind {
             OrderKind::Limit { px, .. } if px.is_finite() && px > 0.0 => px,
@@ -57,7 +56,6 @@ impl Kernel {
         self.book.register(
             client_order_id,
             Pending {
-                strategy: intent.strategy,
                 symbol: intent.symbol,
                 signed_qty: signed(intent.side, approved_qty),
                 reduce_only: intent.reduce_only,
@@ -163,9 +161,7 @@ impl Kernel {
 
         // 7. The account-wide capital caps.
         self.account_caps(notional, &projected, &view)?;
-
-        // 8. The per-strategy capital partition.
-        self.partition_qty(intent.strategy, ask_qty, px, &view)
+        Ok(ask_qty)
     }
 
     /// Account-wide gross notional once this order is added, plus the
@@ -234,8 +230,7 @@ impl Kernel {
     /// rescale `profile_at_capital_reference` does to the whole profile.
     ///
     /// These refuse rather than clamp, as the Python kernel refuses the whole
-    /// batch. Only the per-strategy partition after this clamps, so it stays
-    /// the last word on size.
+    /// batch.
     fn account_caps(
         &self,
         notional: f64,
@@ -254,8 +249,8 @@ impl Kernel {
         }
 
         // The intent carries no leverage of its own, so the account leverage
-        // stands in — the same substitution the partition's margin share makes.
-        let leverage = self.cfg.partition.leverage;
+        // stands in.
+        let leverage = self.cfg.leverage;
         let margin_usdt = projected.gross_usdt / leverage;
         let cap_usdt = caps.max_initial_margin_usdt * scale;
         if margin_usdt > cap_usdt {
@@ -300,49 +295,6 @@ impl Kernel {
         }
     }
 
-    fn partition_qty(
-        &self,
-        strategy: StrategyId,
-        ask_qty: f64,
-        px: f64,
-        view: &ViewFacts,
-    ) -> Result<f64, DenyReason> {
-        if self.cfg.partition.allocations.is_empty() {
-            return Ok(ask_qty);
-        }
-        let requested_usdt = ask_qty * px;
-        let Some(share) = self.cfg.partition.share(strategy) else {
-            // A partition that exempts the sleeves it does not name is not a
-            // partition.
-            return Err(DenyReason::PartitionExhausted {
-                strategy,
-                requested_usdt,
-                remaining_usdt: 0.0,
-            });
-        };
-        let scale = self.envelope.scale();
-        let cap_usdt = (share.max_gross_notional_usdt * scale)
-            .min(share.max_initial_margin_usdt * scale * self.cfg.partition.leverage);
-        let used_usdt = self
-            .book
-            .strategy_notional_usdt(strategy, |symbol| self.price_for(symbol, view))
-            .ok_or_else(|| unknown("no price for a symbol this strategy holds"))?;
-        let remaining_usdt = (cap_usdt - used_usdt).max(0.0);
-        if requested_usdt <= remaining_usdt {
-            return Ok(ask_qty);
-        }
-        let clamped_qty = remaining_usdt / px;
-        if remaining_usdt < self.cfg.partition.min_order_notional_usdt
-            || clamped_qty <= self.cfg.qty_tolerance
-        {
-            return Err(DenyReason::PartitionExhausted {
-                strategy,
-                requested_usdt,
-                remaining_usdt,
-            });
-        }
-        Ok(clamped_qty)
-    }
 }
 
 impl RiskKernel for Kernel {
@@ -361,9 +313,7 @@ impl RiskKernel for Kernel {
     ///    book's gross ([`DenyReason::ComponentGrossBreached`]), the whole
     ///    book's margin ([`DenyReason::InitialMarginBreached`]), and whether
     ///    the account's spare margin funds the increase
-    ///    ([`DenyReason::AvailableMarginExhausted`]);
-    /// 8. the per-strategy partition, which clamps before it refuses —
-    ///    [`DenyReason::PartitionExhausted`].
+    ///    ([`DenyReason::AvailableMarginExhausted`]).
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict {
         match self.evaluate(intent, account) {
             Ok(qty) => RiskVerdict::Allow { qty },

@@ -1,6 +1,14 @@
-//! The pooled HTTPS client: one warm keep-alive connection per host, HTTP/1.1
-//! only, Nagle off. Signing happens here so the bytes that are signed are the
-//! bytes that go on the wire.
+//! The pooled HTTPS client every venue sends through: one warm keep-alive
+//! connection per host, HTTP/1.1 only, Nagle off.
+//!
+//! Only the wire lives here. Signing belongs to each venue, because the four
+//! do not agree on what is signed or where the proof rides — Bybit signs the
+//! exact bytes and puts a hex HMAC in a header, Hyperliquid signs a hash of a
+//! msgpack action and puts the signature *inside* the body, Lighter signs a
+//! field-element hash and sends the transaction as a form field. What they do
+//! agree on is that a signature covers the bytes that actually go out, so a
+//! venue hands finished bytes down here and nothing re-serializes them on the
+//! way.
 
 use std::time::Duration;
 
@@ -14,30 +22,17 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde_json::Value;
 
-use crate::clock::wall_ms;
-use crate::creds::Credentials;
-use crate::sign::{
-    rest_signature, HEADER_KEY, HEADER_RECV_WINDOW, HEADER_SIGN, HEADER_TIMESTAMP, RECV_WINDOW_MS,
-};
-
 /// A reply this slow is no use to a trading loop; the caller is told the
 /// send failed and the log already holds the intent.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub(crate) struct RestClient {
+pub(crate) struct HttpClient {
     client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
     base: String,
-    creds: Credentials,
 }
 
-impl RestClient {
-    /// The host this client actually sends to. Read back by the live gateway
-    /// constructor to check the realm and the host agree.
-    pub(crate) fn base(&self) -> &str {
-        &self.base
-    }
-
-    pub(crate) fn new(base: impl Into<String>, creds: Credentials) -> Self {
+impl HttpClient {
+    pub(crate) fn new(base: impl Into<String>) -> Self {
         crate::tls::install_crypto_provider();
 
         let mut http = HttpConnector::new();
@@ -66,18 +61,16 @@ impl RestClient {
         Self {
             client,
             base: base.into(),
-            creds,
         }
     }
 
-    /// The key these requests are signed with. Not a secret — it goes out in
-    /// a header on every signed call — and the account-identity check needs
-    /// it to compare against the key the venue says it saw.
-    pub(crate) fn api_key(&self) -> &str {
-        self.creds.key()
+    /// The host this client actually sends to. Read back by the live gateway
+    /// constructors to check the realm and the host agree.
+    pub(crate) fn base(&self) -> &str {
+        &self.base
     }
 
-    fn url(&self, path: &str, query: &str) -> String {
+    pub(crate) fn url(&self, path: &str, query: &str) -> String {
         if query.is_empty() {
             format!("{}{}", self.base, path)
         } else {
@@ -85,46 +78,39 @@ impl RestClient {
         }
     }
 
-    /// Unsigned GET, for the public endpoints.
-    pub(crate) async fn get_public(&self, path: &str, query: &str) -> Result<Value, VenueError> {
-        let req = Request::builder()
-            .method("GET")
-            .uri(self.url(path, query))
+    pub(crate) async fn get(
+        &self,
+        path: &str,
+        query: &str,
+        headers: &[(&str, String)],
+    ) -> Result<Value, VenueError> {
+        let mut req = Request::builder().method("GET").uri(self.url(path, query));
+        for (name, value) in headers {
+            req = req.header(*name, value);
+        }
+        let req = req
             .body(Full::new(Bytes::new()))
             .map_err(|e| VenueError::BadRequest(e.to_string()))?;
         self.send(req).await
     }
 
-    /// Signed GET. The signature covers the raw query string.
-    pub(crate) async fn get_signed(&self, path: &str, query: &str) -> Result<Value, VenueError> {
-        let ts = wall_ms();
-        let sign = rest_signature(self.creds.secret(), ts, self.creds.key(), query);
-        let req = Request::builder()
-            .method("GET")
-            .uri(self.url(path, query))
-            .header(HEADER_KEY, self.creds.key())
-            .header(HEADER_TIMESTAMP, ts.to_string())
-            .header(HEADER_RECV_WINDOW, RECV_WINDOW_MS)
-            .header(HEADER_SIGN, sign)
-            .body(Full::new(Bytes::new()))
-            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
-        self.send(req).await
-    }
-
-    /// Signed POST. The signature covers the exact body bytes sent.
-    pub(crate) async fn post_signed(&self, path: &str, body: &Value) -> Result<Value, VenueError> {
-        let body = serde_json::to_string(body)
-            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
-        let ts = wall_ms();
-        let sign = rest_signature(self.creds.secret(), ts, self.creds.key(), &body);
-        let req = Request::builder()
+    /// POST the exact bytes given. The caller has already signed them, so
+    /// nothing here may touch them.
+    pub(crate) async fn post(
+        &self,
+        path: &str,
+        body: String,
+        content_type: &str,
+        headers: &[(&str, String)],
+    ) -> Result<Value, VenueError> {
+        let mut req = Request::builder()
             .method("POST")
             .uri(self.url(path, ""))
-            .header(HEADER_KEY, self.creds.key())
-            .header(HEADER_TIMESTAMP, ts.to_string())
-            .header(HEADER_RECV_WINDOW, RECV_WINDOW_MS)
-            .header(HEADER_SIGN, sign)
-            .header("Content-Type", "application/json")
+            .header("Content-Type", content_type);
+        for (name, value) in headers {
+            req = req.header(*name, value);
+        }
+        let req = req
             .body(Full::new(Bytes::from(body)))
             .map_err(|e| VenueError::BadRequest(e.to_string()))?;
         self.send(req).await
@@ -155,8 +141,9 @@ async fn read_json(resp: Response<hyper::body::Incoming>) -> Result<Value, Venue
         .map_err(|e| VenueError::Transport(format!("reply body: {e}")))?
         .to_bytes();
 
-    // Bybit answers business failures with HTTP 200 and a non-zero retCode;
-    // a non-2xx status is the edge or the rate limiter, so it is transport.
+    // Venues answer business failures with HTTP 200 and their own status
+    // field; a non-2xx status is the edge or the rate limiter, so it is
+    // transport. Each venue's parse owns the 200-with-an-error case.
     if !status.is_success() {
         return Err(VenueError::Transport(format!(
             "HTTP {}: {}",
@@ -172,4 +159,40 @@ async fn read_json(resp: Response<hyper::body::Incoming>) -> Result<Value, Venue
 fn snippet(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     text.chars().take(200).collect()
+}
+
+/// Percent-encode one query-string value.
+///
+/// Cursors and addresses come back with characters that mean something in a
+/// query string, and a signature covers the query exactly as sent.
+pub(crate) fn percent_encode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_values_are_escaped_for_the_query_string() {
+        assert_eq!(percent_encode("next%3D"), "next%253D");
+        assert_eq!(percent_encode("a b&c=d"), "a%20b%26c%3Dd");
+        assert_eq!(percent_encode("plain-Cursor_1.0~"), "plain-Cursor_1.0~");
+    }
+
+    #[test]
+    fn a_url_with_no_query_carries_no_question_mark() {
+        let client = HttpClient::new("http://127.0.0.1:1");
+        assert_eq!(client.url("/v5/x", ""), "http://127.0.0.1:1/v5/x");
+        assert_eq!(client.url("/v5/x", "a=1"), "http://127.0.0.1:1/v5/x?a=1");
+    }
 }

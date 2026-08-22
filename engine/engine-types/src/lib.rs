@@ -47,9 +47,18 @@ pub use wal::{
 /// keeps them from both sending.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountIdentity {
-    /// The venue's own account number, as a decimal string.
+    /// Which venue this account lives on: `bybit`, `hyperliquid`, `lighter`,
+    /// `variational`. Part of the single-writer lock's name, because two
+    /// venues can hand out the same account number and they are not the same
+    /// account.
+    pub venue: String,
+    /// The venue's own name for the account. A number on Bybit and Lighter, a
+    /// wallet address on Hyperliquid — whatever that venue calls the thing the
+    /// credentials open.
     pub user_id: String,
-    /// Which venue the account lives on: `demo` or `mainnet`.
+    /// Which of the venue's realms: `demo` or `mainnet` on Bybit, and
+    /// venue-qualified elsewhere (`hyperliquid_mainnet`), so that a realm
+    /// string read out of a heartbeat can only mean one venue's account.
     pub realm: String,
 }
 

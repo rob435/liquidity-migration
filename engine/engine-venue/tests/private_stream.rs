@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use engine_types::{FeedError, OrderFeed, OrderUpdate, Side, SymbolId};
-use engine_venue::{BybitOrderFeed, Credentials, VenueRealm};
+use engine_venue::{BybitOrderFeed, VenueRealm};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
@@ -206,7 +206,7 @@ async fn start(frames: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
 fn feed(url: &str) -> BybitOrderFeed {
     BybitOrderFeed::for_test(
         url,
-        Credentials::new(VenueRealm::Demo, KEY, SECRET),
+        VenueRealm::Demo.credentials_for_test(KEY, SECRET),
         vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
     )
 }

@@ -11,6 +11,8 @@ use engine_types::risk::PositionView;
 use engine_types::{Side, VenueError};
 use serde_json::Value;
 
+use crate::json::{kind_of, num_field, opt_num_field, str_field};
+
 /// Unwrap the `retCode` envelope every v5 endpoint shares.
 pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
     let mut obj = match envelope {
@@ -272,49 +274,6 @@ fn list_field(result: &Value) -> Result<&Vec<Value>, VenueError> {
         .ok_or_else(|| VenueError::BadReply("reply carries no result.list".to_string()))
 }
 
-pub(crate) fn str_field(obj: &Value, name: &str) -> Result<String, VenueError> {
-    obj.get(name)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| VenueError::BadReply(format!("field {name} is missing or not a string")))
-}
-
-pub(crate) fn num_field(obj: &Value, name: &str) -> Result<f64, VenueError> {
-    opt_num_field(obj, name)?
-        .ok_or_else(|| VenueError::BadReply(format!("field {name} is missing or blank")))
-}
-
-/// `None` means present-but-blank or absent; an unparseable value is an error.
-pub(crate) fn opt_num_field(obj: &Value, name: &str) -> Result<Option<f64>, VenueError> {
-    match obj.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
-        Some(Value::String(s)) => s
-            .trim()
-            .parse::<f64>()
-            .map(Some)
-            .map_err(|_| VenueError::BadReply(format!("field {name} is not a number: {s:?}"))),
-        Some(Value::Number(n)) => n
-            .as_f64()
-            .map(Some)
-            .ok_or_else(|| VenueError::BadReply(format!("field {name} is not a finite number"))),
-        Some(other) => Err(VenueError::BadReply(format!(
-            "field {name} is a {}, not a number",
-            kind_of(other)
-        ))),
-    }
-}
-
-fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
 
 #[cfg(test)]
 mod tests {

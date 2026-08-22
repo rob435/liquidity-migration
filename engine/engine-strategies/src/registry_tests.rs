@@ -13,12 +13,12 @@ fn build_err(result: Result<Box<dyn Strategy>, BuildError>) -> BuildError {
 const ID: StrategyId = StrategyId(0);
 
 /// The flat block the research system writes, exactly as the registry
-/// documents it. The engine core keeps `name` and `capital_usdt` and hands
-/// the rest over as the parameter table — mirrored below in the test.
+/// documents it. The engine core keeps `name`, `sleeve` and `book_path`, and
+/// hands the rest over as the parameter table — mirrored below in the test.
 const RESEARCH_BLOCK: &str = r#"
 [[strategy]]
 name = "touch_sniper"
-capital_usdt = 50.0
+sleeve = "sniper"
 symbol = "BTCUSDT"
 side = "buy"
 trigger_px = 61000.0
@@ -81,11 +81,11 @@ fn the_documented_research_block_builds() {
     assert_eq!(blocks.len(), 1);
 
     let name = blocks[0].get("name").unwrap().as_str().unwrap().to_string();
-    // What the engine core does with a flat block: keep name and
-    // capital_usdt, hand the rest over.
+    // What the engine core does with a flat block: keep its own keys, hand the
+    // rest over.
     let mut table = blocks[0].as_table().expect("a table").clone();
     table.remove("name");
-    table.remove("capital_usdt");
+    table.remove("sleeve");
     let block_params = toml::Value::Table(table);
     let strategy = build_strategy(&name, StrategyId(3), &block_params).expect("the block builds");
 
@@ -109,7 +109,7 @@ fn an_unknown_name_says_so_and_lists_what_it_knows() {
 const FOLLOWER_BLOCK: &str = r#"
 [[strategy]]
 name = "target_book"
-capital_usdt = 200.0
+sleeve = "long"
 symbols = ["KAITOUSDT", "COTIUSDT"]
 "#;
 
@@ -120,7 +120,7 @@ fn the_documented_target_book_block_builds_and_subscribes_to_its_universe() {
     let name = blocks[0].get("name").unwrap().as_str().unwrap().to_string();
     let mut table = blocks[0].as_table().expect("a table").clone();
     table.remove("name");
-    table.remove("capital_usdt");
+    table.remove("sleeve");
     let strategy = build_strategy(&name, StrategyId(1), &toml::Value::Table(table))
         .expect("the block builds");
 

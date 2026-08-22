@@ -119,10 +119,13 @@ fn an_unreadable_equity_is_reported_even_when_the_view_is_also_stale() {
 }
 
 #[test]
-fn a_missing_stop_is_reported_before_an_exhausted_partition() {
-    let mut kernel = Kernel::new(partition_config()).expect("config");
-    // CONTINUOUS has no share at all, and this order carries no stop.
-    let naked = naked_entry(CONTINUOUS, BUSDT, Side::Buy, 1.0, 10.0, NOW);
+fn a_missing_stop_is_reported_before_a_breached_cap() {
+    let mut cfg = demo_config();
+    // Small enough that the order below breaches every cap under the stop
+    // check as well as failing it.
+    cfg.envelope.max_component_gross_notional_usdt = 1.0;
+    let mut kernel = Kernel::new(cfg).expect("config");
+    let naked = naked_entry(CARRY, BUSDT, Side::Buy, 100.0, 10.0, NOW);
     assert_eq!(
         deny_reason(kernel.assess(&naked, &flat(10_000.0, NOW))),
         DenyReason::MissingStop
@@ -130,11 +133,15 @@ fn a_missing_stop_is_reported_before_an_exhausted_partition() {
 }
 
 #[test]
-fn an_envelope_breach_is_reported_before_an_exhausted_partition() {
-    let mut kernel = Kernel::new(partition_config()).expect("config");
-    // 2000 USDT of worst case against a 350 allowance, from a strategy the
-    // partition does not name.
-    let huge = entry(CONTINUOUS, BUSDT, Side::Buy, 200.0, 10.0, 9.0, NOW);
+fn an_envelope_breach_is_reported_before_the_account_caps() {
+    let mut cfg = demo_config();
+    cfg.envelope.reference_usdt = 500.0;
+    cfg.envelope.max_component_gross_notional_usdt = 1_000.0;
+    cfg.envelope.max_initial_margin_usdt = 500.0;
+    let mut kernel = Kernel::new(cfg).expect("config");
+    // 2000 USDT of book: past the envelope's allowance and past the gross
+    // ceiling, so which one is named says which ran first.
+    let huge = entry(CARRY, BUSDT, Side::Buy, 200.0, 10.0, 9.0, NOW);
     assert!(matches!(
         deny_reason(kernel.assess(&huge, &flat(10_000.0, NOW))),
         DenyReason::EnvelopeBreached { .. }

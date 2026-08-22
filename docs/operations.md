@@ -148,9 +148,8 @@ reference tracks observed wallet equity, and every cap in the profile is a ratio
 ([`envelope.rs`](../engine/engine-risk/src/envelope.rs)). Equity
 down rescales the caps immediately; equity up waits for a move larger than the dead band; missing or
 stale equity holds the current reference, and below the floor it clamps rather than collapsing.
-`account_risk.sleeve_limits` partitions the account gross and margin caps into per-sleeve shares; the
-kernel holds each sleeve to its share on every exposure-increasing batch and refuses a sleeve the
-partition does not name. Risk-reducing batches bypass every cap, so exits are always possible. A
+Every cap is account-wide: no sleeve holds a private share, so any one of them can spend the lot.
+Risk-reducing batches bypass every cap, so exits are always possible. A
 dedicated subaccount would put the ceiling at the venue instead of in software; declined, so these caps
 are what hold size.
 

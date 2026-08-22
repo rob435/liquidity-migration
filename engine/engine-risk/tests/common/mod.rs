@@ -5,7 +5,7 @@
 //! unused-here helper is normal and the lint is off for the file.
 #![allow(dead_code)]
 
-use engine_risk::{EnvelopeConfig, KernelConfig, PartitionConfig, StrategyAllocation};
+use engine_risk::{EnvelopeConfig, KernelConfig};
 use engine_types::ids::{StrategyId, SymbolId};
 use engine_types::orders::{Intent, OrderKind, Side, StopSpec, TimeInForce};
 use engine_types::risk::{AccountView, PositionView};
@@ -18,20 +18,15 @@ pub const MAX_VIEW_AGE_NS: u64 = 120 * SEC;
 pub const DISASTER_STOP_FRACTION: f64 = 0.35;
 /// account_contracts.py: AccountRiskPolicy.quantity_tolerance.
 pub const QTY_TOLERANCE: f64 = 1e-12;
-/// tests/account/test_sleeve_capital_partition.py: InstrumentRules min_notional.
-pub const MIN_ORDER_NOTIONAL_USDT: f64 = 1.0;
 
 pub const CARRY: StrategyId = StrategyId(0);
 pub const LONG: StrategyId = StrategyId(1);
-/// A strategy with no share: no fixture partition names it, which is what
-/// these tables use it to exercise. Not a live sleeve.
-pub const CONTINUOUS: StrategyId = StrategyId(2);
 pub const BUSDT: SymbolId = SymbolId(0);
 pub const CUSDT: SymbolId = SymbolId(1);
 
-/// The unpartitioned shape: a fixed 250_000 capital reference and a gross cap
-/// twice it. The reference is the demo profile's; the multiple is this file's
-/// own, kept low so the partition tables reach their caps.
+/// A fixed 250_000 capital reference and a gross cap twice it. The reference
+/// is the demo profile's; the multiple is this file's own, kept low so the
+/// tables here reach their caps.
 pub fn demo_config() -> KernelConfig {
     KernelConfig {
         max_account_view_age_ns: MAX_VIEW_AGE_NS,
@@ -45,17 +40,13 @@ pub fn demo_config() -> KernelConfig {
             disaster_stop_fraction: DISASTER_STOP_FRACTION,
             // The loosest legal setting: the second gross ceiling at the
             // account gross cap, margin at what that gross funds. These tables
-            // are about the envelope and the partition, and a tighter cap here
-            // would refuse their orders before the control under test ran.
+            // are about the envelope, and a tighter cap here would refuse
+            // their orders before the control under test ran.
             // tests/account_caps.rs sets each cap to the binding one instead.
             max_component_gross_notional_usdt: 500_000.0,
             max_initial_margin_usdt: 250_000.0,
         },
-        partition: PartitionConfig {
-            allocations: Vec::new(),
-            leverage: 2.0,
-            min_order_notional_usdt: MIN_ORDER_NOTIONAL_USDT,
-        },
+        leverage: 2.0,
         qty_tolerance: QTY_TOLERANCE,
     }
 }
@@ -65,35 +56,6 @@ pub fn demo_config() -> KernelConfig {
 pub fn equity_tracking_config() -> KernelConfig {
     let mut cfg = demo_config();
     cfg.envelope.tracks_equity = true;
-    cfg
-}
-
-/// tests/account/test_sleeve_capital_partition.py `_policy()`: room for 1000
-/// USDT of book, split 600 CARRY / 300 LONG, margin shares at leverage 2.
-pub fn partition_config() -> KernelConfig {
-    let mut cfg = demo_config();
-    cfg.envelope.reference_usdt = 500.0;
-    cfg.envelope.gross_notional_multiple = 2.0;
-    // The account caps move with the reference, or they would sit 500x above
-    // the 1000 USDT of book this shape describes and never be reached.
-    cfg.envelope.max_component_gross_notional_usdt = 1_000.0;
-    cfg.envelope.max_initial_margin_usdt = 500.0;
-    cfg.partition = PartitionConfig {
-        allocations: vec![
-            StrategyAllocation {
-                strategy: CARRY,
-                max_gross_notional_usdt: 600.0,
-                max_initial_margin_usdt: 300.0,
-            },
-            StrategyAllocation {
-                strategy: LONG,
-                max_gross_notional_usdt: 300.0,
-                max_initial_margin_usdt: 150.0,
-            },
-        ],
-        leverage: 2.0,
-        min_order_notional_usdt: MIN_ORDER_NOTIONAL_USDT,
-    };
     cfg
 }
 

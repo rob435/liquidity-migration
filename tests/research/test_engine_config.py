@@ -13,7 +13,6 @@ from liquidity_migration.research.engine_config import (
 def _touch_block() -> EngineStrategyBlock:
     return EngineStrategyBlock(
         name="touch_sniper",
-        capital_usdt=100.0,
         params={
             "symbol": "BTCUSDT",
             "side": "buy",
@@ -30,11 +29,10 @@ def test_rendered_block_parses_back_to_the_same_values() -> None:
     parsed = tomllib.loads(text)
     assert len(parsed["strategy"]) == 1
     block = parsed["strategy"][0]
-    # Flat shape: the engine keeps name and capital_usdt, the rest is the
-    # strategy's parameter table.
+    # Flat shape: the engine keeps name, the rest is the strategy's parameter
+    # table.
     assert block == {
         "name": "touch_sniper",
-        "capital_usdt": 100.0,
         "symbol": "BTCUSDT",
         "side": "buy",
         "trigger_px": 60000.0,
@@ -60,15 +58,14 @@ def test_two_blocks_render_as_two_toml_entries() -> None:
 @pytest.mark.parametrize(
     ("block", "match"),
     [
-        (EngineStrategyBlock(name="", capital_usdt=1.0), "not a plain identifier"),
-        (EngineStrategyBlock(name="touch sniper", capital_usdt=1.0), "not a plain identifier"),
-        (EngineStrategyBlock(name="t", capital_usdt=0.0), "positive finite"),
-        (EngineStrategyBlock(name="t", capital_usdt=float("nan")), "positive finite"),
-        (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"bad key": 1}), "not a plain identifier"),
-        (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"px": float("inf")}), "not a finite number"),
-        (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"s": 'a"b'}), "would mangle"),
-        (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"name": "x"}), "reserved"),
-        (EngineStrategyBlock(name="t", capital_usdt=1.0, params={"capital_usdt": 2.0}), "reserved"),
+        (EngineStrategyBlock(name=""), "not a plain identifier"),
+        (EngineStrategyBlock(name="touch sniper"), "not a plain identifier"),
+        (EngineStrategyBlock(name="t", params={"bad key": 1}), "not a plain identifier"),
+        (EngineStrategyBlock(name="t", params={"px": float("inf")}), "not a finite number"),
+        (EngineStrategyBlock(name="t", params={"s": 'a"b'}), "would mangle"),
+        (EngineStrategyBlock(name="t", params={"name": "x"}), "reserved"),
+        (EngineStrategyBlock(name="t", params={"sleeve": "carry"}), "reserved"),
+        (EngineStrategyBlock(name="t", params={"book_path": "/tmp/b.json"}), "reserved"),
     ],
 )
 def test_bad_blocks_are_refused_with_a_named_reason(block: EngineStrategyBlock, match: str) -> None:
@@ -83,6 +80,6 @@ def test_empty_render_is_refused() -> None:
 
 def test_bools_do_not_render_as_integers() -> None:
     text = render_engine_strategies(
-        [EngineStrategyBlock(name="t", capital_usdt=1.0, params={"enabled": True})]
+        [EngineStrategyBlock(name="t", params={"enabled": True})]
     )
     assert "enabled = true" in text

@@ -2,11 +2,40 @@
 
 use crate::orders::{InstrumentRule, Side};
 
+/// How far a count of ticks may sit from a whole number and still be that
+/// whole number. The widest dust measured across every step size these venues
+/// use is one part in 10^16, so this is four orders of magnitude of headroom —
+/// and still 10^11 times finer than the half-step that would be a real
+/// difference.
+const DUST: f64 = 1e-12;
+
+/// A count of whole steps, with float dust shaved before it is rounded.
+///
+/// `0.29 / 0.01` is 28.999999999999996, not 29. Flooring that loses a whole
+/// step, so a price already on the venue's tick comes back a tick away from
+/// where the strategy put it and a size the risk kernel approved is sent
+/// short. No genuine sub-step offset can be this small: the venue cannot
+/// represent one.
+pub fn steps(value: f64, step: f64) -> f64 {
+    shave_dust(value / step)
+}
+
+/// The same shave for venues that scale by a power of ten instead of dividing
+/// by a step — `qty * 10^decimals` carries the same dust.
+pub fn shave_dust(count: f64) -> f64 {
+    let whole = count.round();
+    if (count - whole).abs() <= DUST * whole.abs().max(1.0) {
+        whole
+    } else {
+        count
+    }
+}
+
 /// Round a price to the instrument tick, toward the passive side: buys round
 /// down, sells round up, so quantization never makes an order more
 /// aggressive than the strategy asked for.
 pub fn quantize_px(px: f64, side: Side, rule: &InstrumentRule) -> f64 {
-    let ticks = px / rule.tick_size;
+    let ticks = steps(px, rule.tick_size);
     let snapped = match side {
         Side::Buy => ticks.floor(),
         Side::Sell => ticks.ceil(),
@@ -17,7 +46,10 @@ pub fn quantize_px(px: f64, side: Side, rule: &InstrumentRule) -> f64 {
 /// Round a quantity DOWN to the step (never size up), returning `None` when
 /// the result falls below the venue minimum.
 pub fn quantize_qty(qty: f64, rule: &InstrumentRule) -> Option<f64> {
-    let stepped = round_clean((qty / rule.qty_step).floor() * rule.qty_step, rule.qty_step);
+    let stepped = round_clean(
+        steps(qty, rule.qty_step).floor() * rule.qty_step,
+        rule.qty_step,
+    );
     if stepped + 1e-12 < rule.min_qty || stepped <= 0.0 {
         return None;
     }
@@ -71,5 +103,44 @@ mod tests {
     fn float_dust_is_shaved() {
         let rule = InstrumentRule { tick_size: 0.1, qty_step: 0.1, min_qty: 0.1, min_notional: 0.0 };
         assert_eq!(quantize_px(0.30000000000000004, Side::Buy, &rule), 0.3);
+    }
+
+    #[test]
+    fn a_price_already_on_the_tick_is_left_where_it_is() {
+        // `0.3 / 0.1` is 2.9999999999999996 and `0.07 / 0.01` is
+        // 7.000000000000001. Rounding those to whole ticks without shaving the
+        // dust moves a buy a tick down and a sell a tick up — silently, on
+        // every order whose price the strategy took off the book.
+        for (px, tick) in [(0.3, 0.1), (2.9, 0.1), (8.2, 0.1), (0.29, 0.01), (112.35, 0.05)] {
+            let rule = InstrumentRule {
+                tick_size: tick,
+                qty_step: tick,
+                min_qty: 0.0,
+                min_notional: 0.0,
+            };
+            assert_eq!(quantize_px(px, Side::Buy, &rule), px, "buy at {px} on {tick}");
+            assert_eq!(quantize_px(px, Side::Sell, &rule), px, "sell at {px} on {tick}");
+            assert_eq!(quantize_qty(px, &rule), Some(px), "size {px} on {tick}");
+        }
+    }
+
+    #[test]
+    fn a_price_between_ticks_still_moves_to_the_passive_one() {
+        // The other half: the shave must not swallow a real difference. Half a
+        // tick out is a real difference and still rounds the passive way.
+        let rule = InstrumentRule { tick_size: 0.1, qty_step: 0.1, min_qty: 0.0, min_notional: 0.0 };
+        assert_eq!(quantize_px(0.35, Side::Buy, &rule), 0.3);
+        assert_eq!(quantize_px(0.35, Side::Sell, &rule), 0.4);
+        assert_eq!(quantize_qty(0.35, &rule), Some(0.3));
+    }
+
+    #[test]
+    fn the_shave_reaches_dust_and_stops_well_short_of_a_step() {
+        assert_eq!(shave_dust(28.999999999999996), 29.0);
+        assert_eq!(shave_dust(7.000000000000001), 7.0);
+        // A tenth of a step out is a real difference at every scale.
+        assert_eq!(shave_dust(29.1), 29.1);
+        assert_eq!(shave_dust(1_000_000_029.1), 1_000_000_029.1);
+        assert_eq!(shave_dust(0.0), 0.0);
     }
 }

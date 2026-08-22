@@ -263,6 +263,7 @@ impl Heartbeat {
             ("orders_sent", facts.orders_sent.to_string()),
             ("pid", std::process::id().to_string()),
             ("realm", or_null(self.account.as_ref().map(|a| quoted(&a.realm)))),
+            ("venue", or_null(self.account.as_ref().map(|a| quoted(&a.venue)))),
             ("positions", positions(facts.holdings)),
             ("strategies", list(facts.strategies)),
             ("wall_ts_ms", wall_ts_ms.to_string()),
@@ -415,7 +416,7 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 25] = [
+    const KEYS: [&str; 26] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -438,6 +439,7 @@ mod tests {
         "positions",
         "realm",
         "strategies",
+        "venue",
         "wall_ts_ms",
         "wire_p50_ns",
         "wire_p99_ns",
@@ -608,7 +610,11 @@ mod tests {
     fn on_the_demo_account(path: PathBuf) -> Heartbeat {
         Heartbeat::new(
             path,
-            Some(AccountIdentity { user_id: "6039967".into(), realm: "demo".into() }),
+            Some(AccountIdentity {
+                venue: "bybit".into(),
+                user_id: "6039967".into(),
+                realm: "demo".into(),
+            }),
             Some(PathBuf::from(
                 "/run/lock/liquidity-migration/bybit-demo-user-6039967.lock",
             )),
@@ -640,6 +646,10 @@ mod tests {
 
         assert_eq!(fields["account_user_id"], "6039967");
         assert_eq!(fields["realm"], "demo");
+        assert_eq!(
+            fields["venue"], "bybit",
+            "with four venues a heartbeat has to say which one it is on"
+        );
         assert_eq!(
             fields["lease_path"],
             "/run/lock/liquidity-migration/bybit-demo-user-6039967.lock"

@@ -1,24 +1,28 @@
 //! API credentials, read from the environment, bound to their realm.
 //!
-//! A `Credentials` value knows which account it authenticates against. That is
-//! not decoration: the REST client and the order stream both derive their host
-//! from it, so a key and a hostname cannot drift apart. There is no
-//! constructor that takes a key without also taking the realm it belongs to.
+//! A `Credentials` value knows which realm it authenticates against and
+//! whether that realm moves real money. That is not decoration: the arming
+//! check runs off it, and the REST client and the order stream both derive
+//! their host from the same realm, so a key and a hostname cannot drift apart.
+//! There is no constructor that takes a key without also taking the realm it
+//! belongs to.
+//!
+//! What the two strings *mean* is the venue's business, and the four disagree:
+//! Bybit's pair is an API key and an HMAC secret; Hyperliquid's is the account
+//! address and an API-wallet private key; Lighter's is an account and API-key
+//! index and a curve private key. This module holds them, checks they are
+//! there, and keeps the secret out of every log line.
 
 use std::fmt;
 
 use engine_types::VenueError;
 
-use crate::realm::{check_arming, VenueRealm};
-
-/// The demo credential variables, re-exported for the operator-facing checks
-/// that name them. The authority is [`VenueRealm::credential_vars`].
-pub const API_KEY_ENV: &str = "BYBIT_DEMO_API_KEY";
-pub const API_SECRET_ENV: &str = "BYBIT_DEMO_API_SECRET";
+use crate::arming::check_arming;
 
 #[derive(Clone)]
 pub struct Credentials {
-    realm: VenueRealm,
+    realm: String,
+    real_money: bool,
     key: String,
     secret: String,
 }
@@ -27,14 +31,19 @@ impl Credentials {
     /// Read one realm's key and secret from the environment.
     ///
     /// The arming check runs *first*, before either variable is read, so a
-    /// host with mainnet keys sitting in its environment still refuses to
+    /// host with real-money keys sitting in its environment still refuses to
     /// build them into anything while `REAL_MONEY` is unset. Missing or blank
     /// is a typed error, never a silent unsigned request.
-    pub fn from_env(realm: VenueRealm) -> Result<Self, VenueError> {
-        check_arming(realm)?;
-        let (key_var, secret_var) = realm.credential_vars();
+    pub fn from_env(
+        realm: &str,
+        real_money: bool,
+        key_var: &str,
+        secret_var: &str,
+    ) -> Result<Self, VenueError> {
+        check_arming(realm, real_money)?;
         Ok(Self {
-            realm,
+            realm: realm.to_string(),
+            real_money,
             key: read(key_var)?,
             secret: read(secret_var)?,
         })
@@ -42,17 +51,28 @@ impl Credentials {
 
     /// Build credentials directly. Tests and the mock venue only; the live
     /// path is [`Credentials::from_env`], which is the one that checks arming.
-    pub fn new(realm: VenueRealm, key: impl Into<String>, secret: impl Into<String>) -> Self {
+    pub fn new(
+        realm: &str,
+        real_money: bool,
+        key: impl Into<String>,
+        secret: impl Into<String>,
+    ) -> Self {
         Self {
-            realm,
+            realm: realm.to_string(),
+            real_money,
             key: key.into(),
             secret: secret.into(),
         }
     }
 
-    /// Which account these authenticate against.
-    pub fn realm(&self) -> VenueRealm {
-        self.realm
+    /// Which realm these authenticate against.
+    pub fn realm(&self) -> &str {
+        &self.realm
+    }
+
+    /// Whether that realm moves real capital.
+    pub fn is_real_money(&self) -> bool {
+        self.real_money
     }
 
     pub fn key(&self) -> &str {
@@ -70,9 +90,17 @@ impl Credentials {
 /// it is not a secret.
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tail: String = self.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = self
+            .key
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         f.debug_struct("Credentials")
-            .field("realm", &self.realm.as_str())
+            .field("realm", &self.realm)
             .field("key", &format!("<redacted>..{tail}"))
             .field("secret", &"<redacted>")
             .finish()
@@ -93,7 +121,7 @@ mod tests {
 
     #[test]
     fn debug_hides_the_secret_and_all_but_the_keys_tail() {
-        let creds = Credentials::new(VenueRealm::Demo, "key-12345", "super-secret");
+        let creds = Credentials::new("demo", false, "key-12345", "super-secret");
         let shown = format!("{creds:?}");
         assert!(!shown.contains("key-12345"), "the full key leaked: {shown}");
         assert!(shown.contains("2345"), "the tail identifies the key: {shown}");
@@ -102,16 +130,16 @@ mod tests {
 
     #[test]
     fn debug_names_the_realm_so_a_log_line_says_which_account() {
-        let shown = format!("{:?}", Credentials::new(VenueRealm::Mainnet, "k", "s"));
+        let shown = format!("{:?}", Credentials::new("mainnet", true, "k", "s"));
         assert!(shown.contains("mainnet"), "{shown}");
     }
 
     #[test]
     fn credentials_carry_the_realm_they_were_built_for() {
-        assert_eq!(
-            Credentials::new(VenueRealm::Mainnet, "k", "s").realm(),
-            VenueRealm::Mainnet
-        );
+        let creds = Credentials::new("mainnet", true, "k", "s");
+        assert_eq!(creds.realm(), "mainnet");
+        assert!(creds.is_real_money());
+        assert!(!Credentials::new("demo", false, "k", "s").is_real_money());
     }
 
     #[test]
@@ -120,13 +148,5 @@ mod tests {
         // directly so the test never depends on the ambient environment.
         let err = read("ENGINE_VENUE_DEFINITELY_UNSET_VAR").unwrap_err();
         assert!(matches!(err, VenueError::Credentials(_)));
-    }
-
-    #[test]
-    fn the_exported_demo_variable_names_match_the_realm_table() {
-        assert_eq!(
-            VenueRealm::Demo.credential_vars(),
-            (API_KEY_ENV, API_SECRET_ENV)
-        );
     }
 }

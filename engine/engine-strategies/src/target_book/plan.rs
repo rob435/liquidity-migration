@@ -338,9 +338,13 @@ fn restop(
     want_side: Side,
     rule: &InstrumentRule,
 ) -> Option<Step> {
+    // Negated rather than `<= 0.0`: this form is false for NaN too, and a NaN
+    // stop must not become a repair.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(position.stop_px > 0.0) || !(position.entry_px > 0.0) {
         return None;
     }
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(target.stop_loss_fraction > 0.0) {
         return None;
     }

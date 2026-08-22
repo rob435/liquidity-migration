@@ -16,7 +16,7 @@
 mod common;
 
 use common::*;
-use engine_risk::{EnvelopeConfig, Kernel, KernelConfig, PartitionConfig, StrategyAllocation};
+use engine_risk::{EnvelopeConfig, Kernel, KernelConfig};
 use engine_types::orders::Side;
 use engine_types::risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 
@@ -38,22 +38,7 @@ fn mainnet_config() -> KernelConfig {
             max_component_gross_notional_usdt: 175.0,
             max_initial_margin_usdt: 100.0,
         },
-        partition: PartitionConfig {
-            allocations: vec![
-                StrategyAllocation {
-                    strategy: CARRY,
-                    max_gross_notional_usdt: 100.0,
-                    max_initial_margin_usdt: 57.14285714285714,
-                },
-                StrategyAllocation {
-                    strategy: LONG,
-                    max_gross_notional_usdt: 75.0,
-                    max_initial_margin_usdt: 42.857142857142854,
-                },
-            ],
-            leverage: 2.0,
-            min_order_notional_usdt: MIN_ORDER_NOTIONAL_USDT,
-        },
+        leverage: 2.0,
         qty_tolerance: QTY_TOLERANCE,
     }
 }
@@ -94,27 +79,29 @@ fn view_with_available(
 // --------------------------------------------------------------------------
 
 #[test]
-// One name may carry a sleeve's whole gross share. On this shape that is 100
-// USDT of book against a 100 USDT reference — the concentration the retired
-// per-symbol cap used to refuse at 50.
-fn one_symbol_may_carry_the_whole_sleeve_share() {
+// One name may carry the whole book. On this shape that is 175 USDT against a
+// 100 USDT reference — the concentration the retired per-symbol cap used to
+// refuse at 50.
+fn one_symbol_may_carry_the_whole_book() {
     let mut k = kernel(mainnet_config());
     assert_eq!(
-        k.assess(&buy(10.0), &flat(100.0, NOW)),
-        RiskVerdict::Allow { qty: 10.0 }
+        k.assess(&buy(17.5), &flat(100.0, NOW)),
+        RiskVerdict::Allow { qty: 17.5 }
     );
 }
 
 #[test]
-// And the share is what bounds it: past CARRY's 100 the partition clamps,
-// which is a resize rather than a refusal.
-fn the_sleeve_share_is_what_bounds_one_symbol_now() {
+// And what bounds it is a whole-book control, reached by the whole book: on
+// this shape the envelope's allowance and the account gross ceiling both sit
+// at 175, and the envelope is evaluated first.
+fn what_bounds_one_symbol_is_a_whole_book_control() {
     let mut k = kernel(mainnet_config());
-    assert_eq!(
-        k.assess(&buy(11.0), &flat(100.0, NOW)),
-        RiskVerdict::Allow { qty: 10.0 },
-        "110 asked against a 100 gross share clamps to 100"
-    );
+    assert!(matches!(
+        k.assess(&buy(17.6), &flat(100.0, NOW)),
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+        }
+    ));
 }
 
 #[test]
@@ -212,12 +199,11 @@ fn the_second_gross_ceiling_follows_the_capital_reference() {
 // 3. max_initial_margin_usdt at account level
 // --------------------------------------------------------------------------
 
-/// Unpartitioned, with the account margin cap set below what the gross cap
-/// funds — otherwise the envelope allowance reaches the same book first.
+/// The account margin cap set below what the gross cap funds — otherwise the
+/// envelope allowance reaches the same book first.
 fn margin_capped_config() -> KernelConfig {
     let mut cfg = mainnet_config();
     cfg.envelope.max_initial_margin_usdt = 40.0;
-    cfg.partition.allocations = Vec::new();
     cfg
 }
 
@@ -402,9 +388,6 @@ fn an_exit_is_never_blocked_by_the_account_caps() {
     let mut cfg = mainnet_config();
     cfg.envelope.max_component_gross_notional_usdt = 1.0;
     cfg.envelope.max_initial_margin_usdt = 1.0;
-    // The partition's margin shares would not fit a 1 USDT account cap, and
-    // the shares are not what this case is about.
-    cfg.partition.allocations = Vec::new();
     let mut k = kernel(cfg);
     let held = view_with_available(
         100.0,
@@ -440,19 +423,6 @@ fn a_config_whose_caps_do_not_nest_is_refused() {
         .expect("must refuse")
         .detail
         .contains("max_initial_margin_usdt cannot exceed"));
-}
-
-#[test]
-// _parse_sleeve_limits proves the margin shares sum inside the declared
-// account margin cap. The mainnet shares sum to exactly it.
-fn a_partition_whose_margin_shares_exceed_the_account_cap_is_refused() {
-    let mut cfg = mainnet_config();
-    cfg.envelope.max_initial_margin_usdt = 99.0;
-    assert!(Kernel::new(cfg)
-        .err()
-        .expect("must refuse")
-        .detail
-        .contains("partition margin shares sum above max_initial_margin_usdt"));
 }
 
 #[test]

@@ -1,32 +1,41 @@
-//! The venue adapters: Bybit v5 over HTTPS, and the private order stream.
+//! The venue adapters, and the one switch that picks between them.
 //!
-//! Two realms, demo and mainnet, and the difference between them is real
-//! money. [`realm`] is the only module that turns a realm into a hostname or a
-//! credential variable name; everything else carries a [`VenueRealm`] and asks
-//! it. That is what makes the guarantees below checkable in one place instead
-//! of argued across a crate.
+//! Four venues live under [`venues`], one module each: Bybit, Hyperliquid,
+//! Lighter, Variational. The engine names one in `engine.toml` and gets its
+//! gateway, its private order stream, and its public market feed — all three
+//! from the same name, so a config cannot half-switch.
 //!
-//! **What stops an accident reaching the funded account.** Four things, and
-//! none of them is "we were careful":
+//! Every venue has realms, and the difference between two realms is real
+//! money. A venue's own `realm` module is the only place that turns one of its
+//! realms into a hostname or a credential variable name; everything else
+//! carries the realm and asks it. That is what makes the guarantees below
+//! checkable in one place instead of argued across a crate.
+//!
+//! **What stops an accident reaching a funded account.** Four things, and none
+//! of them is "we were careful":
 //!
 //! 1. `REAL_MONEY=true` must be set in the host's credential file, by the
 //!    account owner. The engine never writes it. Without it, building a
-//!    mainnet gateway fails at the credential read, before a socket is opened.
-//! 2. The two realms read disjoint environment variables, so a demo key cannot
-//!    authenticate mainnet even if the realm were wrong.
+//!    real-money gateway fails at the credential read, before a socket is
+//!    opened. The rule is stated once, in [`arming`], and every venue's realm
+//!    table asks it rather than restating it.
+//! 2. Each realm reads its own environment variables, disjoint from every
+//!    other realm's — across venues as well as within one. A Bybit demo key
+//!    cannot authenticate Bybit mainnet, and no key of any venue can
+//!    authenticate another.
 //! 3. A realm is always named explicitly. There is no default, so a config
 //!    that forgets to say which account it trades does not get one chosen for
 //!    it.
 //! 4. The realm and the host cannot disagree: the live constructors take a
 //!    realm and derive the host from it, and then read it back and check.
 //!
-//! And it cuts both ways — an armed host refuses to run the *demo* realm, so a
-//! box cannot be half-live and half-practice at once.
+//! And it cuts both ways — an armed host refuses to run a *practice* realm, so
+//! a box cannot be half-live and half-practice at once.
 //!
 //! `tests/venue_fence.rs` reads the whole crate source back and enforces the
-//! structural half: the only venue hosts named anywhere are the four in
-//! [`realm`], they appear only in that module, and testnet and every alternate
-//! Bybit domain are absent entirely.
+//! structural half: every venue host named anywhere in the crate is one this
+//! crate declares, each appears only in its own venue's `realm.rs`, and
+//! testnet hosts of a venue that has no testnet realm are absent entirely.
 //!
 //! Credentials come from the environment and are never taken as arguments in
 //! the live path. A base URL can be supplied only through the `for_test`
@@ -34,28 +43,31 @@
 //! reach localhost.
 //!
 //! [`lease`] names accounts rather than reaching them; the module says why its
-//! spelling of `mainnet` is a lock file's name and not an endpoint.
+//! spelling of a realm is a lock file's name and not an endpoint.
+
+pub mod arming;
+pub mod lease;
+pub mod venues;
 
 mod clock;
 mod creds;
 mod fmt;
-mod gateway;
-pub mod lease;
-mod parse;
-pub mod realm;
+mod http;
+mod json;
 mod registry;
-mod rest;
-mod sign;
 mod tls;
-mod ws;
 
-pub use creds::{Credentials, API_KEY_ENV, API_SECRET_ENV};
-pub use gateway::BybitGateway;
-pub use realm::{
-    check_arming, check_arming_with, env_flag, real_money_armed, VenueRealm, REAL_MONEY_ENV,
+pub(crate) use clock::{mono_ns, wall_ms};
+
+pub use arming::{
+    check_arming, check_arming_with, env_flag, real_money_armed, REAL_MONEY_ENV,
 };
-pub use registry::{Venue, BYBIT_DEMO, BYBIT_MAINNET, KNOWN_VENUES};
-pub use ws::BybitOrderFeed;
-
-/// Every request is `linear` — USDT perpetuals, the only thing we trade.
-pub(crate) const CATEGORY: &str = "linear";
+pub use creds::Credentials;
+pub use registry::{
+    OrderFeeds, Venue, VenueName, BYBIT_DEMO, BYBIT_MAINNET, HYPERLIQUID_MAINNET,
+    HYPERLIQUID_TESTNET, KNOWN_VENUES, LIGHTER_MAINNET, LIGHTER_TESTNET, VARIATIONAL_MAINNET,
+};
+pub use venues::bybit::{BybitGateway, BybitOrderFeed, VenueRealm, API_KEY_ENV, API_SECRET_ENV};
+pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
+pub use venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};
+pub use venues::variational::{VariationalGateway, VariationalRealm};

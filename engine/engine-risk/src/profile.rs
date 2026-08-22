@@ -17,20 +17,15 @@
 //! The producer blocks (`long`, `carry`, `hedge`) are sizing for the Python
 //! producers, are not the kernel's business, and are skipped by name.
 //!
-//! **What is not in the file.** Three numbers the kernel needs live elsewhere,
+//! **What is not in the file.** Two numbers the kernel needs live elsewhere,
 //! so the caller supplies them through [`ProfileInputs`] rather than this
 //! module inventing defaults: the disaster-stop distance (an environment
-//! variable on the host, `DISASTER_STOP_FRACTION`), the minimum order notional
-//! (a venue instrument rule), and how stale an account reading may be.
+//! variable on the host, `DISASTER_STOP_FRACTION`) and how stale an account
+//! reading may be.
 
-use std::collections::BTreeMap;
-
-use engine_types::ids::StrategyId;
 use serde_json::Value;
 
-use crate::config::{
-    ConfigError, EnvelopeConfig, KernelConfig, PartitionConfig, StrategyAllocation,
-};
+use crate::config::{ConfigError, EnvelopeConfig, KernelConfig};
 
 /// The only schema this reads. A profile from the future is refused rather
 /// than read optimistically — the fields it added would be the interesting
@@ -62,7 +57,6 @@ const ACCOUNT_RISK_KEYS: &[&str] = &[
     "max_initial_margin_usdt",
     "max_leverage",
     "quantity_tolerance",
-    "sleeve_limits",
 ];
 
 const CAPITAL_REFERENCE_KEYS: &[&str] = &[
@@ -72,21 +66,14 @@ const CAPITAL_REFERENCE_KEYS: &[&str] = &[
     "expand_dead_band_fraction",
 ];
 
-const SLEEVE_LIMIT_KEYS: &[&str] = &["max_gross_notional_usdt", "max_initial_margin_usdt"];
-
 /// The numbers the kernel needs that the profile does not carry.
-#[derive(Clone, Debug)]
-pub struct ProfileInputs<'a> {
+#[derive(Clone, Copy, Debug)]
+pub struct ProfileInputs {
     /// How far a position may move against us before its stop ends it. The
     /// host's `DISASTER_STOP_FRACTION`.
     pub disaster_stop_fraction: f64,
-    /// An order smaller than this after clamping is refused, not sent.
-    pub min_order_notional_usdt: f64,
     /// An account view older than this is not evidence about the account now.
     pub max_account_view_age_ns: u64,
-    /// Which strategy each sleeve name in `sleeve_limits` refers to. A sleeve
-    /// the engine does not run is an error, not a share left on the floor.
-    pub sleeves: &'a [(&'a str, StrategyId)],
 }
 
 fn bad(detail: impl Into<String>) -> ConfigError {
@@ -160,11 +147,11 @@ fn optional_number(
 ///
 /// The returned config has already been through [`KernelConfig::validate`], so
 /// a profile that describes a book nobody can reach — caps that do not nest,
-/// partition shares that sum above the account — is an error here rather than
-/// a surprise at the first order.
+/// gross the reference could not fund at its own leverage — is an error here
+/// rather than a surprise at the first order.
 pub fn kernel_config_from_profile(
     text: &str,
-    inputs: &ProfileInputs<'_>,
+    inputs: &ProfileInputs,
 ) -> Result<KernelConfig, ConfigError> {
     let parsed: Value = serde_json::from_str(text)
         .map_err(|err| bad(format!("the operational profile is not valid JSON: {err}")))?;
@@ -278,70 +265,12 @@ pub fn kernel_config_from_profile(
         max_initial_margin_usdt: number(account, "max_initial_margin_usdt", "account_risk")?,
     };
 
-    let allocations = parse_sleeve_limits(account, inputs)?;
-
     let config = KernelConfig {
         max_account_view_age_ns: inputs.max_account_view_age_ns,
         envelope,
-        partition: PartitionConfig {
-            allocations,
-            leverage: number(account, "max_leverage", "account_risk")?,
-            min_order_notional_usdt: inputs.min_order_notional_usdt,
-        },
+        leverage: number(account, "max_leverage", "account_risk")?,
         qty_tolerance: number(account, "quantity_tolerance", "account_risk")?,
     };
     config.validate()?;
     Ok(config)
-}
-
-fn parse_sleeve_limits(
-    account: &serde_json::Map<String, Value>,
-    inputs: &ProfileInputs<'_>,
-) -> Result<Vec<StrategyAllocation>, ConfigError> {
-    let Some(value) = account.get("sleeve_limits") else {
-        // No partition. The account caps alone bind, exactly as an
-        // unpartitioned Python profile behaves.
-        return Ok(Vec::new());
-    };
-    let row = value
-        .as_object()
-        .ok_or_else(|| bad("account_risk.sleeve_limits must be an object"))?;
-
-    let known: BTreeMap<&str, StrategyId> = inputs.sleeves.iter().copied().collect();
-    let mut allocations = Vec::with_capacity(row.len());
-    for (sleeve, limits) in row {
-        let Some(strategy) = known.get(sleeve.as_str()) else {
-            // A share of the account earmarked for something that is not
-            // running is not harmless: the sums that prove the partition fits
-            // inside the account would count capital nobody can spend, and the
-            // engine would be enforcing a different partition from the fleet.
-            return Err(bad(format!(
-                "sleeve_limits names {sleeve:?}, which this engine does not run \
-                 (it runs: {})",
-                if inputs.sleeves.is_empty() {
-                    "nothing".to_string()
-                } else {
-                    inputs
-                        .sleeves
-                        .iter()
-                        .map(|(name, _)| *name)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-            )));
-        };
-        let limits = limits.as_object().ok_or_else(|| {
-            bad(format!("account_risk.sleeve_limits.{sleeve} must be an object"))
-        })?;
-        let where_ = format!("sleeve_limits.{sleeve}");
-        reject_unknown_keys(limits, SLEEVE_LIMIT_KEYS, &[], &where_)?;
-        allocations.push(StrategyAllocation {
-            strategy: *strategy,
-            max_gross_notional_usdt: number(limits, "max_gross_notional_usdt", &where_)?,
-            max_initial_margin_usdt: number(limits, "max_initial_margin_usdt", &where_)?,
-        });
-    }
-    // Stable order so two loads of one file produce equal configs.
-    allocations.sort_by_key(|share| share.strategy.0);
-    Ok(allocations)
 }

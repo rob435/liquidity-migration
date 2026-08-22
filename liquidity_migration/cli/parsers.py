@@ -235,8 +235,6 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     long_demo.add_argument(
         "--execution-environment",
         required=True,
-        # The profile's sleeve partition means LONG cannot spend CARRY's share
-        # and CARRY cannot spend LONG's.
         choices=EXECUTION_ENVIRONMENT_CHOICES,
         help="Select exactly one account target owner; producers never submit orders.",
     )

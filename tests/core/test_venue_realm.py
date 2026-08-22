@@ -82,10 +82,10 @@ def test_the_durable_route_identity_carries_the_realm(tmp_path: Path) -> None:
 
 
 
-def test_mainnet_is_a_choice_only_for_partitioned_sleeves_and_never_a_default() -> None:
-    """CARRY and LONG may address the mainnet owner; nothing defaults to it. LONG can
-    only join because the profile's ``sleeve_limits`` partition means it cannot spend
-    CARRY's share. CONTINUOUS is retired and stays ``demo``-only.
+def test_mainnet_is_a_choice_only_for_the_funded_sleeves_and_never_a_default() -> None:
+    """CARRY and LONG may address the mainnet owner; nothing defaults to it.
+
+    CONTINUOUS is retired and stays ``demo``-only.
     """
 
     partitioned = {

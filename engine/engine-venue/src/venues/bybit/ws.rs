@@ -30,11 +30,11 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
-use crate::clock::{mono_ns, wall_ms};
+use crate::{mono_ns, wall_ms};
 use crate::creds::Credentials;
-use crate::parse::{num_field, opt_num_field, str_field};
-use crate::realm::VenueRealm;
-use crate::sign::ws_signature;
+use crate::json::{num_field, opt_num_field, str_field};
+use super::realm::VenueRealm;
+use super::sign::ws_signature;
 
 /// Bybit drops a private socket that goes quiet for 30 seconds.
 const PING_EVERY: Duration = Duration::from_secs(20);
@@ -77,7 +77,7 @@ impl BybitOrderFeed {
     /// from the environment. Like the gateway, mainnet fails here unless the
     /// owner has armed `REAL_MONEY`.
     pub fn new(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
-        let creds = Credentials::from_env(realm)?;
+        let creds = realm.credentials()?;
         Ok(Self::build(realm.private_ws(), creds, symbols))
     }
 

@@ -7,15 +7,15 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use engine_marketdata::BybitPublicFeed;
+use engine_marketdata::MarketFeeds;
 use engine_risk::{
-    EnvelopeConfig, Kernel, KernelConfig, PartitionConfig, StrategyAllocation,
+    EnvelopeConfig, Kernel, KernelConfig,
 };
 use engine_strategies::build_strategy;
 use engine_types::{
     AccountIdentity, Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
 };
-use engine_venue::{BybitOrderFeed, Venue, VenueRealm};
+use engine_venue::{OrderFeeds, Venue, VenueName};
 use engine_wal::WalWriter;
 use serde::Deserialize;
 
@@ -98,26 +98,38 @@ pub fn boot_subscriptions(symbols: &[Symbol], wanted: &[Subscription]) -> Vec<Su
     subs
 }
 
-/// Bybit's public market stream, subscribed to exactly what was asked.
-pub fn market_feed(wanted: &[Subscription]) -> BybitPublicFeed {
-    BybitPublicFeed::new(wanted)
+/// Read the config's venue name — the switch, turned once.
+///
+/// Every one of the three constructors below takes the value this returns, so
+/// the gateway, the private order stream and the public market feed are all
+/// the same venue by construction. None of them is handed a name of its own to
+/// get wrong.
+///
+/// An unknown name is refused rather than defaulted: a typo that quietly fell
+/// back to some other venue would be a strategy trading somewhere nobody
+/// chose.
+pub fn venue_name(name: &str) -> Result<VenueName, VenueError> {
+    VenueName::parse(name)
 }
 
-/// The venue's private order stream, on the same account the gateway trades.
-///
-/// The realm is taken from the built venue rather than re-read from config,
-/// so the stream that reports fills and the gateway that causes them cannot
-/// end up on different accounts.
-pub fn order_feed(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<BybitOrderFeed, VenueError> {
-    BybitOrderFeed::new(realm, symbols)
+/// The chosen venue's public market stream, subscribed to exactly what was
+/// asked.
+pub fn market_feed(name: VenueName, wanted: &[Subscription]) -> MarketFeeds {
+    MarketFeeds::build(name, wanted)
+}
+
+/// The chosen venue's private order stream, on the same account the gateway
+/// trades — so the stream that reports fills and the gateway that causes them
+/// cannot end up on different accounts.
+pub fn order_feed(name: VenueName, symbols: Vec<Symbol>) -> Result<OrderFeeds, VenueError> {
+    OrderFeeds::build(name, symbols)
 }
 
 /// The venue the config named (credentials from the environment). The name
 /// picks one of the adapters compiled into the venue crate — it is not an
-/// address, and an unknown name is refused rather than defaulted to
-/// somewhere nobody chose.
-pub fn venue(name: &str, symbols: Vec<Symbol>) -> Result<Venue, VenueError> {
-    Venue::by_name(name, symbols)
+/// address.
+pub fn venue(name: VenueName, symbols: Vec<Symbol>) -> Result<Venue, VenueError> {
+    Venue::build(name, symbols)
 }
 
 /// Every target book this engine watches, each bound to the one strategy that
@@ -249,7 +261,6 @@ pub fn heartbeat(
 struct RiskSection {
     max_account_view_age_s: u64,
     leverage: f64,
-    min_order_notional_usdt: f64,
     #[serde(default = "default_qty_tolerance")]
     qty_tolerance: f64,
     envelope: EnvelopeSection,
@@ -280,7 +291,6 @@ struct ProfileRiskSection {
     /// The operational profile to read, e.g. `configs/operational.mainnet.json`.
     operational_profile_path: PathBuf,
     max_account_view_age_s: u64,
-    min_order_notional_usdt: f64,
     /// How far a position may move against it before its stop ends it. Not in
     /// the profile — it is `DISASTER_STOP_FRACTION` on the host — so it is
     /// named here rather than guessed.
@@ -291,52 +301,19 @@ fn default_qty_tolerance() -> f64 {
     1e-12
 }
 
-/// The three capital controls, from one of two places.
+/// The capital controls, from one of two places.
 ///
-/// Either the caps are written out in `[risk]`, and each strategy's
-/// `capital_usdt` is its margin share of the partition; or `[risk]` names the
-/// fleet's operational profile and the caps and the sleeve shares come from
-/// that document. Naming a profile is what the funded account does, so the
-/// engine and the Python fleet are held to one file rather than to two copies
-/// of it.
-///
-/// Either way `Kernel::new` proves the shares fit inside the account caps and
-/// refuses a config that does not.
-pub fn risk(
-    section: &toml::Table,
-    strategies: &[StrategyConfig],
-) -> Result<Kernel, Box<dyn Error>> {
+/// Either the caps are written out in `[risk]`, or `[risk]` names the fleet's
+/// operational profile and they come from that document. Naming a profile is
+/// what the funded account does, so the engine and the Python fleet are held
+/// to one file rather than to two copies of it.
+pub fn risk(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
     if section.contains_key("operational_profile_path") {
-        return risk_from_profile(section, strategies);
+        return risk_from_profile(section);
     }
     let parsed: RiskSection = toml::Value::Table(section.clone())
         .try_into()
         .map_err(|e| format!("the [risk] block is wrong: {e}"))?;
-    let mut allocations = Vec::with_capacity(strategies.len());
-    for (index, s) in strategies.iter().enumerate() {
-        let Some(capital_usdt) = s.capital_usdt else {
-            return Err(format!(
-                "strategy \"{}\" has no capital_usdt, and [risk] names no \
-                 operational_profile_path — one of the two has to say how much of the \
-                 account this strategy may use",
-                s.name
-            )
-            .into());
-        };
-        if s.sleeve.is_some() {
-            return Err(format!(
-                "strategy \"{}\" names a sleeve, but [risk] names no \
-                 operational_profile_path — there is no profile for that sleeve to be in",
-                s.name
-            )
-            .into());
-        }
-        allocations.push(StrategyAllocation {
-            strategy: StrategyId(index as u16),
-            max_gross_notional_usdt: capital_usdt * parsed.leverage,
-            max_initial_margin_usdt: capital_usdt,
-        });
-    }
     let cfg = KernelConfig {
         max_account_view_age_ns: parsed.max_account_view_age_s.saturating_mul(1_000_000_000),
         envelope: EnvelopeConfig {
@@ -350,63 +327,17 @@ pub fn risk(
             max_component_gross_notional_usdt: parsed.envelope.max_component_gross_notional_usdt,
             max_initial_margin_usdt: parsed.envelope.max_initial_margin_usdt,
         },
-        partition: PartitionConfig {
-            allocations,
-            leverage: parsed.leverage,
-            min_order_notional_usdt: parsed.min_order_notional_usdt,
-        },
+        leverage: parsed.leverage,
         qty_tolerance: parsed.qty_tolerance,
     };
     Ok(Kernel::new(cfg).map_err(|e| format!("the risk kernel refuses this config: {e}"))?)
 }
 
 /// The caps, read from the fleet's own operational profile.
-///
-/// Every strategy must appear in the profile's `sleeve_limits`, and every
-/// sleeve in the profile must be a strategy the engine runs. Both directions
-/// matter and they fail differently:
-///
-/// - A sleeve with no strategy is caught by the profile loader. Its share
-///   would be counted in the sums that prove the partition fits, so the other
-///   sleeves would look smaller than they are.
-/// - A strategy with no sleeve is caught here. The kernel refuses every order
-///   from a strategy the partition does not name, so it would start, subscribe,
-///   decide, and have every order denied — a sleeve that is running and cannot
-///   trade, which reads from the outside like a quiet market.
-fn risk_from_profile(
-    section: &toml::Table,
-    strategies: &[StrategyConfig],
-) -> Result<Kernel, Box<dyn Error>> {
+fn risk_from_profile(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
     let parsed: ProfileRiskSection = toml::Value::Table(section.clone())
         .try_into()
         .map_err(|e| format!("the [risk] block is wrong: {e}"))?;
-
-    for s in strategies {
-        if s.capital_usdt.is_some() {
-            return Err(format!(
-                "strategy \"{}\" sets capital_usdt, but [risk] takes the sleeve shares from \
-                 {}. Two answers to one question: take the capital_usdt line out.",
-                s.name,
-                parsed.operational_profile_path.display()
-            )
-            .into());
-        }
-    }
-
-    let mut sleeves: Vec<(&str, StrategyId)> = Vec::with_capacity(strategies.len());
-    for (index, s) in strategies.iter().enumerate() {
-        let name = s.sleeve_name();
-        if let Some((_, first)) = sleeves.iter().find(|(seen, _)| *seen == name) {
-            return Err(format!(
-                "two strategy blocks both claim the sleeve \"{name}\" (the first is #{}); \
-                 one sleeve is one share of the account, so give one of them its own \
-                 `sleeve = ...`",
-                first.0
-            )
-            .into());
-        }
-        sleeves.push((name, StrategyId(index as u16)));
-    }
 
     let text = std::fs::read_to_string(&parsed.operational_profile_path).map_err(|e| {
         format!(
@@ -418,9 +349,7 @@ fn risk_from_profile(
         &text,
         &engine_risk::ProfileInputs {
             disaster_stop_fraction: parsed.disaster_stop_fraction,
-            min_order_notional_usdt: parsed.min_order_notional_usdt,
             max_account_view_age_ns: parsed.max_account_view_age_s.saturating_mul(1_000_000_000),
-            sleeves: &sleeves,
         },
     )
     .map_err(|e| {
@@ -430,35 +359,18 @@ fn risk_from_profile(
         )
     })?;
 
-    // The other direction. An empty partition means the profile named no
-    // sleeves at all, which is a legitimate unpartitioned profile — there the
-    // account caps bind and no strategy is left unable to trade.
-    if !cfg.partition.allocations.is_empty() {
-        for (name, id) in &sleeves {
-            if cfg.partition.share(*id).is_none() {
-                return Err(format!(
-                    "the engine runs the sleeve \"{name}\", but {} gives it no share of the \
-                     account. It would start and then have every order refused.",
-                    parsed.operational_profile_path.display()
-                )
-                .into());
-            }
-        }
-    }
-
     tracing::info!(
         profile = %parsed.operational_profile_path.display(),
         reference_usdt = cfg.envelope.reference_usdt,
         account_gross_cap_usdt = cfg.envelope.account_gross_cap_usdt(),
-        sleeves = cfg.partition.allocations.len(),
         "capital limits read from the fleet's operational profile"
     );
     Ok(Kernel::new(cfg).map_err(|e| format!("the risk kernel refuses this config: {e}"))?)
 }
 
-/// Name plus config block to a live strategy, ids in block order — the same
-/// order the partition shares were derived in.
+/// Name plus config block to a live strategy, ids in block order.
 pub fn strategies(configured: &[StrategyConfig]) -> Result<Vec<Box<dyn Strategy>>, Box<dyn Error>> {
+    one_name_per_sleeve(configured)?;
     let mut out: Vec<Box<dyn Strategy>> = Vec::with_capacity(configured.len());
     for (index, cfg) in configured.iter().enumerate() {
         let id = StrategyId(u16::try_from(index).map_err(|_| "more than 65535 strategies")?);
@@ -511,6 +423,29 @@ fn one_owner_per_symbol(built: &[Box<dyn Strategy>]) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+/// A sleeve name belongs to one block.
+///
+/// The name is what the log's id table, the heartbeat and the fill-cost report
+/// call this strategy. Two blocks answering to one name make every row in
+/// those three ambiguous, and both of this fleet's sleeves run the same plug,
+/// so the name is all there is to tell them apart.
+fn one_name_per_sleeve(configured: &[StrategyConfig]) -> Result<(), Box<dyn Error>> {
+    let mut seen: Vec<&str> = Vec::with_capacity(configured.len());
+    for (index, cfg) in configured.iter().enumerate() {
+        let name = cfg.sleeve_name();
+        if let Some(first) = seen.iter().position(|taken| *taken == name) {
+            return Err(format!(
+                "two strategy blocks both claim the sleeve \"{name}\" (#{first} and \
+                 #{index}); the log, the heartbeat and the cost report all name a sleeve \
+                 by this string, so give one of them its own `sleeve = ...`"
+            )
+            .into());
+        }
+        seen.push(name);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,7 +461,7 @@ mod tests {
         "#
         ))
         .expect("test config parses");
-        StrategyConfig { name: "touch_sniper".into(), capital_usdt: Some(50.0), sleeve: None, book_path: None, params }
+        StrategyConfig { name: "touch_sniper".into(), sleeve: None, book_path: None, params }
     }
 
     fn quoter(symbol: &str) -> StrategyConfig {
@@ -541,14 +476,13 @@ mod tests {
         "#
         ))
         .expect("test config parses");
-        StrategyConfig { name: "quoter".into(), capital_usdt: Some(50.0), sleeve: None, book_path: None, params }
+        StrategyConfig { name: "quoter".into(), sleeve: None, book_path: None, params }
     }
 
     /// The shipped engine.toml `[risk]` block.
     const RISK: &str = r#"
 max_account_view_age_s = 120
 leverage = 2.0
-min_order_notional_usdt = 1.0
 
 [envelope]
 tracks_equity = true
@@ -568,7 +502,7 @@ max_initial_margin_usdt = 100.0
 
     #[test]
     fn the_shipped_risk_block_builds_a_kernel() {
-        assert!(risk(&risk_block(RISK), &[sniper("BTCUSDT")]).is_ok());
+        assert!(risk(&risk_block(RISK)).is_ok());
     }
 
     #[test]
@@ -584,7 +518,7 @@ max_initial_margin_usdt = 100.0
                 .filter(|line| !line.starts_with(key))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let err = risk(&risk_block(&without), &[sniper("BTCUSDT")])
+            let err = risk(&risk_block(&without))
                 .err()
                 .unwrap_or_else(|| panic!("a block with no {key} must not boot"));
             let text = err.to_string();
@@ -634,34 +568,8 @@ max_initial_margin_usdt = 100.0
             r#"
 operational_profile_path = "../../configs/{profile}"
 max_account_view_age_s = 120
-min_order_notional_usdt = 1.0
 disaster_stop_fraction = 0.35
 "#
-        ))
-    }
-
-    /// The funded profile with a partition added, written where a `[risk]`
-    /// block can point at it. Neither committed profile carries one, so the
-    /// sleeve-to-strategy proofs need a document that does. `tag` keeps
-    /// parallel tests off each other's file.
-    fn partitioned_profile_risk(tag: &str) -> toml::Table {
-        let raw = std::fs::read_to_string("../../configs/operational.mainnet.json")
-            .expect("the funded profile must be readable");
-        let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        doc["account_risk"]["sleeve_limits"] = serde_json::json!({
-            "carry": {"max_gross_notional_usdt": 200.0, "max_initial_margin_usdt": 40.0},
-            "long": {"max_gross_notional_usdt": 300.0, "max_initial_margin_usdt": 60.0},
-        });
-        let path = std::env::temp_dir().join(format!("engine-partitioned-{tag}.json"));
-        std::fs::write(&path, doc.to_string()).expect("the temp profile must be writable");
-        risk_block(&format!(
-            r#"
-operational_profile_path = "{}"
-max_account_view_age_s = 120
-min_order_notional_usdt = 1.0
-disaster_stop_fraction = 0.35
-"#,
-            path.display()
         ))
     }
 
@@ -673,80 +581,41 @@ disaster_stop_fraction = 0.35
         }
     }
 
-    /// A strategy block in profile mode: no capital of its own, a sleeve name.
+    /// A strategy block that names its own sleeve.
     fn sleeve_strategy(sleeve: &str, symbol: &str) -> StrategyConfig {
         let mut cfg = sniper(symbol);
-        cfg.capital_usdt = None;
         cfg.sleeve = Some(sleeve.to_string());
         cfg
     }
 
     #[test]
     fn the_shipped_mainnet_profile_builds_a_kernel() {
-        let sleeves = [
-            sleeve_strategy("carry", "BTCUSDT"),
-            sleeve_strategy("long", "ETHUSDT"),
-        ];
-        risk(&profile_risk("operational.mainnet.json"), &sleeves)
+        risk(&profile_risk("operational.mainnet.json"))
             .expect("the funded account's own profile must build a kernel");
     }
 
     #[test]
-    fn a_strategy_that_also_states_its_capital_is_refused() {
-        // Two answers to one question. Which one binds would depend on which
-        // line someone read.
-        let mut sleeves = vec![
-            sleeve_strategy("carry", "BTCUSDT"),
-            sleeve_strategy("long", "ETHUSDT"),
-        ];
-        sleeves[0].capital_usdt = Some(40.0);
-        let err = refusal(risk(&profile_risk("operational.mainnet.json"), &sleeves), "capital_usdt beside a profile was accepted");
-        assert!(err.to_string().contains("capital_usdt"), "{err}");
-    }
-
-    #[test]
     fn caps_written_beside_a_named_profile_are_refused() {
-        // The same worry from the other side: an [envelope] block left in the
-        // file when the profile took over would be a set of limits nobody is
-        // enforcing, sitting somewhere an operator would read them.
+        // An [envelope] block left in the file when the profile took over
+        // would be a set of limits nobody is enforcing, sitting somewhere an
+        // operator would read them.
         let mut block = profile_risk("operational.mainnet.json");
         block.insert("leverage".into(), toml::Value::Float(2.0));
-        let err = refusal(risk(&block, &[sleeve_strategy("carry", "BTCUSDT")]), "a stray cap beside a profile was accepted");
+        let err = refusal(risk(&block), "a stray cap beside a profile was accepted");
         assert!(err.to_string().contains("leverage"), "{err}");
     }
 
     #[test]
-    fn a_sleeve_the_profile_does_not_fund_is_refused() {
-        // It would boot, subscribe, decide, and have every order denied by the
-        // partition -- which from outside looks like a quiet market.
-        let sleeves = [
-            sleeve_strategy("carry", "BTCUSDT"),
-            sleeve_strategy("long", "ETHUSDT"),
-            sleeve_strategy("hedge", "SOLUSDT"),
-        ];
-        let err = refusal(risk(&partitioned_profile_risk("unfunded"), &sleeves), "an unfunded sleeve was accepted");
-        assert!(err.to_string().contains("hedge"), "{err}");
-    }
-
-    #[test]
-    fn a_profile_sleeve_with_no_strategy_is_refused() {
-        // The other direction. Its share is counted in the sums that prove the
-        // partition fits inside the account, so leaving it out would make the
-        // sleeves that are running look smaller than they are.
-        let err = refusal(risk(
-            &partitioned_profile_risk("no-strategy"),
-            &[sleeve_strategy("carry", "BTCUSDT")],
-        ), "a profile naming a sleeve nobody runs was accepted");
-        assert!(err.to_string().contains("long"), "{err}");
-    }
-
-    #[test]
-    fn two_strategies_cannot_claim_one_sleeve() {
-        let sleeves = [
+    fn two_strategy_blocks_cannot_answer_to_one_name() {
+        // The log's id table, the heartbeat and the cost report all name a
+        // sleeve by this string, and both of this fleet's sleeves run the same
+        // plug — so two blocks under one name make every row ambiguous.
+        let Err(err) = strategies(&[
             sleeve_strategy("carry", "BTCUSDT"),
             sleeve_strategy("carry", "ETHUSDT"),
-        ];
-        let err = refusal(risk(&profile_risk("operational.mainnet.json"), &sleeves), "one share of the account was handed to two strategies");
+        ]) else {
+            panic!("one name was handed to two strategy blocks");
+        };
         assert!(err.to_string().contains("carry"), "{err}");
     }
 
@@ -791,7 +660,6 @@ disaster_stop_fraction = 0.35
             .enumerate()
             .map(|(i, path)| StrategyConfig {
                 name: format!("s{i}"),
-                capital_usdt: Some(10.0),
                 sleeve: None,
                 book_path: path.map(PathBuf::from),
                 params: toml::Table::new(),
@@ -911,7 +779,6 @@ disaster_stop_fraction = 0.35
     #[test]
     fn the_sleeve_name_falls_back_to_the_strategy_name() {
         let mut cfg = sniper("BTCUSDT");
-        cfg.capital_usdt = None;
         assert_eq!(cfg.sleeve_name(), "touch_sniper");
         cfg.sleeve = Some("carry".into());
         assert_eq!(cfg.sleeve_name(), "carry");
@@ -919,27 +786,11 @@ disaster_stop_fraction = 0.35
 
     #[test]
     fn a_missing_profile_file_says_which_file() {
-        let err = refusal(risk(
-            &profile_risk("operational.does-not-exist.json"),
-            &[sleeve_strategy("carry", "BTCUSDT")],
-        ), "a missing profile was accepted");
+        let err = refusal(
+            risk(&profile_risk("operational.does-not-exist.json")),
+            "a missing profile was accepted",
+        );
         assert!(err.to_string().contains("does-not-exist"), "{err}");
-    }
-
-    #[test]
-    fn without_a_profile_a_strategy_must_still_state_its_capital() {
-        let mut cfg = sniper("BTCUSDT");
-        cfg.capital_usdt = None;
-        let err = refusal(risk(&risk_block(RISK), &[cfg]), "a strategy with no capital booted");
-        assert!(err.to_string().contains("capital_usdt"), "{err}");
-    }
-
-    #[test]
-    fn without_a_profile_a_sleeve_name_means_nothing_and_is_refused() {
-        let mut cfg = sniper("BTCUSDT");
-        cfg.sleeve = Some("carry".into());
-        let err = refusal(risk(&risk_block(RISK), &[cfg]), "a sleeve with no profile booted");
-        assert!(err.to_string().contains("sleeve"), "{err}");
     }
 
     #[test]
@@ -977,10 +828,10 @@ disaster_stop_fraction = 0.35
             quote("DOGEUSDT"), // the new seed the log already knows
         ];
         let symbols = symbol_order(&replayed, &wanted);
-        let feed = market_feed(&boot_subscriptions(&symbols, &wanted));
+        let feed = market_feed(VenueName::BybitDemo, &boot_subscriptions(&symbols, &wanted));
         for (position, name) in symbols.iter().enumerate() {
             assert_eq!(
-                feed.symbols().get(name),
+                feed.id_of(name),
                 Some(engine_types::SymbolId(position as u16)),
                 "{name} must sit at the same position in the feed's table as in \
                  the core's, or its prices arrive under another symbol's id"
@@ -1021,7 +872,7 @@ mod deployed_templates {
         let config = config_from(template, profile);
         let built = strategies(&config.strategies)
             .unwrap_or_else(|e| panic!("{template} must build its strategies: {e}"));
-        risk(&config.risk, &config.strategies)
+        risk(&config.risk)
             .unwrap_or_else(|e| panic!("{template} must build its risk kernel: {e}"));
         target_books(&config.engine, &config.strategies, &built)
             .unwrap_or_else(|e| panic!("{template} must wire its books: {e}"));

@@ -6,6 +6,11 @@ license.workspace = true
 
 [dependencies]
 engine-types = { path = "../engine-types" }
+# For the venue realm tables. Market data is public and needs no credential,
+# but it does need a hostname — and every venue host this engine knows is
+# written in exactly one file per venue, which lives over there. Importing the
+# table is what keeps that true of this crate too.
+engine-venue = { path = "../engine-venue" }
 futures-util = "0.3.34"
 # The TLS provider tokio-tungstenite leaves for the caller to choose. Same
 # provider engine-venue already picked, so the workspace links one.

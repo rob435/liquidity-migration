@@ -78,7 +78,11 @@ fn quick_tick() -> EngineSection {
 fn every_tick(path: &std::path::Path) -> Heartbeat {
     Heartbeat::with_every(
         path.to_path_buf(),
-        Some(AccountIdentity { user_id: "6039967".into(), realm: "demo".into() }),
+        Some(AccountIdentity {
+            venue: "bybit".into(),
+            user_id: "6039967".into(),
+            realm: "demo".into(),
+        }),
         Some(std::path::PathBuf::from(
             "/run/lock/liquidity-migration/bybit-demo-user-6039967.lock",
         )),
