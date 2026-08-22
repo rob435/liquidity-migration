@@ -247,9 +247,12 @@ file.
   are derivable from the log alone; the signed markout at 1 s / 15 s / 1 min /
   5 min is written when its horizon comes due, because a log holds no prices.
   Names and signs are `docs/architecture.md` §Trade diagnostics. `engine fills
-  --wal PATH` is the read, per sleeve and symbol; five of the numbers are in the
-  heartbeat. **`M0` is the top of book**, so nothing here measures impact. The
-  engine is the only writer of these receipts, for its own fills only.
+  --wal PATH` is the read, one row per sleeve and coin — keyed by the names the
+  ids meant where each record sits, because the id tables are rebuilt every
+  boot. Five of the numbers are in the heartbeat. **`M0` is the top of book**,
+  so nothing here measures impact. A fill the private stream missed and the
+  venue's execution history gave back is priced like any other. The engine is
+  the only writer of these receipts, for its own fills only.
 - **A deploy restarts both engines.** They share one binary, and
   `mainnet-engine-ok` prints beside `engine-ok`. Verify a deploy by a field only
   the new code produces, read on **both** heartbeats — "active" says nothing

@@ -44,6 +44,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use engine_types::{MarketState, OrderUpdate, Side, StrategyId, SymbolId, WalRecord};
 
+use crate::replay::LogNames;
+
 /// The horizons a markout is read at (`docs/architecture.md`: 1 s, 15 s,
 /// 1 min, 5 min). A 50 ms markout is deliberately absent there and absent
 /// here: it is only honest with exact raw observations and clock bounds, and
@@ -205,8 +207,13 @@ pub struct Costs {
     pub all_in: Weighted,
     /// One per entry in [`HORIZONS_MS`].
     pub markout: [Weighted; HORIZONS_MS.len()],
-    /// Fills whose horizon came and went without a readable book.
+    /// Horizons that came and went without a readable book.
     pub marks_unmeasurable: u64,
+    /// Horizons whose book was read, too long after the horizon for the number
+    /// to be that horizon's. Kept apart from the line above because they say
+    /// different things about the run: one is a market that went quiet, the
+    /// other is this process falling behind.
+    pub marks_late: u64,
 }
 
 impl Costs {
@@ -243,6 +250,7 @@ impl Costs {
             mine.merge(theirs);
         }
         self.marks_unmeasurable += other.marks_unmeasurable;
+        self.marks_late += other.marks_late;
     }
 }
 
@@ -313,37 +321,109 @@ impl Owed {
 /// and a window that usually reports nothing is not a measurement.
 #[derive(Default)]
 pub struct Fills {
-    /// Keyed `(strategy, symbol)` and ordered, so a report reads the same way
-    /// twice.
-    by_key: BTreeMap<(u16, u16), Costs>,
+    /// Keyed by the sleeve's and the coin's *names* and ordered, so a report
+    /// reads the same way twice.
+    ///
+    /// Not by id. An id means whatever the table in force said it meant, and
+    /// that table is rebuilt every boot: symbol 8 has been both HYPEUSDT and
+    /// BICOUSDT in one log, and strategy 3 was a sleeve since retired. Keyed
+    /// by id, a report over a log that spans boots adds two coins' trading
+    /// into one row and labels it with whichever name the last table carried.
+    by_key: BTreeMap<(String, String), Costs>,
+    /// What the ids mean right now, kept current by [`Fills::learn`].
+    names: LogNames,
     pending: VecDeque<Owed>,
     /// Fills dropped from `pending` because too many were waiting at once.
     pub dropped: u64,
     /// Private-stream reconnections. Every one is a window in which fills
-    /// happened and were never delivered, so everything here is short by
-    /// however many — and a report that did not say so would be claiming to
-    /// be a complete account of what the trading cost.
+    /// happened and were never delivered.
     pub stream_gaps: u64,
+    /// Fills the stream never delivered and the venue's own execution history
+    /// gave up afterwards. Counted separately because they are the answer to
+    /// `stream_gaps`: without them a reader has to assume the worst.
+    pub recovered: u64,
 }
 
 impl Fills {
-    /// The private stream reconnected, so fills may have been lost in the gap.
+    /// The id tables changed. Both callers say so at the moment the change is
+    /// recorded, which is what lets a row be keyed by name rather than by an
+    /// id whose meaning does not survive the next boot.
+    pub fn learn(&mut self, record: &WalRecord) {
+        self.names.learn(record);
+    }
+
+    /// What a row for this fill or mark is called, as the ids read right now.
+    fn key(&self, strategy: StrategyId, symbol: SymbolId) -> (String, String) {
+        (self.names.strategy(strategy), self.names.symbol(symbol))
+    }
+
+    /// The private stream reconnected, so fills were delivered to nobody while
+    /// it was down.
     ///
-    /// Nothing here can recover them: the engine refreshes its account reading
-    /// to repair its idea of exposure, but the individual fills and their
-    /// prices are gone. All this can do is remember that the account below is
-    /// incomplete, and say so.
+    /// The engine asks the venue for its own execution history afterwards and
+    /// recovers what it can; a recovered fill is priced here like any other,
+    /// and counted again as recovered so a report can say how much of itself
+    /// arrived the slow way.
     pub fn stream_gap(&mut self) {
         self.stream_gaps += 1;
     }
 
-    /// Price one fill and start its markout clock.
-    pub fn on_fill(&mut self, fill: &Fill, now_ns: u64) {
+    /// A fill the private stream never delivered, read back from the venue's
+    /// own execution history. Priced exactly like a delivered one.
+    ///
+    /// `filled_ns` is when it happened, not when it was found. A recovery that
+    /// runs seconds later still gets real markouts; one that runs minutes later
+    /// finds every horizon already past, and the lateness bound throws those
+    /// reads away rather than marking a stale trade against a fresh book.
+    /// `None` is a fill older than the engine's clock, whose origin is this
+    /// process: it cost what it cost, and it is owed no mark at all.
+    pub fn on_recovered_fill(&mut self, fill: &Fill, filled_ns: Option<u64>) {
+        self.recovered += 1;
+        match filled_ns {
+            Some(filled_ns) => self.on_fill(fill, filled_ns),
+            None => {
+                self.price(fill);
+            }
+        }
+    }
+
+    /// Price one fill and start its markout clock. `filled_ns` is when the
+    /// fill happened on the engine's own clock.
+    pub fn on_fill(&mut self, fill: &Fill, filled_ns: u64) {
+        let notional = self.price(fill);
+
+        // `usable`, not `is_finite`: a zero-notional fill would otherwise be
+        // owed marks that are measured, written to the log, and then dropped
+        // by a weight of zero -- counted neither in the average nor in the
+        // tally of what could not be measured.
+        if !usable(fill.px) || !usable(notional) {
+            // Nothing later could be measured against this, so do not hold a
+            // slot open for it.
+            return;
+        }
+        if self.pending.len() >= MAX_PENDING {
+            self.pending.pop_front();
+            self.dropped += 1;
+        }
+        self.pending.push_back(Owed {
+            client_order_id: fill.client_order_id.clone(),
+            strategy: fill.strategy,
+            symbol: fill.symbol,
+            side: fill.side,
+            px: fill.px,
+            notional_usdt: notional,
+            fill_ts_ms: fill.venue_ts_ms,
+            filled_ns,
+            owed: (1u8 << HORIZONS_MS.len()) - 1,
+        });
+    }
+
+    /// What one fill cost, folded into its row. Returns the notional, which is
+    /// the weight every mark it is later owed carries.
+    fn price(&mut self, fill: &Fill) -> f64 {
         let notional = (fill.px * fill.qty).abs();
-        let costs = self
-            .by_key
-            .entry((fill.strategy.0, fill.symbol.0))
-            .or_default();
+        let key = self.key(fill.strategy, fill.symbol);
+        let costs = self.by_key.entry(key).or_default();
         costs.fills += 1;
         if fill.is_maker {
             costs.maker_fills += 1;
@@ -368,31 +448,7 @@ impl Fills {
         if let (Some(shortfall), Some(fee)) = (shortfall, fee) {
             costs.all_in.add(shortfall + fee, notional);
         }
-
-        // `usable`, not `is_finite`: a zero-notional fill would otherwise be
-        // owed marks that are measured, written to the log, and then dropped
-        // by a weight of zero -- counted neither in the average nor in the
-        // tally of what could not be measured.
-        if !usable(fill.px) || !usable(notional) {
-            // Nothing later could be measured against this, so do not hold a
-            // slot open for it.
-            return;
-        }
-        if self.pending.len() >= MAX_PENDING {
-            self.pending.pop_front();
-            self.dropped += 1;
-        }
-        self.pending.push_back(Owed {
-            client_order_id: fill.client_order_id.clone(),
-            strategy: fill.strategy,
-            symbol: fill.symbol,
-            side: fill.side,
-            px: fill.px,
-            notional_usdt: notional,
-            fill_ts_ms: fill.venue_ts_ms,
-            filled_ns: now_ns,
-            owed: (1u8 << HORIZONS_MS.len()) - 1,
-        });
+        notional
     }
 
     /// Read every markout that has come due, and fold it in. Called from the
@@ -456,10 +512,8 @@ impl Fills {
         // averaged into the one-second column at full weight and read as a
         // one-second fact.
         if mark.actual_horizon_ms > mark.horizon_ms.saturating_add(LATENESS_BOUND_MS) {
-            self.by_key
-                .entry((mark.strategy.0, mark.symbol.0))
-                .or_default()
-                .marks_unmeasurable += 1;
+            let key = self.key(mark.strategy, mark.symbol);
+            self.by_key.entry(key).or_default().marks_late += 1;
             return;
         }
         let Some(index) = HORIZONS_MS.iter().position(|h| *h == mark.horizon_ms) else {
@@ -467,10 +521,8 @@ impl Fills {
             // wrong bucket would be worse than not counting it.
             return;
         };
-        let costs = self
-            .by_key
-            .entry((mark.strategy.0, mark.symbol.0))
-            .or_default();
+        let key = self.key(mark.strategy, mark.symbol);
+        let costs = self.by_key.entry(key).or_default();
         match mark.signed_markout_bps {
             Some(bps) => costs.markout[index].add(bps, mark.notional_usdt),
             None => costs.marks_unmeasurable += 1,
@@ -486,18 +538,18 @@ impl Fills {
         total
     }
 
-    /// Per strategy and symbol, in a stable order.
-    pub fn rows(&self) -> impl Iterator<Item = (StrategyId, SymbolId, &Costs)> {
+    /// Per sleeve and coin, in a stable order.
+    pub fn rows(&self) -> impl Iterator<Item = (&str, &str, &Costs)> {
         self.by_key
             .iter()
-            .map(|((strategy, symbol), costs)| (StrategyId(*strategy), SymbolId(*symbol), costs))
+            .map(|((strategy, symbol), costs)| (strategy.as_str(), symbol.as_str(), costs))
     }
 
-    /// One strategy's trading, across every symbol it touched.
-    pub fn for_strategy(&self, strategy: StrategyId) -> Costs {
+    /// One sleeve's trading, across every coin it touched.
+    pub fn for_strategy(&self, strategy: &str) -> Costs {
         let mut total = Costs::default();
-        for ((sid, _), costs) in self.by_key.iter() {
-            if *sid == strategy.0 {
+        for ((sleeve, _), costs) in self.by_key.iter() {
+            if sleeve == strategy {
                 total.merge(costs);
             }
         }
@@ -522,6 +574,9 @@ impl Fills {
         let mut sent: HashMap<&str, (StrategyId, f64)> = HashMap::new();
         let mut me = Fills::default();
         for record in records {
+            // Before the record is folded, never after: a row is keyed by what
+            // its ids meant at its own place in the log, not at the end of it.
+            me.learn(record);
             match record {
                 WalRecord::OrderSent {
                     request,
@@ -595,6 +650,40 @@ impl Fills {
                 WalRecord::OrderUpdate {
                     update: OrderUpdate::StreamReset { .. },
                 } => me.stream_gap(),
+                // What the stream missed, read back off the venue. The same
+                // join as a delivered fill -- through the order that produced
+                // it -- so one with no order of ours is priced for nobody.
+                WalRecord::RecoveredFill {
+                    client_order_id,
+                    symbol,
+                    side,
+                    qty,
+                    px,
+                    fee,
+                    is_maker,
+                    venue_ts_ms,
+                    ..
+                } => {
+                    let Some((strategy, arrival_mid)) = sent.get(client_order_id.as_str()).copied()
+                    else {
+                        continue;
+                    };
+                    me.on_recovered_fill(
+                        &Fill {
+                            client_order_id: client_order_id.clone(),
+                            strategy,
+                            symbol: *symbol,
+                            side: *side,
+                            qty: *qty,
+                            px: *px,
+                            fee: *fee,
+                            is_maker: *is_maker,
+                            arrival_mid,
+                            venue_ts_ms: *venue_ts_ms,
+                        },
+                        Some(0),
+                    );
+                }
                 // A rotation restated every still-open order, so a fill that
                 // lands after the rotation can still be priced against the
                 // midpoint its order left at. The cost totals themselves are

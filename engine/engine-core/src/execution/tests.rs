@@ -12,6 +12,14 @@ const ETH: SymbolId = SymbolId(1);
 
 const MS: u64 = 1_000_000;
 
+/// What the ids mean, as the engine writes it down before its first order.
+fn names() -> WalRecord {
+    WalRecord::Names {
+        strategies: vec!["carry".into(), "long".into()],
+        symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
+    }
+}
+
 fn market(bid: f64, ask: f64) -> MarketState {
     let mut market = MarketState::default();
     market.add_symbol("BTCUSDT");
@@ -295,7 +303,8 @@ fn a_mark_that_arrives_long_after_its_horizon_is_not_that_horizon() {
     fills.fold_mark(&late);
     let total = fills.total();
     assert_eq!(total.markout[0].mean(), None, "not folded in");
-    assert_eq!(total.marks_unmeasurable, 1, "counted, not hidden");
+    assert_eq!(total.marks_late, 1, "counted, not hidden");
+    assert_eq!(total.marks_unmeasurable, 0, "the book was read; it was read too late");
 
     // A mark inside the bound is the horizon it says it is.
     fills.fold_mark(&Mark { actual_horizon_ms: 1_250, ..late });
@@ -317,14 +326,15 @@ fn each_sleeves_costs_are_its_own() {
     // One account, two sleeves. A rollup that mixed them would hide the one
     // that is trading badly behind the one that is not.
     let mut fills = Fills::default();
+    fills.learn(&names());
     let mut theirs = fill(Side::Buy, 101.0, 10.0, 100.0);
     theirs.strategy = LONG;
     theirs.symbol = ETH;
     fills.on_fill(&fill(Side::Buy, 100.5, 10.0, 100.0), 0);
     fills.on_fill(&theirs, 0);
 
-    assert_eq!(fills.for_strategy(CARRY).arrival_shortfall.mean(), Some(50.0));
-    assert_eq!(fills.for_strategy(LONG).arrival_shortfall.mean(), Some(100.0));
+    assert_eq!(fills.for_strategy("carry").arrival_shortfall.mean(), Some(50.0));
+    assert_eq!(fills.for_strategy("long").arrival_shortfall.mean(), Some(100.0));
     assert_eq!(fills.rows().count(), 2);
     // The rollup is notional-weighted, so the bigger trade pulls harder: 50 bp
     // over 1,005 USDT against 100 bp over 1,010, not the plain mean of 75.
@@ -460,6 +470,7 @@ fn the_log_alone_says_what_the_trading_cost() {
     // report read off a finished log are the same arithmetic, so they cannot
     // disagree about a number the owner is looking at.
     let log = vec![
+        names(),
         sent("eng-1", CARRY, 100.0),
         filled("eng-1", 101.0, true),
         sent("eng-2", LONG, 100.0),
@@ -468,6 +479,7 @@ fn the_log_alone_says_what_the_trading_cost() {
     let off_the_log = Fills::from_records(&log);
 
     let mut live = Fills::default();
+    live.learn(&names());
     for (id, strategy, px, is_maker) in
         [("eng-1", CARRY, 101.0, true), ("eng-2", LONG, 100.5, false)]
     {
@@ -489,8 +501,8 @@ fn the_log_alone_says_what_the_trading_cost() {
     }
     assert_eq!(off_the_log.total(), live.total());
     assert_eq!(off_the_log.total().maker_fills, 1);
-    assert_eq!(off_the_log.for_strategy(CARRY).arrival_shortfall.mean(), Some(100.0));
-    assert_eq!(off_the_log.for_strategy(LONG).arrival_shortfall.mean(), Some(50.0));
+    assert_eq!(off_the_log.for_strategy("carry").arrival_shortfall.mean(), Some(100.0));
+    assert_eq!(off_the_log.for_strategy("long").arrival_shortfall.mean(), Some(50.0));
 }
 
 #[test]
@@ -589,4 +601,201 @@ fn a_mark_survives_the_round_trip_through_a_record() {
         }
     });
     assert_eq!(folded.total(), off_the_record.total());
+}
+
+// ------------------------------------------------- ids are not names
+
+/// The tables as a boot that admitted its coins in a different order writes
+/// them. `symbols` is what shifts: the seeds hold the low ids and everything
+/// after arrives in whatever order a book first named it.
+fn names_with(strategies: &[&str], symbols: &[&str]) -> WalRecord {
+    WalRecord::Names {
+        strategies: strategies.iter().map(|s| s.to_string()).collect(),
+        symbols: symbols.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn sent_for(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
+    WalRecord::OrderSent {
+        request: OrderRequest {
+            client_order_id: id.into(),
+            strategy,
+            symbol,
+            side: Side::Buy,
+            qty: 10.0,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: false,
+        },
+        wire_ns: 1,
+        arrival_mid: 100.0,
+    }
+}
+
+fn filled_for(id: &str, symbol: SymbolId, px: f64) -> WalRecord {
+    WalRecord::OrderUpdate {
+        update: OrderUpdate::Fill {
+            client_order_id: id.into(),
+            symbol,
+            side: Side::Buy,
+            qty: 10.0,
+            px,
+            fee: 0.0,
+            is_maker: false,
+            venue_ts_ms: 1_700_000_000_000,
+            recv_ns: 1,
+        },
+    }
+}
+
+#[test]
+fn one_id_that_meant_two_coins_is_two_rows() {
+    // The demo log does this: the symbol table is rebuilt every boot, seeds
+    // first and the rest in the order a book first named them, so id 8 has
+    // been both HYPEUSDT and BICOUSDT. Keyed by id, one row would carry both
+    // coins' trading under whichever name the last table happened to hold.
+    let log = vec![
+        names_with(&["carry"], &["BTCUSDT", "HYPEUSDT"]),
+        sent_for("eng-1", CARRY, ETH),
+        filled_for("eng-1", ETH, 69.0),
+        names_with(&["carry"], &["BTCUSDT", "BICOUSDT"]),
+        sent_for("eng-2", CARRY, ETH),
+        filled_for("eng-2", ETH, 0.02),
+    ];
+    let fills = Fills::from_records(&log);
+
+    let rows: Vec<(&str, &str, u64)> =
+        fills.rows().map(|(sleeve, symbol, costs)| (sleeve, symbol, costs.fills)).collect();
+    assert_eq!(rows, vec![("carry", "BICOUSDT", 1), ("carry", "HYPEUSDT", 1)]);
+}
+
+#[test]
+fn a_retired_sleeve_keeps_the_name_it_traded_under() {
+    // `llm_gate` was a fourth sleeve for a day and was then taken out of the
+    // config. Its fills are still in the log, and the table that names them
+    // is the one that was in force when they happened -- not the last table,
+    // which no longer reaches id 3.
+    const GATE: StrategyId = StrategyId(3);
+    let log = vec![
+        names_with(&["carry", "long", "exodus", "llm_gate"], &["BTCUSDT"]),
+        sent_for("eng-1", GATE, BTC),
+        filled_for("eng-1", BTC, 100.0),
+        names_with(&["carry", "long", "exodus"], &["BTCUSDT"]),
+    ];
+    let fills = Fills::from_records(&log);
+
+    let rows: Vec<(&str, &str)> = fills.rows().map(|(sleeve, symbol, _)| (sleeve, symbol)).collect();
+    assert_eq!(rows, vec![("llm_gate", "BTCUSDT")]);
+}
+
+#[test]
+fn an_id_no_table_ever_named_still_reads_as_a_number() {
+    // A log written before the engine recorded its tables. The fills are
+    // real and are counted; there is nothing to call them but their ids.
+    let log = vec![sent_for("eng-1", CARRY, BTC), filled_for("eng-1", BTC, 100.0)];
+    let fills = Fills::from_records(&log);
+    let rows: Vec<(&str, &str)> = fills.rows().map(|(sleeve, symbol, _)| (sleeve, symbol)).collect();
+    assert_eq!(rows, vec![("strategy 0", "symbol 0")]);
+}
+
+// ------------------------------------------------ fills the stream missed
+
+fn recovered(id: &str, symbol: SymbolId, px: f64, venue_ts_ms: i64) -> WalRecord {
+    WalRecord::RecoveredFill {
+        exec_id: format!("venue-{id}"),
+        client_order_id: id.into(),
+        symbol,
+        side: Side::Buy,
+        qty: 10.0,
+        px,
+        fee: 0.5,
+        is_maker: false,
+        venue_ts_ms,
+        recovered_wall_ts_ms: venue_ts_ms + 60_000,
+    }
+}
+
+#[test]
+fn a_fill_the_stream_missed_costs_the_same_as_one_it_delivered() {
+    // The stream went down, the venue's own execution history gave the fill
+    // back, and it cost exactly what it cost. Leaving it out understates the
+    // traded notional and every mean taken over it.
+    let log = vec![
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::StreamReset { recv_ns: 1 },
+        },
+        recovered("eng-1", BTC, 101.0, 1_700_000_000_000),
+    ];
+    let fills = Fills::from_records(&log);
+    let total = fills.total();
+
+    assert_eq!(total.fills, 1);
+    assert_eq!(fills.recovered, 1, "and said so");
+    assert_eq!(fills.stream_gaps, 1);
+    assert!((total.notional_usdt - 1010.0).abs() < 1e-9, "{}", total.notional_usdt);
+    // Priced against the book its own order left at, like any other fill.
+    assert_eq!(total.arrival_shortfall.mean(), Some(100.0));
+    let rows: Vec<(&str, &str)> = fills.rows().map(|(sleeve, symbol, _)| (sleeve, symbol)).collect();
+    assert_eq!(rows, vec![("carry", "BTCUSDT")]);
+}
+
+#[test]
+fn a_fill_recovered_for_no_order_of_ours_is_priced_for_nobody() {
+    // A venue-attached stop firing, or a hand trade: the same join as a
+    // delivered fill, and the same answer when the join finds nothing.
+    let log = vec![names(), recovered("stranger", BTC, 101.0, 1_700_000_000_000)];
+    let fills = Fills::from_records(&log);
+    assert_eq!(fills.total().fills, 0);
+    assert_eq!(fills.recovered, 0);
+}
+
+#[test]
+fn a_fill_found_after_its_horizons_passed_is_not_marked_against_a_later_book() {
+    // Recovery runs after the gap closes, which can be minutes. Dating the
+    // fill to when it was found would mark a five-minute-old trade against
+    // the book in front of us and call it a one-second markout.
+    let found_ns = 310 * 1_000 * MS;
+    let mut market = market(100.0, 101.0);
+    // A book that is live right now, so every horizon has a mid to be marked
+    // against. That is exactly the trap: it is this minute's price, and the
+    // fill is five minutes old.
+    market.apply(&MarketEvent::Quote {
+        symbol: BTC,
+        quote: Quote { bid_px: 200.0, ask_px: 201.0, recv_ns: found_ns, ..Quote::default() },
+    });
+
+    let mut fills = Fills::default();
+    fills.learn(&names());
+    let five_minutes_ago = 0u64;
+    fills.on_recovered_fill(&fill(Side::Buy, 100.5, 10.0, 100.0), Some(five_minutes_ago));
+
+    let marks = fills.due(found_ns, &market);
+    assert_eq!(marks.len(), HORIZONS_MS.len(), "every horizon is answered, once");
+    assert!(marks.iter().all(|mark| mark.mid == Some(200.5)), "the book was readable");
+    let total = fills.total();
+    assert_eq!(total.marks_late as usize, HORIZONS_MS.len());
+    assert_eq!(total.marks_unmeasurable, 0, "the book was there; it was the clock");
+    for horizon in &total.markout {
+        assert_eq!(horizon.mean(), None, "a late read is not a markout");
+    }
+}
+
+#[test]
+fn a_fill_older_than_the_engine_itself_is_owed_no_mark() {
+    // The engine's clock starts with the process, so an execution from before
+    // the boot has no instant on it to date from. Dating it to the origin
+    // would make a trade from before the restart look brand new and mark it
+    // against the book in front of us.
+    let mut fills = Fills::default();
+    fills.learn(&names());
+    fills.on_recovered_fill(&fill(Side::Buy, 100.5, 10.0, 100.0), None);
+
+    let total = fills.total();
+    assert_eq!(total.fills, 1, "it still traded, and it still cost something");
+    assert!((total.notional_usdt - 1005.0).abs() < 1e-9);
+    assert_eq!(total.arrival_shortfall.mean(), Some(50.0));
+    assert_eq!(fills.pending(), 0, "nothing is waiting for a horizon that is gone");
+    assert_eq!(total.marks_late, 0, "no mark was attempted, so none was thrown away");
 }

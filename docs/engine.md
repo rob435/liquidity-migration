@@ -319,12 +319,22 @@ measured without it and turning it on silently would put fill handling inside
 numbers nobody re-measured. Pace the run: the shortest horizon is a second, so
 a bench that finishes in eighty milliseconds never brings a mark due.
 
-One row per sleeve and symbol: maker share, fee, arrival shortfall, all-in, and
+One row per sleeve and coin: maker share, fee, arrival shortfall, all-in, and
 the signed markout at 1 s, 15 s, 1 min and 5 min. The footer confesses rather
 than staying silent — what share of the traded notional had a book to be
-measured against, how many horizons never found one, what was dropped, what is
-still waiting. Five of those numbers are also in the heartbeat, so an operator
-sees them without the log.
+measured against, how many horizons never found one, how many were read too
+late to be the horizon they claim, what was dropped, what is still waiting, and
+how many records of how many segments the numbers came from. Five of those
+numbers are also in the heartbeat, so an operator sees them without the log.
+
+A row is keyed by the **names** the ids meant where the record sits, not by the
+ids. Within one run ids are only appended, but the next boot rebuilds both
+tables from a config and a log whose universe has moved: id 8 has been
+HYPEUSDT and BICOUSDT in one log, and a sleeve that was id 3 has since been
+retired. Keyed by id, a report over a log that spans boots adds two coins'
+trading into one row and labels it with whatever the last table called it. Two
+sleeves cannot share a name — boot refuses a config where two blocks claim one
+— so only a log written before sleeves were named puts two of them in a row.
 
 Two rules keep it from measuring nothing and calling it something. A markout
 is only taken against a book that **arrived at or after the horizon it
@@ -336,10 +346,16 @@ turns up long after its horizon is not that horizon: a stall or a replayed
 backlog would otherwise be averaged into the one-second column at full weight.
 
 What it cannot repair, it confesses. A private-stream reconnection is a window
-in which fills happened and were never delivered; the engine repairs its idea
-of exposure from the venue but the fills themselves are gone, so the footer
-says how many gaps there were. A restart ends every horizon a fill was still
-owed, so the later columns cover less of the trading than the earlier ones.
+in which fills happened and were delivered to nobody; the engine asks the venue
+for its own execution history afterwards, and what comes back is priced against
+its order's own `M0` like any other fill. The footer says how many gaps there
+were and how many fills arrived that way. Recovery can run minutes after the
+trade, and a fill found then is dated to when it happened rather than when it
+was found, so its horizons read as already past instead of being marked
+against a book from long afterwards; one older than the engine's clock — whose
+origin is the process — is owed no mark at all. A restart ends every horizon a
+fill was still owed, so the later columns cover less of the trading than the
+earlier ones.
 
 Two honest differences from the Python half, both stated in the module header:
 `M0` here is the **top of book**, because that is the only book the engine

@@ -7,13 +7,11 @@
 
 use engine_types::WalRecord;
 
-use crate::replay::LogNames;
-
 use super::{Costs, Fills, HORIZONS_MS};
 
 /// Read a log and say what its trading cost.
 pub fn of_log(records: &[WalRecord]) -> String {
-    table(&Fills::from_records(records), &LogNames::of_log(records))
+    table(&Fills::from_records(records))
 }
 
 /// The em dash a number that was never measured is printed as. Not a zero:
@@ -27,7 +25,7 @@ struct Column {
 
 const COLUMNS: &[Column] = &[
     Column { head: "sleeve", width: 14 },
-    Column { head: "symbol", width: 12 },
+    Column { head: "symbol", width: 14 },
     Column { head: "fills", width: 6 },
     Column { head: "maker", width: 6 },
     Column { head: "traded USDT", width: 13 },
@@ -40,7 +38,7 @@ const COLUMNS: &[Column] = &[
     Column { head: "+5m", width: 8 },
 ];
 
-pub fn table(fills: &Fills, names: &LogNames) -> String {
+pub fn table(fills: &Fills) -> String {
     let mut out = String::from("what the fills cost\n\n");
     out.push_str("  ");
     for (index, column) in COLUMNS.iter().enumerate() {
@@ -54,13 +52,9 @@ pub fn table(fills: &Fills, names: &LogNames) -> String {
     out.push('\n');
 
     let mut rows = 0usize;
-    for (strategy, symbol, costs) in fills.rows() {
+    for (sleeve, symbol, costs) in fills.rows() {
         rows += 1;
-        out.push_str(&row(
-            &names.strategy(strategy),
-            &names.symbol(symbol),
-            costs,
-        ));
+        out.push_str(&row(sleeve, symbol, costs));
     }
     if rows == 0 {
         out.push_str("\n  nothing has filled yet.\n");
@@ -81,7 +75,7 @@ fn width_of_all() -> usize {
 fn row(sleeve: &str, symbol: &str, costs: &Costs) -> String {
     let mut cells = vec![
         format!("{:<width$}", clipped(sleeve, 13), width = COLUMNS[0].width),
-        format!("{:<width$}", clipped(symbol, 11), width = COLUMNS[1].width),
+        format!("{:<width$}", clipped(symbol, 13), width = COLUMNS[1].width),
         format!("{:>width$}", costs.fills, width = COLUMNS[2].width),
         format!(
             "{:>width$}",
@@ -139,6 +133,13 @@ fn footer(total: &Costs, fills: &Fills) -> String {
             total.marks_unmeasurable
         ));
     }
+    if total.marks_late > 0 {
+        out.push_str(&format!(
+            "  {} markout(s) were read too long after their horizon to be that horizon,\n  \
+             and were thrown away rather than averaged in.\n",
+            total.marks_late
+        ));
+    }
     // Deliberately not reported off a log: a replay owes nothing a future
     // mark and drops nothing, so both counters are always zero there. They
     // belong to a running engine, and this footer is written for both.
@@ -157,10 +158,23 @@ fn footer(total: &Costs, fills: &Fills) -> String {
     }
     if fills.stream_gaps > 0 {
         out.push_str(&format!(
-            "  the private stream reconnected {} time(s). Fills that happened inside those\n  \
-             gaps were never delivered and are in none of these numbers.\n",
+            "  the private stream reconnected {} time(s), and delivered nothing while it was\n  \
+             down.\n",
             fills.stream_gaps
         ));
+    }
+    if fills.recovered > 0 {
+        out.push_str(&format!(
+            "  {} fill(s) reached this account only through the venue's own execution\n  \
+             history, and are counted here. One of them has a markout only where its\n  \
+             horizon had not already passed by the time it was found.\n",
+            fills.recovered
+        ));
+    } else if fills.stream_gaps > 0 {
+        out.push_str(
+            "  nothing was read back off the venue, so a fill inside one of those gaps is\n  \
+             in none of these numbers.\n",
+        );
     }
     // The later columns are measured over fewer fills than the earlier ones,
     // for two quite different reasons, and the difference matters: one is a
@@ -171,9 +185,10 @@ fn footer(total: &Costs, fills: &Fills) -> String {
     if total.markout[0].weight > total.markout[HORIZONS_MS.len() - 1].weight {
         out.push_str(
             "  the later horizons cover less of the trading than the earlier ones, because\n  \
-             a fill is owed its five-minute mark five minutes later. Either the run is\n  \
-             younger than that, or it restarted -- a restart ends every horizon a fill was\n  \
-             still owed, and restarts cluster on deploys.\n",
+             a fill is owed its five-minute mark five minutes later. The run is younger\n  \
+             than that, or it restarted -- a restart ends every horizon a fill was still\n  \
+             owed, and restarts cluster on deploys -- or this is one segment of a log\n  \
+             whose next segment holds the marks that are missing.\n",
         );
     }
     out

@@ -34,7 +34,7 @@ pub fn describe(records: &[WalRecord], torn_tail: bool) -> ReplayReport {
 
     // Ids are positions, so a record's `strategy` and `symbol` fields mean
     // nothing without the tables the run was using. The log says so as it
-    // goes; ids are only appended, so the newest table is the fullest.
+    // goes, and each record is read against the tables in force where it sits.
     let mut names = LogNames::default();
     for (index, record) in records.iter().enumerate() {
         names.learn(record);
@@ -79,8 +79,13 @@ pub struct LogNames {
 
 impl LogNames {
     /// Take the tables from a record that carries them, and ignore the rest.
-    /// Ids are only appended, so the newest record is the fullest. A segment
-    /// restatement carries the same tables and counts the same way.
+    /// A segment restatement carries the same tables and counts the same way.
+    ///
+    /// Set, not extended, and that is the whole point: within one run ids are
+    /// only appended, but the next boot rebuilds both tables from a config and
+    /// a log whose universe has moved. Id 8 has been HYPEUSDT and BICOUSDT in
+    /// one log. So a reader walks the records and asks this as it goes; asking
+    /// it once at the end would name every id after the last table.
     pub fn learn(&mut self, record: &WalRecord) {
         match record {
             WalRecord::Names { strategies, symbols }

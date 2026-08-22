@@ -419,6 +419,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 _ => None,
             })
             .collect();
+        // A gap-recovery pass reaches back past this boot, and the venue hands
+        // back everything in that window — the last run's ordinary fills
+        // included. A delivered fill carries no venue execution id, so only
+        // this can tell the pass it already has one.
+        let mut recent_fills: VecDeque<(String, i64, f64)> = effective
+            .iter()
+            .filter_map(|record| match record {
+                WalRecord::OrderUpdate {
+                    update: OrderUpdate::Fill { client_order_id, venue_ts_ms, qty, .. },
+                } => Some((client_order_id.clone(), *venue_ts_ms, *qty)),
+                _ => None,
+            })
+            .collect();
+        while recent_fills.len() > RECENT_FILLS_KEPT {
+            recent_fills.pop_front();
+        }
 
         // What the log believes against what the venue says. Boot is the one
         // moment the two can be compared: from here on the engine only ever
@@ -550,7 +566,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
 
         let now = clock::now_ns();
-        Ok(Engine {
+        let mut engine = Engine {
             wal,
             risk,
             venue,
@@ -585,7 +601,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // next gap starts here.
             recovered_until_ms: clock::wall_ms(),
             recovered_exec_ids,
-            recent_fills: VecDeque::new(),
+            recent_fills,
             ledger: LatencyLedger::new(now),
             // Deliberately not rebuilt from the log at boot, unlike
             // attribution: this is a running score for the run in front of
@@ -602,7 +618,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             orders_sent: 0,
             events_seen: 0,
             subscriptions,
-        })
+        };
+        engine.fills.learn(&names_record(&engine.names, &engine.market));
+        Ok(engine)
     }
 
     /// Ask the venue what traded on this account since the log's newest
@@ -1110,7 +1128,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         // The table grew, so say what it is now. Ids are only appended, so
         // this is the earlier one plus the new names.
-        self.wal.append(&names_record(&self.names, &self.market))?;
+        let names = names_record(&self.names, &self.market);
+        self.wal.append(&names)?;
+        self.fills.learn(&names);
         // One venue read covers everything admitted this pass. Without a rule
         // there is no way to quantize, so the symbol is followed but nothing
         // can be sent for it — which is the same state as a symbol whose rule
@@ -2107,6 +2127,30 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // fill; one with no order of ours is charged to nobody.
             if let Some(sid) = self.orders.owner_of(&exec.client_order_id) {
                 self.attribution.note(sid, symbol, exec.side, exec.qty);
+                // What it cost is the same question whichever way it arrived,
+                // and the anchor is the book its own order left at.
+                let late_ns = now_ms
+                    .saturating_sub(exec.venue_ts_ms)
+                    .max(0)
+                    .saturating_mul(1_000_000) as u64;
+                // Dated to when it traded, not to when it was found, or a
+                // trade from minutes ago is marked against this minute's book
+                // and the number is read as a one-second fact.
+                self.fills.on_recovered_fill(
+                    &execution::Fill {
+                        client_order_id: exec.client_order_id.clone(),
+                        strategy: sid,
+                        symbol,
+                        side: exec.side,
+                        qty: exec.qty,
+                        px: exec.px,
+                        fee: exec.fee,
+                        is_maker: exec.is_maker,
+                        arrival_mid: self.arrival_mid_of(&exec.client_order_id),
+                        venue_ts_ms: exec.venue_ts_ms,
+                    },
+                    clock::now_ns().checked_sub(late_ns),
+                );
             }
             // The kernel reserved this order's size when it approved it, and
             // only a fill releases the reservation. Skipping it here leaves the
@@ -2204,9 +2248,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // A private-stream gap may have swallowed fills. Refresh the account
         // reading now rather than trusting exposure across the gap.
         if let OrderUpdate::StreamReset { .. } = update {
-            // The cost ledger stays marked: recovered fills carry no arrival
-            // anchor, so the cost report is still not a complete account of
-            // what the trading cost.
             self.fills.stream_gap();
             match self.venue.account_view().await {
                 Ok(view) => self.adopt_view(view),
@@ -2396,6 +2437,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .find(|px| *px > 0.0)
     }
 
+    /// `M0` for an order of ours, off the order ledger. Zero for one the
+    /// ledger no longer holds, which makes every arrival number for its fills
+    /// missing rather than wrong.
+    fn arrival_mid_of(&self, client_order_id: &str) -> f64 {
+        self.orders
+            .orders
+            .get(client_order_id)
+            .map(|order| order.arrival_mid)
+            .unwrap_or(0.0)
+    }
+
     /// Price one fill against the book that was on the screen when its order
     /// left, and start its markout clock.
     ///
@@ -2417,12 +2469,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         else {
             return;
         };
-        let arrival_mid = self
-            .orders
-            .orders
-            .get(client_order_id)
-            .map(|order| order.arrival_mid)
-            .unwrap_or(0.0);
+        let arrival_mid = self.arrival_mid_of(client_order_id);
         self.fills.on_fill(
             &execution::Fill {
                 client_order_id: client_order_id.clone(),

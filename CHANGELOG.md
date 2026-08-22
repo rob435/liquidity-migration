@@ -16,6 +16,65 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-22 — the cost report names a row by what its ids meant, and counts
+  the fills the stream missed.** `engine fills` read the whole log with one id
+  table — the last one in the file — and keyed every row by the raw pair
+  `(strategy id, symbol id)`. Both tables are rebuilt at every boot, so over a
+  log spanning boots that added different coins into one row and then labelled
+  it wrong. Measured on the demo log: **id 8 has been HYPEUSDT and BICOUSDT, id
+  5 has been ALICEUSDT, BMTUSDT, COWUSDT and CAPUSDT, id 7 has been ACEUSDT,
+  EDENUSDT and HOMEUSDT.** The table claimed carry traded 39 ACEUSDT fills; it
+  traded 58. It claimed 6 HYPEUSDT fills; 2 were HYPE and 6 were BICO. BICOUSDT,
+  CAPUSDT, COWUSDT, STORJUSDT and ALICEUSDT had no row at all. Three rows read
+  `strategy 3` — the `llm_gate` sleeve, which the last table no longer reaches.
+
+  A row is now keyed by the **names** the ids meant where the record sits.
+  `Fills` carries the id tables and learns them as it walks, so the live
+  summary and the replayed report still run one arithmetic. Every count in the
+  new table matches an independent join of the log's own name records.
+
+  Four more, in the same read:
+
+  - **Fills recovered after a stream gap were in no cost number.** The record
+    was written and folded into the order ledger, exposure, the claims table
+    and the risk kernel, and then not priced — live or replayed. They are now
+    priced against their own order's `M0` like any other fill, and counted as
+    recovered so the footer can say how many arrived that way. The footer used
+    to say those fills "were never delivered and are in none of these numbers";
+    it now says what actually happened.
+  - **A recovered fill is dated to when it traded, not when it was found.** A
+    trade found minutes later would otherwise be marked against the book in
+    front of us and printed as a one-second number; dated properly, the
+    lateness bound throws those reads away. One older than the process has no
+    instant on the engine's clock at all, so it is owed no mark: it cost what
+    it cost, and the markout columns say nothing about it.
+  - **A gap-recovery pass could recover a fill the last run was already told
+    about.** The dedup list started empty at boot while the pass reaches two
+    minutes back past it, and a delivered fill carries no venue execution id.
+    The first reset after a restart re-wrote it — doubling exposure, the claims
+    table, the kernel's released reservation and now the cost row. The list is
+    seeded from the log at boot. `a_fill_the_last_run_was_told_about_is_not_
+    recovered_again` fails without the seed.
+  - **The footer said a cause it had not measured.** One counter held both
+    "no readable book" and "read too late to be that horizon"; the footer
+    reported both as the first. They are two counters now. The report also
+    says how many records of how many segments it read — naming a rotated
+    segment reads that segment alone and the table looked identical either way.
+
+  **Not changed, deliberately.** The `long DOGEUSDT` row still reads arrival
+  3750 bp and markouts around −502,000 bp. Those are two orders from
+  2026-08-20, sent 3.2 s into a boot whose market feed had built its symbol
+  table one place out of step with the core's: slot 12 held LINKUSDT's book,
+  so both the anchor (10.6095, 10.6615 against DOGE at 0.079) and the marks
+  that followed (`mid: 10.6595`, `signed_markout_bps: -1331661.42`) are LINK's
+  price over a DOGE fill. That fault was fixed the same afternoon in
+  `e3ac11bf`; the log honestly records what the engine believed at the time,
+  and the two poisoned orders are the only ones in 178 fills. Filtering them
+  in the reader would split the live and replayed arithmetic the module exists
+  to keep together, and a validity band on a price is machinery to prove
+  absent a fault that is already absent. Read the current segment for the
+  current number: 24 fills, $2,833 traded, fee 5.48 bp, arrival −3.44 bp.
+
 - **2026-08-22 — one watchdog run is one Telegram message.** A routine fleet
   restart was sending **28 messages**. The engine going down trips
   `unit:…engine.service` and `engine_heartbeat_stale`; the two producers going

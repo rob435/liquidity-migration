@@ -151,8 +151,16 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             // rotated is a family of one, so a plain file path still means
             // what it always did.
             let (replayed, torn) = engine_wal::replay_chain(Path::new(&path))?;
+            let segments = engine_wal::segments(Path::new(&path))?.len();
             let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
             print!("{}", execution::report::of_log(&records));
+            // Naming a numbered segment reads that segment alone, and the
+            // table looks exactly the same either way.
+            println!(
+                "\n  {} record(s), from {} log segment(s) under {path}.",
+                records.len(),
+                segments
+            );
             if torn {
                 println!(
                     "\n  the log ends part-way through a record; anything after that point is \
