@@ -12,7 +12,8 @@ and research tools read and write. Where the engine and a Python module describe
 
 ## Producer / owner split
 
-Strategy processes publish absolute component targets. They hold no venue credentials and never
+Strategy processes publish absolute component targets — absolute over the engine's own positions,
+never over exposure it did not open. They hold no venue credentials and never
 submit, adopt, repair or close an order. Sleeve code may compute signals and desired notionals but
 never call a venue client, mutate a ledger or reserve margin;
 [`strategy_runtime.py`](../liquidity_migration/account/strategy_runtime.py) converts all sleeve intents

@@ -243,6 +243,43 @@ impl TargetBookFollower {
         targets.retain(|target| !foreign.contains(&target.symbol));
         held.retain(|symbol| !foreign.contains(symbol));
 
+        // Exposure this engine has no fills for is not ours to touch. A
+        // position the owner opened by hand reads exactly this way, and the
+        // book is absolute: without this it is a name the book does not
+        // mention, so the next pass would close it, and the pass after that
+        // would close it again. Left alone entirely -- not entered, not
+        // exited -- the same as another sleeve's name.
+        //
+        // `in_flight` is in the test because our own entry is held at the
+        // venue before its fill reaches attribution, and for that moment it
+        // would otherwise read as somebody else's.
+        let mut unowned: Vec<String> = Vec::new();
+        for symbol in targets
+            .iter()
+            .map(|target| target.symbol.clone())
+            .chain(held.iter().cloned())
+        {
+            if unowned.contains(&symbol) {
+                continue;
+            }
+            let hand_held = ctx.symbol_id(&symbol).is_some_and(|id| {
+                ctx.position(id).is_some() && ctx.my_position(id) == 0.0 && ctx.in_flight(id) == 0.0
+            });
+            if hand_held {
+                if !self.complained.contains(&symbol) {
+                    tracing::warn!(
+                        symbol = %symbol,
+                        "this account holds a position in this name that no order of \
+                         ours ever opened; leaving it alone"
+                    );
+                    self.complained.push(symbol.clone());
+                }
+                unowned.push(symbol);
+            }
+        }
+        targets.retain(|target| !unowned.contains(&target.symbol));
+        held.retain(|symbol| !unowned.contains(symbol));
+
         // An entry the kernel just refused is left out of this pass entirely,
         // the same way a foreign holding is: planning it again would only
         // produce the same refusal on the next quote. The next book clears it.

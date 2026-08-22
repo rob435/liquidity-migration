@@ -148,6 +148,16 @@ impl MockCtx {
     pub fn set_position(&mut self, symbol: &str, side: Side, qty: f64, entry_px: f64) {
         let id = self.add_symbol(symbol);
         self.foreign.remove(&id);
+        // Attributed to this strategy too: a holding a test seeds is one this
+        // strategy opened unless the test says otherwise, and the follower
+        // now reads exposure with no fills behind it as somebody else's.
+        self.mine.insert(
+            id,
+            match side {
+                Side::Buy => qty,
+                Side::Sell => -qty,
+            },
+        );
         self.positions.insert(
             id,
             PositionView {
@@ -161,6 +171,16 @@ impl MockCtx {
         );
     }
 
+    /// Seed a holding the venue reports that no order of this engine's ever
+    /// opened -- a position the owner placed by hand. It shows in `position`
+    /// and in nobody's attribution, which is the shape that used to make the
+    /// book close the owner's own trade.
+    pub fn set_hand_position(&mut self, symbol: &str, side: Side, qty: f64, entry_px: f64) {
+        self.set_position(symbol, side, qty, entry_px);
+        let id = self.id_of(symbol);
+        self.mine.remove(&id);
+    }
+
     /// Seed a holding the venue reports that belongs to *another* strategy on
     /// the same account — the other sleeve's position, in other words. It
     /// shows in `position` and is foreign to whoever is asking, which is the
@@ -168,6 +188,7 @@ impl MockCtx {
     pub fn set_foreign_position(&mut self, symbol: &str, side: Side, qty: f64, entry_px: f64) {
         self.set_position(symbol, side, qty, entry_px);
         let id = self.id_of(symbol);
+        self.mine.remove(&id);
         self.foreign.insert(id);
     }
 

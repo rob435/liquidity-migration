@@ -16,6 +16,29 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-22 — the book closed positions the owner opened by hand, and it
+  no longer can. Automated trading stopped.** A target book is absolute:
+  silence about a symbol means hold none of it. The follower gathered what to
+  hold from the account reading, filtered only names *another sleeve* held —
+  and a hand trade is attributed to nobody, so it read as false there. Any
+  hand-placed position in a name the plug seeds or has held (`BTCUSDT`,
+  `ETHUSDT` on carry; `SOLUSDT`, `XRPUSDT` on LONG; `DOGEUSDT` on exodus) was
+  therefore a name the book did not mention, and every pass closed it again:
+  open by hand, closed by the book, open again, closed again.
+
+  Exposure this engine has no fills for is now left alone entirely — not
+  entered, not exited — exactly as another sleeve's name already was. The
+  signal is `my_position`, the engine's own attributed fills, rebuilt from the
+  log at boot, with `in_flight` in the test so our own entry is not disowned in
+  the window between its send and its fill. Three tests: the hand position is
+  not exited, it is not added to either, and a position we did fill ourselves
+  still exits when the book stops naming it — the first two fail without the
+  guard, the third passes either way, so the guard did not simply switch exits
+  off.
+
+  Both engines and all four producers are stopped, with the sleeves turned off
+  on the host so a deploy does not restart them.
+
 - **2026-08-22 — one toggle: `REAL_MONEY`, and nothing else.** Owner
   instruction. Shadow mode and `ENGINE_LIVE` are gone from the engine, the
   runtime wrapper, both unit files, both config templates and `.env.example`.

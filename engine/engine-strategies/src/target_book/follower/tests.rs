@@ -711,6 +711,59 @@ fn a_follower_does_not_exit_a_position_another_sleeve_opened() {
 }
 
 #[test]
+fn a_follower_does_not_exit_a_position_the_owner_opened_by_hand() {
+    // A hand trade is held at the venue and attributed to nobody. The book is
+    // absolute, so a name it does not mention reads as "hold none of it" --
+    // which closed the owner's own position, and closed it again every time
+    // they re-opened it.
+    let mut h = bench(&["KAITOUSDT", "BTCUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_hand_position("BTCUSDT", Side::Buy, 1.0, 60_000.0);
+
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+
+    let sent = h.drain();
+    let btc = h.ctx.id_of("BTCUSDT");
+    assert!(
+        sent.iter().all(|intent| intent.symbol != btc),
+        "a position no order of ours opened is not ours to close, got {sent:?}"
+    );
+    assert_eq!(sent.len(), 1, "our own name is still entered");
+}
+
+#[test]
+fn a_follower_does_not_add_to_a_hand_position_either() {
+    // The other half: the book naming it does not make it ours. Sizing up to
+    // the target would take the owner's position somewhere they did not ask
+    // for, and the venue keeps one stop per position.
+    let mut h = bench(&["BTCUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_hand_position("BTCUSDT", Side::Buy, 1.0, 60_000.0);
+
+    h.targets(book(vec![target("BTCUSDT", 100_000.0)]));
+
+    assert!(h.drain().is_empty(), "the hand position is left alone entirely");
+}
+
+#[test]
+fn our_own_position_is_still_exited_when_the_book_stops_naming_it() {
+    // The guard above must not orphan the engine's own book: a name we filled
+    // ourselves is attributed to us, so silence about it is still an exit.
+    let mut h = bench(&["KAITOUSDT", "BTCUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_position("BTCUSDT", Side::Buy, 1.0, 60_000.0);
+
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+
+    let sent = h.drain();
+    let btc = h.ctx.id_of("BTCUSDT");
+    assert!(
+        sent.iter().any(|intent| intent.symbol == btc && intent.reduce_only),
+        "our own position still exits, got {sent:?}"
+    );
+}
+
+#[test]
 fn a_follower_does_not_enter_a_name_another_sleeve_is_holding() {
     // Both books want it. The first one there keeps it: one venue stop per
     // position means the second entry would silently replace the first's.

@@ -245,7 +245,7 @@ fn the_account_reading_does_not_decide_this_makers_inventory() {
     // sum of both. A maker that believed it would stop quoting a side it is
     // nowhere near the ceiling on.
     let mut h = quoter_over(&["BTCUSDT"], 0.0);
-    h.ctx.set_position("BTCUSDT", Side::Buy, 0.3, 100.0);
+    h.ctx.set_hand_position("BTCUSDT", Side::Buy, 0.3, 100.0);
     h.quote("BTCUSDT", 99.0, 101.0);
     let intents = placed(&mut h);
     assert_eq!(intents.len(), 2, "our own book is flat, so both sides are quoted");

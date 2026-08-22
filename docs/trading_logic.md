@@ -153,9 +153,14 @@ no cooldown starts, because the name never held. A confirmed holding under a ref
 exit business and stays. Both the drop and the skip are counted
 (`engine_blocked_asks`, `skipped_engine_blocked`).
 
+**The book is absolute, but only over the engine's own positions.** Silence about a symbol
+means hold none of it — of what this engine opened. Exposure no order of its own ever
+opened is left alone entirely: not entered, not exited, whoever put it there. A position
+the owner places by hand is attributed to nobody, so without that it read as a name the
+book does not mention, and every pass closed it again.
+
 **The producer's record fails closed.** `long-demo-state.json` is the producer's only
-memory of what it asked for, and the engine reads the book as absolute — silence about a
-symbol means hold none of it. A record that exists but cannot be read back (torn JSON, an
+memory of what it asked for. A record that exists but cannot be read back (torn JSON, an
 unknown version, one unreadable held row) fails the cycle loudly rather than reading as
 empty, which would market-close every open position at once and, written back, make a
 transient read failure permanent. Writes are fsynced before the rename. A missing file is

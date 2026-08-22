@@ -12,6 +12,13 @@ file.
 
 ### The fleet
 
+- **AUTOMATED TRADING IS OFF, by owner instruction.** Both engines and all four
+  producers are stopped, and `LONG_SLEEVE=off` / `CARRY_SLEEVE=off` in
+  `/etc/liquidity-migration/sleeves.env` so a deploy does not bring them back.
+  Positions stay under their venue-native stops. The liveness watchdogs are
+  still armed and will page `engine_heartbeat_stale` while this holds. Turning
+  it back on is removing that host override and starting the units.
+
 - **A third sleeve, the EXODUS SHORT, is registered and deployed to demo.**
   When carry's v7 pre-settle exit fires, the carry producer publishes the
   abandoned position as a SHORT to the engine's `exodus` sleeve (its own
