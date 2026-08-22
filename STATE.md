@@ -12,12 +12,15 @@ file.
 
 ### The fleet
 
-- **AUTOMATED TRADING IS OFF, by owner instruction.** Both engines and all four
-  producers are stopped, and `LONG_SLEEVE=off` / `CARRY_SLEEVE=off` in
-  `/etc/liquidity-migration/sleeves.env` so a deploy does not bring them back.
-  Positions stay under their venue-native stops. The liveness watchdogs are
-  still armed and will page `engine_heartbeat_stale` while this holds. Turning
-  it back on is removing that host override and starting the units.
+- **AUTOMATED TRADING IS ON, on both fleets.** Both engines, all four
+  producers, the Telegram controls and every timer are active and enabled, and
+  `REAL_MONEY` is armed. There is no sleeve override on the host — the
+  `sleeves.env` file that used to hold one is gone — so a deploy brings the
+  whole fleet back up.
+
+  The funded account holds no position and about four cents of equity, so what
+  is at risk there today is nothing; the demo account carries the open book.
+  Exact live truth is `scripts/ops.sh status`, never this prose.
 
 - **A third sleeve, the EXODUS SHORT, is registered and deployed to demo.**
   When carry's v7 pre-settle exit fires, the carry producer publishes the

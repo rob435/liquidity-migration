@@ -16,6 +16,37 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-22 — the deploy's receipt.** `staged --profile operational
+  --stop-first`, commit `9d2c646e`. Both engines and all four producers are up,
+  `mainnet=armed`, nothing latched: demo `may_open` true on eleven positions
+  across three sleeves, funded `may_open` true, flat, four cents of equity.
+
+  **Both engines were down for 4m17s (20:58:55–21:03:12 UTC), and it was
+  foreseeable.** `staged` activates before it builds, so `activate` restarted
+  both on the *old* binary against the host config already corrected for the
+  new one; each logged `the [risk] block is wrong: missing field
+  min_order_notional_usdt` every five seconds until `build_engine` finished
+  (4m13s, a cold build of k256, sha3, rustls and the rest) and restarted them.
+  Producers stayed up and fail-closed on the stale heartbeat; positions stayed
+  under their venue-native stops. Any future change to what the host `[risk]`
+  block may contain buys the same gap.
+
+  The proof it is the new binary is a field only new code writes: the
+  capital-limits line at boot no longer carries `sleeves=`.
+
+  **Two host-config corrections went with it**, backed up beside themselves as
+  `engine{,-mainnet}.toml.bak-2026-08-22`. `min_order_notional_usdt` had to go
+  or the new binary refuses the block. And `shadow = true` was still in **both**
+  files, the funded one included, long after that mode was deleted — `[engine]`
+  has no `deny_unknown_fields`, so it sat there inert, reading "compute and log
+  orders, send nothing" on an engine that was sending. Removed; it changed no
+  behaviour, only what the file claims.
+
+  Also corrected in STATE.md: it said automated trading was off, both engines
+  and all four producers stopped behind `LONG_SLEEVE=off` / `CARRY_SLEEVE=off`
+  in `/etc/liquidity-migration/sleeves.env`. That file does not exist and the
+  whole fleet was running, armed.
+
 - **2026-08-22 — the per-sleeve capital partition is removed, and the two
   defects the audit left standing are fixed.** By owner instruction, on the
   finding that the partition did not survive a restart: boot re-registered only
