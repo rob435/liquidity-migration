@@ -540,12 +540,11 @@ def test_delivery_time_change_updates_registry_and_continues(tmp_path: Path) -> 
     assert row.evidence_source == "live_instrument_delivery_time_updated"
     assert moved.active_symbols == ("AAAUSDT",)
 
-    # The cycle after the move has to be able to read what the move wrote.
-    # Until 2026-08-14 it could not: the writer recorded the moved date with
-    # its own evidence source and the reader accepted only the original one,
-    # so every pass from here on raised "candidate-retirement registry record
-    # is invalid" — on a path LONG runs every cycle, with real retirements
-    # standing on the funded account.
+    # The cycle after the move has to be able to read what the move wrote: the
+    # writer records the moved date under its own evidence source, so a reader
+    # that accepted only the original one would raise "candidate-retirement
+    # registry record is invalid" on every pass — on a path LONG runs every
+    # cycle, with real retirements standing on the funded account.
     again = enforce_frozen_candidate_frames(
         _normalize_instruments(
             [

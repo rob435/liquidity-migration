@@ -97,18 +97,13 @@ def test_demo_rule_age_warns_before_expiry_and_fails_closed_after() -> None:
 
 
 def test_expired_demo_rules_no_longer_claim_the_next_start_fails_closed() -> None:
-    """Demo's expiry used to refuse the next authorized runtime start, because
-    the Python account owner loaded the receipt as it came up. That owner was
-    deleted on 2026-08-14. Nothing in the demo runtime path reads the receipt
-    now — run_authorized_runtime.sh has no rule gate, neither producer script
-    mentions one, and the engine parses instrument rules straight off the venue.
+    """Nothing in the demo runtime path reads the demo rule receipt:
+    run_authorized_runtime.sh has no rule gate, neither producer script mentions
+    one, and the engine parses instrument rules straight off the venue. So an
+    expired demo receipt must not claim the next start will refuse.
 
-    So the fleet spent three days being told every hour that its next restart
-    would refuse to start, which was not true and would not have been noticed if
-    it were, because it shared a channel with 250 other false alarms a day.
-
-    Mainnet is untouched: its receipt really does gate the funded owner, and
-    every deploy renews it.
+    Mainnet is the other way round: its receipt really does gate the funded
+    owner, and every deploy renews it.
     """
     hour_ns = 3_600_000_000_000
     verified = 1_780_000_000 * 1_000_000_000
