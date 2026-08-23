@@ -1,47 +1,27 @@
 """The account reading the target producers size from.
 
-Until the Python account owner was deleted this came from
-``account_owner_health.json``, which that owner rewrote every few seconds
-beside its journal. The producers read one number out of it, equity, and
-blocked every entry when it was missing or stale.
+The engine owns the account and says this in its heartbeat: what the venue last
+reported as equity and spare margin, and **when that reading was taken at the
+venue** -- not when the file was written. The distinction is the whole check.
+An engine whose loop keeps running while its venue reads fail rewrites its
+heartbeat on time with the reading stamp standing still, so the number goes
+stale exactly when the account knowledge does, which is the case a producer
+must not size against.
 
-The engine owns the account now, and says the same thing in its heartbeat:
-what the venue last reported as equity and spare margin, and **when that
-reading was taken at the venue** -- not when the file was written. The
-distinction is the whole check. An engine whose loop keeps running while its
-venue reads fail rewrites its heartbeat on time with the reading stamp
-standing still, so the number goes stale exactly when the account knowledge
-does, which is the case a producer must not size against.
+**The stamp is on the wall clock.** The engine's own clock is monotonic -- it
+counts from an arbitrary instant near its boot -- so it converts the reading's
+*age* into a stamp on the same clock it writes ``wall_ts_ms`` with, and both
+halves have a test that says which clock it is.
 
-**The stamp is on the wall clock, and that cost a live deploy to learn.** The
-first version read `account_observed_ns` straight out of the file and compared
-it against `time.time_ns()`. The engine's clock is monotonic -- it counts from
-an arbitrary instant near its own boot -- so a healthy engine six seconds old
-published a stamp of six seconds, and this read it as fifty-six thousand years
-stale and blocked every entry on both sleeves. The engine now converts the
-reading's *age* into a stamp on the same clock it writes `wall_ts_ms` with, and
-both halves have a test that says which clock it is.
-
-What the old receipt carried beyond equity -- a journal sequence, a state
-hash, a systemd generation binding -- described the owner's own loop. There is
-no such loop to describe, and the engine does not read the Python journal, so
-inventing those fields would have meant writing down numbers that referred to
-nothing. They are gone rather than faked.
-
-**What is checked is the realm, not the account id, and that was a correction
-made against the live host.** The first draft compared the producer's
-``route.account_id`` with the id the engine authenticated as. Those are two
-different id spaces: the route names an account logically
-(``bybit-mainnet-unified``) and the engine reports the venue's own user number
-(``552445993``, the same one its lease file is named after). They never match,
-so that check would have blocked every entry on every cycle -- fail-closed,
-silent, and exactly the outcome this module exists to prevent.
-
-The realm is the comparison that carries the real risk anyway. What must never
-happen is a demo heartbeat sizing a mainnet producer, and realm catches that
-while being a value both halves genuinely share. The venue user id is still
-read and still reported in errors, because when something is wrong it is the
-number that identifies which account you are actually looking at.
+**What is checked is the realm, not the account id.** A route names an account
+logically (``bybit-mainnet-unified``); the engine reports the venue's own user
+number (``552445993``, the same one its lease file is named after). They are
+two id spaces and never match, so comparing them would block every entry on
+every cycle -- fail-closed and silent. Realm is the comparison that carries the
+real risk anyway: what must never happen is a demo heartbeat sizing a mainnet
+producer. The venue user id is still read and still reported in errors, because
+when something is wrong it is the number that identifies which account you are
+actually looking at.
 """
 
 from __future__ import annotations

@@ -984,20 +984,14 @@ class AccountIntentInbox:
                     continue
                 if existing.parent.name == "failed":
                     # Retire the old copy before re-queueing, and BEFORE the
-                    # immutability comparison below. Leaving it meant the
-                    # request had two durable files, and the next
-                    # ``require_durable_request`` raised — out of the
-                    # protection engine's evaluate loop, which stopped
-                    # stop-loss and take-profit evaluation for every component
-                    # until someone deleted the file by hand. Comparing first
-                    # did not fix that: a protection request keeps a stable
+                    # immutability comparison below: two durable files make
+                    # ``require_durable_request`` raise, and comparing first
+                    # raises too, because a protection request keeps a stable
                     # request_id but rebuilds its body every pass with a fresh
-                    # ``created_ts_ns`` and trigger price, so the comparison
-                    # raised the same ValueError out of the same loop. A copy
-                    # in ``failed`` is by definition not an in-force
-                    # publication, so its content promises nothing. The arrival
-                    # sidecar goes with it so the retry queues at the back
-                    # rather than reclaiming its old place.
+                    # ``created_ts_ns`` and trigger price. A copy in ``failed``
+                    # is not an in-force publication, so its content promises
+                    # nothing. The arrival sidecar goes with it so the retry
+                    # queues at the back rather than reclaiming its old place.
                     existing.unlink(missing_ok=True)
                     self._queued_cache.pop(str(existing), None)
                     self._arrival_path(filename).unlink(missing_ok=True)
@@ -2024,10 +2018,9 @@ class AccountExecutionService:
                 require_external_health=True,
                 account_wide=True,
                 # The preview above already read the wallet for this batch, and
-                # everything between the two reads is local arithmetic. A second
-                # read cost a full round trip to the venue — about 175 ms on the
-                # Frankfurt route — for a number that cannot have moved on our
-                # account. A fabricated preview snapshot is never reused: it
+                # everything between the two reads is local arithmetic, so a
+                # second read spends a venue round trip on a number that cannot
+                # have moved. A fabricated preview snapshot is never reused: it
                 # carries a zero equity, and an entry has to price off a real
                 # wallet or fail.
                 reuse_snapshot=(
@@ -2166,9 +2159,9 @@ class AccountExecutionService:
         # The journal walks are a pure function of the snapshot and the symbols
         # read off it — no clock reaches them — so they are derived once per
         # journal change instead of twice per loop pass. Re-deriving them from
-        # every event ever written cost a slice of a core that grew with the
-        # epoch: about 9% at 10k events, half a core at 50k, and past ~200k the
-        # owner can no longer hold its 10Hz cadence. The key is exact rather
+        # every event ever written costs a share of a core that grows with the
+        # epoch, and past ~200k events the owner cannot hold its 10 Hz cadence.
+        # The key is exact rather
         # than a heuristic, since the rolling hash advances on every journaled
         # event, so a hit returns what a rescan would have built.
         scan_key = (
@@ -2693,11 +2686,10 @@ class AccountExecutionService:
             # stepping over it before that would abandon work the venue never
             # saw. A durable submission attempt is the other, and it is true
             # from the instant it is journaled — the driver raises
-            # `AmbiguousExposureSubmission` on exactly that predicate. Waiting
-            # out the age bound for THAT case cost five minutes in which this
-            # loop returned on the first such plan and raised, taking
-            # reduce-only exits for every other symbol down with it, on every
-            # pass. That is the shape of the recorded nine-hour funded block.
+            # `AmbiguousExposureSubmission` on exactly that predicate, which
+            # is why it must not wait out the age bound: one such plan would
+            # raise here and take every other symbol's reduce-only exit with
+            # it, every pass.
             wedged_by_age = {
                 wedge.command_id: wedge.describe()
                 for wedge in wedged_commands(commanded_orders, now_ns=now_ns)
@@ -2965,12 +2957,8 @@ class AccountExecutionService:
         # object rather than mutating the old one, so identity is exactly the
         # right cache key.
         #
-        # It is worth caching: protections accumulate for the life of the
-        # account -- 200 of them on the demo book -- and this ran on every owner
-        # pass, ahead of every request. A profile of the order path put 24.5% of
-        # its time in this comprehension alone, which is about 46% of everything
-        # that is not the venue round trip, all of it to rediscover that no
-        # native breach is outstanding.
+        # Worth caching because protections accumulate for the life of the
+        # account and this sits ahead of every request on the order path.
         if self._safety_flat_state is not state:
             self._safety_flat_state = state
             self._safety_flat_hashes = {

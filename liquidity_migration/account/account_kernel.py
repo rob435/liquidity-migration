@@ -1171,11 +1171,11 @@ def _projection_last_event_hash(path: Path) -> str:
 
 
 #: Per-projection ``(size_bytes, last_event_hash)`` as this process last left the
-#: file. The continuity check below is a seek-to-end plus a backward read on
-#: every commit -- twice on the path between a durable intent and the venue --
-#: purely to learn a hash this process just wrote. A ``stat`` that agrees on the
-#: size proves nothing else has appended since, and costs a hundredth of the
-#: read. Any disagreement, any miss, and the file is read exactly as before.
+#: file. The continuity check below is a seek-to-end plus a backward read, on
+#: the path between a durable intent and the venue, purely to learn a hash this
+#: process just wrote. A ``stat`` that agrees on the size proves nothing else
+#: has appended since. Any disagreement, any miss, and the file is read as
+#: before.
 _PROJECTION_TAIL: dict[str, tuple[int, str]] = {}
 
 
@@ -1242,11 +1242,9 @@ def _append_jsonl_projection(
             written_bytes += len(data)
         # Deliberately not fsynced. This projection is rebuildable and is not
         # the commit point -- the transaction segment above it is, and that one
-        # is still synced before anything acts on it. Syncing here cost a
-        # measured 1.02 ms on every commit, twice on the path between a durable
-        # intent and the order reaching the venue, to protect a file that a
-        # machine crash can already only leave torn and that the hash check at
-        # the top of this function rebuilds when it is.
+        # is still synced before anything acts on it. A machine crash can only
+        # leave this file torn, and the hash check at the top of this function
+        # rebuilds it when it is.
         _PROJECTION_TAIL[str(path)] = (
             start_size + written_bytes,
             appended[-1].event_hash,

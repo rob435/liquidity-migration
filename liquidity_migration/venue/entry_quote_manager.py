@@ -636,14 +636,11 @@ class EntryQuoteManager:
         new_price = self._desired_price(quote, now_ns, tick, bid, ask, bid_qty, ask_qty)
         if new_price is None or abs(float(new_price) - quote.price) < tick * 0.5:
             return
-        # The budget is a schedule, not a protection. It shipped as 8 when a
-        # reprice was every 15s, so it spanned the whole 120s window; when the
-        # cadence went to 3s the same 8 covered only the first 24s, and a quote
-        # whose touch moved early could never reach the urgency ladder — join
-        # at half the window, improve at 85% — that the same commit added and
-        # justified at -0.36 bp/entry. Past the join threshold the escalation
-        # outranks the budget. Bounded: only a real >=half-tick move amends at
-        # all, and only the window's last half can spend past 8.
+        # The budget is a schedule, not a protection: at a 3s cadence it covers
+        # only the first 24s of the 120s window, so past the join threshold the
+        # urgency ladder — join at half the window, improve at 85% — outranks
+        # it. Bounded: only a real >=half-tick move amends at all, and only the
+        # window's last half can spend past the budget.
         if (
             quote.amend_count >= self.config.max_amends
             and self._elapsed_fraction(quote, now_ns) < self.config.urgency_join_frac

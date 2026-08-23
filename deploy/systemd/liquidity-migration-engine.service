@@ -19,17 +19,11 @@ Group=root
 # this directory before the engine starts.
 StateDirectory=liquidity-migration-engine
 WorkingDirectory=/var/lib/liquidity-migration-engine
-# The FLEET's demo account, 555899665. This used to name bybit-quote-lab.env,
-# the engine's own second demo account (579580669), and the reason was real:
-# liquidity-migration-account-execution.service owned this account, two writers
-# on one venue account wedge each other, and on 2026-08-14 01:56 a live engine
-# here blocked that owner for about a hundred seconds.
-#
-# That owner was deleted with the rest of the Python order path. Nothing else
-# writes to this account now, and the engine is what the producers publish
-# their books to — so it has to be this account, not a second one. The kernel
-# lease still holds: if anything else does take the account, the engine refuses
-# to start rather than fighting it.
+# The FLEET's demo account, 555899665 — the account the producers publish their
+# books to, so it has to be this one and not the engine's own second demo
+# account, 579580669 in bybit-quote-lab.env. Two writers on one venue account
+# wedge each other; the kernel lease is what stops that, and the engine refuses
+# to start rather than fight anything else that holds the account.
 #
 # The Telegram tokens in this file are unset below. The engine sends no
 # messages, and a process that cannot reach the owner's chat cannot post to it

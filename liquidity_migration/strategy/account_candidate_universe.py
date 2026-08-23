@@ -733,8 +733,8 @@ def load_candidate_universe(
         raise ValueError("candidate-universe artifact must not be group/world accessible")
     if snapshot.uid != os.geteuid():
         raise ValueError("candidate-universe artifact must be owned by the verifier")
-    # The artifact is frozen and every producer re-derived the whole thing each
-    # cycle. Its own content hash keys the result exactly: the ownership and
+    # The artifact is frozen, so its own content hash keys the result exactly.
+    # The ownership and
     # permission checks above still run on every call against the live stat, so
     # the memo accelerates the parse, not the verification.
     # The path is part of what this returns, so two artifacts with identical

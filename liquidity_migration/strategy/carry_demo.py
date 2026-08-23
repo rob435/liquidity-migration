@@ -157,8 +157,7 @@ CARRY_CONFIG_PATH = _CONFIGS_DIR / "lane2_carry_hold_v6.json"
 #: Registered CARRY deployments, selectable per unit exactly like LONG's
 #: (``CARRY_STRATEGY_PROFILE`` env → ``--strategy-profile``). Switching
 #: versions is an env change plus a registered config file — never a code
-#: edit. Exception: v6 was the first profile whose rule reads a second venue
-#: (the Binance whale ratio), so ITS first deploy carried the feed code too.
+#: edit.
 CARRY_STRATEGY_PROFILE_CHOICES: tuple[str, ...] = ("v3", "v4", "v6", "v7")
 DEFAULT_CARRY_STRATEGY_PROFILE = "v7"
 
@@ -311,12 +310,9 @@ def decide_book(
 # ---------------------------------------------------------------------------
 # Cycle layer: the deployed CARRY target producer.
 #
-# The engine above answers "what should the book be at 00:00 UTC today"; the
-# layer below turns that answer into immutable account-target requests. It is
-# a diff machine, not an order machine: every cycle it recomputes the desired
-# book, reads the account owner's accepted reservations, and publishes only
-# the difference (exit-first). No diff means no publication, which is what
-# makes a 60-second cadence safe for a daily strategy.
+# Publishes only the difference between the desired book and the owner's
+# accepted reservations, exit-first. No diff means no publication, which is
+# what makes a 60-second cadence safe for a daily strategy.
 # ---------------------------------------------------------------------------
 
 _logger = logging.getLogger(__name__)
@@ -330,8 +326,7 @@ _logger = logging.getLogger(__name__)
 #: own id, while new components open under this one.
 CARRY_STRATEGY_ID = "carry_hold"
 #: Filing ids of earlier deployments, still read (and drained) from standing
-#: state. The sleeve filed under the version-shaped "carry_hold_v3" from its
-#: first deployment through 2026-08-05, including the v4 promotion.
+#: state.
 CARRY_LEGACY_STRATEGY_IDS: tuple[str, ...] = ("carry_hold_v3",)
 #: One stable component per symbol. Unlike the continuous sleeve (one
 #: component per signal), carry manages a persistent per-symbol target that is
@@ -537,8 +532,7 @@ class CarryCycleState:
         remain the capital-preservation path.
 
         The first usable call for a decision bar sets that bar's anchor, and
-        since the freeze-ahead pass (2026-08-13) that first call happens ~90
-        seconds BEFORE the boundary by design: the day's equity is the
+        it happens ~90 seconds BEFORE the boundary by design: the day's equity is the
         freeze-time mark, not the boundary-time mark, and the resize dead-band
         absorbs the drift between the two. Anchors keep two-day retention so
         pre-boundary cycles sizing TODAY cannot evict TOMORROW's freeze-time
@@ -585,8 +579,8 @@ class CarryDemoCycleConfig:
     #: Registered deployment version (``resolve_carry_strategy_profile``).
     strategy_profile: str = DEFAULT_CARRY_STRATEGY_PROFILE
     #: Sell an exiting name at the settled print that ends it instead of the
-    #: next midnight (owner-directed 2026-08-19; ``CARRY_EARLY_EXIT`` on the
-    #: units). Off by default so ad-hoc runs replay the registered clock.
+    #: next midnight (``CARRY_EARLY_EXIT`` on the units). Off by default so
+    #: ad-hoc runs replay the registered clock.
     early_exit_enabled: bool = False
     # --- sizing (operational profile carry block) ---
     notional_multiplier: float = 1.0
@@ -904,8 +898,8 @@ def _refresh_carry_whale_cache(
 
 
 # ---------------------------------------------------------------------------
-# Early exit (owner-directed 2026-08-19): sell an exiting name at the print
-# that ends it, not at the next midnight. A held name's exit condition is the
+# Early exit: sell an exiting name at the print that ends it rather than at
+# the next midnight. A held name's exit condition is the
 # registered one — the latest settled print at or above -exit_bp — and every
 # print that can fire it settles intraday on the modern (sub-8h) book, so the
 # fire needs no new threshold and no new data: the hourly funding sweep
@@ -2189,8 +2183,7 @@ def _candidate_filtered_universe(
         # instrument set. Binding to the carry profile instead would cut the
         # tradable population from every listed perpetual (510 on demo, 512 on
         # mainnet as of the 2026-08-13 freeze) to the carry top-150 — a
-        # strategy change, not a rename. Whether to
-        # narrow it is an open question for the owner and is not decided here.
+        # strategy change, not a rename.
         require_profile_binding(
             frozen,
             profile="carry",
@@ -2395,19 +2388,14 @@ def run_carry_demo_cycle(
         standing_rows = _carry_standing_rows(reservations)
         standing_symbols = set(standing_rows)
         # Only the market-boundary wake serves the owner-health reading the
-        # freeze window stored — that is the declared trade: the day sizes
-        # off freeze-time equity, so the boundary pays no health I/O and none
-        # of the head-retry sleeps. The bound is the freeze window itself
-        # (any reading taken inside it is exactly the freeze-time equity the
-        # trade names), which also means the served value skips the owner
-        # journal-head binding a live read enforces: at worst it reflects
-        # owner state ~2 minutes old (reading age up to ~95s, plus the ~30s
-        # owner-receipt age the live read allowed at stamp time). The resize
-        # dead-band absorbs the drift and the disaster stop never reads this.
-        # A journal-change wake fires BECAUSE the journal moved, so it always
-        # reads live — served equity there could predate the very fill that
-        # woke it. Stale or absent readings fall through to the live read
-        # (the declared degraded path, which may sleep).
+        # freeze window stored: the day sizes off freeze-time equity, and any
+        # reading taken inside that window is exactly that. It skips the
+        # journal-head binding a live read enforces, so it can be ~2 minutes
+        # behind owner state (up to ~95s reading age plus the ~30s
+        # owner-receipt age); the resize dead-band absorbs that and the
+        # disaster stop never reads it. A journal-change wake always reads
+        # live — served equity there could predate the fill that woke it.
+        # Stale or absent falls through to the live read, which may sleep.
         now_ns = cycle_now_ms * 1_000_000
         freeze_reading = (
             state.owner_health_reading if cycle_kind == "market_boundary" else None
@@ -2490,13 +2478,10 @@ def run_carry_demo_cycle(
                         root, whale_symbols, now_ms=cycle_now_ms, state=state
                     )
                     build_stats.update(whale_stats)
-                # Asked before the panel is built, not after: the decision is frozen
-                # for the whole day, so on all but the first cycle the rebuild below
-                # — two sorts and an as-of join over the whole window — produced a
-                # ``universe_eligible`` that the frozen tuple immediately replaced,
-                # and nothing else read the panel. ``_build_carry_demo_market_data``
-                # stays above, so the hourly funding sweep and the kline caches are
-                # still maintained every cycle.
+                # Asked before the panel is built: a frozen decision cannot read
+                # the panel, and nothing else does.
+                # ``_build_carry_demo_market_data`` stays above so the hourly
+                # funding sweep and the kline caches are still maintained.
                 frozen = state.frozen_decision(decision_ts_ms)
                 if frozen is not None:
                     decision, trail_by_symbol, universe_eligible = frozen
@@ -2684,7 +2669,7 @@ def run_carry_demo_cycle(
                         presettle_error,
                     )
 
-        # The drop exit (part of the exit clock since 2026-08-23): mask the
+        # The drop exit: mask the
         # names the UPCOMING frozen decision zeroes out of the served
         # (old-day) book, so their exit intents publish this cycle — ~00:02,
         # before the post-settlement drift the 00:20 clock sells into.
@@ -2862,7 +2847,7 @@ def run_carry_demo_cycle(
             "decision_error": decision_error,
             "decision_stale": decision_stale,
             "decision_frozen": decision_frozen,
-            # Deadline-latency provenance (2026-08-13): whether this cycle
+            # Deadline-latency provenance: whether this cycle
             # skipped the data build (deadline wake on a frozen day), whether
             # the decision it served was frozen ahead of the deadline, and
             # whether this cycle itself froze the upcoming day.
@@ -2944,8 +2929,6 @@ def run_carry_demo_cycle(
             "kline_fetched_rows": int(build_stats.get("kline_fetched_rows", 0)),
             "kline_output_rows": int(build_stats.get("kline_output_rows", 0)),
             "kline_fetch_symbols": int(build_stats.get("kline_fetch_symbols", 0)),
-            # A real gauge since 2026-08-03; it was a hardcoded 0 before, which
-            # masked the store never serving (the probe defect fixed the same day).
             "kline_store_rows": int(build_stats.get("kline_store_rows", 0)),
             "funding_swept": bool(build_stats.get("funding_swept", False)),
             "funding_rows_appended": int(build_stats.get("funding_rows_appended", 0)),

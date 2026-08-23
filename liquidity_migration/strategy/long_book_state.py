@@ -1,12 +1,9 @@
 """What LONG asked the engine to hold, and since when.
 
-The producers used to learn what they held by reading the account owner's
-journal: the owner drained an inbox, placed the orders, and wrote down what
-happened. That owner is gone -- the engine executes now -- and the journal
-stopped being written with it. Reading it anyway would be worse than reading
-nothing, because the file is still on disk: a producer would go on believing
-it holds whatever the owner last wrote, for ever, and every one of those
-ghosts would eventually pass its deadline and occupy a slot nothing can free.
+Never read the account owner's journal for this. Nothing writes it any more,
+but the file is still on disk, so a producer that read it would go on believing
+it holds whatever was last written there, for ever, and every one of those
+ghosts would pass its deadline and occupy a slot nothing can free.
 
 The engine's contract is an *absolute* book. The producer says what it wants
 held; the engine works out the difference from what is actually there. So what
@@ -15,12 +12,10 @@ at what size, with what stop, and since when. Every clock LONG runs hangs off
 that one instant -- the three-day time stop, the v12 stop decay, and the
 cooldown that starts when a name leaves the book.
 
-This is deliberately shaped to read back as the same table the journal used to
-produce, so the entry screen, the exit planner and the cooldown keep working on
-it unchanged. What changed underneath is what "open" means. It used to mean a
-fill the owner had attributed. It now means a name this producer is asking for.
-Those differ for as long as an entry takes to fill, which is the engine's
-business and no longer something the producer guesses at.
+The shape is the table the entry screen, the exit planner and the cooldown all
+read, so it is not free to change. "Open" here means a name this producer is
+asking for, not a fill: the two differ for as long as an entry takes to fill,
+which is the engine's business and not something the producer guesses at.
 
 **A stop that fires is news, and it arrives from the engine.** The engine
 publishes what the venue says is held in its heartbeat, and `seen_held` below

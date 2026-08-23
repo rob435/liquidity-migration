@@ -1986,22 +1986,14 @@ class BybitRawPublicMarketStream:
                     close()
                 break
             try:
-                # ``skip_utf8_validation`` is the library's own switch for
-                # this, and it is worth taking. A profile of the ticker
-                # stream's thread put 2.7% of its samples in
-                # ``websocket-client``'s ``_validate_utf8`` and another 1.3% in
-                # its ``_decode`` -- roughly a third of everything that thread
-                # does while awake -- against 0.6% in this module's own frame
-                # handler. Both are pure-Python byte loops, so they hold the
-                # GIL, and the order path runs on the thread they take it from.
-                #
-                # With this set the library hands ``on_message`` the raw bytes
+                # ``skip_utf8_validation`` hands ``on_message`` raw bytes
                 # instead of a decoded str, and ``_on_message`` passes them
-                # straight to ``json.loads`` -- which decodes UTF-8 strictly and
+                # straight to ``json.loads``, which decodes UTF-8 strictly and
                 # raises on a malformed frame exactly as the library's own
-                # decode did. So nothing here trusts the frame more than before;
-                # what is skipped is only the library re-proving UTF-8 validity
-                # in a Python byte loop before doing the same work again.
+                # decode did -- nothing here trusts the frame more than before.
+                # What is skipped is the library re-proving UTF-8 validity in a
+                # pure-Python byte loop, which holds the GIL on the thread the
+                # order path shares.
                 socket.run_forever(ping_interval=20, ping_timeout=10, skip_utf8_validation=True)
             except Exception:
                 _logger.exception("raw Bybit public stream failed")

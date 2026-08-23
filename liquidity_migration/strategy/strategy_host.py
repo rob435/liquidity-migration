@@ -244,7 +244,7 @@ class StrategyHostDaemon:
         # to the health check and the recovery path.
         self._ticker_stream_installed_monotonic: float | None = None
         # Serializes _ticker_stream open/close across the seed/reconcile/watchdog threads
-        # so a race can't leak a second ticker WS (DAEM-002; see EventDemoDaemon).
+        # so a race can't leak a second ticker WS.
         self._ticker_stream_lock = threading.Lock()
         self._ticker_stream_factory = ticker_stream_factory or _default_public_ticker_stream_factory
         # Cache the public REST client across refreshes to avoid per-minute
@@ -255,7 +255,7 @@ class StrategyHostDaemon:
         self._ticker_reconcile_interval_seconds = float(ticker_reconcile_interval_seconds)
         self._state_cache_stale_seconds = float(state_cache_stale_seconds)
         self._reconcile_thread: threading.Thread | None = None
-        self._seed_thread: threading.Thread | None = None  # tracked so shutdown can join it (DAEM-003)
+        self._seed_thread: threading.Thread | None = None  # shutdown joins it
         self._reconcile_stop = threading.Event()
         self._reconciles_total = 0
         self._reconcile_errors = 0
@@ -399,7 +399,7 @@ class StrategyHostDaemon:
                     self._wait_for_next_cycle_timer()
         finally:
             # Join the fire-and-forget seed thread FIRST (shutdown is set, so it returns)
-            # so it's quiescent before the ticker/WS it may touch is closed (DAEM-003).
+            # so it's quiescent before the ticker/WS it may touch is closed.
             seed = self._seed_thread
             self._seed_thread = None
             if seed is not None:
@@ -621,7 +621,7 @@ class StrategyHostDaemon:
         self._seed_thread.start()
 
     def _run_public_ticker_seed(self) -> None:
-        # Reconcile loop is the SINGLE writer of the counters (DAEM-004; see EventDemoDaemon).
+        # Reconcile loop is the SINGLE writer of the counters.
         try:
             self._refresh_public_ticker_cache()
         except Exception as exc:

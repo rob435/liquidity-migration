@@ -494,13 +494,8 @@ def component_execution_anchors_from_snapshot(
         raise RuntimeError("component anchor event/state snapshot is inconsistent")
     # The pair just validated is a complete identity for this projection, so it
     # is also the right memo key: the same snapshot always yields the same
-    # anchors. Without it this replayed the whole event history on every call,
-    # which is what the docstring above says it exists to avoid -- and history
-    # is never pruned, so the cost grew with the account's age. Measured on a
-    # book after a day of trading it was the largest single item left in the
-    # reconcile. ``protection_engine`` already kept this memo for its own two
-    # call sites; the reconcile's path through ``venue_protection`` did not,
-    # and holding it here covers every caller.
+    # anchors. Without it every call replays the whole event history, and
+    # history is never pruned, so the cost grows with the account's age.
     #
     # Sorting is part of the projection, not of the filter, so it is cached
     # too. The filter runs per call over the ordered anchors, which preserves

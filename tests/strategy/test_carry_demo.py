@@ -898,7 +898,7 @@ def test_run_cycle_blocks_entries_but_exits_when_owner_health_unavailable(
         now_ms=NOW_MS,
     )
 
-    # 7af59f3 convention: equity is null, never 0.0, on an owner-health error.
+    # Equity is null, never 0.0, on an owner-health error.
     assert payload["equity_usdt"] is None
     assert payload["account_owner_health_error"]
     assert payload["entry_blocked_reason"] == "account_owner_health_unavailable"
