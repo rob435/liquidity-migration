@@ -2960,7 +2960,7 @@ class TestPresettleExit:
         assert payload["presettle_fired"] == []
 
 
-# --- leg B drop exit (owner-directed 2026-08-23): sell the zeroed before 00:20 ---
+# --- drop exit (part of the exit clock 2026-08-23): sell the zeroed before 00:20 ---
 
 
 class TestDropExit:
@@ -2976,7 +2976,7 @@ class TestDropExit:
     def _state_with_upcoming(
         self, *, upcoming_weights: dict[str, float] | None = None
     ) -> CarryCycleState:
-        """Yesterday served, today frozen ahead: the leg B precondition."""
+        """Yesterday served, today frozen ahead: the drop-exit precondition."""
 
         state = CarryCycleState()
         state.freeze_decision(
@@ -3058,9 +3058,7 @@ class TestDropExit:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _route(tmp_path / "route")
-        demo_config = _routed_config(
-            tmp_path / "route", drop_exit_enabled=True
-        )
+        demo_config = _routed_config(tmp_path / "route")
         _patch_demo_market_data_ws_served(monkeypatch)
         standing = pl.DataFrame(
             [
@@ -3097,7 +3095,6 @@ class TestDropExit:
 
         assert payload["decision_error"] is None
         assert payload["decision_ts_ms"] == D0 - MS_PER_DAY
-        assert payload["drop_exit_enabled"] is True
         # This build froze the upcoming book itself, ~00:03.
         assert payload["drop_exit_froze_ahead"] is True
         assert payload["drop_exit_fired"] == [DEEP_A]
@@ -3127,12 +3124,15 @@ class TestDropExit:
         assert payload2["drop_exit_masked"] == 1
         assert payload2["desired_book_size"] == 2
 
-    def test_disabled_keeps_the_deployed_clock(
+    def test_a_rest_degraded_build_keeps_the_old_clock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The freeze gates refuse a REST-repaired build (the deadline's own
+        # rebuild could see different rows), so the day degrades to the old
+        # clock: no early freeze, no early sell, the doomed name waits.
         _route(tmp_path / "route")
         demo_config = _routed_config(tmp_path / "route")
-        _patch_demo_market_data_ws_served(monkeypatch)
+        _patch_demo_market_data(monkeypatch)
         standing = pl.DataFrame(
             [
                 {
@@ -3164,12 +3164,9 @@ class TestDropExit:
             cycle_state=state,
         )
 
-        assert payload["drop_exit_enabled"] is False
+        assert payload["drop_exit_froze_ahead"] is False
         assert payload["drop_exit_fired"] == []
         assert payload["drop_exit_masked"] == 0
-        # Off means fully off: no early freeze either, so the served book
-        # still carries the doomed name until the 00:20 flip.
-        assert payload["drop_exit_froze_ahead"] is False
         assert payload["desired_book_size"] == 3
         assert payload["exit_targets_queued"] == 0
 

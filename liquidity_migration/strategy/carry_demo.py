@@ -480,7 +480,7 @@ class CarryCycleState:
         # Early-exit mask: symbol -> the decision bar it fired under. None
         # until first use, then mirrors the on-disk state file.
         self.early_exits: dict[str, int] | None = None
-        # Drop-exit logging guard (leg B): the names the upcoming decision
+        # Drop-exit logging guard: the names the upcoming decision
         # zeroed and this process already announced. The mask itself is
         # re-derived every cycle from the two frozen books, so losing this
         # only repeats a log line.
@@ -588,12 +588,6 @@ class CarryDemoCycleConfig:
     #: next midnight (owner-directed 2026-08-19; ``CARRY_EARLY_EXIT`` on the
     #: units). Off by default so ad-hoc runs replay the registered clock.
     early_exit_enabled: bool = False
-    #: Sell a held name the UPCOMING decision zeroes (universe rank,
-    #: persistence cut, suspend) at the first post-midnight cycle instead of
-    #: the 00:20 clock (owner-directed 2026-08-23; ``CARRY_DROP_EXIT`` on the
-    #: units). Entries keep the deployed clock either way. Off by default so
-    #: ad-hoc runs replay the deployed clock.
-    drop_exit_enabled: bool = False
     # --- sizing (operational profile carry block) ---
     notional_multiplier: float = 1.0
     #: The EXODUS SHORT's own multiplier; None inherits ``notional_multiplier``
@@ -2560,14 +2554,15 @@ def run_carry_demo_cycle(
                 standing_symbols=standing_symbols,
                 whale_events=whale_events,
             )
-        if demo.drop_exit_enabled and built_klines is not None and built_funding is not None:
-            # Leg B of the two-leg exit clock: the upcoming day's decision
-            # reads only rows already public minutes after midnight, so freeze
-            # it at the first clean post-midnight build instead of inside the
-            # pre-deadline window. The drops' exits then publish ~00:02 while
-            # entries still wait for the 00:20 clock. Same function, same
-            # gates, same refusal semantics as the deadline freeze: a
-            # repair-pending build pins nothing.
+        if built_klines is not None and built_funding is not None:
+            # The drop exit, part of the strategy's own exit clock: the
+            # upcoming day's decision reads only rows already public minutes
+            # after midnight, so freeze it at the first clean post-midnight
+            # build instead of inside the pre-deadline window. The zeroed
+            # names' exits then publish ~00:02 while entries still wait for
+            # the 00:20 clock. Same function, same gates, same refusal
+            # semantics as the deadline freeze: a repair-pending build pins
+            # nothing and the day degrades to the old clock.
             drop_day_ts = (cycle_now_ms // DAY_MS) * DAY_MS
             if drop_day_ts > decision_ts_ms and state.frozen_decision(drop_day_ts) is None:
                 drop_exit_frozen = _freeze_decision_ahead(
@@ -2689,16 +2684,13 @@ def run_carry_demo_cycle(
                         presettle_error,
                     )
 
-        # Leg B: mask the names the UPCOMING frozen decision zeroes out of the
-        # served (old-day) book, so their exit intents publish this cycle —
-        # ~00:02, before the post-settlement drift the 00:20 clock sells into.
+        # The drop exit (part of the exit clock since 2026-08-23): mask the
+        # names the UPCOMING frozen decision zeroes out of the served
+        # (old-day) book, so their exit intents publish this cycle — ~00:02,
+        # before the post-settlement drift the 00:20 clock sells into.
         drop_exit_fires: list[str] = []
         drop_exit_masked = 0
-        if (
-            decision is not None
-            and demo.drop_exit_enabled
-            and decision.decision_ts_ms % DAY_MS == 0
-        ):
+        if decision is not None and decision.decision_ts_ms % DAY_MS == 0:
             decision, dropped_now, drop_exit_masked = _apply_drop_exits(
                 decision=decision, state=state
             )
@@ -2903,10 +2895,9 @@ def run_carry_demo_cycle(
             ),
             "presettle_fired": presettle_fires,
             "presettle_error": presettle_error,
-            # Drop-exit receipt (leg B): names the upcoming decision zeroed
-            # and this cycle announced, plus whether this cycle froze that
-            # upcoming book early.
-            "drop_exit_enabled": demo.drop_exit_enabled,
+            # Drop-exit receipt: names the upcoming decision zeroed and this
+            # cycle announced, plus whether this cycle froze that upcoming
+            # book early. Part of the exit clock; no dial.
             "drop_exit_fired": drop_exit_fires,
             "drop_exit_masked": drop_exit_masked,
             "drop_exit_froze_ahead": drop_exit_frozen,
@@ -3035,7 +3026,7 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
     if payload.get("freeze_ahead_frozen"):
         fast_path_text += " froze_ahead=True"
     # Only rendered when engaged: the early freeze and the names it let sell
-    # before the 00:20 clock are leg B's whole receipt.
+    # before the 00:20 clock are the drop exit's whole receipt.
     if payload.get("drop_exit_froze_ahead"):
         fast_path_text += " drop_froze=True"
     drops = payload.get("drop_exit_fired") or []

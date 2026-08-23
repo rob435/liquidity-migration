@@ -68,12 +68,12 @@ file.
   `9d2c646e`, with carry_hold **v7** on both CARRY producers: v6's registered
   rule byte-identical plus the pre-settlement exit read (`strategy_profile=v7
   early_exit=1` — the early exit fires on the venue's running rate up to 15
-  minutes before a dying print pays; settled-print fallback kept). Both units
-  also carry `CARRY_DROP_EXIT=1`: a held name the upcoming midnight decision
-  zeroes (universe rank, persistence cut, suspend) sells at the first
-  post-midnight cycle (~00:02) instead of on the 00:20 clock; entries keep
-  that clock. Armed in the unit files 2026-08-23, live from the next deploy;
-  kill switch `CARRY_DROP_EXIT=0`.
+  minutes before a dying print pays; settled-print fallback kept). The drop
+  exit is part of the producers' exit clock (no dial): a held name the
+  upcoming midnight decision zeroes — universe rank, persistence cut,
+  suspend — sells at the first post-midnight cycle (~00:02) instead of on the
+  00:20 clock; entries keep that clock. In the tree since 2026-08-23, live
+  from the next deploy.
 
   The engine recovers fills its stream never delivered from the venue's own
   execution history — at boot and after every private-stream reconnect — so the
@@ -408,11 +408,10 @@ the last 15 minutes before a held name's settlement, selling before the
 payment instead of one minute after it; config unchanged — v7 trades
 `lane2_carry_hold_v6` byte-identical, so its forward grade continues under one
 config id; graded from engine exit fills against the settled-print
-counterfactual; rollback dial is `v6`), and the CARRY drop exit (leg B,
-2026-08-23: `CARRY_DROP_EXIT=1` on both carry units — a held name the upcoming
-decision zeroes sells ~00:02 instead of 00:20, entries unchanged; armed in the
-unit files, accruing from its deploy; rollback dial is `CARRY_DROP_EXIT=0`),
-LONG
+counterfactual; rollback dial is `v6`), and the drop exit (folded into the
+producers' exit clock 2026-08-23 — a held name the upcoming decision zeroes
+sells ~00:02 instead of 00:20, entries unchanged; no dial, the rollback is a
+revert and redeploy), LONG
 v12 wide-stop (2026-08-03), and the entry execution recipes
 (quote-first entries, touch-sized windows, and the replay-selected resting recipe,
 all 2026-08-04 — deployed with `f85371e`). 2026-08-21 adds three sizing

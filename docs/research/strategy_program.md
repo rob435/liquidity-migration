@@ -410,10 +410,11 @@ with both signals measured.**
 The book's names drift down after the 00:00 settlement, and on exit days they
 leak price all evening; the 00:20 sell sat at the bottom of both. Leg A is the
 deployed early-exit clock (the settled-print fire, generalized by the v7
-pre-settlement read). Leg B is the drop exit (`CARRY_DROP_EXIT=1`, owner
-2026-08-23): a held name the upcoming midnight decision zeroes — universe
-rank, persistence cut, suspend — sells at the first post-midnight cycle off
-the swept print and WS-served bars instead of on the 00:20 REST-era margin.
+pre-settlement read). Leg B is folded into the strategy itself (owner swept
+the dial away 2026-08-23): a held name the upcoming midnight decision zeroes —
+universe rank, persistence cut, suspend — sells at the first post-midnight
+cycle off the swept print and WS-served bars instead of on the 00:20 REST-era
+margin; a dirty build degrades that day to the old clock.
 Measured on every held name-day 2021–2026 with all-in accounting:
 
 - **Leg A (fee recoveries):** selling at the recovered print beats the 00:20

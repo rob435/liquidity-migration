@@ -163,26 +163,27 @@ edit STATE.md to match.
   the registered differentials, n too small to read: v5−v4 **+0.05 bp/day**
   and v6−v5 **−4.87 bp/day** over their first 2 post-commit days.
 
-- **2026-08-23 — leg B of the carry exit clock: names the next decision zeroes
-  sell at ~00:02, not 00:20 (`CARRY_DROP_EXIT`).** The measured population —
-  exits forced by a universe/persistence drop rather than a fee recovery —
-  leaks +74/+43 bp pooled between 23:55 and the 00:20 fill (t 3.5), but only
-  +18/+15 in 2026 alone (t 0.8); that era-weak tail is the honest size of the
-  live edge. Mechanics: when `CARRY_DROP_EXIT=1`, the first clean post-midnight
-  build freezes the upcoming day's book through the same `_freeze_decision_ahead`
-  gates the pre-deadline freeze uses (WS-store-served klines, no funding-fetch
-  failures — a repair-pending build pins nothing), masks the zeroed names out
-  of the served old-day book, and their exit intents publish exit-first at
-  ~00:02. Entries never move early (they exist only in the upcoming book,
-  behind the 00:20 flip; yesterday's signals are long expired by then). A
-  shrunk weight is a resize, not a drop. The exodus sleeve does not take these
-  over — its trigger stays the fee-recovery fire. Known cost, documented in the
-  freeze-ahead residual it inherits: the early ticker snapshot can drop a name
-  the authoritative 00:20 rebuild keeps, selling once and re-buying (~15.56 bp)
-  against the leak. Kill switch: `CARRY_DROP_EXIT=0`. Wired to both carry units;
-  live from the next deploy. Tests: `TestDropExit` (mask boundary, resize
-  not-a-drop, no-freeze noop, full-cycle fire with entries held back, disabled
-  keeps the deployed clock).
+- **2026-08-23 — the carry exit clock also sells names the next decision
+  zeroes at ~00:02, not 00:20.** The measured population — exits forced by a
+  universe/persistence drop rather than a fee recovery — leaks +74/+43 bp
+  pooled between 23:55 and the 00:20 fill (t 3.5), but only +18/+15 in 2026
+  alone (t 0.8); that era-weak tail is the honest size of the live edge.
+  Mechanics: on every clean post-midnight build the producer freezes the
+  upcoming day's book through the same `_freeze_decision_ahead` gates the
+  pre-deadline freeze uses (WS-store-served klines, no funding-fetch failures
+  — a repair-pending build pins nothing and the day keeps the old clock),
+  masks the zeroed names out of the served old-day book, and their exit
+  intents publish exit-first at ~00:02. Entries never move early (they exist
+  only in the upcoming book, behind the 00:20 flip; yesterday's signals are
+  long expired by then). A shrunk weight is a resize, not a drop. The exodus
+  sleeve does not take these over — its trigger stays the fee-recovery fire.
+  Known cost, documented in the freeze-ahead residual it inherits: the early
+  ticker snapshot can drop a name the authoritative 00:20 rebuild keeps,
+  selling once and re-buying (~15.56 bp) against the leak. Owner folded it
+  into the strategy same day: no dial, both producers carry it; rollback is a
+  revert and redeploy. Tests: `TestDropExit` (mask boundary, resize
+  not-a-drop, no-freeze noop, full-cycle fire with entries held back,
+  REST-degraded build keeps the old clock).
 
 - **2026-08-23 — the resting recipe takes the sweep's answer: move every 15 s,
   never cross early, ride to the deadline. Deployed.** Two numbers in
