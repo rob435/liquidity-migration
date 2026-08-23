@@ -7,7 +7,7 @@
 
 use engine_types::VenueError;
 
-use super::markets::{Market, Markets};
+use super::markets::Market;
 use super::parse::{parse_markets, venue_result};
 use super::realm::LighterRealm;
 use crate::http::HttpClient;
@@ -24,9 +24,4 @@ pub async fn markets_from(base_url: &str) -> Result<Vec<Market>, VenueError> {
     let http = HttpClient::new(base_url);
     let reply = http.get(PATH_MARKETS, "", &[]).await?;
     parse_markets(&venue_result(reply)?)
-}
-
-/// The market table, for a caller that wants the lookups rather than the rows.
-pub async fn market_table(realm: LighterRealm) -> Result<Markets, VenueError> {
-    Ok(Markets::from_rows(markets(realm).await?))
 }

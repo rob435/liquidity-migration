@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Quote, Subscription, SymbolId, Ticker};
 use engine_venue::venues::mexc::public;
@@ -180,6 +180,7 @@ impl Worker {
         loop {
             match self.connect().await {
                 Ok(mut socket) => {
+                    let opened = Instant::now();
                     if self.connected_before {
                         // Prices during the gap were missed; the engine clears
                         // its picture rather than reading a stale one as
@@ -192,9 +193,14 @@ impl Worker {
                         }
                     }
                     self.connected_before = true;
-                    self.backoff = Duration::ZERO;
                     if self.pump(&mut socket, &events).await.is_err() {
                         return;
+                    }
+                    // Only a socket that stayed up earns the reset. Zeroing on
+                    // connect instead lets a venue that accepts and drops be
+                    // redialled with no wait, for ever.
+                    if opened.elapsed() >= Duration::from_secs(30) {
+                        self.backoff = Duration::ZERO;
                     }
                 }
                 Err(e) => {

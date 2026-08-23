@@ -16,6 +16,46 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — the MEXC feed could never back off, and three docs described a
+  funded cap that does not exist.** Cleanup pass; the only behaviour change is
+  the MEXC one, on a venue no config names.
+  **MEXC's reconnect loop.** `mexc.rs` set `self.backoff = Duration::ZERO`
+  *before* `pump`, so a venue that accepts a socket and drops it immediately was
+  redialled with no wait at all: connect Ok → backoff 0 → pump returns on close
+  → the `if !self.backoff.is_zero()` sleep is skipped → the next iteration zeroes
+  it again. The backoff could never exceed one unslept step. `hyperliquid.rs` and
+  `lighter.rs`, which it was copied from, reset after `pump` and only once the
+  socket has stayed up 30 s; MEXC now does the same. No feed in
+  `engine-marketdata` has a test module — the loops need a live socket — so this
+  is proved by matching its two siblings, not by a test.
+  **The funded envelope.** STATE.md, `trading_logic.md` and `operations.md` said
+  the funded gross cap was "split carry 200/long 300" and that each sleeve holds
+  "a private share". `configs/operational.mainnet.json` has one account-wide
+  `max_account_gross_notional_usdt` of 500 and the same figure per component;
+  the sleeve blocks carry multipliers and leverage only. Four other places in
+  the same docs already said "no sleeve holds a private share", which is the
+  standing decision in AGENTS.md, so the repo disagreed with itself about how
+  much one sleeve can spend.
+  **Other stale claims, each checked against the artifact.**
+  `trading_logic.md` marked all three sleeves "Mainnet | off" while both mainnet
+  producers and the funded engine are active and `sleeves.env` has no mainnet
+  toggle at all. README.md described a shadow engine that exists in no build —
+  the heartbeat writes `mode: "live"` unconditionally — and counted four venues
+  when there are five. `PARTITIONABLE_SLEEVES`, `mirror_source_request_id`,
+  `mirror_source_environment` and `mirror_scale` are cited by docs and defined
+  in zero code files. `engine.md`'s "Adding a fifth" is now "Adding a venue".
+  **Dead code.** `lighter::public::market_table` had no call site anywhere.
+  `_outcome` in `test_telegram_controls.py` had none either, under a section
+  header with no tests under it. `DAEM-002/003/004` and `BUG-2` name no tracker
+  and `EventDemoDaemon` names no class; all five existed only inside comments.
+  **Left alone deliberately.** `architecture.md` §Trade diagnostics describes a
+  route nothing feeds, but it is the repository's only definition of the
+  execution-cost formulas and their signs and other docs cite it as that. The
+  `below_entry_floor` warning repeats ~675 times a day for one symbol, and its
+  own comment records "no cooldown" as a deliberate choice — suppressing it is a
+  strategy change, not cleanup.
+  Suite: 2416 Python, 1071 engine, both unchanged from before the pass.
+
 - **2026-08-23 — the engine's own logs were 42% waste; the fleet writes a
   quarter fewer lines.** Measured on a 40,000-line sample of the host's syslog:
   25.9% fewer lines and 42.3% fewer bytes after three changes, none of which
