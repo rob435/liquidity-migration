@@ -1247,7 +1247,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         book: TargetBook,
     ) -> Result<(), EngineError> {
         let now = clock::now_ns();
-        tracing::info!(
+        // The watcher already logged this book by path and decision stamp;
+        // the strategy id here is a per-boot position, not a name.
+        tracing::debug!(
             strategy = strategy.0,
             source = %book.source,
             targets = book.targets.len(),

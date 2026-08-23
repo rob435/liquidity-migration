@@ -55,6 +55,10 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with_target(false)
+        // journald stores colour escapes as literal bytes and rsyslog widens
+        // each one to the four characters `#033`, so they are written only for
+        // a human at a terminal.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();

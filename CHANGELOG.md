@@ -16,6 +16,35 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — the engine's own logs were 42% waste; the fleet writes a
+  quarter fewer lines.** Measured on a 40,000-line sample of the host's syslog:
+  25.9% fewer lines and 42.3% fewer bytes after three changes, none of which
+  touches what the engine trades.
+  **Colour escapes were being written to journald.** `tracing_subscriber::fmt()`
+  turns ANSI on whenever the feature is compiled in, and nothing here turned it
+  off, so every engine log line carried SGR codes — and rsyslog widens each
+  escape byte to the four characters `#033`, so one 885 KB sample of a single
+  log message held 338 KB of colour. It also broke grep: `path=` never matched,
+  because `#033[3m` sat between the message and the field. The subscriber now
+  asks whether stdout is a terminal, so a human running `engine` by hand still
+  gets colour and journald gets bytes. Proved by running `engine bench` both
+  ways: 0 escape bytes through a pipe, colour intact under a pty.
+  **One book arrival was logged twice.** `targets.rs` logs a book by path and
+  decision stamp, and `on_targets` logged the same arrival again at INFO
+  milliseconds later; every book read reaches `on_targets`, so the second line
+  was never news. It carried only the strategy id on top, which is a per-boot
+  position rather than a name. Now `debug!`.
+  **Two account-state warnings shouted every cycle.** A name another sleeve
+  holds, and a position the owner opened by hand, are both facts about the
+  account that stay true for as long as the position is open; they were guarded
+  by the per-book `complained` list, which is cleared for each new book by
+  design, so each fact was re-announced every cycle — 2,049 fires in one sample.
+  They now share `others_held_said`, which survives a new book and is pruned to
+  what is still true, so a name that goes flat and comes back is news again. The
+  book-scoped warning for a symbol outside the plug's universe keeps its fresh
+  hearing.
+  Engine tests: 1071 before, 1071 after.
+
 - **2026-08-23 ~19:25-19:42 UTC — deployed `130a0bf0`, both engines crash-looped
   on their own logs, fixed forward in `2a194e05`.** The fleet is on `2a194e05`,
   all ten units active, both engines booted clean. Seventeen minutes with no

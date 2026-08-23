@@ -81,6 +81,12 @@ pub struct TargetBookFollower {
     /// every quote, so without it one unreachable name in a book writes a
     /// warning a hundred times a second until the next book lands.
     complained: Vec<String>,
+    /// Names already announced as somebody else's -- another sleeve's, or the
+    /// owner's own hand. That is account state, not book state: it stays true
+    /// for as long as the position is open, so announcing it per book shouts
+    /// the same fact every cycle. Pruned to what is still true, so a name that
+    /// goes flat and comes back is news again.
+    others_held_said: Vec<String>,
     /// Names that went flat while the book still wanted them. See the module
     /// note: something other than this plug closed them, and buying them back
     /// would undo it. Cleared per symbol when the book stops asking.
@@ -168,6 +174,7 @@ impl TargetBookFollower {
             book: None,
             rules: PlanRules::FLEET,
             complained: Vec::new(),
+            others_held_said: Vec::new(),
             closed_under_us: Vec::new(),
             refused_entries: Vec::new(),
             skipped_entries: Vec::new(),
@@ -251,12 +258,12 @@ impl TargetBookFollower {
                 .symbol_id(&symbol)
                 .is_some_and(|id| ctx.foreign_position(id))
             {
-                if !self.complained.contains(&symbol) {
+                if !self.others_held_said.contains(&symbol) {
                     tracing::warn!(
                         symbol = %symbol,
                         "another strategy on this account is holding this name; leaving it alone"
                     );
-                    self.complained.push(symbol.clone());
+                    self.others_held_said.push(symbol.clone());
                 }
                 foreign.push(symbol);
             }
@@ -287,19 +294,21 @@ impl TargetBookFollower {
                 ctx.position(id).is_some() && ctx.my_position(id) == 0.0 && ctx.in_flight(id) == 0.0
             });
             if hand_held {
-                if !self.complained.contains(&symbol) {
+                if !self.others_held_said.contains(&symbol) {
                     tracing::warn!(
                         symbol = %symbol,
                         "this account holds a position in this name that no order of \
                          ours ever opened; leaving it alone"
                     );
-                    self.complained.push(symbol.clone());
+                    self.others_held_said.push(symbol.clone());
                 }
                 unowned.push(symbol);
             }
         }
         targets.retain(|target| !unowned.contains(&target.symbol));
         held.retain(|symbol| !unowned.contains(symbol));
+        self.others_held_said
+            .retain(|said| foreign.contains(said) || unowned.contains(said));
 
         // An entry the kernel just refused is left out of this pass entirely,
         // the same way a foreign holding is: planning it again would only
