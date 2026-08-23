@@ -1,8 +1,4 @@
-"""Behavioral contract for the demo ledger reset.
-
-Ported 2026-08-03 from textual assertions on the retired bash implementation
-to direct tests of ``liquidity_migration.ops.demo_ledger_reset``.
-"""
+"""Behavioral contract for the demo ledger reset."""
 
 from __future__ import annotations
 

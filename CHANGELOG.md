@@ -16,6 +16,44 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — the second cleanup pass: a dead download path, five unused
+  names, and four docs that described the system wrongly.** No behaviour change
+  outside the one noted below; suite 2414 Python (two tests went with the code
+  they tested) and 1071 engine.
+  **The ZIP archive path is gone**, ~94 lines. `_download_one_archive_hourly_kline`
+  had no caller but its own test, and `_is_v5_listing_row`,
+  `_download_and_read_hourly_archive` and `_delete_local_archive` had no caller
+  but it; the CLI names only the v5 API path. `ArchiveHourlyKlineDownloadConfig`
+  went with it and `_select_manifest_rows` narrows to the API config. The nine
+  test sites that used the ZIP config were exercising `_select_manifest_rows`,
+  which the live path shares, so they moved to the API config instead of being
+  deleted. `data/archive.py` keeps its readers — they have their own tests.
+  **Also removed, each with zero references anywhere**: `_OWNER_BLOCKED_PREFIX`
+  and its comment describing a function that no longer exists; the second copy
+  of `_monthly_returns`; `_SCALAR_TYPES`; `_MATCH_BACKTEST_UNIVERSE_FLOOR`;
+  `venue_realm_for_environment`, whose job production does through
+  `core.venue_realm.venue_realm()`; `load_risk_policy_bytes`, a shim whose own
+  comment claimed "isolated tools/tests" when only the test existed; and
+  `lm_load_private_systemd_environment`'s pass-through, which was a second name
+  for one function.
+  **Docs that were wrong, not merely verbose.** The LONG mainnet unit told an
+  operator the gate was `LONG_MAINNET_SLEEVE` — a retired key that toggles
+  nothing and only earns a warning from `lib_sleeves.sh`; the gate is
+  `REAL_MONEY`. `deploy/systemd/README.md` said the mainnet scope skips the
+  rule-receipt check, while `check_fleet_liveness.py` runs it in both realms and
+  says so in its own comment. `bybit_execution_adapter` said the owner stopped
+  hand-trading on 2026-08-08, which stopped being true the next day; the
+  docstring now states the `sole_leverage_authority` contract instead of a date.
+  `engine-marketdata`, `engine-venue` and `engine-venue/src/venues` counted four
+  venues; `engine-core/src/main.rs` named four of its six subcommands, and now
+  points at `USAGE` so one edit cannot desynchronise them again. `VenueGateway`
+  opened with "Implementations reach practice venues only", which its own next
+  sentence contradicted and which two mainnet adapters disprove.
+  **One inefficiency**: the LONG cycle report was `json.dumps`-ed twice with
+  identical arguments for two files; it is serialised once now.
+  Two orphaned doc comments left behind when `intern` moved to `symbols.rs` were
+  attaching themselves to the next item in `hyperliquid.rs` and `variational.rs`.
+
 - **2026-08-23 — the MEXC feed could never back off, and three docs described a
   funded cap that does not exist.** Cleanup pass; the only behaviour change is
   the MEXC one, on a venue no config names.

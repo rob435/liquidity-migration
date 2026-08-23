@@ -17,10 +17,9 @@ and runs three owner actions per environment:
     (a manual owner narrowing is preserved), regenerate the resolved toggles,
     and start whichever producers resolve on.
 
-There is no ``close`` button. It market-closed the book by publishing zero
-targets into the deleted Python owner's inbox. ``scripts/ops.sh flatten
---execute`` does that job again on the engine's own path, and it is left as an
-operator command rather than a button on purpose: it stops the producers, and a
+There is no ``close`` button. ``scripts/ops.sh flatten --execute`` takes an
+account to zero on the engine's own path, and it is an operator command rather
+than a button on purpose: it stops the producers, and a
 button that quietly stops a sleeve is the kind of thing somebody presses to see
 what it does. Pause still stops new decisions.
 

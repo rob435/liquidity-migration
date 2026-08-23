@@ -119,9 +119,7 @@ running fleet):
 | **in → durable → out the socket** | **2.28 ms** | **5.18 ms** | **9.47 ms** |
 
 The box's CPU is slower than the laptop's, so thinking costs more; its disk
-is faster to make durable, so the chain is shorter overall. For scale: the
-Python fleet measured 25.7 ms of software time per order, median, on that same
-box — same hardware, same venue, ~10× more time.
+is faster to make durable, so the chain is shorter overall.
 
 ### Against the real venue
 

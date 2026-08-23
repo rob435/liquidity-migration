@@ -58,13 +58,8 @@ lm_parse_sleeve_environment() {
                 _LM_PARSED_CARRY="$_lpe_value"
                 ;;
             CONTINUOUS_SLEEVE|CONTINUOUS_HEDGE_TIMER|CONTINUOUS_PAPER_SLEEVE|CARRY_PAPER_SLEEVE|PAPER_TARGET_MIRROR|CARRY_MAINNET_SLEEVE|LONG_MAINNET_SLEEVE)
-                # Paper trading was retired 2026-08-03; the mainnet sleeve
-                # toggles were retired the same day when REAL_MONEY in
-                # /etc/liquidity-migration/bybit-mainnet.env became the single
-                # arming switch; the continuous sleeve's units left the deploy
-                # set on 2026-08-03 too (sleeve retired 2026-07-29). A stale
-                # host override may still carry these keys; they toggle
-                # nothing and must not brick the deploy.
+                # These toggles are retired and control nothing. A stale host
+                # override may still carry them, and must not brick the deploy.
                 echo "retired sleeve toggle ignored at $_lpe_file:$_lpe_line_number: $_lpe_key" >&2
                 ;;
             *)

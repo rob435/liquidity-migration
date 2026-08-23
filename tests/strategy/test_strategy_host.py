@@ -62,9 +62,8 @@ def test_event_wait_fires_a_near_deadline_instead_of_sleeping_the_debounce(tmp_p
 
 
 def test_a_due_deadline_outranks_a_pending_bar_wake(tmp_path: Path) -> None:
-    # Old behavior labeled the pass confirmed_bar and pushed the due deadline
-    # a full cycle later; the deadline cycle reads the same fresh data the
-    # bar announced, so it goes first and consumes the wake.
+    # The deadline cycle reads the same fresh data the bar announced, so it
+    # goes first and consumes the wake.
     daemon = _host(tmp_path)
     daemon._next_wake_deadline_ts_ms = _now_ms() - 1
     daemon._bar_event.set()

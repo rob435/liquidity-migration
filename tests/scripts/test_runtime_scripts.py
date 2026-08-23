@@ -83,9 +83,7 @@ def test_authorized_wrapper_owns_every_runtime_argv() -> None:
         assert f"{unit}:main" in wrapper
         fragment = _unit(unit)
         assert f"run_authorized_runtime.sh {unit} main" in fragment
-    # No readiness entrypoint is registered any more. It belonged to the two
-    # Python account owner units, and both are gone, so a wrapper arm for one
-    # would be an argv nothing can reach.
+    # The wrapper registers no readiness arm; there is no unit it could reach.
     assert ":readiness" not in wrapper
 
 

@@ -243,9 +243,8 @@ def test_parser_rejects_duplicate_carry_toggles(tmp_path: Path) -> None:
 
 
 def test_parser_ignores_retired_paper_toggles_but_rejects_unknown_keys(tmp_path: Path) -> None:
-    # A stale host override may still carry the retired 2026-08-03 paper keys.
-    # They toggle nothing and warn instead of bricking the deploy that removes
-    # the fleet they used to control; a genuinely unknown key still fails hard.
+    # A stale host override may still carry the retired paper keys. They toggle
+    # nothing and warn rather than brick the deploy; an unknown key fails hard.
     retired = tmp_path / "retired-sleeves.env"
     retired.write_text(
         "CARRY_SLEEVE=on\n"

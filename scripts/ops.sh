@@ -205,9 +205,8 @@ exec .venv/bin/python scripts/maintain/reconcile_bybit_demo_accounting.py \
     # create; with --execute it creates them. None of them sets REAL_MONEY,
     # writes a credential, or starts a unit -- every one of those is the
     # owner's own act.
-    # No argument means preflight, and it has to be *passed*: leaving argv
-    # empty ran the module with no subcommand and got an argparse usage error
-    # instead of the read-only report the operator asked for.
+    # No argument means preflight, and it must be passed: an empty argv reaches
+    # the module with no subcommand and argparse answers with a usage error.
     if [[ "$#" -eq 0 ]]; then
       set -- preflight
     fi

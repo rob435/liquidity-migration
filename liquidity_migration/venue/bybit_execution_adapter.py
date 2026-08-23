@@ -241,13 +241,11 @@ class BybitDemoExecutionAdapter:
         A symbol with no open position is the case ``sole_leverage_authority``
         decides. Bybit keeps a symbol's leverage after the position closes, so
         what this process last set is still what the venue holds -- unless
-        somebody else changed it. While the owner hand-traded this account, they
-        could, so a flat symbol was dropped and its next entry paid one
-        ``set_leverage``: measured at 188-194 ms, on every fresh entry. With the
-        owner no longer hand-trading (2026-08-08), nothing else writes leverage
-        here, so the cache survives going flat and that round trip disappears.
-        Pass ``sole_leverage_authority=False`` to restore the old behaviour the
-        moment hand-trading resumes.
+        somebody else changed it. Under ``sole_leverage_authority=True`` nothing
+        else writes leverage on this account, so the cache survives a symbol
+        going flat. Pass ``False`` whenever someone else may set it, a
+        hand-trading owner above all: a flat symbol is then dropped and its next
+        entry pays one ``set_leverage``, measured at 188-194 ms.
         """
 
         confirmed = {str(symbol).upper(): float(value) for symbol, value in venue_leverage.items()}

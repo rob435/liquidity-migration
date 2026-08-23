@@ -1,10 +1,8 @@
 [Unit]
 Description=liquidity-migration LONG MAINNET target producer (LongV12WideStop)
 Wants=network-online.target
-# No account owner to depend on any more. This producer's whole output is a
-# target book on disk; the engine reads that book and owns the account. The old
-# Requires= existed so a dead owner stopped the producer feeding it; with the
-# owner gone there is nothing here to bind to.
+# No ordering edge to anything: this producer's whole output is a target book
+# on disk, and the engine reads that book and owns the account.
 After=network-online.target
 
 [Service]
@@ -28,8 +26,9 @@ Environment=LOOKBACK_DAYS=100
 Environment=WORKERS=2
 Environment=WS_KLINES_ENABLED=1
 Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
-# Same registered profile as demo (change point 2026-08-03). Wiring
-# only: LONG_MAINNET_SLEEVE stays off and arming is the owner's separate act.
+# Same registered profile as demo (change point 2026-08-03). Wiring only:
+# the single arming switch is REAL_MONEY=true in
+# /etc/liquidity-migration/bybit-mainnet.env, set by the owner's own hand.
 Environment=LONG_STRATEGY_PROFILE=v12
 # The book the funded engine follows, and this producer's own record of what it
 # asked for. Required together: the book is absolute, so a producer that forgot

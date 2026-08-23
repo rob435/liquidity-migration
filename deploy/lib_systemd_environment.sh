@@ -4,9 +4,9 @@
 # owner-matched, mode-0600 regular file and emits only caller-allowlisted values
 # as NUL-delimited pairs. No value is evaluated or passed through argv.
 
-_lm_load_systemd_environment() {
+lm_load_private_systemd_environment() {
     if [ "$#" -lt 3 ]; then
-        echo "usage: _lm_load_systemd_environment PYTHON FILE KEY [KEY ...]" >&2
+        echo "usage: lm_load_private_systemd_environment PYTHON FILE KEY [KEY ...]" >&2
         return 2
     fi
     local _lse_python="$1"
@@ -77,14 +77,4 @@ _lm_load_systemd_environment() {
             export "$_lse_name"
         fi
     done
-}
-
-lm_load_private_systemd_environment() {
-    if [ "$#" -lt 3 ]; then
-        echo "usage: lm_load_private_systemd_environment PYTHON FILE KEY [KEY ...]" >&2
-        return 2
-    fi
-    local _lse_python="$1" _lse_file="$2"
-    shift 2
-    _lm_load_systemd_environment "$_lse_python" "$_lse_file" "$@"
 }

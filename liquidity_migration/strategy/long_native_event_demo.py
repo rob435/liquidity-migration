@@ -922,11 +922,10 @@ def run_long_native_demo_cycle(
             cycles_dataset,
             partition_by=("date",),
         )
+        report_json = json.dumps(payload, indent=2, default=str)
         report_path = report_dir / f"long_native_cycle_{cycle_id}.json"
-        report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-        (report_dir / "latest_long_native_cycle.json").write_text(
-            json.dumps(payload, indent=2, default=str), encoding="utf-8"
-        )
+        report_path.write_text(report_json, encoding="utf-8")
+        (report_dir / "latest_long_native_cycle.json").write_text(report_json, encoding="utf-8")
         (report_dir / "latest_long_native_cycle.md").write_text(
             format_long_demo_cycle_summary(payload), encoding="utf-8"
         )

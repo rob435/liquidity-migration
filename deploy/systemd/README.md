@@ -112,6 +112,6 @@ health failures are never suppressed.
 The demo watchdog also reopens the bound demo-rule receipt and warns in the
 final 24 hours before the age bound the owner was started with (168 hours by
 default). That is visibility only — it starts no maintenance, and an ordinary
-rollout re-probes the rules well before it matters. The mainnet scope skips it:
-that receipt is the demo realm's empirical order probe, which has no mainnet
-counterpart.
+rollout re-probes the rules well before it matters. Both scopes run the check
+with their own realm; only mainnet holds the 168-hour ceiling as a hard start
+refusal.
