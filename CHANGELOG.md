@@ -16,6 +16,16 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — the first trade is news, not history.** `trade-notify`
+  baselines a closed-trade file it has never seen, because such a file holds
+  trades from before the reader existed. The engine creates that file on its
+  first close, so the run that found it also decided it had always been there
+  and swallowed exactly one trade — the first. It now writes down that it
+  looked while the file was still absent, which makes everything that appears
+  afterwards new. Caught by watching the first live run, before anything
+  closed; pinned by a test that fails without the fix. The state file is also
+  written whole now, so keys a reader no longer keeps stop lingering.
+
 - **2026-08-23 — an exit on the phone now says what it made.** The engine could
   always say what a fill cost; nothing could say what a position came to. The
   target books, which the notifier diffed, only ever knew what a sleeve asked
@@ -44,7 +54,10 @@ edit STATE.md to match.
   from the demo log: MOVEUSDT gross $26.52 less $0.60 of fees against a reported
   net of $25.90. Host configs gain `trades_path` (`[engine]` ignores keys it
   does not know, so it is safe to place before the binary that reads it).
-  Deployed d361d659→
+  Deployed d361d659→b3fa6558, and the first live run found one more: the
+  notifier baselined the closed-trade file the run it first *appeared*, which
+  would have swallowed the first close ever written. It now records that it
+  looked while the file was still absent (303defbc below).
 
 - **2026-08-23 — the last of the audit list: a dead watchdog flag, a duplicated
   digest, and a comment that outlived its narration.** No behaviour change.

@@ -316,24 +316,27 @@ def main() -> None:
     enabled = os.environ.get("TELEGRAM_ENABLED", "").strip() == "1"
     messages: list[str] = []
     books_now: dict[str, dict[str, float]] = {}
-    all_trades: list[dict] = []
 
     for account in ACCOUNTS:
-        new_trades, offset = (None, 0)
+        first_sight = account.trades not in offsets
         read = read_new_trades(account.trades, int(offsets.get(account.trades, 0)))
-        if read is not None:
+        new_trades = None
+        if read is None:
+            # No file yet. Remembering that we looked is what makes the first
+            # trade ever written news rather than history: without it, the
+            # run that finds the file also decides it has always been there.
+            offsets[account.trades] = 0
+        else:
             new_trades, offset = read
-            first_sight = account.trades not in offsets
             if first_sight:
-                # Everything already in the file happened before this reader
-                # existed. Baseline to the end of it rather than announcing a
-                # history.
+                # A file that was already there when this reader first looked
+                # holds trades from before it existed. Baseline to the end
+                # rather than announcing a history.
                 offset = os.path.getsize(account.trades)
                 print(f"baselined {account.trades} at {offset} bytes")
             else:
                 for trade in new_trades:
                     messages.append(exit_message(trade, account.tag))
-                    all_trades.append(trade)
             offsets[account.trades] = offset
 
         for sleeve, path in account.books.items():
@@ -366,10 +369,14 @@ def main() -> None:
     if not messages:
         print("nothing to say")
 
-    state["books"] = books_now
-    state["trade_offsets"] = offsets
+    # Written whole, so a key this reader no longer keeps does not linger.
+    kept = {
+        "books": books_now,
+        "trade_offsets": offsets,
+        "summarised_day": state.get("summarised_day"),
+    }
     tmp = state_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
+    tmp.write_text(json.dumps(kept, indent=1, sort_keys=True))
     tmp.replace(state_path)
 
 

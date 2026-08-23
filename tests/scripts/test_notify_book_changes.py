@@ -388,3 +388,34 @@ class TestOneWholeRun:
         assert len(sent) == 1 and sent[0].startswith("📊 2026-08-23")
         notify.main()
         assert len(sent) == 1, "the same day is not summarised twice"
+
+    def test_the_first_trade_ever_written_is_news_not_history(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The engine creates its file on the first close. A run that finds a
+        file it has never seen baselines it — so a run has to have looked
+        while it was still absent, and remembered that."""
+
+        sent = self._fleet(tmp_path, monkeypatch)
+        self._write_book(tmp_path / "carry.json", {})
+        self._write_book(tmp_path / "exodus.json", {})
+        notify.main()
+        assert not (tmp_path / "trades.jsonl").exists()
+
+        (tmp_path / "trades.jsonl").write_text(json.dumps(_trade()) + "\n")
+        notify.main()
+        assert len(sent) == 1, sent
+        assert sent[0].startswith("🟢 CARRY exit ONGUSDT long")
+
+    def test_the_state_keeps_only_what_it_reads(self, tmp_path, monkeypatch) -> None:
+        self._fleet(tmp_path, monkeypatch)
+        state = tmp_path / "state.json"
+        state.write_text(json.dumps({"CARRY": {"ONGUSDT": 1.0}}))
+        self._write_book(tmp_path / "carry.json", {})
+        self._write_book(tmp_path / "exodus.json", {})
+        notify.main()
+        assert set(json.loads(state.read_text())) == {
+            "books",
+            "trade_offsets",
+            "summarised_day",
+        }
