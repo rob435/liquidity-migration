@@ -90,9 +90,17 @@ pub struct WorkPolicy {
     /// worse price than that. Nothing is bought above, or sold below, the
     /// price the strategy decided on; the cost is every fill the market walks
     /// away from.
+    ///
+    /// Defaulted on read: the log holds records written before this field
+    /// existed, and replay must not fail on them. A required field here is an
+    /// engine that cannot boot on its own history.
+    #[serde(default)]
     pub hold_decision_px: bool,
     /// When patience runs out, take the order down instead of crossing for
     /// what is left. Without this the price cap above only delays the cross.
+    ///
+    /// Defaulted on read, for the same reason as the field above.
+    #[serde(default)]
     pub give_up_instead_of_crossing: bool,
 }
 

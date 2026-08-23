@@ -525,3 +525,22 @@ fn an_absent_optional_number_is_still_written() {
         records
     );
 }
+
+#[test]
+fn a_record_written_before_a_field_existed_still_replays() {
+    // The shape of a `work` policy as the engine wrote it before
+    // `hold_decision_px` and `give_up_instead_of_crossing` were added. A
+    // required field on a WAL record is an engine that cannot boot on its own
+    // history: the live fleet crash-looped on exactly this, replaying a log
+    // whose frames passed their checksum and then failed to parse.
+    let old_shape = r#"{"window_ms":120000,"reprice_ms":15000,"cross_grace_ms":20000,
+        "max_amends":8,"improve_lean":0.15,"back_lean":0.15,"urgency_join_frac":0.5,
+        "urgency_improve_frac":0.85,"drift_cross_fee_bp":0.0}"#;
+    let policy: engine_types::orders::WorkPolicy =
+        serde_json::from_str(old_shape).expect("a record from before the field must still read");
+    assert!(!policy.hold_decision_px);
+    assert!(!policy.give_up_instead_of_crossing);
+    // The fields that were always there are unchanged by the default.
+    assert_eq!(policy.window_ms, 120_000);
+    assert_eq!(policy.max_amends, 8);
+}
