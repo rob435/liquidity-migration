@@ -1,5 +1,5 @@
 //! The socket: connect, subscribe, keep alive, reconnect. Every parsing and
-//! bookkeeping decision belongs to [`crate::parse`] and [`crate::state`]; this
+//! bookkeeping decision belongs to [`super::parse`] and [`super::state`]; this
 //! file owns only the wire and the clock.
 //!
 //! The socket lives in its own task, not inside `next_event`. The engine core
@@ -26,8 +26,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
-use crate::parse::{parse_frame, parse_frame_bytes, ParsedFrame};
-use crate::state::{Applied, FeedState, ResyncReason};
+use crate::bybit::parse::{parse_frame, parse_frame_bytes, ParsedFrame};
+use crate::bybit::state::{Applied, FeedState, ResyncReason};
 
 /// Public market data for USDT/USDC perpetuals. No credentials: the demo
 /// account trades against these same prices.

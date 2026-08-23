@@ -11,10 +11,13 @@
 //! [`crate::registry`] the name that picks one.
 //!
 //! Adding a fifth is a directory here, a `mod` line below, a realm table with
-//! its hosts, and a name in [`crate::registry::KNOWN_VENUES`]. Nothing in the
-//! engine's wiring moves: the loop is generic over the gateway type, and
+//! its hosts, and a variant in [`crate::registry::VenueName::ALL`] — plus its
+//! arms in the two switches, one here and one in `engine-marketdata`. Nothing
+//! in `engine-core` moves: the loop is generic over the gateway type. A venue
+//! left out of `ALL` is one no config can select, refused at boot by name.
 //! `tests/venue_fence.rs` reads this tree back to check the new hosts are
-//! written in exactly one file.
+//! written in exactly one file, and fails outright on a venue directory it
+//! does not know.
 
 pub mod bybit;
 pub mod hyperliquid;

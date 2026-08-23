@@ -109,8 +109,6 @@ impl VenueGateway for VariationalGateway {
         VenueCaps {
             native_position_stop: false,
             amend_in_place: false,
-            post_only: false,
-            batch_orders: false,
             set_leverage: false,
         }
     }
@@ -247,8 +245,6 @@ mod tests {
         let caps = gateway().caps();
         assert!(!caps.native_position_stop);
         assert!(!caps.amend_in_place);
-        assert!(!caps.post_only);
-        assert!(!caps.batch_orders);
         assert!(!caps.set_leverage);
     }
 

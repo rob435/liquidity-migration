@@ -14,6 +14,12 @@ const RULE: InstrumentRule = InstrumentRule {
 };
 
 const SECOND: u64 = 1_000_000_000;
+
+/// Past the reprice cadence, derived rather than written as a number: a
+/// hardcoded clock stops meaning "a look is due" the moment the cadence moves.
+fn due_ns() -> u64 {
+    WorkPolicy::default().reprice_ms * 1_000_000 + SECOND
+}
 const SYMBOL: SymbolId = SymbolId(0);
 
 fn rules() -> Vec<Option<InstrumentRule>> {
@@ -94,7 +100,7 @@ fn an_order_the_log_has_ended_stops_being_worked() {
         },
     ]);
     let market = market(100.0, 102.0);
-    assert!(one_pass(&mut working, &ledger, &market, 4 * SECOND).is_empty());
+    assert!(one_pass(&mut working, &ledger, &market, due_ns()).is_empty());
     assert!(working.is_empty(), "a filled order is not something to reprice");
 }
 
@@ -103,7 +109,7 @@ fn an_order_the_log_never_heard_of_is_dropped() {
     let (mut working, _) = working_one();
     let empty = LedgerOfOrders::default();
     let market = market(100.0, 102.0);
-    assert!(one_pass(&mut working, &empty, &market, 4 * SECOND).is_empty());
+    assert!(one_pass(&mut working, &empty, &market, due_ns()).is_empty());
     assert!(working.is_empty());
 }
 
@@ -113,7 +119,7 @@ fn a_move_reaches_the_queue_as_a_price_only_amend() {
     // before the wire, and that fsync would land on every reprice.
     let (mut working, ledger) = working_one();
     let market = market(100.0, 102.0);
-    let out = one_pass(&mut working, &ledger, &market, 4 * SECOND);
+    let out = one_pass(&mut working, &ledger, &market, due_ns());
     assert_eq!(
         out,
         vec![Action::Amend {
@@ -128,11 +134,11 @@ fn a_move_reaches_the_queue_as_a_price_only_amend() {
 fn a_move_the_venue_took_counts_against_the_budget_and_moves_the_price() {
     let (mut working, ledger) = working_one();
     let market = market(100.0, 102.0);
-    one_pass(&mut working, &ledger, &market, 4 * SECOND);
-    working.amended("a", Some(100.0), true, 4 * SECOND);
+    one_pass(&mut working, &ledger, &market, due_ns());
+    working.amended("a", Some(100.0), true, due_ns());
 
     // At the new price there is nothing left to do about this book.
-    let out = one_pass(&mut working, &ledger, &market, 8 * SECOND);
+    let out = one_pass(&mut working, &ledger, &market, 2 * due_ns());
     assert!(out.is_empty(), "it is already where it belongs");
 }
 
@@ -140,11 +146,11 @@ fn a_move_the_venue_took_counts_against_the_budget_and_moves_the_price() {
 fn a_move_the_venue_refused_leaves_the_order_where_it_was() {
     let (mut working, ledger) = working_one();
     let market = market(100.0, 102.0);
-    one_pass(&mut working, &ledger, &market, 4 * SECOND);
-    working.amended("a", Some(100.0), false, 4 * SECOND);
+    one_pass(&mut working, &ledger, &market, due_ns());
+    working.amended("a", Some(100.0), false, due_ns());
 
     // Still at 99, so the next look asks for the same move again.
-    let out = one_pass(&mut working, &ledger, &market, 8 * SECOND);
+    let out = one_pass(&mut working, &ledger, &market, 2 * due_ns());
     assert_eq!(
         out,
         vec![Action::Amend {
@@ -180,7 +186,7 @@ fn a_failed_cancel_does_not_latch() {
     working.cancelled("a", false);
 
     // It must come round again, on the retry pacing.
-    let later = window_over + grace_over + 3 * SECOND;
+    let later = window_over + grace_over + due_ns();
     assert_eq!(
         one_pass(&mut working, &ledger, &market, later),
         vec![Action::Cancel { symbol: SYMBOL, client_order_id: "a".into() }],
@@ -201,7 +207,7 @@ fn a_cancel_the_venue_took_is_not_asked_for_twice() {
     one_pass(&mut working, &ledger, &market, window_over + grace_over);
     working.cancelled("a", true);
 
-    let later = window_over + grace_over + 10 * SECOND;
+    let later = window_over + grace_over + due_ns();
     assert!(one_pass(&mut working, &ledger, &market, later).is_empty());
 }
 
@@ -216,7 +222,7 @@ fn a_cross_the_venue_refused_is_retried_and_does_not_count_as_crossed() {
 
     // Paced, then tried again — still a cross, not a reprice.
     assert!(one_pass(&mut working, &ledger, &market, window_over + SECOND).is_empty());
-    let retry = one_pass(&mut working, &ledger, &market, window_over + 3 * SECOND);
+    let retry = one_pass(&mut working, &ledger, &market, window_over + due_ns());
     assert_eq!(
         retry,
         vec![Action::Amend {

@@ -52,6 +52,12 @@ pub struct WorkPolicy {
     pub window_ms: u64,
     /// The floor on how often the order is moved. Also paces the retries of a
     /// cross and of the cancel that follows one.
+    ///
+    /// Fifteen seconds, which is the cadence every measured arm ran at and
+    /// what the amend budget below was sized for. Moving the order more often
+    /// buys almost nothing — across a 24-arm tape sweep, chasing at all was
+    /// worth 0.20 bp against not chasing — and each move is a signed venue
+    /// call.
     pub reprice_ms: u64,
     /// After the cross, how long to wait for the rest to fill before pulling
     /// the order and letting the strategy decide again.
@@ -73,9 +79,12 @@ pub struct WorkPolicy {
     pub urgency_improve_frac: f64,
     /// The fee term in the early cross: leave patience once the market has
     /// run against the decision by more than twice the half-spread plus this.
-    /// Zero turns the early cross off. Measured on the same night replay:
-    /// making this trigger MORE sensitive was the only dial that was clearly
-    /// harmful.
+    /// Zero turns the early cross off, and that is what ships.
+    ///
+    /// Every arm of the tape sweep waited out its window instead, and every
+    /// one beat crossing — because a rest that misses costs only 0.94 bp more
+    /// than crossing at the start, while one that fills saves 4.18. Giving up
+    /// early forfeits the second to avoid the first.
     pub drift_cross_fee_bp: f64,
     /// Rest at the mid the order was decided against, and never move to a
     /// worse price than that. Nothing is bought above, or sold below, the
@@ -91,14 +100,14 @@ impl Default for WorkPolicy {
     fn default() -> Self {
         WorkPolicy {
             window_ms: 120_000,
-            reprice_ms: 3_000,
+            reprice_ms: 15_000,
             cross_grace_ms: 20_000,
             max_amends: 8,
             improve_lean: 0.15,
             back_lean: 0.15,
             urgency_join_frac: 0.5,
             urgency_improve_frac: 0.85,
-            drift_cross_fee_bp: 5.5,
+            drift_cross_fee_bp: 0.0,
             hold_decision_px: false,
             give_up_instead_of_crossing: false,
         }

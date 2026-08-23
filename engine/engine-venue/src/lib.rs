@@ -64,8 +64,8 @@ pub use arming::{
 };
 pub use creds::Credentials;
 pub use registry::{
-    OrderFeeds, Venue, VenueName, BYBIT_DEMO, BYBIT_MAINNET, HYPERLIQUID_MAINNET,
-    HYPERLIQUID_TESTNET, KNOWN_VENUES, LIGHTER_MAINNET, LIGHTER_TESTNET, VARIATIONAL_MAINNET,
+    known_venues, OrderFeeds, Venue, VenueName, BYBIT_DEMO, BYBIT_MAINNET, HYPERLIQUID_MAINNET,
+    HYPERLIQUID_TESTNET, LIGHTER_MAINNET, LIGHTER_TESTNET, VARIATIONAL_MAINNET,
 };
 pub use venues::bybit::{BybitGateway, BybitOrderFeed, VenueRealm, API_KEY_ENV, API_SECRET_ENV};
 pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};

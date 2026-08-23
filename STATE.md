@@ -261,12 +261,14 @@ file.
   `mainnet-engine-ok` prints beside `engine-ok`. Verify a deploy by a field only
   the new code produces, read on **both** heartbeats — "active" says nothing
   about which binary.
-- **A resting entry waits 120 s.** That is the engine's
-  `WorkPolicy::default().window_ms` (`engine-types/src/orders.rs`), and it is
-  not one of the dials a strategy block can set — `hold_decision_price` and
-  `give_up_instead_of_crossing` are the only two, both off by default. Measured
-  on 15 live resting entries, fills came at a median of 1.28 s and a maximum of
-  36.6 s.
+- **A resting entry waits the full 120 s.** That is the engine's
+  `WorkPolicy::default().window_ms` (`engine-types/src/orders.rs`); the order
+  moves every 15 s and nothing crosses it early. 180 s was cheaper on tape but
+  does not fit the account owner's 120 s sibling-batch freshness budget.
+  `hold_decision_price` and `give_up_instead_of_crossing` are the only two
+  dials a strategy block can set, both off by default — the tape sweep says
+  cross at the deadline rather than give up. Measured on 15 live resting
+  entries, fills came at a median of 1.28 s and a maximum of 36.6 s.
 - **Pricing and market data for the order path live in the engine.** It
   subscribes its own venue stream per followed symbol and refuses an entry
   decided against a quote older than its declared bound (default 30 s —

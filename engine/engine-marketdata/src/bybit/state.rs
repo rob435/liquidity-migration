@@ -6,7 +6,7 @@
 
 use engine_types::{MarketEvent, Quote, Subscription, SymbolId, SymbolTable, Ticker};
 
-use crate::parse::{BookFrame, Level, ParsedFrame, TickerFrame};
+use crate::bybit::parse::{BookFrame, Level, ParsedFrame, TickerFrame};
 
 /// What the feed should do with a frame it just parsed.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -207,7 +207,7 @@ impl FeedState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::parse_frame;
+    use crate::bybit::parse::parse_frame;
     use engine_types::Feed;
 
     fn subs() -> Vec<Subscription> {

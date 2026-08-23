@@ -135,12 +135,18 @@ fn hosts_in(text: &str, domains: &[String]) -> Vec<String> {
 }
 
 /// Whether this file is the realm table that owns the venue's hosts.
+///
+/// Anchored to `src/venues/`, not merely to a directory named after the
+/// venue. Any crate here may grow a per-venue directory — the market-data
+/// crate now has one — and without the anchor a `realm.rs` inside any of them
+/// would become a second legal place to write that venue's hosts.
 fn is_host_home(file: &Path, venue: &str) -> bool {
+    let named = |path: Option<&Path>, want: &str| {
+        path.and_then(Path::file_name).is_some_and(|n| n == want)
+    };
     file.file_name().is_some_and(|n| n == "realm.rs")
-        && file
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|n| n == venue)
+        && named(file.parent(), venue)
+        && named(file.parent().and_then(Path::parent), "venues")
 }
 
 #[test]
@@ -345,9 +351,9 @@ fn every_venue_the_crate_declares_has_a_realm_table_the_fence_reads() {
 fn every_real_money_venue_name_says_that_it_is_real_money() {
     // The string an operator types into engine.toml must not be quietly
     // mistakable for a practice one, and vice versa.
-    use engine_venue::{VenueName, KNOWN_VENUES};
-    assert!(!KNOWN_VENUES.is_empty(), "no venue is selectable");
-    for name in KNOWN_VENUES {
+    use engine_venue::{known_venues, VenueName};
+    assert!(!known_venues().is_empty(), "no venue is selectable");
+    for name in known_venues() {
         let parsed = VenueName::parse(name).expect(name);
         assert_eq!(parsed.is_real_money(), name.contains("mainnet"), "{name}");
     }
@@ -357,8 +363,8 @@ fn every_real_money_venue_name_says_that_it_is_real_money() {
 
 #[test]
 fn every_known_venue_name_reaches_its_own_adapter() {
-    use engine_venue::{Venue, VenueName, KNOWN_VENUES};
-    for name in KNOWN_VENUES {
+    use engine_venue::{known_venues, Venue, VenueName};
+    for name in known_venues() {
         // Credentials come from the environment, which a test box may or may
         // not have; either the venue is built or it stops at the credential
         // read — and for a real-money realm, at the arming check, which is
@@ -376,8 +382,15 @@ fn every_known_venue_name_reaches_its_own_adapter() {
             // it is not evidence that this name reached this adapter.
             Err(engine_types::VenueError::Credentials(why)) => {
                 let (key, secret) = chosen.credential_vars();
+                // The arming refusal names the realm, and it must be THIS
+                // realm. Accepting the bare word "REAL_MONEY" accepted every
+                // venue's refusal, so on an unarmed box — every box this runs
+                // on — the four funded names proved nothing. The prefix is
+                // load-bearing: bybit_mainnet's realm is the bare "mainnet",
+                // which is a substring of the other three.
+                let mine = format!("the {} realm", chosen.realm());
                 assert!(
-                    why.contains(key) || why.contains(secret) || why.contains("REAL_MONEY"),
+                    why.contains(key) || why.contains(secret) || why.contains(&mine),
                     "{name} stopped on something that is not its own credential: {why}"
                 );
             }
@@ -391,8 +404,8 @@ fn every_known_venue_name_reaches_its_own_private_stream() {
     // The other half of the switch. A name whose feed constructor was
     // forgotten would be an engine that sends orders and never hears what
     // happened to them.
-    use engine_venue::{OrderFeeds, VenueName, KNOWN_VENUES};
-    for name in KNOWN_VENUES {
+    use engine_venue::{known_venues, OrderFeeds, VenueName};
+    for name in known_venues() {
         let chosen = VenueName::parse(name).unwrap();
         match OrderFeeds::build(chosen, vec!["BTCUSDT".to_string()]) {
             Ok(_) => {}
@@ -402,8 +415,15 @@ fn every_known_venue_name_reaches_its_own_private_stream() {
             // stopped on: that is the chosen realm's own, and no other's.
             Err(engine_types::VenueError::Credentials(why)) => {
                 let (key, secret) = chosen.credential_vars();
+                // The arming refusal names the realm, and it must be THIS
+                // realm. Accepting the bare word "REAL_MONEY" accepted every
+                // venue's refusal, so on an unarmed box — every box this runs
+                // on — the four funded names proved nothing. The prefix is
+                // load-bearing: bybit_mainnet's realm is the bare "mainnet",
+                // which is a substring of the other three.
+                let mine = format!("the {} realm", chosen.realm());
                 assert!(
-                    why.contains(key) || why.contains(secret) || why.contains("REAL_MONEY"),
+                    why.contains(key) || why.contains(secret) || why.contains(&mine),
                     "{name} stopped on something that is not its own credential: {why}"
                 );
             }
@@ -453,17 +473,17 @@ fn no_two_realms_anywhere_share_a_credential_variable() {
     // units unset, so a rename here without a rename there would silently
     // stop that from doing anything.
     //
-    // Walked from KNOWN_VENUES rather than listed, because a list is what a
+    // Walked from the venue list rather than re-typed, because a second list is what a
     // new venue falls out of without anyone noticing.
-    use engine_venue::{VenueName, KNOWN_VENUES};
+    use engine_venue::{known_venues, VenueName};
     let mut all: Vec<(&str, &str)> = Vec::new();
-    for name in KNOWN_VENUES {
+    for name in known_venues() {
         let (key, secret) = VenueName::parse(name).unwrap().credential_vars();
         assert_ne!(key, secret, "{name} reads one variable for both halves");
         all.push((name, key));
         all.push((name, secret));
     }
-    assert_eq!(all.len(), KNOWN_VENUES.len() * 2);
+    assert_eq!(all.len(), known_venues().len() * 2);
     for (i, (name, var)) in all.iter().enumerate() {
         for (other_name, other) in &all[i + 1..] {
             assert_ne!(

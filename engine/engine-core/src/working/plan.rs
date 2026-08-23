@@ -353,11 +353,9 @@ pub fn plan_work(
     if (want - state.px).abs() < rule.tick_size * 0.5 {
         return WorkDecision::looked(WorkStep::Hold);
     }
-    // The budget is a schedule, not a protection. It was written when a
-    // reprice was every 15 s, so eight of them spanned the whole window; at a
-    // 3 s cadence the same eight cover only the first 24 s, and an order
-    // whose touch moved early could never reach the urgency ladder that the
-    // same measurement justified. Past the join threshold, escalation wins.
+    // The budget is a schedule, not a protection: eight moves at the reprice
+    // cadence span the whole window. Past the join threshold, escalation wins
+    // anyway.
     if state.amends >= policy.max_amends
         && elapsed_frac(state, now_ns, policy) < policy.urgency_join_frac
     {

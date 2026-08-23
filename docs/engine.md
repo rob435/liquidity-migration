@@ -159,7 +159,7 @@ parallel and integrate by type-check.
 | --- | --- |
 | `engine-types` | every shared type and trait: events, intents, orders, log records, the `Strategy` trait, and the capability traits (`Wal`, `VenueGateway`, `RiskKernel`) |
 | `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
-| `engine-marketdata` | every venue's public feed: subscribe or poll, sequence-check, parse once into flat per-symbol state, stamp arrival time. One enum, built from the same venue name as the gateway |
+| `engine-marketdata` | every venue's public feed: subscribe or poll, parse once into flat per-symbol state, stamp arrival time. Bybit's feed sequence-checks and resyncs on lost continuity; the other three do not. One enum, built from the same venue name as the gateway |
 | `engine-venue` | four venue adapters, one directory each, practice or funded by realm: each venue's own signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and balance reads, and the realm's private order stream |
 | `engine-risk` | the capital controls: equity-anchored envelope, account-wide caps, stop-attach discipline. Fail-closed |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
@@ -255,6 +255,15 @@ be), escalates as the window runs out, and finally crosses at a bounded price
 rather than sending an unbounded market order. Every number in the recipe is
 measured; the decision is a pure function and the engine's group-flush tick
 drives it.
+
+**Patience runs to the deadline.** The order is moved every 15 s and no early
+cross ends the wait, whatever the market does in between. A tape sweep of 24
+policies over 20 symbols put a number on why: a rest that fills costs 3.53 bp
+against 7.71 for crossing, and a rest that *misses* costs 8.65 — only 0.94 bp
+worse than crossing at the start. Waiting is nearly free and filling is worth
+4.18, so resting pays unless it fills less than 18% of the time. The window is
+also the only dial that moves the result; chasing was worth 0.20 bp across
+that sweep and resting a tick inside the touch 0.05.
 
 Two gates decide whether resting is worth it at all: the spread must be at
 least two ticks **and** at least one basis point of the price. The second is
@@ -515,7 +524,7 @@ engine at an endpoint nobody compiled in.
 without it, a practice realm refuses to build with it, and the rule is stated
 once in `engine-venue/src/arming.rs` rather than restated per venue. Each realm
 reads its own credential variables, disjoint across every realm of every venue,
-and a test walks `KNOWN_VENUES` to prove no two share one.
+and a test walks the venue list to prove no two share one.
 
 The check runs at the credential read, so it reaches every realm that reads a
 credential — every one but Variational, which authenticates nothing because
@@ -526,9 +535,10 @@ through the same path and is armed like the rest.
 ### What differs between them, where it changes a decision
 
 Venues differ in kind, not just in address, so each states what it can do
-rather than the engine assuming. `VenueCaps` declares five things — position
-stop, amend in place, post-only, batching, leverage — and the engine refuses an
-action a venue cannot honour instead of quietly substituting a different one.
+rather than the engine assuming. `VenueCaps` declares three things — position
+stop, amend in place, leverage — and the engine reads every one of them and
+refuses an action a venue cannot honour instead of quietly substituting a
+different one. Nothing is declared that nothing reads.
 Cancel-and-replace is not an amend: it is a new order at the back of the queue
 at a fresh price, and a strategy that asked to move a quote would never learn
 it had been given something else.
@@ -582,7 +592,7 @@ it had been given something else.
 
 ### Adding a fifth
 
-Five steps, all in `engine-venue`:
+Six steps, five in `engine-venue` and one next door:
 
 1. A directory under `src/venues/`, with `realm.rs` holding its hosts,
    credential variable names, and whether each realm is real money. That file
@@ -591,15 +601,18 @@ Five steps, all in `engine-venue`:
    `set_leverage` and `executions` carry defaults, twelve in all. Take
    `executions` seriously: its default refuses, so an adapter that leaves it
    alone runs with fill-gap recovery off. State the capabilities honestly.
-3. A variant in `Venue`, `OrderFeeds` (`engine-venue/src/registry.rs`) and
-   `MarketFeeds` (`engine-marketdata/src/feeds.rs`), and a name in
-   `VenueName`. Dispatch is an enum, not `Box<dyn VenueGateway>`: the trait
-   uses `async fn`, which cannot be a trait object, and a closed enum keeps
-   the whole set visible in one place.
-4. A row in `venue_hosts()` in `tests/venue_fence.rs`. The fence fails if a
+3. A variant in `VenueName` **and in `VenueName::ALL`**, then in `Venue` and
+   `OrderFeeds` (`engine-venue/src/registry.rs`). `ALL` is the one list: the
+   parser walks it, the refusal names it, and every completeness check
+   iterates it. A venue left out of it is one no config can select — refused
+   at boot — rather than one that works and no test ever visits.
+4. A variant in `MarketFeeds` (`engine-marketdata/src/feeds.rs`). Its switch
+   test matches exhaustively, so this does not compile until the test says
+   which name reaches the new feed.
+5. A row in `venue_hosts()` in `tests/venue_fence.rs`. The fence fails if a
    venue directory exists that it does not know about, so this cannot be
    forgotten silently.
-5. Nothing in `engine-core`. The loop is generic over the gateway type, and
+6. Nothing in `engine-core`. The loop is generic over the gateway type, and
    `assembly.rs` already asks for a venue by name.
 
 ## What the engine does

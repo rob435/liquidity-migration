@@ -343,13 +343,6 @@ impl VenueGateway for HyperliquidGateway {
             // The `batchModify` action, addressed by the engine's own client
             // order id.
             amend_in_place: true,
-            // Time-in-force `Alo`, "add liquidity only".
-            post_only: true,
-            // The venue takes an array of orders and this adapter sends one
-            // request per order — except an entry and its stop, which have to
-            // travel together. Declared false because a caller that batched on
-            // this word would find nothing to call.
-            batch_orders: false,
             // The `updateLeverage` action.
             set_leverage: true,
         }
@@ -870,9 +863,7 @@ mod tests {
         let caps = gateway().caps();
         assert!(caps.native_position_stop);
         assert!(caps.amend_in_place);
-        assert!(caps.post_only);
         assert!(caps.set_leverage);
-        assert!(!caps.batch_orders, "nothing here sends a batch");
     }
 
     #[test]

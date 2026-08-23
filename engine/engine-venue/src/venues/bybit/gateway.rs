@@ -165,13 +165,6 @@ impl VenueGateway for BybitGateway {
             native_position_stop: true,
             // POST /v5/order/amend, by orderLinkId — see amend_order below.
             amend_in_place: true,
-            // timeInForce "PostOnly" on a limit order; see tif_str below.
-            post_only: true,
-            // Bybit does have a batch endpoint, but this crate has no path to
-            // it: every order goes out one request at a time. Declared false
-            // because a caller that batched on this word would find nothing
-            // to call.
-            batch_orders: false,
             // POST /v5/position/set-leverage; see set_leverage below.
             set_leverage: true,
         }

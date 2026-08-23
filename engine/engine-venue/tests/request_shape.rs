@@ -292,11 +292,6 @@ async fn the_gateway_says_what_bybit_can_actually_do() {
     let caps = gateway(&server).caps();
     assert!(caps.native_position_stop, "trading-stop holds the position stop");
     assert!(caps.amend_in_place, "/v5/order/amend");
-    assert!(caps.post_only, "timeInForce PostOnly");
-    assert!(
-        !caps.batch_orders,
-        "Bybit has a batch endpoint but this crate has no path to it"
-    );
 }
 
 #[tokio::test]

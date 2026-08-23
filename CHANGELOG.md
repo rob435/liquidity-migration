@@ -16,6 +16,69 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — the venue plugin boundary: one list, and four checks that
+  could not fail.** No behaviour change and nothing deployed; the engine sends
+  exactly what it sent. What changed is which mistakes stay silent. Four
+  receipts, each landed before its fix:
+  (1) **An eighth venue passed the whole suite.** Added a `VenueName` variant
+  reaching a real-money Variational gateway, wrote every arm the compiler
+  demanded, left it out of `KNOWN_VENUES` — all 1,012 tests green, visited by
+  none of them. `KNOWN_VENUES` was a hand list with no link to the enum and
+  nine tests drew all their coverage from walking it. Replaced by
+  `VenueName::ALL`, which `parse` now walks, so a venue left out is one no
+  config can select rather than one that works untested. Rust cannot enumerate
+  variants without a macro, so `ALL` is still typed by hand — the win is the
+  relocation of the failure, not a compiler proof.
+  (2) **`bybit_mainnet` wired to the Hyperliquid gateway passed the fence.**
+  `venue_fence.rs` accepted any refusal containing `REAL_MONEY`, and on an
+  unarmed box — every dev box and CI — arming is checked before any credential
+  is read, so all four funded names proved nothing. Now matched as
+  `the {realm} realm`; the prefix is load-bearing, because Bybit's realm is the
+  bare `mainnet`, a substring of the other three, and the unprefixed form
+  everyone reaches for false-passes on exactly the funded account.
+  (3) **The lease accepted a realm no venue reaches.** `KNOWN_REALMS` was a
+  second hand-typed copy carrying `variational_testnet`, which
+  `VariationalRealm::parse` explicitly refuses. The missing direction of the
+  containment test was written first and failed on the untouched tree; the
+  realm set is now read from `VenueName::ALL` and both containment tests are
+  deleted as tautologies.
+  (4) **A second Bybit realm table outside `engine-venue` passed the fence.**
+  The host-home rule checked only for a `realm.rs` in a directory named after
+  the venue, so moving Bybit's price feed to `engine-marketdata/src/bybit/`
+  would have made `.../bybit/realm.rs` a legal place to write `api.bybit.com`.
+  Anchored to `src/venues/` in the same change and proved both ways with a
+  planted host.
+  Also: `post_only` and `batch_orders` deleted from `VenueCaps` — declared by
+  all four adapters, asserted in eight tests, read by no engine code, while the
+  docs claimed five enforcement points where there were three. Every venue's
+  post-only behaviour stays pinned on the wire (`timeInForce PostOnly`, `Alo`,
+  `TIF_POST_ONLY`). The market-feed switch test now matches exhaustively, so a
+  fifth feed variant does not compile until the test says which name reaches
+  it; it previously pinned Lighter only by elimination. Bybit's price feed
+  moved to `engine-marketdata/src/bybit/{feed,parse,state}.rs`, making the four
+  exchanges one folder each in both crates — pure renames, `parse.rs` byte
+  identical. The `set_stop` contract doc said it is only called when the venue
+  declares a position stop; both call sites are unguarded on purpose, so the
+  doc was corrected rather than the code gated. Suite 1,011 green (one
+  tautological test removed), Python 2,408 green, net −18 lines before the
+  move. Adding a fifth exchange still costs roughly 50 edit sites, not the
+  handful a macro would promise: macro-generating the registry was measured and
+  declined, because the trait defaults on `add_symbol`, `set_leverage` and
+  `executions` mean an omitted template entry disables a method for all four
+  venues at once — a worse blast radius than the 48 arms the compiler already
+  checks, and the failure `2c071703` already recorded once.
+
+- **2026-08-23 — the forward record's five dark days are scored again.** The
+  daily sequence had stopped after 2026-08-16: a run on 2026-08-19 11:28 UTC
+  failed at the refresh step (consistent with the documented Binance
+  late-morning archive publish — the rerun passed) and nothing re-ran it, so
+  the rolling ledger sat dark while v6, the early exit, and the exodus sleeve
+  registered. Today's full sequence (research refresh stamped clean at
+  `c0c59d24` → whale metrics → full panel rebuild, 12.1M rows → ledger append,
+  +7,156 rows) scores 2026-08-17 through 2026-08-21. First forward days for
+  the registered differentials, n too small to read: v5−v4 **+0.05 bp/day**
+  and v6−v5 **−4.87 bp/day** over their first 2 post-commit days.
+
 - **2026-08-23 — leg B of the carry exit clock: names the next decision zeroes
   sell at ~00:02, not 00:20 (`CARRY_DROP_EXIT`).** The measured population —
   exits forced by a universe/persistence drop rather than a fee recovery —
@@ -36,6 +99,37 @@ edit STATE.md to match.
   live from the next deploy. Tests: `TestDropExit` (mask boundary, resize
   not-a-drop, no-freeze noop, full-cycle fire with entries held back, disabled
   keeps the deployed clock).
+
+- **2026-08-23 — the resting recipe takes the sweep's answer: move every 15 s,
+  never cross early, ride to the deadline. Deployed.** Two numbers in
+  `WorkPolicy::default()` change, and only carry rests, so only carry moves.
+
+  - `reprice_ms` **3_000 → 15_000**. Fifteen seconds is the cadence every
+    measured arm ran at and what the eight-amend budget spans a whole window
+    at; 3 s was in none of them. Chasing at all was worth 0.20 bp across the
+    sweep, so a fifth of the venue calls buys the same result.
+  - `drift_cross_fee_bp` **5.5 → 0.0**, which turns the early cross off. Every
+    arm of the sweep waited its window out and every one beat crossing. A rest
+    that misses costs 8.65 bp against 7.71 for crossing at the start — 0.94 bp
+    — while one that fills saves 4.18. Ending patience early forfeits the
+    second to avoid the first.
+
+  **A runaway market now rides to the 120 s deadline and crosses there.** That
+  is the change: an entry whose market has left no longer gives up at roughly
+  11 bp of drift. The venue-native stop still bounds the position that results;
+  the early cross was an execution-cost heuristic, not a capital control.
+
+  `window_ms` stays at 120 s. 180 s was cheaper on tape (−3.93 vs −3.83 bp) but
+  does not fit the account owner's 120 s sibling-batch freshness budget.
+  `hold_decision_price` and `give_up_instead_of_crossing` stay off: the sweep
+  says cross at the deadline, so the give-up dial built the day before is
+  measured-and-not-adopted.
+
+  The test clocks were written as bare seconds against the 3 s cadence and
+  silently stopped meaning "a look is due"; they derive the interval from the
+  policy now, so the next cadence change fails them instead of passing them for
+  the wrong reason. Both new defaults are pinned and proved failing against the
+  old values.
 
 - **2026-08-23 — the execution arms are swept offline, and resting beats
   crossing on every symbol and every arm. Two research faults fixed with it.**

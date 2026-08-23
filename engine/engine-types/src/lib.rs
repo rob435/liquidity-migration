@@ -78,10 +78,6 @@ pub struct VenueCaps {
     /// A resting order can be repriced or resized in place, keeping its
     /// venue identity.
     pub amend_in_place: bool,
-    /// Post-only (maker-or-cancel) is honoured on limit orders.
-    pub post_only: bool,
-    /// Orders may be sent in batches within one request.
-    pub batch_orders: bool,
     /// The venue's margin leverage for a symbol can be set by the engine.
     /// False means whatever leverage the symbol already carries is what an
     /// order will post margin at, and the engine has no say in it.
@@ -120,8 +116,11 @@ pub trait VenueGateway {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError>;
-    /// Attach or move a position stop (stop-loss trigger price). Only called
-    /// when [`VenueCaps::native_position_stop`] is true.
+    /// Attach or move a position stop (stop-loss trigger price).
+    ///
+    /// Called whatever the caps say. Reconciliation puts back a stop the log
+    /// says a position was opened behind, and a venue whose caps under-declare
+    /// must not be the reason a held position stays naked.
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError>;
     /// Start trading a symbol this gateway was not built with, and return the
     /// id it will use. `None` if it cannot grow.

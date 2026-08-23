@@ -32,6 +32,8 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::registry::VenueName;
+
 /// Where lease files live. Python's units are handed this directory by
 /// systemd's `RuntimeDirectory`; it is written out here rather than derived
 /// because the two systems must name the same string or they are not sharing
@@ -50,23 +52,11 @@ pub const REALM_MAINNET: &str = "mainnet";
 /// different files for one account.
 pub const VENUE_BYBIT: &str = "bybit";
 
-/// Every realm a lease may be taken for.
-///
-/// The three venues that came after Bybit qualify their realm names with the
-/// venue. That is not decoration: a realm string travels in the engine's
-/// heartbeat, and the Python producers block every entry when it does not
-/// match the environment they were told to size from. Two venues both calling
-/// a realm `mainnet` would let one venue's heartbeat pass the other's check.
-pub const KNOWN_REALMS: &[&str] = &[
-    REALM_DEMO,
-    REALM_MAINNET,
-    "hyperliquid_testnet",
-    "hyperliquid_mainnet",
-    "lighter_testnet",
-    "lighter_mainnet",
-    "variational_testnet",
-    "variational_mainnet",
-];
+/// Every realm a lease may be taken for: exactly the realms a venue name
+/// reaches, read from the venue list rather than typed again here.
+fn known_realms() -> [&'static str; VenueName::ALL.len()] {
+    VenueName::ALL.map(VenueName::realm)
+}
 
 /// Owner read and write, the mode Python's own lease creates the file with.
 /// Only used when the file does not exist yet; an existing file keeps the
@@ -427,10 +417,9 @@ fn wall_ns() -> u128 {
 /// accounts sharing a lock or one account holding two.
 fn realm_text(raw: &str) -> Option<&'static str> {
     let trimmed = raw.trim();
-    KNOWN_REALMS
-        .iter()
+    known_realms()
+        .into_iter()
         .find(|known| trimmed.eq_ignore_ascii_case(known))
-        .copied()
 }
 
 /// A venue account id as the lease path spells it, for any of the four

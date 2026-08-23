@@ -20,10 +20,12 @@
 //! still not permission — the gateway refuses to build unless the owner has
 //! armed `REAL_MONEY` on the host.
 //!
-//! Dispatch is an enum rather than `Box<dyn VenueGateway>` for two reasons.
+//! Dispatch is an enum rather than `Box<dyn VenueGateway>` because
 //! [`VenueGateway`] uses `async fn` in trait, which cannot be made into a
-//! trait object at all; and a closed enum keeps the whole set of venues
-//! visible in one place, which is the property the fence depends on.
+//! trait object as written, and because a match arm per venue is a forwarding
+//! the compiler checks. The fence does not rest on this enum: it reads the
+//! directory tree under `src/venues/`, and the completeness checks walk
+//! [`VenueName::ALL`].
 //!
 //! The variants are one per *venue*, not one per realm: Bybit demo and Bybit
 //! mainnet are the same adapter pointed at different accounts, and giving them
@@ -67,16 +69,10 @@ pub const LIGHTER_MAINNET: &str = "lighter_mainnet";
 /// to trade it, saying why.
 pub const VARIATIONAL_MAINNET: &str = "variational_mainnet";
 
-/// Every name [`VenueName::parse`] answers to.
-pub const KNOWN_VENUES: &[&str] = &[
-    BYBIT_DEMO,
-    BYBIT_MAINNET,
-    HYPERLIQUID_TESTNET,
-    HYPERLIQUID_MAINNET,
-    LIGHTER_TESTNET,
-    LIGHTER_MAINNET,
-    VARIATIONAL_MAINNET,
-];
+/// Every name [`VenueName::parse`] answers to, derived from the one list.
+pub fn known_venues() -> [&'static str; VenueName::ALL.len()] {
+    VenueName::ALL.map(VenueName::as_str)
+}
 
 /// A venue name that has been read: which adapter, and which of its realms.
 ///
@@ -96,25 +92,40 @@ pub enum VenueName {
 }
 
 impl VenueName {
+    /// Every venue this engine can be pointed at.
+    ///
+    /// The one list. The parser walks it, the refusal names it, and every
+    /// completeness check iterates it — so a venue cannot be selectable and
+    /// unchecked at the same time. Rust cannot enumerate an enum's variants,
+    /// so this is still typed by hand; what it buys is that a variant left out
+    /// is a venue no config can select, refused at boot, rather than one that
+    /// works and is visited by no test.
+    pub const ALL: [VenueName; 7] = [
+        VenueName::BybitDemo,
+        VenueName::BybitMainnet,
+        VenueName::HyperliquidTestnet,
+        VenueName::HyperliquidMainnet,
+        VenueName::LighterTestnet,
+        VenueName::LighterMainnet,
+        VenueName::VariationalMainnet,
+    ];
+
     /// Read one of the names above, refusing every fallback.
     ///
     /// An unknown name is refused rather than defaulted: a typo that quietly
     /// fell back to some other venue would be a strategy trading somewhere
     /// nobody chose.
     pub fn parse(name: &str) -> Result<Self, VenueError> {
-        match name.trim() {
-            BYBIT_DEMO => Ok(VenueName::BybitDemo),
-            BYBIT_MAINNET => Ok(VenueName::BybitMainnet),
-            HYPERLIQUID_TESTNET => Ok(VenueName::HyperliquidTestnet),
-            HYPERLIQUID_MAINNET => Ok(VenueName::HyperliquidMainnet),
-            LIGHTER_TESTNET => Ok(VenueName::LighterTestnet),
-            LIGHTER_MAINNET => Ok(VenueName::LighterMainnet),
-            VARIATIONAL_MAINNET => Ok(VenueName::VariationalMainnet),
-            other => Err(VenueError::BadRequest(format!(
-                "no venue named \"{other}\" is compiled into this engine (known: {})",
-                KNOWN_VENUES.join(", ")
-            ))),
-        }
+        let name = name.trim();
+        VenueName::ALL
+            .into_iter()
+            .find(|known| known.as_str() == name)
+            .ok_or_else(|| {
+                VenueError::BadRequest(format!(
+                    "no venue named \"{name}\" is compiled into this engine (known: {})",
+                    known_venues().join(", ")
+                ))
+            })
     }
 
     pub fn as_str(self) -> &'static str {
@@ -145,6 +156,14 @@ impl VenueName {
     }
 
     /// Which of that venue's realms, spelled the way the heartbeat spells it.
+    ///
+    /// The three venues that came after Bybit qualify their realm names with
+    /// the venue. That is not decoration: this string travels in the engine's
+    /// heartbeat, and the Python producers block every entry when it does not
+    /// match the environment they were told to size from. Two venues both
+    /// calling a realm `mainnet` would let one venue's heartbeat pass the
+    /// other's check. It also names the lease file, so the set of realms a
+    /// lease may be taken for is read from here.
     pub fn realm(self) -> &'static str {
         match self {
             VenueName::BybitDemo => VenueRealm::Demo.as_str(),
@@ -160,7 +179,7 @@ impl VenueName {
     /// The two environment variables this name's realm reads.
     ///
     /// Here rather than only in each realm table so the whole set can be
-    /// walked from [`KNOWN_VENUES`]. "A key left on a host for one account can
+    /// walked from [`VenueName::ALL`]. "A key left on a host for one account can
     /// never authenticate another" is a claim about every pair of realms in
     /// the engine, and a check that lists them by hand is one a new venue
     /// silently falls out of — which is exactly what happened to Lighter. The
@@ -497,7 +516,7 @@ mod tests {
         };
         let said = err.to_string();
         assert!(said.contains("bybit"), "{said}");
-        for known in KNOWN_VENUES {
+        for known in known_venues() {
             assert!(said.contains(known), "{said} does not mention {known}");
         }
     }
@@ -517,9 +536,9 @@ mod tests {
 
     #[test]
     fn every_known_name_parses_and_prints_back_the_same() {
-        for name in KNOWN_VENUES {
+        for name in known_venues() {
             let parsed = VenueName::parse(name).expect(name);
-            assert_eq!(parsed.as_str(), *name);
+            assert_eq!(parsed.as_str(), name);
         }
     }
 
@@ -545,26 +564,12 @@ mod tests {
     }
 
     #[test]
-    fn every_realm_a_name_can_reach_is_one_the_lease_will_take() {
-        // The lease refuses a realm it does not know, and it refuses at boot,
-        // after the account has already been read. A name whose realm the
-        // lease has never heard of would be a venue that cannot start.
-        for name in KNOWN_VENUES {
-            let realm = VenueName::parse(name).unwrap().realm();
-            assert!(
-                crate::lease::KNOWN_REALMS.contains(&realm),
-                "{name} names the realm {realm}, which the lease does not know"
-            );
-        }
-    }
-
-    #[test]
     fn no_two_names_share_a_realm_string() {
         // The realm travels in the heartbeat, and the producers refuse to size
         // from one whose realm is not theirs. Two venues sharing a realm
         // string would let one venue's heartbeat pass the other's check.
         let mut seen: Vec<&str> = Vec::new();
-        for name in KNOWN_VENUES {
+        for name in known_venues() {
             let realm = VenueName::parse(name).unwrap().realm();
             assert!(!seen.contains(&realm), "{realm} is claimed by two venue names");
             seen.push(realm);
@@ -576,7 +581,7 @@ mod tests {
         // The string an operator types has to make a mistake read as a
         // mistake. Every real-money name says "mainnet"; no practice name
         // does.
-        for name in KNOWN_VENUES {
+        for name in known_venues() {
             let parsed = VenueName::parse(name).unwrap();
             if parsed.is_real_money() {
                 assert!(name.contains("mainnet"), "{name} moves real money and does not say so");

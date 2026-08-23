@@ -14,8 +14,28 @@ const RULE: InstrumentRule = InstrumentRule {
 
 const SECOND: u64 = 1_000_000_000;
 
+/// Far enough past placement that the reprice cadence has come round. Derived,
+/// not written as a number: a hardcoded clock stops meaning "a look is due"
+/// the moment the cadence moves, and the test then passes for the wrong
+/// reason.
+fn due_ns() -> u64 {
+    policy().reprice_ms * 1_000_000 + SECOND
+}
+
+/// Not yet due.
+fn early_ns() -> u64 {
+    policy().reprice_ms * 1_000_000 / 2
+}
+
 fn policy() -> WorkPolicy {
     WorkPolicy::default()
+}
+
+/// The early cross turned on. It ships off — every arm of the tape sweep
+/// waited its window out and beat crossing — but the trigger is still here
+/// and still has to work when a config asks for it.
+fn early_crossing() -> WorkPolicy {
+    WorkPolicy { drift_cross_fee_bp: 5.5, ..WorkPolicy::default() }
 }
 
 /// A two-sided book with four ticks of spread — plenty to rest in.
@@ -168,7 +188,7 @@ fn a_touch_that_fell_away_does_not_drag_the_order_down() {
     // the best place to be. Chasing it down would give that away.
     let state = buying(99.0, 0);
     let retreated = Touch { bid_px: 98.0, bid_qty: 0.0, ask_px: 100.0, ask_qty: 0.0 };
-    let out = plan_work(&state, retreated, &RULE, 4 * SECOND, &policy());
+    let out = plan_work(&state, retreated, &RULE, due_ns(), &policy());
     assert_eq!(out.step, WorkStep::Hold);
     assert!(out.looked, "the cadence still came round");
 }
@@ -187,7 +207,7 @@ fn an_order_the_touch_overtook_comes_back_to_it() {
     let state = buying(99.0, 0);
     let moved_up = Touch { bid_px: 100.0, bid_qty: 0.0, ask_px: 102.0, ask_qty: 0.0 };
     assert_eq!(
-        plan_work(&state, moved_up, &RULE, 4 * SECOND, &policy()).step,
+        plan_work(&state, moved_up, &RULE, due_ns(), &policy()).step,
         WorkStep::Move { px: 100.0 }
     );
 }
@@ -198,7 +218,7 @@ fn a_book_that_leans_against_us_keeps_the_order_back_while_the_window_is_young()
     // cheaper fill.
     let state = buying(98.5, 0);
     let against = Touch { bid_px: 99.0, bid_qty: 100.0, ask_px: 101.0, ask_qty: 1000.0 };
-    assert_eq!(plan_work(&state, against, &RULE, 4 * SECOND, &policy()).step, WorkStep::Hold);
+    assert_eq!(plan_work(&state, against, &RULE, due_ns(), &policy()).step, WorkStep::Hold);
 
     // Past half the window it joins anyway: the clock outranks the lean.
     let half = policy().window_ms / 2 * 1_000_000;
@@ -223,7 +243,7 @@ fn past_the_improve_urgency_the_order_moves_inside_the_spread() {
 fn a_price_that_is_already_right_is_left_alone() {
     // Under half a tick is the same price, and moving costs queue position.
     let state = buying(99.0, 0);
-    assert_eq!(plan_work(&state, no_sizes(), &RULE, 4 * SECOND, &policy()).step, WorkStep::Hold);
+    assert_eq!(plan_work(&state, no_sizes(), &RULE, due_ns(), &policy()).step, WorkStep::Hold);
 }
 
 #[test]
@@ -233,7 +253,7 @@ fn the_amend_budget_stops_mattering_past_the_join_urgency() {
     let moved_up = Touch { bid_px: 100.0, bid_qty: 0.0, ask_px: 102.0, ask_qty: 0.0 };
 
     // Early in the window the budget holds it.
-    assert_eq!(plan_work(&state, moved_up, &RULE, 4 * SECOND, &policy()).step, WorkStep::Hold);
+    assert_eq!(plan_work(&state, moved_up, &RULE, due_ns(), &policy()).step, WorkStep::Hold);
 
     // Past the join threshold the escalation outranks the budget: the ladder
     // the budget would block is the whole reason the recipe measured cheaper.
@@ -248,10 +268,10 @@ fn the_amend_budget_stops_mattering_past_the_join_urgency() {
 fn the_reprice_cadence_paces_the_looks() {
     let state = buying(99.0, 0);
     let moved_up = Touch { bid_px: 100.0, bid_qty: 0.0, ask_px: 102.0, ask_qty: 0.0 };
-    let early = plan_work(&state, moved_up, &RULE, SECOND, &policy());
+    let early = plan_work(&state, moved_up, &RULE, early_ns(), &policy());
     assert_eq!(early.step, WorkStep::Hold);
     assert!(!early.looked, "the cadence has not come round");
-    let due = plan_work(&state, moved_up, &RULE, 3 * SECOND, &policy());
+    let due = plan_work(&state, moved_up, &RULE, due_ns(), &policy());
     assert!(due.looked);
     assert_eq!(due.step, WorkStep::Move { px: 100.0 });
 }
@@ -262,7 +282,7 @@ fn a_book_that_cannot_be_read_still_costs_a_look() {
     // cadence.
     let state = buying(99.0, 0);
     let dark = Touch::default();
-    let out = plan_work(&state, dark, &RULE, 4 * SECOND, &policy());
+    let out = plan_work(&state, dark, &RULE, due_ns(), &policy());
     assert_eq!(out.step, WorkStep::Hold);
     assert!(out.looked);
 }
@@ -304,12 +324,11 @@ fn a_sell_crosses_down_through_the_bid() {
 }
 
 #[test]
-fn a_market_that_ran_against_the_decision_crosses_early() {
-    // Waiting has been proven more expensive than the spread.
+fn a_market_that_ran_against_the_decision_crosses_early_when_asked() {
     let state = WorkState::new(Side::Buy, 99.0, 100.0, 0);
     let ran_up = Touch { bid_px: 101.5, bid_qty: 0.0, ask_px: 102.5, ask_qty: 0.0 };
     assert!(matches!(
-        plan_work(&state, ran_up, &RULE, 4 * SECOND, &policy()).step,
+        plan_work(&state, ran_up, &RULE, due_ns(), &early_crossing()).step,
         WorkStep::Cross { .. }
     ));
 }
@@ -319,7 +338,7 @@ fn a_market_that_only_drifted_a_little_keeps_waiting() {
     let state = WorkState::new(Side::Buy, 99.0, 100.0, 0);
     let nudged = Touch { bid_px: 100.0, bid_qty: 0.0, ask_px: 101.0, ask_qty: 0.0 };
     assert!(!matches!(
-        plan_work(&state, nudged, &RULE, 4 * SECOND, &policy()).step,
+        plan_work(&state, nudged, &RULE, due_ns(), &early_crossing()).step,
         WorkStep::Cross { .. }
     ));
 }
@@ -331,20 +350,32 @@ fn the_early_cross_stays_off_without_a_decision_mid() {
     let state = WorkState::new(Side::Buy, 99.0, 0.0, 0);
     let ran_up = Touch { bid_px: 101.5, bid_qty: 0.0, ask_px: 102.5, ask_qty: 0.0 };
     assert!(!matches!(
-        plan_work(&state, ran_up, &RULE, 4 * SECOND, &policy()).step,
+        plan_work(&state, ran_up, &RULE, due_ns(), &early_crossing()).step,
         WorkStep::Cross { .. }
     ));
 }
 
 #[test]
-fn the_early_cross_can_be_turned_off() {
+fn what_ships_waits_a_runaway_market_out_instead_of_crossing_early() {
+    // The measured default. A market that has run past the price of crossing
+    // rides to the deadline: a rest that misses costs 0.94 bp more than
+    // crossing at the start, and one that fills saves 4.18.
     let state = WorkState::new(Side::Buy, 99.0, 100.0, 0);
     let ran_up = Touch { bid_px: 101.5, bid_qty: 0.0, ask_px: 102.5, ask_qty: 0.0 };
-    let off = WorkPolicy { drift_cross_fee_bp: 0.0, ..policy() };
+    assert_eq!(WorkPolicy::default().drift_cross_fee_bp, 0.0);
     assert!(!matches!(
-        plan_work(&state, ran_up, &RULE, 4 * SECOND, &off).step,
+        plan_work(&state, ran_up, &RULE, due_ns(), &policy()).step,
         WorkStep::Cross { .. }
     ));
+}
+
+#[test]
+fn what_ships_moves_the_order_at_the_measured_cadence() {
+    // Fifteen seconds: the cadence every measured arm ran at, and what the
+    // eight-amend budget spans a whole window at.
+    let policy = WorkPolicy::default();
+    assert_eq!(policy.reprice_ms, 15_000);
+    assert_eq!(policy.max_amends as u64 * policy.reprice_ms, policy.window_ms);
 }
 
 #[test]
@@ -366,11 +397,11 @@ fn cross_retries_are_paced_on_the_reprice_cadence() {
     state.cross_started_ns = 10 * SECOND;
     state.last_cross_try_ns = 10 * SECOND;
     assert_eq!(
-        plan_work(&state, no_sizes(), &RULE, 11 * SECOND, &policy()).step,
+        plan_work(&state, no_sizes(), &RULE, 10 * SECOND + early_ns(), &policy()).step,
         WorkStep::Hold
     );
     assert!(matches!(
-        plan_work(&state, no_sizes(), &RULE, 13 * SECOND, &policy()).step,
+        plan_work(&state, no_sizes(), &RULE, 10 * SECOND + due_ns(), &policy()).step,
         WorkStep::Cross { .. }
     ));
 }
@@ -382,7 +413,7 @@ fn a_cross_the_venue_took_stops_the_retries() {
     state.last_cross_try_ns = 10 * SECOND;
     state.crossed = true;
     assert_eq!(
-        plan_work(&state, no_sizes(), &RULE, 20 * SECOND, &policy()).step,
+        plan_work(&state, no_sizes(), &RULE, 10 * SECOND + due_ns(), &policy()).step,
         WorkStep::Hold,
         "it is crossed and inside the grace; there is nothing to do but wait"
     );
@@ -413,7 +444,7 @@ fn cancel_retries_are_paced_too() {
         WorkStep::Hold
     );
     assert_eq!(
-        plan_work(&state, no_sizes(), &RULE, grace_over + 3 * SECOND, &policy()).step,
+        plan_work(&state, no_sizes(), &RULE, grace_over + due_ns(), &policy()).step,
         WorkStep::Cancel
     );
 }
@@ -426,7 +457,7 @@ fn an_order_already_asked_to_be_pulled_is_left_alone() {
     state.cancel_requested = true;
     let grace_over = 10 * SECOND + policy().cross_grace_ms * 1_000_000;
     assert_eq!(
-        plan_work(&state, no_sizes(), &RULE, grace_over + 10 * SECOND, &policy()).step,
+        plan_work(&state, no_sizes(), &RULE, grace_over + due_ns(), &policy()).step,
         WorkStep::Hold
     );
 }
@@ -508,7 +539,7 @@ fn a_buy_never_moves_up_to_a_market_that_left() {
         ask_px: 105.0,
         ask_qty: 0.0,
     };
-    let now = 4 * SECOND;
+    let now = due_ns();
 
     let chasing = plan_work(&state, ran_away, &RULE, now, &patient());
     assert_eq!(
@@ -531,12 +562,12 @@ fn a_sell_never_moves_down_to_a_market_that_left() {
         ask_qty: 0.0,
     };
     assert_eq!(
-        plan_work(&state, ran_away, &RULE, 4 * SECOND, &patient()).step,
+        plan_work(&state, ran_away, &RULE, due_ns(), &patient()).step,
         WorkStep::Move { px: 97.0 },
         "today's recipe rejoins the touch that overtook it"
     );
     assert_eq!(
-        plan_work(&state, ran_away, &RULE, 4 * SECOND, &patient_and_holding()).step,
+        plan_work(&state, ran_away, &RULE, due_ns(), &patient_and_holding()).step,
         WorkStep::Hold
     );
 }
@@ -555,7 +586,7 @@ fn the_cap_still_lets_the_order_follow_a_market_coming_toward_it() {
     };
     // The touch fell away and left the order at the front: never chase it.
     assert_eq!(
-        plan_work(&state, overtaken_below, &RULE, 4 * SECOND, &patient_and_holding()).step,
+        plan_work(&state, overtaken_below, &RULE, due_ns(), &patient_and_holding()).step,
         WorkStep::Hold
     );
 }
@@ -572,15 +603,19 @@ fn the_early_cross_gives_up_instead_when_it_is_told_to() {
         ask_px: 105.0,
         ask_qty: 0.0,
     };
-    let now = 4 * SECOND;
+    let now = due_ns();
     assert!(
-        matches!(plan_work(&state, ran_away, &RULE, now, &policy()).step, WorkStep::Cross { .. }),
-        "today's recipe crosses once the drift proves waiting expensive"
+        matches!(
+            plan_work(&state, ran_away, &RULE, now, &early_crossing()).step,
+            WorkStep::Cross { .. }
+        ),
+        "with the trigger on, drift ends patience in a cross"
     );
 
     let giving_up = WorkPolicy {
         give_up_instead_of_crossing: true,
-        ..holding()
+        hold_decision_px: true,
+        ..early_crossing()
     };
     assert_eq!(plan_work(&state, ran_away, &RULE, now, &giving_up).step, WorkStep::Cancel);
 }

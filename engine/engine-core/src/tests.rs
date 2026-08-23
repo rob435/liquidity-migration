@@ -199,8 +199,6 @@ fn bybit_like_caps() -> VenueCaps {
     VenueCaps {
         native_position_stop: true,
         amend_in_place: true,
-        post_only: true,
-        batch_orders: false,
         set_leverage: true,
     }
 }

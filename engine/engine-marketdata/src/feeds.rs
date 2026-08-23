@@ -1,15 +1,19 @@
 //! The chosen venue's public market feed, behind one type.
 //!
 //! Same reasoning as the gateway's registry: `async fn` in trait cannot be a
-//! trait object, and a closed enum keeps every feed visible in one place. And
-//! the same reasoning as the switch itself: this is built from the venue name
-//! the gateway was built from, so the engine cannot send orders to one venue
-//! while pricing them off another's book.
+//! trait object as written, and a match arm per venue is a forwarding the
+//! compiler checks. And the same reasoning as the switch itself: this is built
+//! from the venue name the gateway was built from, so the engine cannot send
+//! orders to one venue while pricing them off another's book.
+//!
+//! This feed is polled once per loop turn, hundreds of times a second, inside
+//! the segment the engine reports in nanoseconds — a different budget from the
+//! gateway, which is called once per order.
 
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId};
-use engine_venue::{HyperliquidRealm, LighterRealm, VariationalRealm, VenueName, VenueRealm};
+use engine_venue::{HyperliquidRealm, LighterRealm, VariationalRealm, VenueName};
 
-use crate::feed::BybitPublicFeed;
+use crate::bybit::feed::BybitPublicFeed;
 use crate::hyperliquid::HyperliquidPublicFeed;
 use crate::lighter::LighterPublicFeed;
 use crate::variational::VariationalPublicFeed;
@@ -28,7 +32,6 @@ impl MarketFeeds {
             // Bybit publishes one public stream for both realms; the demo
             // account matches against these same prices.
             VenueName::BybitDemo | VenueName::BybitMainnet => {
-                let _ = VenueRealm::Demo;
                 MarketFeeds::Bybit(BybitPublicFeed::new(subs))
             }
             VenueName::HyperliquidTestnet => MarketFeeds::Hyperliquid(
@@ -101,27 +104,26 @@ mod tests {
         // A name that fell through to another venue's feed would be an engine
         // pricing one venue's orders off another venue's book — the exact
         // thing one switch exists to make impossible.
-        for (name, is_bybit, is_hyperliquid, is_variational) in [
-            (VenueName::BybitDemo, true, false, false),
-            (VenueName::BybitMainnet, true, false, false),
-            (VenueName::HyperliquidTestnet, false, true, false),
-            (VenueName::HyperliquidMainnet, false, true, false),
-            (VenueName::LighterTestnet, false, false, false),
-            (VenueName::LighterMainnet, false, false, false),
-            (VenueName::VariationalMainnet, false, false, true),
+        //
+        // The inner match is exhaustive on purpose: a new feed variant does
+        // not compile until this test says which name reaches it. A table of
+        // booleans let the last venue pass by elimination instead.
+        for (name, expected) in [
+            (VenueName::BybitDemo, "bybit"),
+            (VenueName::BybitMainnet, "bybit"),
+            (VenueName::HyperliquidTestnet, "hyperliquid"),
+            (VenueName::HyperliquidMainnet, "hyperliquid"),
+            (VenueName::LighterTestnet, "lighter"),
+            (VenueName::LighterMainnet, "lighter"),
+            (VenueName::VariationalMainnet, "variational"),
         ] {
-            let built = MarketFeeds::build(name, &subs());
-            assert_eq!(matches!(built, MarketFeeds::Bybit(_)), is_bybit, "{name}");
-            assert_eq!(
-                matches!(built, MarketFeeds::Hyperliquid(_)),
-                is_hyperliquid,
-                "{name}"
-            );
-            assert_eq!(
-                matches!(built, MarketFeeds::Variational(_)),
-                is_variational,
-                "{name}"
-            );
+            let built = match MarketFeeds::build(name, &subs()) {
+                MarketFeeds::Bybit(_) => "bybit",
+                MarketFeeds::Hyperliquid(_) => "hyperliquid",
+                MarketFeeds::Lighter(_) => "lighter",
+                MarketFeeds::Variational(_) => "variational",
+            };
+            assert_eq!(built, expected, "{name} built the wrong venue's feed");
         }
     }
 

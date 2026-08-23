@@ -362,10 +362,6 @@ impl VenueGateway for LighterGateway {
             // the order where it is and says so in the log. A resting quote on
             // this venue therefore does not move until it is cancelled.
             amend_in_place: false,
-            // Time-in-force "post only".
-            post_only: true,
-            // The venue has a batch endpoint; nothing here sends to it.
-            batch_orders: false,
             // Leverage is set by a margin-fraction transaction this adapter
             // does not send, so the symbol keeps whatever it carries and the
             // engine is told it has no say.
@@ -825,9 +821,7 @@ mod tests {
     fn the_caps_say_only_what_this_adapter_actually_does() {
         let caps = gateway().caps();
         assert!(caps.native_position_stop);
-        assert!(caps.post_only);
         assert!(!caps.amend_in_place, "nothing here sends a modify");
-        assert!(!caps.batch_orders);
         assert!(!caps.set_leverage, "nothing here sends a margin change");
     }
 
