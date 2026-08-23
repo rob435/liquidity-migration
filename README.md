@@ -9,8 +9,8 @@ Bybit.
 one loop from market message to signed order. It **is the account owner,
 deployed and live on the demo account** — it holds that account's
 single-writer lease, it is the only order path, and both producers size from
-its heartbeat. A second engine unit runs against the funded account in shadow
-and has never sent an order.
+its heartbeat. A second engine unit runs on the funded account, and only while
+`REAL_MONEY` is armed in the host credential file.
 
 Measured by `cd engine && cargo run --release -- bench`, with real signing and
 a real disk flush in the chain. On the production box: the decision itself
@@ -19,10 +19,9 @@ median, 5.18 ms p99. (On a laptop the decision is faster and the flush slower �
 84 ns and 3.9 ms; both tables are in [docs/engine.md](docs/engine.md).) The
 venue round trip on top is ~172 ms — geography, not software.
 
-The four venue hostnames may be written in exactly one file (`realm.rs`), the
-funded one refuses to build unless `REAL_MONEY` is armed in the host
-credential file, and shadow is the default: a shadow engine logs intents and
-sends nothing. Design, crates and safety posture:
+Each of the five venues may write its hostnames in exactly one file, its own
+`realm.rs`, and the funded gateway refuses to build unless `REAL_MONEY` is
+armed in the host credential file. Design, crates and safety posture:
 [docs/engine.md](docs/engine.md). Live truth: [STATE.md](STATE.md).
 
 ## Sleeves

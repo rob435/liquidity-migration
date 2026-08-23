@@ -607,7 +607,7 @@ it had been given something else.
   it reports no instrument rules, so the engine's own "no rule, nothing can be
   sent" refusal would stop an order before the gateway's did.
 
-### Adding a fifth
+### Adding a venue
 
 Six steps, five in `engine-venue` and one next door:
 

@@ -838,12 +838,8 @@ def test_universe_refresh_threshold_log_counts_only_new_targets(tmp_path: Path, 
 
 # --- universe_refresh_errors must not double-count ---
 #
-# Defect: ``universe_refresh_errors`` was double-counted on the default-fetcher
-# empty path. When ``force_refresh_universe`` calls ``_fetch_universe`` and the
-# default fetcher's ``get_instruments_info`` raises, ``_fetch_universe`` already
-# increments ``_universe_refresh_errors`` (line ~413) and returns ``[]``; the
-# empty-set guard in ``force_refresh_universe`` then increments it a SECOND time
-# for the same underlying error.
+# ``_fetch_universe`` already counts a REST failure and returns ``[]``, so the
+# empty-set guard in ``force_refresh_universe`` must not count it again.
 #
 # These tests pin:
 #   * the default-fetcher REST-exception path counts the error exactly ONCE

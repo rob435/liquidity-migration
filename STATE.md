@@ -304,11 +304,11 @@ mainnet engine, demo LONG and CARRY producers, mainnet LONG and CARRY
 producers, and the Telegram controls. Four timers drive four oneshots beside
 them — demo liveness, mainnet liveness, the LLM ledger, and the trade notifier.
 The host carries exactly the unit files in `deploy/systemd/` and nothing else;
-[the inventory is that directory's README](deploy/systemd/README.md). Paper is
-retired whole; demo is the only practice book.
+[the inventory is that directory's README](deploy/systemd/README.md). Demo is
+the only practice book.
 
-Bulk collectors are removed and raw account-market persistence is disabled. Live
-L2 readiness and exact decision-book capture remain enabled.
+Raw account-market persistence is off. Live L2 readiness and exact
+decision-book capture are on.
 
 ## Risk envelope
 
@@ -330,8 +330,9 @@ the key. The installed host file does not carry the lines yet, so setting a
 funded multiplier is not yet possible — say the number in the profile instead.
 `RM_CARRY_STOP_LOSS_FRACTION` (**0.35**) is the protection dial and is the
 owner's own. The account document (`configs/operational.mainnet.json`) is
-static: entry leverage 5×, gross cap = wallet × 5 split carry 200/long 300,
-margin cap = wallet, and no per-symbol ceiling — every cap a ratio of the
+static: entry leverage 5×, gross cap = wallet × 5 account-wide and the same
+per component, margin cap = wallet, and no per-symbol ceiling — one sleeve can
+spend the whole envelope, and every cap is a ratio of the
 equity-tracked reference, proved at load and re-proved on each rebase. A
 book the dials build past those caps is refused per entry by the engine's
 runtime admission; a retired `RM_*` line in an env file is refused by name.
@@ -448,11 +449,6 @@ instant, with the venue's raw numbers kept verbatim (`venue_funding_usdt`,
 
 Real money is a separate door: no runtime status or rolling record arms it —
 arming is the owner's hand on the switch (constraint above).
-
-Research-only: Strategy Overhaul V2 closed with no qualifying thesis and did not
-touch its reserved holdout. The consolidated conclusion and successor direction
-are in `docs/research/strategy_program.md`; current anomaly evidence is in
-`docs/research/archive/2026-07-24-anomaly-research.md`.
 
 ## Known benign alert shapes
 

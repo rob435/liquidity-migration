@@ -93,17 +93,13 @@ ENGINE_UNIT = "liquidity-migration-engine.service"
 
 
 def test_engine_unit_runs_the_fleets_demo_account_and_never_the_funded_one() -> None:
-    """The engine is what executes on the demo account now.
+    """The engine executes on the fleet's demo account, and the funded account
+    stays out of reach.
 
-    It used to name bybit-quote-lab.env, a second demo account (579580669),
-    because liquidity-migration-account-execution.service owned the fleet's
-    account and two writers on one venue account wedge each other -- on
-    2026-08-14 a live engine here blocked that owner for about a hundred
-    seconds. That owner was deleted with the Python order path, and the
-    producers publish their books to this account and size from its equity, so
-    the engine has to be on it.
-
-    The funded account stays out of reach, and that half has not changed.
+    The producers publish their books to this account and size from its equity,
+    so the engine has to be on it and not on the second demo account
+    (579580669) in bybit-quote-lab.env. The unit names both, because two
+    writers on one venue account wedge each other.
     """
 
     unit = _unit(ENGINE_UNIT)

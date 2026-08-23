@@ -293,18 +293,13 @@ def test_empty_message_text_is_still_sent(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ---------------------------------------------------------------------------
-# Edge-case robustness for the notify-only telegram transport.
+# Edge-case robustness for the notify-only telegram transport, each with a
+# normal-input guard so the happy path stays byte-identical:
 #
-# Four defects, each with a failing-on-old-code regression plus a normal-input
-# guard so the happy path stays byte-identical:
-#
-# (A) a non-finite Retry-After ("nan"/"inf") must not reach time.sleep() — it
-#     raised ValueError (nan) or hung; the helper now clamps to the 1s default.
-# (B) the 429 retry path leaked the first HTTPError response (its fp was never
-#     closed) before retrying; it now closes the error response.
-# (C) covered by the corrected docstring + the propagation tests above
-#     (frozen contract: errors raise); here we just pin that a bare transport
-#     fault still propagates.
+# (A) a non-finite Retry-After ("nan"/"inf") never reaches time.sleep(); the
+#     helper clamps it to the 1s default.
+# (B) the 429 retry path closes the first HTTPError response before retrying.
+# (C) a bare transport fault propagates — errors raise is the frozen contract.
 # ---------------------------------------------------------------------------
 
 

@@ -112,15 +112,12 @@ def test_idless_split_fills_are_not_dedup_collapsed() -> None:
 # Densify's multi-symbol recursion must not reuse one symbol's
 # prior-close seed for every symbol.
 #
-# Defect: hourly densification split a multi-symbol frame and recursed with the
-# SAME scalar ``initial_price`` for every symbol. ``initial_price`` is the prior close
-# of ONE symbol (the production callers compute it per-symbol via
-# ``previous_kline_close(..., symbol=symbol, ...)``), so a multi-symbol frame would seed
-# e.g. BTC's prior close onto ETH's leading-null minutes — a data-integrity bug.
-#
-# Fix: drop the scalar seed on the multi-symbol recursion (a single scalar cannot be a
-# correct seed for >1 symbol). Single-symbol callers — the only production path — never
-# enter the recursion branch, so their seed flows through unchanged.
+# ``initial_price`` is the prior close of ONE symbol — the production callers
+# compute it per-symbol via ``previous_kline_close(..., symbol=symbol, ...)`` —
+# so a single scalar cannot seed a multi-symbol frame: it would put e.g. BTC's
+# prior close onto ETH's leading-null minutes. The multi-symbol recursion
+# therefore carries no seed. Single-symbol callers, the only production path,
+# never enter that branch.
 
 # 2025-01-01T00:00:00Z, the day-start used throughout the existing ingestion tests.
 DAY_START_MS = 1_735_689_600_000

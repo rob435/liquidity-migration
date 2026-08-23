@@ -673,13 +673,11 @@ def test_flush_failure_cleans_up_temp_file(tmp_path: Path, monkeypatch) -> None:
     assert leftovers == []
 
 
-# kline_store freshness: newest_ts_ms is always backed by a stored bar
-# (kline_store_fresh #1). VERDICT: NOT a defect within kline_store.py.
-# recover_from_disk is a documented add-only idempotent keyed MERGE; it never
-# drops symbols (that is keep_only_symbols' job). After recovery the cached
-# _global_max_ts_ms is always exactly consistent with the bars actually present,
-# so newest_ts_ms() never reports a phantom timestamp. These tests PIN that
-# verified contract on the current (unmodified) source.
+# kline_store freshness: newest_ts_ms is always backed by a stored bar.
+# recover_from_disk is an add-only idempotent keyed MERGE and never drops
+# symbols — that is keep_only_symbols' job — so after recovery the cached
+# _global_max_ts_ms is exactly consistent with the bars present and
+# newest_ts_ms() never reports a phantom timestamp.
 def test_recover_keeps_global_max_consistent_with_present_bars(tmp_path: Path) -> None:
     """``recover_from_disk`` is add-only: after every recover, ``newest_ts_ms()`` equals
     the true max of bars actually present, never a phantom ts. A departed symbol's

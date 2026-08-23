@@ -15,17 +15,19 @@ Publication switches live in [`deploy/sleeves.env`](../deploy/sleeves.env).
 
 | Sleeve | Trades | Demo | Mainnet |
 | --- | --- | --- | --- |
-| LONG | Long a fresh volume pump, bought on a shallow retrace | on | off |
-| CARRY | Long coins whose shorts pay a deep crowd fee | on | off |
-| EXODUS | Short the name carry just abandoned, through the post-settlement fall | on | off |
+| LONG | Long a fresh volume pump, bought on a shallow retrace | on | gated by `REAL_MONEY` |
+| CARRY | Long coins whose shorts pay a deep crowd fee | on | gated by `REAL_MONEY` |
+| EXODUS | Short the name carry just abandoned, through the post-settlement fall | on | not published |
 
 EXODUS has no toggle in `sleeves.env`: it is published by the carry producer (its trigger
 is carry's own pre-settle exit fire), armed per unit by `EXODUS_SHORT_PROFILE` in the unit
 environment, and holds its own engine sleeve, book file, and fill attribution.
 
 Producers publish absolute component targets; they never place orders and never own fills,
-funding, or P&L ([`architecture.md`](architecture.md)). Demo is the only practice book; the
-mainnet route is wired but off.
+funding, or P&L ([`architecture.md`](architecture.md)). Demo is the only practice book.
+`sleeves.env` carries no mainnet toggle — the funded route's single arming switch is
+`REAL_MONEY` in the host credential file, and whether it is armed today is
+[STATE.md](../STATE.md), not this page.
 
 ## LONG — `LongV12WideStop`
 
@@ -134,8 +136,9 @@ producer sizes off *observed* equity, so those caps sit orders of magnitude abov
 it can ask for and never bind. On demo the venue-native stop is the only bound that acts.
 
 On the funded profile the reference tracks the wallet, so the ratios are real there: a full
-ten-slot book would be 562% gross against a 500% cap, and LONG's own share stops at 300% of
-the wallet. Nothing resizes to fit — the engine refuses each entry that would breach.
+ten-slot book would be 562% gross against a 500% cap. The cap is account-wide — there is no
+per-sleeve share, so one sleeve can spend the lot. Nothing resizes to fit — the engine
+refuses each entry that would breach.
 Runtime profile bytes override any number here.
 
 **The engine works each standing position toward its ask.** The book's notional is frozen
@@ -433,8 +436,7 @@ stop. The validator re-runs on the equity-rescaled profile, not only at load. Se
 normal risk or venue-rule rejection when live account state differs from the validation
 reference is a safety decision, not configuration drift — do not "fix" it by raising caps.
 
-`PARTITIONABLE_SLEEVES` in `policy/operational_profile.py` is `("carry", "hedge", "long")`
-and both operational profiles carry a `hedge` block — an empty seat, so adding a hedge needs
+Both operational profiles carry a `hedge` block — an empty seat, so adding a hedge needs
 no schema change. `btc_risk_decision_evidence` is defined in `account/entry_attempts.py`
 beside the other metadata keys, so an entry's evidence copies forward onto its close.
 

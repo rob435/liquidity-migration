@@ -124,15 +124,16 @@ environment, roots, candidate universe, rules, risk policy and sleeve toggles ar
 
 ## Real money
 
-CARRY and LONG on one funded Bybit account, each holding a private share of an envelope scaled to
-observed wallet equity.
+CARRY and LONG on one funded Bybit account, under one account-wide envelope scaled to observed
+wallet equity. There is no per-sleeve share: either sleeve can spend the whole of it.
 
 **The single arming switch is `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env`** — the
 same root-owned `0600` file the live API key goes into, edited on the VPS by the owner's own hand.
 There is no repo toggle, so a git commit can never arm. When the switch is armed, a plain `activate` or
 `rollout` creates the mainnet state roots, requires `real-money preflight` to pass, then starts the
 mainnet engine (`liquidity-migration-engine-mainnet.service`), both producers, and the liveness timer.
-Which sleeves trade, and at what share, is the installed risk profile's decision.
+Which sleeves trade, and at what size multiplier, is the installed risk profile's decision;
+the caps themselves are account-wide.
 
 **stop-mainnet** (`scripts/ops.sh deploy stop-mainnet`) disables and stops the mainnet timer, watchdog,
 both producers and the mainnet engine unit, and fails if any survives. It stops publication only —

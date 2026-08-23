@@ -298,19 +298,3 @@ def test_mainnet_pause_and_resume_touch_only_mainnet_units(fleet_env) -> None:
     touched = {argv[3] for argv in commands if argv[0] == "systemctl" and len(argv) > 3}
     assert touched == set(tc.MAINNET_PRODUCER_UNITS)
     assert not config.host_sleeves_env.exists()
-
-
-# --------------------------------------------------------------------------
-# Flatten outcome rendering
-# --------------------------------------------------------------------------
-
-
-def _outcome(status: str, *, components: int = 2, positions=None, detail: str = "") -> dict[str, object]:
-    return {
-        "status": status,
-        "detail": detail,
-        "plan": {"components": [{"symbol": f"S{i}"} for i in range(components)]},
-        "residual": {"positions": positions or []},
-    }
-
-

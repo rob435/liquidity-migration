@@ -4188,9 +4188,8 @@ def test_transaction_state_copy_shares_orders_until_one_is_written(tmp_path: Pat
 def test_transaction_state_copy_shares_positions_until_one_is_written(tmp_path: Path) -> None:
     """Positions carry the same copy-on-write contract as orders.
 
-    They used to be copied one by one on every journaled event batch, which is
-    a linear slice of the whole symbol history per transaction — and positions
-    are never pruned, so a symbol traded once is copied forever after.
+    Positions are never pruned, so copying them one by one per journaled event
+    batch would slice the whole symbol history on every transaction.
     """
 
     committed = _indexed_journal(tmp_path).state()

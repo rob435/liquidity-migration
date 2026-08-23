@@ -111,8 +111,8 @@ def test_demo_kline_cache_fetches_only_new_hour(tmp_path: Path) -> None:
 def test_demo_kline_fetch_ranges_tails_contiguous_and_backfills_holes() -> None:
     # AAAUSDT has a MID-WINDOW HOLE (bars at 0 and 2h, missing 1h): the fetch
     # range must cover the full window to backfill the hole, NOT just the tail
-    # after the latest bar (the old latest-bar-only behaviour left the hole
-    # forever and the day failed the >=20-bar filter — BUG-2).
+    # after the latest bar: a tail-only fetch leaves the hole forever and the
+    # day fails the >=20-bar filter.
     # BBBUSDT is merely BEHIND (contiguous, latest at 0): a tail fetch suffices.
     # DDDUSDT is absent: full window.
     cached = pl.DataFrame(
@@ -355,7 +355,7 @@ def test_download_recent_1h_klines_falls_back_to_rest_for_uncovered_symbols(tmp_
 
 def test_download_recent_1h_klines_backfills_store_midwindow_hole(tmp_path: Path) -> None:
     """A store symbol that reaches end_ms but has a MID-WINDOW hole must be forced
-    off the fast path and REST-backfilled, not trusted as covered (BUG-2)."""
+    off the fast path and REST-backfilled, not trusted as covered."""
     from liquidity_migration.marketdata.kline_store import KlineStore
 
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)

@@ -90,9 +90,6 @@ never-attempted `StaleUnsubmittedExposureCommand` and every entry intent is past
 Exits never expire; a batch with attempted commands keeps resuming past expiry so possibly-live venue
 state reconciles.
 
-Paper-twin journals remain on disk; intents in them carry `mirror_source_request_id` /
-`mirror_source_environment` / `mirror_scale` metadata.
-
 ## The account journal
 
 Event-sourced, and the accounting authority for demo, mainnet and historical replay.

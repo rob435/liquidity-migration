@@ -475,8 +475,7 @@ def test_marker_path_sanitizes_symbol_and_suffix(tmp_path) -> None:
 #
 # These tests pin the incremental-refresh behaviour: a daily refresh with a
 # slightly later --end must NOT refetch the full historical range. The marker
-# scheme used to key on exact (start_ms, end_ms) pairs so any change to either
-# bound caused a full re-fetch; the coverage check fixes that.
+# is checked for coverage, not for an exact (start_ms, end_ms) match.
 
 
 def _write_marker(tmp_path, *, dataset: str, symbol: str, start_ms: int, end_ms: int, suffix: str = "") -> None:
@@ -728,14 +727,11 @@ def test_download_symbol_dataset_clamped_window_marker_keys_on_covered_range(tmp
 
 # --- _normalize_binance_taker_flow non-finite / negative guard --------------
 #
-# _normalize_binance_taker_flow must guard non-finite / negative taker volumes
-# before computing the imbalance ratio, instead of emitting a fabricated 0.0.
-# A NaN/inf or negative buy/sell volume slips past the
-# `is None` check; `total = buy + sell` is then NaN or <= 0, so the
-# `(buy - sell) / total if total > 0 else 0.0` branch fabricates a 0.0 imbalance
-# (or a NaN) alongside a NaN/garbage signed volume — the spurious-zero corruption
-# the function's own docstring forbids for missing data. Fix: treat a non-finite
-# or negative volume as missing data and emit null derived fields.
+# _normalize_binance_taker_flow treats a non-finite or negative taker volume as
+# missing data and emits null derived fields. Such a volume passes the `is None`
+# check, so without the guard `total = buy + sell` is NaN or <= 0 and the ratio
+# branch fabricates a 0.0 imbalance — the spurious zero the function's own
+# docstring forbids for missing data.
 
 
 def _row(ts, buy, sell, ratio="1.0"):
