@@ -16,6 +16,85 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — leg B of the carry exit clock: names the next decision zeroes
+  sell at ~00:02, not 00:20 (`CARRY_DROP_EXIT`).** The measured population —
+  exits forced by a universe/persistence drop rather than a fee recovery —
+  leaks +74/+43 bp pooled between 23:55 and the 00:20 fill (t 3.5), but only
+  +18/+15 in 2026 alone (t 0.8); that era-weak tail is the honest size of the
+  live edge. Mechanics: when `CARRY_DROP_EXIT=1`, the first clean post-midnight
+  build freezes the upcoming day's book through the same `_freeze_decision_ahead`
+  gates the pre-deadline freeze uses (WS-store-served klines, no funding-fetch
+  failures — a repair-pending build pins nothing), masks the zeroed names out
+  of the served old-day book, and their exit intents publish exit-first at
+  ~00:02. Entries never move early (they exist only in the upcoming book,
+  behind the 00:20 flip; yesterday's signals are long expired by then). A
+  shrunk weight is a resize, not a drop. The exodus sleeve does not take these
+  over — its trigger stays the fee-recovery fire. Known cost, documented in the
+  freeze-ahead residual it inherits: the early ticker snapshot can drop a name
+  the authoritative 00:20 rebuild keeps, selling once and re-buying (~15.56 bp)
+  against the leak. Kill switch: `CARRY_DROP_EXIT=0`. Wired to both carry units;
+  live from the next deploy. Tests: `TestDropExit` (mask boundary, resize
+  not-a-drop, no-freeze noop, full-cycle fire with entries held back, disabled
+  keeps the deployed clock).
+
+- **2026-08-23 — the execution arms are swept offline, and resting beats
+  crossing on every symbol and every arm. Two research faults fixed with it.**
+  `quote_lab/shadow.py` replays a recorded tape with queue-position-respecting
+  fill bounds; it had tests and no driver, and 2.5 GB of tape from the two lab
+  nights is still on the box. `scripts/research/sweep_quote_arms.py` now
+  replays 24 arms — placement (join/improve) x chase (0/1/2/4 ticks) x timeout
+  (60/120/180 s) — over it, **paired at the decision instant** so each attempt
+  yields what resting cost and what crossing would have cost on the same book.
+  20 symbols, ~14,000 paired attempts per arm. Receipt:
+  `/var/lib/liquidity-migration/research-evidence/quote-arm-sweeps/quote-arm-sweep-20260823-tapenight20260804.json`.
+
+  **Every arm beats crossing, by 3.31 to 4.07 bp, at t −49 to −68. No symbol
+  and no arm is an exception.** What moves the number:
+
+  | factor | effect on the diff |
+  | --- | --- |
+  | timeout 60 → 120 → 180 s | −3.43 → −3.83 → −3.93 bp |
+  | chase 0 → 1 → 2 → 4 ticks | −3.60 → −3.72 → −3.80 → −3.78 bp |
+  | join vs improve | −3.70 vs −3.75 bp |
+
+  **The window is the lever; chase and placement are rounding.** Plain resting
+  at the touch with no chase for 180 s (`join-c0-t180`, −3.73 bp) is 91% of the
+  best arm. Chasing two ticks buys 0.20 bp; improving buys 0.05.
+
+  Regressing cost on fill rate across the 24 arms (R² 0.952) separates the two
+  states: **a rest that fills costs 3.53 bp, a rest that misses costs 8.65,
+  crossing costs 7.71 — so resting pays unless the fill rate falls under 18%.**
+  That is what makes the finding robust to the replay being generous about
+  fills: at the live probe's measured 44% it is still −1.31 bp, at the quote
+  lab's 70% it is −2.64.
+
+  Two faults found and fixed in the instruments:
+
+  - **The passive-fill probe charged the spread twice.** `itt_cost_bp` was
+    handed `MEASURED_TAKER_FEE_BP_PER_SIDE = 7.78` — a per-side *all-in* cost,
+    fee and spread — as a fee, on top of a price term that already crosses the
+    spread. Every passive miss read ~2.3 bp dearer than it was, which was the
+    whole margin by which the 2026-08-23 run had passive "losing" (+2.42 bp,
+    t 1.96; regraded +0.96 bp, t 0.81). The parameter is a fee now, the 7.78
+    survives as `MEASURED_TAKER_ALL_IN_BP_PER_SIDE` — a basis to beat, never an
+    input — and `observed_taker_fee_bp` reads the rate per symbol from the
+    run's own taker fills, so CAPUSDT and BMTUSDT price at the 11.0 bp the
+    venue actually bills. `run_quote_lab.py` shared the fault through the same
+    function. **This re-registers the probe's accounting; earlier receipts are
+    graded on the old basis and are not comparable.**
+  - **A tape read from its first byte scores nothing, silently.** The book
+    mirror refuses deltas until a snapshot, and the tape's snapshots are sparse
+    and not at segment starts — a budgeted read spends itself on an unhealthy
+    book and returns zero outcomes with no error. The sweep starts at the first
+    snapshot, and keeps `sequence_gap`/`restart_snapshot`, which a trimmed
+    record would otherwise drop.
+
+  **What this does not say.** The tape's 34 symbols are the 2026-08-03/04
+  universe and include none of the names carry trades today. The replay rests
+  zero size, so its 82–97% fill rates are an upper bound a real order will not
+  see — the 18% break-even is what carries the conclusion, not the fill rate.
+  Nothing was deployed and no dial was changed.
+
 - **2026-08-23 — a resting entry can be pinned to the price it was decided
   at, instead of following the market. Built, off by default, not deployed.**
   Carry rests its entries and gets 4% maker share by notional: $658 of $5,029

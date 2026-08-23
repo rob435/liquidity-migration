@@ -2960,6 +2960,220 @@ class TestPresettleExit:
         assert payload["presettle_fired"] == []
 
 
+# --- leg B drop exit (owner-directed 2026-08-23): sell the zeroed before 00:20 ---
+
+
+class TestDropExit:
+    def _decision(self, ts_ms: int) -> CarryDecision:
+        return CarryDecision(
+            decision_ts_ms=ts_ms,
+            weights={DEEP_A: 0.0125, DEEP_B: 0.0247, RESIZED: 0.0125},
+            universe_size=56,
+            replay_days=60,
+            gross=0.0497,
+        )
+
+    def _state_with_upcoming(
+        self, *, upcoming_weights: dict[str, float] | None = None
+    ) -> CarryCycleState:
+        """Yesterday served, today frozen ahead: the leg B precondition."""
+
+        state = CarryCycleState()
+        state.freeze_decision(
+            decision_ts_ms=D0 - MS_PER_DAY,
+            decision=self._decision(D0 - MS_PER_DAY),
+            trail_by_symbol={},
+            universe_eligible=56,
+        )
+        upcoming = CarryDecision(
+            decision_ts_ms=D0,
+            weights=(
+                {DEEP_B: 0.0247, RESIZED: 0.0125}
+                if upcoming_weights is None
+                else upcoming_weights
+            ),
+            universe_size=56,
+            replay_days=60,
+            gross=sum((upcoming_weights or {}).values()),
+        )
+        state.freeze_decision(
+            decision_ts_ms=D0,
+            decision=upcoming,
+            trail_by_symbol={},
+            universe_eligible=56,
+        )
+        return state
+
+    def test_masks_exactly_the_names_the_upcoming_book_zeroes(self) -> None:
+        masked, dropped, count = module._apply_drop_exits(
+            decision=self._decision(D0 - MS_PER_DAY),
+            state=self._state_with_upcoming(),
+        )
+        assert dropped == [DEEP_A]
+        assert count == 1
+        assert set(masked.weights) == {DEEP_B, RESIZED}
+        assert masked.gross == pytest.approx(0.0247 + 0.0125)
+
+    def test_a_smaller_upcoming_weight_is_a_resize_not_a_drop(self) -> None:
+        masked, dropped, count = module._apply_drop_exits(
+            decision=self._decision(D0 - MS_PER_DAY),
+            state=self._state_with_upcoming(
+                upcoming_weights={
+                    DEEP_A: 0.006,  # halved in place: still desired
+                    DEEP_B: 0.0247,
+                    RESIZED: 0.0125,
+                }
+            ),
+        )
+        assert dropped == []
+        assert count == 0
+        assert set(masked.weights) == {DEEP_A, DEEP_B, RESIZED}
+
+    def test_no_frozen_upcoming_book_is_a_noop(self) -> None:
+        state = CarryCycleState()
+        decision = self._decision(D0 - MS_PER_DAY)
+        masked, dropped, count = module._apply_drop_exits(
+            decision=decision, state=state
+        )
+        assert dropped == []
+        assert count == 0
+        assert masked.weights == decision.weights
+
+    def _drop_market(self) -> _FakeCarryMarket:
+        class _PersistGoneMarket(_FakeCarryMarket):
+            """DEEP_A's crowd never persists: every print shallower than the
+            -10 bp entry depth fails the persistence cut, so the D0 replay
+            zeroes it while the pre-seeded old-day book still holds it."""
+
+            def get_funding_history(self, symbol: str, start: int, end: int):
+                rows = super().get_funding_history(symbol, start, end)
+                if symbol == DEEP_A:
+                    for row in rows:
+                        row["fundingRate"] = "-0.0005"  # -5 bp: holds, never deep
+                return rows
+
+        return _PersistGoneMarket()
+
+    def test_run_cycle_sells_the_dropped_name_before_the_flip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        demo_config = _routed_config(
+            tmp_path / "route", drop_exit_enabled=True
+        )
+        _patch_demo_market_data_ws_served(monkeypatch)
+        standing = pl.DataFrame(
+            [
+                {
+                    "trade_id": CARRY_COMPONENT_ID,
+                    "target_key": f"carry/{CARRY_STRATEGY_ID}/{CARRY_COMPONENT_ID}/{DEEP_A}",
+                    "strategy_id": CARRY_STRATEGY_ID,
+                    "symbol": DEEP_A,
+                    "status": "open",
+                    "signed_qty": 2.0,
+                    "target_reference_price": 100.0,
+                }
+            ]
+        )
+        _patch_planning(monkeypatch, standing=standing)
+        # 00:03: past the settlement, before the 00:20 flip. The cycle serves
+        # yesterday's frozen book; the early freeze computes today's.
+        state = CarryCycleState()
+        state.freeze_decision(
+            decision_ts_ms=D0 - MS_PER_DAY,
+            decision=self._decision(D0 - MS_PER_DAY),
+            trail_by_symbol={},
+            universe_eligible=56,
+        )
+
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=self._drop_market(),
+            now_ms=D0 + 3 * 60_000,
+            cycle_state=state,
+        )
+
+        assert payload["decision_error"] is None
+        assert payload["decision_ts_ms"] == D0 - MS_PER_DAY
+        assert payload["drop_exit_enabled"] is True
+        # This build froze the upcoming book itself, ~00:03.
+        assert payload["drop_exit_froze_ahead"] is True
+        assert payload["drop_exit_fired"] == [DEEP_A]
+        assert payload["drop_exit_masked"] == 1
+        assert payload["desired_book_size"] == 2
+        # The standing position gets its zero-target sell THIS cycle.
+        assert payload["exit_targets_queued"] == 1
+        exit_intent = payload.publication.exit_requests[0].request.intents[0].intent
+        assert exit_intent.symbol == DEEP_A
+        assert exit_intent.signed_notional_usdt == 0.0
+        # Entries NEVER move early: yesterday's signals are long expired and
+        # nothing of today's book may publish before the flip.
+        assert payload["entry_targets_queued"] == 0
+        assert payload["entry_validity_expired_skips"] >= 1
+
+        # Second cycle: no re-fire, mask holds, sell still proposed against
+        # the static harness snapshot.
+        payload2 = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=self._drop_market(),
+            now_ms=D0 + 4 * 60_000,
+            cycle_state=state,
+        )
+        assert payload2["drop_exit_fired"] == []
+        assert payload2["drop_exit_masked"] == 1
+        assert payload2["desired_book_size"] == 2
+
+    def test_disabled_keeps_the_deployed_clock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _route(tmp_path / "route")
+        demo_config = _routed_config(tmp_path / "route")
+        _patch_demo_market_data_ws_served(monkeypatch)
+        standing = pl.DataFrame(
+            [
+                {
+                    "trade_id": CARRY_COMPONENT_ID,
+                    "target_key": f"carry/{CARRY_STRATEGY_ID}/{CARRY_COMPONENT_ID}/{DEEP_A}",
+                    "strategy_id": CARRY_STRATEGY_ID,
+                    "symbol": DEEP_A,
+                    "status": "open",
+                    "signed_qty": 2.0,
+                    "target_reference_price": 100.0,
+                }
+            ]
+        )
+        _patch_planning(monkeypatch, standing=standing)
+        state = CarryCycleState()
+        state.freeze_decision(
+            decision_ts_ms=D0 - MS_PER_DAY,
+            decision=self._decision(D0 - MS_PER_DAY),
+            trail_by_symbol={},
+            universe_eligible=56,
+        )
+
+        payload = module.run_carry_demo_cycle(
+            tmp_path / "producer",
+            config=ResearchConfig(),
+            demo_config=demo_config,
+            market_client=self._drop_market(),
+            now_ms=D0 + 3 * 60_000,
+            cycle_state=state,
+        )
+
+        assert payload["drop_exit_enabled"] is False
+        assert payload["drop_exit_fired"] == []
+        assert payload["drop_exit_masked"] == 0
+        # Off means fully off: no early freeze either, so the served book
+        # still carries the doomed name until the 00:20 flip.
+        assert payload["drop_exit_froze_ahead"] is False
+        assert payload["desired_book_size"] == 3
+        assert payload["exit_targets_queued"] == 0
+
+
 # --- the exodus short (owner-directed 2026-08-20): the fire flips to a short ---
 
 

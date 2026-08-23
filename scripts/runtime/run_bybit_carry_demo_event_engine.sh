@@ -89,6 +89,18 @@ case "$CARRY_EARLY_EXIT" in
         exit 2
         ;;
 esac
+# CARRY_DROP_EXIT=1 sells a held name the upcoming decision zeroes (universe
+# rank, persistence cut, suspend) at the first post-midnight cycle instead of
+# the 00:20 clock; entries keep that clock either way (owner-directed
+# 2026-08-23). Unset means off.
+CARRY_DROP_EXIT="${CARRY_DROP_EXIT:-0}"
+case "$CARRY_DROP_EXIT" in
+    0|1) ;;
+    *)
+        echo "CARRY_DROP_EXIT must be 0 or 1, got: $CARRY_DROP_EXIT" >&2
+        exit 2
+        ;;
+esac
 # WS klines are the primary bar source; REST covers gaps. 0 disables the
 # stream and returns to REST-on-cycle.
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
@@ -122,7 +134,12 @@ if [[ "$CARRY_EARLY_EXIT" == "1" ]]; then
 else
     target_route_args+=(--no-early-exit)
 fi
-echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE strategy_profile=$CARRY_STRATEGY_PROFILE early_exit=$CARRY_EARLY_EXIT"
+if [[ "$CARRY_DROP_EXIT" == "1" ]]; then
+    target_route_args+=(--drop-exit)
+else
+    target_route_args+=(--no-drop-exit)
+fi
+echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE strategy_profile=$CARRY_STRATEGY_PROFILE early_exit=$CARRY_EARLY_EXIT drop_exit=$CARRY_DROP_EXIT"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \

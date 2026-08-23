@@ -445,6 +445,7 @@ class CarryCycleState:
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
         "early_exits",
+        "drop_exits_logged",
         "exodus_shorts",
         "whale_last_attempt_ms",
         "whale_store",
@@ -479,6 +480,11 @@ class CarryCycleState:
         # Early-exit mask: symbol -> the decision bar it fired under. None
         # until first use, then mirrors the on-disk state file.
         self.early_exits: dict[str, int] | None = None
+        # Drop-exit logging guard (leg B): the names the upcoming decision
+        # zeroed and this process already announced. The mask itself is
+        # re-derived every cycle from the two frozen books, so losing this
+        # only repeats a log line.
+        self.drop_exits_logged: frozenset[str] = frozenset()
         # Open exodus shorts. None until first use, then mirrors the on-disk
         # state file; losing it re-loads from disk, and a lost FILE covers
         # every open short (absence from the book is the exit).
@@ -582,6 +588,12 @@ class CarryDemoCycleConfig:
     #: next midnight (owner-directed 2026-08-19; ``CARRY_EARLY_EXIT`` on the
     #: units). Off by default so ad-hoc runs replay the registered clock.
     early_exit_enabled: bool = False
+    #: Sell a held name the UPCOMING decision zeroes (universe rank,
+    #: persistence cut, suspend) at the first post-midnight cycle instead of
+    #: the 00:20 clock (owner-directed 2026-08-23; ``CARRY_DROP_EXIT`` on the
+    #: units). Entries keep the deployed clock either way. Off by default so
+    #: ad-hoc runs replay the deployed clock.
+    drop_exit_enabled: bool = False
     # --- sizing (operational profile carry block) ---
     notional_multiplier: float = 1.0
     #: The EXODUS SHORT's own multiplier; None inherits ``notional_multiplier``
@@ -1109,6 +1121,39 @@ def _apply_presettle_exits(
         dataclasses.replace(decision, weights=masked, gross=sum(masked.values())),
         new_fires,
         fire_details,
+    )
+
+
+def _apply_drop_exits(
+    *,
+    decision: CarryDecision,
+    state: CarryCycleState,
+) -> tuple[CarryDecision, list[str], int]:
+    """Mask the names the UPCOMING frozen decision zeroes out of this book.
+
+    Leg B of the two-leg exit clock: run pre-flip against the served old-day
+    decision, it lets those exits publish at the first post-midnight cycle
+    instead of the 00:20 clock, ahead of the measured post-settlement drift.
+    A name still desired at any weight is a resize, not a drop, and waits
+    for the flip. The exodus sleeve does NOT take these over: its registered
+    trigger is the fee-recovery fire, never a membership drop. Idempotent
+    across cycles — both books are frozen, so the drop set cannot drift.
+    """
+
+    upcoming = state.frozen_decision(decision.decision_ts_ms + DAY_MS)
+    if upcoming is None:
+        return decision, [], 0
+    upcoming_weights = upcoming[0].weights
+    dropped = sorted(s for s in decision.weights if s not in upcoming_weights)
+    if not dropped:
+        return decision, [], 0
+    masked = {
+        s: w for s, w in decision.weights.items() if s in upcoming_weights
+    }
+    return (
+        dataclasses.replace(decision, weights=masked, gross=sum(masked.values())),
+        dropped,
+        len(dropped),
     )
 
 
@@ -2393,6 +2438,7 @@ def run_carry_demo_cycle(
         build_stats: dict[str, Any] = {}
         universe_eligible = 0
         freeze_ahead_frozen = False
+        drop_exit_frozen = False
         built_klines: pl.DataFrame | None = None
         built_funding: pl.DataFrame | None = None
         whale_events: pl.DataFrame | None = None
@@ -2514,6 +2560,28 @@ def run_carry_demo_cycle(
                 standing_symbols=standing_symbols,
                 whale_events=whale_events,
             )
+        if demo.drop_exit_enabled and built_klines is not None and built_funding is not None:
+            # Leg B of the two-leg exit clock: the upcoming day's decision
+            # reads only rows already public minutes after midnight, so freeze
+            # it at the first clean post-midnight build instead of inside the
+            # pre-deadline window. The drops' exits then publish ~00:02 while
+            # entries still wait for the 00:20 clock. Same function, same
+            # gates, same refusal semantics as the deadline freeze: a
+            # repair-pending build pins nothing.
+            drop_day_ts = (cycle_now_ms // DAY_MS) * DAY_MS
+            if drop_day_ts > decision_ts_ms and state.frozen_decision(drop_day_ts) is None:
+                drop_exit_frozen = _freeze_decision_ahead(
+                    state=state,
+                    rule=rule,
+                    klines=built_klines,
+                    funding=built_funding,
+                    build_stats=build_stats,
+                    ahead_ts_ms=drop_day_ts,
+                    current_decision_ts_ms=decision_ts_ms,
+                    replay_days=demo.replay_days,
+                    standing_symbols=standing_symbols,
+                    whale_events=whale_events,
+                )
         if (
             freeze_ahead_decision_ts_ms is not None
             and state.frozen_decision(int(freeze_ahead_decision_ts_ms)) is not None
@@ -2620,6 +2688,29 @@ def run_carry_demo_cycle(
                         "stands: %s",
                         presettle_error,
                     )
+
+        # Leg B: mask the names the UPCOMING frozen decision zeroes out of the
+        # served (old-day) book, so their exit intents publish this cycle —
+        # ~00:02, before the post-settlement drift the 00:20 clock sells into.
+        drop_exit_fires: list[str] = []
+        drop_exit_masked = 0
+        if (
+            decision is not None
+            and demo.drop_exit_enabled
+            and decision.decision_ts_ms % DAY_MS == 0
+        ):
+            decision, dropped_now, drop_exit_masked = _apply_drop_exits(
+                decision=decision, state=state
+            )
+            if dropped_now:
+                if frozenset(dropped_now) != state.drop_exits_logged:
+                    _logger.info(
+                        "drop exit fired: %s (the upcoming decision zeroes "
+                        "them; selling ahead of the 00:20 clock)",
+                        ",".join(dropped_now),
+                    )
+                    drop_exit_fires = dropped_now
+                state.drop_exits_logged = frozenset(dropped_now)
 
         # The exodus pass runs on EVERY cycle: covers must drain even when
         # the carry decision is unavailable. Entries additionally need the
@@ -2812,6 +2903,13 @@ def run_carry_demo_cycle(
             ),
             "presettle_fired": presettle_fires,
             "presettle_error": presettle_error,
+            # Drop-exit receipt (leg B): names the upcoming decision zeroed
+            # and this cycle announced, plus whether this cycle froze that
+            # upcoming book early.
+            "drop_exit_enabled": demo.drop_exit_enabled,
+            "drop_exit_fired": drop_exit_fires,
+            "drop_exit_masked": drop_exit_masked,
+            "drop_exit_froze_ahead": drop_exit_frozen,
             # Exodus-short receipt (lane2_exodus_short_v1): what the sleeve
             # did this cycle. Absent keys mean the unit does not publish it.
             "exodus_enabled": exodus_receipt.get("exodus_enabled"),
@@ -2936,6 +3034,13 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
     fast_path_text = " build_skipped=True" if payload.get("data_build_skipped") else ""
     if payload.get("freeze_ahead_frozen"):
         fast_path_text += " froze_ahead=True"
+    # Only rendered when engaged: the early freeze and the names it let sell
+    # before the 00:20 clock are leg B's whole receipt.
+    if payload.get("drop_exit_froze_ahead"):
+        fast_path_text += " drop_froze=True"
+    drops = payload.get("drop_exit_fired") or []
+    if drops:
+        fast_path_text += f" drop_exits={','.join(drops)}"
     return (
         "carry target producer "
         f"id={payload.get('cycle_id', '')} mode={payload.get('mode')} "

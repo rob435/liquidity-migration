@@ -124,16 +124,45 @@ def price_cost_bp(*, side: str, reference_mid: float, fill_price: float) -> floa
     return (signed if side == "Buy" else -signed) * 1e4
 
 
-def itt_cost_bp(record: AttemptRecord, *, taker_fee_bp_fallback: float) -> float | None:
+def observed_taker_fee_bp(
+    records: Iterable[AttemptRecord], *, default: float
+) -> dict[str, float]:
+    """The taker fee the venue actually charged, per symbol.
+
+    Read from this run's own filled taker attempts rather than assumed. Bybit
+    charges twice its usual rate on some contracts — CAPUSDT and BMTUSDT bill
+    11.0 bp against 5.5 — and pricing one symbol's missed passive attempts at
+    another's rate is the difference between a passive arm that wins and one
+    that loses.
+    """
+
+    seen: dict[str, list[float]] = {}
+    for record in records:
+        if record.arm != ARM_TAKER or record.terminal_state != TERMINAL_FILLED:
+            continue
+        if not record.fee_observed or record.fill_fee_bp is None:
+            continue
+        seen.setdefault(record.symbol, []).append(record.fill_fee_bp)
+    return {
+        symbol: statistics.median(fees) for symbol, fees in seen.items() if fees
+    } or {"": default}
+
+
+def itt_cost_bp(record: AttemptRecord, *, taker_fee_bp: float) -> float | None:
     """Intention-to-treat cost of one attempt, in bp vs the decision mid.
 
     - Filled (either arm): realized price cost plus the observed fee, or the
-      registered taker fallback fee when the venue never reported one on a
-      taker fill (a maker fill without an observed fee returns None rather
-      than inventing a rebate).
+      taker fee when the venue never reported one on a taker fill (a maker
+      fill without an observed fee returns None rather than inventing a
+      rebate).
     - Unfilled post-only: charged as an immediate taker at the terminal quote
       (cross the terminal spread) plus the taker fee — the price of having
       tried to be passive and failed, including any drift while waiting.
+
+    `taker_fee_bp` is a **fee**, not an all-in basis. The price of crossing is
+    already in the term beside it, so handing this the measured all-in taker
+    cost charges the spread twice and makes every passive miss look ~2.3 bp
+    dearer than it was.
     """
     if record.terminal_state == TERMINAL_FILLED:
         assert record.fill_price is not None
@@ -143,7 +172,7 @@ def itt_cost_bp(record: AttemptRecord, *, taker_fee_bp_fallback: float) -> float
         if record.fee_observed and record.fill_fee_bp is not None:
             return price + record.fill_fee_bp
         if record.arm == ARM_TAKER:
-            return price + taker_fee_bp_fallback
+            return price + taker_fee_bp
         return None  # maker fill with unresolved fee: do not fabricate a rebate
     # Passive failure -> taker fallback at the terminal quote.
     if record.terminal_bid is None or record.terminal_ask is None:
@@ -152,7 +181,7 @@ def itt_cost_bp(record: AttemptRecord, *, taker_fee_bp_fallback: float) -> float
     price = price_cost_bp(
         side=record.side, reference_mid=record.decision_mid, fill_price=fallback_fill
     )
-    return price + taker_fee_bp_fallback
+    return price + taker_fee_bp
 
 
 def adverse_selection_bp(record: AttemptRecord) -> float | None:
@@ -176,10 +205,17 @@ def _mean_std(values: list[float]) -> tuple[float, float]:
 def summarize(
     records: Iterable[AttemptRecord],
     *,
-    taker_fee_bp_fallback: float,
+    taker_fee_bp: float,
 ) -> dict[str, Any]:
-    """Per-arm ITT cost and fill rate."""
+    """Per-arm ITT cost and fill rate.
+
+    `taker_fee_bp` is the rate to charge a symbol whose own taker fills never
+    reported one; every other symbol is priced at the fee this run observed
+    the venue charge it.
+    """
     rows = list(records)
+    fees = observed_taker_fee_bp(rows, default=taker_fee_bp)
+    fee_of = lambda symbol: fees.get(symbol, taker_fee_bp)  # noqa: E731
     out: dict[str, Any] = {"n_total": len(rows), "arms": {}}
     costs: dict[str, list[float]] = {ARM_TAKER: [], ARM_POST_ONLY: []}
     for arm in (ARM_TAKER, ARM_POST_ONLY):
@@ -188,7 +224,7 @@ def summarize(
         arm_costs = [
             cost
             for row in arm_rows
-            if (cost := itt_cost_bp(row, taker_fee_bp_fallback=taker_fee_bp_fallback)) is not None
+            if (cost := itt_cost_bp(row, taker_fee_bp=fee_of(row.symbol))) is not None
         ]
         costs[arm] = arm_costs
         mean, std = _mean_std(arm_costs)
@@ -239,6 +275,7 @@ def summarize(
         "min_attempts_per_arm": REGISTERED_MIN_ATTEMPTS_PER_ARM,
         "max_attempt_notional_usdt": REGISTERED_MAX_ATTEMPT_NOTIONAL_USDT,
         "kill_min_fill_rate": KILL_MIN_FILL_RATE,
-        "taker_fee_bp_fallback": taker_fee_bp_fallback,
+        "taker_fee_bp_default": taker_fee_bp,
+        "taker_fee_bp_observed": fees,
     }
     return out

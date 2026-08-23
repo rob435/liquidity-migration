@@ -18,11 +18,12 @@ from liquidity_migration.research.execution.passive_fill_probe import (
     adverse_selection_bp,
     allocate_arm,
     itt_cost_bp,
+    observed_taker_fee_bp,
     price_cost_bp,
     summarize,
 )
 
-TAKER_FEE = 7.78
+TAKER_FEE = 5.5
 
 
 def _record(**overrides) -> AttemptRecord:
@@ -85,17 +86,17 @@ class TestPriceCost:
 class TestIntentionToTreat:
     def test_taker_fill_uses_fallback_fee_when_unobserved(self) -> None:
         record = _record(fill_price=99.9)  # sell at bid: pays half spread
-        cost = itt_cost_bp(record, taker_fee_bp_fallback=TAKER_FEE)
+        cost = itt_cost_bp(record, taker_fee_bp=TAKER_FEE)
         assert cost == pytest.approx(price_cost_bp(side="Sell", reference_mid=100.0, fill_price=99.9) + TAKER_FEE)
 
     def test_maker_fill_with_observed_fee_uses_it(self) -> None:
         record = _record(arm=ARM_POST_ONLY, fill_price=100.1, fill_fee_bp=2.0, fee_observed=True)
-        cost = itt_cost_bp(record, taker_fee_bp_fallback=TAKER_FEE)
+        cost = itt_cost_bp(record, taker_fee_bp=TAKER_FEE)
         assert cost == pytest.approx(-10.0 + 2.0)
 
     def test_maker_fill_without_observed_fee_returns_none_not_a_fabricated_rebate(self) -> None:
         record = _record(arm=ARM_POST_ONLY, fill_price=100.1)
-        assert itt_cost_bp(record, taker_fee_bp_fallback=TAKER_FEE) is None
+        assert itt_cost_bp(record, taker_fee_bp=TAKER_FEE) is None
 
     def test_unfilled_passive_is_charged_taker_at_terminal_quote(self) -> None:
         # Price drifted against the short while waiting; ITT charges the drift
@@ -107,7 +108,7 @@ class TestIntentionToTreat:
             terminal_bid=100.4,
             terminal_ask=100.6,
         )
-        cost = itt_cost_bp(record, taker_fee_bp_fallback=TAKER_FEE)
+        cost = itt_cost_bp(record, taker_fee_bp=TAKER_FEE)
         # The sell fallback fills at the terminal bid 100.4 vs decision mid
         # 100.0 — the wait happened to help the short, so the price leg is an
         # improvement and only the taker fee remains a cost.
@@ -121,14 +122,14 @@ class TestIntentionToTreat:
             terminal_bid=99.4,
             terminal_ask=99.6,
         )
-        cost = itt_cost_bp(record, taker_fee_bp_fallback=TAKER_FEE)
+        cost = itt_cost_bp(record, taker_fee_bp=TAKER_FEE)
         assert cost == pytest.approx(60.0 + TAKER_FEE)
 
     def test_unfilled_passive_without_terminal_quote_is_unresolved(self) -> None:
         record = _record(
             arm=ARM_POST_ONLY, terminal_state=TERMINAL_TIMEOUT_CANCELLED, fill_price=None
         )
-        assert itt_cost_bp(record, taker_fee_bp_fallback=TAKER_FEE) is None
+        assert itt_cost_bp(record, taker_fee_bp=TAKER_FEE) is None
 
 
 class TestAdverseSelection:
@@ -177,21 +178,21 @@ class TestSummarize:
         return rows
 
     def test_underpowered_sample_reports_no_verdicts(self) -> None:
-        summary = summarize(self._records(5), taker_fee_bp_fallback=TAKER_FEE)
+        summary = summarize(self._records(5), taker_fee_bp=TAKER_FEE)
         assert summary["powered"] is False
         assert summary["kill_low_fill_rate"] is None
         assert summary["kill_no_cost_edge"] is None
 
     def test_powered_sample_with_passive_edge_kills_nothing(self) -> None:
         summary = summarize(
-            self._records(REGISTERED_MIN_ATTEMPTS_PER_ARM), taker_fee_bp_fallback=TAKER_FEE
+            self._records(REGISTERED_MIN_ATTEMPTS_PER_ARM), taker_fee_bp=TAKER_FEE
         )
         assert summary["powered"] is True
         assert summary["kill_low_fill_rate"] is False
         assert summary["kill_no_cost_edge"] is False
         diff = summary["itt_diff_bp_post_only_minus_taker"]
-        # passive: -10 + 1 = -9; taker: +10 + 7.78 = +17.78; diff = -26.78
-        assert diff == pytest.approx(-26.78)
+        # passive: -10 + 1 = -9; taker: +10 + 5.5 = +15.5; diff = -24.5
+        assert diff == pytest.approx(-24.5)
 
     def test_low_fill_rate_triggers_its_kill(self) -> None:
         rows: list[AttemptRecord] = []
@@ -221,14 +222,66 @@ class TestSummarize:
                         terminal_ask=100.1,
                     )
                 )
-        summary = summarize(rows, taker_fee_bp_fallback=TAKER_FEE)
+        summary = summarize(rows, taker_fee_bp=TAKER_FEE)
         assert summary["powered"] is True
         assert summary["kill_low_fill_rate"] is True
         assert summary["arms"][ARM_POST_ONLY]["fill_rate"] < KILL_MIN_FILL_RATE
 
     def test_registered_parameters_are_recorded_in_every_summary(self) -> None:
-        summary = summarize([], taker_fee_bp_fallback=TAKER_FEE)
+        summary = summarize([], taker_fee_bp=TAKER_FEE)
         registered = summary["registered"]
-        assert registered["taker_fee_bp_fallback"] == TAKER_FEE
+        assert registered["taker_fee_bp_default"] == TAKER_FEE
         assert registered["min_attempts_per_arm"] == REGISTERED_MIN_ATTEMPTS_PER_ARM
         assert not math.isnan(registered["kill_min_fill_rate"])
+
+
+class TestTakerFeeIsAFeeNotABasis:
+    """The 7.78 bp figure is fee AND spread; `itt_cost_bp` charges the spread
+    itself. Handing it the all-in number made every passive miss ~2.3 bp
+    dearer than it was, which is the whole margin between the arms."""
+
+    def _missed(self, symbol: str = "AAAUSDT") -> AttemptRecord:
+        return AttemptRecord(
+            symbol=symbol,
+            arm=ARM_POST_ONLY,
+            side="Sell",
+            attempt_index=0,
+            decision_ts_ns=1,
+            decision_bid=100.0,
+            decision_ask=100.0,
+            terminal_state=TERMINAL_TIMEOUT_CANCELLED,
+            terminal_ts_ns=2,
+            terminal_bid=100.0,
+            terminal_ask=100.0,
+        )
+
+    def test_a_miss_is_charged_the_fee_and_the_spread_once_each(self) -> None:
+        # A flat book that never moved: the whole cost is the fee.
+        assert itt_cost_bp(self._missed(), taker_fee_bp=5.5) == pytest.approx(5.5)
+
+    def test_the_fee_charged_is_the_one_the_venue_billed_that_symbol(self) -> None:
+        # Bybit bills 11.0 bp on some contracts. A run that priced them at 5.5
+        # would understate what missing costs there by half.
+        dear = AttemptRecord(
+            symbol="CAPUSDT",
+            arm=ARM_TAKER,
+            side="Sell",
+            attempt_index=1,
+            decision_ts_ns=1,
+            decision_bid=100.0,
+            decision_ask=100.0,
+            terminal_state=TERMINAL_FILLED,
+            terminal_ts_ns=2,
+            terminal_bid=100.0,
+            terminal_ask=100.0,
+            fill_price=100.0,
+            fee_observed=True,
+            fill_fee_bp=11.0,
+        )
+        fees = observed_taker_fee_bp([dear], default=5.5)
+        assert fees["CAPUSDT"] == 11.0
+        missed_there = self._missed("CAPUSDT")
+        assert itt_cost_bp(missed_there, taker_fee_bp=fees["CAPUSDT"]) == pytest.approx(11.0)
+
+    def test_a_symbol_that_never_reported_a_fee_falls_back(self) -> None:
+        assert observed_taker_fee_bp([], default=5.5) == {"": 5.5}

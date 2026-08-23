@@ -28,6 +28,10 @@ Environment=CARRY_STRATEGY_PROFILE=v7
 # Sell an exiting name at the settled print that ends it, not at the next
 # midnight (owner-directed 2026-08-19; the kill switch is setting this to 0).
 Environment=CARRY_EARLY_EXIT=1
+# Sell a held name the upcoming decision zeroes (universe rank, persistence
+# cut, suspend) at the first post-midnight cycle, not on the 00:20 clock;
+# entries keep that clock (owner-directed 2026-08-23; kill switch is 0).
+Environment=CARRY_DROP_EXIT=1
 # Where this producer writes the book the funded engine follows. Must match the
 # carry sleeve's `book_path` in /etc/liquidity-migration/engine-mainnet.toml,
 # and nothing checks that agreement for you. Writing a book is not trading, but

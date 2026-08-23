@@ -353,6 +353,24 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         action="store_false",
         help="Exits keep the registered midnight clock.",
     )
+    drop = p.add_mutually_exclusive_group()
+    drop.add_argument(
+        "--drop-exit",
+        dest="drop_exit_enabled",
+        action="store_true",
+        default=d.drop_exit_enabled,
+        help=(
+            "Sell a held name the upcoming decision zeroes (universe rank, "
+            "persistence cut, suspend) at the first post-midnight cycle "
+            "instead of the 00:20 clock; entries keep that clock."
+        ),
+    )
+    drop.add_argument(
+        "--no-drop-exit",
+        dest="drop_exit_enabled",
+        action="store_false",
+        help="Drops keep the 00:20 clock.",
+    )
     p.add_argument(
         "--workers",
         type=int,

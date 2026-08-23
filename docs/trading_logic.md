@@ -268,6 +268,25 @@ per fire all-in over the settled-print sell (median +11.3, t 4.9; 2025/26 ≈ +2
 charged in the research row. `CARRY_EARLY_EXIT=0` kills both exit clocks;
 `CARRY_STRATEGY_PROFILE=v6` keeps the settled-print clock only.
 
+**Drop exit (owner-directed, `CARRY_DROP_EXIT=1` on both carry units).** A held
+name the UPCOMING midnight decision zeroes — universe rank, persistence cut,
+suspend — sells at the first cycle after the data is ready post-midnight
+(~00:02) instead of on the 00:20 clock those names otherwise wait for. The
+producer freezes the upcoming day's book early (same computation, same gates,
+same refusal semantics as the pre-deadline freeze-ahead: a build the WS store
+served without REST repair or funding-fetch failures), masks the zeroed names
+out of the served old-day book, and their exit intents publish immediately.
+Entries never move early: they exist only in the upcoming book and stay behind
+the 00:20 flip. A resize (weight shrunk, not zeroed) is not a drop and waits
+for the flip too. The exodus sleeve does not take these over — its trigger is
+the fee-recovery fire above, never a membership drop. Measured: exits forced
+by a universe/persistence drop leak +74/+43 bp pooled between 23:55 and the
+00:20 fill (t 3.5), but only +18/+15 bp in 2026 alone (t 0.8); the residual
+risk is a ticker snapshot sampled early shrinking the frozen universe and
+selling a name the authoritative 00:20 rebuild would have kept (re-buy round
+trip ~15.56 bp, charged against the leak). `CARRY_DROP_EXIT=0` kills the
+clock; nothing else changes.
+
 **Limits.** Concentrated (~2–3 names when active — v4 holds 22% fewer name-days than v3 and
 is flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity ~$1M at
 1% participation. The registered daily frame exits every name 24h before its final panel

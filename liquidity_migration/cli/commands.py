@@ -402,6 +402,7 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         candidate_universe_file=getattr(args, "candidate_universe_file", ""),
         strategy_profile=args.strategy_profile,
         early_exit_enabled=getattr(args, "early_exit_enabled", False),
+        drop_exit_enabled=getattr(args, "drop_exit_enabled", False),
         notional_multiplier=(
             carry_multiplier_dial
             if carry_multiplier_dial is not None

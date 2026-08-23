@@ -70,9 +70,13 @@ from liquidity_migration.research.execution.passive_fill_probe import (  # noqa:
 RECEIPT_KIND = "liquidity_migration_passive_fill_ab_receipt"
 RECEIPT_SCHEMA_VERSION = 1
 PROBE_LINK_PREFIX = "lm-pfab-"
-# Measured per-side taker cost: the ITT fallback fee and the basis the passive
-# arm must beat.
-MEASURED_TAKER_FEE_BP_PER_SIDE = 7.78
+# The per-side all-in taker cost the research surfaces are priced at — fee AND
+# spread. It is the basis the passive arm must beat; it is NOT a fee and must
+# never be handed to `itt_cost_bp`, which already charges the spread.
+MEASURED_TAKER_ALL_IN_BP_PER_SIDE = 7.78
+# What the venue bills a taker, for a symbol whose own fills never reported
+# one. Every symbol that did report is priced at what it actually paid.
+REGISTERED_TAKER_FEE_BP = 5.5
 POLL_SECONDS = 1.0
 
 
@@ -384,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         final = _flatness(client)
-        summary = summarize(records, taker_fee_bp_fallback=MEASURED_TAKER_FEE_BP_PER_SIDE)
+        summary = summarize(records, taker_fee_bp=REGISTERED_TAKER_FEE_BP)
         payload: dict[str, Any] = {
             "schema_version": RECEIPT_SCHEMA_VERSION,
             "kind": RECEIPT_KIND,

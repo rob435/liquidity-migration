@@ -405,45 +405,39 @@ with both signals measured.**
 
 ---
 
-### 5. The two-leg exit clock — the measured floor under the deployed early exit
+### 5. The two-leg exit clock — both legs deployed
 
 The book's names drift down after the 00:00 settlement, and on exit days they
-leak price all evening; the old 00:20 sell sat at the bottom of both. The
-deployed early exit is leg A's parameter-free generalization; leg B is not
-built. Measured on every held name-day 2021–2026 with all-in accounting:
+leak price all evening; the 00:20 sell sat at the bottom of both. Leg A is the
+deployed early-exit clock (the settled-print fire, generalized by the v7
+pre-settlement read). Leg B is the drop exit (`CARRY_DROP_EXIT=1`, owner
+2026-08-23): a held name the upcoming midnight decision zeroes — universe
+rank, persistence cut, suspend — sells at the first post-midnight cycle off
+the swept print and WS-served bars instead of on the 00:20 REST-era margin.
+Measured on every held name-day 2021–2026 with all-in accounting:
 
-- **Leg A (evening, the big one):** the modern book is ~100% hourly settlers, so
-  the last SETTLED print visible at 23:00 forecasts tonight's recovery exit at
-  **98% precision** (15 false fires in five years), catching 56% of exits.
-  Selling those at 23:00 is **all-in +49.0 bp per fire (t 4.2)**, decaying
-  monotonically to zero by 00:20; the skipped final print costs ~nothing
-  (recovered prints are ~0) and false fires are charged the full re-buy round
-  trip.
-- **Leg B (early morning):** the remaining exits sell at ~00:02 off the swept
-  midnight print + WS-closed kline instead of 00:20 — +15–24 bp per exit (the
-  00:20 clock is a REST-era margin exits no longer need).
+- **Leg A (fee recoveries):** selling at the recovered print beats the 00:20
+  fill by +21.3 bp per fire (t 4.9); deployed as v7.
+- **Leg B (universe/persistence drops):** those exits leak **+74/+43 bp pooled
+  between 23:55 and the 00:20 fill (t 3.5)** — but only +18/+15 in 2026 alone
+  (t 0.8), so the live edge is the era-weak tail of the measurement. Selling
+  all exits at minute ~3 beat 00:20 by +24 bp pooled (+12 in 2026),
+  weight-summed **+0.6 (2026) to +3.8 (2025) bp/day, positive all six years**
+  — measured before v7 existed, so the fee-recovery share has since left the
+  residual population.
 
-Combined, weight-summed: **+0.71/+1.97/+0.94/+5.26/+2.56 bp/day for 2022–2026**
-— positive all six years, several times the v6−v5 improvement. Membership logic
-is untouched: both legs sell only names the registered rule is exiting anyway,
-on settled prints only, never the displayed rate. It degrades gracefully to the
-00:20 clock if the venue's interval mix reverts toward 8h. A clock change is a
-strategy change: it needs its own change point and is graded live by the
-engine's fill records. Full grids, including the refuted adaptive entry-sniping
-arms and the entry-side answer (00:20 is already optimal for entries; the drift
-is one-sided): `research_findings.md` §Settlement-instant timing.
-
----
-
-### 6. Universe-drop exits leak the last 25 minutes — not built
-
-Exits forced by a universe drop leak **+74/+43 bp over the last 25 minutes**
-before the 00:20 fill. Not built: 2026 is weak at +18/+15 (t 0.8), and capturing
-it needs a 23:55 shadow decision the producer does not make.
+The known cost: the early freeze samples its ticker snapshot minutes before
+the authoritative rebuild, so a name kept by the 00:20 computation can be sold
+once and re-bought (~15.56 bp round trip) — the same documented residual the
+pre-deadline freeze-ahead already carries for the whole book. Entries never
+move early (filling into the post-payment dump costs −46 bp/entry; the entry
+clock is measured-optimal where it is). Full grids, including the refuted
+adaptive entry-sniping arms:
+`research_findings.md` §Settlement-instant timing.
 
 ---
 
-### 7. Two-book portfolio — measured 2026-08-19
+### 6. Two-book portfolio — measured 2026-08-19
 
 On the 1,747 shared days (2021-10-05..2026-07-17; LONG leg = the on-disk
 2026-07-24 mark-to-market build; equal-risk = inverse full-window vol,
@@ -463,7 +457,7 @@ phase-1 screen harness. Do not rebuild it; the receipt is in
 
 ---
 
-### 8. Premium divergence as a LONG entry filter — measured null at available power
+### 7. Premium divergence as a LONG entry filter — measured null at available power
 
 Joined PIT `premium_diff_bp` onto all 292 LONG trades (97% coverage): quintile
 means +9.4/+11.0/+8.7/+14.8/+16.4 bp per trade — a ~7 bp spread in the WRONG
@@ -474,7 +468,7 @@ several-fold.
 
 ---
 
-### 9. LONG v13 rework — closed, v12 stands; one forward experiment survives
+### 8. LONG v13 rework — closed, v12 stands; one forward experiment survives
 
 25 cells over the full 2021→2026-08 window through the registered kernel
 accounting (exit re-anchoring, hold extension, information exits, the
@@ -535,7 +529,7 @@ ended. Armed by `DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible
 endpoint via `LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals
 nominations.
 
-### 10. Genuinely open
+### 9. Genuinely open
 
 - **Per-symbol coordination between the two sleeves.** They collide on 11
   name-days in 5.5 years, and nothing sizes them against each other on a name —

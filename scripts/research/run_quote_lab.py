@@ -77,7 +77,9 @@ EVENTS_JOURNAL_NAME = "quote_lab_events.jsonl"
 ATTEMPTS_JOURNAL_NAME = "quote_lab_attempts.jsonl"
 LINK_PREFIX = "lm-qlab-"
 # Measured per-side taker cost; the ITT fallback fee for unfilled passive attempts.
-TAKER_FEE_BP_FALLBACK = 7.78
+# A fee, not the 7.78 bp all-in basis: `itt_cost_bp` already charges
+# the spread beside it.
+TAKER_FEE_BP = 5.5
 INSTRUMENTS_URL = "https://api.bybit.com/v5/market/instruments-info?category=linear&symbol="
 WS_WARMUP_SECONDS = 10.0
 
@@ -416,7 +418,7 @@ def _summarize_attempts(attempts: list[QuoteAttempt]) -> dict[str, Any]:
             terminal_bid=attempt.terminal_bid,
             terminal_ask=attempt.terminal_ask,
         )
-        cost = itt_cost_bp(record, taker_fee_bp_fallback=TAKER_FEE_BP_FALLBACK)
+        cost = itt_cost_bp(record, taker_fee_bp=TAKER_FEE_BP)
         if cost is not None:
             itt_costs.append(cost)
     per_symbol: dict[str, dict[str, int]] = {}
@@ -436,7 +438,7 @@ def _summarize_attempts(attempts: list[QuoteAttempt]) -> dict[str, Any]:
         "itt_cost_bp_n": len(itt_costs),
         "itt_cost_bp_mean": statistics.fmean(itt_costs) if itt_costs else float("nan"),
         "itt_cost_bp_median": statistics.median(itt_costs) if itt_costs else float("nan"),
-        "taker_fee_bp_fallback": TAKER_FEE_BP_FALLBACK,
+        "taker_fee_bp": TAKER_FEE_BP,
         "per_symbol": per_symbol,
     }
 
