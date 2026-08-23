@@ -77,6 +77,14 @@ pub struct WorkPolicy {
     /// making this trigger MORE sensitive was the only dial that was clearly
     /// harmful.
     pub drift_cross_fee_bp: f64,
+    /// Rest at the mid the order was decided against, and never move to a
+    /// worse price than that. Nothing is bought above, or sold below, the
+    /// price the strategy decided on; the cost is every fill the market walks
+    /// away from.
+    pub hold_decision_px: bool,
+    /// When patience runs out, take the order down instead of crossing for
+    /// what is left. Without this the price cap above only delays the cross.
+    pub give_up_instead_of_crossing: bool,
 }
 
 impl Default for WorkPolicy {
@@ -91,6 +99,8 @@ impl Default for WorkPolicy {
             urgency_join_frac: 0.5,
             urgency_improve_frac: 0.85,
             drift_cross_fee_bp: 5.5,
+            hold_decision_px: false,
+            give_up_instead_of_crossing: false,
         }
     }
 }

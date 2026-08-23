@@ -528,6 +528,44 @@ fn adding_to_a_position_is_worked_like_any_other_entry() {
 }
 
 #[test]
+fn the_resting_dials_reach_the_policy_the_entry_carries() {
+    let config: toml::Value = toml::from_str(
+        "symbols = [\"KAITOUSDT\"]\nrest_entries = true\n\
+         hold_decision_price = true\ngive_up_instead_of_crossing = true\n",
+    )
+    .expect("test config parses");
+    let plug = TargetBookFollower::from_params(StrategyId(0), &config).expect("it builds");
+    let mut h = Harness::new(Box::new(plug));
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_rule("KAITOUSDT", RULE);
+    h.quote("KAITOUSDT", 9.5, 10.5);
+    h.drain();
+    h.targets(book(vec![target("KAITOUSDT", 60.0)]));
+
+    let work = h.one_intent().work.expect("the entry is worked");
+    assert!(work.hold_decision_px, "a dial the config sets and nothing reads is not a dial");
+    assert!(work.give_up_instead_of_crossing);
+}
+
+#[test]
+fn a_resting_dial_without_resting_is_refused_rather_than_left_inert() {
+    let bad: toml::Value = toml::from_str(
+        "symbols = [\"KAITOUSDT\"]\nhold_decision_price = true\n",
+    )
+    .expect("test config parses");
+    assert!(TargetBookFollower::from_params(StrategyId(0), &bad).is_err());
+}
+
+#[test]
+fn the_resting_dials_are_off_unless_the_config_says_otherwise() {
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 60.0)]));
+    let work = h.one_intent().work.expect("the entry is worked");
+    assert!(!work.hold_decision_px, "the measured recipe is what a silent config gets");
+    assert!(!work.give_up_instead_of_crossing);
+}
+
+#[test]
 fn a_rest_entries_value_that_is_not_true_or_false_is_refused() {
     let bad: toml::Value = toml::from_str(
         "symbols = [\"KAITOUSDT\"]\nrest_entries = \"yes\"\n",

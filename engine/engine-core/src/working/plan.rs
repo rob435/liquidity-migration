@@ -242,6 +242,13 @@ pub fn resting_px(
     if !worth_resting(touch, tick) {
         return None;
     }
+    if policy.hold_decision_px {
+        // This book's mid IS the decision mid: both are read from the same
+        // quote in the same pass. Resting there is inside the touch, which
+        // the spread gate above leaves room for, and it is the cap the order
+        // never moves past afterwards.
+        return Some(snap_rest(touch.mid(), side, rule));
+    }
     let lean = lean(side, touch);
     if policy.improve_lean > 0.0 && lean.is_some_and(|l| l >= policy.improve_lean) {
         // The spread gate above is what makes this safe: with two ticks to
@@ -275,14 +282,16 @@ pub fn plan_work(
     if rule.tick_size <= 0.0 {
         return WorkDecision::hold();
     }
+    // The venue took a cancel, so this order is on its way out whichever path
+    // asked for it.
+    if state.cancel_requested {
+        return WorkDecision::hold();
+    }
     let reprice_ns = ms_ns(policy.reprice_ms);
 
     // Already crossing. Nothing here is patient any more; the only questions
     // are whether to retry the cross and when to give up on it.
     if state.cross_started_ns != 0 {
-        if state.cancel_requested {
-            return WorkDecision::hold();
-        }
         let grace_over = now_ns >= state.cross_started_ns.saturating_add(ms_ns(policy.cross_grace_ms));
         if !state.crossed && !grace_over {
             // Paced, and that pacing is load-bearing. Each attempt is a
@@ -308,7 +317,7 @@ pub fn plan_work(
 
     // The window ran out: stop paying for patience.
     if now_ns >= state.placed_ns.saturating_add(ms_ns(policy.window_ms)) {
-        return WorkDecision::looked(cross_step(state.side, touch, rule));
+        return patience_over(state, touch, rule, now_ns, policy);
     }
 
     // The reprice gate. Everything past this line counts as a look, book
@@ -332,7 +341,7 @@ pub fn plan_work(
         };
         let half_spread_bp = touch.spread() / 2.0 / mid * 1e4;
         if against_bp >= 2.0 * (half_spread_bp + policy.drift_cross_fee_bp) {
-            return WorkDecision::looked(cross_step(state.side, touch, rule));
+            return patience_over(state, touch, rule, now_ns, policy);
         }
     }
 
@@ -355,6 +364,41 @@ pub fn plan_work(
         return WorkDecision::looked(WorkStep::Hold);
     }
     WorkDecision::looked(WorkStep::Move { px: want })
+}
+
+/// Patience is over, one way or the other: cross for whatever is left, or take
+/// the order down and let the strategy decide again.
+///
+/// The cancel is paced like every other venue call here, so a venue that keeps
+/// refusing one cannot become a hot loop.
+fn patience_over(
+    state: &WorkState,
+    touch: Touch,
+    rule: &InstrumentRule,
+    now_ns: u64,
+    policy: &WorkPolicy,
+) -> WorkDecision {
+    if !policy.give_up_instead_of_crossing {
+        return WorkDecision::looked(cross_step(state.side, touch, rule));
+    }
+    if now_ns.saturating_sub(state.last_cancel_try_ns) < ms_ns(policy.reprice_ms) {
+        return WorkDecision::hold();
+    }
+    WorkDecision::looked(WorkStep::Cancel)
+}
+
+/// Never worse than the price the order was decided at, when the policy says
+/// so. A buy is capped from above and a sell from below, so this only ever
+/// moves a price toward the passive side — it can never turn a resting price
+/// into a crossing one.
+fn capped(px: f64, state: &WorkState, policy: &WorkPolicy) -> f64 {
+    if !policy.hold_decision_px || state.decision_mid <= 0.0 {
+        return px;
+    }
+    match state.side {
+        Side::Buy => px.min(state.decision_mid),
+        Side::Sell => px.max(state.decision_mid),
+    }
 }
 
 /// How far through its window this order is, from 0 at placement to 1 at the
@@ -399,7 +443,7 @@ fn desired_px(
         policy.improve_lean > 0.0 && lean.is_some_and(|l| l >= policy.improve_lean) && can_improve;
 
     if elapsed >= policy.urgency_improve_frac && can_improve && !ahead {
-        return Some(snap_rest(improved, state.side, rule));
+        return Some(snap_rest(capped(improved, state, policy), state.side, rule));
     }
     if behind {
         let stay_back = policy.back_lean > 0.0
@@ -409,10 +453,10 @@ fn desired_px(
             return None;
         }
         let want = if wants_improve { improved } else { near };
-        return Some(snap_rest(want, state.side, rule));
+        return Some(snap_rest(capped(want, state, policy), state.side, rule));
     }
     if !ahead && wants_improve {
-        return Some(snap_rest(improved, state.side, rule));
+        return Some(snap_rest(capped(improved, state, policy), state.side, rule));
     }
     None
 }

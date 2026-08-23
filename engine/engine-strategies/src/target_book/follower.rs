@@ -125,12 +125,33 @@ fn wants(targets: &[Target], symbol: &str) -> bool {
 impl TargetBookFollower {
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
         let p = Params::new(NAME, params)?;
-        p.reject_unknown(&["symbols", "rest_entries"])?;
+        p.reject_unknown(&[
+            "symbols",
+            "rest_entries",
+            "hold_decision_price",
+            "give_up_instead_of_crossing",
+        ])?;
 
         // Entries rest at the touch and are worked by the engine instead of
         // crossing the spread. Off by default so turning it on is a decision
         // somebody made, not one they inherited.
         let rest_entries = p.bool_or("rest_entries", false)?;
+        // How the resting is worked. Both off by default: the recipe they
+        // change was measured over 199,785 paired attempts and these arms
+        // were not.
+        let work = engine_types::WorkPolicy {
+            hold_decision_px: p.bool_or("hold_decision_price", false)?,
+            give_up_instead_of_crossing: p.bool_or("give_up_instead_of_crossing", false)?,
+            ..engine_types::WorkPolicy::default()
+        };
+        if !rest_entries && (work.hold_decision_px || work.give_up_instead_of_crossing) {
+            return Err(p.invalid(
+                "rest_entries",
+                "hold_decision_price and give_up_instead_of_crossing only govern a resting \
+                 entry; with rest_entries off nothing rests and they would sit here doing \
+                 nothing",
+            ));
+        }
 
         let symbols = p.strings("symbols")?;
         if symbols.is_empty() {
@@ -141,7 +162,7 @@ impl TargetBookFollower {
         }
 
         Ok(Self {
-            entry_work: rest_entries.then(engine_types::WorkPolicy::default),
+            entry_work: rest_entries.then_some(work),
             id,
             symbols,
             book: None,

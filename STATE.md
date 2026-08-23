@@ -258,9 +258,10 @@ file.
   the new code produces, read on **both** heartbeats — "active" says nothing
   about which binary.
 - **A resting entry waits 120 s.** That is the engine's
-  `WorkPolicy::default().window_ms` (`engine-types/src/orders.rs`), it is not
-  exposed in the strategy block, so no host setting reaches it. Measured on 15
-  live resting entries, fills came at a median of 1.28 s and a maximum of
+  `WorkPolicy::default().window_ms` (`engine-types/src/orders.rs`), and it is
+  not one of the dials a strategy block can set — `hold_decision_price` and
+  `give_up_instead_of_crossing` are the only two, both off by default. Measured
+  on 15 live resting entries, fills came at a median of 1.28 s and a maximum of
   36.6 s.
 - **Pricing and market data for the order path live in the engine.** It
   subscribes its own venue stream per followed symbol and refuses an entry

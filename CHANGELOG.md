@@ -16,6 +16,42 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — a resting entry can be pinned to the price it was decided
+  at, instead of following the market. Built, off by default, not deployed.**
+  Carry rests its entries and gets 4% maker share by notional: $658 of $5,029
+  of entry notional fills passively, and 14 of the 21 passive fills are **$5–$9
+  crumbs** against entries of ~$140, landing **25–65 bp above** the mid the
+  entry was decided at. The supervisor rejoins a touch that overtakes it, so a
+  market that runs gets followed up, a few dollars fill high, and the bulk
+  crosses anyway.
+
+  Two dials on the target-book follower, both off unless a sleeve writes them:
+
+  - `hold_decision_price = true` — the first rest sits at the decision mid
+    rather than the touch (at placement they are the same quote, so this is
+    the decision price), and `desired_px` is capped so the order never moves
+    to a worse price than that. The clamp only ever moves a price toward the
+    passive side, so it cannot turn a resting order into a crossing one.
+  - `give_up_instead_of_crossing = true` — the end of patience, whether the
+    window ran out or the drift trigger fired, takes the order down instead of
+    crossing. Cancels are paced on the reprice cadence like every other venue
+    call here, and a cancel the venue took is not asked for twice.
+
+  Either without `rest_entries` is refused at boot rather than sitting inert.
+
+  **Nothing changed for anything running.** The recipe these replace was
+  measured on a 34-symbol night replay, 199,785 paired attempts, at 0.36 bp per
+  entry cheaper than joining the touch and repricing on a timer; these arms
+  were not measured. Every test asserts the old behaviour and the new one side
+  by side, and all three changes were proved failing without themselves.
+
+  **What is not known:** whether a missed entry costs carry more than a
+  paid-up one. Holding the price turns a partial fill at intermediate prices
+  into all-or-nothing, and carry only collects funding if it is in the
+  position at settlement. The quote lab's measured passive fill rate (70.4%,
+  1,586 attempts, median 41.6 s) came from an arm that repriced every 15 s;
+  `WorkPolicy::default()` reprices every 3 s.
+
 - **2026-08-22 — the cost report names a row by what its ids meant, and counts
   the fills the stream missed.** `engine fills` read the whole log with one id
   table — the last one in the file — and keyed every row by the raw pair

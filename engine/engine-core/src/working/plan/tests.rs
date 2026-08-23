@@ -454,3 +454,176 @@ fn a_symbol_with_no_tick_is_not_worked_at_all() {
         WorkStep::Hold
     );
 }
+
+// ------------------------------------------- holding the decision price
+
+fn holding() -> WorkPolicy {
+    WorkPolicy {
+        hold_decision_px: true,
+        ..WorkPolicy::default()
+    }
+}
+
+/// The early cross off, so a test about where the order sits is not answered
+/// by the drift trigger firing first.
+fn patient() -> WorkPolicy {
+    WorkPolicy {
+        drift_cross_fee_bp: 0.0,
+        ..WorkPolicy::default()
+    }
+}
+
+fn patient_and_holding() -> WorkPolicy {
+    WorkPolicy {
+        hold_decision_px: true,
+        ..patient()
+    }
+}
+
+#[test]
+fn the_first_rest_sits_at_the_price_the_order_was_decided_at() {
+    // The book's mid is the decision mid — both come off the same quote in
+    // the same pass — so resting there is resting at the decision price.
+    // Inside the touch, not on it: the spread gate leaves room for that.
+    let px = resting_px(Side::Buy, wide(0.0, 0.0), &RULE, &holding()).expect("wide enough to rest");
+    assert_eq!(px, 100.0, "the mid of 99/101");
+    assert!(px > 99.0, "inside the touch, not joining it");
+    assert!(px < 101.0, "and still a maker");
+
+    let selling =
+        resting_px(Side::Sell, wide(0.0, 0.0), &RULE, &holding()).expect("wide enough to rest");
+    assert_eq!(selling, 100.0);
+}
+
+#[test]
+fn a_buy_never_moves_up_to_a_market_that_left() {
+    // The whole point. The market runs away, the touch overtakes the order,
+    // and the old recipe rejoins the new touch — filling crumbs above the
+    // price the trade was decided at. This one stays where it was put.
+    let mut state = WorkState::new(Side::Buy, 100.0, 100.0, 0);
+    state.last_look_ns = 0;
+    let ran_away = Touch {
+        bid_px: 103.0,
+        bid_qty: 0.0,
+        ask_px: 105.0,
+        ask_qty: 0.0,
+    };
+    let now = 4 * SECOND;
+
+    let chasing = plan_work(&state, ran_away, &RULE, now, &patient());
+    assert_eq!(
+        chasing.step,
+        WorkStep::Move { px: 103.0 },
+        "today's recipe rejoins the touch that overtook it"
+    );
+
+    let held = plan_work(&state, ran_away, &RULE, now, &patient_and_holding());
+    assert_eq!(held.step, WorkStep::Hold, "the cap leaves it where the decision was");
+}
+
+#[test]
+fn a_sell_never_moves_down_to_a_market_that_left() {
+    let state = WorkState::new(Side::Sell, 100.0, 100.0, 0);
+    let ran_away = Touch {
+        bid_px: 95.0,
+        bid_qty: 0.0,
+        ask_px: 97.0,
+        ask_qty: 0.0,
+    };
+    assert_eq!(
+        plan_work(&state, ran_away, &RULE, 4 * SECOND, &patient()).step,
+        WorkStep::Move { px: 97.0 },
+        "today's recipe rejoins the touch that overtook it"
+    );
+    assert_eq!(
+        plan_work(&state, ran_away, &RULE, 4 * SECOND, &patient_and_holding()).step,
+        WorkStep::Hold
+    );
+}
+
+#[test]
+fn the_cap_still_lets_the_order_follow_a_market_coming_toward_it() {
+    // Capped from one side only. A buy may still move down — that is not
+    // paying up, it is the market improving — and the existing rule that
+    // never chases a retreating touch still governs which way it goes.
+    let state = WorkState::new(Side::Buy, 100.0, 100.0, 0);
+    let overtaken_below = Touch {
+        bid_px: 98.0,
+        bid_qty: 0.0,
+        ask_px: 99.0,
+        ask_qty: 0.0,
+    };
+    // The touch fell away and left the order at the front: never chase it.
+    assert_eq!(
+        plan_work(&state, overtaken_below, &RULE, 4 * SECOND, &patient_and_holding()).step,
+        WorkStep::Hold
+    );
+}
+
+#[test]
+fn the_early_cross_gives_up_instead_when_it_is_told_to() {
+    // The market ran past the price of crossing. Crossing takes the trade at
+    // the new price; giving up says the trade was decided at a price that is
+    // gone.
+    let state = WorkState::new(Side::Buy, 100.0, 100.0, 0);
+    let ran_away = Touch {
+        bid_px: 103.0,
+        bid_qty: 0.0,
+        ask_px: 105.0,
+        ask_qty: 0.0,
+    };
+    let now = 4 * SECOND;
+    assert!(
+        matches!(plan_work(&state, ran_away, &RULE, now, &policy()).step, WorkStep::Cross { .. }),
+        "today's recipe crosses once the drift proves waiting expensive"
+    );
+
+    let giving_up = WorkPolicy {
+        give_up_instead_of_crossing: true,
+        ..holding()
+    };
+    assert_eq!(plan_work(&state, ran_away, &RULE, now, &giving_up).step, WorkStep::Cancel);
+}
+
+#[test]
+fn the_window_ends_in_a_cancel_rather_than_a_cross() {
+    let giving_up = WorkPolicy {
+        give_up_instead_of_crossing: true,
+        ..holding()
+    };
+    let state = WorkState::new(Side::Buy, 100.0, 100.0, 0);
+    let over = ms_ns(giving_up.window_ms) + SECOND;
+
+    assert!(
+        matches!(plan_work(&state, no_sizes(), &RULE, over, &policy()).step, WorkStep::Cross { .. }),
+        "today's recipe crosses at the deadline"
+    );
+    assert_eq!(plan_work(&state, no_sizes(), &RULE, over, &giving_up).step, WorkStep::Cancel);
+}
+
+#[test]
+fn a_cancel_the_venue_took_is_not_asked_for_twice() {
+    // Paced while the venue has not answered, silent once it has: this path
+    // never enters the crossing branch, so it needs its own way of stopping.
+    let giving_up = WorkPolicy {
+        give_up_instead_of_crossing: true,
+        ..holding()
+    };
+    let over = ms_ns(giving_up.window_ms) + SECOND;
+    let mut state = WorkState::new(Side::Buy, 100.0, 100.0, 0);
+
+    state.last_cancel_try_ns = over;
+    assert_eq!(
+        plan_work(&state, no_sizes(), &RULE, over, &giving_up).step,
+        WorkStep::Hold,
+        "asked a moment ago; wait for the cadence"
+    );
+
+    state.last_cancel_try_ns = 0;
+    state.cancel_requested = true;
+    assert_eq!(
+        plan_work(&state, no_sizes(), &RULE, over, &giving_up).step,
+        WorkStep::Hold,
+        "the venue took it; the order is on its way out"
+    );
+}

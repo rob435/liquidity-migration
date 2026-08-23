@@ -264,6 +264,24 @@ under a basis point, so an entry there crosses whatever the config says.
 Off unless asked. `rest_entries = true` on the target-book follower turns it
 on; a trim or an exit is never worked, whatever the config says.
 
+Two dials change the recipe above, and both are off unless a sleeve sets them,
+because what they replace was measured over 199,785 paired attempts and they
+were not:
+
+- **`hold_decision_price = true`** — the first rest sits at the mid the order
+  was decided against rather than at the touch, and the order never moves to a
+  worse price than that. Nothing is bought above, or sold below, the price the
+  strategy decided on. It pays for that in fill rate: a market that walks away
+  is no longer followed, and the order simply sits.
+- **`give_up_instead_of_crossing = true`** — when patience runs out, at the
+  window's end or because the drift already proved waiting more expensive than
+  the spread, the order is taken down instead of crossing for what is left.
+  Without it the price cap only delays the cross; with it a missed entry is a
+  trade not taken, and the strategy decides again on its next pass.
+
+Either of them without `rest_entries` is refused at boot: nothing would rest,
+so they would sit in the config doing nothing.
+
 One thing worth knowing: a strategy that decides before the market feed has
 delivered a quote has no touch to rest at, and its order goes as written. A
 target book already on disk at boot is read within a second, before the feed

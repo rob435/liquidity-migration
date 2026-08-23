@@ -99,6 +99,13 @@ book_path = "/var/lib/liquidity-migration/targets/carry-demo.json"
 # crossing the spread. Carry entries are not urgent and the spread is the
 # largest cost they pay.
 rest_entries = true
+# Two dials on how the resting is worked, both off unless written here. The
+# first pins the rest to the price the order was decided at and stops it
+# following a market that leaves; the second takes the order down at the end
+# of its patience instead of crossing. Together they are "my price or no
+# trade". See docs/engine.md §Worked entries for what they cost.
+# hold_decision_price = true
+# give_up_instead_of_crossing = true
 symbols = ["BTCUSDT", "ETHUSDT"]
 
 [[strategy]]
