@@ -332,6 +332,9 @@ pub struct Fills {
     by_key: BTreeMap<(String, String), Costs>,
     /// What the ids mean right now, kept current by [`Fills::learn`].
     names: LogNames,
+    /// The same fills again, gathered into positions rather than into costs,
+    /// so a sleeve going flat can say what the trip made.
+    lots: roundtrip::Lots,
     pending: VecDeque<Owed>,
     /// Fills dropped from `pending` because too many were waiting at once.
     pub dropped: u64,
@@ -423,6 +426,7 @@ impl Fills {
     fn price(&mut self, fill: &Fill) -> f64 {
         let notional = (fill.px * fill.qty).abs();
         let key = self.key(fill.strategy, fill.symbol);
+        self.lots.on_fill(&key.0, &key.1, fill);
         let costs = self.by_key.entry(key).or_default();
         costs.fills += 1;
         if fill.is_maker {
@@ -561,6 +565,34 @@ impl Fills {
         self.pending.len()
     }
 
+    /// Every round trip this has seen close, in the order they closed.
+    pub fn closed(&self) -> &[roundtrip::ClosedTrade] {
+        self.lots.closed()
+    }
+
+    /// The round trips that closed since this was last asked, and clear them.
+    pub fn take_closed(&mut self) -> Vec<roundtrip::ClosedTrade> {
+        self.lots.take_closed()
+    }
+
+    /// The open positions, for a caller that has to drop some of them.
+    pub fn lots(&mut self) -> &mut roundtrip::Lots {
+        &mut self.lots
+    }
+
+    /// Adopt the open positions a log leaves behind, and nothing else from it.
+    ///
+    /// The cost rows are this run's on purpose (struct note above), but a
+    /// position is not: a sleeve that opened before a restart is still
+    /// holding, and a close priced without its entry is a number about
+    /// nothing. The trips those records already closed are dropped rather
+    /// than announced a second time.
+    pub fn seed_lots(&mut self, records: &[WalRecord]) {
+        let mut rebuilt = Fills::from_records(records);
+        rebuilt.lots.take_closed();
+        self.lots = rebuilt.lots;
+    }
+
     /// Rebuild everything the log can account for.
     ///
     /// The arrival numbers are recomputed from `OrderSent` and the fills, by
@@ -650,6 +682,19 @@ impl Fills {
                 WalRecord::OrderUpdate {
                     update: OrderUpdate::StreamReset { .. },
                 } => me.stream_gap(),
+                // A claim boot found the venue does not back. There is no
+                // exit price for it, so it is forgotten rather than reported.
+                WalRecord::ClaimsDropped { rows, .. } => {
+                    let gone: Vec<(String, String)> = rows
+                        .iter()
+                        .map(|row| {
+                            (me.names.strategy(row.strategy), me.names.symbol(row.symbol))
+                        })
+                        .collect();
+                    me.lots.drop_symbols(|sleeve, symbol| {
+                        gone.iter().any(|(s, y)| s == sleeve && y == symbol)
+                    });
+                }
                 // What the stream missed, read back off the venue. The same
                 // join as a delivered fill -- through the order that produced
                 // it -- so one with no order of ours is priced for nobody.
@@ -690,13 +735,29 @@ impl Fills {
                 // NOT restated: a report over one segment covers that
                 // segment's fills, and the whole history is a chain read
                 // away.
-                WalRecord::SegmentBase { open_orders, .. } => {
+                WalRecord::SegmentBase { open_orders, attribution, .. } => {
                     for open in open_orders {
                         sent.insert(
                             open.request.client_order_id.as_str(),
                             (open.request.strategy, open.arrival_mid),
                         );
                     }
+                    // What each sleeve was HOLDING, which the cost totals
+                    // above have no use for and a position cannot do
+                    // without: the fills that opened it are in the segment
+                    // before this one, and this record is the only thing
+                    // that carries the position across the boundary.
+                    let held: Vec<(String, String, f64)> = attribution
+                        .iter()
+                        .map(|row| {
+                            (
+                                me.names.strategy(row.strategy),
+                                me.names.symbol(row.symbol),
+                                row.signed_qty,
+                            )
+                        })
+                        .collect();
+                    me.lots.restate(&held);
                 }
                 _ => {}
             }
@@ -730,6 +791,7 @@ impl Mark {
 }
 
 pub mod report;
+pub mod roundtrip;
 
 #[cfg(test)]
 mod tests;

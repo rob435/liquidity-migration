@@ -2,11 +2,11 @@
 
 Two chat lines, two reporters, one listener. The liveness watchdog pages when the fleet stops looking
 healthy, and its view of the engine is the heartbeat file the engine rewrites every few seconds;
-`trade-notify` diffs the target books and sends every sleeve's entries and exits to the owner's DM. The
-engines send nothing themselves (both units strip the bot token). **Nothing reports fills** — the books
-say what was asked for, not what happened — and there is no hourly digest (§The hourly digest). The
-listener is the control panel (§Owner control buttons): the one component that reads the chat, and it
-posts the panel and its action results.
+`trade-notify` sends every sleeve's entries and exits to the owner's DM, and an exit carries what the
+position made (§The trading story). The engines send nothing themselves (both units strip the bot
+token) — they write files, and `trade-notify` is what reaches a phone. There is no hourly digest
+(§The hourly digest). The listener is the control panel (§Owner control buttons): the one component
+that reads the chat, and it posts the panel and its action results.
 
 **The main line** (`TELEGRAM_CHAT_ID`) carries the control panel and its action results. **The alerts
 line** (`TELEGRAM_ALERT_CHAT_ID`) carries
@@ -31,14 +31,64 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 | `telegram-controls` | on | control panel + action results; **also listens** | main |
 | `engine` / `engine-mainnet` | off — the unit strips the token | nothing; the engine's live signal is its heartbeat file, which the watchdog reads | — |
 | `llm-ledger` | off — the unit reads no Telegram env | nothing; its judged candidates are read by the LONG producer, and the trades they become page as LONG entries/exits | — |
-| `trade-notify` | on | every sleeve's entries and exits from the target books (carry, LONG, exodus), 5-minute diff | main |
+| `trade-notify` | on | both accounts' entries (from the books) and exits with their P&L (from the engines), plus one daily summary; runs every 5 minutes | main |
 | every producer | off or unset | nothing | — |
 
 Producers publish targets and never notify; the phone's trading story comes
-from the two notifier units above, reading the books the producers publish.
-The main line is the owner's DM with the bot; the alerts line is the group,
-and it belongs to the watchdog. A producer that goes quiet is the watchdog's
-problem.
+from the notifier units above, reading what the producers and the engines
+write. The main line is the owner's DM with the bot; the alerts line is the
+group, and it belongs to the watchdog. A producer that goes quiet is the
+watchdog's problem.
+
+## The trading story
+
+[`scripts/runtime/notify_book_changes.py`](../scripts/runtime/notify_book_changes.py), on a 5-minute
+timer, reading two kinds of file for two different questions.
+
+**Entries come from the target books.** A symbol appearing with size is a sleeve's decision, and that
+is news the moment it is decided, before anything fills.
+
+    ⚡ CARRY entry ONGUSDT $478.10
+
+**Exits come from the engine**, out of the closed-trade file it appends a line to whenever a position
+goes flat (`trades_path` in `engine.toml`). An exit is worth reading only with its numbers beside it:
+
+    🟢 CARRY exit ONGUSDT long
+    +$16.28 after fees · +324 bp · held 8h 38m
+    in 0.06845589 → out 0.07072479 · $503 · 2 fills
+    rested 100% · slip +1.1 bp · fee $0.55
+
+`rested` is the share of the traded notional that earned the spread instead of paying it (maker share);
+`slip` is how far the fills landed from the price on the screen when their orders left (arrival
+shortfall), positive being adverse. Both are `docs/architecture.md` §Trade diagnostics numbers, computed
+by the engine off its own log.
+
+**"After fees" means after fees and nothing else.** The crowd fee (funding) is settled into the wallet
+on the venue's own eight-hourly clock and the engine is never told about it, so no number here carries
+it. For carry, whose expected edge *is* the crowd fee, that makes these numbers the price move and the
+costs — not the whole of what the sleeve earned.
+
+A close the engine cannot price says so rather than claiming a zero:
+
+    ⚪ CARRY exit ONGUSDT long
+    out 0.0886 · 5,056
+    what it made is not in the engine's current log
+
+That happens when the fills that opened the position are in a log segment boot no longer replays. The
+quantity survives the rotation in the new segment's restatement and the prices do not, so the close is
+reported and the money is not.
+
+**One run is one message.** Everything a 5-minute run has to say goes out together, split only when it
+passes what Telegram will take.
+
+**One daily summary**, on the first run after midnight UTC, over the day that just ended: how many
+closed, how many won, the total after fees, a line per sleeve, the best and the worst, and the funding
+caveat again. It is stamped by the day it covers, so a run that could not send retries rather than
+skipping it.
+
+With no closed-trade file at all — an engine whose config names no `trades_path` — exits fall back to
+the books: `⚪ CARRY exit ONGUSDT`, with nothing about what it made. That is the only thing the books
+can say.
 
 ## Owner control buttons
 
@@ -76,17 +126,19 @@ There is no hourly digest. Nothing writes
 read it. `--account-notification-state` defaults to empty; pointing it at a file
 is opt-in, for whenever a digest comes back.
 
-The engine's heartbeat covers liveness, not accounting: see the watchdog below.
-A periodic position-and-P&L summary is not something the engine does yet, and
-this section will say so until it does.
+**What is covered is the closed side**: every position that ends is reported as it
+ends, and a daily summary adds them up (§The trading story). What is not covered
+is the *open* side — what is held right now, what it is worth, and whether the
+account and the journal agree about it. The engine's heartbeat carries the open
+positions but nothing turns them into a page; it covers liveness, not accounting.
 
-The rest of this section is the shape of what is missing — the specification for
-whatever fills it.
+The rest of this section is the shape of what is still missing — the specification
+for whatever fills it.
 
 - **Hourly summary** on the UTC hour boundary: open positions with side, quantity, price, open P&L and
-  stop; realized P&L (with a short `(pending: …)` note when funding/fees are not final); account health;
-  entry-block counts. When journal and venue disagree the summary shows both sides rather than picking
-  one ("Exchange:" vs "Our records:").
+  stop; account health; entry-block counts. When journal and venue disagree the summary shows both sides
+  rather than picking one ("Exchange:" vs "Our records:"). Realized P&L is the one part already
+  answered, per trade and per day.
 - **Event notices** as they commit, for `FILL`, `PNL`, `PROTECTION`, and `RISK_DECISION`. Everything
   else is left to the hourly roll-up. Bookkeeping detail (component ids, accounting provenance) goes to
   the owner's service journal, not the chat.

@@ -145,6 +145,7 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         // No heartbeat: the bench measures the order path, and a file write
         // riding the tick would be one more thing in the numbers.
         heartbeat_path: None,
+        trades_path: None,
     };
     // The real log, so the measured barrier is the shipping fsync path.
     let (wal, _replayed) = engine_wal::WalWriter::open(&options.wal_path)?;

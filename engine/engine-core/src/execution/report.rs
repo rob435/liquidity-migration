@@ -9,9 +9,10 @@ use engine_types::WalRecord;
 
 use super::{Costs, Fills, HORIZONS_MS};
 
-/// Read a log and say what its trading cost.
+/// Read a log and say what its trading cost, and what its positions made.
 pub fn of_log(records: &[WalRecord]) -> String {
-    table(&Fills::from_records(records))
+    let fills = Fills::from_records(records);
+    format!("{}\n{}", table(&fills), trips(&fills))
 }
 
 /// The em dash a number that was never measured is printed as. Not a zero:
@@ -108,6 +109,134 @@ fn clipped(text: &str, width: usize) -> String {
         return text.to_string();
     }
     text.chars().take(width).collect()
+}
+
+/// What the closed positions made, per sleeve.
+///
+/// The other half of the question the table above answers. Costs say what the
+/// trading paid away; this says whether the trading was worth doing.
+pub fn trips(fills: &Fills) -> String {
+    let mut out = String::from("what the positions made\n\n");
+    out.push_str(
+        "  sleeve            trips     won      net USDT          best         worst\n",
+    );
+    let mut sleeves: Vec<&str> = fills.closed().iter().map(|t| t.sleeve.as_str()).collect();
+    sleeves.sort_unstable();
+    sleeves.dedup();
+    if sleeves.is_empty() {
+        out.push_str("\n  nothing has closed yet.\n");
+        return out;
+    }
+    for sleeve in sleeves {
+        out.push_str(&trip_row(sleeve, fills, |trade| trade.sleeve == sleeve));
+    }
+    out.push_str(&format!("  {}\n", "-".repeat(74)));
+    out.push_str(&trip_row("everything", fills, |_| true));
+    out.push_str(&trip_list(fills));
+    out.push_str(
+        "\n  the crowd fee (funding) is NOT in these numbers. The venue settles it\n  into the wallet on its own clock and tells the engine nothing about it, so\n  a net that carried it would be an estimate in a receipt's clothes.\n",
+    );
+    // A trip whose opening fills are in an older segment has no money on it.
+    // Counting it as a zero would drag every average toward nothing.
+    let unpriced = fills
+        .closed()
+        .iter()
+        .filter(|trade| trade.round_trip.is_none())
+        .count();
+    if unpriced > 0 {
+        out.push_str(&format!(
+            "  {unpriced} close(s) are left out: this log does not hold what opened them.\n"
+        ));
+    }
+    out
+}
+
+/// The newest trips one to a line, so a number in the table above can be
+/// taken apart.
+fn trip_list(fills: &Fills) -> String {
+    const SHOWN: usize = 30;
+    let closed = fills.closed();
+    let skipped = closed.len().saturating_sub(SHOWN);
+    let mut out = String::from(
+        "\n  sleeve        symbol          side      qty         in        out       held   net USDT\n",
+    );
+    for trade in closed.iter().skip(skipped) {
+        let rt = trade.round_trip.as_ref();
+        out.push_str(&format!(
+            "  {:<14}{:<15}{:<7}{:>9}{:>11}{:>11}{:>11}{:>11}\n",
+            clipped(&trade.sleeve, 13),
+            clipped(&trade.symbol, 14),
+            trade.side,
+            figure(trade.qty),
+            rt.map(|rt| figure(rt.entry_px)).unwrap_or_else(|| NOTHING.into()),
+            figure(trade.exit_px),
+            rt.map(|rt| held(rt.held_ms)).unwrap_or_else(|| NOTHING.into()),
+            rt.map(|rt| format!("{:+.2}", rt.net_usdt)).unwrap_or_else(|| NOTHING.into()),
+        ));
+    }
+    if skipped > 0 {
+        out.push_str(&format!(
+            "  ...and {skipped} older trip(s), counted above but not listed.\n"
+        ));
+    }
+    out
+}
+
+/// A price or a quantity at the precision it needs, since this fleet trades
+/// both 100,000 of a coin worth 0.0037 and 0.05 of one worth 800.
+fn figure(value: f64) -> String {
+    let text = match value.abs() {
+        v if v >= 1_000.0 => format!("{value:.0}"),
+        v if v >= 1.0 => format!("{value:.4}"),
+        v if v > 0.0 => format!("{value:.8}"),
+        _ => format!("{value}"),
+    };
+    // A trailing run of zeros is precision this number does not have.
+    if text.contains('.') {
+        return text.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    text
+}
+
+fn held(ms: i64) -> String {
+    let seconds = ms.max(0) / 1_000;
+    let (days, hours, minutes) = (
+        seconds / 86_400,
+        (seconds % 86_400) / 3_600,
+        (seconds % 3_600) / 60,
+    );
+    if days > 0 {
+        return format!("{days}d{hours}h");
+    }
+    if hours > 0 {
+        return format!("{hours}h{minutes}m");
+    }
+    format!("{minutes}m")
+}
+
+fn trip_row(label: &str, fills: &Fills, keep: impl Fn(&super::roundtrip::ClosedTrade) -> bool) -> String {
+    let nets: Vec<f64> = fills
+        .closed()
+        .iter()
+        .filter(|trade| keep(trade))
+        .filter_map(|trade| trade.round_trip.as_ref().map(|rt| rt.net_usdt))
+        .collect();
+    if nets.is_empty() {
+        return format!("  {:<18}{:>5}{:>8}{:>14}{:>14}{:>14}\n", clipped(label, 17), 0, NOTHING, NOTHING, NOTHING, NOTHING);
+    }
+    let won = nets.iter().filter(|net| **net > 0.0).count();
+    let total: f64 = nets.iter().sum();
+    let best = nets.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let worst = nets.iter().cloned().fold(f64::INFINITY, f64::min);
+    format!(
+        "  {:<18}{:>5}{:>7.0}%{:>14.2}{:>14.2}{:>14.2}\n",
+        clipped(label, 17),
+        nets.len(),
+        100.0 * won as f64 / nets.len() as f64,
+        total,
+        best,
+        worst
+    )
 }
 
 fn footer(total: &Costs, fills: &Fills) -> String {
@@ -319,7 +448,9 @@ mod tests {
 
     #[test]
     fn every_row_is_the_same_width_as_the_header() {
-        let text = of_log(&log());
+        // The cost table alone: the trips table below it has its own header
+        // and its own widths.
+        let text = table(&Fills::from_records(&log()));
         let lines: Vec<&str> = text
             .lines()
             .filter(|l| l.starts_with("  ") && (l.contains("sleeve") || l.contains("BTCUSDT")))

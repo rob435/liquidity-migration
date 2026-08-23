@@ -352,6 +352,32 @@ late to be the horizon they claim, what was dropped, what is still waiting, and
 how many records of how many segments the numbers came from. Five of those
 numbers are also in the heartbeat, so an operator sees them without the log.
 
+Under that table is a second one: **what the positions made**. A sleeve's fills
+in a coin add up to a position, and when that position comes back to flat the
+round trip is closed — per sleeve, how many closed, how many won, the total
+after fees, the best and the worst, and then the newest thirty one to a line
+with entry, exit, time held and money. The arithmetic is one running sum: a buy
+pays out and a sell takes in, so the cash left over when the quantity returns to
+zero IS the gross, whichever way round the position was.
+
+**The crowd fee (funding) is in none of it.** The venue settles that into the
+wallet on its own eight-hourly clock and never tells the engine, so a net
+carrying it would be an estimate in a receipt's clothes. Everything else is a
+receipt out of the log.
+
+A position whose opening fills are in an older segment is reported as closed
+with no money on it, and the footer counts how many. A rotation restates the
+*quantity* each sleeve holds and not what it paid, so a close over that boundary
+is knowable and its P&L is not — and inventing one is worse than a gap: without
+the restated quantity, the sale that closes such a position reads as opening a
+short, and the purchase that opens the next position closes that phantom for a
+profit nobody made.
+
+The same accounting runs live. `trades_path` in `engine.toml` names a file the
+engine appends one JSON line to per closed position, which is what puts an exit
+on the owner's phone with its numbers ([`notifications.md`](notifications.md)
+§The trading story).
+
 A row is keyed by the **names** the ids meant where the record sits, not by the
 ids. Within one run ids are only appended, but the next boot rebuilds both
 tables from a config and a log whose universe has moved: id 8 has been

@@ -94,6 +94,11 @@ pub struct EngineSection {
     /// on itself is not a fault.
     #[serde(default)]
     pub heartbeat_path: Option<PathBuf>,
+    /// Where to append one line per closed round trip: what the position
+    /// made, for the notifier that puts it on the owner's phone. Left out
+    /// means none is written and the phone falls back to reporting the books.
+    #[serde(default)]
+    pub trades_path: Option<PathBuf>,
 }
 
 /// See [`EngineSection::leverage_authority`].

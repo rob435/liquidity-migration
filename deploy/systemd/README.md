@@ -24,7 +24,7 @@ Fifteen unit files: eleven services and four timers (two liveness, the LLM ledge
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
 | `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume — there is no close button) — the sole `getUpdates` consumer |
 | `liquidity-migration-llm-ledger.service` | LLM driver judgments on movers and trigger events, and the judged candidates file the demo LONG sleeve enters through — run by its hourly timer |
-| `liquidity-migration-trade-notify.service` | Diffs the target books and sends every sleeve's entries and exits to the owner's DM — run by its 5-minute timer |
+| `liquidity-migration-trade-notify.service` | Sends every sleeve's entries and its exits with what they made to the owner's DM — run by its 5-minute timer |
 
 The liveness services are invoked by their matching timers, and the engines own
 the accounts. Target producers and auxiliary services have private API, mainnet,

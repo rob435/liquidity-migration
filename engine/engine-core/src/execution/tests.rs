@@ -799,3 +799,156 @@ fn a_fill_older_than_the_engine_itself_is_owed_no_mark() {
     assert_eq!(fills.pending(), 0, "nothing is waiting for a horizon that is gone");
     assert_eq!(total.marks_late, 0, "no mark was attempted, so none was thrown away");
 }
+
+/// A restart mid-position. The cost rows are this run's, but the position is
+/// not: the sleeve is still holding, and its close has to be priced against
+/// the entry the old run made.
+#[test]
+fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
+    fn order(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: id.into(),
+                strategy,
+                symbol,
+                side: Side::Buy,
+                qty: 1.0,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: false,
+            },
+            wire_ns: 1,
+            arrival_mid: 0.0,
+        }
+    }
+    fn traded(id: &str, symbol: SymbolId, side: Side, px: f64, qty: f64) -> WalRecord {
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                client_order_id: id.into(),
+                symbol,
+                side,
+                qty,
+                px,
+                fee: 0.0,
+                is_maker: false,
+                venue_ts_ms: 1,
+                recv_ns: 1,
+            },
+        }
+    }
+
+    let opened = vec![
+        names(),
+        order("eng-1", CARRY, BTC),
+        traded("eng-1", BTC, Side::Buy, 100.0, 2.0),
+        order("eng-2", LONG, ETH),
+        traded("eng-2", ETH, Side::Buy, 10.0, 5.0),
+        order("eng-3", LONG, ETH),
+        traded("eng-3", ETH, Side::Sell, 12.0, 5.0),
+    ];
+
+    // Boot's own order: adopt the positions, then say what this run's ids
+    // mean. A lot is keyed by name for exactly this reason — the id table is
+    // rebuilt every boot and the names are what survive it.
+    let mut fresh = Fills::default();
+    fresh.seed_lots(&opened);
+    fresh.learn(&names());
+    assert!(
+        fresh.take_closed().is_empty(),
+        "the trip the old run already closed must not be announced again"
+    );
+
+    // Carry is still long 2 BTC at 100. Selling it here is the whole point:
+    // without the seed this reads as opening a short and reports nothing.
+    fresh.on_fill(
+        &Fill {
+            client_order_id: "eng-4".into(),
+            strategy: CARRY,
+            symbol: BTC,
+            side: Side::Sell,
+            qty: 2.0,
+            px: 110.0,
+            fee: 0.0,
+            is_maker: false,
+            arrival_mid: 0.0,
+            venue_ts_ms: 9,
+        },
+        0,
+    );
+    let closed = fresh.take_closed();
+    assert_eq!(closed.len(), 1);
+    let rt = closed[0].round_trip.as_ref().expect("the entry came off the log");
+    assert_eq!(rt.entry_px, 100.0);
+    assert!((rt.net_usdt - 20.0).abs() < 1e-9, "{}", rt.net_usdt);
+}
+
+/// A log that starts mid-position. Read without the rotation's own account of
+/// what each sleeve held, the closing sale reads as opening a short and the
+/// next entry closes that phantom for a profit nobody made — which is what
+/// the live demo log did, to the tune of a fabricated +101 USDT.
+#[test]
+fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
+    let held = WalRecord::SegmentBase {
+        wall_ts_ms: 1,
+        strategies: vec!["carry".into()],
+        symbols: vec!["ONGUSDT".into()],
+        may_open: true,
+        control_anchors: vec![],
+        attribution: vec![engine_types::wal::FilledTotal {
+            strategy: CARRY,
+            symbol: BTC,
+            signed_qty: 5_056.0,
+        }],
+        logged_exposure: vec![],
+        intended_stops: vec![],
+        open_orders: vec![],
+    };
+    fn order(id: &str) -> WalRecord {
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: id.into(),
+                strategy: CARRY,
+                symbol: BTC,
+                side: Side::Sell,
+                qty: 1.0,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: false,
+            },
+            wire_ns: 1,
+            arrival_mid: 0.0,
+        }
+    }
+    fn traded(id: &str, side: Side, px: f64, qty: f64) -> WalRecord {
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                client_order_id: id.into(),
+                symbol: BTC,
+                side,
+                qty,
+                px,
+                fee: 0.0,
+                is_maker: false,
+                venue_ts_ms: 1,
+                recv_ns: 1,
+            },
+        }
+    }
+
+    let fills = Fills::from_records(&[
+        held,
+        order("eng-1"),
+        traded("eng-1", Side::Sell, 0.0886, 5_056.0),
+        order("eng-2"),
+        traded("eng-2", Side::Buy, 0.0684, 7_347.0),
+    ]);
+
+    let closed = fills.closed();
+    assert_eq!(closed.len(), 1, "one close, and the re-entry is not a trip");
+    assert_eq!(closed[0].side, "long", "it was long before the rotation");
+    assert!(
+        closed[0].round_trip.is_none(),
+        "priced from an entry this log never held: {:?}",
+        closed[0].round_trip
+    );
+}

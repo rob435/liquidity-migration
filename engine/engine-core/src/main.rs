@@ -32,7 +32,9 @@ engine — the execution loop
   engine fills --wal PATH
       What the trading cost: maker share, fee, how far each fill landed from
       the price on the screen when its order left, and where the market went
-      afterwards. Per sleeve and symbol.
+      afterwards. Per sleeve and symbol. Then what the positions made: every
+      round trip that closed, with its P&L after fees. The crowd fee (funding)
+      is in neither -- the venue never tells the engine about it.
 
   engine venue-key --config engine.toml
       What this host signs as at the config's venue, so it can be registered

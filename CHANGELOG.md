@@ -16,6 +16,36 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — an exit on the phone now says what it made.** The engine could
+  always say what a fill cost; nothing could say what a position came to. The
+  target books, which the notifier diffed, only ever knew what a sleeve asked
+  for — so an exit read `CARRY exit: ONGUSDT` and stopped there. New in the
+  engine: a sleeve's fills in a coin are gathered into a position, and when it
+  comes back to flat the round trip is closed and appended as one JSON line to
+  `trades_path` (`execution/roundtrip.rs`, `trades.rs`). The arithmetic is one
+  running sum — a buy pays out, a sell takes in, so the cash left at flat IS the
+  gross whichever way round the position was. `trade-notify` reads that file and
+  sends the exit with its P&L after fees, its bp return, time held, entry and
+  exit price, fill count, maker share, slippage and fee; entries still come off
+  the books, where a sleeve's decision is news before anything fills. Both
+  accounts are covered, the funded one tagged. One run is one message, and one
+  daily summary goes out after midnight UTC. `engine fills` grew the same table
+  offline: per sleeve, how many closed, how many won, the total, best and worst,
+  and the newest thirty one to a line. **The crowd fee (funding) is in none of
+  it** — the venue settles it into the wallet and never tells the engine, and a
+  net carrying it would be an estimate in a receipt's clothes; the docs and the
+  daily summary both say so. Two defects the live log caught before deploy, both
+  now pinned by tests that fail without their fix: a log segment that starts
+  mid-position read the closing sale as *opening a short*, and the next entry
+  closed that phantom for a fabricated +101 USDT — fixed by restating each
+  sleeve's held quantity from the rotation's own `SegmentBase`; and a position
+  restated that way, then added to, still cannot be priced, because the cash
+  never saw what the earlier segment paid. Verified against 311,604 real records
+  from the demo log: MOVEUSDT gross $26.52 less $0.60 of fees against a reported
+  net of $25.90. Host configs gain `trades_path` (`[engine]` ignores keys it
+  does not know, so it is safe to place before the binary that reads it).
+  Deployed d361d659→
+
 - **2026-08-23 — the last of the audit list: a dead watchdog flag, a duplicated
   digest, and a comment that outlived its narration.** No behaviour change.
   `check_fleet_liveness.py` declared `--max-account-capture-age-min` and read

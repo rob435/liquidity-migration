@@ -723,6 +723,7 @@ fn settings() -> EngineSection {
         // itself.
         target_book_path: None,
         heartbeat_path: None,
+        trades_path: None,
     }
 }
 

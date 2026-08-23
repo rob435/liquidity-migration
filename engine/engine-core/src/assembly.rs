@@ -22,6 +22,7 @@ use serde::Deserialize;
 use crate::config::{EngineSection, StrategyConfig};
 use crate::heartbeat::Heartbeat;
 use crate::targets::{TargetBookWatcher, TargetBooks};
+use crate::trades::Trades;
 
 /// Open the log and replay what an earlier run left. The log may have been
 /// rotated into segments: this opens the newest one boot can trust, whose
@@ -251,6 +252,15 @@ pub fn heartbeat(
     let path = settings.heartbeat_path.as_ref()?;
     tracing::info!(path = %path.display(), "writing a heartbeat file");
     Some(Heartbeat::new(path.clone(), account, lease_path))
+}
+
+/// The closed-round-trip file, but only when the config names a path. No path
+/// means the engine says nothing about what its positions made, and the phone
+/// hears about exits from the target books instead.
+pub fn trades(settings: &EngineSection) -> Option<Trades> {
+    let path = settings.trades_path.as_ref()?;
+    tracing::info!(path = %path.display(), "writing a closed-trade file");
+    Some(Trades::new(path.clone()))
 }
 
 /// The `[risk]` block, exactly as engine.toml spells it. There are no
@@ -678,6 +688,7 @@ disaster_stop_fraction = 0.35
             leverage_authority: crate::config::LeverageAuthority::default(),
             target_book_path: engine_level_book.map(PathBuf::from),
             heartbeat_path: None,
+        trades_path: None,
         }
     }
 

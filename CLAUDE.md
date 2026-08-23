@@ -51,7 +51,7 @@ never copy sleeve status or thresholds here.
 | `.venv/bin/python -m ruff check liquidity_migration scripts tests` | lint |
 | `cd engine && cargo test` | engine tests |
 | `cd engine && cargo run --release -- bench` | engine benchmark: re-measures the latency table in [docs/engine.md](docs/engine.md) |
-| `cd engine && cargo run --release -- fills --wal PATH` | what the trading cost: maker share, fee, arrival shortfall, markouts, per sleeve and symbol |
+| `cd engine && cargo run --release -- fills --wal PATH` | what the trading cost and what the positions made: maker share, fee, arrival shortfall, markouts, and closed round trips with their P&L |
 | `scripts/ops.sh help` | operator router: status, equity, reset, deploy, and the rest |
 | `python -m liquidity_migration --help` | research and data CLI |
 

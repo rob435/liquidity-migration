@@ -132,8 +132,10 @@ file.
     watched reading the funded account (552445993) under the mainnet profile —
     reference $100 tracking equity, gross at five times it.
 
-  - **There is no hourly Telegram digest.** Pause, resume and `ops.sh flatten`
-    work, on the engine's own path.
+  - **There is no hourly Telegram digest of what is held.** Every position that
+    closes is reported as it closes, with its P&L after fees, and a daily
+    summary adds them up; nothing pages what is open right now. Pause, resume
+    and `ops.sh flatten` work, on the engine's own path.
 
   - **There is no per-sleeve capital share, on either fleet or in either
     half of the system.** Every sleeve draws on the account-wide caps and any

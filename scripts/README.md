@@ -14,7 +14,7 @@ a group below, so moving a grouped script never edits a unit file.
 | `deploy_everything.command` | **the owner, by double-click** | the whole redeploy in one click: stop the fleet (funded units included), install GitHub main, activate — which starts the funded fleet when `REAL_MONEY` is armed — and verify. No prompts; clicking it is the decision. |
 | `run_authorized_runtime.sh` | systemd | the wrapper every unit's `ExecStart` names; dispatches into `runtime/` |
 | `deploy_vps_live.sh` | you (via `ops.sh deploy`) / GitHub Actions | the deploy engine; modes are tabulated in [`docs/operations.md`](../docs/operations.md) |
-| `runtime/` | systemd, via the wrapper | four files: the LONG and CARRY event engines, the fleet liveness check the two liveness timers run, and `notify_book_changes.py`, which the trade-notify timer runs to diff the target books |
+| `runtime/` | systemd, via the wrapper | four files: the LONG and CARRY event engines, the fleet liveness check the two liveness timers run, and `notify_book_changes.py`, which the trade-notify timer runs to put entries, exits and their P&L on the phone |
 | `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, rollout readiness, flatten |
 | `maintain/` | you, one-shot | ledger reset, universe and instrument-rule freezes, the candidate-universe schema-4 to schema-5 converter, demo-rule probe and its projection, order-permission check, venue-accounting reconcile |
 | `data/` | you or the refresh timer | point-in-time data-root and panel builders, residual-momentum precompute, and the Binance positioning-metrics refresh (`refresh_binance_metrics.py`, feeds the panel's `--metrics-root` columns) |

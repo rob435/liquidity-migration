@@ -24,6 +24,7 @@ pub mod replay;
 pub mod routing;
 pub mod runner;
 pub mod targets;
+pub mod trades;
 pub mod working;
 
 #[cfg(test)]

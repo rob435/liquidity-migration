@@ -24,6 +24,12 @@ wal_path = "/var/lib/liquidity-migration-engine/engine.wal"
 # path out and the producers block every entry, per cycle, quietly.
 heartbeat_path = "/var/lib/liquidity-migration-engine/heartbeat.json"
 
+# One line of JSON per position that closes: what it made, what it cost, how
+# long it was held. The trade-notify unit reads it and is what puts an exit on
+# the owner's phone with its numbers. Leave this path out and exits fall back
+# to the target books, which can say a position ended but never what it made.
+trades_path = "/var/lib/liquidity-migration-engine/trades.jsonl"
+
 group_flush_ms = 250
 
 # Rotate the log into a fresh segment once the current one passes this many

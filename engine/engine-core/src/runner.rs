@@ -95,6 +95,9 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     .await?;
 
     engine.watch_targets(books);
+    if let Some(trades) = assembly::trades(&settings) {
+        engine.write_trades(trades);
+    }
     if let Some(heartbeat) = assembly::heartbeat(
         &settings,
         claimed.account.clone(),

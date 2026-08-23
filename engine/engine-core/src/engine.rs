@@ -49,6 +49,7 @@ use crate::covers::CoverBook;
 use crate::ctx::{Ctx, Timers};
 use crate::execution::{self, Fills};
 use crate::heartbeat::{self, Heartbeat};
+use crate::trades::Trades;
 use crate::inflight::{self, LedgerOfOrders, OrderRegistry};
 use crate::reconcile;
 use crate::ledger::{LatencyLedger, Segment};
@@ -212,6 +213,9 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// The heartbeat file, when one was configured. Telemetry only: nothing
     /// in the loop reads it and nothing in the loop waits on it.
     heartbeat: Option<Heartbeat>,
+    /// Where closed round trips are written, when one was configured. Also
+    /// telemetry: an engine that cannot say what a trade made still made it.
+    trades: Option<Trades>,
     /// Whether boot's comparison against the venue left this engine free to
     /// add exposure. False latches: it is written into the log and read back
     /// on the next boot, so a restart cannot quietly clear it.
@@ -407,6 +411,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // Same records, same join: a restart must not forget whose
         // position is whose, or the other sleeve trades straight into it.
         let mut attribution = Attribution::from_records(effective);
+        let mut fills = Fills::default();
+        fills.seed_lots(effective);
         // Seeded by the same scans reconcile trusts and kept live from here
         // on, because a rotation restates them into the new segment's first
         // record and must say exactly what a replay would have said.
@@ -514,6 +520,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // rebuilding the residue from the old fills — by then another
             // sleeve may hold the symbol, and a venue no longer flat would
             // make the residue undroppable.
+            // The same names, out of the position accounting too: a claim the
+            // venue does not back has no exit price, so its trip cannot be
+            // reported and must not sit waiting for one.
+            let gone: std::collections::HashSet<(String, String)> = stale_claims
+                .iter()
+                .map(|(strategy, symbol, _)| {
+                    (
+                        names.get(strategy.0 as usize).cloned().unwrap_or_default(),
+                        market.table.name(*symbol).to_string(),
+                    )
+                })
+                .collect();
+            fills.lots().drop_symbols(|sleeve, symbol| {
+                gone.contains(&(sleeve.to_string(), symbol.to_string()))
+            });
             wal.append(&WalRecord::ClaimsDropped {
                 wall_ts_ms: clock::wall_ms(),
                 rows: stale_claims
@@ -603,12 +624,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             recovered_exec_ids,
             recent_fills,
             ledger: LatencyLedger::new(now),
-            // Deliberately not rebuilt from the log at boot, unlike
-            // attribution: this is a running score for the run in front of
-            // you, and the whole history is one `engine fills` away.
-            fills: Fills::default(),
+            // Its cost rows are a running score for the run in front of you,
+            // and the whole history is one `engine fills` away; its open
+            // positions were rebuilt above, because a close priced without
+            // its entry is a number about nothing.
+            fills,
             targets: TargetBooks::new(Vec::new()),
             heartbeat: None,
+            trades: None,
             leverage_authority: settings.leverage_authority,
             group_flush: Duration::from_millis(settings.group_flush_ms.max(1)),
             refresh_after_ns: settings.account_view_max_age_ms.saturating_mul(1_000_000) / 2,
@@ -853,6 +876,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Say how this engine is, in a file. Optional: with no heartbeat the
     /// engine writes nothing about itself and nothing outside the process can
     /// tell whether it is well.
+    pub fn write_trades(&mut self, trades: Trades) {
+        self.trades = Some(trades);
+    }
+
     pub fn write_heartbeat(&mut self, heartbeat: Heartbeat) {
         self.heartbeat = Some(heartbeat);
     }
@@ -1359,6 +1386,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // cheapest point in the tick, and it is in front of the account
         // refresh below, which is a venue round trip.
         self.beat(now);
+        self.record_trades();
         if self.ledger.due(now) {
             let record = self.ledger.record_for_wal(now);
             self.wal.append(&record)?;
@@ -1399,6 +1427,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         // Through the ordinary queue, so the flood cap counts these too.
         self.drain(now).await
+    }
+
+    /// Write down what any position that just closed made.
+    ///
+    /// Drained whether or not a file was configured: the list would otherwise
+    /// grow for the life of a process nobody asked to report on itself.
+    fn record_trades(&mut self) {
+        let closed = self.fills.take_closed();
+        if closed.is_empty() {
+            return;
+        }
+        if let Some(trades) = self.trades.as_mut() {
+            trades.write(&closed);
+        }
     }
 
     /// Write the heartbeat file, when one was asked for and its own cadence

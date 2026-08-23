@@ -30,7 +30,7 @@ The units live in `deploy/systemd/`; that directory's
 | Liveness | `demo-liveness`, `mainnet-liveness` (each with a `.timer`) | No credential, no ordering dependency on what it watches |
 | Owner controls | `telegram-controls` | No — pause/resume buttons, acting through `systemctl` and the sleeve toggles |
 | LLM ledger | `llm-ledger` (with a `.timer`) | No — no venue credential; it writes the LONG sleeve's candidates file |
-| Trade notifier | `trade-notify` (with a `.timer`) | No — it diffs the target books to the owner's DM |
+| Trade notifier | `trade-notify` (with a `.timer`) | No — it reads the target books and the engines' closed-trade files, and sends to the owner's DM |
 
 ```text
 market data -> strategy target -> durable inbox -> account kernel
