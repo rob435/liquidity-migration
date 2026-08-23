@@ -63,12 +63,6 @@ def account_id_for_environment(value: object) -> str:
     return _ACCOUNT_IDS[execution_environment(value)]
 
 
-def venue_realm_for_environment(value: object) -> VenueRealm:
-    """The venue realm this environment authenticates against."""
-
-    return _VENUE_REALMS[execution_environment(value)]
-
-
 def candidate_universe_realm(value: object) -> VenueRealm:
     """The realm whose frozen candidate universe this environment reads."""
 

@@ -88,9 +88,9 @@ pub struct VenueCaps {
 /// state. One implementation per venue; the engine picks one by name at
 /// assembly and never learns which it got.
 ///
-/// Implementations reach practice venues only. Whether a given adapter is
-/// allowed to touch real money is that adapter's own decision, made in its
-/// own crate — this trait deliberately cannot express an endpoint.
+/// Whether a given adapter is allowed to touch real money is that adapter's
+/// own decision, made in its own crate — this trait deliberately cannot
+/// express an endpoint.
 #[allow(async_fn_in_trait)]
 pub trait VenueGateway {
     /// What this venue can do. Read before asking it for anything exotic.

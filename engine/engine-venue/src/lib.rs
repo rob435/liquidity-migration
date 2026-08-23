@@ -1,7 +1,7 @@
 //! The venue adapters, and the one switch that picks between them.
 //!
-//! Four venues live under [`venues`], one module each: Bybit, Hyperliquid,
-//! Lighter, Variational. The engine names one in `engine.toml` and gets its
+//! Five venues live under [`venues`], one module each: Bybit, Hyperliquid,
+//! Lighter, MEXC, Variational. The engine names one in `engine.toml` and gets its
 //! gateway, its private order stream, and its public market feed — all three
 //! from the same name, so a config cannot half-switch.
 //!

@@ -15,37 +15,6 @@ from liquidity_migration.data.trade_lifecycle import _has_columns
 
 
 
-def _monthly_returns(baskets: pl.DataFrame) -> pl.DataFrame:
-    if baskets.is_empty():
-        return pl.DataFrame(
-            {
-                "month": pl.Series([], dtype=pl.String),
-                "strategy_return": pl.Series([], dtype=pl.Float64),
-                "long_return": pl.Series([], dtype=pl.Float64),
-                "short_return": pl.Series([], dtype=pl.Float64),
-                "cost_return": pl.Series([], dtype=pl.Float64),
-                "funding_return": pl.Series([], dtype=pl.Float64),
-                "baskets": pl.Series([], dtype=pl.Int64),
-                "trades": pl.Series([], dtype=pl.Int64),
-            }
-        )
-    return (
-        baskets.with_columns(pl.from_epoch(pl.col("exit_ts_ms"), time_unit="ms").dt.strftime("%Y-%m").alias("month"))
-        .group_by("month")
-        .agg(
-            [
-                ((pl.col("basket_return") + 1.0).product() - 1.0).alias("strategy_return"),
-                pl.col("long_return").sum().alias("long_return"),
-                pl.col("short_return").sum().alias("short_return"),
-                pl.col("cost_return").sum().alias("cost_return"),
-                pl.col("funding_return").sum().alias("funding_return"),
-                pl.len().alias("baskets"),
-                pl.col("trades").sum().alias("trades"),
-            ]
-        )
-        .sort("month")
-    )
-
 def _write_equity_benchmark_chart(
     output_dir: Path,
     *,

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.policy.account_execution_config import load_risk_policy_bytes
 from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
 
 
@@ -23,7 +22,6 @@ def _bytes(payload: dict[str, object]) -> bytes:
 def test_tracked_operational_profile_is_coherent_and_feeds_account_owner() -> None:
     data = PROFILE_PATH.read_bytes()
     profile = load_operational_profile_bytes(data)
-    policy = load_risk_policy_bytes(data)
 
     # Risk-on since 2026-08-21 (owner): one 3.0x multiplier on both sleeves —
     # carry's per-name weight 0.10 x 3.0 = 30% of sizing equity per new name,
@@ -34,7 +32,6 @@ def test_tracked_operational_profile_is_coherent_and_feeds_account_owner() -> No
     assert profile.hedge.entry_leverage == 5.0
     assert profile.long.notional_multiplier == 3.0
     assert profile.carry.notional_multiplier == 3.0
-    assert policy == profile.account_risk.to_policy()
 
 
 @pytest.mark.parametrize("producer", ("long", "carry", "hedge"))

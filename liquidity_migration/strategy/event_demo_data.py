@@ -30,7 +30,6 @@ from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR, coerce_int
 _logger = logging.getLogger(__name__)
 
 _DEMO_INSTRUMENTS_CACHE_TTL_MS = 60 * 60 * 1000
-_MATCH_BACKTEST_UNIVERSE_FLOOR = 300
 
 
 def _float(value: Any) -> float:

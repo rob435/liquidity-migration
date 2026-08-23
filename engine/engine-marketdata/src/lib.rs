@@ -1,13 +1,13 @@
 //! Public market data for every venue the engine can trade, parsed once into
 //! the engine's contract types.
 //!
-//! One module per venue — [`bybit`], [`hyperliquid`], [`lighter`],
-//! [`variational`] — the same four the order crate is laid out by, so an
+//! One module per venue — [`bybit`], [`hyperliquid`], [`lighter`], [`mexc`],
+//! [`variational`] — the same five the order crate is laid out by, so an
 //! exchange is one folder in each.
 //!
 //! The Bybit stream is public — no credentials — and it is the same price feed
-//! the demo account trades against. [`hyperliquid`], [`lighter`] and
-//! [`variational`] are the other three venues' feeds, and [`feeds`] is the one
+//! the demo account trades against. [`hyperliquid`], [`lighter`], [`mexc`] and
+//! [`variational`] are the other four venues' feeds, and [`feeds`] is the one
 //! type the engine holds:
 //! built from the same venue name that built the gateway, so orders and prices
 //! cannot come from two different venues.

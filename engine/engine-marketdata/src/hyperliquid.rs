@@ -413,10 +413,6 @@ impl Worker {
     }
 }
 
-/// Give a symbol an id, or return the one it already has. Ids are positions,
-/// assigned in the order symbols are first seen — the same rule every other
-/// table in the engine follows.
-
 /// The engine dropped the feed.
 struct Gone;
 

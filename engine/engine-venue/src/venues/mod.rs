@@ -1,4 +1,4 @@
-//! One module per venue. Four peers, not one venue and three exceptions.
+//! One module per venue. Five peers, not one venue and four exceptions.
 //!
 //! Each holds everything that is true of that venue and nothing that is true
 //! of another: its realm table (the only place its hosts are written down),
@@ -10,7 +10,7 @@
 //! [`crate::http`] the socket, [`crate::json`] the field reads, and
 //! [`crate::registry`] the name that picks one.
 //!
-//! Adding a fifth is a directory here, a `mod` line below, a realm table with
+//! Adding another is a directory here, a `mod` line below, a realm table with
 //! its hosts, and a variant in [`crate::registry::VenueName::ALL`] — plus its
 //! arms in the two switches, one here and one in `engine-marketdata`. Nothing
 //! in `engine-core` moves: the loop is generic over the gateway type. A venue

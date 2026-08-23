@@ -20,7 +20,6 @@ from liquidity_migration.data.archive import (
 )
 from liquidity_migration.data.archive_manifest import (
     ArchiveHourlyKlineApiDownloadConfig,
-    ArchiveHourlyKlineDownloadConfig,
     ArchiveManifestConfig,
     parse_symbol_directories,
     parse_trade_archive_entries,
@@ -34,7 +33,7 @@ from liquidity_migration.data.storage import read_dataset, write_dataset
 
 
 def test_archive_hourly_kline_default_resumes_written_partitions() -> None:
-    assert ArchiveHourlyKlineDownloadConfig().min_existing_bars == 1
+    assert ArchiveHourlyKlineApiDownloadConfig().min_existing_bars == 1
 
 
 def test_archive_hourly_api_kline_default_resumes_written_partitions() -> None:

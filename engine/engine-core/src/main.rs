@@ -1,4 +1,4 @@
-//! The engine binary: `run`, `bench`, `replay`, `fills`.
+//! The engine binary. `USAGE` below is the list of subcommands.
 //!
 //! One thread. The runtime is tokio's current-thread build on purpose — the
 //! whole point of the design is that a market message is turned into an order

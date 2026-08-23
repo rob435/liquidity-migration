@@ -12,8 +12,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-_SCALAR_TYPES = (str, bool, int, float)
-
 #: Keys the engine core reads out of a ``[[strategy]]`` block itself.
 _ENGINE_KEYS = ("name", "sleeve", "book_path")
 

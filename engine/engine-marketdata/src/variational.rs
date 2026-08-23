@@ -206,8 +206,6 @@ async fn poll_forever(
     }
 }
 
-/// Give a symbol an id, or return the one it already has.
-
 #[cfg(test)]
 mod tests {
     use super::*;

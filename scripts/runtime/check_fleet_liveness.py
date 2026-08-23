@@ -184,11 +184,6 @@ def _unverified_generation_cycle_alert(*, label: str, detail: str) -> Alert:
     )
 
 
-# require_recent_account_owner_health() prefixes every owner-reported blocked
-# status with this; every other error it raises means the evidence is missing,
-# stale, or from a previous generation.
-_OWNER_BLOCKED_PREFIX = "account owner is blocked:"
-
 # `systemctl is-enabled` values that mean "this unit is supposed to be running".
 # `static`, `disabled`, `indirect`, and `linked` are not: a timer-driven oneshot
 # is static and inactive between runs by design.

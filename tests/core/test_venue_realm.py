@@ -12,8 +12,8 @@ from liquidity_migration.account.execution_environment import (
     EXECUTION_ENVIRONMENT_CHOICES,
     ExecutionEnvironment,
     account_id_for_environment,
+    candidate_universe_realm,
     execution_environment,
-    venue_realm_for_environment,
 )
 from liquidity_migration.core.venue_realm import (
     REALM_CREDENTIAL_VARIABLES,
@@ -31,8 +31,8 @@ def test_every_environment_has_an_account_id_and_a_defined_realm() -> None:
     }
     assert len(set(account_ids.values())) == len(ExecutionEnvironment)
     assert account_ids[ExecutionEnvironment.MAINNET] == "bybit-mainnet-unified"
-    assert venue_realm_for_environment("demo") is VenueRealm.DEMO
-    assert venue_realm_for_environment("mainnet") is VenueRealm.MAINNET
+    assert candidate_universe_realm("demo") is VenueRealm.DEMO
+    assert candidate_universe_realm("mainnet") is VenueRealm.MAINNET
 
 
 def test_environment_and_realm_parsers_reject_every_fallback() -> None:

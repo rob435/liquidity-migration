@@ -22,7 +22,6 @@ import polars as pl
 from pyarrow import parquet as pq
 
 from liquidity_migration.core._common import safe_name
-from liquidity_migration.data.archive import download_public_trade_archive, read_public_trade_archive_klines_1h
 from liquidity_migration.data.ingestion import densify_trade_klines_1h
 from liquidity_migration.data.storage import dataset_path, read_dataset, write_dataset
 from liquidity_migration.core.symbol_codec import encode_symbol_partition
@@ -85,19 +84,6 @@ class ArchiveManifestConfig:
     v5_category: str = "linear"
     # Permit a known degraded rebuild to replace manifest partitions.
     allow_degraded: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class ArchiveHourlyKlineDownloadConfig:
-    start: str | None = None
-    end: str | None = None
-    symbols: tuple[str, ...] = ()
-    max_rows: int = 0
-    workers: int = 8
-    missing_only: bool = True
-    min_existing_bars: int = 1
-    discard_archives_after_success: bool = False
-    name: str = "bybit-public-trading-klines-1h"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1144,7 +1130,7 @@ def _select_manifest_rows(
     manifest: pl.DataFrame,
     *,
     data_root: str | Path,
-    config: ArchiveHourlyKlineDownloadConfig | ArchiveHourlyKlineApiDownloadConfig,
+    config: ArchiveHourlyKlineApiDownloadConfig,
     dataset: str = "klines_1h",
 ) -> list[dict[str, Any]]:
     frame = manifest
@@ -1215,76 +1201,6 @@ def _rows_by_symbol(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     for row in sorted(rows, key=lambda value: (str(value["symbol"]), str(value["date"]))):
         grouped.setdefault(str(row["symbol"]), []).append(row)
     return list(grouped.values())
-
-
-def _is_v5_listing_row(row: dict[str, Any]) -> bool:
-    """True for a synthesised v5-listing sentinel row (no real archive zip).
-
-    Match either ``url`` or ``source`` so scrape download paths skip it even
-    when only one sentinel field is present.
-    """
-    return (
-        str(row.get("url", "")) == V5_LISTING_URL_SENTINEL
-        or str(row.get("source", "")) == V5_LISTING_SOURCE
-    )
-
-
-def _download_one_archive_hourly_kline(
-    data_root: str | Path,
-    row: dict[str, Any],
-    *,
-    missing_only: bool,
-    min_existing_bars: int,
-    discard_archives_after_success: bool,
-) -> dict[str, Any]:
-    symbol = str(row["symbol"])
-    archive_date = str(row["date"])
-    url = str(row["url"])
-    if _is_v5_listing_row(row):
-        # v5-listing sentinel rows have no archive URL; the API path handles them.
-        return _download_result(row, status="skipped_v5_listing", bar_rows=0, valid_bar_rows=0)
-    existing_bar_rows = _kline_partition_bar_rows(data_root, dataset="klines_1h", symbol=symbol, date=archive_date)
-    existing_valid_bar_rows = _kline_partition_valid_bar_rows(data_root, dataset="klines_1h", symbol=symbol, date=archive_date)
-    required_bars = max(int(min_existing_bars), 1)
-    existing_count = existing_bar_rows if required_bars <= 1 else existing_valid_bar_rows
-    if missing_only and existing_count >= required_bars:
-        return _download_result(row, status="cached", bar_rows=existing_bar_rows, valid_bar_rows=existing_valid_bar_rows)
-    local_path = Path(data_root) / "archives" / symbol / Path(urlparse(url).path).name
-    try:
-        archive_path, klines = _download_and_read_hourly_archive(url, local_path, symbol=symbol)
-        if klines.is_empty():
-            return _download_result(row, status="empty", bar_rows=0, valid_bar_rows=0, archive_path=str(archive_path))
-        initial_price = previous_kline_close(data_root, symbol=symbol, archive_date=archive_date, dataset="klines_1h")
-        klines = densify_trade_klines_1h(klines, archive_date=archive_date, initial_price=initial_price)
-        write_dataset(klines, data_root, "klines_1h", append=False)
-        archive_deleted = False
-        cleanup_error = ""
-        if discard_archives_after_success:
-            archive_deleted, cleanup_error = _delete_local_archive(Path(data_root), Path(archive_path))
-        valid_bar_rows = _valid_price_rows(klines)
-        return _download_result(
-            row,
-            status="downloaded",
-            bar_rows=klines.height,
-            valid_bar_rows=valid_bar_rows,
-            archive_path=str(archive_path),
-            archive_deleted=archive_deleted,
-            archive_cleanup_error=cleanup_error,
-        )
-    except Exception as exc:  # noqa: BLE001 - archive failures must be reported per row
-        return _download_result(row, status="failed", bar_rows=0, valid_bar_rows=0, error=str(exc))
-
-
-def _download_and_read_hourly_archive(url: str, local_path: Path, *, symbol: str) -> tuple[Path, pl.DataFrame]:
-    archive_path = download_public_trade_archive(url, local_path)
-    try:
-        return archive_path, read_public_trade_archive_klines_1h(archive_path, symbol=symbol)
-    except Exception:
-        if Path(archive_path) == local_path and local_path.exists():
-            local_path.unlink(missing_ok=True)
-            archive_path = download_public_trade_archive(url, local_path)
-            return archive_path, read_public_trade_archive_klines_1h(archive_path, symbol=symbol)
-        raise
 
 
 def _download_result(
@@ -1398,18 +1314,6 @@ def _valid_price_rows(frame: pl.DataFrame) -> int:
     if len(price_cols) < 4 or frame.is_empty():
         return 0
     return int(frame.select(pl.all_horizontal([pl.col(col).is_not_null() for col in price_cols]).sum()).item())
-
-
-def _delete_local_archive(data_root: Path, archive_path: Path) -> tuple[bool, str]:
-    try:
-        archive_root = (data_root / "archives").resolve()
-        resolved = archive_path.resolve()
-        if not resolved.is_relative_to(archive_root):
-            return False, "archive outside data_root archives; retained"
-        resolved.unlink(missing_ok=True)
-        return True, ""
-    except Exception as exc:  # noqa: BLE001 - cleanup failure must not hide kline success
-        return False, str(exc)
 
 
 def _empty_manifest() -> pl.DataFrame:

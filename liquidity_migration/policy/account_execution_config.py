@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from liquidity_migration.account.account_contracts import (
-    AccountRiskPolicy,
     InstrumentRules,
 )
 from liquidity_migration.core.artifact_snapshot import StableFileSnapshot, read_stable_file
@@ -144,23 +143,6 @@ def load_demo_rules(
         snapshot.data,
         now_ns=now_ns,
         max_age_seconds=max_age_seconds,
-    )
-
-
-def load_risk_policy_bytes(data: bytes) -> AccountRiskPolicy:
-    payload = _load_json_bytes(data, label="risk policy")
-    if payload.get("kind") == "liquidity_migration_operational_profile":
-        # Producers and owner share one profile. The flat policy shape stays
-        # readable for isolated tools/tests.
-        from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
-
-        return load_operational_profile_bytes(data).account_risk.to_policy()
-    return AccountRiskPolicy(
-        max_component_gross_notional_usdt=float(payload["max_component_gross_notional_usdt"]),
-        max_account_gross_notional_usdt=float(payload["max_account_gross_notional_usdt"]),
-        max_initial_margin_usdt=float(payload["max_initial_margin_usdt"]),
-        max_leverage=float(payload["max_leverage"]),
-        quantity_tolerance=float(payload.get("quantity_tolerance") or 1e-12),
     )
 
 
