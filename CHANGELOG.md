@@ -16,6 +16,33 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 ~19:25-19:42 UTC — deployed `130a0bf0`, both engines crash-looped
+  on their own logs, fixed forward in `2a194e05`.** The fleet is on `2a194e05`,
+  all ten units active, both engines booted clean. Seventeen minutes with no
+  engine on either account; the producers, timers and Telegram controls stayed
+  up throughout, and no order was sent or missed because nothing was executing.
+  **What happened.** `WorkPolicy` gained two required fields, `hold_decision_px`
+  and `give_up_instead_of_crossing`. `WorkPolicy` is serialized into the WAL,
+  and the engine reads its whole log at boot, so the first binary carrying them
+  could not parse any frame written before them: `wal frame corrupt at offset
+  46825454: frame passed its checksum but is not a readable record: missing
+  field hold_decision_px`. Demo reached restart 42; mainnet failed on its own
+  log at offset 636. The commit that added the fields had been sitting on local
+  main undeployed since 01:16, so the deploy is what exposed it, not what caused
+  it. **The fix** is `#[serde(default)]` on both: the log is append-only,
+  self-describing JSON, so an old frame simply lacks the key and reads as false,
+  which is what the dial meant before it existed. `engine-wal/tests/wal.rs`
+  replays a record in the pre-field shape.
+  **The rule this is the second instance of.** The WAL holds every record whole
+  and forever, so a field added to anything serialized into it is a schema
+  change, not a dial — it must default on read or the engine cannot boot on its
+  own history. Adding a required field passes every test, because the tests
+  write and read the same shape.
+  Also deployed in the same commit: MEXC as venue five (compiled in, no config
+  names it), and the venue-plugin reform. The engine was rebuilt on the box —
+  `engine-ok` and `mainnet-engine-ok` both at the deployed commit — which is the
+  first evidence the MEXC adapter compiles in release on Linux.
+
 - **2026-08-23 — MEXC is the fifth venue: built, wired, and never run against
   the venue.** Selectable as `mexc_mainnet`; nothing deployed and nothing sent.
   Read the two facts that shape it before touching this adapter.
