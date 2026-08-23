@@ -160,7 +160,7 @@ parallel and integrate by type-check.
 | `engine-types` | every shared type and trait: events, intents, orders, log records, the `Strategy` trait, and the capability traits (`Wal`, `VenueGateway`, `RiskKernel`) |
 | `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
 | `engine-marketdata` | every venue's public feed: subscribe or poll, parse once into flat per-symbol state, stamp arrival time. Bybit's feed sequence-checks and resyncs on lost continuity; the other three do not. One enum, built from the same venue name as the gateway |
-| `engine-venue` | four venue adapters, one directory each, practice or funded by realm: each venue's own signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and balance reads, and the realm's private order stream |
+| `engine-venue` | five venue adapters, one directory each, practice or funded by realm: each venue's own signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and balance reads, and the realm's private order stream |
 | `engine-risk` | the capital controls: equity-anchored envelope, account-wide caps, stop-attach discipline. Fail-closed |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
 | `engine-strategies` | the plugs: a registry from name + TOML to a boxed `Strategy` |
@@ -495,7 +495,7 @@ back.
 
 ## The venues
 
-Four are compiled in, and one name in `engine.toml` picks between them:
+Five are compiled in, and one name in `engine.toml` picks between them:
 
 | `venue =` | What it is | Real money |
 | --- | --- | --- |
@@ -505,6 +505,7 @@ Four are compiled in, and one name in `engine.toml` picks between them:
 | `hyperliquid_mainnet` | Hyperliquid's funded account | **yes** |
 | `lighter_testnet` | Lighter's testnet rollup | no |
 | `lighter_mainnet` | Lighter's funded account | **yes** |
+| `mexc_mainnet` | MEXC's funded futures account — its only realm | **yes** |
 | `variational_mainnet` | Variational, read-only | no orders possible |
 
 **One name decides three things**: the gateway that sends orders, the private
@@ -561,6 +562,22 @@ it had been given something else.
   engine is upper-cased by the Python fleet's own books. The gateway folds the
   case and will trade them; the public feed names the coin in its subscription
   and cannot recover the venue's spelling, so it gets no book for them.
+- **MEXC has no practice account.** Bybit has a demo realm, Hyperliquid and
+  Lighter have testnets; MEXC publishes no testnet host for the futures API at
+  all, so `mexc_mainnet` is the only spelling and every MEXC order is real
+  money. Nothing in that adapter has run against the venue.
+- **MEXC counts contracts, not coins.** One contract is `contractSize` of the
+  base coin — 0.0001 BTC, 1 XRP, 100 TUT — and fewer than a quarter of its
+  contracts have that equal to 1. Sizes cross that boundary through the venue's
+  own contract table in both directions. Its ten inverse contracts (the
+  USD-quoted ones) are not listed at all: their contract size is denominated in
+  the quote currency, and the linear rule would size them out by the price of a
+  coin. MEXC also publishes `apiAllowed` per contract and sets it false on some,
+  independently of whether the contract is otherwise live.
+- **MEXC's REST and websocket are on different hosts.** The venue moved its REST
+  domain in January 2026 and left the websocket behind. The retired REST host
+  still answers, byte-identically and with no deprecation header, so nothing at
+  runtime would notice a fallback to it.
 - **Only Bybit keeps a stop on the position.** Hyperliquid and Lighter keep it
   as a separate reduce-only trigger order, so "is this position protected" is
   answered by reading the open orders, and a position with no such order comes

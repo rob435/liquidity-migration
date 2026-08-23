@@ -42,6 +42,7 @@ use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
 use crate::venues::bybit::{BybitGateway, BybitOrderFeed, VenueRealm};
 use crate::venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
 use crate::venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};
+use crate::venues::mexc::{MexcGateway, MexcOrderFeed, MexcRealm};
 use crate::venues::variational::{VariationalGateway, VariationalRealm};
 
 /// Bybit's practice account: play money on a real matching engine, and the
@@ -63,6 +64,11 @@ pub const LIGHTER_TESTNET: &str = "lighter_testnet";
 
 /// Lighter's funded account. Real money, and armed the same way.
 pub const LIGHTER_MAINNET: &str = "lighter_mainnet";
+
+/// MEXC's funded futures account. Real money, and the only MEXC realm there
+/// is — the venue publishes no testnet host, so there is no practice spelling
+/// of this name.
+pub const MEXC_MAINNET: &str = "mexc_mainnet";
 
 /// Variational's production endpoint, which publishes market data and no
 /// trading API. Selecting it gives an engine that reads the venue and refuses
@@ -88,6 +94,7 @@ pub enum VenueName {
     HyperliquidMainnet,
     LighterTestnet,
     LighterMainnet,
+    MexcMainnet,
     VariationalMainnet,
 }
 
@@ -100,13 +107,14 @@ impl VenueName {
     /// so this is still typed by hand; what it buys is that a variant left out
     /// is a venue no config can select, refused at boot, rather than one that
     /// works and is visited by no test.
-    pub const ALL: [VenueName; 7] = [
+    pub const ALL: [VenueName; 8] = [
         VenueName::BybitDemo,
         VenueName::BybitMainnet,
         VenueName::HyperliquidTestnet,
         VenueName::HyperliquidMainnet,
         VenueName::LighterTestnet,
         VenueName::LighterMainnet,
+        VenueName::MexcMainnet,
         VenueName::VariationalMainnet,
     ];
 
@@ -136,6 +144,7 @@ impl VenueName {
             VenueName::HyperliquidMainnet => HYPERLIQUID_MAINNET,
             VenueName::LighterTestnet => LIGHTER_TESTNET,
             VenueName::LighterMainnet => LIGHTER_MAINNET,
+            VenueName::MexcMainnet => MEXC_MAINNET,
             VenueName::VariationalMainnet => VARIATIONAL_MAINNET,
         }
     }
@@ -151,6 +160,7 @@ impl VenueName {
             VenueName::LighterTestnet | VenueName::LighterMainnet => {
                 crate::venues::lighter::VENUE_NAME
             }
+            VenueName::MexcMainnet => crate::venues::mexc::VENUE_NAME,
             VenueName::VariationalMainnet => crate::venues::variational::VENUE_NAME,
         }
     }
@@ -172,6 +182,7 @@ impl VenueName {
             VenueName::HyperliquidMainnet => HyperliquidRealm::Mainnet.as_str(),
             VenueName::LighterTestnet => LighterRealm::Testnet.as_str(),
             VenueName::LighterMainnet => LighterRealm::Mainnet.as_str(),
+            VenueName::MexcMainnet => MexcRealm::Mainnet.as_str(),
             VenueName::VariationalMainnet => VariationalRealm::Mainnet.as_str(),
         }
     }
@@ -192,6 +203,7 @@ impl VenueName {
             VenueName::HyperliquidMainnet => HyperliquidRealm::Mainnet.credential_vars(),
             VenueName::LighterTestnet => LighterRealm::Testnet.credential_vars(),
             VenueName::LighterMainnet => LighterRealm::Mainnet.credential_vars(),
+            VenueName::MexcMainnet => MexcRealm::Mainnet.credential_vars(),
             VenueName::VariationalMainnet => VariationalRealm::Mainnet.credential_vars(),
         }
     }
@@ -207,6 +219,7 @@ impl VenueName {
             VenueName::HyperliquidMainnet => HyperliquidRealm::Mainnet.is_real_money(),
             VenueName::LighterTestnet => LighterRealm::Testnet.is_real_money(),
             VenueName::LighterMainnet => LighterRealm::Mainnet.is_real_money(),
+            VenueName::MexcMainnet => MexcRealm::Mainnet.is_real_money(),
             VenueName::VariationalMainnet => VariationalRealm::Mainnet.is_real_money(),
         }
     }
@@ -224,6 +237,7 @@ pub enum Venue {
     Bybit(BybitGateway),
     Hyperliquid(HyperliquidGateway),
     Lighter(LighterGateway),
+    Mexc(MexcGateway),
     Variational(VariationalGateway),
 }
 
@@ -250,6 +264,7 @@ impl Venue {
             VenueName::LighterMainnet => {
                 Venue::Lighter(LighterGateway::new(LighterRealm::Mainnet, symbols)?)
             }
+            VenueName::MexcMainnet => Venue::Mexc(MexcGateway::new(MexcRealm::Mainnet, symbols)?),
             VenueName::VariationalMainnet => {
                 Venue::Variational(VariationalGateway::new(VariationalRealm::Mainnet, symbols)?)
             }
@@ -278,6 +293,9 @@ impl Venue {
                 LighterRealm::Testnet => VenueName::LighterTestnet,
                 LighterRealm::Mainnet => VenueName::LighterMainnet,
             },
+            Venue::Mexc(gw) => match gw.realm() {
+                MexcRealm::Mainnet => VenueName::MexcMainnet,
+            },
             Venue::Variational(gw) => match gw.realm() {
                 VariationalRealm::Mainnet => VenueName::VariationalMainnet,
             },
@@ -303,6 +321,8 @@ impl Venue {
             Venue::Bybit(_) => None,
             Venue::Hyperliquid(gw) => Some(gw.signer_address()),
             Venue::Lighter(gw) => Some(gw.public_key()),
+            // Not a secret: it rides in a header on every signed request.
+            Venue::Mexc(_) => None,
             Venue::Variational(_) => None,
         }
     }
@@ -317,6 +337,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.caps(),
             Venue::Hyperliquid(gw) => gw.caps(),
             Venue::Lighter(gw) => gw.caps(),
+            Venue::Mexc(gw) => gw.caps(),
             Venue::Variational(gw) => gw.caps(),
         }
     }
@@ -326,6 +347,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.send_order(req).await,
             Venue::Hyperliquid(gw) => gw.send_order(req).await,
             Venue::Lighter(gw) => gw.send_order(req).await,
+            Venue::Mexc(gw) => gw.send_order(req).await,
             Venue::Variational(gw) => gw.send_order(req).await,
         }
     }
@@ -339,6 +361,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.cancel_order(symbol, client_order_id).await,
             Venue::Hyperliquid(gw) => gw.cancel_order(symbol, client_order_id).await,
             Venue::Lighter(gw) => gw.cancel_order(symbol, client_order_id).await,
+            Venue::Mexc(gw) => gw.cancel_order(symbol, client_order_id).await,
             Venue::Variational(gw) => gw.cancel_order(symbol, client_order_id).await,
         }
     }
@@ -353,6 +376,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.amend_order(symbol, client_order_id, spec).await,
             Venue::Hyperliquid(gw) => gw.amend_order(symbol, client_order_id, spec).await,
             Venue::Lighter(gw) => gw.amend_order(symbol, client_order_id, spec).await,
+            Venue::Mexc(gw) => gw.amend_order(symbol, client_order_id, spec).await,
             Venue::Variational(gw) => gw.amend_order(symbol, client_order_id, spec).await,
         }
     }
@@ -362,6 +386,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.set_stop(symbol, trigger_px).await,
             Venue::Hyperliquid(gw) => gw.set_stop(symbol, trigger_px).await,
             Venue::Lighter(gw) => gw.set_stop(symbol, trigger_px).await,
+            Venue::Mexc(gw) => gw.set_stop(symbol, trigger_px).await,
             Venue::Variational(gw) => gw.set_stop(symbol, trigger_px).await,
         }
     }
@@ -371,6 +396,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.set_leverage(symbol, leverage).await,
             Venue::Hyperliquid(gw) => gw.set_leverage(symbol, leverage).await,
             Venue::Lighter(gw) => gw.set_leverage(symbol, leverage).await,
+            Venue::Mexc(gw) => gw.set_leverage(symbol, leverage).await,
             Venue::Variational(gw) => gw.set_leverage(symbol, leverage).await,
         }
     }
@@ -380,6 +406,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => VenueGateway::add_symbol(gw, symbol),
             Venue::Hyperliquid(gw) => VenueGateway::add_symbol(gw, symbol),
             Venue::Lighter(gw) => VenueGateway::add_symbol(gw, symbol),
+            Venue::Mexc(gw) => VenueGateway::add_symbol(gw, symbol),
             Venue::Variational(gw) => VenueGateway::add_symbol(gw, symbol),
         }
     }
@@ -389,6 +416,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.account_identity().await,
             Venue::Hyperliquid(gw) => gw.account_identity().await,
             Venue::Lighter(gw) => gw.account_identity().await,
+            Venue::Mexc(gw) => gw.account_identity().await,
             Venue::Variational(gw) => gw.account_identity().await,
         }
     }
@@ -398,6 +426,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.account_view().await,
             Venue::Hyperliquid(gw) => gw.account_view().await,
             Venue::Lighter(gw) => gw.account_view().await,
+            Venue::Mexc(gw) => gw.account_view().await,
             Venue::Variational(gw) => gw.account_view().await,
         }
     }
@@ -407,6 +436,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.instrument_rules().await,
             Venue::Hyperliquid(gw) => gw.instrument_rules().await,
             Venue::Lighter(gw) => gw.instrument_rules().await,
+            Venue::Mexc(gw) => gw.instrument_rules().await,
             Venue::Variational(gw) => gw.instrument_rules().await,
         }
     }
@@ -416,6 +446,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.working_orders().await,
             Venue::Hyperliquid(gw) => gw.working_orders().await,
             Venue::Lighter(gw) => gw.working_orders().await,
+            Venue::Mexc(gw) => gw.working_orders().await,
             Venue::Variational(gw) => gw.working_orders().await,
         }
     }
@@ -429,6 +460,7 @@ impl VenueGateway for Venue {
             Venue::Bybit(gw) => gw.executions(start_ms, end_ms).await,
             Venue::Hyperliquid(gw) => gw.executions(start_ms, end_ms).await,
             Venue::Lighter(gw) => gw.executions(start_ms, end_ms).await,
+            Venue::Mexc(gw) => gw.executions(start_ms, end_ms).await,
             Venue::Variational(gw) => gw.executions(start_ms, end_ms).await,
         }
     }
@@ -446,6 +478,11 @@ pub enum OrderFeeds {
     /// paces the engine's own resync instead, and the fills arrive from the
     /// venue's execution history — see `venues/lighter/ws.rs`.
     Lighter(LighterOrderFeed),
+    /// Not a socket either, and for a different reason from Lighter's: MEXC's
+    /// private channel does carry the engine's own order id, but it is entered
+    /// by a login frame that cannot be exercised anywhere except a funded
+    /// account. See `venues/mexc/ws.rs`.
+    Mexc(MexcOrderFeed),
     /// Variational publishes no account stream, because it publishes no
     /// account. The feed exists so the engine's loop is the same shape on
     /// every venue; it simply never delivers an update.
@@ -476,6 +513,7 @@ impl OrderFeeds {
             VenueName::LighterMainnet => {
                 OrderFeeds::Lighter(LighterOrderFeed::new(LighterRealm::Mainnet)?)
             }
+            VenueName::MexcMainnet => OrderFeeds::Mexc(MexcOrderFeed::new(MexcRealm::Mainnet)?),
             VenueName::VariationalMainnet => OrderFeeds::Silent,
         })
     }
@@ -487,6 +525,7 @@ impl OrderFeed for OrderFeeds {
             OrderFeeds::Bybit(feed) => OrderFeed::learn(feed, symbol, id),
             OrderFeeds::Hyperliquid(feed) => OrderFeed::learn(feed, symbol, id),
             OrderFeeds::Lighter(feed) => OrderFeed::learn(feed, symbol, id),
+            OrderFeeds::Mexc(feed) => OrderFeed::learn(feed, symbol, id),
             OrderFeeds::Silent => (),
         }
     }
@@ -496,6 +535,7 @@ impl OrderFeed for OrderFeeds {
             OrderFeeds::Bybit(feed) => feed.next_update().await,
             OrderFeeds::Hyperliquid(feed) => feed.next_update().await,
             OrderFeeds::Lighter(feed) => feed.next_update().await,
+            OrderFeeds::Mexc(feed) => feed.next_update().await,
             // Never ready, rather than an error every loop turn: the engine
             // waits on this inside a `select!`, and a feed that returned an
             // error immediately would spin the loop at full speed reporting a

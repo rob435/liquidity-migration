@@ -58,7 +58,14 @@ pub fn quantize_qty(qty: f64, rule: &InstrumentRule) -> Option<f64> {
 
 /// Shave float dust so 0.1 + 0.2-style artifacts do not leak into venue
 /// payloads: round to the step's own decimal precision.
-fn round_clean(value: f64, step: f64) -> f64 {
+///
+/// Public because quantizing an order is not the only venue-boundary
+/// conversion that carries dust. A venue that reports sizes in its own unit —
+/// MEXC counts contracts, not coins — multiplies on the way back, and `3 *
+/// 0.0001` is 0.00030000000000000003. A size that differs from the engine's
+/// own ledger in the last bit fails a reconciliation that is supposed to be
+/// exact.
+pub fn round_clean(value: f64, step: f64) -> f64 {
     let decimals = decimals_of(step);
     let scale = 10f64.powi(decimals);
     (value * scale).round() / scale

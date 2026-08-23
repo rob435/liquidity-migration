@@ -69,6 +69,17 @@ fn venue_hosts() -> Vec<VenueHosts> {
             ],
         },
         VenueHosts {
+            venue: "mexc",
+            domains: vec![[".mexc", ".com"].concat()],
+            allowed: vec![
+                // REST and the websocket are on different hosts here, and the
+                // venue moved only the REST one. Both are declared; nothing
+                // else on this domain is.
+                ["api", ".mexc", ".com"].concat(),
+                ["contract", ".mexc", ".com"].concat(),
+            ],
+        },
+        VenueHosts {
             venue: "variational",
             domains: vec![[".variational", ".io"].concat()],
             allowed: vec![
@@ -212,6 +223,11 @@ fn testnet_and_every_alternate_domain_are_absent() {
         ["api", ".byhkbit", ".com"].concat(),
         ["api", ".bybit-tr", ".com"].concat(),
         ["api", ".bybit", ".kz"].concat(),
+        // MEXC's undocumented third futures host. It answers REST and the
+        // websocket correctly and appears in no MEXC announcement, so it has
+        // no support commitment at all — and it is easy to find empirically
+        // and reach for.
+        ["futures", ".mexc", ".com"].concat(),
     ];
     for file in scanned_sources() {
         let text = std::fs::read_to_string(&file).unwrap();
@@ -223,7 +239,7 @@ fn testnet_and_every_alternate_domain_are_absent() {
 
 #[test]
 fn the_realm_tables_are_the_shipped_ones() {
-    use engine_venue::{HyperliquidRealm, LighterRealm, VariationalRealm, VenueRealm};
+    use engine_venue::{HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueRealm};
 
     let demo_rest = ["https://", &["api-demo", ".bybit", ".com"].concat()].concat();
     let demo_ws = ["wss://", &["stream-demo", ".bybit", ".com"].concat(), "/v5/private"].concat();
@@ -266,6 +282,16 @@ fn the_realm_tables_are_the_shipped_ones() {
     // of "which network" as the host is.
     assert_eq!(LighterRealm::Mainnet.chain_id(), 304);
     assert_eq!(LighterRealm::Testnet.chain_id(), 300);
+
+    // MEXC's two hosts are deliberately different: the January 2026 domain move
+    // took the REST host and left the websocket behind. Pinned so a later
+    // tidy-up that makes them match fails here rather than silently taking the
+    // market feed down.
+    let mexc_rest = ["https://", &["api", ".mexc", ".com"].concat()].concat();
+    let mexc_ws = ["wss://", &["contract", ".mexc", ".com"].concat(), "/edge"].concat();
+    assert_eq!(MexcRealm::Mainnet.rest_base(), mexc_rest);
+    assert_eq!(MexcRealm::Mainnet.websocket(), mexc_ws);
+    assert!(MexcRealm::Mainnet.is_real_money(), "MEXC has no practice realm");
 
     assert_eq!(
         VariationalRealm::Mainnet.rest_base(),

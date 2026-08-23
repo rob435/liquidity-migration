@@ -38,14 +38,27 @@ impl MexcRealm {
         }
     }
 
-    /// The futures REST host. The only MEXC host this engine knows.
+    /// The futures REST host.
+    ///
+    /// MEXC moved this from `contract.mexc.com` on 2026-01-12 and said support
+    /// for the old one ended on 2026-01-19. The old host still answers, and
+    /// serves byte-identical payloads with no deprecation header — so an
+    /// adapter built against it passes every test and dies with no warning on
+    /// the day the cutoff is actually enforced. This names the announced host,
+    /// and nothing falls back to the old one.
     pub fn rest_base(self) -> &'static str {
         match self {
-            MexcRealm::Mainnet => "https://contract.mexc.com",
+            MexcRealm::Mainnet => "https://api.mexc.com",
         }
     }
 
-    /// The futures websocket. Same host as REST.
+    /// The futures websocket, which is on a DIFFERENT host from REST.
+    ///
+    /// Not an oversight, and not a copy-paste that was missed. The January
+    /// 2026 domain move was REST-only: `wss://api.mexc.com/edge` answers 404,
+    /// and `wss://contract.mexc.com/edge` is the live stream. Anyone who reads
+    /// the two lines above as an inconsistency and makes them match will take
+    /// the market feed down.
     pub fn websocket(self) -> &'static str {
         match self {
             MexcRealm::Mainnet => "wss://contract.mexc.com/edge",
@@ -114,6 +127,27 @@ mod tests {
         // not, so there is no spelling of MEXC that is safe to run unarmed.
         assert!(MexcRealm::Mainnet.is_real_money());
         assert!(MexcRealm::Mainnet.as_str().contains("mainnet"));
+    }
+
+    #[test]
+    fn rest_and_the_websocket_are_deliberately_on_different_hosts() {
+        // The January 2026 domain move was REST-only. Pinned because the two
+        // lines look like a mistake and are not: wss://api.mexc.com/edge
+        // answers 404, and making them match takes the market feed down.
+        let rest = MexcRealm::Mainnet.rest_base();
+        let ws = MexcRealm::Mainnet.websocket();
+        assert!(rest.starts_with("https://api."), "{rest}");
+        assert!(ws.starts_with("wss://contract."), "{ws}");
+        let host_of = |url: &str| url.split("://").nth(1).unwrap().split('/').next().unwrap().to_string();
+        assert_ne!(host_of(rest), host_of(ws));
+    }
+
+    #[test]
+    fn the_retired_rest_host_is_not_reachable_from_this_table() {
+        // It still answers today, byte-identically and with no deprecation
+        // header, so nothing at runtime would notice a fallback to it until
+        // the announced cutoff is enforced.
+        assert!(!MexcRealm::Mainnet.rest_base().contains("contract."));
     }
 
     #[test]

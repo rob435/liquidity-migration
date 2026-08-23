@@ -16,6 +16,63 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — MEXC is the fifth venue: built, wired, and never run against
+  the venue.** Selectable as `mexc_mainnet`; nothing deployed and nothing sent.
+  Read the two facts that shape it before touching this adapter.
+  **(1) There is no practice account.** MEXC's demo trading is a UI feature with
+  no API host — seven candidate testnet hostnames resolve to nothing — so
+  `mexc_mainnet` is the only spelling, it is real money, and it refuses to build
+  without `REAL_MONEY` armed. The first MEXC order this engine ever sends will
+  be its first against the venue at all. Nothing here has been exercised beyond
+  recorded bytes.
+  **(2) Orders are counted in contracts.** One contract is `contractSize` of the
+  base coin, and only 253 of 1142 listed contracts have that equal to 1 — an
+  adapter passing base units through would be wrong on 78% of symbols and right
+  on enough to look correct. Proved from the venue's own numbers rather than its
+  prose, which never states the unit: implied price from
+  `amount24 / (volume24 x contractSize)` lands inside each symbol's own daily
+  band for twelve symbols spanning the full multiplier range, and MEXC's
+  documented margin example (`im 27.444375` on `holdVol 5` at 109777.5,
+  leverage 2) reconciles exactly only on that reading. The ten USD-quoted
+  inverse contracts are not listed at all — their contract size is in the quote
+  currency, so the linear rule would size them out by the price of a coin, and
+  `futureType` is 1 on both kinds so it cannot separate them; settling in
+  something other than the quote currency can.
+  Traps found and pinned, each of which passes every test today and fails later:
+  MEXC moved its REST domain to `api.mexc.com` in January 2026 and **left the
+  websocket on `contract.mexc.com`** — the announcement does not say so, and
+  `wss://api.mexc.com/edge` answers 404; the retired REST host still serves
+  byte-identical payloads with no deprecation header, and a third live host
+  (`futures.mexc.com`) appears in no MEXC document at all — both are in the
+  fence's forbidden list. The legacy doc set still marks order placement "under
+  maintenance" from 2022-07-25; the current changelog records it reopening
+  2026-03-31, which the live venue corroborates with `apiAllowed:true` on 1113
+  of 1142 contracts. `apiAllowed` is per contract, false on 29, and independent
+  of `state`. Fills renamed `isTaker` to `taker`, so the retired spelling reads
+  every fill as a maker fill; the absent field is read as taker.
+  What the adapter declares: `native_position_stop: true` by the owner's
+  decision, with every undocumented flag stated rather than defaulted —
+  `stopLossReverse=2` (a reversing stop opens an opposite position instead of
+  flattening), `volType=2` (the record's size tracks the position),
+  `positionMode=2` (hedge mode would hold two positions per symbol and
+  reduce-only is one-way only). `amend_in_place: false` — MEXC has no amend for
+  an ordinary order. Cross margin, because isolated makes the venue require a
+  leverage on every order and this engine decides leverage separately. Entries
+  carry their stop in the same signed call so a fill is never unprotected;
+  `set_stop` then works the position-level record. The private stream is a paced
+  resync like Lighter's, for a different reason: MEXC's channel does carry the
+  engine's own order id, but its login frame cannot be exercised anywhere except
+  a funded account, so fills come from the venue's history within one period.
+  The price feed uses `sub.ticker` — touch, mark, index and the eight-hourly
+  funding rate in one push — because `sub.depth` is gzip-compressed by default;
+  the ticker states no size, so quote quantities are zero for "not stated".
+  What is NOT proven: nothing in the signed path has ever reached MEXC. The
+  signature is pinned against vectors from an independent implementation and the
+  request shapes against recorded bytes, and that is all. Suite 1,070 green.
+  Also: the `intern` function three market-data feeds each held a byte-identical
+  copy of now lives once in `engine-marketdata/src/symbols.rs` — it assigns the
+  symbol ids that must agree position-for-position with the engine's own table.
+
 - **2026-08-23 — the venue plugin boundary: one list, and four checks that
   could not fail.** No behaviour change and nothing deployed; the engine sends
   exactly what it sent. What changed is which mistakes stay silent. Four

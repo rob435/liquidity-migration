@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use crate::symbols::intern;
 
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId};
 use engine_venue::venues::variational::parse::parse_stats;
@@ -206,15 +207,6 @@ async fn poll_forever(
 }
 
 /// Give a symbol an id, or return the one it already has.
-fn intern(ids: &Arc<RwLock<HashMap<String, SymbolId>>>, symbol: &str) -> SymbolId {
-    let mut ids = ids.write().expect("the symbol map lock is poisoned");
-    if let Some(id) = ids.get(symbol) {
-        return *id;
-    }
-    let id = SymbolId(u16::try_from(ids.len()).expect("more than 65535 symbols"));
-    ids.insert(symbol.to_string(), id);
-    id
-}
 
 #[cfg(test)]
 mod tests {

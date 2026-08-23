@@ -70,4 +70,5 @@ pub use registry::{
 pub use venues::bybit::{BybitGateway, BybitOrderFeed, VenueRealm, API_KEY_ENV, API_SECRET_ENV};
 pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
 pub use venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};
+pub use venues::mexc::{MexcGateway, MexcOrderFeed, MexcRealm};
 pub use venues::variational::{VariationalGateway, VariationalRealm};

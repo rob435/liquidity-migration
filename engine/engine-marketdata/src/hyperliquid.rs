@@ -18,6 +18,7 @@
 //! engine waits on `next_event` inside a `select!` and drops the losing
 //! branch's future several times a second, so a dial or a backoff sleep held
 //! inside it would start over from nothing every tick.
+use crate::symbols::intern;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -415,15 +416,6 @@ impl Worker {
 /// Give a symbol an id, or return the one it already has. Ids are positions,
 /// assigned in the order symbols are first seen — the same rule every other
 /// table in the engine follows.
-fn intern(ids: &Arc<RwLock<HashMap<String, SymbolId>>>, symbol: &str) -> SymbolId {
-    let mut ids = ids.write().expect("the symbol map lock is poisoned");
-    if let Some(id) = ids.get(symbol) {
-        return *id;
-    }
-    let id = SymbolId(u16::try_from(ids.len()).expect("more than 65535 symbols"));
-    ids.insert(symbol.to_string(), id);
-    id
-}
 
 /// The engine dropped the feed.
 struct Gone;

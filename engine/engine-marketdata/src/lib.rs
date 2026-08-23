@@ -20,10 +20,14 @@ pub mod bybit;
 pub mod feeds;
 pub mod hyperliquid;
 pub mod lighter;
+pub mod mexc;
 pub mod variational;
+
+mod symbols;
 
 pub use bybit::BybitPublicFeed;
 pub use feeds::MarketFeeds;
 pub use hyperliquid::HyperliquidPublicFeed;
 pub use lighter::LighterPublicFeed;
+pub use mexc::MexcPublicFeed;
 pub use variational::VariationalPublicFeed;
