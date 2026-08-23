@@ -1,10 +1,12 @@
 """Shared low-level helpers: time constants, formatting, coercion, date parsing."""
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -219,3 +221,10 @@ def _date_symbol_set(frame: pl.DataFrame) -> set[tuple[str, str]]:
     }
 
 
+def sha256_file(path: Path) -> str:
+    """Hex digest of a file, read in 1 MiB chunks so a large artifact never lands in memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

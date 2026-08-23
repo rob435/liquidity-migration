@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from liquidity_migration.account.account_kernel import read_account_journal
+from liquidity_migration.core._common import sha256_file
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.research.execution.trade_diagnostics import (
     build_execution_diagnostics,
@@ -31,14 +32,6 @@ def _git(*args: str) -> str:
         text=True,
     )
     return result.stdout.strip()
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -124,7 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest["files"] = {
             "execution_tca.parquet": {
                 "bytes": parquet.stat().st_size,
-                "sha256": _sha256(parquet),
+                "sha256": sha256_file(parquet),
             }
         }
         manifest.pop("manifest_payload_sha256", None)

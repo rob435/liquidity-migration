@@ -9,7 +9,7 @@ from typing import Any
 
 import polars as pl
 
-from liquidity_migration.core._common import _float_or_nan, _parse_day
+from liquidity_migration.core._common import _float_or_nan, _parse_day, finite_float
 from liquidity_migration.data.trade_lifecycle import _has_columns
 
 
@@ -336,21 +336,14 @@ def _chart_metric_tiles(metrics: dict[str, Any] | None) -> list[tuple[str, str, 
     if not metrics:
         return []
 
-    def finite(value: Any) -> float | None:
-        try:
-            out = float(value)
-        except (TypeError, ValueError):
-            return None
-        return out if math.isfinite(out) else None
-
     def pct(key: str, *, signed: bool = True) -> str | None:
-        value = finite(metrics.get(key))
+        value = finite_float(metrics.get(key))
         if value is None:
             return None
         return f"{value:+.2f}%" if signed else f"{value:.2f}%"
 
     def num(key: str, digits: int = 2) -> str | None:
-        value = finite(metrics.get(key))
+        value = finite_float(metrics.get(key))
         if value is None:
             return None
         return f"{value:.{digits}f}"
@@ -362,7 +355,7 @@ def _chart_metric_tiles(metrics: dict[str, Any] | None) -> list[tuple[str, str, 
         ("Worst Day", pct("worst_day_pct", signed=False), (185, 28, 28, 255)),
         ("Sharpe", num("sharpe_daily_ann"), (7, 14, 31, 255)),
         ("MAR", num("mar"), (7, 14, 31, 255)),
-        ("Years", (f"{v:.2f}" if (v := finite(metrics.get("years"))) is not None else None), (7, 14, 31, 255)),
+        ("Years", (f"{v:.2f}" if (v := finite_float(metrics.get("years"))) is not None else None), (7, 14, 31, 255)),
     ]
     return [(label, value, color) for label, value, color in candidates if value is not None]
 

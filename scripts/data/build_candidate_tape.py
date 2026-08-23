@@ -51,7 +51,7 @@ def _install_import_only_windows_fcntl_guard() -> None:
 
 _install_import_only_windows_fcntl_guard()
 
-from liquidity_migration.core._common import MS_PER_HOUR, exact_duration_ms  # noqa: E402
+from liquidity_migration.core._common import MS_PER_HOUR, exact_duration_ms, sha256_file  # noqa: E402
 from liquidity_migration.rules.long_native import (  # noqa: E402
     _classify_entry,
     build_long_features,
@@ -95,14 +95,6 @@ def _git(*args: str, check: bool = True) -> str:
         text=True,
     )
     return result.stdout.strip()
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _date_range(start: dt.date, end: dt.date) -> list[dt.date]:
@@ -158,7 +150,7 @@ def _aggregate_file_identity(paths: Sequence[Path], *, relative_to: Path) -> dic
     total_bytes = 0
     for path in sorted(set(paths)):
         stat = path.stat()
-        file_hash = _sha256(path)
+        file_hash = sha256_file(path)
         relative = path.relative_to(relative_to).as_posix()
         digest.update(canonical_payload({"path": relative, "bytes": stat.st_size, "sha256": file_hash}))
         digest.update(b"\n")
@@ -561,7 +553,7 @@ def _validate_existing_output(out: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     for name, identity in manifest.get("files", {}).items():
         path = out / name
-        if not path.is_file() or _sha256(path) != identity.get("sha256"):
+        if not path.is_file() or sha256_file(path) != identity.get("sha256"):
             raise RuntimeError(f"existing candidate output failed identity check: {path}")
     return manifest
 
@@ -624,7 +616,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "residual_momentum": (
             {
                 "path": str(rmom_path),
-                "sha256": _sha256(rmom_path),
+                "sha256": sha256_file(rmom_path),
                 "consumed": False,
                 "rejection": "missing is_provisional provenance",
             }
@@ -641,7 +633,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "config_identities": _config_identities(args.start, args.end),
         "cost_config": {
             "path": "configs/volume_alpha.default.yaml",
-            "sha256": _sha256(REPO / "configs/volume_alpha.default.yaml"),
+            "sha256": sha256_file(REPO / "configs/volume_alpha.default.yaml"),
             "hash_scope": "native worktree bytes",
             "platform": sys.platform,
         },
@@ -751,11 +743,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "files": {
                 "decision_funnel.parquet": {
                     "bytes": funnel_path.stat().st_size,
-                    "sha256": _sha256(funnel_path),
+                    "sha256": sha256_file(funnel_path),
                 },
                 "path_labels.parquet": {
                     "bytes": labels_path.stat().st_size,
-                    "sha256": _sha256(labels_path),
+                    "sha256": sha256_file(labels_path),
                 },
             },
             "explicit_non_conclusions": [

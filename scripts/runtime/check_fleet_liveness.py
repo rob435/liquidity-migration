@@ -1472,12 +1472,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="bound empirical demo-rule receipt; warns during its final 24 hours ('' to skip)",
     )
     p.add_argument(
-        "--max-account-capture-age-min",
-        type=float,
-        default=3.0,
-        help="critical alert if canonical account-owner live L2 is older than this",
-    )
-    p.add_argument(
         "--max-account-health-age-min",
         type=float,
         default=1.0,
@@ -1601,15 +1595,13 @@ def main() -> int:
                 realm="mainnet" if mainnet else "demo",
             )
         )
-    # The account journal is not read here any more: no engine crate names the
-    # journal, so the file is frozen and a check against it can never clear.
+    # Do not check the account journal here: no engine crate names it, so the
+    # file is frozen and such a check can never clear. The engine's own account
+    # reading, checked in the heartbeat above, is what has a live writer.
     #
-    # What replaced it is the engine's own account reading, checked inside the
-    # heartbeat above, which has a live writer. What is genuinely not replaced
-    # is `account_health_unhealthy` — "the exchange and our records disagree".
-    # The engine reconciles but publishes no mismatch, so nothing watches that
-    # today. `gather_account_health_alerts` is kept, uncalled, because it is the
-    # specification for whatever writes that evidence next.
+    # Nothing watches "the exchange and our records disagree" today — the engine
+    # reconciles but publishes no mismatch. `gather_account_health_alerts` is
+    # kept, uncalled, as the specification for whatever writes that evidence.
     if not mainnet and long_root is not None:
         alerts.extend(
             gather_long_alerts(

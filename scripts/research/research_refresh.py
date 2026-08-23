@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO))
 import polars as pl  # noqa: E402
 
 from liquidity_migration.data.binance_vision import validate_usdm_usdt_symbols  # noqa: E402
+from liquidity_migration.core._common import sha256_file  # noqa: E402
 from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
 from liquidity_migration.strategy.carry_demo import CARRY_CONFIG_PATH  # noqa: E402
 
@@ -104,14 +105,6 @@ def _git(*args: str) -> str:
         text=True,
     )
     return result.stdout.strip()
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _safe_step_name(value: str) -> str:
@@ -816,7 +809,7 @@ def _backtest_step(
         expected_paths=(expected,),
         fingerprint_extra={
             "coverage": coverage_snapshot(root, venue=venue),
-            "rmom_sha256": _sha256(root / "residual_momentum.parquet")
+            "rmom_sha256": sha256_file(root / "residual_momentum.parquet")
             if (root / "residual_momentum.parquet").is_file()
             else None,
         },
@@ -916,7 +909,7 @@ def _run_summary(
                     "venue": venue,
                     "path": str(path),
                     "bytes": path.stat().st_size,
-                    "sha256": _sha256(path),
+                    "sha256": sha256_file(path),
                 }
             )
     material = {
@@ -954,7 +947,7 @@ def _manifest_configuration(args: argparse.Namespace) -> dict[str, Any]:
         if not path.is_absolute():
             path = REPO / path
         path = path.resolve(strict=True)
-        preregistration = {"path": str(path), "sha256": _sha256(path)}
+        preregistration = {"path": str(path), "sha256": sha256_file(path)}
     return {
         "end_exclusive": end.isoformat(),
         "window_start": start.isoformat(),

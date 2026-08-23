@@ -16,6 +16,28 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-23 — the last of the audit list: a dead watchdog flag, a duplicated
+  digest, and a comment that outlived its narration.** No behaviour change.
+  `check_fleet_liveness.py` declared `--max-account-capture-age-min` and read
+  its dest nowhere — not in the units, not in a script, not in a test. Gone.
+  The comment above the LONG alert block kept two standing decisions worth
+  keeping — do not check the frozen account journal, because such a check can
+  never clear; and `gather_account_health_alerts` stays uncalled as the
+  specification for whatever writes mismatch evidence next — inside six lines of
+  narration about what replaced what. The decisions stay, the narration does not.
+  `_sha256` was byte-identical in `research_refresh.py`,
+  `build_trade_diagnostics.py` and `build_candidate_tape.py`; it is now
+  `core._common.sha256_file`, and the three scripts import it. A local `finite`
+  closure in `volume_events_charts.py` re-implemented
+  `core._common.finite_float` exactly and now calls it.
+  **Checked and deliberately left.** `liquidity_migration/runtime/` is an empty
+  package, and `liquidity_migration/README.md` names it as the import order's
+  sink — architecture, not dead code. `FunnelJsonlWriter` has no production
+  constructor, but `DecisionFunnelObserver` is a live protocol the LONG producer
+  takes and research drives the writer by hand. `_flatness` is duplicated across
+  two ad-hoc research probes; sharing a venue-touching helper for sixteen lines
+  buys less than it costs.
+
 - **2026-08-23 — the second cleanup pass: a dead download path, five unused
   names, and four docs that described the system wrongly.** No behaviour change
   outside the one noted below; suite 2414 Python (two tests went with the code
