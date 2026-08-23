@@ -218,15 +218,17 @@ file.
 
 ### Execution and market data
 
-- **The engine trades four venues, and one name in `engine.toml` picks which.**
+- **The engine trades five venues, and one name in `engine.toml` picks which.**
   The demo engine runs `venue = "bybit_demo"` and the funded one
   `venue = "bybit_mainnet"`; the other names are
   `hyperliquid_testnet`, `hyperliquid_mainnet`,
-  `lighter_testnet`, `lighter_mainnet`, `variational_mainnet`. That one name
+  `lighter_testnet`, `lighter_mainnet`, `mexc_mainnet`,
+  `variational_mainnet`. MEXC has no testnet at all, so `mexc_mainnet` is its
+  only spelling and its first order would be real money. That one name
   decides the gateway, the private order stream and the public market feed
   together, so a config cannot send orders to one venue and price them off
   another's book. **Nothing has ever been sent to any venue but Bybit** — the
-  three new adapters are built, fenced and tested, and no order has left the
+  four new adapters are built, fenced and tested, and no order has left the
   box for any of them. Lighter also cannot open a position yet: it has no
   leverage transaction here, and the engine refuses an entry naming a leverage
   it cannot set. `REAL_MONEY` is still the single arming switch, and it
