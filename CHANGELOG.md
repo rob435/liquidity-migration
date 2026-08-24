@@ -33,7 +33,17 @@ edit STATE.md to match.
   `account-execution-mainnet.env` and restart the two LONG producers.
   Same day, STATE reflects the funded account's first live state: ~$160
   equity, two LONG positions held (ETHUSDT, PUMPFUNUSDT) under the 3.0-era
-  sizing.
+  sizing. Deployed `55acea58` via `staged --stop-first`; both LONG producer
+  processes verified reading the 6.0 dial and the installed mainnet profile
+  re-rendered at 6.0. The restart's boot reconciliation latched the mainnet
+  may-open gate on one standing finding — the venue holds 0.01 ETH, the log
+  accounted 0.024 (hand-trade era debt) — cleared with `engine
+  reconcile-clear --execute` after reading the table: PUMPFUN matched
+  exactly, ETH restated to the venue's 0.01, `latch_cleared` receipt in the
+  WAL, `may_open` back to true with both positions intact. Also found: the
+  retired Python owner's `account_owner_health.json` is a frozen tombstone
+  (stamped 2026-08-14, the order-path deletion day) — live equity is the
+  engine heartbeat, which the producers already read.
 
 - **2026-08-23 — the first trade is news, not history.** `trade-notify`
   baselines a closed-trade file it has never seen, because such a file holds
