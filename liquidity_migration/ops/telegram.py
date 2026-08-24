@@ -27,6 +27,7 @@ def send_telegram_message(
     config: TelegramConfig | None = None,
     enabled: bool = True,
     channel: str = "main",
+    parse_mode: str | None = None,
 ) -> bool:
     # True on 2xx; False when disabled or the token/chat_id vars are absent.
     # Transport errors propagate — callers that must not crash wrap this
@@ -34,6 +35,10 @@ def send_telegram_message(
     #
     # channel="main" is the trading story; channel="alerts" is the watchdog /
     # needs-fixing line and goes to TELEGRAM_ALERT_CHAT_ID when that is set.
+    #
+    # parse_mode="HTML" is opt-in per call because it changes what a message
+    # may contain: Telegram rejects a stray `<` outright, so only a caller
+    # that escapes its own text may ask for it. The watchdog sends plain.
     if channel not in ("main", "alerts"):
         raise ValueError(f"unknown telegram channel {channel!r}")
     if not enabled:
@@ -46,13 +51,14 @@ def send_telegram_message(
     if not token or not chat_id:
         return False
 
-    payload = urllib.parse.urlencode(
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "disable_web_page_preview": "true",
-        }
-    ).encode("utf-8")
+    fields = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": "true",
+    }
+    if parse_mode is not None:
+        fields["parse_mode"] = parse_mode
+    payload = urllib.parse.urlencode(fields).encode("utf-8")
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
         data=payload,

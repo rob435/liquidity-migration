@@ -16,6 +16,21 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-24 — The phone's trade messages get a design (owner directed).**
+  The trade notifier's vocabulary shrinks to three dots — 🟢 made money,
+  🔴 lost it, ⚪ neutral — and the verdict leads: an exit's first line is the
+  dot, the sleeve, and the net in bold, because the phone's notification
+  preview shows one line. Sleeves act in verbs (enters, shorts, exits,
+  covers, closed), prices carry four significant figures, the funded account
+  leads with FUNDED, and the daily summary opens with the day's own colour
+  over a monospace win–loss table. Messages are Telegram HTML now:
+  `send_telegram_message` grows an opt-in `parse_mode` argument, opt-in
+  because HTML rejects a stray `<` — the notifier escapes its text and asks
+  for it, the watchdog stays plain. The notifier's state schema is unchanged,
+  so the changeover run sends nothing spurious. `scripts/runtime/
+  notify_book_changes.py`, `liquidity_migration/ops/telegram.py`,
+  `docs/notifications.md`.
+
 - **2026-08-24 — LLM gate prompt v7: the crime-pump playbook joins the
   rubric (owner approved).** The driver-judgment prompt
   (`scripts/research/llm_driver_ledger.py`) moves to

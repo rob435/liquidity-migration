@@ -45,23 +45,31 @@ watchdog's problem.
 [`scripts/runtime/notify_book_changes.py`](../scripts/runtime/notify_book_changes.py), on a 5-minute
 timer, reading two kinds of file for two different questions.
 
+The vocabulary is three dots and nothing else: 🟢 made money, 🔴 lost it, ⚪ neutral. The verdict and
+the money are the first line, bold, because a phone's notification preview shows one line and that line
+is the whole point. Messages are Telegram HTML (`parse_mode=HTML`), which is what the bold and the
+monospace table below are.
+
 **Entries come from the target books.** A symbol appearing with size is a sleeve's decision, and that
 is news the moment it is decided, before anything fills.
 
-    ⚡ CARRY entry ONGUSDT $478.10
+    ⚪ CARRY enters ONGUSDT · $478
+    ⚪ EXODUS shorts COTIUSDT · $536
+    ⚪ FUNDED LONG enters ETHUSDT · $25.74
 
 **Exits come from the engine**, out of the closed-trade file it appends a line to whenever a position
 goes flat (`trades_path` in `engine.toml`). An exit is worth reading only with its numbers beside it:
 
-    🟢 CARRY exit ONGUSDT long
-    +$16.28 after fees · +324 bp · held 8h 38m
-    in 0.06845589 → out 0.07072479 · $503 · 2 fills
-    rested 100% · slip +1.1 bp · fee $0.55
+    🟢 CARRY +$16.28 · ONGUSDT
+    long 8h 38m · 0.06846 → 0.07072 · +324 bp
+    $503 · fee $0.55 · maker 100% · slip +1.1 bp
 
-`rested` is the share of the traded notional that earned the spread instead of paying it (maker share);
-`slip` is how far the fills landed from the price on the screen when their orders left (arrival
-shortfall), positive being adverse. Both are `docs/architecture.md` §Trade diagnostics numbers, computed
-by the engine off its own log.
+Line one is the verdict, line two the trade, line three what it cost. `maker` is the share of the
+traded notional that earned the spread instead of paying it; `slip` is how far the fills landed from
+the price on the screen when their orders left (arrival shortfall), positive being adverse. Both are
+`docs/architecture.md` §Trade diagnostics numbers, computed by the engine off its own log. Prices carry
+four significant figures — past that they are texture, and the basis-point figure already says what
+moved.
 
 **"After fees" means after fees and nothing else.** The crowd fee (funding) is settled into the wallet
 on the venue's own eight-hourly clock and the engine is never told about it, so no number here carries
@@ -70,9 +78,8 @@ costs — not the whole of what the sleeve earned.
 
 A close the engine cannot price says so rather than claiming a zero:
 
-    ⚪ CARRY exit ONGUSDT long
-    out 0.0886 · 5,056
-    what it made is not in the engine's current log
+    ⚪ CARRY closed ONGUSDT · long · out 0.0886
+    opened before this log, so what it made is unknown
 
 That happens when the fills that opened the position are in a log segment boot no longer replays. The
 quantity survives the rotation in the new segment's restatement and the prices do not, so the close is
@@ -81,14 +88,21 @@ reported and the money is not.
 **One run is one message.** Everything a 5-minute run has to say goes out together, split only when it
 passes what Telegram will take.
 
-**One daily summary**, on the first run after midnight UTC, over the day that just ended: how many
-closed, how many won, the total after fees, a line per sleeve, the best and the worst, and the funding
-caveat again. It is stamped by the day it covers, so a run that could not send retries rather than
-skipping it.
+**One daily summary**, on the first run after midnight UTC, over the day that just ended. Its dot is
+the day's colour, and the per-sleeve lines are a monospace win–loss table:
+
+    🟢 Sun 23 Aug · 8 trips · 6 won · +$103.90
+    CARRY    3–0  +$62.40
+    EXODUS   3–2  +$41.50
+    best +$34.05 · EXODUS COTIUSDT
+    worst -$2.26 · EXODUS COTIUSDT
+    after fees — funding settles to the wallet separately
+
+It is stamped by the day it covers, so a run that could not send retries rather than skipping it.
 
 With no closed-trade file at all — an engine whose config names no `trades_path` — exits fall back to
-the books: `⚪ CARRY exit ONGUSDT`, with nothing about what it made. That is the only thing the books
-can say.
+the books: `⚪ CARRY exits ONGUSDT`, `⚪ EXODUS covers ONGUSDT` — with nothing about what they made,
+which is the only thing the books can say.
 
 ## Owner control buttons
 

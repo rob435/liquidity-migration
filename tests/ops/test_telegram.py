@@ -487,3 +487,20 @@ def test_429_retry_returns_false_on_non_2xx_retry(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
     assert send_telegram_message("hi") is False
     assert calls["n"] == 2
+
+
+def test_parse_mode_rides_in_the_payload_only_when_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_credentials(monkeypatch, token="t", chat_id="c")
+    calls = _install_urlopen(monkeypatch, lambda req: FakeResponse(200))
+
+    assert send_telegram_message("<b>bold</b>", parse_mode="HTML") is True
+    assert send_telegram_message("plain") is True
+
+    first = urllib.parse.parse_qs(calls[0]["data"].decode())
+    second = urllib.parse.parse_qs(calls[1]["data"].decode())
+    assert first["parse_mode"] == ["HTML"]
+    # The watchdog sends plain text that may contain a stray `<`; a default
+    # parse mode would have Telegram reject those messages outright.
+    assert "parse_mode" not in second

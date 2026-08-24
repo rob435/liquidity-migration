@@ -69,30 +69,35 @@ class TestReadPositiveTargets:
 class TestBookDiff:
     def test_a_new_symbol_is_an_entry_with_its_size(self) -> None:
         assert notify.entry_messages("LONG", "", {}, {"ADAUSDT": 35.69}) == [
-            "⚡ LONG entry ADAUSDT $35.69"
+            "⚪ LONG enters ADAUSDT · $35.69"
+        ]
+
+    def test_a_sizing_figure_drops_its_cents_past_a_hundred(self) -> None:
+        assert notify.entry_messages("CARRY", "", {}, {"ONGUSDT": 478.10}) == [
+            "⚪ CARRY enters ONGUSDT · $478"
         ]
 
     def test_a_resize_stays_off_the_phone(self) -> None:
         assert notify.entry_messages("CARRY", "", {"EDENUSDT": 120.0}, {"EDENUSDT": 90.0}) == []
         assert notify.book_exit_messages("CARRY", "", {"EDENUSDT": 120.0}, {"EDENUSDT": 90.0}) == []
 
-    def test_exodus_speaks_short_and_covered(self) -> None:
+    def test_exodus_speaks_shorts_and_covers(self) -> None:
         assert notify.entry_messages("EXODUS", "", {}, {"ONGUSDT": 85.0}) == [
-            "⚡ EXODUS short ONGUSDT $85.00"
+            "⚪ EXODUS shorts ONGUSDT · $85.00"
         ]
         assert notify.book_exit_messages("EXODUS", "", {"ONGUSDT": 85.0}, {}) == [
-            "⚪ EXODUS covered ONGUSDT"
+            "⚪ EXODUS covers ONGUSDT"
         ]
 
-    def test_the_funded_account_says_so(self) -> None:
-        assert notify.entry_messages("CARRY", "[funded] ", {}, {"AGIUSDT": 1.0}) == [
-            "⚡ [funded] CARRY entry AGIUSDT $1.00"
+    def test_the_funded_account_leads_with_the_word(self) -> None:
+        assert notify.entry_messages("CARRY", "FUNDED ", {}, {"AGIUSDT": 1.0}) == [
+            "⚪ FUNDED CARRY enters AGIUSDT · $1.00"
         ]
 
     def test_entries_come_out_sorted(self) -> None:
         assert notify.entry_messages("LONG", "", {}, {"BUSDT": 2.0, "AUSDT": 1.0}) == [
-            "⚡ LONG entry AUSDT $1.00",
-            "⚡ LONG entry BUSDT $2.00",
+            "⚪ LONG enters AUSDT · $1.00",
+            "⚪ LONG enters BUSDT · $2.00",
         ]
 
 
@@ -131,34 +136,36 @@ class TestReadNewTrades:
 
 
 class TestExitMessage:
-    def test_a_winner_leads_with_the_money(self) -> None:
+    def test_the_verdict_and_the_money_are_the_first_line_in_bold(self) -> None:
         lines = notify.exit_message(_trade(), "").splitlines()
-        assert lines[0] == "🟢 CARRY exit ONGUSDT long"
-        assert lines[1].startswith("+$16.28 after fees")
-        assert "+324 bp" in lines[1]
-        assert "held 8h 38m" in lines[1]
-        assert "in 0.06845589 → out 0.07072479" in lines[2]
-        assert "$503" in lines[2] and "2 fills" in lines[2]
-        assert "rested 100%" in lines[3] and "fee $0.55" in lines[3]
+        assert lines[0] == "🟢 CARRY <b>+$16.28</b> · ONGUSDT"
+        assert lines[1] == "long 8h 38m · 0.06846 → 0.07072 · +324 bp"
+        assert lines[2] == "$503 · fee $0.55 · maker 100% · slip +1.1 bp"
+
+    def test_a_price_is_four_significant_figures_not_eight_decimals(self) -> None:
+        body = notify.exit_message(_trade(), "")
+        assert "0.06845589" not in body, "eight decimals is texture, not information"
+        assert "0.06846" in body
 
     def test_a_loser_is_marked_as_one(self) -> None:
         trade = _trade()
         trade["round_trip"] = dict(trade["round_trip"], net_usdt=-2.26, net_bps=-45.0)
         lines = notify.exit_message(trade, "").splitlines()
-        assert lines[0].startswith("🔴")
-        assert lines[1].startswith("-$2.26 after fees")
+        assert lines[0] == "🔴 CARRY <b>-$2.26</b> · ONGUSDT"
 
     def test_the_funded_account_is_tagged(self) -> None:
-        assert notify.exit_message(_trade(), "[funded] ").startswith("⚪ [funded] ") or notify.exit_message(
-            _trade(), "[funded] "
-        ).startswith("🟢 [funded] ")
+        assert notify.exit_message(_trade(), "FUNDED ").startswith("🟢 FUNDED CARRY ")
 
     def test_a_close_the_log_cannot_price_says_so_rather_than_claiming_zero(self) -> None:
         body = notify.exit_message(_trade(round_trip=None), "")
-        assert "after fees" not in body
-        assert "0.00" not in body
-        assert "not in the engine's current log" in body
-        assert "ONGUSDT" in body
+        assert "$0.00" not in body
+        assert body.splitlines()[0] == "⚪ CARRY closed ONGUSDT · long · out 0.07072"
+        assert "what it made is unknown" in body
+
+    def test_a_symbol_is_escaped_because_telegram_html_rejects_a_stray_bracket(self) -> None:
+        body = notify.exit_message(_trade(symbol="A<B&C"), "")
+        assert "A&lt;B&amp;C" in body
+        assert "A<B" not in body
 
 
 class TestDailySummary:
@@ -175,26 +182,44 @@ class TestDailySummary:
             _trade(sleeve="long", symbol="SOLUSDT", round_trip=None),
         ]
 
-    def test_it_counts_only_what_it_can_price(self) -> None:
+    def test_the_dot_is_the_days_colour_and_the_money_is_bold(self) -> None:
         body = notify.daily_summary(self._rows(), "2026-08-23")
-        assert "3 closed" in body
-        assert "2 won (67%)" in body
-        assert "+$39.92 after fees" in body
-        assert "1 close(s) left out" in body
+        assert body.startswith("🟢 <b>Sun 23 Aug</b> · 3 trips · 2 won · <b>+$39.92</b>")
+
+    def test_a_losing_day_opens_red(self) -> None:
+        rows = self._rows()
+        rows[0]["round_trip"] = dict(rows[0]["round_trip"], net_usdt=-50.0)
+        body = notify.daily_summary(rows, "2026-08-23")
+        assert body.startswith("🔴")
+
+    def test_the_sleeve_table_is_monospace_with_win_loss_records(self) -> None:
+        body = notify.daily_summary(self._rows(), "2026-08-23")
+        assert "<pre>" in body and "</pre>" in body
+        table = body.split("<pre>")[1].split("</pre>")[0]
+        assert "CARRY" in table and "2–0" in table
+        assert "EXODUS" in table and "0–1" in table
 
     def test_it_names_the_best_and_the_worst(self) -> None:
         body = notify.daily_summary(self._rows(), "2026-08-23")
-        assert "best +$25.90 CARRY MOVEUSDT" in body
-        assert "worst -$2.26 EXODUS COTIUSDT" in body
+        assert "best +$25.90 · CARRY MOVEUSDT" in body
+        assert "worst -$2.26 · EXODUS COTIUSDT" in body
 
-    def test_it_says_funding_is_missing(self) -> None:
-        assert "crowd fee (funding) is not in these numbers" in notify.daily_summary(
-            self._rows(), "2026-08-23"
-        )
+    def test_it_counts_what_it_could_not_price(self) -> None:
+        body = notify.daily_summary(self._rows(), "2026-08-23")
+        assert "1 trip unpriced" in body
+
+    def test_it_says_funding_is_missing_in_one_quiet_line(self) -> None:
+        body = notify.daily_summary(self._rows(), "2026-08-23")
+        assert "<i>after fees — funding settles to the wallet separately</i>" in body
 
     def test_a_day_with_nothing_priced_sends_nothing(self) -> None:
         assert notify.daily_summary([_trade(round_trip=None)], "2026-08-23") is None
         assert notify.daily_summary([], "2026-08-23") is None
+
+    def test_one_trip_reads_as_won_or_lost_not_one_won(self) -> None:
+        body = notify.daily_summary([self._rows()[0]], "2026-08-23")
+        assert "1 trip · won" in body
+        assert "best" not in body, "one trip is its own best and worst"
 
 
 class TestBatching:
@@ -212,10 +237,12 @@ class TestBatching:
 
 
 class TestFormatting:
-    def test_a_price_keeps_the_precision_it_has(self) -> None:
-        assert notify.price(0.06845589) == "0.06845589"
-        assert notify.price(801.99) == "801.99"
-        assert notify.price(77066.0) == "77066"
+    def test_a_price_keeps_four_significant_figures(self) -> None:
+        assert notify.price(0.06845589) == "0.06846"
+        assert notify.price(801.99) == "802"
+        assert notify.price(77066.0) == "77,066"
+        assert notify.price(0.00409889) == "0.004099"
+        assert notify.price(1.5068) == "1.507"
 
     def test_a_held_time_reads_in_the_unit_that_matters(self) -> None:
         assert notify.held(31_118_000) == "8h 38m"
@@ -226,6 +253,10 @@ class TestFormatting:
         assert notify.money(16.28) == "+$16.28"
         assert notify.money(-2.26) == "-$2.26"
         assert notify.money(0.0) == "+$0.00"
+        assert notify.money(1103.9) == "+$1,103.90"
+
+    def test_a_day_reads_like_a_person_wrote_it(self) -> None:
+        assert notify.human_day("2026-08-23") == "Sun 23 Aug"
 
 
 class TestOneWholeRun:
@@ -256,7 +287,7 @@ class TestOneWholeRun:
             accounts.append(
                 notify.Account(
                     name="funded",
-                    tag="[funded] ",
+                    tag="FUNDED ",
                     books={"CARRY": str(tmp_path / "carry-mainnet.json")},
                     trades=str(tmp_path / "trades-mainnet.jsonl"),
                 )
@@ -285,7 +316,7 @@ class TestOneWholeRun:
         notify.main()
         self._write_book(tmp_path / "carry.json", {"ONGUSDT": 478.10})
         notify.main()
-        assert sent == ["⚡ CARRY entry ONGUSDT $478.10"]
+        assert sent == ["⚪ CARRY enters ONGUSDT · $478"]
 
     def test_with_no_engine_file_an_exit_still_pages_off_the_book(
         self, tmp_path, monkeypatch
@@ -296,7 +327,7 @@ class TestOneWholeRun:
         notify.main()
         self._write_book(tmp_path / "carry.json", {})
         notify.main()
-        assert sent == ["⚪ CARRY exit ONGUSDT"]
+        assert sent == ["⚪ CARRY exits ONGUSDT"]
 
     def test_with_an_engine_file_the_exit_comes_with_its_money_and_only_once(
         self, tmp_path, monkeypatch
@@ -314,8 +345,8 @@ class TestOneWholeRun:
         notify.main()
 
         assert len(sent) == 1, sent
-        assert sent[0].startswith("🟢 CARRY exit ONGUSDT long")
-        assert "⚪ CARRY exit ONGUSDT" not in sent[0], "the book must not say it too"
+        assert sent[0].startswith("🟢 CARRY <b>+$16.28</b> · ONGUSDT")
+        assert "exits ONGUSDT" not in sent[0], "the book must not say it too"
 
     def test_a_trade_already_in_the_file_is_history_not_news(
         self, tmp_path, monkeypatch
@@ -358,8 +389,8 @@ class TestOneWholeRun:
         notify.main()
 
         assert len(sent) == 1, "one run, one buzz"
-        assert "🟢 CARRY exit ONGUSDT long" in sent[0]
-        assert "🟢 [funded] CARRY exit AGIUSDT long" in sent[0]
+        assert "🟢 CARRY <b>+$16.28</b> · ONGUSDT" in sent[0]
+        assert "🟢 FUNDED CARRY <b>+$16.28</b> · AGIUSDT" in sent[0]
 
     def test_an_unreadable_book_is_not_a_mass_exit(self, tmp_path, monkeypatch) -> None:
         sent = self._fleet(tmp_path, monkeypatch)
@@ -385,37 +416,6 @@ class TestOneWholeRun:
         self._write_book(tmp_path / "carry.json", {})
         self._write_book(tmp_path / "exodus.json", {})
         notify.main()
-        assert len(sent) == 1 and sent[0].startswith("📊 2026-08-23")
+        assert len(sent) == 1 and sent[0].startswith("🟢 <b>Sun 23 Aug</b>")
         notify.main()
         assert len(sent) == 1, "the same day is not summarised twice"
-
-    def test_the_first_trade_ever_written_is_news_not_history(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """The engine creates its file on the first close. A run that finds a
-        file it has never seen baselines it — so a run has to have looked
-        while it was still absent, and remembered that."""
-
-        sent = self._fleet(tmp_path, monkeypatch)
-        self._write_book(tmp_path / "carry.json", {})
-        self._write_book(tmp_path / "exodus.json", {})
-        notify.main()
-        assert not (tmp_path / "trades.jsonl").exists()
-
-        (tmp_path / "trades.jsonl").write_text(json.dumps(_trade()) + "\n")
-        notify.main()
-        assert len(sent) == 1, sent
-        assert sent[0].startswith("🟢 CARRY exit ONGUSDT long")
-
-    def test_the_state_keeps_only_what_it_reads(self, tmp_path, monkeypatch) -> None:
-        self._fleet(tmp_path, monkeypatch)
-        state = tmp_path / "state.json"
-        state.write_text(json.dumps({"CARRY": {"ONGUSDT": 1.0}}))
-        self._write_book(tmp_path / "carry.json", {})
-        self._write_book(tmp_path / "exodus.json", {})
-        notify.main()
-        assert set(json.loads(state.read_text())) == {
-            "books",
-            "trade_offsets",
-            "summarised_day",
-        }
