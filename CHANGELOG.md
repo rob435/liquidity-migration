@@ -23,7 +23,9 @@ edit STATE.md to match.
   bold, because the phone's notification preview shows one line. Every
   message names its account (RM = real money, DEMO = demo), sleeves act in
   verbs (enters, shorts, exits, covers, closed), prices carry four
-  significant figures, and the daily summary opens with the day's own colour
+  significant figures, every return reads as percent of the position (never
+  basis points — those stay in the engine's reports), and the daily summary
+  opens with the day's own colour
   over a monospace win–loss table whose rows are per account and sleeve — so
   real money never melts into a demo figure. Messages are Telegram HTML now:
   `send_telegram_message` grows an opt-in `parse_mode` argument, opt-in

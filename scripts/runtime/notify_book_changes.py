@@ -12,8 +12,9 @@ The look is deliberate and small. Two dots — 🟢 made money, 🔴 lost it —
 the messages that carry a verdict, and bare text on the ones that do not; the
 verdict and the money lead, bold, because the phone's notification preview
 shows one line and that line is the whole point. Prices carry four
-significant figures: past that they are texture, and the basis-point figure
-already says what moved. Messages are Telegram HTML, so every symbol and
+significant figures: past that they are texture, and the percent figure
+already says what moved. Returns read as percent of the position, never
+basis points. Messages are Telegram HTML, so every symbol and
 sleeve name is escaped here.
 
 Every message names its account: RM is the funded account (real money), DEMO
@@ -173,7 +174,7 @@ def notional(usdt: float) -> str:
 
 def price(value: float) -> str:
     """Four significant figures. 0.06845589 → 0.06846: on a phone the rest is
-    texture, and the basis-point figure already carries the move."""
+    texture, and the percent figure already carries the move."""
 
     if not math.isfinite(value) or value == 0.0:
         return str(value)
@@ -198,6 +199,18 @@ def held(ms: int) -> str:
     if hours:
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
+
+
+def percent(bps: float) -> str:
+    """A basis-point figure as percent of the position, which is the unit
+    the owner reads. Two decimals for a return; two significant figures for
+    slip, which lives near a hundredth of a percent and would read as a
+    measured zero at return precision."""
+
+    pct = bps / 100.0
+    if abs(pct) >= 0.01 or pct == 0.0:
+        return f"{pct:+.2f}%"
+    return f"{pct:+.2g}%"
 
 
 def human_day(day: str) -> str:
@@ -235,14 +248,14 @@ def exit_message(trade: dict, tag: str) -> str:
         stats.append(f"maker {float(share) * 100:.0f}%")
     slip = trade.get("arrival_shortfall_bps")
     if slip is not None:
-        stats.append(f"slip {float(slip):+.1f} bp")
+        stats.append(f"slip {percent(float(slip))}")
     return "\n".join(
         [
             f"{'🟢' if net >= 0 else '🔴'} {tag}{sleeve} <b>{money(net)}</b> · {symbol}",
             f"{side} {held(int(round_trip['held_ms']))}"
             f" · {price(float(round_trip['entry_px']))}"
             f" → {price(float(trade.get('exit_px', 0.0)))}"
-            f" · {float(round_trip['net_bps']):+.0f} bp",
+            f" · {percent(float(round_trip['net_bps']))}",
             " · ".join(stats),
         ]
     )

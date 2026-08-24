@@ -139,8 +139,8 @@ class TestExitMessage:
     def test_the_verdict_and_the_money_are_the_first_line_in_bold(self) -> None:
         lines = notify.exit_message(_trade(), "").splitlines()
         assert lines[0] == "🟢 CARRY <b>+$16.28</b> · ONGUSDT"
-        assert lines[1] == "long 8h 38m · 0.06846 → 0.07072 · +324 bp"
-        assert lines[2] == "$503 · fee $0.55 · maker 100% · slip +1.1 bp"
+        assert lines[1] == "long 8h 38m · 0.06846 → 0.07072 · +3.24%"
+        assert lines[2] == "$503 · fee $0.55 · maker 100% · slip +0.01%"
 
     def test_a_price_is_four_significant_figures_not_eight_decimals(self) -> None:
         body = notify.exit_message(_trade(), "")
@@ -269,6 +269,17 @@ class TestFormatting:
         assert notify.money(-2.26) == "-$2.26"
         assert notify.money(0.0) == "+$0.00"
         assert notify.money(1103.9) == "+$1,103.90"
+
+    def test_returns_read_as_percent_of_the_position_never_bp(self) -> None:
+        assert notify.percent(323.7) == "+3.24%"
+        assert notify.percent(-133.0) == "-1.33%"
+        # Slip lives near a hundredth of a percent; return precision would
+        # print a measured zero for it.
+        assert notify.percent(0.4) == "+0.004%"
+        assert notify.percent(-1.8) == "-0.02%"
+        assert notify.percent(0.0) == "+0.00%"
+        body = notify.exit_message(_trade(), "DEMO ")
+        assert " bp" not in body
 
     def test_a_day_reads_like_a_person_wrote_it(self) -> None:
         assert notify.human_day("2026-08-23") == "Sun 23 Aug"

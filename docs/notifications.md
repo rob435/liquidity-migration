@@ -62,15 +62,16 @@ is news the moment it is decided, before anything fills.
 goes flat (`trades_path` in `engine.toml`). An exit is worth reading only with its numbers beside it:
 
     🟢 DEMO CARRY +$16.28 · ONGUSDT
-    long 8h 38m · 0.06846 → 0.07072 · +324 bp
-    $503 · fee $0.55 · maker 100% · slip +1.1 bp
+    long 8h 38m · 0.06846 → 0.07072 · +3.24%
+    $503 · fee $0.55 · maker 100% · slip +0.01%
 
-Line one is the verdict, line two the trade, line three what it cost. `maker` is the share of the
-traded notional that earned the spread instead of paying it; `slip` is how far the fills landed from
-the price on the screen when their orders left (arrival shortfall), positive being adverse. Both are
+Line one is the verdict, line two the trade — ending in the position's percent gain, net of fees.
+Line three is what it cost: `maker` is the share of the traded notional that earned the spread instead
+of paying it; `slip` is how far the fills landed from the price on the screen when their orders left
+(arrival shortfall) as a percent of the position, positive being adverse. Both are
 `docs/architecture.md` §Trade diagnostics numbers, computed by the engine off its own log. Prices carry
-four significant figures — past that they are texture, and the basis-point figure already says what
-moved.
+four significant figures, and every return reads as percent of the position — basis points stay in the
+engine's own reports.
 
 **"After fees" means after fees and nothing else.** The crowd fee (funding) is settled into the wallet
 on the venue's own eight-hourly clock and the engine is never told about it, so no number here carries
