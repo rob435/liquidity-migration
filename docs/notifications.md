@@ -63,12 +63,15 @@ goes flat (`trades_path` in `engine.toml`). An exit is worth reading only with i
 
     🟢 DEMO CARRY +$16.28 · ONGUSDT
     long 8h 38m · 0.06846 → 0.07072 · +3.24%
-    $503 · fee $0.55 · maker 100% · slip +0.01%
+    $503 · fee $0.55 · maker 100% · slip paid 0.01%
 
 Line one is the verdict, line two the trade — ending in the position's percent gain, net of fees.
 Line three is what it cost: `maker` is the share of the traded notional that earned the spread instead
 of paying it; `slip` is how far the fills landed from the price on the screen when their orders left
-(arrival shortfall) as a percent of the position, positive being adverse. Both are
+(arrival shortfall), as a percent of what traded — **paid** when they landed worse, **saved** when
+better. The verb carries the direction because the engine's own convention (positive when adverse)
+runs against the net beside it, where positive means made money; a chased resting order keeps its
+decision-time anchor, so chasing lands in slip rather than being hidden by re-anchoring. Both are
 `docs/architecture.md` §Trade diagnostics numbers, computed by the engine off its own log. Prices carry
 four significant figures, and every return reads as percent of the position — basis points stay in the
 engine's own reports.

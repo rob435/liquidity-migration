@@ -140,7 +140,7 @@ class TestExitMessage:
         lines = notify.exit_message(_trade(), "").splitlines()
         assert lines[0] == "🟢 CARRY <b>+$16.28</b> · ONGUSDT"
         assert lines[1] == "long 8h 38m · 0.06846 → 0.07072 · +3.24%"
-        assert lines[2] == "$503 · fee $0.55 · maker 100% · slip +0.01%"
+        assert lines[2] == "$503 · fee $0.55 · maker 100% · slip paid 0.01%"
 
     def test_a_price_is_four_significant_figures_not_eight_decimals(self) -> None:
         body = notify.exit_message(_trade(), "")
@@ -280,6 +280,15 @@ class TestFormatting:
         assert notify.percent(0.0) == "+0.00%"
         body = notify.exit_message(_trade(), "DEMO ")
         assert " bp" not in body
+
+    def test_slip_speaks_in_verbs_because_its_sign_runs_against_the_nets(self) -> None:
+        # Engine convention: positive shortfall is adverse. Next to a net
+        # where positive means made money, a bare plus reads as a bonus.
+        paid = notify.exit_message(_trade(arrival_shortfall_bps=2.84), "DEMO ")
+        assert "slip paid 0.03%" in paid
+        saved = notify.exit_message(_trade(arrival_shortfall_bps=-1.8), "DEMO ")
+        assert "slip saved 0.02%" in saved
+        assert "slip +" not in paid and "slip -" not in saved
 
     def test_a_day_reads_like_a_person_wrote_it(self) -> None:
         assert notify.human_day("2026-08-23") == "Sun 23 Aug"

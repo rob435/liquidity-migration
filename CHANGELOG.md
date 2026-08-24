@@ -24,7 +24,9 @@ edit STATE.md to match.
   message names its account (RM = real money, DEMO = demo), sleeves act in
   verbs (enters, shorts, exits, covers, closed), prices carry four
   significant figures, every return reads as percent of the position (never
-  basis points — those stay in the engine's reports), and the daily summary
+  basis points — those stay in the engine's reports), slip reads "paid" or
+  "saved" because its adverse-positive convention runs against the net
+  beside it, and the daily summary
   opens with the day's own colour
   over a monospace win–loss table whose rows are per account and sleeve — so
   real money never melts into a demo figure. Messages are Telegram HTML now:

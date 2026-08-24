@@ -248,7 +248,15 @@ def exit_message(trade: dict, tag: str) -> str:
         stats.append(f"maker {float(share) * 100:.0f}%")
     slip = trade.get("arrival_shortfall_bps")
     if slip is not None:
-        stats.append(f"slip {percent(float(slip))}")
+        # The engine's convention is positive-when-adverse; a signed number
+        # on the phone would sit next to a net where positive means made
+        # money. The verb carries the direction instead, no sign to misread.
+        cost = float(slip)
+        if cost == 0.0:
+            stats.append("slip 0.00%")
+        else:
+            verb = "paid" if cost > 0 else "saved"
+            stats.append(f"slip {verb} {percent(abs(cost)).lstrip('+')}")
     return "\n".join(
         [
             f"{'🟢' if net >= 0 else '🔴'} {tag}{sleeve} <b>{money(net)}</b> · {symbol}",
