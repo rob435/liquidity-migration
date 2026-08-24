@@ -45,22 +45,23 @@ watchdog's problem.
 [`scripts/runtime/notify_book_changes.py`](../scripts/runtime/notify_book_changes.py), on a 5-minute
 timer, reading two kinds of file for two different questions.
 
-The vocabulary is three dots and nothing else: 🟢 made money, 🔴 lost it, ⚪ neutral. The verdict and
-the money are the first line, bold, because a phone's notification preview shows one line and that line
-is the whole point. Messages are Telegram HTML (`parse_mode=HTML`), which is what the bold and the
-monospace table below are.
+The vocabulary is two dots: 🟢 made money, 🔴 lost it — only on messages that carry a verdict; the
+rest are bare text. Every message names its account — RM is the funded account (real money), DEMO the
+demo. The verdict and the money are the first line, bold, because a phone's notification preview shows
+one line and that line is the whole point. Messages are Telegram HTML (`parse_mode=HTML`), which is
+what the bold and the monospace table below are.
 
 **Entries come from the target books.** A symbol appearing with size is a sleeve's decision, and that
 is news the moment it is decided, before anything fills.
 
-    ⚪ CARRY enters ONGUSDT · $478
-    ⚪ EXODUS shorts COTIUSDT · $536
-    ⚪ FUNDED LONG enters ETHUSDT · $25.74
+    DEMO CARRY enters ONGUSDT · $478
+    DEMO EXODUS shorts COTIUSDT · $536
+    RM LONG enters ETHUSDT · $25.74
 
 **Exits come from the engine**, out of the closed-trade file it appends a line to whenever a position
 goes flat (`trades_path` in `engine.toml`). An exit is worth reading only with its numbers beside it:
 
-    🟢 CARRY +$16.28 · ONGUSDT
+    🟢 DEMO CARRY +$16.28 · ONGUSDT
     long 8h 38m · 0.06846 → 0.07072 · +324 bp
     $503 · fee $0.55 · maker 100% · slip +1.1 bp
 
@@ -78,7 +79,7 @@ costs — not the whole of what the sleeve earned.
 
 A close the engine cannot price says so rather than claiming a zero:
 
-    ⚪ CARRY closed ONGUSDT · long · out 0.0886
+    DEMO CARRY closed ONGUSDT · long · out 0.0886
     opened before this log, so what it made is unknown
 
 That happens when the fills that opened the position are in a log segment boot no longer replays. The
@@ -92,17 +93,20 @@ passes what Telegram will take.
 the day's colour, and the per-sleeve lines are a monospace win–loss table:
 
     🟢 Sun 23 Aug · 8 trips · 6 won · +$103.90
-    CARRY    3–0  +$62.40
-    EXODUS   3–2  +$41.50
-    best +$34.05 · EXODUS COTIUSDT
-    worst -$2.26 · EXODUS COTIUSDT
+    DEMO CARRY    3–0  +$62.40
+    DEMO EXODUS   3–2  +$41.50
+    best +$34.05 · DEMO EXODUS COTIUSDT
+    worst -$2.26 · DEMO EXODUS COTIUSDT
     after fees — funding settles to the wallet separately
+
+Rows are per account as well as per sleeve — real money and demo run the same sleeves, and one row
+adding both would put play money and the owner's own in a single figure.
 
 It is stamped by the day it covers, so a run that could not send retries rather than skipping it.
 
 With no closed-trade file at all — an engine whose config names no `trades_path` — exits fall back to
-the books: `⚪ CARRY exits ONGUSDT`, `⚪ EXODUS covers ONGUSDT` — with nothing about what they made,
-which is the only thing the books can say.
+the books: `DEMO CARRY exits ONGUSDT`, `DEMO EXODUS covers ONGUSDT` — with nothing about what they
+made, which is the only thing the books can say.
 
 ## Owner control buttons
 

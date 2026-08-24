@@ -8,15 +8,16 @@ prices, the fees, the time held, and the money. An exit is worth reading only
 with those numbers next to it, so exits come from the engine and entries from
 the books.
 
-The look is deliberate and small. Three dots — 🟢 made money, 🔴 lost it,
-⚪ neutral — and nothing else; the verdict and the money lead every message,
-bold, because the phone's notification preview shows one line and that line
-is the whole point. Prices carry four significant figures: past that they are
-texture, and the basis-point figure already says what moved. Messages are
-Telegram HTML, so every symbol and sleeve name is escaped here.
+The look is deliberate and small. Two dots — 🟢 made money, 🔴 lost it — on
+the messages that carry a verdict, and bare text on the ones that do not; the
+verdict and the money lead, bold, because the phone's notification preview
+shows one line and that line is the whole point. Prices carry four
+significant figures: past that they are texture, and the basis-point figure
+already says what moved. Messages are Telegram HTML, so every symbol and
+sleeve name is escaped here.
 
-Both accounts are covered. The funded one leads with FUNDED; the demo one is
-unmarked, because it is the one that speaks most days.
+Every message names its account: RM is the funded account (real money), DEMO
+is the demo.
 
 **Net here is after the venue's fees and nothing else.** The crowd fee
 (funding) is settled into the wallet on the venue's own clock and the engine
@@ -69,7 +70,7 @@ class Account:
 ACCOUNTS = (
     Account(
         name="demo",
-        tag="",
+        tag="DEMO ",
         books={
             "CARRY": f"{TARGETS}/carry-demo.json",
             "LONG": f"{TARGETS}/long-demo.json",
@@ -79,7 +80,7 @@ ACCOUNTS = (
     ),
     Account(
         name="funded",
-        tag="FUNDED ",
+        tag="RM ",
         books={
             "CARRY": f"{TARGETS}/carry-mainnet.json",
             "LONG": f"{TARGETS}/long-mainnet.json",
@@ -220,7 +221,7 @@ def exit_message(trade: dict, tag: str) -> str:
         # replays. The close is still news; the money is not knowable.
         return "\n".join(
             [
-                f"⚪ {tag}{sleeve} closed {symbol} · {side}"
+                f"{tag}{sleeve} closed {symbol} · {side}"
                 f" · out {price(float(trade.get('exit_px', 0.0)))}",
                 "opened before this log, so what it made is unknown",
             ]
@@ -254,7 +255,7 @@ def entry_messages(
 
     verb = "shorts" if sleeve == "EXODUS" else "enters"
     return [
-        f"⚪ {tag}{esc(sleeve)} {verb} {esc(symbol)} · {notional(now[symbol])}"
+        f"{tag}{esc(sleeve)} {verb} {esc(symbol)} · {notional(now[symbol])}"
         for symbol in sorted(set(now) - set(before))
     ]
 
@@ -267,7 +268,7 @@ def book_exit_messages(
 
     verb = "covers" if sleeve == "EXODUS" else "exits"
     return [
-        f"⚪ {tag}{esc(sleeve)} {verb} {esc(symbol)}"
+        f"{tag}{esc(sleeve)} {verb} {esc(symbol)}"
         for symbol in sorted(set(before) - set(now))
     ]
 
@@ -297,9 +298,11 @@ def daily_summary(trades: list[dict], day: str) -> str | None:
 
     by_sleeve: dict[str, list[float]] = {}
     for trade in priced:
-        by_sleeve.setdefault(esc(str(trade["sleeve"]).upper()), []).append(
-            float(trade["round_trip"]["net_usdt"])
-        )
+        # The account is part of the row's name: real money and demo run the
+        # same sleeves, and one row adding both would put play money and the
+        # owner's own in a single figure.
+        label = esc(str(trade.get("account_tag", "")) + str(trade["sleeve"]).upper())
+        by_sleeve.setdefault(label, []).append(float(trade["round_trip"]["net_usdt"]))
     name_w = max(len(name) for name in by_sleeve)
     sums = {name: sum(rows) for name, rows in by_sleeve.items()}
     money_w = max(len(money(v)) for v in sums.values())
@@ -315,11 +318,13 @@ def daily_summary(trades: list[dict], day: str) -> str | None:
         worst = min(priced, key=lambda t: float(t["round_trip"]["net_usdt"]))
         lines.append(
             f"best {money(float(best['round_trip']['net_usdt']))}"
-            f" · {esc(str(best['sleeve']).upper())} {esc(best['symbol'])}"
+            f" · {esc(str(best.get('account_tag', '')) + str(best['sleeve']).upper())}"
+            f" {esc(best['symbol'])}"
         )
         lines.append(
             f"worst {money(float(worst['round_trip']['net_usdt']))}"
-            f" · {esc(str(worst['sleeve']).upper())} {esc(worst['symbol'])}"
+            f" · {esc(str(worst.get('account_tag', '')) + str(worst['sleeve']).upper())}"
+            f" {esc(worst['symbol'])}"
         )
 
     lines.append("<i>after fees — funding settles to the wallet separately</i>")
@@ -456,6 +461,9 @@ def trades_of_day(day: str) -> list[dict]:
                     except Exception:
                         continue
                     if start <= int(trade.get("closed_ms", 0)) < end:
+                        # Which account it was is known only here, by which
+                        # file the line came out of; the line does not say.
+                        trade["account_tag"] = account.tag
                         out.append(trade)
         except OSError:
             continue
