@@ -433,7 +433,10 @@ the authoritative rebuild, so a name kept by the 00:20 computation can be sold
 once and re-bought (~15.56 bp round trip) — the same documented residual the
 pre-deadline freeze-ahead already carries for the whole book. Entries never
 move early (filling into the post-payment dump costs −46 bp/entry; the entry
-clock is measured-optimal where it is). Full grids, including the refuted
+clock is measured-optimal where it is). The one residual on the old clock is
+resize-DOWN flow on kept names: ~1.03% of equity/day, worth ~+0.25 bp/day at
+the pooled drift (+0.12 at 2026's) BEFORE the re-buy churn early sizing would
+add — measured 2026-08-24 and judged not worth the build. Full grids, including the refuted
 adaptive entry-sniping arms:
 `research_findings.md` §Settlement-instant timing.
 
