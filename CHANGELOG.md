@@ -16,6 +16,29 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-24 — LLM gate prompt v7: the crime-pump playbook joins the
+  rubric (owner approved).** The driver-judgment prompt
+  (`scripts/research/llm_driver_ledger.py`) moves to
+  `driver-judgment-v7-crime-pump`. Two changes, both judgment food, no new
+  mechanical rule: (1) a new enrichment fact `turnover_to_oi_24h` — the
+  day's traded volume against the standing open interest (the venue reports
+  OI in contracts, so notional derives as contracts × price) — the churn
+  read that public research on manufactured pumps calls "brushed" volume;
+  (2) the manufactured-pump step now names the two documented crime-pump
+  shapes — the low-float walk-up and the short-squeeze bait — and each
+  judgment reports a `manipulation_shape` verdict. The one outside number
+  (volume-to-OI low single digits typical, 20+ suspect) is labeled
+  unmeasured on this desk inside the prompt itself; every measured prior in
+  the rubric is unchanged. `--grade` buckets by prompt version, so v7
+  accrues its own forward record and v6's rows are untouched. The entry
+  gate is unchanged: score ≥ 6, same candidates file, same LONG-sleeve
+  sizing, exits, and stops. Motivation: a public post-mortem of seven
+  manipulated tokens (MYX, COAI et al.); its mechanical signals are already
+  measured dead on this book (OI exits, funding-flip exits, pool-level
+  taker reads — receipts in `docs/research/research_findings.md` §2), so
+  the judged rubric is the one seam that takes it. This commit is the
+  change point.
+
 - **2026-08-24 — LONG size doubled: multiplier 3.0 → 6.0, both fleets (owner:
   "just promote this and deploy this fully"; the funded account was funded the
   same day, ~$160).** The promotion note, in five lines: (1) Claim: doubling

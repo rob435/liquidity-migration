@@ -12,8 +12,9 @@ So this script does exactly two things, and never trades:
 
   --once     nominate current movers from Bybit public tickers (loose quant
              nominator), enrich each with the public facts a judgment needs
-             (funding, perp premium, open-interest change, beta context, range
-             and volume anomaly, listing age), ask the model to walk a fixed
+             (funding, perp premium, open-interest change, volume against open
+             interest, beta context, range and volume anomaly, listing age),
+             ask the model to walk a fixed
              methodology, and append facts + judgment to a JSONL ledger,
              timestamped, before the outcome exists.
   --triggers run hourly: detect fresh intraday deep-trigger events (rolling
@@ -57,7 +58,7 @@ from typing import Any
 BYBIT_PUBLIC = "https://api.bybit.com"
 #: Binance publishes who was aggressive; Bybit does not. Public, no key.
 BINANCE_PUBLIC = "https://fapi.binance.com"
-PROMPT_VERSION = "driver-judgment-v6-scored"
+PROMPT_VERSION = "driver-judgment-v7-crime-pump"
 
 # Loose nominator: enough movers to give the discriminator something to
 # separate, few enough that every row gets judged.
@@ -75,8 +76,10 @@ TRIGGER_TURNOVER_RANK_MAX = 10
 
 # The rubric the model executes. Every number in the priors step is this
 # repo's own measurement, not folklore: the depth figure from the daily v13
-# program, the rest graded on 5.5 years of these hourly triggers. Bump
-# PROMPT_VERSION with any edit here -- `--grade` buckets by it.
+# program, the rest graded on 5.5 years of these hourly triggers. The one
+# outside number -- step 7's volume-to-open-interest band -- is labeled as
+# unmeasured on this desk inside the prompt itself. Bump PROMPT_VERSION with
+# any edit here -- `--grade` buckets by it.
 METHODOLOGY = """You are judging one crypto perpetual pump for a systematic desk.
 Walk these steps IN ORDER and report every step's answer in the JSON schema
 below. Be concrete; a step you cannot ground must say so and lower the final
@@ -136,17 +139,30 @@ the wrong prior here. Do not be contrarian by default. A deeper move is worth
 more on average and wins less often: the edge is in the tail, so do not mark a
 pump down for having run far.
 
-STEP 7 — scam pump. Some of these are manufactured: a thin book walked up by
-one desk, a fresh listing with almost no float, a name whose whole history is
-pump-and-collapse. The tape cannot tell you this — every mechanical shape
-measure was tested against outcomes and none separated a manufactured pump
-from a real one, so the ONLY edge here is what you know about the token
-itself. Ask: is this a name with real usage and a real holder base, or a
-vehicle? Has it done this before and given it all back? Is the 24h turnover
-large in absolute terms, or is a big percentage move sitting on a small book?
-Set scam_pump_risk to low | medium | high, and say which of those three
-questions decided it. High means the score must be 3 or below whatever else
-looks good.
+STEP 7 — scam pump. Some of these are manufactured, and the manufactured
+ones follow two documented shapes. (a) The low-float walk-up: a young listing
+with most of its supply still locked, walked up by a coordinated cluster of
+wallets on a book so thin that a few million dollars is the whole market —
+the whole move from launch to top runs in days. (b) The squeeze bait: a pump
+engineered to look obviously unsustainable so shorts crowd in — funding goes
+deeply negative while price holds a range — and the operators then force the
+shorts out in a liquidation cascade before dumping. The tape alone cannot
+prove either — every mechanical shape measure this desk tested against
+outcomes failed to separate a manufactured pump from a real one — so weigh
+the provided facts together with what you know about the token itself. Ask:
+is this a name with real usage and a real holder base, or a vehicle? Has it
+done this before and given it all back? Is the 24h turnover large in
+absolute terms, or is a big percentage move sitting on a small book? Is the
+listing fresh (listing_age_days), and if you know its tokenomics, is most of
+the supply still locked? And read turnover_to_oi_24h — the day's traded
+volume against the standing open interest: outside research on manufactured
+pumps reports low single digits as typical and reads sustained 20+ as
+churned, self-traded volume. This desk has NOT measured that band; treat it
+as one caution among several, never a rule. Set scam_pump_risk to
+low | medium | high and manipulation_shape to
+none | low_float_walk | squeeze_bait | unclear, and say in scam_pump_reason
+which consideration decided it. High risk means the score must be 3 or below
+whatever else looks good.
 
 STEP 8 — verdict. pump_quality_score is the headline: an integer 0-10 for
 "how attractive is holding this pump from here for the next 1-3 days" —
@@ -160,6 +176,7 @@ later, so use the full range and do not cluster at 5.
 Reply with ONLY this JSON object, no other text:
 {"identity": "one sentence", "recognized": true/false,
  "scam_pump_risk": "low|medium|high", "scam_pump_reason": "one sentence",
+ "manipulation_shape": "none|low_float_walk|squeeze_bait|unclear",
  "beta_share": "none|partial|mostly_market", "flow_type":
  "leverage_chase|spot_led|short_squeeze|mixed|unclear", "structure":
  "fresh_breakout|exhaustion_top|downtrend_bounce|range|unclear",
@@ -246,8 +263,22 @@ def enrich(symbol: str, facts: dict[str, Any]) -> dict[str, Any]:
                 "&intervalTime=1h&limit=49"
             )
         )
+        oi.sort(key=lambda r: int(r["timestamp"]))
+        if oi:
+            # The venue reports OI in contracts; notional is contracts x price.
+            oi_latest = float(oi[-1]["openInterest"])
+            turnover = facts.get("turnover_24h_usdt")
+            price = facts.get("last_price")
+            if (
+                oi_latest > 0
+                and isinstance(turnover, (int, float))
+                and isinstance(price, (int, float))
+                and price > 0
+            ):
+                facts["turnover_to_oi_24h"] = round(
+                    float(turnover) / (oi_latest * float(price)), 1
+                )
         if len(oi) >= 25:
-            oi.sort(key=lambda r: int(r["timestamp"]))
             last = float(oi[-1]["openInterest"])
             first24 = float(oi[-25]["openInterest"])
             if first24 > 0:

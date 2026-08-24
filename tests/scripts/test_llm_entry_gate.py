@@ -197,7 +197,39 @@ class TestEnrichLeverageFlowFacts:
         assert "premium_change_24h_bp" not in facts
 
 
-def test_prompt_version_buckets_the_v6_fact_set() -> None:
-    """--grade buckets by PROMPT_VERSION: a fact-set change must land in a new
-    bucket, never rewrite v5's forward record."""
-    assert ledger.PROMPT_VERSION == "driver-judgment-v6-scored"
+class TestEnrichTurnoverToOiChurn:
+    """v7 fact set: the day's traded volume against the standing open interest,
+    the churn read the manufactured-pump step consumes. The venue reports OI in
+    contracts, so notional derives as contracts x price."""
+
+    OI_ROWS = [{"timestamp": str(NOW_MS), "openInterest": "1000000"}]
+
+    def test_the_churn_ratio_is_attached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        TestEnrichLeverageFlowFacts._mock_http(
+            monkeypatch, {"open-interest": {"result": {"list": self.OI_ROWS}}}
+        )
+        facts = ledger.enrich(
+            "AAAUSDT", {"turnover_24h_usdt": 24_000_000.0, "last_price": 2.0}
+        )
+        assert facts["turnover_to_oi_24h"] == 12.0
+
+    def test_missing_turnover_price_or_oi_leaves_the_fact_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        TestEnrichLeverageFlowFacts._mock_http(
+            monkeypatch, {"open-interest": {"result": {"list": self.OI_ROWS}}}
+        )
+        assert "turnover_to_oi_24h" not in ledger.enrich("AAAUSDT", {"last_price": 2.0})
+        assert "turnover_to_oi_24h" not in ledger.enrich(
+            "AAAUSDT", {"turnover_24h_usdt": 24_000_000.0}
+        )
+        TestEnrichLeverageFlowFacts._mock_http(monkeypatch, {})
+        assert "turnover_to_oi_24h" not in ledger.enrich(
+            "AAAUSDT", {"turnover_24h_usdt": 24_000_000.0, "last_price": 2.0}
+        )
+
+
+def test_prompt_version_buckets_the_v7_fact_set() -> None:
+    """--grade buckets by PROMPT_VERSION: a fact-set or rubric change must land
+    in a new bucket, never rewrite v6's forward record."""
+    assert ledger.PROMPT_VERSION == "driver-judgment-v7-crime-pump"

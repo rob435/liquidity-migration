@@ -523,9 +523,14 @@ through that sleeve's own sizing, exits, and stops — one strategy, one book;
 mechanics in `docs/trading_logic.md` §LLM GATE. The forward record grades
 real fills beside the shadow rows; the registered lane-1 prior is that no
 mechanical gate on these events cleared the bar, so this rides entirely on
-the judged discriminator and the owner's decision. The fact set is v6 as of
-2026-08-21 (leverage-flow paths added; the rubric states plainly that the
-desk measured no mechanical edge in them). Forward-only by
+the judged discriminator and the owner's decision. The prompt is v7 as of
+2026-08-24: the facts carry the day's traded volume against the standing
+open interest (`turnover_to_oi_24h`), and the manufactured-pump step names
+the two crime-pump shapes — the low-float walk-up and the short-squeeze
+bait — reporting a `manipulation_shape` verdict per judgment. The rubric
+states plainly which numbers the desk measured and that the one outside
+threshold (the volume-to-open-interest band) is unmeasured here; each
+prompt version grades in its own bucket. Forward-only by
 construction: a model judged on historical pumps already knows how they
 ended. Armed by `DEEPSEEK_API_KEY` (or `LLM_API_KEY`; any OpenAI-compatible
 endpoint via `LLM_BASE_URL`/`LLM_MODEL`); without a key it still journals
