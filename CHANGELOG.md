@@ -37,7 +37,13 @@ edit STATE.md to match.
   measured dead on this book (OI exits, funding-flip exits, pool-level
   taker reads — receipts in `docs/research/research_findings.md` §2), so
   the judged rubric is the one seam that takes it. This commit is the
-  change point.
+  change point. Deployed `b51aa3a8` via `staged --stop-first` the same day:
+  verify-ok on the commit, both engines rebuilt on it, the funded engine's
+  boot reconciliation stayed clean (`may_open: true` in the mainnet
+  heartbeat — false is the latch, `engine/engine-types/src/wal.rs`), and
+  the ledger service's first run under v7 completed green on a quiet hour
+  (0 movers, 0 triggers, so 0 rows — the first journaled
+  `driver-judgment-v7-crime-pump` row is the runtime receipt to watch).
 
 - **2026-08-24 — LONG size doubled: multiplier 3.0 → 6.0, both fleets (owner:
   "just promote this and deploy this fully"; the funded account was funded the
