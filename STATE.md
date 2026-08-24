@@ -20,9 +20,9 @@ file.
   whole fleet up. That host file is how a sleeve is held down — it can only
   turn one off, never on — and the Telegram pause button writes it.
 
-  The funded account holds no position and about four cents of equity, so what
-  is at risk there today is nothing; the demo account carries the open book.
-  Exact live truth is `scripts/ops.sh status`, never this prose.
+  The funded account is funded (~$160 equity on 2026-08-24) and the funded
+  engine trades it — the demo account carries the larger practice book. Exact
+  live truth is `scripts/ops.sh status`, never this prose.
 
 - **A third sleeve, the EXODUS SHORT, is registered and deployed to demo.**
   When carry's v7 pre-settle exit fires, the carry producer publishes the
@@ -48,16 +48,17 @@ file.
   `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit, or stop
   `llm-ledger.timer`. Detail: `docs/trading_logic.md` §LLM GATE.
 
-- **Every strategy runs the same 3x multiplier, set from one dial bank (owner
-  directive, both fleets).** Sizing is three env dials read directly by the
-  producers — `CARRY_NOTIONAL_MULTIPLIER`, `LONG_NOTIONAL_MULTIPLIER`,
+- **LONG runs at 6.0× and carry/exodus at 3.0×, set from one dial bank
+  (owner directive, both fleets).** Sizing is three env dials read directly by
+  the producers — `CARRY_NOTIONAL_MULTIPLIER`, `LONG_NOTIONAL_MULTIPLIER`,
   `EXODUS_NOTIONAL_MULTIPLIER` — each entry = the strategy's base slot (at
-  most 10% of equity) × its multiplier; all three sit at **3.0** (~30% of
-  equity per name, before LONG's own vol/weekend scaling). On demo the dials
-  are in `bybit-demo.env`; on the funded fleet the committed profile's own
-  multipliers are what apply (see Risk envelope §Real money). Both profiles
-  carry 3.0, so the two agree today. There is no
-  book-level margin ceiling in the way: what bounds a loss is the
+  most 10% of equity) × its multiplier. LONG sits at **6.0** (~60% of equity
+  per entry before LONG's own vol/weekend scaling — the measured
+  double-LONG-at-no-Sharpe-cost lever, strategy_program §3), carry and exodus
+  at **3.0** (~30% per name). On demo the dials are in `bybit-demo.env`; on
+  the funded fleet the LONG line is in `account-execution-mainnet.env` and
+  carry sizes from the committed profile (see Risk envelope §Real money).
+  There is no book-level margin ceiling in the way: what bounds a loss is the
   venue-native stop on each position. Held components keep their
   fill-anchored size — the dials reach new entries only. The mainnet account
   document (`operational.mainnet.json`) is static: entry leverage 5, gross
@@ -127,10 +128,10 @@ file.
 
   What is not done, plainly:
 
-  - **The funded engine has not yet been watched trading.** Its config and env
-    file are on the host, both mainnet producers write books, and it has been
-    watched reading the funded account (552445993) under the mainnet profile —
-    reference $100 tracking equity, gross at five times it.
+  - **The funded engine trades.** It holds LONG positions on the funded
+    account (552445993) under the mainnet profile — reference tracking equity,
+    gross at five times it. What it has not yet had is a graded stretch: the
+    forward record on real fills is days old, not weeks.
 
   - **There is no hourly Telegram digest of what is held.** Every position that
     closes is reported as it closes, with its P&L after fees, and a daily
@@ -319,19 +320,19 @@ decision-book capture are on.
 **Demo** (risk-on): capital reference 250,000 USDT, component/account gross
 1,250,000, initial margin 250,000. No per-symbol ceiling. Entry
 leverage 5× on every sleeve, account max leverage 5×, LONG notional multiplier
-3.0 and CARRY multiplier 3.0 (per-name 0.10 and gross cap 1.0 come from the
-registered rule and multiply through, so each new carry name takes 30% of the
-sizing equity and a full CARRY book is 3× it). Startup and authorization
+6.0 and CARRY multiplier 3.0 (per-name 0.10 and gross cap 1.0 come from the
+registered rule and multiply through, so a LONG entry takes 60% of the sizing
+equity before its own vol/weekend scaling, each new carry name 30%, and a full
+CARRY book is 3× it). Startup and authorization
 reject unknown profile fields and producer leverage above the owner cap; how
 large a book the multipliers build is the owner's dial, bounded per position
 by each venue-native stop.
 
-**Real money**: the funded fleet sizes from the committed profile's own
-multipliers (all 3.0), **not from a dial**. The three `*_NOTIONAL_MULTIPLIER`
-names belong in `account-execution-mainnet.env`, the no-secrets file the two
-mainnet producer units load; they do not load `bybit-mainnet.env`, which holds
-the key. The installed host file does not carry the lines yet, so setting a
-funded multiplier is not yet possible — say the number in the profile instead.
+**Real money**: the funded fleet sizes LONG at 6.0 and CARRY at 3.0. LONG's
+6.0 is set both in the committed profile and as `LONG_NOTIONAL_MULTIPLIER=6.0`
+in `account-execution-mainnet.env`, the no-secrets file the two mainnet
+producer units load; they do not load `bybit-mainnet.env`, which holds the
+key. Carry sizes from the committed profile's 3.0 with no env line.
 `RM_CARRY_STOP_LOSS_FRACTION` (**0.35**) is the protection dial and is the
 owner's own. The account document (`configs/operational.mainnet.json`) is
 static: entry leverage 5×, gross cap = wallet × 5 account-wide and the same

@@ -16,6 +16,25 @@ edit STATE.md to match.
 > accurate history — they are not runnable instructions.** Deployed
 > 2026-07-31 in `cdb6e61`.
 
+- **2026-08-24 — LONG size doubled: multiplier 3.0 → 6.0, both fleets (owner:
+  "just promote this and deploy this fully"; the funded account was funded the
+  same day, ~$160).** The promotion note, in five lines: (1) Claim: doubling
+  LONG's per-position size costs no risk-adjusted return — the research-frame
+  cell (slots 10 → 5) takes total return 38.5% → 85.8% at Sharpe 1.24 → 1.27,
+  and capacity never binds (`skipped_capacity: 0` all history). (2) Change:
+  `LONG_NOTIONAL_MULTIPLIER` 6.0 — the live equivalent of that cell — in the
+  committed profiles, the render source, the mainnet env template, the demo
+  host env, and a new line in the funded host env; the registered v12 rule,
+  its trades, slots and stops are untouched; carry and exodus stay 3.0.
+  (3) The change point is this commit; held positions keep their fill-anchored
+  size, the dial reaches new entries only. (4) Grade: the LONG fill record
+  (engine WAL / trades.jsonl) after the change point, against the same record
+  before it. (5) Rollback: set the dial back to 3.0 in `bybit-demo.env` and
+  `account-execution-mainnet.env` and restart the two LONG producers.
+  Same day, STATE reflects the funded account's first live state: ~$160
+  equity, two LONG positions held (ETHUSDT, PUMPFUNUSDT) under the 3.0-era
+  sizing.
+
 - **2026-08-23 — the first trade is news, not history.** `trade-notify`
   baselines a closed-trade file it has never seen, because such a file holds
   trades from before the reader existed. The engine creates that file on its

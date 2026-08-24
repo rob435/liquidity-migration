@@ -350,11 +350,7 @@ to bp/day.
 
 ---
 
-### 3. Capital efficiency — the largest unexploited lever, and it is not alpha
-
-Both deployed-shape sleeves are tiny. LONG deploys **2.7%** of account equity
-averaged across all calendar days; carry_hold uses **9.4%**. Together the
-two-sleeve book puts about 12% of the account to work.
+### 3. Capital efficiency — the LONG half of the lever is taken
 
 `max_concurrent_positions` is a pure size dial for LONG, not a capacity
 constraint: the book holds roughly one position at a time and the 10 slots never
@@ -362,12 +358,17 @@ bind (`skipped_capacity: 0` across the whole history). Halving it to 5 doubles
 position size and takes total return 38.5% → **85.8%** at Sharpe 1.24 → 1.27 —
 i.e. **at no measurable risk-adjusted cost**.
 
-**Why it is not done.** It is an envelope and margin decision, not a research
-one, and it is the same ask the owner already declined: `notional_multiplier`
-1.0 was refused on 2026-07-28 because it needed roughly 4× the envelope. Equal
-risk against carry would need 8.5×. Two of the three names in
-`LongV11aDivWeekendVol` — the weekend 1.5× boost and the BTC-vol scalar — are
-this same lever already in the profile, and both *cost* Sharpe when widened.
+**Taken (owner decision, 2026-08-24):** the live equivalent of that cell —
+`LONG_NOTIONAL_MULTIPLIER` 3.0 → **6.0** on both fleets (per-entry 60% of
+sizing equity before LONG's own vol/weekend scaling; the registered v12 rule,
+its trades and its slots are untouched). Carry stays at 3.0. The commit is the
+change point; the grade is the LONG fill record after it.
+
+**Still untaken, deliberately.** Equal risk against carry would need 8.5× —
+not measured, and two of the three names in `LongV11aDivWeekendVol` — the
+weekend 1.5× boost and the BTC-vol scalar — are this same lever already in the
+profile, and both *cost* Sharpe when widened. Raising carry's gross above 1.0
+is a measured 2025-26 regime bet (the v6 cap-raise cells) and stays declined.
 
 ---
 

@@ -167,7 +167,7 @@ Editing one takes a restart of that producer unit, not a profile re-render.
 | Dial | Default | Meaning |
 | --- | --- | --- |
 | `CARRY_NOTIONAL_MULTIPLIER` | 3.0 | Each new carry name = at most 10% of equity × this, so 30% for a name at full weight; the depth, persistence, flow and whale terms only ever cut it. |
-| `LONG_NOTIONAL_MULTIPLIER` | 3.0 | Each LONG entry = 10% of equity × this, before LONG's own vol/weekend scaling (up to ~1.9× on top). |
+| `LONG_NOTIONAL_MULTIPLIER` | 6.0 | Each LONG entry = 10% of equity × this, before LONG's own vol/weekend scaling (up to ~1.9× on top). |
 | `EXODUS_NOTIONAL_MULTIPLIER` | 3.0 | The exodus short's own multiplier; omit it and it inherits carry's. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | Venue-native disaster-stop distance, armed with the entry. |
 

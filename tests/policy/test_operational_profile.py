@@ -23,14 +23,13 @@ def test_tracked_operational_profile_is_coherent_and_feeds_account_owner() -> No
     data = PROFILE_PATH.read_bytes()
     profile = load_operational_profile_bytes(data)
 
-    # Risk-on since 2026-08-21 (owner): one 3.0x multiplier on both sleeves —
-    # carry's per-name weight 0.10 x 3.0 = 30% of sizing equity per new name,
-    # LONG's base slot 0.10 x 3.0 before its own vol/weekend scaling — still
-    # levered 5x.
+    # LONG at 6.0 (base slot 0.10 x 6.0 = 60% of sizing equity per entry,
+    # before LONG's own vol/weekend scaling), carry at 3.0 (per-name weight
+    # 0.10 x 3.0 = 30% per new name) — still levered 5x.
     assert profile.long.entry_leverage == 5.0
     assert profile.carry.entry_leverage == 5.0
     assert profile.hedge.entry_leverage == 5.0
-    assert profile.long.notional_multiplier == 3.0
+    assert profile.long.notional_multiplier == 6.0
     assert profile.carry.notional_multiplier == 3.0
 
 

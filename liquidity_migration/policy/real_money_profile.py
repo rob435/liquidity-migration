@@ -155,7 +155,7 @@ def render_real_money_profile_json(
             "quantity_tolerance": 1e-12,
         },
         "long": {
-            "notional_multiplier": 3.0,
+            "notional_multiplier": 6.0,
             "entry_leverage": _ENTRY_LEVERAGE,
             "order_notional_pct_equity": 0.0,
             "max_new_entries_per_cycle": _LONG_MAX_NEW_ENTRIES_PER_CYCLE,

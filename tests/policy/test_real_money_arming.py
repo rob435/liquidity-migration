@@ -104,8 +104,9 @@ def test_a_dial_in_the_env_file_reaches_the_rendered_profile() -> None:
     assert profile.carry.declared_stop_loss_fraction == 0.25
 
 
-def test_the_committed_multipliers_are_three_x_and_reach_entry_sizing() -> None:
-    """The whole point of the dials: every strategy at the same multiplier."""
+def test_the_committed_multipliers_reach_entry_sizing() -> None:
+    """LONG runs at 6.0 — twice carry's 3.0 — so a LONG entry is 60% of
+    sizing equity before its own vol/weekend scaling, a carry name 30%."""
 
     from liquidity_migration.rules.long_native import long_v11a_profile
     from liquidity_migration.strategy.carry_demo import load_carry_config
@@ -115,7 +116,7 @@ def test_the_committed_multipliers_are_three_x_and_reach_entry_sizing() -> None:
     )
 
     _data, profile = render_real_money_profile()
-    assert profile.long.notional_multiplier == pytest.approx(3.0)
+    assert profile.long.notional_multiplier == pytest.approx(6.0)
     assert profile.carry.notional_multiplier == pytest.approx(3.0)
 
     long_config = LongNativeDemoCycleConfig(
@@ -125,7 +126,7 @@ def test_the_committed_multipliers_are_three_x_and_reach_entry_sizing() -> None:
         max_new_entries_per_cycle=profile.long.max_new_entries_per_cycle,
     )
     per_entry = target_long_order_notional_pct_equity(long_config, long_v11a_profile())
-    assert per_entry == pytest.approx(0.30)
+    assert per_entry == pytest.approx(0.60)
     carry_name = float(load_carry_config().per_name_cap) * profile.carry.notional_multiplier
     assert carry_name == pytest.approx(0.30)
 
