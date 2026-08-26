@@ -192,8 +192,8 @@ dial shape as LONG's. The journal filing id is the version-free `carry_hold`
 and never changes with the profile (components filed under the older
 `carry_hold_v3` id drain under it). The forward grade for the v6/v7 rule
 continues under one config id. The v6−v5 capital-normalised paired
-differential is the registered forward experiment. See
-[`research_findings.md`](research/research_findings.md) §4.
+differential is the registered forward experiment (see **Registered forward
+experiment** below).
 
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
 Bybit hourly data by calling the registered scorer functions directly, so the deployed book
@@ -215,8 +215,7 @@ Null conditioning values fail open. The whale input is the book's one non-Bybit 
 producer caches Binance end-of-day ratio values per symbol-day (public endpoint, no key,
 `binance_whale_daily.parquet` under the producer root) and the registered 48h freshness
 clause nulls anything stale, so a dead feed degrades v6 toward v6-minus-whale instead of
-blocking a decision. The book is empty on 28% of days in the full record; flat is a state,
-not a fault.
+blocking a decision.
 
 **Sizing.** `weight = 0.10 × clip((|trailing 24h settled funding| / 120bp-day)^1.5, 0.25, 1.0)
 × persistence × flow × whale` — the exponent is v6's one change (v1..v5 ran the straight
@@ -257,19 +256,51 @@ not a drop and waits for the flip too. The exodus sleeve does not take these
 over — its trigger is the fee-recovery fire above, never a membership drop.
 
 Kill switches: `CARRY_EARLY_EXIT=0` silences both exit clocks;
-`CARRY_STRATEGY_PROFILE=v6` keeps the settled-print clock only. Evidence and
-the honest caveats (positive-median, tail-exposed, mean below the t-bar):
-[`research_findings.md`](research/research_findings.md) §Settlement-instant timing.
+`CARRY_STRATEGY_PROFILE=v6` keeps the settled-print clock only.
 
-**Limits.** Concentrated (~2–3 names when active — v4 holds 22% fewer name-days than v3 and
-is flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity ~$1M at
-1% participation. The registered daily frame exits every name 24h before its final panel
-bar, worth roughly +0.13 Sharpe. The single-clock level is decision-hour lucky: the same
-construction over 12 daily offsets spans Sharpe 0.30–1.52 and midnight is the best cell. The
-three v3 filters were chosen in-sample in the review that registered them; the paired forward
-differential against v2 grades them. The corrected carry-hold benchmark Sharpe is **1.21
-(t 2.31)** — it does **not** beat the CONTINUOUS benchmark, and a 2.57 / t 4.87 figure for it
-is a wrong number. Detail: [`research_findings.md`](research/research_findings.md).
+**Mechanism.** Funding is the price of one side of a crowded perp. When it prints deeply
+negative, crowded shorts pay longs ~3×/day to keep the position on; this book supplies that
+long side. The premium persists because the risk is real — these names are usually falling,
+some to zero (LUNA 2022-05 is in the record) — and the unhedgeable version pays in 6/6 eras
+while the delta-neutral version was arbitraged out by 2022. Measured attribution 2021-26:
+**+7.2 units from funding received against −3.4 from price** — a 2.1:1 carry payment, not a
+price anomaly. The book is empty on 28% of days in that record; flat is a state, not a fault.
+
+**Evidence (seen data).** The base-book mechanism, full sample 2021-26 at flat 0.10 per name:
+full-sample **t 2.31**, against the program bar of t ≥ 2.5
+([`governance.md`](research/governance.md) §2). By era, bp/day: 2021 **+3.8** · 2022 **+3.0** ·
+2023 **+26.0** · 2024 **+13.7** · 2025 **+30.3** · 2026 **+32.5** — every year positive, but
+2021-22 is thin and the book makes no bear-robustness claim. The registered v6 on seen data
+(Aug 25 run, panel ending 2026-08-25): mean net **+21.8 bp/day**, Sharpe **1.85**, worst dip
+**−18.6%**, MAR **5.62**, **+31.7×** over ~4.9 years. Against the deployed benchmark this base
+book does not win on Sharpe — the corrected carry-hold benchmark Sharpe is **1.21 (t 2.31)**,
+and the 2.57 / t 4.87 figure for it is a wrong number; return wins, the owner goal was both.
+The same construction on Binance funding and prices does not replicate (t 0.4, Sharpe 0.18)
+— evidence is single-venue Bybit until shown otherwise. These are Lane-1 numbers that
+selected the rule; only the forward record grades it.
+
+**Registered forward experiment.** The v6−v5 capital-normalised paired daily differential on
+shared days is the graded claim. It registered 2026-08-19 and had **0 scored forward days at
+promotion**; the ledger accrues to 2026-08-21 (2 forward days). The earlier "+0.63 bp/day,
+t +2.86" figure was a seen-data reconstruction on the midnight grid — positive in 24 of 24
+hourly clock phases at a mean of +0.43 bp/day — not forward evidence. Quote the mean, not the
+midnight cell. At its own capital the pair is a wash by construction, so the claim is capital
+released, not return gained.
+
+**Risk.** Concentrated (~2–3 names when active; v4 holds 22% fewer name-days than v3 and is
+flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity ~$1M at 1%
+participation, and the deep-negative-funding opportunity set inflates if the structural
+funding inversion normalises. Sizing changes depth, never duration: at 15% vol the max
+underwater spell in the bench window is 204 days (2024-02-26 → 2024-09-17) and the longest
+spell is endemic to every book here. A single-name disaster costs up to its 10% cap; the
+book will hold names that go to zero, and the claim is only that the funding collected
+across the book pays for them. ~90% of the return is name selection, not market timing. The
+registered daily frame exits every name 24h before its final panel bar (worth roughly +0.13
+Sharpe in research's favour); the live sleeve cannot dodge, so forward comparisons quote the
+delayed-entry basis. No take-profit is measured, not assumed: **105 cells across nine
+families** on the v4 book, and not one beats the baseline on mean bp/day. Not modelled: any
+impact book beyond the measured demo taker fee (observed 5.50 bp/side across 346 live orders,
+conservatively scored at 7.78 bp/side), partial fills, borrow, margin cost, venue outage.
 
 ## EXODUS — `lane2_exodus_short_v1`
 
@@ -316,8 +347,7 @@ tail is fat and real: ~8% of fire-days the print was still deep — the short pa
 sometimes gets squeezed (worst −945 bp, SOMI 2025-10-01); the measured answer is size, not a
 stop. Entries and covers are priced at 1m kline opens — no fill model yet; the first demo
 weeks exist to measure that gap. The all-name generalization (shorting settlement deaths
-carry never held) is measured-but-unrun and NOT part of this config. Evidence:
-[`research_findings.md`](research/research_findings.md) §1 (the exodus short row).
+carry never held) is measured-but-unrun and NOT part of this config.
 
 ## LLM GATE — judged entries inside the LONG sleeve
 
@@ -449,8 +479,9 @@ quantization-distorted, so a day where such components carry >20% of gross expos
 plumbing rather than economics
 ([`research_findings.md`](research/research_findings.md)).
 
-The negative results, and what the evidence does and does not establish, are in
-[`research_findings.md`](research/research_findings.md).
-
-Grading rules and the claim boundary are in [`AGENTS.md`](../AGENTS.md); mainnet arming is
+The negative results relevant to each sleeve are stated in that sleeve's section
+above — the no-take-profit finding, the cross-venue non-replication, and the
+measured-but-unrun generalizations. Failure taxonomy:
+[`backtesting_errors_we_never_repeat.md`](research/backtesting_errors_we_never_repeat.md);
+grading rules and the claim boundary are in [`AGENTS.md`](../AGENTS.md); mainnet arming is
 [`operations.md`](operations.md) §Real money.
