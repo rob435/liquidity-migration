@@ -182,15 +182,17 @@ funding-coverage dimension as well as a PIT one, and funding downgrades it indep
 (`_methodology_run_label`, same file). `full_pit_universe_pass=true` beside a
 `full_pit_universe_funding_coverage_low` label is not a historical-universe claim.
 
-## CARRY — the v7 execution clock, trading `lane2_carry_hold_v6`
+## CARRY — the v7 pre-settle execution clock
 
-The deployed CARRY profile is `carry_hold_v7_live_v1` (`CARRY_STRATEGY_PROFILE=v7`
-on both carry units). It trades the registered rule below and the v7 exit clock
-described under **Exit**. Selection is `CARRY_STRATEGY_PROFILE`
+The deployed CARRY sleeve is **v7** (`carry_hold_v7_live_v1`,
+`CARRY_STRATEGY_PROFILE=v7` on both carry units). v7 is an execution clock, not
+a config: it executes the registered rule `lane2_carry_hold_v6` (the file it
+reads, `configs/lane2_carry_hold_v6.json`) byte-identical and moves **when** the
+exit test is evaluated (see **Exit**). Selection is `CARRY_STRATEGY_PROFILE`
 (`v3`/`v4`/`v6`/`v7`) in the unit environment → `--strategy-profile`, the same
 dial shape as LONG's. The journal filing id is the version-free `carry_hold`
 and never changes with the profile (components filed under the older
-`carry_hold_v3` id drain under it). The forward grade for the v6/v7 rule
+`carry_hold_v3` id drain under it). The forward grade for the v6-v7 rule
 continues under one config id. The v6−v5 capital-normalised paired
 differential is the registered forward experiment (see **Registered forward
 experiment** below).

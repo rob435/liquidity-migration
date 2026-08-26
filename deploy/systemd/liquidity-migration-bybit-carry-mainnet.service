@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration Bybit carry-hold MAINNET target producer (lane2_carry_hold_v6 + v7 pre-settle exit)
+Description=liquidity-migration Bybit carry-hold MAINNET target producer (v7 pre-settle exit clock on the lane2_carry_hold_v6 rule)
 Wants=network-online.target
 # No account owner to depend on any more. This producer's whole output is a
 # target book on disk; the engine reads that book and owns the account. The old

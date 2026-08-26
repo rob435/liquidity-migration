@@ -398,15 +398,15 @@ paper retirement, so no valid demo-vs-paper number exists on either side of that
 boundary. All demo equity/P&L numbers before the 2026-08-03 14:38 UTC clean-slate
 reset belong to the archived epoch.
 
-Change points currently accruing forward days: CARRY `lane2_carry_hold_v6`
-(v4 and v5 keep scoring; the v6−v5 capital-normalised differential is the
-registered forward experiment), the CARRY v7 pre-settle exit clock
-(`CARRY_STRATEGY_PROFILE=v7` on both carry units: the same exit test read on
+Change points currently accruing forward days: the CARRY **v7** pre-settle exit
+clock (`CARRY_STRATEGY_PROFILE=v7` on both carry units: the same exit test read on
 the venue's running rate inside the last 15 minutes before a held name's
 settlement, selling before the payment instead of one minute after it; the
-config is unchanged — v7 trades `lane2_carry_hold_v6` byte-identical, so its
-forward grade continues under one config id; graded from engine exit fills
-against the settled-print counterfactual; rollback dial is `v6`), the drop
+rule v7 executes is the registered `lane2_carry_hold_v6` byte-identical, so
+its forward grade continues under one config id; graded from engine exit fills
+against the settled-print counterfactual; rollback dial is `v6`). The v6−v5
+config differential (`lane2_carry_hold_v6` vs v5, with v4 and v5 keeping
+scoring) is the registered forward experiment, and the drop
 exit (a held name the upcoming decision zeroes sells ~00:02 instead of 00:20,
 entries unchanged; no dial, the rollback is a revert and redeploy), LONG v12
 wide-stop, and the entry execution recipes (quote-first entries, touch-sized
