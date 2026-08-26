@@ -6,6 +6,15 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-26 — The demo rule-receipt freshness alert is removed (owner
+  directed).** The demo receipt no longer pages `demo_rules_age`; nothing in
+  the demo runtime path reads the receipt, and a demo receipt in the back half
+  of its life renews itself on the next rollout, so the weekly WARNING only
+  taught operators to ignore a WARNING. The funded receipt still gates the
+  owner, still renews on any deploy, and still pages WARNING/CRITICAL under
+  `venue_rules_age` — that gate is untouched. `check_fleet_liveness.py` now
+  scopes the rules-receipt gather to mainnet only.
+
 - **2026-08-26 — The carry rule rename: registered rule goes to `lane2_carry_hold_v7`
   (name only).** The registration that was `lane2_carry_hold_v6` becomes
   `lane2_carry_hold_v7`, so the live name and the config filename both read

@@ -52,7 +52,6 @@ from liquidity_migration.core.artifact_snapshot import read_stable_file  # noqa:
 from liquidity_migration.account.account_kernel import AccountEventType, read_recent_account_events  # noqa: E402
 from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     REGISTERED_MAX_DEMO_RULE_AGE_HOURS,
-    load_demo_rules,
 )
 from liquidity_migration.core.env_flags import validate_systemd_invocation_id  # noqa: E402
 from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes  # noqa: E402
@@ -322,16 +321,17 @@ def evaluate_demo_rule_age(
     *,
     verified_ts_ns: int,
     now_ns: int,
-    realm: str = "demo",
 ) -> Alert | None:
-    """Warn before rules evidence expires and the next start fails closed.
+    """Warn before the mainnet venue-rules evidence expires and the next start fails closed.
 
-    ``realm`` changes the alert key and the remedy text only: the funded
-    receipt renews through a read-only freeze on any deploy, while demo's
-    slow path is the order-placing probe in a flat maintenance window.
+    Demo receipt freshness is deliberately not alerted: the demo runtime never
+    enforces the age and nothing in the runtime path reads it, so a demo
+    WARNING only taught operators to ignore a WARNING. Only mainnet holds the
+    168h ceiling as a hard start refusal, so its receipt is the one that must
+    never expire unseen.
     """
-    key = "demo_rules_age" if realm == "demo" else "venue_rules_age"
-    label = "demo-rule" if realm == "demo" else f"{realm} venue-rule"
+    key = "venue_rules_age"
+    label = "mainnet venue-rule"
     age_hours = (now_ns - verified_ts_ns) / 3_600_000_000_000.0
     remaining_hours = REGISTERED_MAX_DEMO_RULE_AGE_HOURS - age_hours
     if age_hours < 0.0:
@@ -345,47 +345,25 @@ def evaluate_demo_rule_age(
             headline="The trading-rules receipt is future-dated — invalid.",
         )
     if remaining_hours <= 0.0:
-        # Nothing on demo fails closed on an expired receipt:
-        # run_authorized_runtime.sh has no rule gate, neither producer script
-        # mentions one, and the engine reads instrument rules off the venue.
-        # Calling it CRITICAL only teaches the operator that CRITICAL can be
-        # ignored. What is genuinely stale is the bound receipt the research
-        # and candidate-universe tooling reads.
-        #
-        # Mainnet keeps both the severity and the claim: its receipt does gate
-        # the funded owner, and every deploy renews it.
-        demo = realm == "demo"
+        # Mainnet's receipt does gate the funded owner, and every deploy renews
+        # it (read-only freeze), so an expired one is a genuine CRITICAL.
         return Alert(
             key=key,
-            severity=WARNING if demo else CRITICAL,
+            severity=CRITICAL,
             message=(
                 f"{label} evidence expired {abs(remaining_hours):.1f}h ago; "
-                + (
-                    "nothing in the runtime path reads it, so no unit will refuse to start — what is "
-                    "stale is the bound receipt the research and candidate-universe tooling reads. "
-                    "Refresh it on a deploy carrying --refresh-demo-rules (live PostOnly orders, "
-                    "<=200 USDT per symbol)."
-                    if demo
-                    else "the funded owner will refuse to start; any deploy renews it (read-only freeze)."
-                )
+                "the funded owner will refuse to start; any deploy renews it (read-only freeze)."
             ),
-            headline=(
-                "The demo trading-rules receipt has expired — stale evidence, nothing refuses to start."
-                if demo
-                else "The trading-rules receipt has expired — the next restart will refuse to start."
-            ),
+            headline="The trading-rules receipt has expired — the next restart will refuse to start.",
         )
     if remaining_hours <= DEMO_RULE_MAINTENANCE_WARNING_HOURS:
-        remedy = (
-            "schedule the guarded flat-account maintenance window before expiry "
-            "so the slow path is planned."
-            if realm == "demo"
-            else "any deploy renews it (read-only freeze); deploy before expiry."
-        )
         return Alert(
             key=key,
             severity=WARNING,
-            message=f"{label} evidence expires in {remaining_hours:.1f}h; " + remedy,
+            message=(
+                f"{label} evidence expires in {remaining_hours:.1f}h; "
+                "any deploy renews it (read-only freeze); deploy before expiry."
+            ),
             headline=f"The trading-rules receipt expires in {remaining_hours:.0f}h — plan the refresh.",
         )
     return None
@@ -395,45 +373,37 @@ def gather_demo_rule_alerts(
     *,
     rules_path: Path,
     now_ns: int | None = None,
-    realm: str = "demo",
 ) -> list[Alert]:
-    """Reopen the bound receipt and report corruption, future dating, or expiry.
+    """Reopen the bound mainnet receipt and report corruption, future dating, or expiry.
 
-    The mainnet receipt is validated by the loader that admits one; only
-    mainnet holds the registered 168-hour ceiling as a hard start refusal, so
-    it is exactly the receipt that must not reach that cliff unwatched (it
-    did, silently, until 2026-08-13).
+    Demo receipt freshness is not checked here: the demo runtime never enforces
+    the age and nothing in the runtime path reads it, so demo alerting only
+    taught operators to ignore a WARNING. Only mainnet holds the registered
+    168-hour ceiling as a hard start refusal, so it is exactly the receipt that
+    must not reach that cliff unwatched (it did, silently, until 2026-08-13).
     """
     try:
         snapshot = read_stable_file(
             rules_path,
-            label="demo-rule receipt" if realm == "demo" else f"{realm} venue-rule receipt",
+            label="mainnet venue-rule receipt",
             reject_empty=True,
             require_mode=0o600,
             require_owner=True,
         )
-        if realm == "demo":
-            load_demo_rules(
-                snapshot.path,
-                max_age_seconds=None,
-                snapshot=snapshot,
-            )
-        else:
-            load_venue_rules_bytes(snapshot.data, realm=realm, max_age_seconds=None)
+        load_venue_rules_bytes(snapshot.data, realm="mainnet", max_age_seconds=None)
         payload = json.loads(snapshot.data)
         verified_ts_ns = int(payload.get("verified_ts_ns") or 0)
         alert = evaluate_demo_rule_age(
             verified_ts_ns=verified_ts_ns,
             now_ns=time.time_ns() if now_ns is None else now_ns,
-            realm=realm,
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         return [
             Alert(
-                key="demo_rules_invalid",
+                key="venue_rules_invalid",
                 severity=CRITICAL,
                 message=(
-                    "bound demo-rule evidence is unreadable or invalid: "
+                    "bound venue-rule evidence is unreadable or invalid: "
                     f"{type(exc).__name__}: {str(exc)[:300]}"
                 ),
                 headline="The trading-rules receipt cannot be read.",
@@ -1585,14 +1555,16 @@ def main() -> int:
             required_units=required_account_owner_units,
         )
     )
-    if str(args.demo_rules_file).strip():
-        # Both realms: only mainnet holds the 168h ceiling as a hard start
-        # refusal, so its receipt is the one that must never expire unseen.
+    # Demo receipt freshness does not alert: the demo runtime never enforces it
+    # and nothing in the runtime path reads the age, so the weekly WARNING only
+    # taught operators to ignore a WARNING. Only mainnet holds the 168h ceiling
+    # as a hard start refusal, so its receipt is the one that must never expire
+    # unseen — that one stays CRITICAL.
+    if mainnet and str(args.demo_rules_file).strip():
         alerts.extend(
             gather_demo_rule_alerts(
                 rules_path=Path(args.demo_rules_file),
                 now_ns=now_ms * 1_000_000,
-                realm="mainnet" if mainnet else "demo",
             )
         )
     # Do not check the account journal here: no engine crate names it, so the

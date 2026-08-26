@@ -185,7 +185,7 @@ timer so a hung run goes `failed` rather than silently never re-firing.
 
 What it checks: systemd unit states — including a service that is enabled but not active (debounced one
 interval, then CRITICAL); readiness and live-L2 capture freshness; per-sleeve producer cycle age; the
-frozen demo-rule receipt's remaining life; free disk; and the engine's own heartbeat file, including how
+frozen mainnet venue-rule receipt's remaining life; free disk; and the engine's own heartbeat file, including how
 old the engine's reading of the account is. It reads no account journal and no digest state — see
 [§What is not watched](#what-is-not-watched).
 
@@ -241,10 +241,12 @@ engine to publish a reconciliation mismatch, which is a design question, not a w
 
 Nothing watches a digest arriving either, deliberately: there is no digest.
 
-`demo_rules_age` is a WARNING about stale evidence, and it names the deploy flag that refreshes it.
-Nothing in the demo runtime path reads the receipt — `run_authorized_runtime.sh` has no rule gate,
-neither producer script mentions one, and the engine takes instrument rules straight off the venue.
-Mainnet's receipt genuinely does gate the funded owner, so that one is CRITICAL.
+Demo rule-receipt freshness does not alert. Nothing in the demo runtime path reads the receipt —
+`run_authorized_runtime.sh` has no rule gate, neither producer script mentions one, and the engine
+takes instrument rules straight off the venue. A demo receipt in the back half of its life renews
+itself on the next rollout (`ROLLOUT_REFRESH_STALE_DEMO_RULES=1`), so a demo WARNING only taught
+operators to ignore a WARNING. Only the mainnet receipt is watched: it genuinely does gate the
+funded owner, every deploy renews it, and an expired one pages CRITICAL (`venue_rules_age`).
 
 ### How an alert behaves
 

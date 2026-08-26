@@ -61,67 +61,39 @@ def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
     assert future is not None and "future-dated" in future.message
 
 
-def test_demo_rule_age_warns_before_expiry_and_fails_closed_after() -> None:
+def test_mainnet_rule_age_gates_fresh_warn_expire_future() -> None:
+    """The mainnet receipt is the one that must not expire unseen.
+
+    Its receipt really does gate the funded owner, and every deploy renews it
+    (read-only freeze), so an expired one pages CRITICAL on the venue key.
+    """
     hour_ns = 3_600_000_000_000
     verified = 1_000 * hour_ns
 
+    # Fresh: no alert until the maintenance window opens.
     assert M.evaluate_demo_rule_age(
         verified_ts_ns=verified,
         now_ns=verified + 143 * hour_ns,
     ) is None
+
     warning = M.evaluate_demo_rule_age(
         verified_ts_ns=verified,
         now_ns=verified + 144 * hour_ns,
     )
     assert warning is not None
+    assert warning.key == "venue_rules_age"
     assert warning.severity == M.WARNING
     assert "24.0h" in warning.message
+    assert "any deploy renews it" in warning.message
 
     expired = M.evaluate_demo_rule_age(
         verified_ts_ns=verified,
         now_ns=verified + 169 * hour_ns,
     )
     assert expired is not None
-    # Demo's expiry stopped being a start refusal when the Python order path was
-    # deleted: see the dedicated test below for what it says now.
-    assert expired.severity == M.WARNING
+    assert expired.severity == M.CRITICAL
     assert "expired 1.0h ago" in expired.message
-
-    expired_mainnet = M.evaluate_demo_rule_age(
-        verified_ts_ns=verified,
-        now_ns=verified + 169 * hour_ns,
-        realm="mainnet",
-    )
-    assert expired_mainnet is not None
-    assert expired_mainnet.severity == M.CRITICAL
-
-
-def test_expired_demo_rules_no_longer_claim_the_next_start_fails_closed() -> None:
-    """Nothing in the demo runtime path reads the demo rule receipt:
-    run_authorized_runtime.sh has no rule gate, neither producer script mentions
-    one, and the engine parses instrument rules straight off the venue. So an
-    expired demo receipt must not claim the next start will refuse.
-
-    Mainnet is the other way round: its receipt really does gate the funded
-    owner, and every deploy renews it.
-    """
-    hour_ns = 3_600_000_000_000
-    verified = 1_780_000_000 * 1_000_000_000
-    demo = M.evaluate_demo_rule_age(verified_ts_ns=verified, now_ns=verified + 200 * hour_ns)
-    assert demo is not None
-    assert demo.severity == M.WARNING
-    assert "fail closed" not in demo.message
-    assert "refuse to start" not in demo.headline
-    assert "--refresh-demo-rules" in demo.message
-
-    mainnet = M.evaluate_demo_rule_age(
-        verified_ts_ns=verified,
-        now_ns=verified + 200 * hour_ns,
-        realm="mainnet",
-    )
-    assert mainnet is not None
-    assert mainnet.severity == M.CRITICAL
-    assert "refuse to start" in mainnet.message
+    assert "the funded owner will refuse to start" in expired.message
 
     future = M.evaluate_demo_rule_age(
         verified_ts_ns=verified,
@@ -1181,7 +1153,7 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
         M,
         "gather_demo_rule_alerts",
         lambda **kwargs: calls.append(
-            (f"demo_rules:{kwargs['realm']}", Path(kwargs["rules_path"]).name)
+            ("demo_rules", Path(kwargs["rules_path"]).name)
         )
         or [],
     )
@@ -1218,7 +1190,7 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
 
     assert M.main() == 0
     assert calls == [
-        ("demo_rules:mainnet", "demo-rules.json"),
+        ("demo_rules", "demo-rules.json"),
         ("gather_carry_alerts:mainnet", "bybit-carry-mainnet-event"),
         ("gather_long_alerts:mainnet", "bybit-long-mainnet-event"),
     ]
@@ -1808,14 +1780,14 @@ def test_mainnet_venue_rule_age_alerts_use_their_own_key_and_remedy() -> None:
     fresh_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS - 100) * hour_ns)
     assert (
         M.evaluate_demo_rule_age(
-            verified_ts_ns=fresh_ns, now_ns=now_ns, realm="mainnet"
+            verified_ts_ns=fresh_ns, now_ns=now_ns
         )
         is None
     )
 
     warning_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS - 10) * hour_ns)
     warning = M.evaluate_demo_rule_age(
-        verified_ts_ns=warning_ns, now_ns=now_ns, realm="mainnet"
+        verified_ts_ns=warning_ns, now_ns=now_ns
     )
     assert warning is not None
     assert warning.key == "venue_rules_age"
@@ -1825,20 +1797,12 @@ def test_mainnet_venue_rule_age_alerts_use_their_own_key_and_remedy() -> None:
 
     expired_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS + 1) * hour_ns)
     expired = M.evaluate_demo_rule_age(
-        verified_ts_ns=expired_ns, now_ns=now_ns, realm="mainnet"
+        verified_ts_ns=expired_ns, now_ns=now_ns
     )
     assert expired is not None
     assert expired.key == "venue_rules_age"
     assert expired.severity == M.CRITICAL
     assert "the funded owner will refuse to start" in expired.message
-
-    # Demo keeps its own key and its own remedy, which is now the deploy flag
-    # rather than a start refusal that no longer exists.
-    demo = M.evaluate_demo_rule_age(verified_ts_ns=expired_ns, now_ns=now_ns)
-    assert demo is not None
-    assert demo.key == "demo_rules_age"
-    assert "--refresh-demo-rules" in demo.message
-    assert "the funded owner will refuse to start" not in demo.message
 
 
 # --------------------------------------------------------------------------- #

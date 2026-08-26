@@ -215,7 +215,8 @@ file.
   entries stop, exits keep publishing until flat.
 - **The demo receipt is fresh.** `demo-rules-20260818T220119Z`, probed
   2026-08-18 22:01 UTC inside a flat maintenance window. Expires **2026-08-25
-  ~22:01 UTC**; any rollout in the back half re-probes on its own.
+  ~22:01 UTC**; any rollout in the back half re-probes on its own. Its
+  freshness does not alert — only the funded receipt's does (see below).
 
 ### Execution and market data
 
@@ -360,9 +361,12 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
   the 168-hour ceiling as a hard one, so its expiry would be an owner that
   refuses to start; the other registered startup ceilings (warmup timeout,
   INVOCATION_ID, stray-order gate) also bind mainnet only.
-- **The watchdog watches both rules receipts.** The mainnet liveness scope
-  validates the funded receipt through the loader that admits one and pages
-  WARNING inside 24 hours of expiry and CRITICAL past it, under its own
+- **The watchdog watches only the funded rules receipt.** Demo rule-receipt
+  freshness does not alert: nothing in the demo runtime path reads the receipt,
+  and a demo receipt in its back half renews itself on the next rollout, so a
+  demo WARNING only taught operators to ignore a WARNING. The mainnet liveness
+  scope validates the funded receipt through the loader that admits one and
+  pages WARNING inside 24 hours of expiry and CRITICAL past it, under its own
   `venue_rules_age` key with the deploy-renews-it remedy
   ([`check_fleet_liveness.py`](scripts/runtime/check_fleet_liveness.py)).
 - **Unknown safety-critical state fails closed.**
