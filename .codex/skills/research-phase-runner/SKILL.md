@@ -5,10 +5,10 @@ description: Route, execute, and record research work under the Progressive Evid
 
 # Run research work
 
-Read `STATE.md`, `docs/research/strategy_program.md`, and
-`docs/research/research_findings.md` for current context, provenance, open work,
+Read `STATE.md`, `docs/research/research_findings.md`, and
+`docs/research/governance.md` for current context, provenance, open work,
 and prior formulations. Before selecting new decision-influencing work,
-record its relationship to the compact priors in the strategy program.
+record its relationship to the compact priors in the research findings.
 Negative priors inform questions; they are not forbidden lines. Decide which
 lane the work is in; neither lane has a waiting room.
 
@@ -31,7 +31,7 @@ scorer appends one row per config per new day; a config's evidence is the
 run of days after its commit, and editing it starts a new run. Grade a rule
 only on data it did not shape; commit configs before opening a new surface
 (reserved holdout, freshly backfilled history), and record the opening in
-`docs/research/strategy_program.md`.
+`docs/research/research_findings.md`.
 
 Keep the physics intact in both lanes — causal/PIT inputs, executable
 economics (fills, fees, funding, capacity), reconstructable accounting, and
@@ -51,7 +51,7 @@ them. It never authorizes mainnet.
 Append results to the run's manifest and, when decision-relevant, a short
 evidence note (claim; data that shaped vs graded it; scope; effect size,
 uncertainty, and costs; artifact/commit identities; explicit
-non-conclusions) into `docs/research/strategy_program.md`. Promotion of a winning
+non-conclusions) into `docs/research/research_findings.md`. Promotion of a winning
 config is a five-line note plus a recorded change point through the normal
 deploy flow. Negative results are priors, not prohibitions — a refuted idea
 may return with a new mechanism or new data, and the provenance record

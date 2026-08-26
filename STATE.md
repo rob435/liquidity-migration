@@ -54,7 +54,7 @@ file.
   `EXODUS_NOTIONAL_MULTIPLIER` — each entry = the strategy's base slot (at
   most 10% of equity) × its multiplier. LONG sits at **6.0** (~60% of equity
   per entry before LONG's own vol/weekend scaling — the measured
-  double-LONG-at-no-Sharpe-cost lever, strategy_program §3), carry and exodus
+  double-LONG-at-no-Sharpe-cost lever, research_findings §3), carry and exodus
   at **3.0** (~30% per name). On demo the dials are in `bybit-demo.env`; on
   the funded fleet the LONG line is in `account-execution-mainnet.env` and
   carry sizes from the committed profile (see Risk envelope §Real money).

@@ -150,7 +150,7 @@ rest from this repository's own failures.
     of simple returns does not compound — and wrong as the thing a book is
     graded on, because a trader earns the arithmetic return. Keep the two series
     separate and name them so they cannot be swapped
-    (`docs/research/archive/2026-07-30-idio-charts.md` §4.3).
+    (`docs/research/research_findings.md`).
 
 35. **Cost models that assume full rebalance.** Charging a round trip per period
     to a slow signal overstates its cost by the reciprocal of its turnover and

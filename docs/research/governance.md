@@ -67,7 +67,7 @@ reject. Two things carry the weight the threshold used to:
   reason.
 
 **It is prospective.** Verdicts recorded before 2026-07-31 stand as written;
-`docs/research/archive/` entries quoting 3.25 or 3.58 are accurate and are not
+results quoting the older 3.25 or 3.58 thresholds are accurate and are not
 restated. A pre-2026-07-31 result that sits between 2.5 and 3.25 is not thereby
 promoted — it is eligible to be re-examined, and the re-examination is a new
 registration.
