@@ -440,7 +440,7 @@ Subpackage ownership, what may import what, and the import order:
 [`liquidity_migration/README.md`](../liquidity_migration/README.md). Producer-side strategy modules
 (`long_native*`, `carry_demo*`, `financed_longs.py`) are documented
 with the research they implement: [`trading_logic.md`](trading_logic.md),
-[`strategy_program.md`](research/strategy_program.md). Data roots, PIT rules and clock domains:
+[`research_findings.md`](research/research_findings.md). Data roots, PIT rules and clock domains:
 [`data.md`](data.md).
 
 Moving a module physically is a separate refactor: a file move breaks the systemd launchers

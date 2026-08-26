@@ -76,20 +76,15 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | [docs/architecture.md](docs/architecture.md) | producers, journals, the engine seam — how a target becomes an order |
 | [docs/engine.md](docs/engine.md) | the Rust execution engine: crate contracts, latency budget, crash safety, safety posture |
 | [docs/trading_logic.md](docs/trading_logic.md) | what each sleeve trades and why |
-| [docs/research/carry_hold.md](docs/research/carry_hold.md) | the lead strategy in full: mechanism, tests, run rules, kill conditions |
 | [docs/data.md](docs/data.md) | data roots, point-in-time boundaries, refresh workflow |
 | [docs/research/research_findings.md](docs/research/research_findings.md) | what the evidence supports, including the negative results |
-| [docs/research/strategy_program.md](docs/research/strategy_program.md) | the active research queue; §Theses holds the ideas that work and still are not run, and what disqualifies each |
 | [docs/research/governance.md](docs/research/governance.md) | the Progressive Evidence Model — two lanes, what makes a number real, promotion notes |
 | [docs/research/backtesting_errors_we_never_repeat.md](docs/research/backtesting_errors_we_never_repeat.md) | the failure taxonomy |
-| [docs/research/archive/2026-08-01-settlement-sawtooth-program.md](docs/research/archive/2026-08-01-settlement-sawtooth-program.md) | the price pattern around funding payments, and why the carry book cannot be hedged |
 | [liquidity_migration/README.md](liquidity_migration/README.md) | which subpackage owns a module, and what may import what |
 | [scripts/README.md](scripts/README.md) | which script to run, and who runs it |
 | [docs/operations.md](docs/operations.md) §Real money | the funded-account envelope, the owner's arming runbook, and what is still unproven |
-| [docs/research/archive/](docs/research/archive/README.md) | dated research runs — the underlying tables behind a number |
 
-Registered configs cite the archived runs by section;
-`docs/research/research_findings.md` is the durable summary.
+`docs/research/research_findings.md` is the durable evidence summary.
 
 ## Standing rules
 

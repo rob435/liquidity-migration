@@ -35,8 +35,8 @@ file.
   fence (every measured stop level loses; the cover clock is the exit). No
   live fire yet — the sleeve waits for the first v7 fire like everything else.
   Evidence and the honest 2024-negative era shape:
-  `docs/research/research_findings.md` §1 (the exodus short row); promotion
-  note in `strategy_program.md`.
+  `docs/research/research_findings.md` (the exodus short row); promotion
+  note in `docs/research/governance.md`.
 - **The LLM GATE is an entry source inside the LONG sleeve (owner decision,
   live on demo).** The hourly ledger service judges fresh 4/12/24h trigger
   events on top-10-turnover names and publishes score ≥ 6 names to the LONG
@@ -418,7 +418,7 @@ into three env dials on both fleets; mainnet's account document is static at
 entry leverage 5. The v6 whale halving makes the carry producers read one
 non-Bybit input (Binance top-trader EODs, public endpoint, fail-open under the
 registered 48h freshness clause). Full statements in
-[docs/research/strategy_program.md](docs/research/strategy_program.md).
+[docs/research/research_findings.md](docs/research/research_findings.md).
 
 ## Evidence boundary
 
@@ -475,8 +475,8 @@ ones is indistinguishable from them.
 | Kline bootstrap logs `failed=N` on restart with an intact store | It re-fetches a window it already holds and counts zero new inserts as failure; bounded ~40–50 s per restart. Tracked follow-up |
 | The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 90 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |
-| Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/carry_hold.md` |
-| Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/carry_hold.md` §7, item 5 states it rather than treating it as settled |
+| Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/research_findings.md` |
+| Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/research_findings.md` states it rather than treating it as settled |
 | Nothing watches the venue and our records disagreeing | `account_health_unhealthy` had one writer, the deleted Python owner; the engine reconciles but publishes no mismatch. Freshness is retargeted at the engine's heartbeat, agreement is not. `gather_account_health_alerts()` is kept uncalled as the specification. Needs the engine to publish a mismatch — a design question, owner to decide ([`docs/notifications.md`](docs/notifications.md) §What is not watched) |
 | No positive liveness signal reaches the chat | There is no hourly digest and the dead-man's switch URL is unprovisioned, so silence means either a healthy fleet or a dead box. The engine's heartbeat is checked on-box only, and an on-box watchdog cannot report that the box died |
 

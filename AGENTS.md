@@ -63,8 +63,9 @@ Deciding is not guessing.
 1. Code, tests, deploy files, and generated artifacts define implemented behavior.
 2. [`STATE.md`](STATE.md) is the operational snapshot;
    [`CHANGELOG.md`](CHANGELOG.md) is its dated history.
-3. [`docs/research/strategy_program.md`](docs/research/strategy_program.md) is the current reading
-   of the evidence and the only active research queue.
+3. [`docs/research/governance.md`](docs/research/governance.md) is how evidence is graded,
+   registered, and promoted; [`docs/research/research_findings.md`](docs/research/research_findings.md)
+   is the durable record of what the research establishes.
 4. Skills in `.codex/skills/` are navigation aids, never factual authority —
    verify them against source. (`.claude/skills/` is a symlink to the same
    tree.)

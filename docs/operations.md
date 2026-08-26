@@ -269,7 +269,6 @@ funded account. These hazards remain open:
 ### Ramp
 
 The demo record behind Tier 1 — real funding, simulated fills, exit-depth measurements — is in
-[`research/carry_hold.md`](research/carry_hold.md) and
 [`research/research_findings.md`](research/research_findings.md). Tier 1 buys real fills, not returns.
 Any breach drops to 0, not one tier down.
 

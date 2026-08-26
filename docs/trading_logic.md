@@ -93,7 +93,7 @@ the venue holds no stop on is left to boot's repair rather than given one from a
 move is journaled (`WalRecord::StopSet`) before the call, so a crash leaves the log
 claiming the tighter level and boot puts *that* back. Worth **+13 to +19 bp a trade**,
 measured across 26 of 30 era-and-window cells
-([receipts](research/archive/2026-08-21-llm-gate-window-lab.md)).
+([record](research/research_findings.md)).
 
 `_plan_time_stop_exits` still publishes a zero target (journal reason `decayed_stop_loss`)
 when the producer sees the breach first on its 60s cycle — whichever of the two acts first
@@ -163,7 +163,7 @@ the one honest empty: a producer that has never written a record holds nothing.
 clock; the engine attaches it at entry and moves it in when the book's declared distance
 narrows. Time stop at 3 days publishes a zero target. **No take-profit**: graded on 5.5
 years of hourly triggers it is negative at every multiple tested, so nothing on the live
-path carries one ([receipts](research/archive/2026-08-21-llm-gate-window-lab.md)).
+path carries one ([record](research/research_findings.md)).
 
 **Limits.** The forward record is demo-only. The retained internal backtest result depends
 materially on take-profit winners — **and the live path takes no take-profit**, so the
@@ -193,7 +193,7 @@ and never changes with the profile (components filed under the older
 `carry_hold_v3` id drain under it). The forward grade for the v6/v7 rule
 continues under one config id. The v6−v5 capital-normalised paired
 differential is the registered forward experiment. See
-[`carry_hold.md`](research/carry_hold.md) §4.
+[`research_findings.md`](research/research_findings.md) §4.
 
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
 Bybit hourly data by calling the registered scorer functions directly, so the deployed book
@@ -269,8 +269,7 @@ construction over 12 daily offsets spans Sharpe 0.30–1.52 and midnight is the 
 three v3 filters were chosen in-sample in the review that registered them; the paired forward
 differential against v2 grades them. The corrected carry-hold benchmark Sharpe is **1.21
 (t 2.31)** — it does **not** beat the CONTINUOUS benchmark, and a 2.57 / t 4.87 figure for it
-is a wrong number. Detail: [`carry_hold.md`](research/carry_hold.md),
-[`research_findings.md`](research/research_findings.md).
+is a wrong number. Detail: [`research_findings.md`](research/research_findings.md).
 
 ## EXODUS — `lane2_exodus_short_v1`
 
@@ -338,7 +337,7 @@ price. Everything below 6 stays ledger-only.
 
 The window set and the rank depth are graded, on 5.5 years of hourly bars
 against the sleeve's own exit geometry
-([receipts](research/archive/2026-08-21-llm-gate-window-lab.md)): the 1h and 2h
+([record](research/research_findings.md)): the 1h and 2h
 windows each have a significantly negative year and are not run; turnover rank
 is the strongest thing measured about these triggers, and depth 10 roughly
 doubles the edge per trade against depth 30 in every year. The judged gate
@@ -451,8 +450,7 @@ plumbing rather than economics
 ([`research_findings.md`](research/research_findings.md)).
 
 The negative results, and what the evidence does and does not establish, are in
-[`research_findings.md`](research/research_findings.md) and the
-[archive](research/archive/README.md).
+[`research_findings.md`](research/research_findings.md).
 
 Grading rules and the claim boundary are in [`AGENTS.md`](../AGENTS.md); mainnet arming is
 [`operations.md`](operations.md) §Real money.

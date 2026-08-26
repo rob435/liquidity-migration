@@ -31,12 +31,9 @@ simply, without jargon.
 
 | Question | File |
 | --- | --- |
-| Active queue, current truth, and the measured-but-unrun theses | [strategy_program.md](docs/research/strategy_program.md) |
 | What the evidence supports, including the negative results | [research_findings.md](docs/research/research_findings.md) |
 | How evidence is graded, registered, and promoted | [governance.md](docs/research/governance.md) |
 | Backtest failure modes we do not repeat | [backtesting_errors_we_never_repeat.md](docs/research/backtesting_errors_we_never_repeat.md) |
-| The lead strategy in full | [carry_hold.md](docs/research/carry_hold.md) |
-| Dated receipts and closed programs (the tables behind a number) | [archive/](docs/research/archive/README.md) |
 
 Everything else: [README.md](README.md). Derive live state from these files;
 never copy sleeve status or thresholds here.
