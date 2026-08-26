@@ -31,9 +31,17 @@ contract. Do not assume a default window is OOS or that both venues are required
 - `carry` renders the registered research config
   `configs/lane2_carry_hold_v6.json` from the cross-venue panel, through the
   same `--research-config` path (below). It is the registered research shape,
-  not a demo daemon replay. This is also the deployed v7 profile's config —
-  v7 is an execution clock on the same registered file (never create a v7
-  JSON), and its pre-settle exit uplift is not in this render.
+  not a demo daemon replay. This is the rule the deployed v7 execution clock
+  trades — v7 is an execution clock on the same registered file (never create
+  a v7 JSON), and its pre-settle exit uplift is not in this render.
+- `--combined` renders a LONG+CARRY portfolio through the same standard chart.
+  It reads the two sleeves' daily equity CSVs, brings each leg to its deployed
+  dial (`--combined-long-multiplier` default 6.0, `--combined-carry-multiplier`
+  default 3.0), and blends them. Default blend is equal-risk (inverse-vol), so
+  neither leg dominates; `--combined-weight` forces a fixed CARRY share.
+  `--combined-scale` is presentation leverage on the blend (not modelled cost).
+  EXODUS is not included: it is demo-only and has no standard-format research
+  series. Output under `<out>/combined/`.
 - Neither curve is automatically a literal daemon replay. Capacity, live state,
   netting, optional overlays, order lifecycle, and deploy environment can differ.
   Read `docs/trading_logic.md` and the emitted config before claiming

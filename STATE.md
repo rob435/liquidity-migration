@@ -66,15 +66,13 @@ file.
   equity. The sizing is
   a forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** It runs
-  `9d2c646e`, with carry_hold **v7** on both CARRY producers: v6's registered
-  rule byte-identical plus the pre-settlement exit read (`strategy_profile=v7
-  early_exit=1` — the early exit fires on the venue's running rate up to 15
-  minutes before a dying print pays; settled-print fallback kept). The drop
-  exit is part of the producers' exit clock (no dial): a held name the
-  upcoming midnight decision zeroes — universe rank, persistence cut,
-  suspend — sells at the first post-midnight cycle (~00:02) instead of on the
-  00:20 clock; entries keep that clock. In the tree since 2026-08-23, live
-  from the next deploy.
+  `9d2c646e`, with carry_hold **v7** on both CARRY producers: the v7 execution
+  clock, `strategy_profile=v7 early_exit=1` — the early exit fires on the
+  venue's running rate up to 15 minutes before a dying print pays; settled-print
+  fallback kept. The drop exit is part of the producers' exit clock (no dial):
+  a held name the upcoming midnight decision zeroes — universe rank,
+  persistence cut, suspend — sells at the first post-midnight cycle (~00:02)
+  instead of on the 00:20 clock; entries keep that clock.
 
   The engine recovers fills its stream never delivered from the venue's own
   execution history — at boot and after every private-stream reconnect — so the
@@ -401,37 +399,25 @@ boundary. All demo equity/P&L numbers before the 2026-08-03 14:38 UTC clean-slat
 reset belong to the archived epoch.
 
 Change points currently accruing forward days: CARRY `lane2_carry_hold_v6`
-(promoted 2026-08-19 with zero forward days at promotion — registered the same
-morning; v4 and v5 keep scoring, and the v6−v5 capital-normalised differential
-is the registered forward experiment; v4 held the sleeve from 2026-08-03), the
-CARRY early exit (2026-08-19 late evening: an exiting name is sold at the
-settled print that ends it, not at the next midnight — the registered exit
-test at print time, `CARRY_EARLY_EXIT=1` on both carry units, kill switch is
-setting it to 0; graded from the engine's realized exit fills), the CARRY v7
-pre-settle exit clock (2026-08-19 ~22:49 UTC, `CARRY_STRATEGY_PROFILE=v7` on
-both carry units: the same exit test read on the venue's running rate inside
-the last 15 minutes before a held name's settlement, selling before the
-payment instead of one minute after it; config unchanged — v7 trades
-`lane2_carry_hold_v6` byte-identical, so its forward grade continues under one
-config id; graded from engine exit fills against the settled-print
-counterfactual; rollback dial is `v6`), and the drop exit (folded into the
-producers' exit clock 2026-08-23 — a held name the upcoming decision zeroes
-sells ~00:02 instead of 00:20, entries unchanged; no dial, the rollback is a
-revert and redeploy), LONG
-v12 wide-stop (2026-08-03), and the entry execution recipes
-(quote-first entries, touch-sized windows, and the replay-selected resting recipe,
-all 2026-08-04 — deployed with `f85371e`). 2026-08-21 adds three sizing
-change points on demo: the multipliers move to a fixed multiplier entry on
-both sleeves (carry 2.0→5.0→3.0, LONG 1.5→5.0→3.0 within the day — fill
-receipts grade forward from each deploy), and the LLM gate's judged entries
-move inside the LONG sleeve — same book and identity from then on, so their
-fills grade under LONG v12's config id beside the native entries. The same
-day, sizing collapses into three env dials on both fleets (the RM leverage
-dials and their render math retire; mainnet's account document goes static
-at entry leverage 5) — mainnet has no funded fills to grade yet, so that
-lands on the funded books. The v6 whale halving makes the carry
-producers read one non-Bybit input (Binance top-trader EODs, public endpoint,
-fail-open under the registered 48h freshness clause). Full statements in
+(v4 and v5 keep scoring; the v6−v5 capital-normalised differential is the
+registered forward experiment), the CARRY v7 pre-settle exit clock
+(`CARRY_STRATEGY_PROFILE=v7` on both carry units: the same exit test read on
+the venue's running rate inside the last 15 minutes before a held name's
+settlement, selling before the payment instead of one minute after it; the
+config is unchanged — v7 trades `lane2_carry_hold_v6` byte-identical, so its
+forward grade continues under one config id; graded from engine exit fills
+against the settled-print counterfactual; rollback dial is `v6`), the drop
+exit (a held name the upcoming decision zeroes sells ~00:02 instead of 00:20,
+entries unchanged; no dial, the rollback is a revert and redeploy), LONG v12
+wide-stop, and the entry execution recipes (quote-first entries, touch-sized
+windows, and the replay-selected resting recipe). Sizing is the fixed
+multipliers on both sleeves (carry 3.0, LONG 6.0), and the LLM gate's judged
+entries sit inside the LONG sleeve — same book and identity, so their fills
+grade under LONG v12's config id beside the native entries. Sizing collapses
+into three env dials on both fleets; mainnet's account document is static at
+entry leverage 5. The v6 whale halving makes the carry producers read one
+non-Bybit input (Binance top-trader EODs, public endpoint, fail-open under the
+registered 48h freshness clause). Full statements in
 [docs/research/strategy_program.md](docs/research/strategy_program.md).
 
 ## Evidence boundary
@@ -498,20 +484,3 @@ Audit reports are not kept as standing files. Their findings live in the topic
 docs — `docs/research/research_findings.md`, `docs/architecture.md`,
 `docs/data.md`, `docs/trading_logic.md`, `docs/notifications.md` — and in Git
 history.
-
-## Recovery archive
-
-- 2026-08-03 clean-slate ledger reset (three sleeve roots, account
-  journal/inbox/capture, reports, caches):
-  `data/_archive/ledger-reset-20260803T143852Z.tar.gz`, SHA-256 `4b729c34…937a`.
-- 2026-07-22 owner-authorized full reset (22 account journals, inboxes, captures,
-  epoch projections):
-  `/opt/liquidity-migration/data/_archive/ledger-reset-20260722T213413Z-owner-authorized-full-reset-20260722.tar.gz`
-  (31,490,855 bytes; SHA-256
-  `e629df3efb8c0a3e5101479298589e23d65b7b95c9daa9859531a6da3f91c6d2`).
-- Pre-evidence BTC-risk state, rejected rather than migrated:
-  `/var/lib/liquidity-migration/retired-state/20260716T0948Z-btc-risk-pre-evidence/`
-  (SHA-256 `be80dc76002dc8a0c943798e23b58c29f3894e83f9d6d7a72414008df1d9f146`).
-- 2026-08-05 torn demo event tapes (disk-full casualties):
-  `strategy_event_tape.jsonl.enospc-20260805.bak` beside each, in every demo
-  producer root.

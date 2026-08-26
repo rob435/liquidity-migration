@@ -19,16 +19,6 @@ Publication switches live in [`deploy/sleeves.env`](../deploy/sleeves.env).
 | CARRY | Long coins whose shorts pay a deep crowd fee | on | gated by `REAL_MONEY` |
 | EXODUS | Short the name carry just abandoned, through the post-settlement fall | on | not published |
 
-EXODUS has no toggle in `sleeves.env`: it is published by the carry producer (its trigger
-is carry's own pre-settle exit fire), armed per unit by `EXODUS_SHORT_PROFILE` in the unit
-environment, and holds its own engine sleeve, book file, and fill attribution.
-
-Producers publish absolute component targets; they never place orders and never own fills,
-funding, or P&L ([`architecture.md`](architecture.md)). Demo is the only practice book.
-`sleeves.env` carries no mainnet toggle — the funded route's single arming switch is
-`REAL_MONEY` in the host credential file, and whether it is armed today is
-[STATE.md](../STATE.md), not this page.
-
 ## LONG — `LongV12WideStop`
 
 **Signal.** Two registered profiles share this signal — `long_v11a_profile()` and the
@@ -63,7 +53,7 @@ annual floor, 30% position-weight cap), times 1.5 on weekend entries. Entry leve
 changes margin only, never quantity. Five new entries per cycle maximum; how large a
 multiplier runs is the owner's dial in the operational profile.
 
-### `LongV12WideStop` — registered 2026-08-01, deployed 2026-08-03
+### `LongV12WideStop`
 
 Same signal, same universe, same sizing, same entry. One thing changes against v11a: the
 stop starts at **3× the typical daily swing instead of 1.5×**, and tightens back to 1.5×
@@ -84,9 +74,9 @@ worst dip **−4.4% → −3.9%**, stop-outs 67 → 50, paired daily difference 
 (best 20 trades carry 62% of P&L against 78%). Render it with
 `bash scripts/research/equity_curves.sh --sleeves long --long-profile v12`.
 
-Lane-1 evidence: simulated on the data that also chose the rule. The forward record starts
-at the registering commit. Its identity `long_native_v12_wide_stop` is separate from v11a's
-because that string is a persisted account-journal key.
+Lane-1 evidence: simulated on the data that also chose the rule. Its identity
+`long_native_v12_wide_stop` is separate from v11a's because that string is a persisted
+account-journal key.
 
 **How v12 publishes.** The wide initial stop is the entry's `stop_loss_fraction` in the
 book, which the engine turns into a venue-native stop attached to the position. Each entry
@@ -192,19 +182,18 @@ funding-coverage dimension as well as a PIT one, and funding downgrades it indep
 (`_methodology_run_label`, same file). `full_pit_universe_pass=true` beside a
 `full_pit_universe_funding_coverage_low` label is not a historical-universe claim.
 
-## CARRY — `lane2_carry_hold_v6`
+## CARRY — the v7 execution clock, trading `lane2_carry_hold_v6`
 
-> **Promoted 2026-08-19 by owner override**; forward grading starts there, and it entered
-> with **0 scored days** (promotion note in
-> [`strategy_program.md`](research/strategy_program.md)). On top of v4, v6 carries v5's two
-> size halvings — stale turnover flow and Binance top-trader de-longing (the whale leg, the
-> book's one non-Bybit input) — and bends the depth ladder with a 1.5 exponent, all in the
-> shared registered scorer. Selection is `CARRY_STRATEGY_PROFILE` (`v3`/`v4`/`v6`/`v7` — v7
-> is the dial on both carry units) in the unit environment → `--strategy-profile`, the same
-> dial shape as LONG's; the journal filing id is the version-free `carry_hold` and never
-> changes with the profile (components filed under the older `carry_hold_v3` id drain under
-> it). v4 and v5 keep scoring daily and the v6−v5 capital-normalised paired differential is
-> the registered forward experiment. See [`carry_hold.md`](research/carry_hold.md) §4.
+The deployed CARRY profile is `carry_hold_v7_live_v1` (`CARRY_STRATEGY_PROFILE=v7`
+on both carry units). It trades the registered rule below and the v7 exit clock
+described under **Exit**. Selection is `CARRY_STRATEGY_PROFILE`
+(`v3`/`v4`/`v6`/`v7`) in the unit environment → `--strategy-profile`, the same
+dial shape as LONG's. The journal filing id is the version-free `carry_hold`
+and never changes with the profile (components filed under the older
+`carry_hold_v3` id drain under it). The forward grade for the v6/v7 rule
+continues under one config id. The v6−v5 capital-normalised paired
+differential is the registered forward experiment. See
+[`carry_hold.md`](research/carry_hold.md) §4.
 
 **Signal.** Long-only crowd-fee collection, replayed daily at 00:00 UTC over 90 days of
 Bybit hourly data by calling the registered scorer functions directly, so the deployed book
@@ -240,55 +229,37 @@ the live mark: sizing off the live mark makes the day's target a function of the
 unrealized P&L, and the book churns itself. A 5%-of-standing / $1 dead-band is the
 backstop; entries below $10 notional are skipped.
 
-**Exit.** Exits and resizes are a diff against the account owner's accepted reservations,
-published exit-first. Entry intents expire 6h after the decision bar and are not published
-inside the last 15 minutes of that window. A declared 35% stop backstops each position at
-the venue. No time stop.
+**Exit — the v7 clock.** Exits and resizes are a diff against the account owner's
+accepted reservations, published exit-first. Entry intents expire 6h after the
+decision bar and are not published inside the last 15 minutes of that window.
+A declared 35% stop backstops each position at the venue. No time stop.
 
-**Early exit (owner-directed, `CARRY_EARLY_EXIT=1` on both carry units).** A held name whose
-LATEST settled print has recovered to −3 bp or above — the registered exit test, applied at
-print time instead of the next midnight — is sold at the first cycle after that print sweeps
-in (~1–2 min after the settlement), and masked out of the desired book until the next
-decision bar so the frozen day cannot re-buy it. If the next midnight print is deep again the
-next decision re-enters normally (measured misfire rate ~17% all-day; the research note
-charges it). No new threshold, no new data: the fire condition is `lane2_carry_hold_v6`'s own
-`exit_above_funding_bp` read from the hourly funding sweep. Setting the env to 0 restores the
-registered midnight exit clock. Evidence and the honest caveats (positive-median,
-tail-exposed, mean below the t-bar):
+The exit test is the registered one — a held name is sold when its funding print
+reaches −3 bp or above. v7 moves **when** that test is evaluated: instead of at
+the next midnight decision, the producer fires it against the venue's
+pre-settlement running rate. The venue locks the upcoming crowd-fee rate just
+under a minute before it pays, so inside the final minutes the public ticker's
+running rate is tomorrow's print, visible early. When a held name's settlement
+is at most 15 minutes away and that running rate is at or above −3 bp, the name
+sells immediately — before the payment and the farmer exodus instead of one
+minute into it. The settled-print path is the fallback, so a failed or missed
+read degrades v7 to the ordinary clock.
+
+**Drop exit.** A held name the upcoming midnight decision zeroes — universe
+rank, persistence cut, suspend — sells at the first cycle after the data is
+ready post-midnight (~00:02) instead of on the 00:20 clock those names wait
+for. The producer freezes the upcoming day's book early (same computation,
+same gates, same refusal semantics as the pre-deadline freeze-ahead), masks
+the zeroed names out of the served old-day book, and publishes their exit
+intents immediately. Entries never move early: they exist only in the upcoming
+book and stay behind the 00:20 flip. A resize (weight shrunk, not zeroed) is
+not a drop and waits for the flip too. The exodus sleeve does not take these
+over — its trigger is the fee-recovery fire above, never a membership drop.
+
+Kill switches: `CARRY_EARLY_EXIT=0` silences both exit clocks;
+`CARRY_STRATEGY_PROFILE=v6` keeps the settled-print clock only. Evidence and
+the honest caveats (positive-median, tail-exposed, mean below the t-bar):
 [`research_findings.md`](research/research_findings.md) §Settlement-instant timing.
-
-**v7 pre-settlement exit (owner-directed, `CARRY_STRATEGY_PROFILE=v7` on both carry units).**
-The venue locks the upcoming crowd-fee rate just under a minute before it pays, so inside the
-final minutes the public ticker's running rate is tomorrow's print, visible early. Under the
-v7 profile the producer batch-reads that rate for its held names whenever one of their
-settlements is at most 15 minutes away, and fires the SAME registered exit test on it —
-selling before the payment and the farmer exodus instead of one minute into it. v7 changes
-only this execution clock: its membership rule is `lane2_carry_hold_v6` byte-identical (the
-config's forward grade continues under one id), and the settled-print path above stays as the
-fallback, so a failed or missed read degrades v7 to exactly the v6 clock. Measured: +21.3 bp
-per fire all-in over the settled-print sell (median +11.3, t 4.9; 2025/26 ≈ +29 bp per fire,
-+2.4–3.1 bp/day book-level), premature fires ~4% of fire-days costing ~2.3 bp/fire-day,
-charged in the research row. `CARRY_EARLY_EXIT=0` kills both exit clocks;
-`CARRY_STRATEGY_PROFILE=v6` keeps the settled-print clock only.
-
-**Drop exit (part of the exit clock, 2026-08-23).** A held name the UPCOMING
-midnight decision zeroes — universe rank, persistence cut, suspend — sells at
-the first cycle after the data is ready post-midnight (~00:02) instead of on
-the 00:20 clock those names otherwise wait for. The producer freezes the
-upcoming day's book early (same computation, same gates, same refusal
-semantics as the pre-deadline freeze-ahead: a build the WS store served
-without REST repair or funding-fetch failures), masks the zeroed names out of
-the served old-day book, and their exit intents publish immediately. Entries
-never move early: they exist only in the upcoming book and stay behind the
-00:20 flip. A resize (weight shrunk, not zeroed) is not a drop and waits for
-the flip too. The exodus sleeve does not take these over — its trigger is the
-fee-recovery fire above, never a membership drop. Measured: exits forced by a
-universe/persistence drop leak +74/+43 bp pooled between 23:55 and the 00:20
-fill (t 3.5), but only +18/+15 bp in 2026 alone (t 0.8); the residual risk is
-a ticker snapshot sampled early shrinking the frozen universe and selling a
-name the authoritative 00:20 rebuild would have kept (re-buy round trip
-~15.56 bp, charged against the leak). A dirty build degrades the day to the
-old 00:20 clock.
 
 **Limits.** Concentrated (~2–3 names when active — v4 holds 22% fewer name-days than v3 and
 is flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity ~$1M at
@@ -303,11 +274,11 @@ is a wrong number. Detail: [`carry_hold.md`](research/carry_hold.md),
 
 ## EXODUS — `lane2_exodus_short_v1`
 
-> **Registered and deployed to demo 2026-08-20.** A standalone sleeve at the engine — its own
-> `[[strategy]]` block, book file (`exodus-demo.json`), capital attribution, and kill dial —
-> produced from inside the carry process, because its entire trigger is carry's v7
-> pre-settle exit fire. Registered config: [`lane2_exodus_short_v1.json`](../configs/lane2_exodus_short_v1.json);
-> rules module: [`rules/exodus_short.py`](../liquidity_migration/rules/exodus_short.py).
+A standalone sleeve at the engine — its own `[[strategy]]` block, book file
+(`exodus-demo.json`), capital attribution, and kill dial — produced from inside
+the carry process because its whole trigger is carry's v7 pre-settle exit fire.
+Registered config: [`lane2_exodus_short_v1.json`](../configs/lane2_exodus_short_v1.json);
+rules module: [`rules/exodus_short.py`](../liquidity_migration/rules/exodus_short.py).
 
 **Signal.** None of its own. When the carry sleeve's pre-settle exit fires — the running
 rate says a held name's deep funding print is dying — the name's price keeps falling for
@@ -351,13 +322,12 @@ carry never held) is measured-but-unrun and NOT part of this config. Evidence:
 
 ## LLM GATE — judged entries inside the LONG sleeve
 
-> **Live on demo since 2026-08-21 by owner decision.** The hourly
-> `liquidity-migration-llm-ledger.service` judges fresh 4/12/24h trigger
-> events and publishes every **score ≥ 6** judgment to the LONG sleeve's
-> candidates file; the LONG producer takes those names as entries through its
-> own sizing, exits, and venue-native stops. One strategy, one book
-> (`long-demo.json`), one engine sleeve (`long`) — the ledger holds no venue
-> credentials and writes nothing but the candidates file and its own ledger.
+The hourly `liquidity-migration-llm-ledger.service` judges fresh 4/12/24h
+trigger events and publishes every **score ≥ 6** judgment to the LONG sleeve's
+candidates file; the LONG producer takes those names as entries through its
+own sizing, exits, and venue-native stops. One strategy, one book
+(`long-demo.json`), one engine sleeve (`long`) — the ledger holds no venue
+credentials and writes nothing but the candidates file and its own ledger.
 
 **Signal.** The hourly trigger scan: a **top-10**-turnover name whose rolling
 4/12/24h move clears its vol-scaled bar (the daily 2.5σ trigger × √time) with

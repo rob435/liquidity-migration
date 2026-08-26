@@ -1,31 +1,3 @@
-## Do Not Build Safety Machinery
-
-Do not add safety features, guards, gates, receipts, or proofs on your own
-initiative. Propose them; the owner decides. Fix a fault instead of proving it
-absent.
-
-Existing capital-preservation controls stay and are not yours to remove either.
-They live in the engine now: the equity-anchored envelope
-([`envelope.rs`](engine/engine-risk/src/envelope.rs)), the account-wide capital
-caps ([`kernel.rs`](engine/engine-risk/src/kernel.rs)), and the venue-native
-stop discipline ([`working.rs`](engine/engine-core/src/working.rs) and
-[`reconcile.rs`](engine/engine-core/src/reconcile.rs)).
-
-There is no daily loss halt, by the owner's explicit decision — do not re-add
-it, and do not read its absence as a fault. The venue-native stop bounds each
-position; nothing bounds the accumulation of many stopped positions in one day,
-and the owner accepted that knowingly.
-
-There is no per-sleeve capital share either, by the same kind of decision. Every
-cap is account-wide and one sleeve can spend the lot; do not re-add a
-partition.
-
-## Runtime Safety
-
-- Default to offline, shadow, or demo operation.
-- Unknown safety-critical state fails closed. Alpha metrics never justify
-  dropping a capital-preservation control for real money.
-
 ## Truthfulness
 
 - Optimize for decision-useful work, not agreement with prior docs, labels, or
@@ -39,16 +11,12 @@ partition.
   place only by saying what the code cannot — a constraint, a unit, a frozen
   contract, a venue quirk, who reads this file. Never narrate the line below
   it, never argue that a change is correct, never keep history in code: git
-  and CHANGELOG own history. A comment that repeats the code in English is
-  deleted on sight. The same goes for docstrings that restate the function
-  name — except module docstrings that docs or tests cite as records, which
-  are contracts, not comments.
+  and CHANGELOG own history.
 
 ## Lean Docs
 
 Docs describe the system as it is, in the present tense. History — what
-changed, when, what it replaced — lives in [`CHANGELOG.md`](CHANGELOG.md) and
-the archive directories, nowhere else.
+changed, when, what it replaced — lives in [`CHANGELOG.md`](CHANGELOG.md)
 
 - Never write a deletion note or a back-reference: no "formerly", "previously",
   "as of \<date\>", "used to", "was removed". When something changes, rewrite
@@ -56,20 +24,11 @@ the archive directories, nowhere else.
 - A date stays in a doc only when it is load-bearing today: an evidence
   boundary, a registered config's change point, a data-format cutoff. A date
   that only says when a change happened belongs in CHANGELOG.md.
-- Every sentence must change what the reader does or believes today; cut the
-  rest. Receipt tables go to `docs/research/archive/` — the doc keeps the
-  conclusion and the link. Negative results are current knowledge, not
-  history: keep the finding and its data window, cut the narration.
-- A standing decision ("do not re-add X") stays, with one plain sentence of
-  why — never the story.
-- Comments are under the same law (§Truthfulness): git and CHANGELOG own
-  history, a comment states only what the code cannot.
 
-## Ask Once, Then Decide
+## Ask Questions, Propose Ideas, Then Decide
 
-Scout before you ask. Read the tree, run the baseline, count the call sites. A
-question asked from ignorance burns a turn and gets a vague answer; a question
-asked from evidence gets a real one, because the options are real.
+Scout before you ask. Read the tree, run the baseline, count the call sites.
+Don't be afraid to grill the owner.
 
 - Ask only where different answers change the work. Routine judgment calls are
   yours — make them, say you made them, move on.
@@ -79,34 +38,25 @@ asked from evidence gets a real one, because the options are real.
 - Never ask what you can check. Whether a unit file names a module, whether the
   suite is green, whether a reference resolves — go and look. Guessing out loud
   and asking the owner to confirm is not a question, it is an outsourced task.
-- Surface a surprise the moment it is consequential, even mid-task: a second
-  process writing to the tree, a staged deletion you did not expect, a baseline
-  that is already red. Say it before you build on top of it.
+- Don't be scared to show some personality. These doc's come off as binding but
+  You have >= authority.
 
 ## When You Are Given Authority
 
 "Take full authority", "you decide", "go", "just do it" ends the questions. Do
 not re-ask, do not hedge, do not stop at the first fork for reassurance. Decide,
-act, and report what you chose and why. Coming back with more questions after
-the owner has handed over the decision is a failure to do the work.
+act, and report what you chose and why.
 
 Deciding is not guessing.
 
 - Where the choice is genuinely open and getting it wrong is expensive, make the
   alternatives compete. Generate several plans from different premises, argue
-  them against each other on named criteria, and take the winner apart before
-  adopting it. Spawning agents to hold the opposing positions is a good way to
-  run that argument; a lone plausible-looking answer is not.
+  them against each other on named criteria. Spawning agents to hold the opposing 
+  positions is a good way to run that argument.
 - Then verify the winner yourself. Agents argue confidently and are wrong in
   specific ways — paths that moved, invented line numbers, a check they say they
-  ran. Re-derive the load-bearing claims from source. The argument finds the
-  answer; your own check is what makes it true.
-- Report the decision, the runner-up, and what would change your mind. The owner
-  reads that instead of the questions you did not ask.
-
-Authority over the work is not authority over the money. Arming real money has
-one switch — `REAL_MONEY=true` in the host credential file, set by the owner's
-own hand — and no general grant reaches it.
+  ran. Re-derive the load-bearing claims from source. 
+- Report the decision, the runner-up, and what would change your mind.
 
 ## Which Source Wins
 
@@ -143,3 +93,9 @@ When sources disagree, read the primary artifact and fix the stale source.
   outputs with declared tolerances and matching NaN positions.
 - A strategy change is not a refactor — explain and test the numerical
   difference rather than forcing equivalence, and record the change point.
+
+## Do Not Build Safety Machinery
+
+Do not add safety features, guards, gates, receipts, or proofs on your own
+initiative. Propose them; the owner decides. Fix a fault instead of proving it
+absent.

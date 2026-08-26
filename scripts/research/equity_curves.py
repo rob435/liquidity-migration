@@ -22,6 +22,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import polars as pl
+
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
@@ -120,6 +122,269 @@ def _run_carry(
 
     panel = _load_research_panel(panel_root)
     return research_equity_chart(panel, CARRY_CONFIG_PATH, out, start=start, end=end)
+
+
+#: Daily equity CSV produced by each sleeve runner under its output dir.
+_COMBINED_EQUITY_CSVS = {
+    "long": "long_native_equity.csv",
+    "carry": "lane2_carry_hold_v6_daily_equity.csv",
+}
+
+
+def _combined_daily_returns(equity_csv: Path) -> list[tuple[str, float]]:
+    """[date(str), ret] per day from a sleeve's daily equity CSV.
+
+    LONG's CSV carries ``basket_return``; the carry research renderer writes
+    ``date,equity`` only, so returns are derived by taking the last equity per
+    date. A day with no row means the sleeve did not trade that day and
+    contributes zero return (an absent book cannot lose or earn).
+    """
+    import polars as pl
+
+    df = pl.read_csv(equity_csv)
+    cols = {c.lower(): c for c in df.columns}
+    dcol = next((cols[c] for c in ("date", "day", "timestamp") if c in cols), None)
+    if dcol is None:
+        raise SystemExit(f"{equity_csv.name}: no date column in {df.columns}")
+    date_expr = pl.col(dcol).cast(pl.String).str.slice(0, 10)
+    rcol = next((cols[c] for c in ("basket_return", "ret", "return") if c in cols), None)
+    if rcol is not None:
+        frame = df.select(date=date_expr, ret=pl.col(rcol).cast(pl.Float64))
+    else:
+        ecol = next((cols[c] for c in ("equity", "nav", "equity_usdt") if c in cols), None)
+        if ecol is None:
+            raise SystemExit(f"{equity_csv.name}: no return or equity column in {df.columns}")
+        eq = df.select(date=date_expr, e=pl.col(ecol).cast(pl.Float64)).sort("date")
+        eq = eq.group_by("date").agg(pl.col("e").last()).sort("date")
+        frame = eq.with_columns(
+            ret=(pl.col("e") / pl.col("e").shift(1) - 1.0).fill_null(0.0)
+        ).select("date", "ret")
+    return [
+        (str(row["date"]), float(row["ret"]))
+        for row in frame.group_by("date").agg(pl.col("ret").sum()).sort("date").to_dicts()
+    ]
+
+
+def _combined_equity_frame(
+    out_root: Path,
+    *,
+    weight_carry: float | None,
+    scale: float,
+    long_multiplier: float,
+    carry_multiplier: float,
+    long_profile: str,
+) -> pl.DataFrame:
+    """Build the combined LONG+CARRY equity series.
+
+    Each leg is first brought to its deployed size by multiplying its daily
+    return by ``long_multiplier`` / ``carry_multiplier`` (the research render
+    is at 1x native size; the deployed dials are LONG 6.0, CARRY 3.0). The two
+    dial-scaled legs are then blended.
+
+    ``weight_carry`` is the CARRY share of the blend. When it is None the blend
+    is equal-risk (inverse full-window vol): each leg contributes proportional
+    to 1/vol, so neither dominates. The two legs are aligned over the union of
+    their trading days (a day where only one leg trades contributes that leg's
+    return alone), then ``combined_ret = scale * weighted_blend``. ``scale`` is
+    presentation leverage on the combined book and is NOT modelled cost — the
+    two underlying returns already carry their own costs.
+    """
+    import polars as pl
+
+    long_csv = out_root / "long" / _COMBINED_EQUITY_CSVS["long"]
+    carry_csv = out_root / "carry" / _COMBINED_EQUITY_CSVS["carry"]
+    long_rows = dict(_combined_daily_returns(long_csv))
+    carry_rows = dict(_combined_daily_returns(carry_csv))
+    all_days = sorted(set(long_rows) | set(carry_rows))
+    if len(all_days) < 2:
+        raise SystemExit(f"combined window too short: {len(all_days)} day(s)")
+
+    scaled_long = {d: r * long_multiplier for d, r in long_rows.items()}
+    scaled_carry = {d: r * carry_multiplier for d, r in carry_rows.items()}
+
+    if weight_carry is None:
+        long_vol = _ann_vol([scaled_long[d] for d in all_days if d in scaled_long])
+        carry_vol = _ann_vol([scaled_carry[d] for d in all_days if d in scaled_carry])
+        if long_vol <= 0 or carry_vol <= 0:
+            raise SystemExit("equal-risk blend needs positive per-leg volatility")
+        weight_carry = (1.0 / carry_vol) / (1.0 / long_vol + 1.0 / carry_vol)
+
+    combined: list[tuple[str, float]] = []
+    for day in all_days:
+        lr = scaled_long.get(day, 0.0)
+        cr = scaled_carry.get(day, 0.0)
+        r = scale * ((1.0 - weight_carry) * lr + weight_carry * cr)
+        combined.append((day, r))
+    equity = 1.0
+    rows = []
+    for day, ret in combined:
+        equity *= 1.0 + ret
+        rows.append((day, equity))
+    return pl.DataFrame({"date": [d for d, _ in rows], "equity": [e for _, e in rows]}), weight_carry
+
+
+def _monthly_from_equity(equity: pl.DataFrame) -> pl.DataFrame:
+    """Month-by-month strategy return from a daily equity frame (no trade counts).
+
+    Runs last-equity-in-month / last-equity-in-previous-month - 1, so the first
+    month (no prior month) reads 0.0 rather than a truncated entry month.
+    """
+    import polars as pl
+
+    month_end = (
+        equity.with_columns(month=pl.col("date").str.slice(0, 7))
+        .sort("date")
+        .group_by("month", maintain_order=True)
+        .agg(pl.col("equity").last().alias("last_eq"))
+        .sort("month")
+        .with_columns(ret=pl.col("last_eq") / pl.col("last_eq").shift(1) - 1.0)
+        .with_columns(ret=pl.col("ret").fill_null(0.0).cast(pl.Float64))
+    )
+    return month_end.select("month", pl.col("ret").alias("strategy_return"))
+
+
+def _ann_vol(returns: list[float]) -> float:
+    """Annualised volatility of a daily-return series, or 0.0 when undefined."""
+    import math
+
+    import polars as pl
+
+    if len(returns) < 2:
+        return 0.0
+    s = pl.Series(returns).std(ddof=1)
+    if s is None or float(s) == 0.0:
+        return 0.0
+    return float(s * math.sqrt(365))
+
+
+def _btc_raw_klines(panel_root: str | Path, *, start: str, end: str) -> pl.DataFrame:
+    """BTCUSDT close series in the renderer's ``symbol,date,ts_ms,close`` schema."""
+    import polars as pl
+
+    root = Path(panel_root).expanduser()
+    shards = sorted(str(x) for x in root.glob("*/panel.parquet"))
+    if not shards:
+        return pl.DataFrame(schema={"symbol": pl.String, "date": pl.String, "ts_ms": pl.Int64, "close": pl.Float64})
+    start_ts = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.UTC).timestamp() * 1000)
+    end_ts = int(dt.datetime.fromisoformat(end).replace(tzinfo=dt.UTC).timestamp() * 1000)
+    return (
+        pl.concat([pl.scan_parquet(s) for s in shards])
+        .filter(
+            (pl.col("symbol") == "BTCUSDT")
+            & (pl.col("bar_ts_ms") >= start_ts)
+            & (pl.col("bar_ts_ms") < end_ts)
+            & pl.col("by_close").is_not_null()
+        )
+        .select(
+            pl.col("symbol"),
+            pl.from_epoch("bar_ts_ms", time_unit="ms").dt.date().cast(pl.String).alias("date"),
+            pl.col("bar_ts_ms").alias("ts_ms"),
+            pl.col("by_close").alias("close"),
+        )
+        .collect()
+        .sort("ts_ms")
+    )
+
+
+def _run_combined(
+    panel_root: str,
+    start: str,
+    end: str,
+    out: Path,
+    *,
+    weight_carry: float | None,
+    scale: float,
+    long_multiplier: float,
+    carry_multiplier: float,
+    long_profile: str,
+) -> dict[str, Any]:
+    """Render the LONG+CARRY combined book through the standard chart.
+
+    Reads the two sleeves' already-run daily equity CSVs (call the wrapper
+    with ``--sleeves long,carry`` alongside ``--combined``), brings each leg
+    to its deployed size, blends them (equal-risk by default), applies
+    presentation-only ``scale`` leverage, and draws the same strategy-vs-BTC
+    layout. Combined-book metrics are computed on the blended daily series.
+    """
+    import polars as pl
+
+    out.mkdir(parents=True, exist_ok=True)
+    from liquidity_migration.research.backtest.volume_events_charts import _write_equity_benchmark_chart
+
+    equity, resolved_carry_weight = _combined_equity_frame(
+        out.parent,
+        weight_carry=weight_carry,
+        scale=scale,
+        long_multiplier=long_multiplier,
+        carry_multiplier=carry_multiplier,
+        long_profile=long_profile,
+    )
+    weight_carry = resolved_carry_weight
+    equity.write_csv(out / "combined_equity.csv")
+
+    vals = equity["equity"].to_list()
+    returns = [
+        (vals[i] / vals[i - 1] - 1.0) if i > 0 else 0.0
+        for i in range(len(vals))
+    ]
+    days = equity["date"].to_list()
+    years = max((dt.date.fromisoformat(days[-1]) - dt.date.fromisoformat(days[0])).days, 1) / 365.25
+    total = float(vals[-1] - 1.0)
+    annualized = float(vals[-1] ** (1.0 / years) - 1.0) if total > -1 else -1.0
+    drawdown = float(
+        min((v / max(vals[: i + 1]) - 1.0) for i, v in enumerate(vals))
+    )
+    deviation = float(pl.Series(returns).std(ddof=1)) if len(returns) > 1 else 0.0
+    metrics = {
+        "total_return_pct": total * 100.0,
+        "annualized_pct": annualized * 100.0,
+        "max_drawdown_pct": drawdown * 100.0,
+        "worst_day_pct": min(returns) * 100.0,
+        "sharpe_daily_ann": (
+            float(pl.Series(returns).mean()) / deviation * (365.0 ** 0.5) if deviation > 0 else 0.0
+        ),
+        "mar": (annualized / abs(drawdown)) if drawdown < 0 else None,
+        "years": years,
+    }
+
+    raw_klines = _btc_raw_klines(panel_root, start=start, end=end)
+    combined_equity = equity.with_columns(
+        pl.col("date").cast(pl.Date).cast(pl.Datetime("ms")).dt.epoch("ms").alias("ts_ms")
+    ).select("ts_ms", "date", "equity")
+    blend_note = (
+        f"equal-risk blend (inverse-vol): {1.0 - weight_carry:.1%} LONG / {weight_carry:.1%} CARRY"
+    )
+    monthly = _monthly_from_equity(equity)
+    chart = _write_equity_benchmark_chart(
+        out,
+        equity=combined_equity,
+        raw_klines=raw_klines,
+        monthly=monthly,
+        png_name="combined_equity_btc.png",
+        title="LONG + CARRY - combined research book",
+        subtitle=(
+            f"SIMULATION ON SEEN DATA - opinion, not evidence. Legs at deployed dials "
+            f"(LONG x{long_multiplier:g}, CARRY x{carry_multiplier:g}); {blend_note}; "
+            f"blend scaled x{scale:g} for presentation (not modelled cost). "
+            f"Window {start} -> {end} (end exclusive). Long profile {long_profile}."
+        ),
+        step=False,
+        strategy_name=f"Portfolio {scale:g}x {1.0-weight_carry:.2f} LONG / {weight_carry:.2f} CARRY",
+        metrics=metrics,
+    )
+    return {
+        "run_label": "combined_long_carry_research_seen_data",
+        "summary": {
+            "total_return": total,
+            "max_drawdown": drawdown,
+            "sharpe_like": metrics["sharpe_daily_ann"],
+            "mar": metrics["mar"],
+        },
+        "metrics": metrics,
+        "png": chart.get("png"),
+        "equity": equity,
+        "weight_carry": weight_carry,
+    }
 
 
 RUNNERS = {"long": _run_long, "carry": _run_carry}
@@ -328,12 +593,62 @@ def main() -> int:
         default=DEFAULT_PANEL_ROOT,
         help="Cross-venue panel root for --research-config renders.",
     )
+    p.add_argument(
+        "--combined",
+        action="store_true",
+        help=(
+            "Render the LONG+CARRY combined book through the standard chart, in "
+            "addition to the requested sleeves. Requires --sleeves to include "
+            "long and carry (it runs both so their daily equity CSVs exist). "
+            "Writes under <out>/combined/. The combined book is the weighted sum "
+            "of the two books' daily returns, then scaled by --combined-scale."
+        ),
+    )
+    p.add_argument(
+        "--combined-weight",
+        type=float,
+        default=None,
+        help=(
+            "CARRY share of the combined book (LONG gets 1 - this). Default None "
+            "= equal-risk (inverse-vol) blend, so neither leg dominates. Setting a "
+            "number forces a fixed return split."
+        ),
+    )
+    p.add_argument(
+        "--combined-scale",
+        type=float,
+        default=1.0,
+        help="Presentation leverage applied to the combined daily return (not modelled cost). (default: 1.0)",
+    )
+    p.add_argument(
+        "--combined-long-multiplier",
+        type=float,
+        default=6.0,
+        help="LONG dial multiplier applied to the LONG leg before blending. Research render is 1x. (default: 6.0)",
+    )
+    p.add_argument(
+        "--combined-carry-multiplier",
+        type=float,
+        default=3.0,
+        help="CARRY dial multiplier applied to the CARRY leg before blending. Research render is 1x. (default: 3.0)",
+    )
+    p.add_argument(
+        "--combined-long-profile",
+        choices=("v11a", "v12"),
+        default="v12",
+        help="Which LONG profile was used for the right-hand LONG leg. (default: v12)",
+    )
     args = p.parse_args()
 
     sleeves = [s.strip() for s in args.sleeves.split(",") if s.strip()]
     bad = [s for s in sleeves if s not in RUNNERS]
     if bad:
         raise SystemExit(f"unknown sleeve(s) {bad}; valid: {', '.join(RUNNERS)}")
+    if args.combined:
+        for need in ("long", "carry"):
+            if need not in sleeves:
+                print(f"[combined] adding sleeve {need!r} so its daily equity CSV is produced")
+                sleeves.append(need)
 
     today = _today()
     end = args.end or (today + dt.timedelta(days=1)).isoformat()
@@ -409,9 +724,53 @@ def main() -> int:
         print(f"  PNG: {payload.get('png') or '(none)'}\n", flush=True)
         results[key] = {"png": payload.get("png"), "run_label": payload["run_label"]}
 
+    if args.combined:
+        out = out_root / "combined"
+        _prepare_sleeve_output(out, fresh=args.fresh_output)
+        weight_desc = (
+            f"carry weight {args.combined_weight:.2f}"
+            if args.combined_weight is not None
+            else "equal-risk (inverse-vol) blend"
+        )
+        print(
+            f"=== COMBINED (LONG + CARRY; {weight_desc}, scale {args.combined_scale:g}, "
+            f"dials LONG x{args.combined_long_multiplier:g} / CARRY x{args.combined_carry_multiplier:g}) ===",
+            flush=True,
+        )
+        try:
+            payload = _run_combined(
+                args.panel_root,
+                start,
+                end,
+                out,
+                weight_carry=args.combined_weight,
+                scale=args.combined_scale,
+                long_multiplier=args.combined_long_multiplier,
+                carry_multiplier=args.combined_carry_multiplier,
+                long_profile=args.combined_long_profile,
+            )
+        except Exception as exc:  # noqa: BLE001 - report the combined book, keep going
+            print(f"  [X] combined failed: {type(exc).__name__}: {exc}\n", flush=True)
+            results["combined"] = {"error": str(exc)}
+        else:
+            wc = payload.get("weight_carry")
+            if wc is not None:
+                print(f"  blend weight: {1.0 - float(wc):.1%} LONG / {float(wc):.1%} CARRY (equal-risk)")
+            print(f"  run_label = {payload['run_label']}")
+            print(f"  {_headline(payload)}")
+            print(f"  PNG: {payload.get('png') or '(none)'}\n", flush=True)
+            results["combined"] = {"png": payload.get("png"), "run_label": payload["run_label"]}
+
     print("=" * 64)
     print("EQUITY CURVES - SUMMARY")
-    for s in [*sleeves, *(k for k in results if k.startswith("research:"))]:
+    entry_names = [
+        s
+        for s in [*sleeves, *(k for k in results if k.startswith("research:"))]
+        if s != "combined"
+    ]
+    if "combined" in results:
+        entry_names.append("combined")
+    for s in entry_names:
         r = results.get(s, {})
         if r.get("error"):
             print(f"  {s:11} [X] {r['error'][:80]}")

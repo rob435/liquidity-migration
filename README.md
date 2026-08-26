@@ -29,8 +29,8 @@ armed in the host credential file. Design, crates and safety posture:
 | Sleeve | Profile | Toggle |
 | --- | --- | --- |
 | LONG | `LongV12WideStop` | `LONG_SLEEVE` |
-| CARRY | `lane2_carry_hold_v6` (v7 pre-settle exit clock) | `CARRY_SLEEVE` |
-| EXODUS SHORT | `lane2_exodus_short_v1` — shorts what CARRY's pre-settle exit abandons, demo only | `EXODUS_SHORT_PROFILE` on the demo carry unit; unset drains the book flat |
+| CARRY | `carry_hold_v7_live_v1` — the v7 execution clock, which trades the registered `lane2_carry_hold_v6` rule | `CARRY_SLEEVE` |
+| EXODUS SHORT | `lane2_exodus_short_v1` — shorts what v7's pre-settle exit abandons, demo only | `EXODUS_SHORT_PROFILE` on the demo carry unit; unset drains the book flat |
 | LONG / CARRY, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
 
 Which demo toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not
