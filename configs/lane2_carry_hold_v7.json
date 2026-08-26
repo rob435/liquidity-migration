@@ -1,5 +1,5 @@
 {
-  "config_id": "lane2_carry_hold_v6",
+  "config_id": "lane2_carry_hold_v7",
   "registered": "2026-08-19",
   "lane": 2,
   "surface": "research-only",
@@ -8,11 +8,11 @@
   "claim": "v5's book with ONE shape change and nothing else: the depth ladder bends. A held name's size multiplier becomes clip((|trail_fund_24h|/ref)^1.5, floor, 1.0) instead of the straight clip(ratio, floor, 1.0). Deep names (at or above ref) keep full size, floor names keep the floor; only mid-depth names - paying a fraction of the reference premium - get proportionally less. No new signal, no new threshold, and one FEWER effective lever than a new overlay would add. The claim is capital efficiency: the same money on ~3.5% less average gross.",
   "read_this_before_citing_a_number": {
     "selection_debt": "Chosen 2026-08-19 during the day's SECOND owner-directed hunt (the response-shape program: 'the causes are right, the transfer functions are crude'), roughly 40 scored in-book cells on seen data on top of the ~60 cells behind v5 the same morning. Every sibling axis failed its battery and is closed with receipts: smooth ramps replacing the v5 flow step (wash), whale step (worse, the effect is threshold-local), softened persistence kill (worse - names that rarely print deep are net negative even at quarter size), inverse-vol name sizing (worse, t -2.5; low-vol names lack squeeze fuel), raising the depth cap above 1.0 (real by placebo but a pure 2025-26 regime bet that worsens Sharpe and drawdown at matched capital), an age taper (episodes last 1-2 days, nothing to taper), and a depth-conditional flow drop (midnight capnorm +1.80 t +1.96 with clean placebo and balanced eras, but 14/24 clock phases, mean +0.27 - decision-hour luck, the clock sweep caught what era and placebo missed). This exponent is the sole survivor.",
-    "the_registered_experiment": "the capital-normalised paired daily differential v6-v5 on shared days. Midnight grid +0.63 bp/day at t +2.86; positive in 24/24 hourly grid phases, mean +0.43 bp/day (t +0.80 to +2.94) - cite the +0.43 mean, not the midnight number. Own-capital the pair is a wash by construction (v6 holds the same names on less gross): own-capital diff -0.16 bp/day at t -1.00.",
+    "the_registered_experiment": "the capital-normalised paired daily differential v7-v5 on shared days. Midnight grid +0.63 bp/day at t +2.86; positive in 24/24 hourly grid phases, mean +0.43 bp/day (t +0.80 to +2.94) - cite the +0.43 mean, not the midnight number. Own-capital the pair is a wash by construction (v7 holds the same names on less gross): own-capital diff -0.16 bp/day at t -1.00. (Registered and graded as lane2_carry_hold_v6 until the 2026-08-26 rename to lane2_carry_hold_v7; the graded rows up to 2026-08-21 carry the v6 id.)",
     "placebo": "the per-name-day gamma adjustment factor handed to 20 random permutations of the held book: mean t -0.26, best +2.23, 0/20 reach the real +2.86.",
     "plateau": "exponent 1.25 / 1.5 / 2.0 give capnorm +0.36 / +0.63 / +0.96 at t +2.90 / +2.86 / +2.71. 1.5 is frozen as the midpoint of the probed plateau, not a fitted optimum; the effect grows with the exponent because the bend deepens, and 2.0 was declined because it pushes further toward the deep-name concentration the same day's cap-raise cells showed to be regime-local.",
     "era_shape": "capital-normalised differential by year: 2021 +0.16, 2022 -0.14, 2023 +0.05, 2024 -0.13, 2025 +1.50, 2026 +2.78. Flat floor, no materially negative year, and the economic weight sits in 2025-26 exactly like the book itself. Expect roughly nothing from this bend outside squeeze regimes.",
-    "scale_free_statements": "at its OWN capital v6 is the same book as v5: mean +21.82 vs +21.98 bp/day, Sharpe 1.842 vs 1.841, worst dip -18.6% vs -18.7% - on 3.5% less average gross (0.0724 vs 0.0750) and slightly less turnover. Nothing about v6 is a return claim at own capital; it is a claim about capital released."
+    "scale_free_statements": "at its OWN capital v7 is the same book as v5: mean +21.82 vs +21.98 bp/day, Sharpe 1.842 vs 1.841, worst dip -18.6% vs -18.7% - on 3.5% less average gross (0.0724 vs 0.0750) and slightly less turnover. Nothing about v7 is a return claim at own capital; it is a claim about capital released."
   },
   "rule": {
     "universe": {
@@ -42,7 +42,7 @@
         "ref_bp_per_day": 120.0,
         "floor": 0.25,
         "exponent": 1.5,
-        "note": "NEW in v6: the exponent. multiplier = clip((|trail_fund_24h|/ref)^exponent, floor, 1.0). The measured per-unit-weight response of the held book is flat below ~1.4x ref and jumps above it (2026-08-19 dose-response tables), so the straight ladder was differentiating exactly where the response is flat; the bend moves size toward where the response actually changes without touching the floor or breaching the cap. Names with ratio <= 0.397 land on the floor (the straight ladder floored at 0.25). Everything else in this block is identical to v2..v5."
+        "note": "NEW in v7 (formerly v6): the exponent. multiplier = clip((|trail_fund_24h|/ref)^exponent, floor, 1.0). The measured per-unit-weight response of the held book is flat below ~1.4x ref and jumps above it (2026-08-19 dose-response tables), so the straight ladder was differentiating exactly where the response is flat; the bend moves size toward where the response actually changes without touching the floor or breaching the cap. Names with ratio <= 0.397 land on the floor (the straight ladder floored at 0.25). Everything else in this block is identical to v2..v5."
       },
       "persistence_scaling": { "basis": "deep_settlement_share", "window_settlements": 20, "cut": 0.10, "low_multiplier": 0.0, "note": "identical to v4/v5" },
       "flow_scaling": { "basis": "turnover_growth_3d", "cut": 0.40, "low_multiplier": 0.5, "note": "identical to v5" },

@@ -4,7 +4,7 @@
   "lane": 2,
   "surface": "research-only",
   "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
-  "descends_from": "nothing - a new sleeve. It consumes the carry v7 pre-settle exit fire (lane2_carry_hold_v6.json under the v7 clock) as its trigger, but its economics are its own.",
+  "descends_from": "nothing - a new sleeve. It consumes the carry v7 pre-settle exit fire (lane2_carry_hold_v7.json under the v7 clock) as its trigger, but its economics are its own.",
   "claim": "After a dying deep-negative funding print settles, the name keeps falling for about an hour. When carry's v7 pre-settle exit fires, take over the exact position carry abandons as a SHORT, and cover 60 minutes after the settlement. The trigger, the name, and the size are all carry's own fire - this sleeve adds no signal, no threshold, and no universe of its own.",
   "read_this_before_citing_a_number": {
     "the_mechanism": "post-settlement price curve on all 1,112 walk-forward-rule fires 2023-2026: the bottom sits at S+60, -104.1 bp all-era / -127.3 bp 2025-26 vs S+1. Controls: the same names same-day at S-8h are dead (-7.4 bp, t -0.5) and S-4h is +50.5 (t 4.1) - the edge concentrates at the settlement, it is not a generic down-day.",

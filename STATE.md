@@ -402,10 +402,10 @@ Change points currently accruing forward days: the CARRY **v7** pre-settle exit
 clock (`CARRY_STRATEGY_PROFILE=v7` on both carry units: the same exit test read on
 the venue's running rate inside the last 15 minutes before a held name's
 settlement, selling before the payment instead of one minute after it; the
-rule v7 executes is the registered `lane2_carry_hold_v6` byte-identical, so
-its forward grade continues under one config id; graded from engine exit fills
-against the settled-print counterfactual; rollback dial is `v6`). The v6−v5
-config differential (`lane2_carry_hold_v6` vs v5, with v4 and v5 keeping
+rule v7 executes is `lane2_carry_hold_v7` byte-identical, so
+its forward grade continues; graded from engine exit fills
+against the settled-print counterfactual; rollback dial is `v6`). The v7−v5
+config differential (`lane2_carry_hold_v7` vs v5, with v4 and v5 keeping
 scoring) is the registered forward experiment, and the drop
 exit (a held name the upcoming decision zeroes sells ~00:02 instead of 00:20,
 entries unchanged; no dial, the rollback is a revert and redeploy), LONG v12

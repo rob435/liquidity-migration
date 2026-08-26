@@ -6,8 +6,21 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
-- **2026-08-24 — The phone's trade messages get a design (owner directed).**
-  The trade notifier's vocabulary shrinks to two dots — 🟢 made money,
+- **2026-08-26 — The carry rule rename: registered rule goes to `lane2_carry_hold_v7`
+  (name only).** The registration that was `lane2_carry_hold_v6` becomes
+  `lane2_carry_hold_v7`, so the live name and the config filename both read
+  v7. Nothing about the rule, the config, the parameter values, or the
+  forward grading changed — the file `configs/lane2_carry_hold_v6.json` was
+  renamed to `lane2_carry_hold_v7.json` and its `config_id` updated to
+  `lane2_carry_hold_v7`; `CARRY_CONFIG_PATH`, the v7 profile, and both clock
+  profiles now read `lane2_carry_hold_v7.json`. The v6↔v7 id is a DATING/NAME
+  change point, not an evidence one: rows graded under `lane2_carry_hold_v6`
+  (through 2026-08-21) are the same rule under the old id, and the forward
+  experiment differential is now `carry_hold_v7_minus_v5`. The journal keys
+  (`carry_hold_v6_live_v1`, `carry_hold_v7_live_v1`) and the settled-print
+  rollback dial `CARRY_STRATEGY_PROFILE=v6` are unchanged.
+
+
   🔴 lost it, only where there is a verdict — and the verdict leads: an
   exit's first line is the dot, the account, the sleeve, and the net in
   bold, because the phone's notification preview shows one line. Every

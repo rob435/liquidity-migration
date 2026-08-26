@@ -709,18 +709,18 @@ class TestV6DepthExponent:
         cfg = CarryHoldConfig.from_json(CONFIG_DIR / f"lane2_carry_hold_{name}.json")
         assert cfg.depth_exponent == 1.0
 
-    def test_v6_declares_the_one_lever_and_nothing_else(self) -> None:
+    def test_v7_declares_the_one_lever_and_nothing_else(self) -> None:
         v5 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v5.json")
-        v6 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v6.json")
+        v7 = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v7.json")
         changed = {
             f.name
             for f in dataclasses.fields(CarryHoldConfig)
-            if getattr(v5, f.name) != getattr(v6, f.name)
+            if getattr(v5, f.name) != getattr(v7, f.name)
         }
         assert changed == {"config_id", "depth_exponent"}, (
-            f"v6 changed more than the one declared lever: {changed}"
+            f"v7 changed more than the one declared lever: {changed}"
         )
-        assert v6.depth_exponent == 1.5
+        assert v7.depth_exponent == 1.5
 
     def test_bent_ladder_downsizes_mid_depth_only(self, carry_cfg: CarryHoldConfig) -> None:
         # Constant 8h prints give trailing daily rates -150/-60/-36 bp/day,
@@ -741,11 +741,11 @@ class TestV6DepthExponent:
         assert by_sym["S02USDT"] == pytest.approx(0.1 * 0.5**1.5, rel=1e-9)
         assert by_sym["S03USDT"] == pytest.approx(0.025, rel=1e-9)
 
-    def test_score_carry_hold_v6_end_to_end(self) -> None:
-        cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v6.json")
+    def test_score_carry_hold_v7_end_to_end(self) -> None:
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v7.json")
         panel = _panel(funding_bp={"S01USDT": [-15.0]}).with_columns(
             pl.lit(1.5).alias("bn_tt_ls"), pl.lit(1.0).alias("bn_tt_ls_age_h")
         )
         out = score_carry_hold(panel, cfg)
-        assert out["config_id"] == "lane2_carry_hold_v6"
+        assert out["config_id"] == "lane2_carry_hold_v7"
         assert out["days"] > 0

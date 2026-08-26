@@ -152,7 +152,7 @@ _CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
 #: The DEFAULT deployed rule file — what envelope proofs and research charts
 #: read when no profile is named. The running producer resolves its own file
 #: through ``resolve_carry_strategy_profile``.
-CARRY_CONFIG_PATH = _CONFIGS_DIR / "lane2_carry_hold_v6.json"
+CARRY_CONFIG_PATH = _CONFIGS_DIR / "lane2_carry_hold_v7.json"
 
 #: Registered CARRY deployments, selectable per unit exactly like LONG's
 #: (``CARRY_STRATEGY_PROFILE`` env → ``--strategy-profile``). Switching
@@ -167,9 +167,11 @@ class CarryStrategyProfile:
     """One registered CARRY deployment: journaled profile name + rule file.
 
     ``presettle_exit`` is an EXECUTION-CLOCK switch, not a rule change: v7
-    trades v6's registered membership file unchanged (its forward grading
-    continues unbroken) and only moves the early-exit sell from the settled
-    print to the venue's pre-settlement running rate.
+    reads the rule file unchanged (its forward grading continues unbroken)
+    and only moves the early-exit sell from the settled print to the venue's
+    pre-settlement running rate. The rule file is now ``lane2_carry_hold_v7``
+    (renamed from v6 on 2026-08-26); both the settled-print and pre-settle
+    clocks read it, differing only in the clock switch.
     """
 
     profile_name: str
@@ -180,10 +182,10 @@ class CarryStrategyProfile:
 _CARRY_STRATEGY_PROFILES: dict[str, CarryStrategyProfile] = {
     "v3": CarryStrategyProfile("carry_hold_v3_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v3.json"),
     "v4": CarryStrategyProfile("carry_hold_v4_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v4.json"),
-    "v6": CarryStrategyProfile("carry_hold_v6_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v6.json"),
+    "v6": CarryStrategyProfile("carry_hold_v6_live_v1", _CONFIGS_DIR / "lane2_carry_hold_v7.json"),
     "v7": CarryStrategyProfile(
         "carry_hold_v7_live_v1",
-        _CONFIGS_DIR / "lane2_carry_hold_v6.json",
+        _CONFIGS_DIR / "lane2_carry_hold_v7.json",
         presettle_exit=True,
     ),
 }

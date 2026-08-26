@@ -2,7 +2,7 @@
 """Append the financed-longs rolling forward ledger (one row per config-day).
 
 The Lane-2 recipe for the registered carry-hold configs (``DEFAULT_CONFIGS``
-below, ``lane2_carry_hold_v1`` through ``v6``) is one score row per completed
+below, ``lane2_carry_hold_v1`` through ``v7``) is one score row per completed
 UTC day; only days strictly after each config's registration commit date
 count as forward evidence. (The funding-spread and financed-leaders configs
 scored here until their 2026-08-19 deletion by operator override; their old
@@ -13,8 +13,8 @@ that ledger append-first from a cross-venue panel:
 * every scored panel day is written (seen-data rows carry
   ``forward_eligible=false``) so the ledger is self-describing;
 * the carry-hold sizing experiments get derived rows (``DIFF_PAIRS``):
-  ``carry_hold_v2_minus_v1`` through ``carry_hold_v6_minus_v5``, paired daily
-  differentials, the primary comparison each registration declares. v6−v5 is
+  ``carry_hold_v2_minus_v1`` through ``carry_hold_v7_minus_v5``, paired daily
+  differentials, the primary comparison each registration declares. v7−v5 is
   the currently registered forward experiment. v4's registration declares the
   CAPITAL-NORMALISED differential as its experiment, not this raw one — at its
   own capital v4 is not a return improvement (+1.07 bp/day, t 0.47) and this
@@ -52,7 +52,7 @@ DEFAULT_CONFIGS = (
     "lane2_carry_hold_v3.json",
     "lane2_carry_hold_v4.json",
     "lane2_carry_hold_v5.json",
-    "lane2_carry_hold_v6.json",
+    "lane2_carry_hold_v7.json",
 )
 DIFF_ID = "carry_hold_v2_minus_v1"
 DIFF_PAIRS = (
@@ -60,7 +60,7 @@ DIFF_PAIRS = (
     ("carry_hold_v3_minus_v2", "lane2_carry_hold_v3", "lane2_carry_hold_v2"),
     ("carry_hold_v4_minus_v3", "lane2_carry_hold_v4", "lane2_carry_hold_v3"),
     ("carry_hold_v5_minus_v4", "lane2_carry_hold_v5", "lane2_carry_hold_v4"),
-    ("carry_hold_v6_minus_v5", "lane2_carry_hold_v6", "lane2_carry_hold_v5"),
+    ("carry_hold_v7_minus_v5", "lane2_carry_hold_v7", "lane2_carry_hold_v5"),
 )
 PANEL_COLS = [
     "symbol", "bar_ts_ms", "by_close", "by_turnover_quote", "by_funding",

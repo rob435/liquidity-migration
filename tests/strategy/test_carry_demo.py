@@ -1315,8 +1315,7 @@ class TestCarryStrategyProfileDial:
         assert v4.config_path.name == "lane2_carry_hold_v4.json"
         assert v6.profile_name == "carry_hold_v6_live_v1"
         assert v6.config_path == module.CARRY_CONFIG_PATH
-        # v7 (promoted 2026-08-19, later the same day as v6) is an
-        # execution-clock version: it trades v6's registered membership file
+        # v7 is an execution-clock version: it reads the same rule file
         # UNCHANGED, so the config forward grade continues under one id.
         v7 = module.resolve_carry_strategy_profile("v7")
         assert v7.profile_name == "carry_hold_v7_live_v1"
@@ -2489,7 +2488,7 @@ class TestV6DecidesLive:
             max_bar_ts_ms=D0,
             whale_events=self._whale_events(),
         )
-        cfg = load_carry_config(module._CONFIGS_DIR / "lane2_carry_hold_v6.json")
+        cfg = load_carry_config(module._CONFIGS_DIR / "lane2_carry_hold_v7.json")
         decision = module.decide_book(view, cfg, D0)
 
         assert set(decision.weights) == {DEEP_A, DEEP_B, RESIZED}

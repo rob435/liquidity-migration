@@ -2,7 +2,7 @@
 """One command for standard equity curves.
 
 LONG runs from ``long_native.long_v11a_profile``.
-CARRY renders the deployed rule ``configs/lane2_carry_hold_v6.json``
+CARRY renders the deployed rule ``configs/lane2_carry_hold_v7.json``
 through the same --research-config path (cross-venue panel, settlement-exact
 scorer). That is the registered research shape, not a demo daemon replay.
 
@@ -112,7 +112,7 @@ def _run_carry(
 ) -> dict[str, Any]:
     """Render the CARRY sleeve's registered research shape.
 
-    The carry runtime (v7 profile) trades ``configs/lane2_carry_hold_v6.json``,
+    The carry runtime (v7 profile) trades ``configs/lane2_carry_hold_v7.json``,
     so its standard curve is that same config through the --research-config
     path. It reads the cross-venue panel, not the demo cycle record; v7's
     pre-settle exit clock is execution-time and is not modeled here.
@@ -127,7 +127,7 @@ def _run_carry(
 #: Daily equity CSV produced by each sleeve runner under its output dir.
 _COMBINED_EQUITY_CSVS = {
     "long": "long_native_equity.csv",
-    "carry": "lane2_carry_hold_v6_daily_equity.csv",
+    "carry": "lane2_carry_hold_v7_daily_equity.csv",
 }
 
 
@@ -530,7 +530,7 @@ def main() -> int:
         default="long",
         help=(
             "Comma list: long, carry. 'carry' renders the registered "
-            "research config (lane2_carry_hold_v6, the file the deployed v7 "
+            "research config (lane2_carry_hold_v7, the file the deployed v7 "
             "profile trades) from the cross-venue panel — a research-shape "
             "simulation, not a daemon replay; the v7 pre-settle exit clock "
             "is execution-time and is not modeled here."

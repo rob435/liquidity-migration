@@ -14,7 +14,7 @@ runbook, and what is still unproven — is *Real money* below. Deployed state:
 | `units` | List the fleet's units and timers. |
 | `logs UNIT [LINES]` | One unit's journal, newest last (default 100 lines). |
 | `restart` / `stop` / `start UNIT...` | Unit lifecycle, one or more units at a time. |
-| `equity [ARGS]` | Descriptive equity curves. `--sleeves long,carry` (`carry` renders the deployed rule `configs/lane2_carry_hold_v6.json` — the rule the v7 execution clock trades; the v7 pre-settle exit is not modeled — from the cross-venue panel, not a daemon replay), `--years N`. |
+| `equity [ARGS]` | Descriptive equity curves. `--sleeves long,carry` (`carry` renders the deployed rule `configs/lane2_carry_hold_v7.json` — the rule the v7 execution clock trades; the v7 pre-settle exit is not modeled — from the cross-venue panel, not a daemon replay), `--years N`. |
 | `research-refresh {plan,run}` | Append-first data/features/backtest workflow. `plan` mutates nothing. |
 | `reset [ARGS]` | Demo ledger reset. Preview unless `--execute`. |
 | `flatten --environment ENV [ARGS]` | Take one account to zero exposure on the engine's own path. Reads only unless `--execute`. |

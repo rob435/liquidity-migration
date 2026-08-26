@@ -186,14 +186,14 @@ funding-coverage dimension as well as a PIT one, and funding downgrades it indep
 
 The deployed CARRY sleeve is **v7** (`carry_hold_v7_live_v1`,
 `CARRY_STRATEGY_PROFILE=v7` on both carry units). v7 is an execution clock, not
-a config: it executes the registered rule `lane2_carry_hold_v6` (the file it
-reads, `configs/lane2_carry_hold_v6.json`) byte-identical and moves **when** the
+a config: it executes the registered rule `lane2_carry_hold_v7` (the file it
+reads, `configs/lane2_carry_hold_v7.json`) byte-identical and moves **when** the
 exit test is evaluated (see **Exit**). Selection is `CARRY_STRATEGY_PROFILE`
 (`v3`/`v4`/`v6`/`v7`) in the unit environment → `--strategy-profile`, the same
 dial shape as LONG's. The journal filing id is the version-free `carry_hold`
 and never changes with the profile (components filed under the older
-`carry_hold_v3` id drain under it). The forward grade for the v6-v7 rule
-continues under one config id. The v6−v5 capital-normalised paired
+`carry_hold_v3` id drain under it). The forward grade for the v6/v7 rule
+continues under one config id. The v7−v5 capital-normalised paired
 differential is the registered forward experiment (see **Registered forward
 experiment** below).
 
@@ -210,17 +210,17 @@ Per-name hysteresis:
 | Block entry, suspend hold to zero weight | trailing 3d return in [−30%, 0%) |
 | Block entry | trailing 30d daily vol < 5% |
 | Drop to zero weight (v4) | ≤ 10% of the name's last 20 settlements printed deeper than −10 bp — the isolated deep print is the book's one losing cohort |
-| Halve size (v5/v6, flow) | trailing 24h turnover grew ≤ +40% vs 72h earlier — a held name whose crowd is not growing is a stale crowd |
-| Halve size (v5/v6, whale) | Binance top-trader position long/short ratio fell ≥ 0.26 over 3 days — the informed side de-longing while the crowd still pays |
+| Halve size (v5/v7, flow) | trailing 24h turnover grew ≤ +40% vs 72h earlier — a held name whose crowd is not growing is a stale crowd |
+| Halve size (v5/v7, whale) | Binance top-trader position long/short ratio fell ≥ 0.26 over 3 days — the informed side de-longing while the crowd still pays |
 
 Null conditioning values fail open. The whale input is the book's one non-Bybit read: the
 producer caches Binance end-of-day ratio values per symbol-day (public endpoint, no key,
 `binance_whale_daily.parquet` under the producer root) and the registered 48h freshness
-clause nulls anything stale, so a dead feed degrades v6 toward v6-minus-whale instead of
+clause nulls anything stale, so a dead feed degrades v7 toward v7-minus-whale instead of
 blocking a decision.
 
 **Sizing.** `weight = 0.10 × clip((|trailing 24h settled funding| / 120bp-day)^1.5, 0.25, 1.0)
-× persistence × flow × whale` — the exponent is v6's one change (v1..v5 ran the straight
+× persistence × flow × whale` — the exponent is v7's one change (v1..v5 ran the straight
 ratio); the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it (a
 name with fewer than 20 settlements of history fails open at full size); flow and whale are
 the ×0.5 halvings above — gross capped at 1.0, then
@@ -272,8 +272,8 @@ price anomaly. The book is empty on 28% of days in that record; flat is a state,
 full-sample **t 2.31**, against the program bar of t ≥ 2.5
 ([`governance.md`](research/governance.md) §2). By era, bp/day: 2021 **+3.8** · 2022 **+3.0** ·
 2023 **+26.0** · 2024 **+13.7** · 2025 **+30.3** · 2026 **+32.5** — every year positive, but
-2021-22 is thin and the book makes no bear-robustness claim. The registered v6 on seen data
-(Aug 25 run, panel ending 2026-08-25): mean net **+21.8 bp/day**, Sharpe **1.85**, worst dip
+2021-22 is thin and the book makes no bear-robustness claim. The registered v7 rule on seen
+data (Aug 25 run, panel ending 2026-08-25): mean net **+21.8 bp/day**, Sharpe **1.85**, worst dip
 **−18.6%**, MAR **5.62**, **+31.7×** over ~4.9 years. Against the deployed benchmark this base
 book does not win on Sharpe — the corrected carry-hold benchmark Sharpe is **1.21 (t 2.31)**,
 and the 2.57 / t 4.87 figure for it is a wrong number; return wins, the owner goal was both.
@@ -281,13 +281,15 @@ The same construction on Binance funding and prices does not replicate (t 0.4, S
 — evidence is single-venue Bybit until shown otherwise. These are Lane-1 numbers that
 selected the rule; only the forward record grades it.
 
-**Registered forward experiment.** The v6−v5 capital-normalised paired daily differential on
-shared days is the graded claim. It registered 2026-08-19 and had **0 scored forward days at
-promotion**; the ledger accrues to 2026-08-21 (2 forward days). The earlier "+0.63 bp/day,
-t +2.86" figure was a seen-data reconstruction on the midnight grid — positive in 24 of 24
-hourly clock phases at a mean of +0.43 bp/day — not forward evidence. Quote the mean, not the
-midnight cell. At its own capital the pair is a wash by construction, so the claim is capital
-released, not return gained.
+**Registered forward experiment.** The v7−v5 capital-normalised paired daily differential on
+shared days is the graded claim. The rule registered 2026-08-19 as
+`lane2_carry_hold_v6` and was renamed to `lane2_carry_hold_v7` on 2026-08-26 — the same
+rule, one id change; the graded rows accrued under v6 through 2026-08-21. It had **0 scored
+forward days at promotion**; the ledger accrues to 2026-08-21 (2 forward days). The earlier
+"+0.63 bp/day, t +2.86" figure was a seen-data reconstruction on the midnight grid —
+positive in 24 of 24 hourly clock phases at a mean of +0.43 bp/day — not forward evidence.
+Quote the mean, not the midnight cell. At its own capital the pair is a wash by construction,
+so the claim is capital released, not return gained.
 
 **Risk.** Concentrated (~2–3 names when active; v4 holds 22% fewer name-days than v3 and is
 flat on 46% of days), long-only crash beta, single-venue Bybit evidence, capacity ~$1M at 1%
