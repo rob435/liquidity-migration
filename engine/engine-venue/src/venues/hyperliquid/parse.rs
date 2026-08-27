@@ -164,10 +164,9 @@ pub(crate) fn parse_margin(result: &Value) -> Result<(f64, f64), VenueError> {
 /// Open positions out of a `clearinghouseState` reply, with each one's stop
 /// taken from the open trigger orders rather than from the position row.
 ///
-/// `resolve` maps the engine's spelling of a symbol to its id; a position in a
-/// symbol no strategy follows is still counted, because exposure the engine
-/// cannot name is exposure all the same — it is reported under the id the
-/// caller resolves, and skipped only when there is none.
+/// `resolve` maps the engine's spelling of a symbol to its configured id. Any
+/// non-flat position it cannot resolve invalidates the account snapshot:
+/// silently dropping exposure is never a safe representation of the account.
 pub(crate) fn parse_positions(
     result: &Value,
     stops: &HashMap<String, Stops>,
@@ -189,10 +188,12 @@ pub(crate) fn parse_positions(
         if signed == 0.0 {
             continue;
         }
-        let Some(symbol) = resolve(&symbol_of(&coin)) else {
-            report_foreign_once(&coin, signed);
-            continue;
-        };
+        let engine_name = symbol_of(&coin);
+        let symbol = resolve(&engine_name).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "nonzero position in {engine_name} is absent from the configured symbol table"
+            ))
+        })?;
         let side = if signed > 0.0 { Side::Buy } else { Side::Sell };
         let stop_px = stops.get(&coin).map(|held| held.nearest(side));
         out.push(PositionView {
@@ -344,23 +345,6 @@ fn side_of(row: &Value) -> Result<Side, VenueError> {
     }
 }
 
-/// A position in a symbol the engine does not follow. Said once per coin, at
-/// warn: it is worth knowing about and not worth a line per read.
-fn report_foreign_once(coin: &str, signed_qty: f64) {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut seen = seen.lock().expect("the foreign-symbol set lock is poisoned");
-    if seen.insert(coin.to_string()) {
-        tracing::warn!(
-            coin,
-            qty = signed_qty,
-            "the account holds a position in a symbol no strategy follows"
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +458,21 @@ mod tests {
         let rows = parse_positions(&state, &HashMap::new(), &resolve).unwrap();
         assert_eq!(rows[0].side, Side::Sell);
         assert_eq!(rows[0].qty, 1.5);
+    }
+
+    #[test]
+    fn an_unconfigured_nonzero_position_invalidates_the_account_snapshot() {
+        let resolve = |name: &str| (name == "BTCUSDT").then_some(SymbolId(0));
+        let held = json!({"assetPositions": [
+            {"position": {"coin": "SOL", "szi": "2", "entryPx": "150"}}
+        ]});
+        let err = parse_positions(&held, &HashMap::new(), &resolve).unwrap_err();
+        assert!(err.to_string().contains("SOLUSDT"), "{err}");
+
+        let flat = json!({"assetPositions": [
+            {"position": {"coin": "SOL", "szi": "0"}}
+        ]});
+        assert!(parse_positions(&flat, &HashMap::new(), &resolve).unwrap().is_empty());
     }
 
     #[test]

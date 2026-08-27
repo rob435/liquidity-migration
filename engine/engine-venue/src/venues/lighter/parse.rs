@@ -112,7 +112,11 @@ pub(crate) fn parse_positions(
         let market_index = i16::try_from(int_field(row, "market_id")?)
             .map_err(|_| VenueError::BadReply("a market index out of range".to_string()))?;
         let name = engine_symbol(&str_field(row, "symbol")?);
-        let Some(symbol) = resolve(&name) else { continue };
+        let symbol = resolve(&name).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "nonzero position in {name} is absent from the configured symbol table"
+            ))
+        })?;
         let side = if sign >= 0 { Side::Buy } else { Side::Sell };
         let stop_px = stops.get(&market_index).map(|held| held.nearest(side));
         out.push(PositionView {
@@ -404,6 +408,22 @@ mod tests {
         assert_eq!(rows[0].side, Side::Sell);
         assert_eq!(rows[0].qty, 0.5);
         assert_eq!(rows[0].leverage, None, "a zero margin fraction says nothing");
+    }
+
+    #[test]
+    fn an_unconfigured_nonzero_position_invalidates_the_account_snapshot() {
+        let resolve = |name: &str| (name == "BTCUSDT").then_some(SymbolId(0));
+        let held = json!({"code": 200, "accounts": [{"positions": [{
+            "market_id": 1, "symbol": "ETH", "sign": 1, "position": "0.5",
+            "avg_entry_price": "3000"
+        }]}]});
+        let err = parse_positions(&held, &markets(), &HashMap::new(), &resolve).unwrap_err();
+        assert!(err.to_string().contains("ETHUSDT"), "{err}");
+
+        let flat = json!({"code": 200, "accounts": [{"positions": [{
+            "symbol": "ETH", "position": "0"
+        }]}]});
+        assert!(parse_positions(&flat, &markets(), &HashMap::new(), &resolve).unwrap().is_empty());
     }
 
     #[test]

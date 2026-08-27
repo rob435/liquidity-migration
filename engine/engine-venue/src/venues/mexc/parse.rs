@@ -24,6 +24,8 @@ use engine_types::risk::PositionView;
 use engine_types::VenueError;
 use serde_json::Value;
 
+use crate::json::num_field;
+
 use super::contracts::Contracts;
 
 /// The settle currency this engine trades. The assets call answers for every
@@ -138,13 +140,31 @@ pub(crate) fn parse_positions(
         .ok_or_else(|| VenueError::BadReply("open positions was not a list".into()))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let Some(venue_symbol) = row.get("symbol").and_then(Value::as_str) else { continue };
-        let Some(symbol) = contracts.symbol_of(venue_symbol) else { continue };
-        let Some(&id) = ids.get(symbol.as_str()) else { continue };
-        let Some(contract) = contracts.any(symbol) else { continue };
-        let hold_vol = row.get("holdVol").and_then(Value::as_f64).unwrap_or(0.0);
-        if hold_vol <= 0.0 {
+        let hold_vol = num_field(row, "holdVol")?;
+        if hold_vol == 0.0 {
             continue;
+        }
+        let venue_symbol = row
+            .get("symbol")
+            .and_then(Value::as_str)
+            .ok_or_else(|| VenueError::BadReply("a nonzero position has no readable symbol".into()))?;
+        let symbol = contracts.symbol_of(venue_symbol).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "nonzero position in {venue_symbol} cannot be mapped into the configured symbol table"
+            ))
+        })?;
+        let &id = ids.get(symbol.as_str()).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "nonzero position in {symbol} is absent from the configured symbol table"
+            ))
+        })?;
+        let contract = contracts
+            .any(symbol)
+            .ok_or_else(|| VenueError::BadReply(format!("contract metadata vanished for position in {symbol}")))?;
+        if hold_vol < 0.0 {
+            return Err(VenueError::BadReply(format!(
+                "position in {venue_symbol} has a negative contract size {hold_vol}"
+            )));
         }
         let side = match row.get("positionType").and_then(Value::as_i64) {
             Some(1) => Side::Buy,
@@ -445,9 +465,26 @@ mod tests {
     }
 
     #[test]
-    fn a_row_for_a_contract_this_engine_does_not_list_is_skipped_not_guessed() {
+    fn an_unconfigured_nonzero_position_invalidates_the_account_snapshot() {
+        let configured_elsewhere = json!([{
+            "symbol": "BTC_USDT", "holdVol": 5, "positionType": 1
+        }]);
+        let err = parse_positions(
+            &configured_elsewhere,
+            &contracts(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("BTCUSDT"), "{err}");
+
         let data = json!([{"symbol": "NOTLISTED_USDT", "holdVol": 5, "positionType": 1}]);
-        let out = parse_positions(&data, &contracts(), &ids(), &HashMap::new()).unwrap();
-        assert!(out.is_empty());
+        let err = parse_positions(&data, &contracts(), &ids(), &HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("NOTLISTED_USDT"), "{err}");
+
+        let flat = json!([{"symbol": "NOTLISTED_USDT", "holdVol": 0}]);
+        assert!(parse_positions(&flat, &contracts(), &ids(), &HashMap::new())
+            .unwrap()
+            .is_empty());
     }
 }

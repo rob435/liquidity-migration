@@ -110,13 +110,9 @@ pub(crate) fn parse_wallet(result: &Value) -> Result<(f64, f64), VenueError> {
 
 /// Open positions, with the cursor for the next page.
 ///
-/// A position in a symbol no strategy subscribed to belongs to somebody else
-/// — the owner's own hand-trading, or another process on the same venue
-/// account. It is named in the log and skipped: the engine can only place an
-/// order on a symbol a strategy subscribed to, so a position it cannot even
-/// address is not exposure it can create, hide, or reduce. Refusing to read
-/// the account over one would mean an account holding anything unfamiliar
-/// stops the engine dead.
+/// Every non-flat position must resolve through the configured symbol table.
+/// Dropping an unfamiliar one would understate account exposure and let the
+/// risk kernel act on a partial account snapshot.
 pub(crate) fn parse_positions(
     result: &Value,
     resolve: &dyn Fn(&str) -> Option<SymbolId>,
@@ -126,11 +122,21 @@ pub(crate) fn parse_positions(
     for row in rows {
         let symbol = str_field(row, "symbol")?;
         let qty = num_field(row, "size")?;
-        let side_raw = str_field(row, "side")?;
         // A flat position comes back with size 0 and a blank side.
-        if qty <= 0.0 || side_raw.is_empty() || side_raw == "None" {
+        if qty == 0.0 {
             continue;
         }
+        if qty < 0.0 {
+            return Err(VenueError::BadReply(format!(
+                "position in {symbol} has a negative size {qty}"
+            )));
+        }
+        let id = resolve(&symbol).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "nonzero position in {symbol} is absent from the configured symbol table"
+            ))
+        })?;
+        let side_raw = str_field(row, "side")?;
         let side = match side_raw.as_str() {
             "Buy" => Side::Buy,
             "Sell" => Side::Sell,
@@ -139,10 +145,6 @@ pub(crate) fn parse_positions(
                     "position in {symbol} has an unknown side {other:?}"
                 )))
             }
-        };
-        let Some(id) = resolve(&symbol) else {
-            report_foreign_once(&symbol, qty);
-            continue;
         };
         // Bybit writes "" or "0" when no stop is set on the position.
         let stop_px = opt_num_field(row, "stopLoss")?.filter(|v| *v > 0.0);
@@ -177,6 +179,12 @@ pub(crate) fn parse_working_orders(
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let symbol = str_field(row, "symbol")?;
+        let client_order_id = str_field(row, "orderLinkId")?;
+        if client_order_id.is_empty() && !is_supported_native_position_stop(row)? {
+            return Err(VenueError::BadReply(format!(
+                "working order in {symbol} has no attributable orderLinkId and is not a supported native position stop"
+            )));
+        }
         let side = match str_field(row, "side")?.as_str() {
             "Buy" => Side::Buy,
             "Sell" => Side::Sell,
@@ -187,10 +195,10 @@ pub(crate) fn parse_working_orders(
             }
         };
         out.push(VenueOrder {
-            // The exchange's own orders — the stop it attaches to a position —
-            // carry no id of ours. Kept rather than dropped: an empty id is
-            // how the caller tells them apart from a second writer's order.
-            client_order_id: str_field(row, "orderLinkId").unwrap_or_default(),
+            // A positively identified full-position stop is the one supported
+            // order allowed to carry no client id. Reconciliation recognises
+            // that empty id as the venue-native protective order.
+            client_order_id,
             symbol,
             side,
             qty: num_field(row, "qty")?,
@@ -199,6 +207,21 @@ pub(crate) fn parse_working_orders(
         });
     }
     Ok((out, next_cursor(result)))
+}
+
+fn is_supported_native_position_stop(row: &Value) -> Result<bool, VenueError> {
+    let stop_order_type = str_field(row, "stopOrderType")?;
+    let tpsl_mode = str_field(row, "tpslMode")?;
+    let reduce_only = row
+        .get("reduceOnly")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            VenueError::BadReply(
+                "field reduceOnly is missing or not a boolean on an unlinked working order"
+                    .to_string(),
+            )
+        })?;
+    Ok(stop_order_type == "StopLoss" && tpsl_mode == "Full" && reduce_only)
 }
 
 /// One page of `/v5/execution/list`. Only quantity-moving executions come
@@ -253,24 +276,6 @@ pub(crate) fn parse_executions(
         });
     }
     Ok((out, next_cursor(result)))
-}
-
-/// Say once that somebody else's position is there, not on every account
-/// refresh. The account is read every couple of seconds, so a line per read
-/// is tens of thousands of lines a day that bury everything worth seeing.
-fn report_foreign_once(symbol: &str, qty: f64) {
-    thread_local! {
-        static SAID: std::cell::RefCell<std::collections::BTreeSet<String>> =
-            const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
-    }
-    let first = SAID.with(|said| said.borrow_mut().insert(symbol.to_string()));
-    if first {
-        tracing::warn!(
-            symbol,
-            qty,
-            "position in a symbol no strategy trades; left alone as somebody else's"
-        );
-    }
 }
 
 fn next_cursor(result: &Value) -> String {
@@ -471,20 +476,49 @@ mod tests {
     }
 
     #[test]
-    fn somebody_elses_position_is_skipped_and_does_not_stop_the_read() {
-        // The owner hand-trades the same venue account, so a position in a
-        // symbol no strategy subscribed to is the normal case, not a fault.
-        // The engine cannot place an order on an unsubscribed symbol, so it
-        // reads past it and keeps the positions that are its own.
+    fn an_unconfigured_nonzero_position_invalidates_the_account_snapshot() {
         let result = json!({"list": [
             {"symbol": "VANRYUSDT", "side": "Buy", "size": "100", "avgPrice": "0.1",
              "stopLoss": ""},
             {"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "avgPrice": "95000.5",
              "stopLoss": "90000"}
         ]});
-        let (positions, _) = parse_positions(&result, &resolver()).unwrap();
-        assert_eq!(positions.len(), 1, "only the engine's own symbol survives");
-        assert_eq!(positions[0].qty, 0.5);
+        let err = parse_positions(&result, &resolver()).unwrap_err();
+        assert!(err.to_string().contains("VANRYUSDT"), "{err}");
+
+        // Flat rows carry no exposure and need no configured id.
+        let flat = json!({"list": [{"symbol": "VANRYUSDT", "size": "0"}]});
+        assert!(parse_positions(&flat, &resolver()).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn an_unattributable_working_order_invalidates_the_snapshot() {
+        for row in [
+            json!({"symbol": "BTCUSDT", "side": "Buy", "qty": "1", "cumExecQty": "0"}),
+            json!({"symbol": "BTCUSDT", "orderLinkId": 7, "side": "Buy", "qty": "1",
+                   "cumExecQty": "0"}),
+            json!({"symbol": "BTCUSDT", "orderLinkId": "", "side": "Buy", "qty": "1",
+                   "cumExecQty": "0", "stopOrderType": "UNKNOWN", "tpslMode": "",
+                   "reduceOnly": false}),
+        ] {
+            assert!(matches!(
+                parse_working_orders(&json!({"list": [row]})),
+                Err(VenueError::BadReply(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_full_reduce_only_native_stop_may_have_no_order_link_id() {
+        let page = json!({"list": [{
+            "symbol": "BTCUSDT", "orderLinkId": "", "side": "Sell", "qty": "0.5",
+            "cumExecQty": "0", "stopOrderType": "StopLoss", "tpslMode": "Full",
+            "reduceOnly": true
+        }]});
+        let (orders, _) = parse_working_orders(&page).unwrap();
+        assert_eq!(orders.len(), 1);
+        assert!(orders[0].client_order_id.is_empty());
+        assert!(orders[0].reduce_only);
     }
 
     #[test]
