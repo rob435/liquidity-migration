@@ -175,6 +175,7 @@ def test_a_missing_held_collection_cannot_be_read_as_flat(tmp_path: Path) -> Non
     [
         ("seen_held", "false"),
         ("notional_usdt", "120.0"),
+        ("venue_qty", float("nan")),
         ("entered_ts_ms", 1.5),
     ],
 )

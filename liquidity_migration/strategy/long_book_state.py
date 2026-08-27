@@ -114,6 +114,31 @@ class LongBookEntry:
 
 
 _ENTRY_FIELDS = frozenset(item.name for item in fields(LongBookEntry))
+_ENTRY_TEXT_FIELDS = frozenset({"trade_id", "symbol", "strategy_id", "pattern", "entry_reason"})
+_ENTRY_NUMBER_FIELDS = frozenset(
+    {
+        "notional_usdt",
+        "stop_loss_fraction",
+        "leverage",
+        "entry_price",
+        "decayed_stop_loss_pct",
+        "atr_14d_pct",
+        "venue_qty",
+        "venue_avg_entry_px",
+    }
+)
+_ENTRY_INTEGER_FIELDS = frozenset(
+    {
+        "entered_ts_ms",
+        "max_hold_deadline_ts_ms",
+        "signal_ts_ms",
+        "stop_decay_after_ms",
+        "venue_ts_ms",
+        "requested_ts_ms",
+        "entry_valid_until_ms",
+        "max_hold_duration_ms",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,27 +287,6 @@ def read_book_state(path: str | Path) -> LongBookState:
         raise BookStateError(f"{resolved}: attempted_signals_ms is not an object")
 
     held: dict[str, LongBookEntry] = {}
-    text_fields = {"trade_id", "symbol", "strategy_id", "pattern", "entry_reason"}
-    number_fields = {
-        "notional_usdt",
-        "stop_loss_fraction",
-        "leverage",
-        "entry_price",
-        "decayed_stop_loss_pct",
-        "atr_14d_pct",
-        "venue_qty",
-        "venue_avg_entry_px",
-    }
-    integer_fields = {
-        "entered_ts_ms",
-        "max_hold_deadline_ts_ms",
-        "signal_ts_ms",
-        "stop_decay_after_ms",
-        "venue_ts_ms",
-        "requested_ts_ms",
-        "entry_valid_until_ms",
-        "max_hold_duration_ms",
-    }
     for index, row in enumerate(raw_held):
         if not isinstance(row, dict):
             raise BookStateError(f"{resolved}: held row {index} is not an object")
@@ -291,14 +295,19 @@ def read_book_state(path: str | Path) -> LongBookState:
                 f"{resolved}: held row {index} ({row.get('symbol')!r}) has unexpected or missing fields"
             )
         try:
-            if any(not isinstance(row[name], str) for name in text_fields):
+            if any(not isinstance(row[name], str) for name in _ENTRY_TEXT_FIELDS):
                 raise TypeError("text field is not a string")
             if any(
                 isinstance(row[name], bool) or not isinstance(row[name], (int, float))
-                for name in number_fields
+                for name in _ENTRY_NUMBER_FIELDS
             ):
                 raise TypeError("numeric field is not a JSON number")
-            if any(isinstance(row[name], bool) or not isinstance(row[name], int) for name in integer_fields):
+            if any(not math.isfinite(float(row[name])) for name in _ENTRY_NUMBER_FIELDS):
+                raise ValueError("numeric field is not finite")
+            if any(
+                isinstance(row[name], bool) or not isinstance(row[name], int)
+                for name in _ENTRY_INTEGER_FIELDS
+            ):
                 raise TypeError("timestamp or duration field is not a JSON integer")
             if not isinstance(row["seen_held"], bool):
                 raise TypeError("seen_held is not a JSON boolean")
@@ -347,6 +356,14 @@ def read_book_state(path: str | Path) -> LongBookState:
             or entry.leverage <= 0.0
             or not math.isfinite(entry.entry_price)
             or entry.entry_price <= 0.0
+            or entry.signal_ts_ms <= 0
+            or entry.stop_decay_after_ms < 0
+            or entry.decayed_stop_loss_pct < 0.0
+            or entry.decayed_stop_loss_pct >= 1.0
+            or entry.atr_14d_pct < 0.0
+            or entry.venue_qty < 0.0
+            or entry.venue_avg_entry_px < 0.0
+            or entry.venue_ts_ms < 0
             or entry.requested_ts_ms <= 0
             or entry.entry_valid_until_ms <= entry.requested_ts_ms
             or entry.max_hold_duration_ms <= 0
