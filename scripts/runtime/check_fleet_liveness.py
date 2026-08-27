@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Account-kernel and strategy-input liveness watchdog for the deployed fleets.
+"""Rust account-owner and strategy-input liveness watchdog for the deployed fleets.
 
-Scope is ``demo`` or ``mainnet``. Within it the checker requires the account
-owner, live-L2 readiness sidecar, owner-health projection, and strategy input,
+Scope is ``demo`` or ``mainnet``. Within it the checker requires the Rust account
+owner, its exact-identity heartbeat, and strategy input,
 plus a recent healthy canonical venue snapshot. Strategy-daemon cycle and input
 checks live here because an execution owner cannot detect a hung signal
 scheduler or an empty/stale signal source. The ``mainnet`` scope is disjoint
@@ -49,7 +49,6 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration.core._common import exact_duration_ms  # noqa: E402
 from liquidity_migration.core.artifact_snapshot import read_stable_file  # noqa: E402
-from liquidity_migration.account.account_kernel import AccountEventType, read_recent_account_events  # noqa: E402
 from liquidity_migration.policy.account_execution_config import (  # noqa: E402
     REGISTERED_MAX_DEMO_RULE_AGE_HOURS,
 )
@@ -345,14 +344,14 @@ def evaluate_demo_rule_age(
             headline="The trading-rules receipt is future-dated — invalid.",
         )
     if remaining_hours <= 0.0:
-        # Mainnet's receipt does gate the funded owner, and every deploy renews
-        # it (read-only freeze), so an expired one is a genuine CRITICAL.
+        # Mainnet's receipt gates the funded owner, so expiry is a genuine
+        # CRITICAL until an operator installs fresh reviewed evidence.
         return Alert(
             key=key,
             severity=CRITICAL,
             message=(
                 f"{label} evidence expired {abs(remaining_hours):.1f}h ago; "
-                "the funded owner will refuse to start; any deploy renews it (read-only freeze)."
+                "the funded owner will refuse to start; install fresh reviewed read-only evidence."
             ),
             headline="The trading-rules receipt has expired — the next restart will refuse to start.",
         )
@@ -362,7 +361,7 @@ def evaluate_demo_rule_age(
             severity=WARNING,
             message=(
                 f"{label} evidence expires in {remaining_hours:.1f}h; "
-                "any deploy renews it (read-only freeze); deploy before expiry."
+                "install fresh reviewed read-only evidence before expiry."
             ),
             headline=f"The trading-rules receipt expires in {remaining_hours:.0f}h — plan the refresh.",
         )
@@ -531,6 +530,9 @@ class EngineHeartbeat:
     #: so both of these can be absent from an ordinary healthy heartbeat.
     account_user_id: str | None
     pid: int | None
+    engine_version: str
+    venue: str
+    realm: str
     #: When the venue reading this beat carries was taken, on the same clock as
     #: ``wall_ts_ms``. Absent until the engine has taken one at all.
     account_observed_wall_ts_ms: int | None = None
@@ -561,7 +563,11 @@ class EngineHeartbeat:
 
     @property
     def detail(self) -> str:
-        parts = [f"mode {self.mode}"]
+        parts = [
+            f"engine {self.engine_version}",
+            f"venue {self.venue}/{self.realm}",
+            f"mode {self.mode}",
+        ]
         if self.account_user_id is not None:
             parts.append(f"account {self.account_user_id}")
         if self.pid is not None:
@@ -612,6 +618,9 @@ def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
     for field, expected in (
         ("wall_ts_ms", int),
         ("mode", str),
+        ("engine_version", str),
+        ("venue", str),
+        ("realm", str),
         ("may_open", bool),
         ("market_events", int),
         ("orders_sent", int),
@@ -644,6 +653,9 @@ def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
         orders_sent=int(payload["orders_sent"]),
         account_user_id=account if isinstance(account, str) else None,
         pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+        engine_version=str(payload["engine_version"]),
+        venue=str(payload["venue"]),
+        realm=str(payload["realm"]),
         account_observed_wall_ts_ms=(observed if isinstance(observed, int) and not isinstance(observed, bool) else None),
     )
 
@@ -654,6 +666,10 @@ def evaluate_engine_heartbeat(
     now_ms: int,
     max_age_seconds: float,
     max_account_view_age_minutes: float = VENUE_SNAPSHOT_AGE_FLOOR_MINUTES,
+    expected_account_user_id: str = "",
+    expected_venue: str = "",
+    expected_realm: str = "",
+    expected_engine_version: str = "",
 ) -> list[Alert]:
     """Report an engine that stopped writing, and one that stopped opening positions.
 
@@ -662,6 +678,28 @@ def evaluate_engine_heartbeat(
     conditions mean less on one of those than on a live beat.
     """
     alerts: list[Alert] = []
+    binding_mismatches: list[str] = []
+    for label, expected, observed in (
+        ("account", expected_account_user_id, heartbeat.account_user_id),
+        ("venue", expected_venue, heartbeat.venue),
+        ("realm", expected_realm, heartbeat.realm),
+        ("engine version", expected_engine_version, heartbeat.engine_version),
+    ):
+        if expected and observed != expected:
+            binding_mismatches.append(f"{label} expected {expected!r}, observed {observed!r}")
+    if binding_mismatches:
+        alerts.append(
+            Alert(
+                key="engine_heartbeat_binding",
+                severity=CRITICAL,
+                message=(
+                    "engine heartbeat does not match the account/runtime this watchdog is assigned to: "
+                    + "; ".join(binding_mismatches)
+                    + ". A fresh heartbeat from the wrong process must not make this fleet look healthy."
+                ),
+                headline="The funded engine heartbeat belongs to the wrong account or runtime.",
+            )
+        )
     age_seconds = (now_ms - heartbeat.wall_ts_ms) / 1000.0
     if age_seconds < 0.0:
         alerts.append(
@@ -764,6 +802,10 @@ def gather_engine_heartbeat_alerts(
     heartbeat_path: Path,
     max_age_seconds: float,
     max_account_view_age_minutes: float = VENUE_SNAPSHOT_AGE_FLOOR_MINUTES,
+    expected_account_user_id: str = "",
+    expected_venue: str = "",
+    expected_realm: str = "",
+    expected_engine_version: str = "",
     now_ms: int | None = None,
 ) -> list[Alert]:
     """Read the engine's heartbeat file, or report that it could not be read.
@@ -796,6 +838,10 @@ def gather_engine_heartbeat_alerts(
         now_ms=observed_now_ms,
         max_age_seconds=max_age_seconds,
         max_account_view_age_minutes=max_account_view_age_minutes,
+        expected_account_user_id=expected_account_user_id,
+        expected_venue=expected_venue,
+        expected_realm=expected_realm,
+        expected_engine_version=expected_engine_version,
     )
 
 
@@ -1303,89 +1349,6 @@ def gather_carry_alerts(
 # defaults bound the first value at def time while the runtime clamps read the
 # module attribute, so editing one silently diverged the two.
 
-# The freshness check needs the newest venue snapshot, not a genesis replay:
-# a full verified read cost ~20s CPU and ~250MB peak at 28.5k segments, every
-# 3 minutes, re-verifying a chain each generation already verified at startup.
-# Deep enough that a ten-minute checkpoint is always inside it unless the
-# journal is taking more than one transaction per second, ~250x the observed
-# non-snapshot rate.
-ACCOUNT_HEALTH_TAIL_SEGMENTS = 1024
-
-
-def gather_account_health_alerts(
-    *,
-    account_root: Path,
-    max_age_minutes: float,
-    now_ms: int | None = None,
-) -> list[Alert]:
-    """Require a fresh, healthy venue snapshot from the canonical account journal."""
-
-    try:
-        recent = read_recent_account_events(account_root, max_segments=ACCOUNT_HEALTH_TAIL_SEGMENTS)
-    except Exception as exc:  # noqa: BLE001 - corrupt authority must page, not crash the watchdog
-        return [
-            Alert(
-                key="account_health_unreadable",
-                severity=CRITICAL,
-                message=(f"canonical account health journal is unreadable: {type(exc).__name__}: {str(exc)[:200]}"),
-                headline="The account journal cannot be read.",
-            )
-        ]
-    events = () if recent is None else recent.events
-    snapshots = [event for event in events if event.event_type == AccountEventType.VENUE_SNAPSHOT.value]
-    if not snapshots:
-        window_note = (
-            ""
-            if recent is None or recent.total_segments <= recent.window_segments
-            else f" in the newest {recent.window_segments} of {recent.total_segments} transactions"
-        )
-        return [
-            Alert(
-                key="account_health_missing",
-                severity=CRITICAL,
-                message=(
-                    f"canonical account journal has no venue reconciliation health snapshot{window_note}; "
-                    "demo execution health is unproven."
-                ),
-                headline="The account journal has no recent health snapshot — health is unproven.",
-            )
-        ]
-    latest = max(
-        snapshots,
-        key=lambda event: int(event.payload.get("local_receive_ts_ns") or event.wall_ts_ns),
-    )
-    observed_ns = int(latest.payload.get("local_receive_ts_ns") or latest.wall_ts_ns)
-    observed_now_ms = _now_ms() if now_ms is None else now_ms
-    age_minutes = (observed_now_ms - observed_ns / 1_000_000.0) / 60_000.0
-    bound_minutes = max(max_age_minutes, VENUE_SNAPSHOT_AGE_FLOOR_MINUTES)
-    if age_minutes < 0.0 or age_minutes > bound_minutes:
-        return [
-            Alert(
-                key="account_health_stale",
-                severity=CRITICAL,
-                message=(
-                    f"canonical account reconciliation health is {age_minutes:.1f} min old "
-                    f"(allowed 0..{bound_minutes:g} min); owner health is stale or future-dated."
-                ),
-                headline=(
-                    f"Account health is {age_minutes:.1f} min old — the owner may be stuck."
-                ),
-            )
-        ]
-    if not bool(latest.payload.get("healthy")):
-        mismatches = latest.payload.get("mismatches")
-        detail = "; ".join(str(item) for item in mismatches) if isinstance(mismatches, list) else "unknown mismatch"
-        return [
-            Alert(
-                key="account_health_unhealthy",
-                severity=CRITICAL,
-                message=f"canonical account reconciliation is UNHEALTHY: {detail[:500]}",
-                headline="The exchange and our records disagree — the account needs checking.",
-            )
-        ]
-    return []
-
-
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -1427,16 +1390,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="long-native mainnet root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
-        "--account-root",
-        default=os.environ.get("ACCOUNT_EXECUTION_ROOT") or _default_root("data/bybit-account-execution"),
-        help="canonical demo account journal root for reconciliation health",
-    )
-    p.add_argument(
-        "--account-capture-root",
-        default=os.environ.get("ACCOUNT_CAPTURE_ROOT") or _default_root("data/bybit-account-market-capture"),
-        help="demo account-owner market/readiness and decision-context root",
-    )
-    p.add_argument(
         "--demo-rules-file",
         default=os.environ.get("ACCOUNT_DEMO_RULES_FILE") or "",
         help="bound empirical demo-rule receipt; warns during its final 24 hours ('' to skip)",
@@ -1462,6 +1415,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=60.0,
         help="critical alert if the engine's heartbeat is older than this (it writes every few seconds)",
     )
+    p.add_argument(
+        "--expected-account-user-id",
+        default=os.environ.get("EXPECTED_ENGINE_ACCOUNT_USER_ID") or "",
+        help="require the heartbeat to name this exact venue account id",
+    )
+    p.add_argument(
+        "--expected-engine-venue",
+        default=os.environ.get("EXPECTED_ENGINE_VENUE") or "",
+        help="require the heartbeat to name this exact venue",
+    )
+    p.add_argument(
+        "--expected-engine-realm",
+        default=os.environ.get("EXPECTED_ENGINE_REALM") or "",
+        help="require the heartbeat to name this exact realm",
+    )
+    p.add_argument(
+        "--expected-engine-version",
+        default=os.environ.get("EXPECTED_ENGINE_VERSION") or "",
+        help="optionally require the heartbeat to name this exact engine version",
+    )
     p.add_argument("--cooldown-min", type=float, default=30.0, help="re-alert interval for a persisting condition")
     p.add_argument(
         "--heartbeat-url",
@@ -1472,10 +1445,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--account-notification-state",
         # Empty by default: the hourly digest is retired and nothing writes
-        # this file. Defaulting it from ACCOUNT_EXECUTION_ROOT points both
-        # fleets at a frozen file and pages all day about a notification
-        # channel that is not broken but abolished. The flag still works if a
-        # digest ever returns and is pointed at it explicitly.
+        # this file. The flag remains only for an explicitly configured digest.
         default="",
         help=(
             "committed notification state to age-check; alerts when the digest stalls. Empty by "
@@ -1486,8 +1456,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--state-file",
         type=Path,
-        default=None,
-        help="cooldown state file (default: <repo>/data/.cache/liveness_watchdog.json; per-scope for mainnet)",
+        default=Path(os.environ["LIVENESS_STATE_FILE"]) if os.environ.get("LIVENESS_STATE_FILE") else None,
+        help="cooldown state file (default: environment, then <repo>/data/.cache; per scope)",
     )
     return p
 
@@ -1496,6 +1466,23 @@ def main() -> int:
     args = build_arg_parser().parse_args()
 
     mainnet = args.account_scope == "mainnet"
+    if mainnet:
+        missing_binding = [
+            name
+            for name, value in (
+                ("EXPECTED_ENGINE_ACCOUNT_USER_ID", args.expected_account_user_id),
+                ("EXPECTED_ENGINE_VENUE", args.expected_engine_venue),
+                ("EXPECTED_ENGINE_REALM", args.expected_engine_realm),
+            )
+            if not str(value).strip()
+        ]
+        if missing_binding:
+            raise SystemExit(
+                "mainnet liveness requires an explicit engine binding: "
+                + ", ".join(missing_binding)
+            )
+        if args.expected_engine_realm != args.account_scope:
+            raise SystemExit("engine binding realm must equal --account-scope")
     required_account_owner_units = (
         (_MAINNET_ACCOUNT_OWNER_UNIT,) if mainnet else _REQUIRED_ACCOUNT_OWNER_UNITS
     )
@@ -1567,13 +1554,6 @@ def main() -> int:
                 now_ns=now_ms * 1_000_000,
             )
         )
-    # Do not check the account journal here: no engine crate names it, so the
-    # file is frozen and such a check can never clear. The engine's own account
-    # reading, checked in the heartbeat above, is what has a live writer.
-    #
-    # Nothing watches "the exchange and our records disagree" today — the engine
-    # reconciles but publishes no mismatch. `gather_account_health_alerts` is
-    # kept, uncalled, as the specification for whatever writes that evidence.
     if not mainnet and long_root is not None:
         alerts.extend(
             gather_long_alerts(
@@ -1618,8 +1598,6 @@ def main() -> int:
     if disk_alert is not None:
         alerts.append(disk_alert)
     if str(args.engine_heartbeat_file).strip():
-        # Unset means the file is never opened and nothing new can alert: no
-        # engine heartbeat is provisioned on the fleet as it runs today.
         alerts.extend(
             gather_engine_heartbeat_alerts(
                 heartbeat_path=Path(args.engine_heartbeat_file),
@@ -1627,6 +1605,10 @@ def main() -> int:
                 # The operator dial that bounds the engine's own account
                 # reading: one knob, pointed at the reader that has a writer.
                 max_account_view_age_minutes=args.max_account_health_age_min,
+                expected_account_user_id=args.expected_account_user_id,
+                expected_venue=args.expected_engine_venue,
+                expected_realm=args.expected_engine_realm,
+                expected_engine_version=args.expected_engine_version,
                 # No now_ms: the engine rewrites this file every few seconds, and
                 # by the time this run reaches it the clock sampled at the top of
                 # main() is a second or two behind. Handing that stale reading in

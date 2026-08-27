@@ -106,7 +106,10 @@ symbols = ["BTCUSDT", "ETHUSDT"]
 name = "target_book"
 sleeve = "long"
 book_path = "/var/lib/liquidity-migration/targets/long-mainnet.json"
-rest_entries = true
+# LONG is a short-lived breakout signal; crossing while it is fresh matches the
+# demo execution policy. Resting it for the generic 120s work window admits a
+# materially different, stale entry on the funded account.
+rest_entries = false
 symbols = ["SOLUSDT", "XRPUSDT"]
 
 # NOTE ON THE SYMBOL LISTS ABOVE. They are a seed, not a universe. The engine

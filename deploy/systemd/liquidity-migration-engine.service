@@ -10,8 +10,8 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=liquidity-engine-demo
+Group=liquidity-migration
 # Not the deployed checkout. The engine's log path in engine.toml may be
 # relative, and a relative path resolved inside /opt/liquidity-migration writes
 # an untracked file into the tree the deploy proves clean at every exact-commit
@@ -48,11 +48,15 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=4
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
 UMask=0027
-ReadWritePaths=/var/lib/liquidity-migration-engine
+ReadWritePaths=/run/lock/liquidity-migration /var/lib/liquidity-migration-engine
 MemoryMax=256M
+LimitNOFILE=65536
+TasksMax=256
 
 [Install]
 WantedBy=multi-user.target

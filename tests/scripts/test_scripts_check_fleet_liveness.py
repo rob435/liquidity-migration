@@ -38,7 +38,6 @@ def _stub_account_authority(monkeypatch) -> None:
         "evaluate_required_account_owner_states",
         lambda _states, **_kwargs: [],
     )
-    monkeypatch.setattr(M, "gather_account_health_alerts", lambda **_kwargs: [])
     monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
 
 
@@ -514,141 +513,6 @@ def test_gather_carry_alerts_skips_when_root_absent(tmp_path) -> None:
     )
 
 
-def test_account_health_requires_fresh_healthy_canonical_snapshot(tmp_path) -> None:
-    from liquidity_migration.account.account_kernel import AccountExecutionKernel
-
-    now_ms = 1_000 * HOUR
-    missing = M.gather_account_health_alerts(
-        account_root=tmp_path / "missing",
-        now_ms=now_ms,
-        max_age_minutes=1,
-    )
-    assert [alert.key for alert in missing] == ["account_health_missing"]
-
-    healthy_root = tmp_path / "healthy"
-    kernel = AccountExecutionKernel(healthy_root, account_id="demo")
-    kernel.record_venue_snapshot(
-        snapshot_key="healthy",
-        venue_positions={},
-        reconstructed_positions={},
-        mismatches=(),
-        exchange_ts_ns=0,
-        local_receive_ts_ns=(now_ms - 30_000) * 1_000_000,
-    )
-    assert (
-        M.gather_account_health_alerts(
-            account_root=healthy_root,
-            now_ms=now_ms,
-            max_age_minutes=1,
-        )
-        == []
-    )
-
-    # Inside the 25-minute stopped-journal floor: a flat book legitimately
-    # journals nothing between ten-minute checkpoints.
-    assert (
-        M.gather_account_health_alerts(
-            account_root=healthy_root,
-            now_ms=now_ms + 20 * MIN,
-            max_age_minutes=1,
-        )
-        == []
-    )
-    stale = M.gather_account_health_alerts(
-        account_root=healthy_root,
-        now_ms=now_ms + 26 * MIN,
-        max_age_minutes=1,
-    )
-    assert [alert.key for alert in stale] == ["account_health_stale"]
-
-    kernel.record_venue_snapshot(
-        snapshot_key="unhealthy",
-        venue_positions={"BTCUSDT": 1.0},
-        reconstructed_positions={},
-        mismatches=("BTCUSDT:venue=1:reconstructed=0",),
-        exchange_ts_ns=0,
-        local_receive_ts_ns=now_ms * 1_000_000,
-    )
-    unhealthy = M.gather_account_health_alerts(
-        account_root=healthy_root,
-        now_ms=now_ms,
-        max_age_minutes=1,
-    )
-    assert [alert.key for alert in unhealthy] == ["account_health_unhealthy"]
-    assert "BTCUSDT" in unhealthy[0].message
-
-
-def test_account_health_production_time_is_read_adjacent(tmp_path, monkeypatch) -> None:
-    from liquidity_migration.account.account_kernel import AccountExecutionKernel
-
-    outer_now_ms = 1_000 * HOUR
-    published_ms = outer_now_ms + 84
-    root = tmp_path / "concurrent-reconciliation"
-    AccountExecutionKernel(root, account_id="demo").record_venue_snapshot(
-        snapshot_key="concurrent",
-        venue_positions={},
-        reconstructed_positions={},
-        mismatches=(),
-        exchange_ts_ns=0,
-        local_receive_ts_ns=published_ms * 1_000_000,
-    )
-    monkeypatch.setattr(M, "_now_ms", lambda: published_ms + 1)
-
-    assert (
-        M.gather_account_health_alerts(
-            account_root=root,
-            max_age_minutes=1,
-        )
-        == []
-    )
-    explicit_future = M.gather_account_health_alerts(
-        account_root=root,
-        max_age_minutes=1,
-        now_ms=outer_now_ms,
-    )
-    assert [alert.key for alert in explicit_future] == ["account_health_stale"]
-    assert "-0.0 min old" in explicit_future[0].message
-
-
-def test_account_health_tail_window_survives_bursty_non_snapshot_traffic(
-    tmp_path,
-) -> None:
-    """A checkpoint stays inside the window under a burst of ordinary events."""
-
-    from liquidity_migration.account.account_kernel import AccountExecutionKernel
-
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "bursty"
-    kernel = AccountExecutionKernel(root, account_id="demo")
-    kernel.record_venue_snapshot(
-        snapshot_key="healthy",
-        venue_positions={},
-        reconstructed_positions={},
-        mismatches=(),
-        exchange_ts_ns=0,
-        local_receive_ts_ns=(now_ms - 30_000) * 1_000_000,
-    )
-    for index in range(M.ACCOUNT_HEALTH_TAIL_SEGMENTS - 1):
-        kernel.record_protection(
-            protection_key=f"burst-{index}",
-            symbol="BUSDT",
-            status="synced",
-            stop_price=None,
-            take_profit_price=None,
-            exchange_ts_ns=0,
-            local_receive_ts_ns=(now_ms - 29_000) * 1_000_000 + index,
-        )
-
-    assert (
-        M.gather_account_health_alerts(
-            account_root=root,
-            now_ms=now_ms,
-            max_age_minutes=1,
-        )
-        == []
-    )
-
-
 def test_current_generation_completion_outranks_a_newer_in_flight_cycle_row(
     tmp_path,
 ) -> None:
@@ -1074,8 +938,7 @@ def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
     assert M._CARRY_DEMO_UNIT in captured_runtime_units
 
 
-def test_default_unit_monitoring_is_always_account_kernel_only(monkeypatch) -> None:
-    monkeypatch.delenv("ACCOUNT_EXECUTION_KERNEL_REQUIRED", raising=False)
+def test_default_unit_monitoring_uses_the_rust_owner(monkeypatch) -> None:
     monkeypatch.setenv("LONG_SLEEVE", "on")
     monkeypatch.setenv("CARRY_SLEEVE", "on")
 
@@ -1135,16 +998,14 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
     that inherits them alerts forever about roots it does not own.
     """
     calls: list[tuple[str, str]] = []
+    monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", "104729361")
+    monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
+    monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
     monkeypatch.setenv("CARRY_MAINNET_SLEEVE", "on")
     monkeypatch.setenv("LONG_MAINNET_SLEEVE", "on")
     monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
     monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
-    monkeypatch.setattr(
-        M,
-        "gather_account_health_alerts",
-        lambda **_kwargs: calls.append(("reconciliation", "")) or [],
-    )
     # The rules gather is deliberately NOT skipped on mainnet since
     # 2026-08-13: only mainnet holds the 168h ceiling as a hard start
     # refusal, and its receipt expired unwatched until then. The recorder
@@ -1179,10 +1040,6 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
             "mainnet",
             "--demo-rules-file",
             str(tmp_path / "demo-rules.json"),
-            "--account-root",
-            str(tmp_path / "account-mainnet"),
-            "--account-capture-root",
-            str(tmp_path / "capture-mainnet"),
             "--state-file",
             str(tmp_path / "state.json"),
         ],
@@ -1198,6 +1055,9 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
 
 def test_mainnet_scope_requires_only_the_mainnet_owner(tmp_path, monkeypatch) -> None:
     required: list[tuple[str, ...]] = []
+    monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", "104729361")
+    monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
+    monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
     _stub_account_authority(monkeypatch)
     monkeypatch.setenv("CARRY_MAINNET_SLEEVE", "off")
     monkeypatch.setenv("LONG_MAINNET_SLEEVE", "off")
@@ -1219,6 +1079,9 @@ def test_mainnet_scope_requires_only_the_mainnet_owner(tmp_path, monkeypatch) ->
 def test_mainnet_scope_cooldowns_cannot_collide_with_the_demo_watchdog(tmp_path, monkeypatch) -> None:
     sandbox_repo = tmp_path / "repo"
     sandbox_repo.mkdir()
+    monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", "104729361")
+    monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
+    monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
     _stub_account_authority(monkeypatch)
     monkeypatch.setenv("CARRY_MAINNET_SLEEVE", "off")
     monkeypatch.setenv("LONG_MAINNET_SLEEVE", "off")
@@ -1300,6 +1163,9 @@ def test_state_file_fallback_anchored_at_repo_not_cwd(tmp_path, monkeypatch) -> 
     """
     sandbox_repo = tmp_path / "repo"
     sandbox_repo.mkdir()
+    monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", "104729361")
+    monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
+    monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
     run_cwd = tmp_path / "elsewhere"
     run_cwd.mkdir()
 
@@ -1343,6 +1209,9 @@ def test_a_populated_sleeve_root_does_not_drive_the_state_dir(tmp_path, monkeypa
     """
     sandbox_repo = tmp_path / "repo"
     sandbox_repo.mkdir()
+    monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", "104729361")
+    monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
+    monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
     carry_root = tmp_path / "bybit-carry-demo-event"
     carry_root.mkdir()
     _stub_account_authority(monkeypatch)
@@ -1379,8 +1248,6 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
         "carry_root",
         "carry_mainnet_root",
         "long_mainnet_root",
-        "account_root",
-        "account_capture_root",
     ):
         value = Path(getattr(args, attr))
         assert value.is_absolute(), f"{attr} default must be absolute, got {value}"
@@ -1393,8 +1260,6 @@ def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
     roots = {
         "LONG_DEMO_DATA_ROOT": "/fresh/long-demo",
         "CARRY_DEMO_DATA_ROOT": "/fresh/carry-demo",
-        "ACCOUNT_EXECUTION_ROOT": "/fresh/demo-account",
-        "ACCOUNT_CAPTURE_ROOT": "/fresh/demo-capture",
     }
     for key, value in roots.items():
         monkeypatch.setenv(key, value)
@@ -1403,8 +1268,6 @@ def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
 
     assert args.long_root == roots["LONG_DEMO_DATA_ROOT"]
     assert args.carry_root == roots["CARRY_DEMO_DATA_ROOT"]
-    assert args.account_root == roots["ACCOUNT_EXECUTION_ROOT"]
-    assert args.account_capture_root == roots["ACCOUNT_CAPTURE_ROOT"]
 
 
 def test_timer_not_active_debounced_warning_then_critical() -> None:
@@ -1584,41 +1447,6 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
     assert "[CRITICAL]" in out2
 
 
-def test_account_health_floor_absorbs_a_flat_book_between_checkpoints(tmp_path) -> None:
-    """Two missed ten-minute checkpoints must not page; a third must.
-
-    Sub-minute proof that the owner is reading the venue moved to
-    ``venue_facts_at_ns`` in the owner-health file; this bound only catches a
-    journal that stopped receiving venue facts at all.
-    """
-    from liquidity_migration.account.account_kernel import AccountExecutionKernel
-
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "busy"
-    AccountExecutionKernel(root, account_id="demo").record_venue_snapshot(
-        snapshot_key="healthy",
-        venue_positions={},
-        reconstructed_positions={},
-        mismatches=(),
-        exchange_ts_ns=0,
-        local_receive_ts_ns=(now_ms - 24 * 60_000) * 1_000_000,
-    )
-    assert (
-        M.gather_account_health_alerts(
-            account_root=root,
-            now_ms=now_ms,
-            max_age_minutes=1,
-        )
-        == []
-    )
-    stopped = M.gather_account_health_alerts(
-        account_root=root,
-        now_ms=now_ms + 2 * MIN,
-        max_age_minutes=1,
-    )
-    assert [alert.key for alert in stopped] == ["account_health_stale"]
-
-
 def test_disk_space_alert_thresholds(monkeypatch, tmp_path: Path) -> None:
     def _usage(free_fraction: float):
         return SimpleNamespace(f_blocks=1000, f_frsize=1_000_000, f_bavail=int(1000 * free_fraction))
@@ -1729,45 +1557,6 @@ def test_main_suppresses_the_heartbeat_while_a_critical_alert_fires(tmp_path, mo
     assert pings == []
 
 
-def test_account_health_reads_a_bounded_tail_window_not_the_whole_journal(tmp_path, monkeypatch) -> None:
-    import liquidity_migration.account.account_kernel as kernel_module
-    from liquidity_migration.account.account_kernel import AccountExecutionKernel
-
-    now_ms = 1_000 * HOUR
-    root = tmp_path / "bounded"
-    kernel = AccountExecutionKernel(root, account_id="demo")
-    for index in range(4):
-        kernel.record_venue_snapshot(
-            snapshot_key=f"window-{index}",
-            venue_positions={},
-            reconstructed_positions={},
-            mismatches=(),
-            exchange_ts_ns=0,
-            local_receive_ts_ns=(now_ms - 30_000) * 1_000_000,
-        )
-
-    parsed_segments: list[int] = []
-    original = kernel_module._read_transaction_event_bytes
-
-    def counting(files):  # type: ignore[no-untyped-def]
-        rows = tuple(files)
-        parsed_segments.append(len(rows))
-        return original(rows)
-
-    monkeypatch.setattr(kernel_module, "_read_transaction_event_bytes", counting)
-    monkeypatch.setattr(M, "ACCOUNT_HEALTH_TAIL_SEGMENTS", 2)
-
-    assert (
-        M.gather_account_health_alerts(
-            account_root=root,
-            now_ms=now_ms,
-            max_age_minutes=1,
-        )
-        == []
-    )
-    assert sum(parsed_segments) == 2
-
-
 def test_mainnet_venue_rule_age_alerts_use_their_own_key_and_remedy() -> None:
     """The funded receipt's expiry pages with the deploy remedy, not the probe.
 
@@ -1832,6 +1621,7 @@ def _engine_heartbeat_payload(**overrides) -> dict:
         "orders_sent": 187,
         "pid": 8891,
         "realm": "mainnet",
+        "venue": "bybit",
         "strategies": ["carry"],
         "wall_ts_ms": ENGINE_NOW_MS - 2_000,
         "wire_p50_ns": 3_900_000,
@@ -2014,7 +1804,7 @@ def test_engine_heartbeat_malformed_alerts_instead_of_raising(tmp_path) -> None:
         "the file is empty": empty,
         "it is not valid JSON": truncated,
         "the top level is a list": not_an_object,
-        "these fields are missing or the wrong type: mode, market_events": before_the_rename,
+        "these fields are missing or the wrong type: mode, engine_version, venue, realm, market_events": before_the_rename,
     }
     for expected_reason, path in cases.items():
         alerts = _engine_alerts(path)
@@ -2122,46 +1912,18 @@ def test_main_pages_every_broken_heartbeat_and_still_exits_zero(tmp_path, monkey
             assert "engine_heartbeat" not in out, path
 
 
-def test_the_retired_digest_is_not_provisioned_from_the_account_root(monkeypatch) -> None:
-    """This used to default from ACCOUNT_EXECUTION_ROOT, which pointed both
-    fleets at a file the deleted Python owner used to write. It paged 47 times a
-    day about a notification channel that was not broken but abolished.
-
-    Empty means the file is never opened. The flag still works if a digest ever
-    comes back and someone points it at one.
-    """
-    monkeypatch.setenv("ACCOUNT_EXECUTION_ROOT", "/opt/liquidity-migration/data/bybit-account-execution")
+def test_the_retired_digest_has_no_implicit_default(monkeypatch) -> None:
     assert M.build_arg_parser().parse_args([]).account_notification_state == ""
 
     explicit = M.build_arg_parser().parse_args(["--account-notification-state", "/tmp/digest.json"])
     assert explicit.account_notification_state == "/tmp/digest.json"
 
 
-def test_main_does_not_read_the_deleted_owners_account_journal(tmp_path, monkeypatch, capsys) -> None:
-    """No engine crate writes that journal, and the demo file stopped moving at
-    19:58 on 2026-08-14. Reading it could only ever report a frozen file as
-    illness, so main must not reach for it at all.
-    """
-    reads: list[object] = []
-    monkeypatch.setattr(
-        M,
-        "evaluate_required_account_owner_states",
-        lambda _states, **_kwargs: [],
-    )
-    monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
-    monkeypatch.setattr(
-        M,
-        "gather_account_health_alerts",
-        lambda **kwargs: reads.append(kwargs) or [],
-    )
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
-    monkeypatch.setattr(M, "_unit_states", lambda units: {})
-    monkeypatch.setattr("sys.argv", _engine_main_argv(tmp_path, "state-no-journal.json"))
-
-    assert M.main() == 0
-    assert reads == []
-    assert "account_health" not in capsys.readouterr().out
-
+def test_runtime_has_no_legacy_account_journal_surface() -> None:
+    text = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "gather_account_health_alerts" not in text
+    assert "ACCOUNT_EXECUTION_ROOT" not in text
+    assert "--account-root" not in text
 
 def test_engine_account_view_lag_is_measured_between_the_engine_s_own_two_stamps(tmp_path) -> None:
     """How old the engine's reading of the account is, on the engine's clock.
@@ -2430,3 +2192,39 @@ def test_a_single_alert_still_reads_as_one_alert() -> None:
     assert "alerts" not in message
     assert "engine is dead" in message
     assert "ref engine_heartbeat_stale" in message
+
+def test_engine_heartbeat_exact_runtime_binding_is_fail_closed(tmp_path) -> None:
+    path = _write_engine_heartbeat(tmp_path / "bound.json")
+    assert M.gather_engine_heartbeat_alerts(
+        heartbeat_path=path,
+        max_age_seconds=60.0,
+        now_ms=ENGINE_NOW_MS,
+        expected_account_user_id="104729361",
+        expected_venue="bybit",
+        expected_realm="mainnet",
+        expected_engine_version="0.1.0",
+    ) == []
+
+    for kwargs in (
+        {"expected_account_user_id": "some-other-account"},
+        {"expected_venue": "some-other-venue"},
+        {"expected_realm": "demo"},
+        {"expected_engine_version": "engine-core 9.9.9"},
+    ):
+        alerts = M.gather_engine_heartbeat_alerts(
+            heartbeat_path=path,
+            max_age_seconds=60.0,
+            now_ms=ENGINE_NOW_MS,
+            **kwargs,
+        )
+        assert [alert.key for alert in alerts] == ["engine_heartbeat_binding"]
+        assert alerts[0].severity == M.CRITICAL
+
+
+def test_mainnet_liveness_refuses_an_unbound_engine(monkeypatch) -> None:
+    monkeypatch.delenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", raising=False)
+    monkeypatch.delenv("EXPECTED_ENGINE_VENUE", raising=False)
+    monkeypatch.delenv("EXPECTED_ENGINE_REALM", raising=False)
+    monkeypatch.setattr("sys.argv", ["check_fleet_liveness.py", "--account-scope", "mainnet"])
+    with pytest.raises(SystemExit, match="mainnet liveness requires an explicit engine binding"):
+        M.main()

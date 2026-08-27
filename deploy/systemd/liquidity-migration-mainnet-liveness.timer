@@ -5,7 +5,7 @@ Description=Run the liquidity-migration mainnet liveness + position-safety watch
 # Fast cadence: a down daemon / unprotected position must surface in minutes,
 # not the hourly entry-health window. Give cold-start data bootstraps one full
 # cycle-age window, then run every 3 minutes regardless of prior run duration.
-OnActiveSec=10min
+OnActiveSec=1min
 OnUnitActiveSec=3min
 AccuracySec=15s
 # Persistent applies only to calendar timers, not this monotonic schedule.

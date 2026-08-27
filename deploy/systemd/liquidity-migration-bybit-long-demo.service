@@ -9,14 +9,14 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=liquidity-producer
+Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
-EnvironmentFile=/etc/liquidity-migration/account-execution.env
+EnvironmentFile=/etc/liquidity-migration/producer-demo.env
+EnvironmentFile=/etc/liquidity-migration/engine.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
-Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-long-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=EXECUTION_ENVIRONMENT=demo
@@ -61,10 +61,12 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
 UMask=0027
-ReadWritePaths=/opt/liquidity-migration
+ReadWritePaths=/opt/liquidity-migration/data /var/lib/liquidity-migration/targets
 # No MemoryHigh: measured 2026-08-03 pinned at the old watermark (reclaim
 # throttling, swapped pages, slow cycles entering on stale prices). The
 # producer restarts clean off the journal cursor, so MemoryMax fails loud

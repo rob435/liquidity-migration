@@ -9,13 +9,13 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=liquidity-producer
+Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
-EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
+EnvironmentFile=/etc/liquidity-migration/producer-mainnet.env
+EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
-Environment=ACCOUNT_EXECUTION_KERNEL_REQUIRED=1
 Environment=DATA_ROOT=data/bybit-carry-mainnet-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=EXECUTION_ENVIRONMENT=mainnet
@@ -54,10 +54,12 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
 UMask=0027
-ReadWritePaths=/opt/liquidity-migration
+ReadWritePaths=/opt/liquidity-migration/data /var/lib/liquidity-migration/targets
 MemoryHigh=1152M
 MemoryMax=1408M
 MemorySwapMax=384M

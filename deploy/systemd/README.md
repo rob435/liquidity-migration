@@ -41,9 +41,9 @@ anything else in the fleet.
   a dead engine leaves the producers running and publishing.
 - **Neither liveness unit** has an ordering, requirement, binding, part-of,
   requisite, uphold, or wants edge to the units it watches — a stopped or
-  failed unit is what it alerts on. The mainnet observer loads
-  `bybit-mainnet.env` for the Telegram credentials only and unsets both
-  API-key pairs and `REAL_MONEY`.
+  failed unit is what it alerts on. The mainnet observer loads the root-only
+  `telegram-mainnet.env` projection; funded API keys and `REAL_MONEY` never
+  enter the observer process.
 - **The control panel** (`telegram-controls`) likewise has no edge to the
   fleet it controls: it must keep serving buttons while the units it pauses
   or resumes are stopped. It holds Telegram credentials only — the API-key
@@ -60,16 +60,12 @@ What the engine does with an account is [`../../docs/engine.md`](../../docs/engi
   single-writer kernel lease. Nothing else writes to the account: anything
   else taking the lease stops the engine from starting rather than letting
   two writers wedge each other.
-- **The host opts in.** The manifest installs the unit file everywhere, but
-  the deploy starts and verifies it only where `/etc/liquidity-migration/engine.env`
-  and the built binary both exist (`engine_installed` in
-  [`../../scripts/deploy_vps_live.sh`](../../scripts/deploy_vps_live.sh)).
-  Everywhere else the unit sits installed and stopped and nothing asks about
-  it. `deploy/engine.env.template` is the file to fill in.
-- **Its build cannot fail the deploy.** `cargo` runs in a clone of its own at
-  `/opt/engine-build` after the fleet is up and verified, and after a rollout
-  has disarmed its rollback trap. A missing toolchain or a build that will not
-  compile prints a line and leaves the previously installed binary running.
+- **The engine is mandatory.** Activation requires the exact locked release,
+  `/etc/liquidity-migration/engine.env`, its config, a fresh heartbeat, and the
+  expected account/venue/realm binding. Missing or mismatched inputs fail closed.
+- **Its build is part of the deploy gate.** `cargo build --release --locked`
+  runs while the fleet is quiescent. Any toolchain, fetch, compile, install,
+  restart, digest, or commit-marker failure aborts activation.
 
 `liquidity-migration-engine-mainnet.service` has the same shape on the funded
 account: gated by `/etc/liquidity-migration/engine-mainnet.env` plus the
@@ -78,18 +74,16 @@ binary, started through `start_mainnet_fleet` when `REAL_MONEY=true` in
 the whole of what decides whether the funded engine trades. See the Real-money
 section of [`../../docs/operations.md`](../../docs/operations.md).
 
-Neither engine unit is in `LM_AUTHORIZED_UNITS`
-([`../lib_sleeves.sh`](../lib_sleeves.sh)). Every unit on that list must be
-installed byte-identical on every host and runs with the credential pairs
-stripped; the engines are opt-in per host and need their account's key pair —
-they are what trades.
+The engines are installed by the exact systemd manifest and run under distinct
+unprivileged identities. Their root-only credential files are loaded by PID 1;
+producer and observer processes receive only non-secret projections.
 
 ## Watchdog timers
 
 | Timer | First fire | Then |
 | --- | --- | --- |
 | `demo-liveness.timer` | `OnActiveSec=1min` | `OnUnitActiveSec=3min` |
-| `mainnet-liveness.timer` | `OnActiveSec=10min` | `OnUnitActiveSec=3min` |
+| `mainnet-liveness.timer` | `OnActiveSec=1min` | `OnUnitActiveSec=3min` |
 | `llm-ledger.timer` | `OnCalendar=*-*-* *:05:00` | `Persistent=true` |
 | `trade-notify.timer` | `OnCalendar=*-*-* *:0/5:30` | `Persistent=true` |
 
@@ -109,9 +103,7 @@ only the nonterminal queue-head L2 subscription transition (latched at 30s; the
 terminal timeout still pages). Missing, stale, reconciliation, and capital
 health failures are never suppressed.
 
-The demo watchdog also reopens the bound demo-rule receipt and warns in the
-final 24 hours before the age bound the owner was started with (168 hours by
-default). That is visibility only — it starts no maintenance, and an ordinary
-rollout re-probes the rules well before it matters. Both scopes run the check
-with their own realm; only mainnet holds the 168-hour ceiling as a hard start
-refusal.
+Only the mainnet watchdog pages on rule-receipt age because mainnet enforces the
+168-hour ceiling as a hard start refusal. Deployment validates the declared
+receipt but never renews it or mutates venue state; an operator must install a
+fresh reviewed read-only receipt before expiry.

@@ -5,7 +5,7 @@ set -euo pipefail
 MODE="${1:-${DEPLOY_MODE:-verify}}"
 if [ "$#" -gt 0 ]; then shift; fi
 case "$MODE" in
-    install|activate|verify|staged|rollout|stop-mainnet) ;;
+    install|activate|verify|staged|rollout|stop-mainnet|disarm-mainnet) ;;
     activate-mainnet)
         echo "activate-mainnet retired 2026-08-03: the arming switch is REAL_MONEY=true in /etc/liquidity-migration/bybit-mainnet.env; a plain activate or rollout starts the mainnet fleet when it is armed" >&2
         exit 2
@@ -15,16 +15,13 @@ esac
 
 deploy_usage() {
     cat >&2 <<'USAGE'
-usage: deploy_vps_live.sh {install|activate|verify|staged|rollout|stop-mainnet}
+usage: deploy_vps_live.sh {install|activate|verify|staged|rollout|stop-mainnet|disarm-mainnet}
   --profile operational                   required for staged and rollout
   --stop-first / --no-stop-first          install|activate|staged: stop a running
                                           fleet instead of refusing. Default: stop
                                           unless real money is armed.
   --require-flat                          rollout: gate on a flat demo account
                                           rather than reporting residuals
-  --refresh-demo-rules                    install|staged: re-probe stale demo
-                                          rules (live PostOnly orders, <=200 USDT
-                                          per symbol)
 USAGE
     exit 2
 }
@@ -32,7 +29,6 @@ USAGE
 DEPLOY_PROFILE=""
 STOP_FIRST=auto
 REQUIRE_FLAT=0
-REFRESH_DEMO_RULES="${ROLLOUT_REFRESH_STALE_DEMO_RULES:-0}"
 
 require_mode() {
     local flag="$1"
@@ -65,11 +61,6 @@ while [ "$#" -gt 0 ]; do
         --require-flat)
             require_mode --require-flat rollout
             REQUIRE_FLAT=1
-            shift
-            ;;
-        --refresh-demo-rules)
-            require_mode --refresh-demo-rules install staged
-            REFRESH_DEMO_RULES=1
             shift
             ;;
         *) echo "unknown $MODE argument: $1" >&2; deploy_usage ;;
@@ -166,21 +157,6 @@ fi
     echo "expected commit returned an empty maintenance lock helper" >&2
     exit 1
 }
-ROLLOUT_READINESS_HELPER_B64=""
-if [ "$MODE" = rollout ]; then
-    if ! ROLLOUT_READINESS_HELPER_B64="$(
-        "${LOCAL_GIT[@]}" show \
-            "$EXPECTED_COMMIT:scripts/vps/check_deploy_rollout_readiness.py" \
-        | /usr/bin/python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))'
-    )"; then
-        echo "expected commit does not contain the rollout readiness helper: $EXPECTED_COMMIT" >&2
-        exit 1
-    fi
-    [[ -n "$ROLLOUT_READINESS_HELPER_B64" ]] || {
-        echo "expected commit returned an empty rollout readiness helper" >&2
-        exit 1
-    }
-fi
 read -r -a SSH_ARGS <<< "$SSH_OPTS"
 {
     printf 'MODE=%q\n' "$MODE"
@@ -194,9 +170,7 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
     printf 'STOP_FIRST=%q\n' "$STOP_FIRST"
     printf 'REQUIRE_FLAT=%q\n' "$REQUIRE_FLAT"
-    printf 'ROLLOUT_REFRESH_STALE_DEMO_RULES=%q\n' "$REFRESH_DEMO_RULES"
     printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
-    printf 'ROLLOUT_READINESS_HELPER_B64=%q\n' "$ROLLOUT_READINESS_HELPER_B64"
 	cat <<'REMOTE_SCRIPT'
 # `-E` propagates the ERR trap into shell functions so a strict phase can still
 # report which phase died; see run_strict_phase below.
@@ -355,20 +329,6 @@ exec(compile(source, namespace["__file__"], "exec"), namespace)
 ' "$MAINTENANCE_LOCK_HELPER_B64" "$@"
 }
 
-rollout_readiness_helper() {
-    "$PYTHON" -c '
-import base64
-import sys
-
-encoded = sys.argv[1]
-arguments = sys.argv[2:]
-source = base64.b64decode(encoded, validate=True)
-sys.argv = ["check_deploy_rollout_readiness.py", *arguments]
-namespace = {"__file__": "scripts/vps/check_deploy_rollout_readiness.py", "__name__": "__main__"}
-exec(compile(source, namespace["__file__"], "exec"), namespace)
-' "$ROLLOUT_READINESS_HELPER_B64" "$@"
-}
-
 PROFILE_MARKER=/etc/liquidity-migration/profile
 # Retired paper-fleet artifacts, removed from any host that still carries them.
 # The runtime user/group stay if present (inert without units); state roots
@@ -377,7 +337,149 @@ RETIRED_PAPER_CONFIG_DIR=/etc/liquidity-migration/account-paper-execution
 RETIRED_PAPER_ENVIRONMENT=/etc/liquidity-migration/account-paper-execution.env
 LONG_DEMO_ROOT=/opt/liquidity-migration/data/bybit-long-demo-event
 CARRY_DEMO_ROOT=/opt/liquidity-migration/data/bybit-carry-demo-event
+LONG_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-long-mainnet-event
+CARRY_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-carry-mainnet-event
 
+RUNTIME_GROUP=liquidity-migration
+PRODUCER_USER=liquidity-producer
+DEMO_ENGINE_USER=liquidity-engine-demo
+MAINNET_ENGINE_USER=liquidity-engine-mainnet
+OBSERVER_USER=liquidity-observer
+LLM_USER=liquidity-llm
+PRODUCER_DEMO_ENV=/etc/liquidity-migration/producer-demo.env
+PRODUCER_MAINNET_ENV=/etc/liquidity-migration/producer-mainnet.env
+MAINNET_TELEGRAM_ENV=/etc/liquidity-migration/telegram-mainnet.env
+
+ensure_runtime_identities() {
+    getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || groupadd --system "$RUNTIME_GROUP"
+    local user
+    for user in "$PRODUCER_USER" "$DEMO_ENGINE_USER" "$MAINNET_ENGINE_USER" "$OBSERVER_USER" "$LLM_USER"; do
+        if ! id -u "$user" >/dev/null 2>&1; then
+            useradd --system --no-create-home --home-dir /nonexistent \
+                --shell /usr/sbin/nologin --gid "$RUNTIME_GROUP" "$user"
+        fi
+        id -nG "$user" | tr ' ' '\n' | grep -Fx "$RUNTIME_GROUP" >/dev/null \
+            || fail "$user is not isolated in the $RUNTIME_GROUP runtime group"
+    done
+    install -d -o root -g root -m 0755 /etc/tmpfiles.d
+    printf 'd /run/lock/liquidity-migration 0770 root %s -\n' "$RUNTIME_GROUP" \
+        > /etc/tmpfiles.d/liquidity-migration.conf
+    systemd-tmpfiles --create /etc/tmpfiles.d/liquidity-migration.conf \
+        || fail "cannot create the engine lease directory"
+    install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        /var/lib/liquidity-migration/targets
+}
+
+write_producer_environment() {
+    local source="$1" target="$2"
+    "$PYTHON" - "$source" "$target" <<'PY'
+import os
+import shlex
+import sys
+import tempfile
+from pathlib import Path
+from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+allowed = {
+    "ACCOUNT_DEMO_RULES_FILE", "ACCOUNT_RISK_POLICY_FILE", "ACCOUNT_SYMBOLS_FILE",
+    "ACCOUNT_VENUE_REALM", "CANDIDATE_UNIVERSE_FILE", "CARRY_NOTIONAL_MULTIPLIER",
+    "DISASTER_STOP_FRACTION", "EXODUS_NOTIONAL_MULTIPLIER", "LONG_NOTIONAL_MULTIPLIER",
+}
+values = load_private_systemd_environment(source)
+filtered = {key: value for key, value in values.items() if key in allowed}
+for required in ("ACCOUNT_DEMO_RULES_FILE", "ACCOUNT_RISK_POLICY_FILE", "ACCOUNT_SYMBOLS_FILE", "CANDIDATE_UNIVERSE_FILE"):
+    value = str(filtered.get(required) or "")
+    if not value or not Path(value).is_absolute():
+        raise SystemExit(f"{source}: {required} must be an absolute path")
+target.parent.mkdir(parents=True, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        for key, value in sorted(filtered.items()):
+            handle.write(f"{key}={shlex.quote(str(value))}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o640)
+    os.replace(temporary, target)
+    directory = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except BaseException:
+    Path(temporary).unlink(missing_ok=True)
+    raise
+PY
+    chown root:"$RUNTIME_GROUP" "$target" && chmod 0640 "$target" \
+        || fail "cannot secure producer environment $target"
+    unset ACCOUNT_RISK_POLICY_FILE ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE ACCOUNT_DEMO_RULES_FILE
+    lm_load_private_systemd_environment "$PYTHON" "$source" \
+        ACCOUNT_RISK_POLICY_FILE ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE ACCOUNT_DEMO_RULES_FILE
+    local input
+    for input in "$ACCOUNT_RISK_POLICY_FILE" "$ACCOUNT_SYMBOLS_FILE" \
+        "$CANDIDATE_UNIVERSE_FILE" "${ACCOUNT_DEMO_RULES_FILE:-}"; do
+        [ -z "$input" ] && continue
+        [ -f "$input" ] && [ ! -L "$input" ] \
+            || fail "producer input is missing or linked: $input"
+        chown root:"$RUNTIME_GROUP" "$input" && chmod 0640 "$input" \
+            || fail "cannot secure producer input: $input"
+    done
+    # Grant producer traversal only along the declared inputs, never across every
+    # credential/config directory under /etc/liquidity-migration.
+    local directory
+    for input in "$target" "$ACCOUNT_RISK_POLICY_FILE" "$ACCOUNT_SYMBOLS_FILE" \
+        "$CANDIDATE_UNIVERSE_FILE" "$ACCOUNT_DEMO_RULES_FILE"; do
+        directory="$(dirname "$input")"
+        case "$directory" in
+            /etc/liquidity-migration|/etc/liquidity-migration/*) ;;
+            *) fail "producer input must stay below /etc/liquidity-migration: $input" ;;
+        esac
+        while :; do
+            chown root:"$RUNTIME_GROUP" "$directory" && chmod 0750 "$directory" \
+                || fail "cannot grant producer traversal: $directory"
+            [ "$directory" = /etc/liquidity-migration ] && break
+            directory="$(dirname "$directory")"
+        done
+    done
+}
+
+project_mainnet_telegram_environment() {
+    "$PYTHON" - "$MAINNET_CREDENTIAL_ENV" "$MAINNET_TELEGRAM_ENV" <<'PY'
+import os
+import shlex
+import sys
+import tempfile
+from pathlib import Path
+from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+values = load_private_systemd_environment(source)
+allowed = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERT_CHAT_ID")
+filtered = {key: values[key] for key in allowed if str(values.get(key) or "")}
+if not filtered.get("TELEGRAM_BOT_TOKEN") or not (filtered.get("TELEGRAM_CHAT_ID") or filtered.get("TELEGRAM_ALERT_CHAT_ID")):
+    raise SystemExit("funded watchdog requires a Telegram token and chat id")
+fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        for key, value in sorted(filtered.items()):
+            handle.write(f"{key}={shlex.quote(str(value))}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, target)
+    directory = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except BaseException:
+    Path(temporary).unlink(missing_ok=True)
+    raise
+PY
+    chown root:root "$MAINNET_TELEGRAM_ENV" && chmod 0600 "$MAINNET_TELEGRAM_ENV" \
+        || fail "cannot secure funded notification environment"
+}
 retire_paper_host_config() {
     rm -f "$RETIRED_PAPER_ENVIRONMENT"
     rm -rf "$RETIRED_PAPER_CONFIG_DIR"
@@ -390,7 +492,7 @@ prepare_demo_runtime_config() {
     # here because both halves need it to exist before either runs, and the
     # producer that creates it on first write would create it after the engine
     # has already logged that it cannot find its book.
-    install -d -o root -g root -m 0750 /var/lib/liquidity-migration/targets
+    install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 /var/lib/liquidity-migration/targets
     for path in \
         /etc/liquidity-migration/account-execution.env \
         /etc/liquidity-migration/bybit-demo.env; do
@@ -401,20 +503,12 @@ prepare_demo_runtime_config() {
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/account-execution.env \
         ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE \
-        ACCOUNT_DEMO_RULES_FILE ACCOUNT_RISK_POLICY_FILE ACCOUNT_CAPTURE_ROOT \
-        ACCOUNT_EXECUTION_ROOT
+        ACCOUNT_DEMO_RULES_FILE ACCOUNT_RISK_POLICY_FILE
     demo_symbols="$ACCOUNT_SYMBOLS_FILE"
     demo_candidate="${CANDIDATE_UNIVERSE_FILE:-}"
     demo_rules="$ACCOUNT_DEMO_RULES_FILE"
     demo_risk="$ACCOUNT_RISK_POLICY_FILE"
-    demo_capture="$ACCOUNT_CAPTURE_ROOT"
-    demo_account_root="$ACCOUNT_EXECUTION_ROOT"
-    [ "${demo_account_root#/}" != "$demo_account_root" ] \
-        || fail "demo account root must be absolute: $demo_account_root"
-    [ "${demo_capture#/}" != "$demo_capture" ] \
-        || fail "demo account capture root must be absolute: $demo_capture"
-    [ -d "$demo_capture" ] && [ ! -L "$demo_capture" ] \
-        || fail "missing real demo account capture root: $demo_capture"
+
     for path in "$demo_symbols" "$demo_rules" "$demo_risk"; do
         [ "${path#/}" != "$path" ] || fail "demo account input must be absolute: $path"
         [ -f "$path" ] && [ ! -L "$path" ] || fail "missing real demo account input: $path"
@@ -473,48 +567,15 @@ PY
     [ "$demo_candidate" = "$demo_symbols" ] \
         || fail "demo candidate universe is not the owner symbols file"
 
-    "$PYTHON" - /etc/liquidity-migration/account-execution.env \
-        "$demo_capture/strategy-targets.jsonl" <<'PY'
-import os
-import shlex
-import sys
-import tempfile
-from pathlib import Path
-
-from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
-
-path = Path(sys.argv[1])
-target_capture = Path(sys.argv[2])
-if not target_capture.is_absolute() or target_capture.name != "strategy-targets.jsonl":
-    raise SystemExit("demo strategy target capture path is invalid")
-values = load_private_systemd_environment(path)
-values["STRATEGY_TARGET_CAPTURE_PATH"] = str(target_capture)
-descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-try:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        for key, value in sorted(values.items()):
-            handle.write(f"{key}={shlex.quote(value)}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
-except BaseException:
-    Path(temporary).unlink(missing_ok=True)
-    raise
-PY
 
     install -d -o root -g root -m 0700 /etc/liquidity-migration
     chown root:root /etc/liquidity-migration/sleeves.resolved.env
     chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
+    write_producer_environment /etc/liquidity-migration/account-execution.env "$PRODUCER_DEMO_ENV"
     retire_paper_host_config
 
-    root_uid="$(id -u root)"
-    root_gid="$(id -g root)"
+    producer_uid="$(id -u "$PRODUCER_USER")"
+    runtime_gid="$(getent group "$RUNTIME_GROUP" | cut -d: -f3)"
 
     demo_tree_preflight_phase() {
         "$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-demo \
@@ -527,7 +588,7 @@ PY
             --anchor "$REPO_DIR/data" \
             --root "$LONG_DEMO_ROOT" \
             --root "$CARRY_DEMO_ROOT" \
-            --uid "$root_uid" --gid "$root_gid" --create-missing
+            --uid "$producer_uid" --gid "$runtime_gid" --create-missing
     }
 
     # The normalizer performs a full read-only descriptor-rooted plan first and
@@ -678,207 +739,34 @@ git_fetch() {
     fi
 }
 
-# Rollout sets this itself. A staged `install` completing a failed rollout may
-# request the same maintenance explicitly; without it, a recovery that failed
-# inside rule maintenance can never rebind the candidate/rules.
-ROLLOUT_REFRESH_STALE_DEMO_RULES="${ROLLOUT_REFRESH_STALE_DEMO_RULES:-0}"
-case "$ROLLOUT_REFRESH_STALE_DEMO_RULES" in 0|1) ;; *)
-    echo "ROLLOUT_REFRESH_STALE_DEMO_RULES must be 0 or 1" >&2; exit 2 ;;
-esac
-ROLLOUT_DEMO_RULES_REFRESHED=0
-ROLLOUT_DEMO_RULES_PROJECTED=0
-
-
-refresh_stale_demo_rules_if_requested() {
-    [ "$ROLLOUT_REFRESH_STALE_DEMO_RULES" -eq 1 ] || return 0
-    local demo_rules receipt_dir refreshed_rules="" freshness_status
-    local candidate_dir refreshed_candidate projected_rules projection_status=0
-    local refresh_reason=""
-    unset ACCOUNT_DEMO_RULES_FILE \
-        BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
-        BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
+# Rules are operator-supplied read-only evidence. Deployment validates freshness
+# and coverage but never mutates venue state or manufactures a new receipt.
+validate_declared_demo_rules() {
+    local demo_rules demo_symbols demo_candidate
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/account-execution.env \
-        ACCOUNT_DEMO_RULES_FILE ACCOUNT_SYMBOLS_FILE \
-        ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT
+        ACCOUNT_DEMO_RULES_FILE ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE
     demo_rules="$ACCOUNT_DEMO_RULES_FILE"
-    if "$PYTHON" - "$demo_rules" <<'PY'
+    demo_symbols="$ACCOUNT_SYMBOLS_FILE"
+    demo_candidate="$CANDIDATE_UNIVERSE_FILE"
+    [ -n "$demo_candidate" ] || demo_candidate="$demo_symbols"
+    "$PYTHON" - "$demo_rules" "$demo_candidate" <<'PY'
 import sys
+from liquidity_migration.core.artifact_snapshot import read_stable_file
 from liquidity_migration.ops.candidate_rule_coverage import (
     REGISTERED_MAX_RULE_AGE_SECONDS,
-    REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
-    classify_demo_rule_receipt_freshness,
+    build_candidate_rule_coverage,
 )
-
-status = classify_demo_rule_receipt_freshness(
-    sys.argv[1],
-    max_rule_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
+from liquidity_migration.venue.venue_instrument_rules import load_demo_rules_bytes
+rules, candidate = sys.argv[1:]
+load_demo_rules_bytes(
+    read_stable_file(rules, label="declared demo venue rules", require_single_link=False).data,
+    max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
 )
-if status == "expired":
-    raise SystemExit(3)
-# Proactive renewal: any rollout in the receipt's back half re-probes, so
-# freshness never depends on an operator timing a dispatch against expiry.
-due = classify_demo_rule_receipt_freshness(
-    sys.argv[1],
-    max_rule_age_seconds=REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
-)
-if due == "expired":
-    raise SystemExit(4)
-PY
-    then
-        freshness_status=0
-    else
-        freshness_status=$?
-    fi
-    [ "$freshness_status" -eq 0 ] || [ "$freshness_status" -eq 3 ] || [ "$freshness_status" -eq 4 ] \
-        || fail "configured demo-rule receipt failed validation for a reason other than age"
-
-    # A candidate-universe schema bump makes the installed artifact unreadable by
-    # the code being deployed, which would otherwise fail closed at preflight with
-    # the fleet already stopped. Force the freeze+projection path here instead.
-    candidate_readable=1
-    "$PYTHON" - "$ACCOUNT_SYMBOLS_FILE" <<'PY' || candidate_readable=0
-import sys
-
-from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
-
-load_candidate_universe(sys.argv[1])
-PY
-
-    if [ "$freshness_status" -eq 0 ] \
-        && [ "$candidate_readable" -eq 1 ]; then
-        echo "demo-rule-maintenance-plan path=reuse reason=fresh"
-        return 0
-    fi
-    if [ "$candidate_readable" -eq 0 ]; then
-        echo "demo-rule-maintenance-plan path=refreeze reason=candidate-universe-unreadable-by-target-code"
-    fi
-
-    candidate_dir=/var/lib/liquidity-migration/candidate-universe-receipts
-    receipt_dir=/var/lib/liquidity-migration/demo-rule-receipts
-    install -d -o root -g root -m 0700 "$candidate_dir" "$receipt_dir"
-    refreshed_candidate="$candidate_dir/candidate-universe-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-    "$PYTHON" scripts/maintain/freeze_account_candidate_universe.py \
-        --realm demo --output "$refreshed_candidate"
-    printf 'candidate-universe-refresh-ok path=%s\n' "$refreshed_candidate"
-
-    if [ "$freshness_status" -eq 0 ]; then
-        # A reset changes only local journals. Retained symbols keep their exact
-        # still-fresh venue evidence and timestamp; a candidate addition exits 3
-        # and falls through to a complete fresh probe.
-        projected_rules="$receipt_dir/demo-rules-projected-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-        # The exposure roots keep a held symbol's rules and probe evidence
-        # through the projection even when the fresh universe drops it — the
-        # probe alternative needs a flat account, which exposure precludes.
-        if "$PYTHON" scripts/maintain/project_demo_rules_to_candidate.py \
-            --candidate-file "$refreshed_candidate" \
-            --prior-rules-file "$demo_rules" \
-            --held-exposure-account-root "$ACCOUNT_EXECUTION_ROOT" \
-            --held-exposure-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT" \
-            --output "$projected_rules"; then
-            projection_status=0
-        else
-            projection_status=$?
-        fi
-        case "$projection_status" in
-            0)
-                refreshed_rules="$projected_rules"
-                ROLLOUT_DEMO_RULES_PROJECTED=1
-                echo "demo-rule-maintenance-plan path=projection reason=fresh-candidate-subset"
-                ;;
-            3)
-                refresh_reason=candidate-addition-or-structural-drift
-                echo "demo-rule-maintenance-plan path=probe reason=candidate-addition-or-structural-drift"
-                ;;
-            *) fail "fresh demo-rule candidate projection failed" ;;
-        esac
-    elif [ "$freshness_status" -eq 4 ]; then
-        refresh_reason=refresh-due-past-half-life
-        echo "demo-rule-maintenance-plan path=probe reason=refresh-due-past-half-life"
-    else
-        refresh_reason=expired
-        echo "demo-rule-maintenance-plan path=probe reason=expired"
-    fi
-
-    if [ -z "$refreshed_rules" ]; then
-        lm_load_private_systemd_environment "$PYTHON" \
-            /etc/liquidity-migration/bybit-demo.env \
-            BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
-            BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
-        [ -z "${BYBIT_REAL_API_KEY:-}" ] && [ -z "${BYBIT_REAL_API_SECRET:-}" ] \
-            || fail "demo-rule refresh refuses mainnet credentials"
-        case "${REAL_MONEY:-false}" in
-            0|false|FALSE|no|NO|off|OFF|'') ;;
-            *) fail "demo-rule refresh refuses REAL_MONEY" ;;
-        esac
-        # This probe places live PostOnly orders up to 200 USDT per symbol across
-        # the candidate universe, and the branch above reaches it automatically
-        # once the bound receipt passes half its lifetime, so keep it demo-only.
-        [ "${DEPLOY_VENUE_REALM:-demo}" = "demo" ] \
-            || fail "the order-placing rule probe is demo-only; freeze rules with scripts/maintain/freeze_venue_instrument_rules.py --realm ${DEPLOY_VENUE_REALM}"
-        refreshed_rules="$receipt_dir/demo-rules-$(date -u +%Y%m%dT%H%M%SZ)-${EXPECTED_COMMIT:0:12}-$$.json"
-        DEMO=true "$PYTHON" scripts/maintain/probe_bybit_demo_rules.py \
-            --symbols-file "$refreshed_candidate" \
-            --prior-rules-file "$demo_rules" \
-            --output "$refreshed_rules" \
-            --confirm-demo-probe \
-            || fail "demo-rule probe failed"
-        ROLLOUT_DEMO_RULES_REFRESHED=1
-    fi
-
-    "$PYTHON" - /etc/liquidity-migration/account-execution.env \
-        "$refreshed_rules" "$refreshed_candidate" <<'PY' \
-        || fail "demo-rule rebind of the account execution environment failed"
-import os
-import shlex
-import sys
-import tempfile
-from pathlib import Path
-
-from liquidity_migration.policy.account_execution_config import load_demo_rules
-from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
-from liquidity_migration.ops.candidate_rule_coverage import build_candidate_rule_coverage
-from liquidity_migration.ops.candidate_rule_coverage import REGISTERED_MAX_RULE_AGE_SECONDS
-from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
-
-path = Path(sys.argv[1])
-rules = Path(sys.argv[2]).resolve(strict=True)
-candidate = Path(sys.argv[3]).resolve(strict=True)
-load_demo_rules(rules, max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS)
-values = load_private_systemd_environment(path)
-values["ACCOUNT_DEMO_RULES_FILE"] = str(rules)
-load_candidate_universe(candidate)
 build_candidate_rule_coverage(candidate, rules)
-values["ACCOUNT_SYMBOLS_FILE"] = str(candidate)
-values["CANDIDATE_UNIVERSE_FILE"] = str(candidate)
-descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-try:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        for key, value in sorted(values.items()):
-            handle.write(f"{key}={shlex.quote(value)}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
-except BaseException:
-    Path(temporary).unlink(missing_ok=True)
-    raise
 PY
-    unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY DEMO
-    if [ "$ROLLOUT_DEMO_RULES_PROJECTED" -eq 1 ]; then
-        printf 'demo-rule-projection-ok path=%s candidate=%s\n' \
-            "$refreshed_rules" "$refreshed_candidate"
-    else
-        printf 'demo-rule-refresh-ok path=%s candidate=%s reason=%s\n' \
-            "$refreshed_rules" "$refreshed_candidate" "$refresh_reason"
-    fi
+    echo "demo-rule-validation-ok path=$demo_rules candidate=$demo_candidate source=declared-read-only"
 }
-
 install_mode() {
     local installed_head
     require_checkout
@@ -916,6 +804,8 @@ install_mode() {
     # every push to main, and the ancestor check above proves this commit is on
     # main. Re-running them with the fleet stopped only lengthens the outage.
 
+    run_phase install-runtime-identities ensure_runtime_identities
+
     # Bound journald so logs cannot crowd the data roots, and keep at most the
     # newest timestamped backup of the demo credential file.
     install -d -m 0755 /etc/systemd/journald.conf.d
@@ -937,7 +827,7 @@ install_mode() {
         systemctl disable --now "$unit" 2>/dev/null || true
     done
     require_quiescent
-    run_phase refresh-stale-demo-rules refresh_stale_demo_rules_if_requested
+    run_phase validate-declared-demo-rules validate_declared_demo_rules
 
     lm_load_sleeve_toggles
     # The writer is atomic (mktemp + mv), so re-reading what this process just
@@ -946,6 +836,7 @@ install_mode() {
     lm_write_resolved_sleeve_toggles
     prepare_demo_runtime_config
     require_clean_head
+    run_phase engine-build build_engine
     echo "install-ok commit=$EXPECTED_COMMIT units_started=0"
     echo "next: run activate to start the sleeves this checkout enables"
 }
@@ -1010,9 +901,10 @@ unit_off() {
         && ! systemctl is-enabled --quiet "$1" 2>/dev/null
 }
 
-# The Rust execution engine. It runs its own demo account and none of the
-# Python fleet's work, so everything about it here is conditional: a host that
-# does not run it must deploy and verify exactly as it does today.
+# Rust is the only account owner. Every deployed topology requires the demo
+# engine, and an armed topology also requires the separately credentialed
+# funded engine. Missing binaries/configuration are fatal rather than an
+# implicit opt-out.
 ENGINE_UNIT=liquidity-migration-engine.service
 # Built in a clone of its own, never the deployed checkout: cargo writes a
 # target/ tree beside the source, and the deployed checkout is proved clean
@@ -1021,28 +913,6 @@ ENGINE_BUILD_DIR=/opt/engine-build
 ENGINE_TOOLCHAIN_DIR=/opt/rust
 ENGINE_BINARY=/opt/liquidity-migration-engine/bin/engine
 ENGINE_ENVIRONMENT=/etc/liquidity-migration/engine.env
-
-# Whether this host runs the engine at all. All three must hold, and each says
-# something the other two do not:
-#   * the unit fragment loads — the manifest install adds it, so this is false
-#     only in the window before the commit that introduces it is installed;
-#   * the binary exists — the build produces it, and a build that failed or a
-#     box with no Rust toolchain leaves it absent;
-#   * the environment file exists — the operator put it there, which is how a
-#     host says it wants the engine.
-# Any one of them false and the engine is not part of this host's topology, so
-# nothing starts it and nothing checks it. Requiring it unconditionally would
-# fail every deploy and every status read, on the funded fleet included, until
-# the unit was installed everywhere.
-#
-# The venue credential file is deliberately not in this test: a missing
-# credential should be a loud unit failure, not a quiet "this host does not run
-# the engine".
-engine_installed() {
-    systemctl cat "$ENGINE_UNIT" >/dev/null 2>&1 \
-        && [ -x "$ENGINE_BINARY" ] \
-        && [ -f "$ENGINE_ENVIRONMENT" ]
-}
 
 # The single arming switch: REAL_MONEY=true in the mainnet credential file,
 # written by the owner's own hand next to the live API key. No file, or any
@@ -1055,11 +925,8 @@ mainnet_armed() {
         if [ ! -f "$MAINNET_CREDENTIAL_ENV" ]; then
             MAINNET_ARMED_STATE=off
         else
-            # A hand-edited file arrives 0644 from nano; the strict loader
-            # would refuse it before the later provisioning could normalize
-            # it, so ownership and mode are normalized here, at first read.
-            chown root:root "$MAINNET_CREDENTIAL_ENV" 2>/dev/null || true
-            chmod 600 "$MAINNET_CREDENTIAL_ENV" 2>/dev/null || true
+            # This status read is deliberately non-mutating. Provisioning and
+            # disarm own permission changes; verify never repairs a credential.
             # Early install stages read the switch before PYTHON or the bash
             # env-loader helpers exist in their context, so this read stands
             # entirely on its own: the checkout's interpreter and the strict
@@ -1121,58 +988,29 @@ verify_unit() {
     verify_note "$message"
 }
 
-check_demo_order_permissions() {
-    local context="$1" status=0
-    unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
-    lm_load_private_systemd_environment "$PYTHON" \
-        /etc/liquidity-migration/bybit-demo.env \
-        BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY
-    "$PYTHON" scripts/maintain/check_bybit_order_permissions.py --context "$context" || status=$?
-    unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY
-    return "$status"
-}
-
 rollout_flat_check() {
-    local head_binding="$1" status=0
-    local -a readiness_args
+    local head_binding="$1" realm
     case "$head_binding" in
         exact|allow_behind|none|stopped-maintenance) ;;
         *) fail "invalid rollout head binding" ;;
     esac
-    require_checkout
-    PYTHON=.venv/bin/python
-    [ -x "$PYTHON" ] || fail "missing deployed Python environment"
-    . deploy/lib_systemd_environment.sh
-    unset ACCOUNT_EXECUTION_ROOT BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
-        BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY DEMO
-    lm_load_private_systemd_environment "$PYTHON" \
-        /etc/liquidity-migration/account-execution.env ACCOUNT_EXECUTION_ROOT
-    lm_load_private_systemd_environment "$PYTHON" \
-        /etc/liquidity-migration/bybit-demo.env \
-        BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY
-    [ -n "$ACCOUNT_EXECUTION_ROOT" ] || fail "demo account root is unavailable"
-    readiness_args=(
-        --account-root "$ACCOUNT_EXECUTION_ROOT"
-        --head-binding "$head_binding"
-    )
-    ROLLOUT_HEAD_BINDING="$head_binding" DEMO=true \
-        ACCOUNT_EXECUTION_ROOT="$ACCOUNT_EXECUTION_ROOT" \
-        BYBIT_DEMO_API_KEY="$BYBIT_DEMO_API_KEY" \
-        BYBIT_DEMO_API_SECRET="$BYBIT_DEMO_API_SECRET" \
-        REAL_MONEY="${REAL_MONEY:-false}" \
-        rollout_readiness_helper \
-        "${readiness_args[@]}" || status=$?
-    unset ACCOUNT_EXECUTION_ROOT BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY DEMO
-    return "$status"
+    if mainnet_armed; then realm=mainnet; else realm=demo; fi
+    # There is intentionally no configured-symbol fallback here. The current
+    # engine AccountView can omit unknown or delisted residual positions, so it
+    # cannot establish venue-global flatness. Until an independently reviewed,
+    # credential-isolated venue-global attestation verifier is shipped, every
+    # funded (and every --require-flat) rollout stops before producers, owners,
+    # target books, checkout, or LONG schema-v2 state are changed.
+    printf '%s\n' \
+        "venue-global-flat-attestation-unavailable realm=$realm binding=$head_binding; refusing generation-changing rollout" >&2
+    return 3
 }
-
 verify_topology() {
     VERIFY_UNIT_ROWS=()
     VERIFY_MISMATCHES=()
 
-    # No unconditional account-owner row here. The engine is checked further
-    # down, but only where it is installed, because a host that has not taken
-    # the engine yet must still be deployable — that is how it gets one.
+    # Rust is the only account owner. Every deployed topology requires the demo
+    # engine, and an armed topology additionally requires the funded engine.
     if sleeve_on "$LONG_SLEEVE"; then
         verify_unit on liquidity-migration-bybit-long-demo.service "LONG demo producer is not active"
     else
@@ -1187,6 +1025,7 @@ verify_topology() {
     # verification; armed, the funded fleet is verified exactly like the
     # others.
     if mainnet_armed; then
+        verify_unit on "$MAINNET_OWNER_UNIT" "funded Rust engine is not active"
         verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
         verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
         verify_unit on liquidity-migration-mainnet-liveness.timer "mainnet liveness timer is not active"
@@ -1218,27 +1057,18 @@ verify_topology() {
     if systemctl cat liquidity-migration-trade-notify.timer >/dev/null 2>&1; then
         verify_unit on liquidity-migration-trade-notify.timer "trade notify timer is not active"
     fi
-    # Same tolerance, one condition wider: the manifest installs the engine's
-    # unit file on every host, so the fragment alone would demand a running
-    # engine on a box that has never built one. Where the engine really is
-    # installed it is verified like anything else.
-    # Reported, never a mismatch. Every other unit here carries orders, so a
-    # dead one is a reason to stop and fix. The engine carries none — it trades
-    # a demo account of its own — and a rollout that treats its silence as a
-    # failure reaches the cleanup that stops the whole funded fleet. A bad
-    # engine.toml, a held account lock, or a credential that has expired would
-    # then take the funded account down with it, which is the opposite of what
-    # an experiment on a practice account is allowed to do. The row still
-    # prints, so an operator reading the table sees it is not running.
-    if engine_installed; then
-        local engine_active engine_enabled
-        engine_active="$(systemctl is-active "$ENGINE_UNIT" 2>/dev/null || true)"
-        engine_enabled="$(systemctl is-enabled "$ENGINE_UNIT" 2>/dev/null || true)"
-        VERIFY_UNIT_ROWS+=("$ENGINE_UNIT|on(reported)|${engine_active:-unknown}|${engine_enabled:-unknown}")
-        if ! unit_on "$ENGINE_UNIT"; then
-            printf 'engine-not-running unit=%s active=%s enabled=%s (reported, not a deploy failure)\n' \
-                "$ENGINE_UNIT" "${engine_active:-unknown}" "${engine_enabled:-unknown}" >&2
-        fi
+    verify_unit on "$ENGINE_UNIT" "required demo Rust engine is not active"
+    if [ ! -x "$ENGINE_BINARY" ] || [ ! -r "${ENGINE_BINARY}.release" ]; then
+        verify_note "required commit-bound Rust engine artifact is missing"
+    else
+        local marker_commit marker_digest actual_digest
+        marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
+        marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+        actual_digest="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}' || true)"
+        [ "$marker_commit" = "$EXPECTED_COMMIT" ] \
+            || verify_note "engine artifact is not bound to requested commit $EXPECTED_COMMIT"
+        [ -n "$marker_digest" ] && [ "$marker_digest" = "$actual_digest" ] \
+            || verify_note "engine artifact digest does not match its release marker"
     fi
     for oneshot in \
         liquidity-migration-demo-liveness.service; do
@@ -1246,8 +1076,6 @@ verify_topology() {
             verify_note "$oneshot is failed"
         fi
     done
-    verify_probe demo-order-permissions "demo order permission verification failed" \
-        check_demo_order_permissions verify
 
     # Report the commit the host is actually on, not the one the caller asked
     # about. Echoing EXPECTED_COMMIT made a stale host indistinguishable from a
@@ -1297,156 +1125,313 @@ engine_git() {
         -C "$ENGINE_BUILD_DIR" "$@"
 }
 
-# Build the engine from the commit the fleet is now running, install the
-# binary, and restart it.
-#
-# EVERY PATH HERE RETURNS 0 AND SAYS WHY. The engine is not part of the Python
-# fleet — it trades a demo account of its own — so a missing Rust toolchain, an
-# unreachable crate registry, or code that will not compile must leave the
-# deploy exactly as it is today. Three things make that true, and all three are
-# needed:
-#   * this runs after the fleet is started and verified, so nothing it does can
-#     delay a funded unit coming back up;
-#   * in a rollout it runs after the rollback trap is disarmed, so even an
-#     abort in here cannot reach the machinery that stops the whole fleet;
-#   * it writes only its own build clone and its own binary — never the
-#     deployed checkout, never a fleet unit, never anything under /etc.
+# Build the exact locked release while the managed units are stopped. Any
+# compiler, fetch, build, install, or digest failure aborts the deployment.
 build_engine() {
-    local cargo="$ENGINE_TOOLCHAIN_DIR/cargo/bin/cargo" commit built status=0
-    if [ ! -x "$cargo" ]; then
-        printf 'engine-build-skipped reason=no-toolchain path=%s\n' "$cargo"
-        return 0
-    fi
-    commit="$(safe_git rev-parse HEAD 2>/dev/null)" || commit=""
-    if [ -z "$commit" ]; then
-        printf 'engine-build-skipped reason=cannot-read-installed-commit\n'
-        return 0
-    fi
+    local cargo="$ENGINE_TOOLCHAIN_DIR/cargo/bin/cargo"
+    local rustc="$ENGINE_TOOLCHAIN_DIR/cargo/bin/rustc"
+    local commit built digest marker_tmp status=0
+    [ -x "$cargo" ] || fail "pinned Rust toolchain is missing: $cargo"
+    [ -x "$rustc" ] || fail "pinned rustc is missing: $rustc"
+    "$rustc" --version | grep -F 'rustc 1.90.0 ' >/dev/null \
+        || fail "host Rust compiler does not match rust-toolchain.toml (required 1.90.0)"
+    commit="$(safe_git rev-parse HEAD)" || fail "cannot read installed commit for engine build"
+    [ "$commit" = "$EXPECTED_COMMIT" ] || fail "engine build commit is not the requested commit"
     if [ ! -d "$ENGINE_BUILD_DIR/.git" ]; then
-        # First engine build on this host, or one that was hand-copied here
-        # before there was a deploy path. Existing files stay; the reset below
-        # brings them to the commit.
-        if ! "${GIT_ENV[@]}" /usr/bin/git init --quiet "$ENGINE_BUILD_DIR"; then
-            printf 'engine-build-skipped reason=cannot-prepare-build-clone dir=%s\n' \
-                "$ENGINE_BUILD_DIR" >&2
-            return 0
-        fi
+        "${GIT_ENV[@]}" /usr/bin/git init --quiet "$ENGINE_BUILD_DIR" \
+            || fail "cannot prepare engine build clone"
     fi
-    # Fetched from the deployed checkout, not the network: it is already at the
-    # commit this deploy proved is on the branch, and the host may hold no
-    # credential for the remote. A reset drops files the commit deleted; the
-    # untracked target/ cache beside them survives, which is what keeps an
-    # unchanged engine's rebuild short.
-    if ! engine_git fetch --no-tags --quiet "$REPO_DIR" HEAD \
-        || ! engine_git reset --hard --quiet FETCH_HEAD; then
-        printf 'engine-build-skipped reason=cannot-sync-build-clone commit=%s\n' "$commit" >&2
-        return 0
-    fi
-    built="$(engine_git rev-parse HEAD 2>/dev/null)" || built=""
-    if [ "$built" != "$commit" ]; then
-        printf 'engine-build-skipped reason=build-clone-is-%s-not-%s\n' \
-            "${built:-unreadable}" "$commit" >&2
-        return 0
-    fi
-    # One job, lowest priority: the fleet is trading while this runs, and the
-    # box has two cores.
+    engine_git fetch --no-tags --quiet "$REPO_DIR" HEAD \
+        || fail "cannot copy the deployed commit into the engine build clone"
+    engine_git reset --hard --quiet FETCH_HEAD \
+        || fail "cannot reset the engine build clone to the deployed commit"
+    built="$(engine_git rev-parse HEAD)" || fail "cannot read engine build clone HEAD"
+    [ "$built" = "$commit" ] || fail "engine build clone is $built, not $commit"
     (
         CARGO_HOME="$ENGINE_TOOLCHAIN_DIR/cargo"
         RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup"
         PATH="$ENGINE_TOOLCHAIN_DIR/cargo/bin:$PATH"
         export CARGO_HOME RUSTUP_HOME PATH
-        cd "$ENGINE_BUILD_DIR/engine" || exit 1
+        cd "$ENGINE_BUILD_DIR/engine"
         nice -n 19 "$cargo" build --release --locked -j 1
     ) || status=$?
-    if [ "$status" -ne 0 ]; then
-        printf 'engine-build-failed status=%s commit=%s: the fleet is untouched and the previously installed engine, if any, is still running\n' \
-            "$status" "$commit" >&2
-        return 0
-    fi
-    # Into place under a temporary name and renamed: a half-copied file never
-    # sits at the path the unit starts, and a running engine keeps the file it
-    # was started from until it is restarted below.
-    if ! install -d -o root -g root -m 0755 "${ENGINE_BINARY%/*}" \
-        || ! install -o root -g root -m 0755 \
-            "$ENGINE_BUILD_DIR/engine/target/release/engine" "$ENGINE_BINARY.new" \
-        || ! mv -f "$ENGINE_BINARY.new" "$ENGINE_BINARY"; then
-        printf 'engine-install-failed commit=%s path=%s\n' "$commit" "$ENGINE_BINARY" >&2
-        rm -f "$ENGINE_BINARY.new" 2>/dev/null || true
-        return 0
-    fi
-    if ! engine_installed; then
-        printf 'engine-start-skipped reason=no-environment-file path=%s commit=%s\n' \
-            "$ENGINE_ENVIRONMENT" "$commit"
-        return 0
-    fi
-    systemctl enable "$ENGINE_UNIT" \
-        || printf 'engine-enable-failed unit=%s\n' "$ENGINE_UNIT" >&2
-    if systemctl restart "$ENGINE_UNIT"; then
-        printf 'engine-ok commit=%s binary=%s\n' "$commit" "$ENGINE_BINARY"
-    else
-        printf 'engine-restart-failed unit=%s commit=%s\n' "$ENGINE_UNIT" "$commit" >&2
-    fi
-    # And the funded engine, which shares this binary.
-    #
-    # It is started in the activate phase, which runs BEFORE this build, so
-    # without this line a deploy leaves it running whatever binary it came up
-    # on: the demo engine gets the new code and the funded one silently keeps
-    # the old.
-    #
-    # Same gate as everywhere else -- a host says it runs the funded engine by
-    # having its environment file -- and never fatal, for the same reason the
-    # demo restart is not: a fleet that is already up must not be torn down by
-    # a report.
-    if [ -f /etc/liquidity-migration/engine-mainnet.env ] \
-        && systemctl cat "$MAINNET_OWNER_UNIT" >/dev/null 2>&1; then
-        if systemctl restart "$MAINNET_OWNER_UNIT"; then
-            printf 'mainnet-engine-ok commit=%s binary=%s\n' "$commit" "$ENGINE_BINARY"
-        else
-            printf 'mainnet-engine-restart-failed unit=%s commit=%s\n' \
-                "$MAINNET_OWNER_UNIT" "$commit" >&2
-        fi
-    fi
-    return 0
+    [ "$status" -eq 0 ] || fail "locked release engine build failed (status $status)"
+    install -d -o root -g liquidity-migration -m 0755 "${ENGINE_BINARY%/*}" \
+        || fail "cannot create the engine binary directory"
+    install -o root -g liquidity-migration -m 0755 \
+        "$ENGINE_BUILD_DIR/engine/target/release/engine" "$ENGINE_BINARY.new" \
+        || fail "cannot stage the release engine binary"
+    digest="$(sha256sum "$ENGINE_BINARY.new" | awk '{print $1}')" \
+        || fail "cannot digest the staged engine binary"
+    [ "${#digest}" -eq 64 ] || fail "invalid staged engine digest"
+    mv -f "$ENGINE_BINARY.new" "$ENGINE_BINARY" \
+        || fail "cannot atomically install the engine binary"
+    marker_tmp="${ENGINE_BINARY}.release.tmp.$$"
+    printf 'commit=%s\nsha256=%s\nrustc=1.90.0\n' "$commit" "$digest" > "$marker_tmp" \
+        || fail "cannot write engine release marker"
+    chown root:root "$marker_tmp" && chmod 0644 "$marker_tmp" \
+        || fail "cannot secure engine release marker"
+    mv -f "$marker_tmp" "${ENGINE_BINARY}.release" \
+        || fail "cannot atomically install engine release marker"
+    verify_engine_release
+    printf 'engine-build-ok commit=%s sha256=%s binary=%s\n' "$commit" "$digest" "$ENGINE_BINARY"
 }
 
+verify_engine_release() {
+    local installed_head marker_commit marker_digest actual_digest
+    [ -x "$ENGINE_BINARY" ] || fail "required engine binary is missing: $ENGINE_BINARY"
+    [ -r "${ENGINE_BINARY}.release" ] || fail "engine release marker is missing"
+    installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
+    marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
+    marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    [ -n "$marker_commit" ] && [ "$marker_commit" = "$installed_head" ] \
+        || fail "engine release marker is not bound to installed commit $installed_head"
+    actual_digest="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest installed engine binary"
+    [ -n "$marker_digest" ] && [ "$marker_digest" = "$actual_digest" ] \
+        || fail "installed engine digest does not match its release marker"
+}
+validate_engine_environment() {
+    local env_file="$1" expected_realm="$2" expected_config_venue
+    [ -f "$env_file" ] && [ ! -L "$env_file" ] \
+        || fail "required Rust engine environment is missing or linked: $env_file"
+    chown root:root "$env_file" && chmod 0600 "$env_file" \
+        || fail "cannot secure engine environment $env_file"
+    unset ENGINE_CONFIG_FILE LIVENESS_ENGINE_HEARTBEAT_FILE \
+        EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM \
+        EXPECTED_ENGINE_VERSION
+    lm_load_private_systemd_environment "$PYTHON" "$env_file" \
+        ENGINE_CONFIG_FILE LIVENESS_ENGINE_HEARTBEAT_FILE \
+        EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM \
+        EXPECTED_ENGINE_VERSION
+    [ -n "${EXPECTED_ENGINE_ACCOUNT_USER_ID:-}" ] \
+        || fail "$env_file must set EXPECTED_ENGINE_ACCOUNT_USER_ID to the exact venue id"
+    [[ "$EXPECTED_ENGINE_ACCOUNT_USER_ID" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] \
+        || fail "$env_file contains an invalid EXPECTED_ENGINE_ACCOUNT_USER_ID"
+    [ "${EXPECTED_ENGINE_VENUE:-}" = bybit ] \
+        || fail "$env_file must bind EXPECTED_ENGINE_VENUE=bybit"
+    [ "${EXPECTED_ENGINE_REALM:-}" = "$expected_realm" ] \
+        || fail "$env_file does not bind the expected $expected_realm realm"
+    case "$expected_realm" in
+        demo) expected_config_venue=bybit_demo ;;
+        mainnet) expected_config_venue=bybit_mainnet ;;
+        *) fail "unsupported engine realm $expected_realm" ;;
+    esac
+    [ -f "$ENGINE_CONFIG_FILE" ] && [ ! -L "$ENGINE_CONFIG_FILE" ] \
+        || fail "engine config is missing or linked: $ENGINE_CONFIG_FILE"
+    "$PYTHON" - "$ENGINE_CONFIG_FILE" "$LIVENESS_ENGINE_HEARTBEAT_FILE" \
+        "$expected_config_venue" "$expected_realm" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+config_path = Path(sys.argv[1])
+expected_heartbeat = Path(sys.argv[2])
+expected_venue = sys.argv[3]
+realm = sys.argv[4]
+if not expected_heartbeat.is_absolute():
+    raise SystemExit("engine heartbeat path must be absolute")
+with config_path.open("rb") as handle:
+    config = tomllib.load(handle)
+engine = config.get("engine") or {}
+if engine.get("venue") != expected_venue:
+    raise SystemExit(f"engine config venue is {engine.get('venue')!r}, expected {expected_venue!r}")
+if Path(str(engine.get("heartbeat_path") or "")) != expected_heartbeat:
+    raise SystemExit("engine config heartbeat_path disagrees with LIVENESS_ENGINE_HEARTBEAT_FILE")
+expected_books = {
+    "demo": {
+        "carry": Path("/var/lib/liquidity-migration/targets/carry-demo.json"),
+        "long": Path("/var/lib/liquidity-migration/targets/long-demo.json"),
+        "exodus": Path("/var/lib/liquidity-migration/targets/exodus-demo.json"),
+    },
+    "mainnet": {
+        "carry": Path("/var/lib/liquidity-migration/targets/carry-mainnet.json"),
+        "long": Path("/var/lib/liquidity-migration/targets/long-mainnet.json"),
+    },
+}[realm]
+observed = {
+    str(row.get("sleeve")): Path(str(row.get("book_path") or ""))
+    for row in config.get("strategy", [])
+    if row.get("name") == "target_book"
+}
+for sleeve, expected in expected_books.items():
+    if observed.get(sleeve) != expected:
+        raise SystemExit(f"{sleeve} book_path is {observed.get(sleeve)!s}, expected {expected}")
+PY
+    chown root:"$RUNTIME_GROUP" "$ENGINE_CONFIG_FILE" && chmod 0640 "$ENGINE_CONFIG_FILE" \
+        || fail "cannot make engine config readable only to its runtime group"
+}
+
+quarantine_engine_inputs() {
+    local env_file="$1" realm="$2" archive stamp path
+    validate_engine_environment "$env_file" "$realm"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    archive="/var/lib/liquidity-migration/targets/archive/$stamp-$realm"
+    install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$archive"
+    case "$realm" in
+        demo) set -- long-demo.json carry-demo.json exodus-demo.json ;;
+        mainnet) set -- long-mainnet.json carry-mainnet.json ;;
+    esac
+    for path in "$@"; do
+        if [ -e "/var/lib/liquidity-migration/targets/$path" ]; then
+            [ ! -L "/var/lib/liquidity-migration/targets/$path" ] \
+                || fail "refusing linked target book: $path"
+            mv "/var/lib/liquidity-migration/targets/$path" "$archive/$path"
+        fi
+    done
+    if [ -e "$LIVENESS_ENGINE_HEARTBEAT_FILE" ]; then
+        [ ! -L "$LIVENESS_ENGINE_HEARTBEAT_FILE" ] \
+            || fail "refusing linked engine heartbeat"
+        mv "$LIVENESS_ENGINE_HEARTBEAT_FILE" "$LIVENESS_ENGINE_HEARTBEAT_FILE.pre-activation-$stamp"
+    fi
+}
+
+wait_engine_heartbeat() {
+    local env_file="$1" realm="$2" attempt unit
+    validate_engine_environment "$env_file" "$realm"
+    if [ "$realm" = mainnet ]; then unit="$MAINNET_OWNER_UNIT"; else unit="$ENGINE_UNIT"; fi
+    for attempt in $(seq 1 60); do
+        if systemctl is-active --quiet "$unit" 2>/dev/null \
+            && "$PYTHON" - "$LIVENESS_ENGINE_HEARTBEAT_FILE" \
+                "$EXPECTED_ENGINE_ACCOUNT_USER_ID" "$EXPECTED_ENGINE_VENUE" \
+                "$EXPECTED_ENGINE_REALM" "${EXPECTED_ENGINE_VERSION:-}" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_bytes())
+except (OSError, ValueError):
+    raise SystemExit(1)
+expected_account, expected_venue, expected_realm, expected_version = sys.argv[2:]
+for key, expected in (
+    ("account_user_id", expected_account),
+    ("venue", expected_venue),
+    ("realm", expected_realm),
+):
+    if payload.get(key) != expected:
+        raise SystemExit(1)
+if expected_version and payload.get("engine_version") != expected_version:
+    raise SystemExit(1)
+wall = payload.get("wall_ts_ms")
+observed = payload.get("account_observed_wall_ts_ms")
+if type(wall) is not int or not (0 <= time.time() * 1000 - wall <= 15_000):
+    raise SystemExit(1)
+if type(observed) is not int or not (0 <= wall - observed <= 60_000):
+    raise SystemExit(1)
+if payload.get("mode") != "live" or payload.get("may_open") is not True:
+    raise SystemExit(1)
+PY
+        then
+            printf 'engine-heartbeat-ok realm=%s account=%s path=%s\n' \
+                "$realm" "$EXPECTED_ENGINE_ACCOUNT_USER_ID" "$LIVENESS_ENGINE_HEARTBEAT_FILE"
+            return 0
+        fi
+        [ "$attempt" -eq 60 ] || sleep 2
+    done
+    fail "$realm engine did not publish a fresh, may-open, exact-account heartbeat"
+}
+
+wait_fresh_producer_book() {
+    local unit="$1" root="$2" book="$3" realm="$4" started_ns="$5"
+    local invocation attempt
+    invocation="$(systemctl show "$unit" --property=InvocationID --value --no-pager)" \
+        || fail "cannot read $unit invocation id"
+    [ -n "$invocation" ] || fail "$unit has no systemd invocation id"
+    for attempt in $(seq 1 450); do
+        systemctl is-active --quiet "$unit" \
+            || fail "$unit stopped before publishing a fresh target book"
+        if "$PYTHON" - "$root" "$book" "$realm" "$started_ns" "$invocation" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+root, book = Path(sys.argv[1]), Path(sys.argv[2])
+realm, started_ns, invocation = sys.argv[3], int(sys.argv[4]), sys.argv[5]
+try:
+    health_path = root / ".cache" / "strategy_cycle_health.json"
+    health = json.loads(health_path.read_bytes())
+    payload = json.loads(book.read_bytes())
+    stat = book.stat()
+except (OSError, ValueError):
+    raise SystemExit(1)
+if health.get("invocation_id") != invocation or health.get("environment") != realm:
+    raise SystemExit(1)
+if type(health.get("completed_ts_ns")) is not int or health["completed_ts_ns"] < started_ns:
+    raise SystemExit(1)
+if stat.st_mtime_ns < started_ns:
+    raise SystemExit(1)
+now_ms = int(time.time() * 1000)
+decision = payload.get("decision_ts_ms")
+valid_until = payload.get("valid_until_ms")
+if type(decision) is not int or type(valid_until) is not int:
+    raise SystemExit(1)
+if decision > now_ms + 5_000 or valid_until <= now_ms:
+    raise SystemExit(1)
+if not isinstance(payload.get("targets"), list):
+    raise SystemExit(1)
+PY
+        then
+            printf 'producer-book-ok unit=%s invocation=%s book=%s\n' "$unit" "$invocation" "$book"
+            return 0
+        fi
+        [ "$attempt" -eq 450 ] || sleep 2
+    done
+    fail "$unit did not publish a valid book from its current service generation"
+}
+
+start_required_engine() {
+    local unit="$1" env_file="$2" realm="$3"
+    verify_engine_release
+    quarantine_engine_inputs "$env_file" "$realm"
+    systemctl enable "$unit" || fail "cannot enable required Rust engine $unit"
+    systemctl start "$unit" || fail "cannot start required Rust engine $unit"
+    wait_engine_heartbeat "$env_file" "$realm"
+}
 activate_mode() {
+    local producer_started_ns
     load_authorization
     resolve_stop_first
     require_quiescent
-    check_demo_order_permissions deploy \
-        || fail "demo order permission deploy check failed"
 
     for unit in $(lm_expected_systemd_units); do
         systemctl disable --now "$unit" 2>/dev/null || true
     done
-    # The account owner is started below by the engine block, which is
-    # conditional on the engine being installed. There is no Python owner to
-    # enable here any more.
+    # Remove every previously valid book before the engine starts. It therefore
+    # boots holding/no-op, proves the exact account in a new heartbeat, and only
+    # then admits books from the service generations started below.
+    start_required_engine "$ENGINE_UNIT" "$ENGINE_ENVIRONMENT" demo
+    producer_started_ns="$(date +%s%N)"
     start_if "$LONG_SLEEVE" liquidity-migration-bybit-long-demo.service
     start_if "$CARRY_SLEEVE" liquidity-migration-bybit-carry-demo.service
+    if sleeve_on "$LONG_SLEEVE"; then
+        wait_fresh_producer_book liquidity-migration-bybit-long-demo.service \
+            "$LONG_DEMO_ROOT" /var/lib/liquidity-migration/targets/long-demo.json \
+            demo "$producer_started_ns"
+    fi
+    if sleeve_on "$CARRY_SLEEVE"; then
+        wait_fresh_producer_book liquidity-migration-bybit-carry-demo.service \
+            "$CARRY_DEMO_ROOT" /var/lib/liquidity-migration/targets/carry-demo.json \
+            demo "$producer_started_ns"
+    fi
 
-    systemctl enable --now liquidity-migration-demo-liveness.timer
-    systemctl enable --now liquidity-migration-telegram-controls.service
-    systemctl enable --now liquidity-migration-llm-ledger.timer
-    systemctl enable --now liquidity-migration-trade-notify.timer
+    systemctl enable --now liquidity-migration-demo-liveness.timer \
+        || fail "cannot enable the demo watchdog timer"
+    systemctl start liquidity-migration-demo-liveness.service \
+        || fail "the immediate demo liveness pass failed to start"
+    systemctl is-failed --quiet liquidity-migration-demo-liveness.service \
+        && fail "the immediate demo liveness pass failed"
+    systemctl enable --now liquidity-migration-telegram-controls.service \
+        || fail "cannot start Telegram controls"
+    systemctl enable --now liquidity-migration-llm-ledger.timer \
+        || fail "cannot start the LLM ledger timer"
+    systemctl enable --now liquidity-migration-trade-notify.timer \
+        || fail "cannot start the trade notification timer"
     if mainnet_armed; then
         start_mainnet_fleet
     fi
-    # Last, and never fatal. The loop above disabled every unit in the
-    # manifest, this one included, so a host that runs the engine needs it
-    # started again here — but a start that will not take must be reported by
-    # the verification below, not by aborting an activation that has already
-    # brought the whole trading fleet up. In a rollout an abort here would
-    # reach the rollback trap and stop the fleet again.
-    if engine_installed; then
-        systemctl enable "$ENGINE_UNIT" \
-            || printf 'engine-enable-failed unit=%s\n' "$ENGINE_UNIT" >&2
-        systemctl start "$ENGINE_UNIT" \
-            || printf 'engine-start-failed unit=%s\n' "$ENGINE_UNIT" >&2
-    fi
     verify_topology
 }
-
 # The engine owns the funded account.
 #
 # Naming the engine is not arming it. The mainnet gateway refuses to build
@@ -1461,21 +1446,6 @@ MAINNET_LIVENESS_SERVICE=liquidity-migration-mainnet-liveness.service
 
 MAINNET_ROUTE_ENV=/etc/liquidity-migration/account-execution-mainnet.env
 MAINNET_DEMO_TELEGRAM_ENV=/etc/liquidity-migration/bybit-demo.env
-
-# Run one command with the live credentials in its environment and nowhere
-# else. The subshell keeps them out of this script's scope and its logs.
-lm_run_with_mainnet_credentials() {
-    (
-        # The credential resolver refuses mainnet credentials unless the
-        # owner's armed switch travels with them, so the switch is loaded
-        # from the same owner-written file and goes only to this subprocess.
-        unset BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
-        lm_load_private_systemd_environment "$PYTHON" "$MAINNET_CREDENTIAL_ENV" \
-            BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY || exit 3
-        export BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
-        "$@"
-    )
-}
 
 # The owner writes one file: the credential env (key, secret, REAL_MONEY,
 # optional dials). Everything else is derived here at activation, and
@@ -1500,16 +1470,14 @@ provision_mainnet_prerequisites() {
         || fail "cannot default the mainnet Telegram pair"
     # Artifact paths come from the route file itself, not from copies here.
     local risk_policy_file="" universe_file="" rules_file=""
-    local exposure_account_root="" exposure_inbox_root=""
+
     lm_load_private_systemd_environment "$PYTHON" "$MAINNET_ROUTE_ENV" \
         ACCOUNT_RISK_POLICY_FILE ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE \
-        ACCOUNT_EXECUTION_ROOT ACCOUNT_INTENT_INBOX_ROOT \
         || fail "cannot read artifact paths from $MAINNET_ROUTE_ENV"
     risk_policy_file="$ACCOUNT_RISK_POLICY_FILE"
     universe_file="$ACCOUNT_SYMBOLS_FILE"
     rules_file="$ACCOUNT_DEMO_RULES_FILE"
-    exposure_account_root="$ACCOUNT_EXECUTION_ROOT"
-    exposure_inbox_root="$ACCOUNT_INTENT_INBOX_ROOT"
+
     mkdir -p "$(dirname "$risk_policy_file")"
     chmod 700 "$(dirname "$risk_policy_file")" 2>/dev/null || true
     # The installed profile is always the render of the current dials, so a
@@ -1517,175 +1485,39 @@ provision_mainnet_prerequisites() {
     "$PYTHON" -m liquidity_migration.policy.real_money_arming render-profile \
         --execute --overwrite --output "$risk_policy_file" \
         || fail "mainnet dials do not render a loadable profile"
-    # Bootstrap only when absent: universe first, then rules bound to it.
-    # Renewal is refresh_stale_mainnet_venue_rules below, which freezes a
-    # FRESH universe+rules pair — membership follows the venue.
-    if [ ! -f "$universe_file" ]; then
-        "$PYTHON" scripts/maintain/freeze_account_candidate_universe.py \
-            --realm mainnet --output "$universe_file" \
-            || fail "mainnet candidate-universe freeze failed"
-    fi
-    if [ ! -f "$rules_file" ]; then
-        # The exposure scan matters even at bootstrap: a reprovision over a
-        # live account (route env lost, journal intact) must not mint a
-        # receipt missing the held symbols.
-        lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
-            --realm mainnet --symbols-file "$universe_file" --output "$rules_file" \
-            --held-exposure-account-root "$exposure_account_root" \
-            --held-exposure-inbox-root "$exposure_inbox_root" \
-            || fail "mainnet venue-rules freeze failed"
-    else
-        refresh_stale_mainnet_venue_rules "$universe_file" "$rules_file" \
-            "$exposure_account_root" "$exposure_inbox_root"
-    fi
+    [ -f "$universe_file" ] && [ ! -L "$universe_file" ] \
+        || fail "install a reviewed mainnet candidate-universe artifact before activation: $universe_file"
+    [ -f "$rules_file" ] && [ ! -L "$rules_file" ] \
+        || fail "install reviewed read-only venue rules before activation: $rules_file"
+    validate_declared_mainnet_venue_rules "$universe_file" "$rules_file"
+    write_producer_environment "$MAINNET_ROUTE_ENV" "$PRODUCER_MAINNET_ENV"
+    project_mainnet_telegram_environment
 }
 
-# Frozen once is not frozen forever. The funded owner enforces the registered
-# 168-hour ceiling and cannot be given a larger one, so a receipt nothing
-# renews becomes a hard refusal to start with exposure already on the book.
-# Renew in the receipt's back half, the same policy the demo probe follows;
-# unlike that probe this places no orders, so it needs no stopped window.
-#
-# A renewal freezes a FRESH universe and rules as one pair from the live
-# venue (owner directive 2026-08-13: membership follows the venue). A
-# delisted symbol leaves the universe instead of blocking every renewal:
-# a universe pinned against a live venue that no longer lists one of its
-# names fails every renewal until the receipt's 168-hour cliff.
-# Symbols the account still has exposure on keep rules
-# beyond the universe via the freeze script's exposure scan. Nothing rebinds
-# until both freezes and the coverage proof pass, so any failure keeps the
-# installed pair consistent.
-refresh_stale_mainnet_venue_rules() {
-    local universe_file="$1" rules_file="$2" status=0 refreshed receipt_dir
-    local exposure_account_root="$3" exposure_inbox_root="$4"
-    local stamp refreshed_universe universe_receipt_dir
-    "$PYTHON" - "$rules_file" <<'PY' || status=$?
-import json
+# Mainnet rules are a reviewed, externally supplied read-only receipt. A deploy
+# proves its freshness and candidate coverage but never calls a mutating venue
+# tool or silently renews evidence. Expiry therefore blocks activation until an
+# operator installs a fresh receipt from an approved read-only source.
+validate_declared_mainnet_venue_rules() {
+    local universe_file="$1" rules_file="$2"
+    "$PYTHON" - "$universe_file" "$rules_file" <<'PY'
 import sys
-import time
-from pathlib import Path
-
-from liquidity_migration.core.artifact_snapshot import read_stable_file
-from liquidity_migration.ops.candidate_rule_coverage import (
-    REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS,
-)
-from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes
-
-# The demo classifier refuses a mainnet receipt outright -- it validates
-# through load_demo_rules_bytes, which requires environment=demo -- so the
-# same age question is asked here against the loader that does admit one.
-snapshot = read_stable_file(
-    Path(sys.argv[1]),
-    label="mainnet venue-rule receipt",
-    require_single_link=False,
-)
-load_venue_rules_bytes(snapshot.data, realm="mainnet", max_age_seconds=None)
-age_ns = time.time_ns() - int(json.loads(snapshot.data).get("verified_ts_ns") or 0)
-if age_ns < 0:
-    raise SystemExit(5)
-if age_ns > REGISTERED_ROLLOUT_RULE_REFRESH_AGE_SECONDS * 1_000_000_000:
-    raise SystemExit(4)
-PY
-    case "$status" in
-        0) echo "mainnet-venue-rule-plan path=reuse reason=fresh"; return 0 ;;
-        4) echo "mainnet-venue-rule-plan path=freeze reason=refresh-due-past-half-life" ;;
-        *) fail "installed mainnet venue-rule receipt failed validation for a reason other than age" ;;
-    esac
-
-    # The freezes refuse to overwrite, so a renewal is a new artifact pair
-    # plus a rebind; superseded receipts stay on disk as the evidence they are.
-    receipt_dir=/var/lib/liquidity-migration/mainnet-venue-rule-receipts
-    universe_receipt_dir=/var/lib/liquidity-migration/mainnet-candidate-universe-receipts
-    install -d -o root -g root -m 0700 "$receipt_dir" "$universe_receipt_dir"
-    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    refreshed="$receipt_dir/venue-rules-$stamp-${EXPECTED_COMMIT:0:12}-$$.json"
-    refreshed_universe="$universe_receipt_dir/candidate-universe-$stamp-${EXPECTED_COMMIT:0:12}-$$.json"
-    # This renewal is opportunistic: the installed receipt validated above and
-    # is merely past half-life, so a failed re-freeze keeps the valid
-    # installed PAIR and the deploy continues instead of stopping with the
-    # fleet half-down, mainnet units stopped and disabled. The 168-hour
-    # ceiling is untouched -- the funded owner still refuses to start on an
-    # expired receipt, and the renewal is retried on every deploy until it
-    # succeeds. An orphaned fresh-universe file from a failed rules freeze is
-    # harmless: nothing references it until the rebind below.
-    if ! "$PYTHON" scripts/maintain/freeze_account_candidate_universe.py \
-        --realm mainnet --output "$refreshed_universe"; then
-        rm -f "$refreshed_universe"
-        echo "mainnet-venue-rule-plan path=reuse reason=REFRESH-FAILED-KEEPING-VALID-RECEIPT" >&2
-        echo "WARNING: mainnet candidate-universe re-freeze failed; the installed pair is" >&2
-        echo "WARNING: still valid but the rules age toward their 168-hour ceiling. Fix the" >&2
-        echo "WARNING: freeze before expiry or the funded owner will refuse to start." >&2
-        return 0
-    fi
-    if ! lm_run_with_mainnet_credentials "$PYTHON" scripts/maintain/freeze_venue_instrument_rules.py \
-        --realm mainnet --symbols-file "$refreshed_universe" --output "$refreshed" \
-        --held-exposure-account-root "$exposure_account_root" \
-        --held-exposure-inbox-root "$exposure_inbox_root" \
-        --prior-rules-file "$rules_file"; then
-        rm -f "$refreshed"
-        echo "mainnet-venue-rule-plan path=reuse reason=REFRESH-FAILED-KEEPING-VALID-RECEIPT" >&2
-        echo "WARNING: mainnet venue-rules renewal failed; the installed receipt is still" >&2
-        echo "WARNING: valid but ages toward its 168-hour ceiling. Fix the freeze before" >&2
-        echo "WARNING: it expires or the funded owner will refuse to start." >&2
-        return 0
-    fi
-
-    "$PYTHON" - "$MAINNET_ROUTE_ENV" "$refreshed" "$refreshed_universe" <<'PY' \
-        || fail "mainnet venue-rule rebind of the account execution environment failed"
-import os
-import shlex
-import sys
-import tempfile
-from pathlib import Path
-
 from liquidity_migration.core.artifact_snapshot import read_stable_file
 from liquidity_migration.ops.candidate_rule_coverage import (
     REGISTERED_MAX_RULE_AGE_SECONDS,
     build_candidate_rule_coverage,
 )
-from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
 from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes
-
-path = Path(sys.argv[1])
-rules = Path(sys.argv[2]).resolve(strict=True)
-candidate = Path(sys.argv[3]).resolve(strict=True)
+universe, rules = sys.argv[1:]
 load_venue_rules_bytes(
-    read_stable_file(
-        rules, label="mainnet venue instrument rules", require_single_link=False
-    ).data,
+    read_stable_file(rules, label="declared mainnet venue rules", require_single_link=False).data,
     realm="mainnet",
     max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
 )
-# One accepted rule per frozen symbol, or the owner starts against a universe
-# its rules do not cover.
-build_candidate_rule_coverage(candidate, rules, realm="mainnet")
-values = load_private_systemd_environment(path)
-values["ACCOUNT_DEMO_RULES_FILE"] = str(rules)
-# The pair rebinds together, and the two universe variables must stay equal
-# (real_money_arming enforces it at preflight).
-values["CANDIDATE_UNIVERSE_FILE"] = str(candidate)
-values["ACCOUNT_SYMBOLS_FILE"] = str(candidate)
-descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-try:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        for key, value in sorted(values.items()):
-            handle.write(f"{key}={shlex.quote(value)}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
-except BaseException:
-    Path(temporary).unlink(missing_ok=True)
-    raise
+build_candidate_rule_coverage(universe, rules, realm="mainnet")
 PY
-    printf 'mainnet-venue-rule-refresh-ok path=%s candidate=%s\n' "$refreshed" "$refreshed_universe"
+    echo "mainnet-rule-validation-ok path=$rules_file candidate=$universe_file source=declared-read-only"
 }
-
 ensure_mainnet_state_roots() {
     "$PYTHON" -m liquidity_migration.policy.real_money_arming create-state-roots --execute \
         || fail "mainnet state root creation failed"
@@ -1704,29 +1536,99 @@ require_mainnet_preflight() {
 # decision; the preflight proves the profile is the render of the dials
 # before anything starts.
 start_mainnet_fleet() {
+    local producer_started_ns root
     provision_mainnet_prerequisites
     ensure_mainnet_state_roots
     require_mainnet_preflight
-    # Two hosts cannot both own one account, and the retired Python owner
-    # takes the kernel lease if it is still running.
+    install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets
+    for root in "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT"; do
+        chown -R --no-dereference "$PRODUCER_USER:$RUNTIME_GROUP" "$root" \
+            || fail "cannot assign mainnet producer state to $PRODUCER_USER: $root"
+    done
     if systemctl cat "$RETIRED_MAINNET_OWNER_UNIT" >/dev/null 2>&1; then
-        systemctl disable --now "$RETIRED_MAINNET_OWNER_UNIT" 2>/dev/null || true
+        systemctl disable --now "$RETIRED_MAINNET_OWNER_UNIT" \
+            || fail "cannot stop the retired funded account owner"
+        ! systemctl is-active --quiet "$RETIRED_MAINNET_OWNER_UNIT" \
+            || fail "retired funded account owner remains active"
     fi
-    # Same shape as the demo engine's gate: a host says it runs the funded
-    # engine by having its environment file, and one that does not runs the
-    # producers alone rather than failing the deploy.
-    if [ -x "${ENGINE_BINARY:-}" ] && [ -f /etc/liquidity-migration/engine-mainnet.env ]; then
-        systemctl enable "$MAINNET_OWNER_UNIT"
-        systemctl start "$MAINNET_OWNER_UNIT"
-    else
-        printf 'mainnet-engine-skipped reason=no-binary-or-environment unit=%s\n' \
-            "$MAINNET_OWNER_UNIT" >&2
-    fi
-    systemctl enable --now liquidity-migration-bybit-carry-mainnet.service
-    systemctl enable --now liquidity-migration-bybit-long-mainnet.service
-    systemctl enable --now "$MAINNET_LIVENESS_TIMER"
+    start_required_engine "$MAINNET_OWNER_UNIT" /etc/liquidity-migration/engine-mainnet.env mainnet
+    producer_started_ns="$(date +%s%N)"
+    systemctl enable --now liquidity-migration-bybit-carry-mainnet.service \
+        || fail "cannot start the funded carry target producer"
+    systemctl enable --now liquidity-migration-bybit-long-mainnet.service \
+        || fail "cannot start the funded LONG target producer"
+    wait_fresh_producer_book liquidity-migration-bybit-carry-mainnet.service \
+        "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets/carry-mainnet.json \
+        mainnet "$producer_started_ns"
+    wait_fresh_producer_book liquidity-migration-bybit-long-mainnet.service \
+        "$LONG_MAINNET_ROOT" /var/lib/liquidity-migration/targets/long-mainnet.json \
+        mainnet "$producer_started_ns"
+    systemctl enable --now "$MAINNET_LIVENESS_TIMER" \
+        || fail "cannot enable the funded liveness timer"
+    systemctl start "$MAINNET_LIVENESS_SERVICE" \
+        || fail "the immediate funded liveness pass failed to start"
+    systemctl is-failed --quiet "$MAINNET_LIVENESS_SERVICE" \
+        && fail "the immediate funded liveness pass failed"
 }
-
+disarm_mainnet_mode() {
+    require_checkout
+    PYTHON=.venv/bin/python
+    [ -x "$PYTHON" ] || fail "missing deployed Python environment"
+    [ -f "$MAINNET_CREDENTIAL_ENV" ] && [ ! -L "$MAINNET_CREDENTIAL_ENV" ] \
+        || fail "cannot disarm without the real private credential file: $MAINNET_CREDENTIAL_ENV"
+    # Replace the owner file before stopping processes. A concurrent restart
+    # therefore reads false and refuses mainnet even if this command is
+    # interrupted between the atomic replace and systemctl stop.
+    "$PYTHON" - "$MAINNET_CREDENTIAL_ENV" <<'PY'
+import os
+import shlex
+import sys
+import tempfile
+from pathlib import Path
+from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
+path = Path(sys.argv[1])
+values = load_private_systemd_environment(path)
+values["REAL_MONEY"] = "false"
+fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        for key, value in sorted(values.items()):
+            handle.write(f"{key}={shlex.quote(str(value))}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except BaseException:
+    Path(temporary).unlink(missing_ok=True)
+    raise
+PY
+    chown root:root "$MAINNET_CREDENTIAL_ENV" && chmod 0600 "$MAINNET_CREDENTIAL_ENV" \
+        || fail "cannot secure the atomically disarmed credential file"
+    MAINNET_ARMED_STATE=off
+    local unit
+    for unit in \
+        "$MAINNET_LIVENESS_TIMER" "$MAINNET_LIVENESS_SERVICE" \
+        liquidity-migration-bybit-carry-mainnet.service \
+        liquidity-migration-bybit-long-mainnet.service \
+        "$MAINNET_OWNER_UNIT" "$RETIRED_MAINNET_OWNER_UNIT"; do
+        if systemctl cat "$unit" >/dev/null 2>&1; then
+            systemctl disable --now "$unit" \
+                || fail "failed to stop or disable disarmed unit: $unit"
+            ! systemctl is-active --quiet "$unit" \
+                || fail "disarmed unit remained active: $unit"
+            ! systemctl is-enabled --quiet "$unit" 2>/dev/null \
+                || fail "disarmed unit remained enabled: $unit"
+        fi
+    done
+    echo "disarm-mainnet-ok real_money=false units=inactive-and-disabled"
+    echo "note: disarm does not flatten existing exposure; reconcile/flatten separately"
+}
 stop_mainnet_mode() {
     require_checkout
     # Without this, every systemctl below fails silently and the mode still
@@ -1938,9 +1840,7 @@ staged_mode() {
     run_strict_phase staged-install install_mode
     run_strict_phase record-installed-profile record_installed_profile
     run_strict_phase staged-activate-and-verify activate_mode
-    # After the fleet is up and verified, and never a strict phase: see
-    # build_engine.
-    run_phase engine-build build_engine
+
     printf 'staged-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 
@@ -2009,21 +1909,11 @@ rollout_mode() {
     # From checkout mutation onward there is no rollback authority, so any
     # failure leaves every managed unit stopped rather than guessing.
     ROLLOUT_IRREVERSIBLE=1
-    ROLLOUT_REFRESH_STALE_DEMO_RULES=1
     run_strict_phase stopped-install install_mode
-    if [ "$ROLLOUT_DEMO_RULES_REFRESHED" -eq 1 ]; then
-        rollout_flat_phase post-rule-refresh-flat-account-proof \
-            rollout_flat_check stopped-maintenance
-    fi
     run_strict_phase record-installed-profile record_installed_profile
     run_strict_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
     ROLLOUT_STOPPED=0
-    # Deliberately after those two lines: they disarm the rollback trap, so
-    # from here nothing can stop the fleet again. The engine build is the one
-    # step in this script that is allowed to fail, and it must not be able to
-    # reach that machinery. See build_engine.
-    run_phase engine-build build_engine
     printf 'rollout-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 
@@ -2033,6 +1923,7 @@ case "$MODE" in
     activate) activate_mode ;;
     staged) staged_mode ;;
     stop-mainnet) stop_mainnet_mode ;;
+    disarm-mainnet) disarm_mainnet_mode ;;
     verify) load_authorization; verify_topology ;;
     rollout) rollout_mode ;;
     # Without this an unknown mode silently succeeded having done nothing.

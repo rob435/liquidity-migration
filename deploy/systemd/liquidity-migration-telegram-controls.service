@@ -19,6 +19,7 @@ RestartSec=15
 KillMode=control-group
 TimeoutStopSec=30
 NoNewPrivileges=true
+InaccessiblePaths=/etc/liquidity-migration/bybit-mainnet.env
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false

@@ -8,16 +8,19 @@ Type=oneshot
 # ~12 nominations, each a few public reads plus one LLM call; the hourly
 # timer must never find a hung run still activating.
 TimeoutStartSec=600
-User=root
-Group=root
+User=liquidity-llm
+Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
 # Only the LLM key. This unit reads public market data and holds no venue
 # credentials; it can nominate (without judging) even if the file is absent.
 EnvironmentFile=-/etc/liquidity-migration/llm-ledger.env
 Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0027
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger
 # Sibling books here are only read. The judged candidates file for the LONG

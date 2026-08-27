@@ -10,8 +10,8 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=liquidity-engine-mainnet
+Group=liquidity-migration
 # Not the deployed checkout: a relative log path inside /opt/liquidity-migration
 # would write an untracked file into the tree the deploy proves clean, and stop
 # the next deploy of the fleet. Its own directory, separate from the demo
@@ -23,7 +23,8 @@ WorkingDirectory=/var/lib/liquidity-migration-engine-mainnet
 #
 # This file is the owner's. `REAL_MONEY=true` in it is the single switch that
 # lets anything reach the funded account, it is set by the owner's own hand,
-# and nothing in this repository writes it. Without it the engine refuses to
+# and deploy only ever rewrites it atomically to false during explicit disarm.
+# Without it the engine refuses to
 # build a mainnet gateway at all — it fails at the credential read, before a
 # socket is opened, and says which switch is missing.
 EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
@@ -44,19 +45,22 @@ KillMode=control-group
 # out; nothing here waits on a venue round trip.
 TimeoutStopSec=30
 
-# Level with the Python owner it would replace, not behind it like the demo
-# engine. This one carries real orders; it does not yield CPU to a producer.
+# This process carries real orders; it does not yield CPU to a producer.
 Nice=-5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=4
 
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
 UMask=0027
-ReadWritePaths=/var/lib/liquidity-migration-engine-mainnet
+ReadWritePaths=/run/lock/liquidity-migration /var/lib/liquidity-migration-engine-mainnet
 MemoryMax=512M
+LimitNOFILE=65536
+TasksMax=256
 
 [Install]
 WantedBy=multi-user.target

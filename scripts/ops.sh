@@ -40,12 +40,6 @@ Operator commands:
                                stick across a deploy
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   reset [ARGS...]              remote ledger-reset preview (dry-run by default)
-  venue-accounting [ARGS...]   reconcile demo accounting on the host; LOCAL=1
-                               runs it against this checkout instead
-  wedged-command [--environment demo|mainnet] [ARGS...]
-                               report/probe/resolve wedged order commands
-                               (default demo; the reconciler already does this
-                               automatically in both realms)
   real-money preflight         report every remaining arming step (read-only)
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
@@ -54,7 +48,7 @@ Operator commands:
                                create the mainnet state roots; dry run without
                                --execute
   deploy MODE [ARGS...]        MODE is install|activate|staged|rollout|
-                               stop-mainnet
+                               stop-mainnet|disarm-mainnet
   help                         show this help and do nothing else
 
 A UNIT that does not already start with `liquidity-migration-` gets the prefix:
@@ -97,13 +91,6 @@ remote_exec() {
     printf '%s\n' "$script"
   } | ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$SSH_TARGET" bash -s
 }
-
-# probe/resolve read venue truth, so the demo-owner credentials are loaded
-# exactly as the unit loads them.
-REMOTE_CREDENTIAL_PRELUDE='set -a
-. /etc/liquidity-migration/bybit-demo.env
-. /etc/liquidity-migration/account-execution.env
-set +a'
 
 qualify_unit() {
   case "$1" in
@@ -184,18 +171,6 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
   reset)
     remote_reset "$@"
     ;;
-  venue-accounting)
-    # The evidence and the credentials live on the host, so this runs there.
-    # LOCAL=1 runs it against this checkout instead.
-    if [[ "${LOCAL:-0}" == "1" ]]; then
-      exec "$PYTHON_BIN" "$ROOT_DIR/scripts/maintain/reconcile_bybit_demo_accounting.py" "$@"
-    fi
-    remote_exec 'cd "$REPO_DIR"
-'"$REMOTE_CREDENTIAL_PRELUDE"'
-exec .venv/bin/python scripts/maintain/reconcile_bybit_demo_accounting.py \
-  --account-root data/bybit-account-execution \
-  "${REMOTE_ARGS[@]}"' "$@"
-    ;;
   real-money)
     # The owner-facing arming surface. `preflight` reads only and never prints
     # a secret. `render-profile` without --execute prints the profile to
@@ -242,49 +217,14 @@ exec .venv/bin/python scripts/maintain/reconcile_bybit_demo_accounting.py \
     remote_exec 'exec bash "$REPO_DIR/scripts/vps/flatten_account.sh" "${REMOTE_ARGS[@]}"' \
       ${flatten_args[@]+"${flatten_args[@]}"}
     ;;
-  wedged-command)
-    # `report` and `probe` read only. `resolve` writes one journal transition
-    # and never resends an order; it refuses outright when the venue still
-    # holds the order or cannot be read. The reconciler now does this by itself
-    # in both realms, so this stays for inspection and for a wedge the evidence
-    # ladder deliberately refuses.
-    wedged_environment=demo
-    if [[ "${1:-}" == "--environment" ]]; then
-      wedged_environment="${2:-}"
-      shift 2 || die_usage "--environment needs demo or mainnet"
-    fi
-    case "$wedged_environment" in
-      demo)
-        wedged_prelude="$REMOTE_CREDENTIAL_PRELUDE"
-        wedged_root=data/bybit-account-execution
-        wedged_account=bybit-demo-unified
-        ;;
-      mainnet)
-        wedged_prelude='set -a
-. /etc/liquidity-migration/bybit-mainnet.env
-. /etc/liquidity-migration/account-execution-mainnet.env
-set +a'
-        wedged_root=/var/lib/liquidity-migration/account-mainnet
-        wedged_account=bybit-mainnet-unified
-        ;;
-      *) die_usage "wedged-command --environment must be demo or mainnet" ;;
-    esac
-    remote_exec 'cd "$REPO_DIR"
-'"$wedged_prelude"'
-exec .venv/bin/python -m liquidity_migration.venue.wedged_command_resolution \
-  --account-root '"$wedged_root"' \
-  --account-id '"$wedged_account"' \
-  --realm '"$wedged_environment"' \
-  "${REMOTE_ARGS[@]}"' "$@"
-    ;;
   deploy)
     # A leading --execute is accepted and discarded, for callers that still pass it.
     if [[ "${1:-}" == "--execute" ]]; then
       shift
     fi
     case "${1:-}" in
-      install|activate|staged|rollout|stop-mainnet) ;;
-      *) die_usage "deploy mode must be install, activate, staged, rollout, or stop-mainnet" ;;
+      install|activate|staged|rollout|stop-mainnet|disarm-mainnet) ;;
+      *) die_usage "deploy mode must be install, activate, staged, rollout, stop-mainnet, or disarm-mainnet" ;;
     esac
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "$@"
     ;;

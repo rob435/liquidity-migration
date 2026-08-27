@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration account-kernel and strategy-input liveness watchdog
+Description=liquidity-migration Rust owner and strategy-input liveness watchdog
 Wants=network-online.target
 # No Requires= on the owner: the observer must still run when the owner is
 # stopped or failed, which is exactly what it alerts on.
@@ -11,27 +11,27 @@ Type=oneshot
 # cannot re-trigger while its unit is activating, so one hung run would silence
 # this 3-minute watchdog forever. Bound it under the timer interval.
 TimeoutStartSec=120
-User=root
-Group=root
+User=liquidity-observer
+Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
-EnvironmentFile=/etc/liquidity-migration/account-execution.env
+EnvironmentFile=/etc/liquidity-migration/producer-demo.env
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
-# The engine's file, for LIVENESS_ENGINE_HEARTBEAT_FILE — the other half of the
-# heartbeat the engine writes. Leading `-`: most hosts do not run the engine and
-# do not have this file, and a watchdog that will not start is the one failure
-# nothing else would report. No file means the variable is unset, which means
-# the engine check is skipped entirely rather than paging about a heartbeat
-# nobody writes.
-EnvironmentFile=-/etc/liquidity-migration/engine.env
+# Required binding and heartbeat path for the mandatory Rust account owner.
+# A missing file stops the observer instead of silently skipping engine health.
+EnvironmentFile=/etc/liquidity-migration/engine.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
-ReadWritePaths=/opt/liquidity-migration
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=liquidity-migration/liveness-demo
+Environment=LIVENESS_STATE_FILE=/var/lib/liquidity-migration/liveness-demo/state.json
+ReadWritePaths=/var/lib/liquidity-migration/liveness-demo
 MemoryMax=512M
 # An observer must not preempt the producers it observes (they run Nice=5,
 # the owners Nice=-5).

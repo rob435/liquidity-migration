@@ -21,10 +21,6 @@ fi
 case "${EXECUTION_ENVIRONMENT:-}" in
     demo) ;;
     mainnet)
-        if [[ "${ACCOUNT_EXECUTION_KERNEL_REQUIRED:-}" != "1" ]]; then
-            echo "EXECUTION_ENVIRONMENT=mainnet requires ACCOUNT_EXECUTION_KERNEL_REQUIRED=1." >&2
-            exit 2
-        fi
         # The unit strips these; fail loudly if the strip ever misses.
         if [[ -n "${BYBIT_REAL_API_KEY:-}${BYBIT_REAL_API_SECRET:-}${BYBIT_DEMO_API_KEY:-}${BYBIT_DEMO_API_SECRET:-}" ]]; then
             echo "A target producer must not receive venue credentials." >&2
@@ -43,11 +39,13 @@ case "${EXECUTION_ENVIRONMENT:-}" in
         exit 2
         ;;
 esac
-if [[ -z "${ACCOUNT_INTENT_INBOX_ROOT:-}" || -z "${ACCOUNT_EXECUTION_ROOT:-}" ]]; then
-    echo "EXECUTION_ENVIRONMENT requires ACCOUNT_INTENT_INBOX_ROOT and ACCOUNT_EXECUTION_ROOT." >&2
-    exit 2
-fi
 
+for required_name in LONG_ENGINE_TARGET_BOOK_PATH LONG_ENGINE_BOOK_STATE_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID; do
+    if [[ -z "${!required_name:-}" ]]; then
+        echo "$required_name is required: this producer supports only Rust target-book execution." >&2
+        exit 2
+    fi
+done
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-long-demo-event}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
@@ -97,8 +95,7 @@ ws_klines_args+=(--ws-klines-stale-reconnect-seconds "$WS_KLINES_STALE_RECONNECT
 target_route_args=(
     --strategy-profile "$LONG_STRATEGY_PROFILE"
     --execution-environment "$EXECUTION_ENVIRONMENT"
-    --account-intent-inbox-root "$ACCOUNT_INTENT_INBOX_ROOT"
-    --account-execution-root "$ACCOUNT_EXECUTION_ROOT"
+
     --operational-profile-file "$OPERATIONAL_PROFILE_FILE"
 )
 if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Take an account to zero exposure through the engine.
+# Reduce positions visible to the configured-symbol engine heartbeat.
 #
 # The engine reads one absolute target book per sleeve, and
 # an absolute book that names nothing is a decision to hold nothing -- so this
@@ -14,10 +14,13 @@
 #      running producer would undo this within a minute. Stopping the unit is
 #      enough while the box stays up; the durable off-switch is the sleeve
 #      toggle, and a deploy's activate will start a stopped sleeve again.
-#   2. **Name every symbol at zero, not an empty list.** An empty book only
-#      reaches the names the plug already has in hand. A book of explicit zero
-#      rows reaches any name at all, which is what an operator asking to be
-#      flat means. The names come from the engine's own heartbeat.
+#   2. **Name every observed symbol at zero, not an empty list.** An empty book
+#      only reaches names the plug already has in hand. The names come from the
+#      engine heartbeat and are therefore limited to configured SymbolIds; this
+#      command cannot see or attest unknown/delisted residual positions.
+#
+# This helper never resets producer state and never reports venue-global flat.
+# A future reset requires an independently reviewed venue-global flat attestation.
 #
 # Dry run unless --execute, like every other mutating operator command here.
 
@@ -29,7 +32,8 @@ usage: flatten_account.sh --environment demo|mainnet [--reason TEXT] [--execute]
 
   Without --execute: say what would be written and stopped, change nothing.
   With --execute:    stop the producers, write a zero book per sleeve, and
-                     wait for the engine's heartbeat to show nothing held.
+                     wait for no configured-symbol positions. This does not
+                      prove venue-global flatness or reset producer state.
 
   --wait-seconds N   how long to wait for flat (default 300)
 USAGE
@@ -70,7 +74,6 @@ if [ "$ENVIRONMENT" = demo ]; then
         /var/lib/liquidity-migration/targets/long-demo.json
         /var/lib/liquidity-migration/targets/exodus-demo.json
     )
-    LONG_STATE=/var/lib/liquidity-migration/targets/long-demo-state.json
 else
     HEARTBEAT=/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
     ENGINE_UNIT=liquidity-migration-engine-mainnet.service
@@ -82,7 +85,6 @@ else
         /var/lib/liquidity-migration/targets/carry-mainnet.json
         /var/lib/liquidity-migration/targets/long-mainnet.json
     )
-    LONG_STATE=/var/lib/liquidity-migration/targets/long-mainnet-state.json
 fi
 
 held_symbols() {
@@ -145,8 +147,8 @@ SYMBOLS="$(held_symbols)" || {
 }
 
 if [ -z "$SYMBOLS" ]; then
-    printf 'flatten status=already_flat environment=%s reason=%s\n' "$ENVIRONMENT" "$REASON"
-    exit 0
+    printf 'flatten status=no_configured_positions global_flat=unproven environment=%s reason=%s\n' "$ENVIRONMENT" "$REASON"
+    exit 6
 fi
 
 printf 'flatten environment=%s reason=%s held=%s\n' "$ENVIRONMENT" "$REASON" "$SYMBOLS"
@@ -175,13 +177,8 @@ for book in "${BOOKS[@]}"; do
     printf 'wrote path=%s\n' "$book"
 done
 
-# LONG keeps its own record of what it asked for, and it does not read the book
-# back. Left alone, a restarted producer would republish everything this just
-# closed.
-if [ -e "$LONG_STATE" ]; then
-    printf '{\n  "held": [],\n  "left_at_ms": {},\n  "version": 1\n}\n' > "$LONG_STATE"
-    printf 'cleared path=%s\n' "$LONG_STATE"
-fi
+# Deliberately leave LONG producer state untouched. The heartbeat is scoped to
+# configured symbols and cannot authorize a schema-v2 state reset.
 
 left="$(held_symbols || true)"
 deadline=$(( $(date +%s) + WAIT_SECONDS ))
@@ -189,11 +186,9 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 5
     left="$(held_symbols || true)"
     if [ -z "$left" ]; then
-        printf 'flatten status=flat environment=%s\n' "$ENVIRONMENT"
-        echo "note: the producers are stopped but not disabled. A deploy activate will"
-        echo "      start them again; set the sleeve off in /etc/liquidity-migration/sleeves.env"
-        echo "      to make this stick."
-        exit 0
+        printf 'flatten status=configured_positions_closed global_flat=unproven state_reset=refused environment=%s\n' "$ENVIRONMENT" >&2
+        echo "note: producers remain stopped; use venue-global account evidence before any state reset or restart." >&2
+        exit 6
     fi
     printf 'still held=%s\n' "$left"
 done

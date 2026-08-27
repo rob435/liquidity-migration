@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration MAINNET account-kernel and strategy-input liveness watchdog
+Description=liquidity-migration MAINNET Rust owner and strategy-input liveness watchdog
 Wants=network-online.target
 # No Requires= on the owner: the observer must still run when the owner is
 # stopped or failed, which is exactly what it alerts on.
@@ -11,29 +11,29 @@ Type=oneshot
 # cannot re-trigger while its unit is activating, so one hung run would silence
 # this 3-minute watchdog forever. Bound it under the timer interval.
 TimeoutStartSec=120
-User=root
-Group=root
+User=liquidity-observer
+Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
-EnvironmentFile=/etc/liquidity-migration/account-execution-mainnet.env
-# Only for TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, which share the mainnet
-# credential file. The watchdog reads state and pages; it holds no trading
-# authority, so the keys and the arming switch are stripped straight back out.
-EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
-# The funded engine's file, for LIVENESS_ENGINE_HEARTBEAT_FILE. Without it the
-# variable is unset and the engine check is skipped entirely, so the funded
-# engine's heartbeat goes unwatched while everything else here still reports
-# green. Leading `-`: a host not running the funded engine has no such file,
-# and a watchdog that will not start is the one failure nothing else reports.
-EnvironmentFile=-/etc/liquidity-migration/engine-mainnet.env
+EnvironmentFile=/etc/liquidity-migration/producer-mainnet.env
+# Notification-only projection created atomically by deploy. The observer never
+# receives or has filesystem access to the funded API key or REAL_MONEY switch.
+EnvironmentFile=/etc/liquidity-migration/telegram-mainnet.env
+# Required exact funded-account binding and heartbeat path. A missing file
+# stops the observer instead of silently skipping funded engine health.
+EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
-ReadWritePaths=/opt/liquidity-migration
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=liquidity-migration/liveness-mainnet
+Environment=LIVENESS_STATE_FILE=/var/lib/liquidity-migration/liveness-mainnet/state.json
+ReadWritePaths=/var/lib/liquidity-migration/liveness-mainnet
 MemoryMax=512M
 # An observer must not preempt the producers it observes (they run Nice=5,
 # the owners Nice=-5).
