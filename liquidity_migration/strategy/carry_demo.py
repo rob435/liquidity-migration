@@ -56,6 +56,7 @@ import json
 import logging
 import math
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -65,8 +66,14 @@ from typing import Any
 import polars as pl
 
 from liquidity_migration.core._common import coerce_int
+from liquidity_migration.core.artifact_snapshot import read_stable_file
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.core.durable_file import durable_atomic_replace
 from liquidity_migration.rules.engine_targets import (
     EngineTarget,
+    PublishedTargetBook,
+    publish_target_book,
+    read_target_book,
     render_target_book,
     write_target_book,
 )
@@ -399,6 +406,7 @@ class CarryCycleState:
         "sizing_equity_by_decision",
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
+        "sizing_anchor_path",
         "early_exits",
         "drop_exits_logged",
         "exodus_shorts",
@@ -422,6 +430,7 @@ class CarryCycleState:
         self.sizing_equity_by_decision: dict[int, float] = {}
         self.sizing_equity_usdt: float | None = None
         self.sizing_equity_decision_ts_ms: int | None = None
+        self.sizing_anchor_path: Path | None = None
         # Whale-ratio cache (v5/v6 rules only): the in-memory copy of the
         # on-disk per-symbol-day store, and the last refresh attempt so a
         # Binance outage retries on a cooldown instead of every 60s cycle.
@@ -504,12 +513,70 @@ class CarryCycleState:
         anchored = self.sizing_equity_by_decision.get(key)
         if anchored is None or anchored <= 0.0:
             anchored = float(equity_usdt)
-            self.sizing_equity_by_decision[key] = anchored
-            while len(self.sizing_equity_by_decision) > 2:
-                del self.sizing_equity_by_decision[min(self.sizing_equity_by_decision)]
+            next_anchors = dict(self.sizing_equity_by_decision)
+            next_anchors[key] = anchored
+            while len(next_anchors) > 2:
+                del next_anchors[min(next_anchors)]
+            self._persist_sizing_anchors(next_anchors)
+            self.sizing_equity_by_decision = next_anchors
         self.sizing_equity_decision_ts_ms = key
         self.sizing_equity_usdt = float(anchored)
         return float(anchored)
+
+    def bind_sizing_anchors(self, root: Path) -> None:
+        """Load the durable per-decision sizing anchors once per daemon."""
+
+        path = root / ".cache" / "carry_sizing_anchors.json"
+        if self.sizing_anchor_path is not None:
+            if self.sizing_anchor_path != path:
+                raise RuntimeError("CarryCycleState cannot span two data roots")
+            return
+        self.sizing_anchor_path = path
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return
+        snapshot = read_stable_file(
+            path,
+            label="CARRY sizing anchors",
+            reject_empty=True,
+            require_single_link=True,
+            max_bytes=16 * 1024,
+        )
+        try:
+            payload = json.loads(snapshot.data)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"CARRY sizing anchors are not JSON: {exc}") from exc
+        if not isinstance(payload, dict) or set(payload) != {"schema_version", "anchors"}:
+            raise ValueError("CARRY sizing anchors have invalid fields")
+        if payload["schema_version"] != 1 or not isinstance(payload["anchors"], dict):
+            raise ValueError("CARRY sizing anchors have an unsupported schema")
+        loaded: dict[int, float] = {}
+        for raw_key, raw_value in payload["anchors"].items():
+            key = int(raw_key)
+            value = float(raw_value)
+            if key <= 0 or not math.isfinite(value) or value <= 0.0:
+                raise ValueError("CARRY sizing anchors contain an invalid value")
+            loaded[key] = value
+        if len(loaded) > 2:
+            raise ValueError("CARRY sizing anchors retain more than two decisions")
+        self.sizing_equity_by_decision = loaded
+
+    def _persist_sizing_anchors(self, anchors: Mapping[int, float]) -> None:
+        path = self.sizing_anchor_path
+        if path is None:
+            return
+        durable_atomic_replace(
+            path,
+            canonical_json(
+                {
+                    "schema_version": 1,
+                    "anchors": {str(key): value for key, value in sorted(anchors.items())},
+                }
+            )
+            + b"\n",
+            label="CARRY sizing anchors",
+        )
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -856,20 +923,36 @@ def _early_exit_state_path(root: Path) -> Path:
 
 def _load_early_exits(root: Path) -> dict[str, int]:
     path = _early_exit_state_path(root)
-    if path.exists():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            return {str(s): int(ts) for s, ts in raw.get("fired", {}).items()}
-        except Exception:  # noqa: BLE001 - a torn mask file re-fires at worst
-            _logger.warning("early-exit state unreadable, starting empty: %s", path)
-    return {}
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return {}
+    snapshot = read_stable_file(
+        path,
+        label="CARRY early-exit state",
+        reject_empty=True,
+        require_single_link=True,
+        max_bytes=1024 * 1024,
+    )
+    raw = json.loads(snapshot.data)
+    if not isinstance(raw, dict) or set(raw) != {"fired"} or not isinstance(raw["fired"], dict):
+        raise ValueError("CARRY early-exit state has invalid fields")
+    fired = {str(symbol): int(ts) for symbol, ts in raw["fired"].items()}
+    if any(
+        not symbol or symbol != symbol.upper() or not symbol.isalnum() or ts <= 0
+        for symbol, ts in fired.items()
+    ):
+        raise ValueError("CARRY early-exit state contains an invalid row")
+    return fired
 
 
 def _save_early_exits(root: Path, fired: dict[str, int]) -> None:
     path = _early_exit_state_path(root)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"fired": fired}), encoding="utf-8")
-    os.replace(tmp, path)
+    durable_atomic_replace(
+        path,
+        canonical_json({"fired": dict(sorted(fired.items()))}) + b"\n",
+        label="CARRY early-exit state",
+    )
 
 
 def _apply_early_exits(
@@ -919,11 +1002,8 @@ def _apply_early_exits(
                 fired[sym] = decision.decision_ts_ms
                 new_fires.append(sym)
     if fired != state.early_exits:
+        _save_early_exits(root, fired)
         state.early_exits = fired
-        try:
-            _save_early_exits(root, fired)
-        except Exception:  # noqa: BLE001 - a lost mask re-buys once at worst
-            _logger.warning("early-exit state not persisted; mask is memory-only")
     if not fired:
         return decision, new_fires
     masked = {s: w for s, w in decision.weights.items() if s not in fired}
@@ -1121,19 +1201,27 @@ def _exodus_state_path(root: Path) -> Path:
 
 def _load_exodus_shorts(root: Path) -> list[ExodusShortRecord]:
     path = _exodus_state_path(root)
-    if path.exists():
-        try:
-            return records_from_payload(json.loads(path.read_text(encoding="utf-8")))
-        except Exception:  # noqa: BLE001 - unreadable state fails toward flat
-            _logger.warning("exodus state unreadable, starting flat: %s", path)
-    return []
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return []
+    snapshot = read_stable_file(
+        path,
+        label="exodus-short state",
+        reject_empty=True,
+        require_single_link=True,
+        max_bytes=1024 * 1024,
+    )
+    return records_from_payload(json.loads(snapshot.data))
 
 
 def _save_exodus_shorts(root: Path, records: list[ExodusShortRecord]) -> None:
     path = _exodus_state_path(root)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(records_to_payload(records)), encoding="utf-8")
-    os.replace(tmp, path)
+    durable_atomic_replace(
+        path,
+        canonical_json(records_to_payload(records)) + b"\n",
+        label="exodus-short state",
+    )
 
 
 def _run_exodus_short(
@@ -1207,13 +1295,11 @@ def _run_exodus_short(
         receipt["exodus_covered"] = sorted(r.symbol for r in covered)
         receipt["exodus_open_names"] = len(kept)
         if kept != records:
-            state.exodus_shorts = kept
-            try:
-                _save_exodus_shorts(root, kept)
-            except Exception:  # noqa: BLE001 - a lost state file covers, never strands
-                _logger.warning("exodus state not persisted; memory-only until next change")
-        else:
-            state.exodus_shorts = kept
+            # State reaches disk before either memory or the engine-visible
+            # book advances. A failed cover write therefore leaves both on the
+            # old state and is retried, never resurrected after restart.
+            _save_exodus_shorts(root, kept)
+        state.exodus_shorts = kept
         if receipt["exodus_opened"]:
             _logger.info(
                 "exodus short OPENED: %s (cover %d min after settlement)",
@@ -1560,8 +1646,10 @@ class CarryTargetPlan:
     entry_cap_deferrals: int
     entry_validity_expired_skips: int
     entry_dust_skips: int
+    engine_blocked_entries: int
     entry_blocked_reason: str
     book_written: bool
+    target_book_object_path: str
 
 
 def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
@@ -1574,8 +1662,10 @@ def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
         entry_cap_deferrals=0,
         entry_validity_expired_skips=0,
         entry_dust_skips=0,
+        engine_blocked_entries=0,
         entry_blocked_reason=entry_blocked_reason,
         book_written=False,
+        target_book_object_path="",
     )
 
 
@@ -1588,7 +1678,7 @@ def _write_engine_target_book(
     stop_loss_fraction: float,
     entry_leverage: float,
     strategy_profile: str,
-) -> None:
+) -> PublishedTargetBook:
     """Durably publish one decided absolute book to the Rust engine."""
     path_text = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
     if not path_text:
@@ -1604,7 +1694,7 @@ def _write_engine_target_book(
         )
         for symbol, weight in sorted(desired.items())
     ]
-    write_target_book(
+    return publish_target_book(
         Path(path_text),
         render_target_book(
             source=strategy_profile,
@@ -1623,6 +1713,7 @@ def _carry_target_plan(
     demo: CarryDemoCycleConfig,
     equity_usdt: float,
     engine_account_health_error: str,
+    entry_blockers: Mapping[str, str] | None = None,
     cycle_now_ms: int,
     cycle_state: CarryCycleState | None = None,
 ) -> CarryTargetPlan:
@@ -1636,17 +1727,72 @@ def _carry_target_plan(
     entry_health_ok = not engine_account_health_error and equity_usdt > 0.0
     entry_blocked_reason = "" if entry_health_ok else "engine_account_health_unavailable"
     if not entry_health_ok:
+        path_text = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
+        if not path_text:
+            raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust target book")
+        try:
+            previous = read_target_book(path_text)
+        except (OSError, RuntimeError, ValueError):
+            return CarryTargetPlan(
+                desired_book_size=len(desired),
+                desired_gross_weight=float(decision.gross),
+                planned_exits=0,
+                planned_entries=0,
+                planned_resizes=0,
+                entry_cap_deferrals=0,
+                entry_validity_expired_skips=0,
+                entry_dust_skips=0,
+                engine_blocked_entries=0,
+                entry_blocked_reason=entry_blocked_reason,
+                book_written=False,
+                target_book_object_path="",
+            )
+        if previous.source != str(demo.strategy_profile):
+            raise ValueError(
+                f"active target book source {previous.source!r} does not match "
+                f"CARRY profile {demo.strategy_profile!r}"
+            )
+        retained = [target for target in previous.targets if target.symbol in desired]
+        planned_exits = len(previous.targets) - len(retained)
+        if planned_exits <= 0:
+            return CarryTargetPlan(
+                desired_book_size=len(desired),
+                desired_gross_weight=float(decision.gross),
+                planned_exits=0,
+                planned_entries=0,
+                planned_resizes=0,
+                entry_cap_deferrals=0,
+                entry_validity_expired_skips=0,
+                entry_dust_skips=0,
+                engine_blocked_entries=0,
+                entry_blocked_reason=entry_blocked_reason,
+                book_written=False,
+                target_book_object_path="",
+            )
+        # Expired on publication: the follower may remove exposure and cancel
+        # old entries, but it cannot open or resize any retained name.
+        publication = publish_target_book(
+            Path(path_text),
+            render_target_book(
+                source=str(demo.strategy_profile),
+                decision_ts_ms=max(1, cycle_now_ms - 1),
+                valid_until_ms=max(2, cycle_now_ms),
+                targets=list(retained),
+            ),
+        )
         return CarryTargetPlan(
             desired_book_size=len(desired),
             desired_gross_weight=float(decision.gross),
-            planned_exits=0,
+            planned_exits=planned_exits,
             planned_entries=0,
             planned_resizes=0,
             entry_cap_deferrals=0,
             entry_validity_expired_skips=0,
             entry_dust_skips=0,
+            engine_blocked_entries=0,
             entry_blocked_reason=entry_blocked_reason,
-            book_written=False,
+            book_written=True,
+            target_book_object_path=str(publication.object_path),
         )
     sizing_equity_usdt = (
         cycle_state.sizing_equity(decision_ts_ms=decision_ts_ms, equity_usdt=equity_usdt)
@@ -1677,6 +1823,9 @@ def _carry_target_plan(
         (symbol for symbol in desired if symbol not in standing_symbols),
         key=lambda symbol: (trail_by_symbol.get(symbol, 0.0), symbol),
     )
+    blockers = entry_blockers or {}
+    engine_blocked_entries = sum(1 for symbol in entry_symbols if symbol in blockers)
+    entry_symbols = [symbol for symbol in entry_symbols if symbol not in blockers]
     if cycle_now_ms >= decision_ts_ms + SIGNAL_VALIDITY_MS - ENTRY_PUBLISH_GUARD_MS:
         entry_validity_expired_skips = len(entry_symbols)
         entry_symbols = []
@@ -1707,7 +1856,7 @@ def _carry_target_plan(
         if abs(target_notional - standing) > threshold:
             planned_resizes += 1
 
-    _write_engine_target_book(
+    published_target_book = _write_engine_target_book(
         desired=book_desired,
         decision_ts_ms=decision_ts_ms,
         sizing_equity_usdt=sizing_equity_usdt,
@@ -1726,8 +1875,10 @@ def _carry_target_plan(
         entry_cap_deferrals=entry_cap_deferrals,
         entry_validity_expired_skips=entry_validity_expired_skips,
         entry_dust_skips=entry_dust_skips,
+        engine_blocked_entries=engine_blocked_entries,
         entry_blocked_reason=entry_blocked_reason,
         book_written=True,
+        target_book_object_path=str(published_target_book.object_path),
     )
 
 
@@ -2087,6 +2238,7 @@ def run_carry_demo_cycle(
     state = cycle_state if cycle_state is not None else CarryCycleState()
 
     with exclusive_file_lock(root / ".locks" / "carry_demo_cycle.lock", stale_seconds=900):
+        state.bind_sizing_anchors(root)
         engine_reading: EngineAccountReading | None = None
         try:
             engine_reading = require_recent_engine_account(
@@ -2369,6 +2521,26 @@ def run_carry_demo_cycle(
         # The exodus pass runs on EVERY cycle: covers must drain even when
         # the carry decision is unavailable. Entries additionally need the
         # same sizing basis carry entries need, computed the same way.
+        try:
+            engine_reading = require_recent_engine_account(
+                environment,
+                max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+                now_ns=time.time_ns(),
+            )
+            equity_usdt = float(engine_reading.equity_usdt)
+            engine_account_health_error = ""
+            standing_rows = engine_reading.holdings
+            standing_symbols = set(standing_rows)
+        except (OSError, RuntimeError, ValueError) as exc:
+            engine_reading = None
+            equity_usdt = 0.0
+            engine_account_health_error = str(exc)
+            standing_rows = {}
+            standing_symbols = set()
+            _logger.warning(
+                "CARRY commit-time engine account reading unavailable; additions and resizes blocked: %s",
+                exc,
+            )
         exodus_sizing_equity: float | None = None
         if (
             decision is not None
@@ -2403,6 +2575,7 @@ def run_carry_demo_cycle(
             demo=demo,
             equity_usdt=equity_usdt,
             engine_account_health_error=engine_account_health_error,
+            entry_blockers=(engine_reading.entry_blockers if engine_reading is not None else {}),
             cycle_now_ms=cycle_now_ms,
             cycle_state=state,
         )
@@ -2484,6 +2657,7 @@ def run_carry_demo_cycle(
             "entry_cap_deferrals": plan.entry_cap_deferrals,
             "entry_validity_expired_skips": plan.entry_validity_expired_skips,
             "entry_dust_skips": plan.entry_dust_skips,
+            "engine_blocked_entries": plan.engine_blocked_entries,
             "entry_blocked_reason": plan.entry_blocked_reason,
             "exit_book_removals": plan.planned_exits,
             "entry_book_additions": plan.planned_entries,
@@ -2533,6 +2707,7 @@ def run_carry_demo_cycle(
     return PublishedTargetCyclePayload(
         payload,
         target_book_path=engine_book_path,
+        target_book_object_path=plan.target_book_object_path or None,
     )
 
 

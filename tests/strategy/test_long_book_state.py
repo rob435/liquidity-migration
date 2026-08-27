@@ -37,8 +37,20 @@ def _entry(symbol: str, **overrides: object) -> LongBookEntry:
         "entered_ts_ms": NOW_MS,
         "entry_price": 10.0,
         "max_hold_deadline_ts_ms": NOW_MS + exact_duration_ms(days=3),
+        "seen_held": True,
+        "signal_ts_ms": NOW_MS - 60_000,
+        "requested_ts_ms": NOW_MS - 30_000,
+        "entry_valid_until_ms": NOW_MS + exact_duration_ms(hours=1),
+        "max_hold_duration_ms": exact_duration_ms(days=3),
     }
     fields.update(overrides)
+    if fields["seen_held"] is False:
+        fields.setdefault("entered_ts_ms", 0)
+        fields.setdefault("max_hold_deadline_ts_ms", 0)
+        if "entered_ts_ms" not in overrides:
+            fields["entered_ts_ms"] = 0
+        if "max_hold_deadline_ts_ms" not in overrides:
+            fields["max_hold_deadline_ts_ms"] = 0
     return LongBookEntry(**fields)  # type: ignore[arg-type]
 
 
@@ -104,7 +116,7 @@ def test_one_unreadable_row_fails_the_whole_read(tmp_path: Path) -> None:
     path = tmp_path / "mixed.json"
     good = _entry("KAITOUSDT")
     payload = {
-        "version": 1,
+        "version": 2,
         "held": [
             {"symbol": "BROKENUSDT"},  # no trade_id, no size, no stop
             {
@@ -120,6 +132,7 @@ def test_one_unreadable_row_fails_the_whole_read(tmp_path: Path) -> None:
             },
         ],
         "left_at_ms": {},
+        "attempted_signals_ms": {},
     }
     path.write_text(json.dumps(payload))
 
@@ -135,9 +148,10 @@ def test_a_bad_cooldown_stamp_is_skipped_loudly_and_the_record_survives(
 
     path = tmp_path / "cooldown.json"
     payload = {
-        "version": 1,
+        "version": 2,
         "held": [asdict(_entry("KAITOUSDT"))],
         "left_at_ms": {"COTIUSDT": "not-a-number"},
+        "attempted_signals_ms": {},
     }
     path.write_text(json.dumps(payload))
 
@@ -249,6 +263,7 @@ def _candidate(symbol: str, **overrides: object) -> dict[str, object]:
         "stop_loss_pct": 0.18,
         "position_weight": 1.0,
         "max_hold_days": 3.0,
+        "signal_ts_ms": NOW_MS - 60_000,
     }
     row.update(overrides)
     return row
@@ -261,8 +276,11 @@ def test_a_candidate_enters_the_record_at_the_size_the_sleeve_decided() -> None:
     # equity 10_000 x wallet fraction 1.0 x 0.05 x weight 1.0
     assert entry.notional_usdt == pytest.approx(500.0)
     assert entry.stop_loss_fraction == 0.18
-    assert entry.entered_ts_ms == NOW_MS
-    assert entry.max_hold_deadline_ts_ms == NOW_MS + exact_duration_ms(days=3)
+    assert entry.seen_held is False
+    assert entry.requested_ts_ms == NOW_MS
+    assert entry.entered_ts_ms == 0
+    assert entry.max_hold_deadline_ts_ms == 0
+    assert entry.max_hold_duration_ms == exact_duration_ms(days=3)
 
 
 def test_a_candidate_with_no_usable_stop_is_not_entered() -> None:
@@ -366,11 +384,18 @@ def test_an_empty_record_writes_an_empty_book_not_no_book() -> None:
 
 
 def test_a_name_the_engine_confirms_is_marked_as_actually_held() -> None:
-    before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT")})
+    before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT", seen_held=False)})
 
-    after = _advance(before, held_symbols=frozenset({"KAITOUSDT"}))
+    after = _advance(
+        before,
+        held_symbols=frozenset({"KAITOUSDT"}),
+        venue_holdings={"KAITOUSDT": ("long", 50.0, 9.8)},
+    )
 
     assert after.held["KAITOUSDT"].seen_held is True
+    assert after.held["KAITOUSDT"].entered_ts_ms == NOW_MS
+    assert after.held["KAITOUSDT"].entry_price == 9.8
+    assert after.held["KAITOUSDT"].max_hold_deadline_ts_ms == NOW_MS + exact_duration_ms(days=3)
 
 
 def test_a_name_that_was_held_and_is_gone_leaves_the_book() -> None:
@@ -397,6 +422,45 @@ def test_an_entry_the_engine_has_never_confirmed_is_left_alone() -> None:
     assert after.left_at_ms == {}
 
 
+def test_an_unfilled_request_expires_without_starting_trade_cooldown() -> None:
+    signal_ts_ms = NOW_MS - exact_duration_ms(hours=1)
+    before = LongBookState(
+        held={
+            "KAITOUSDT": _entry(
+                "KAITOUSDT",
+                seen_held=False,
+                signal_ts_ms=signal_ts_ms,
+                requested_ts_ms=NOW_MS - exact_duration_ms(hours=1),
+                entry_valid_until_ms=NOW_MS,
+            )
+        },
+        attempted_signals_ms={"KAITOUSDT": signal_ts_ms},
+    )
+
+    after = _advance(before, held_symbols=frozenset())
+
+    assert after.held == {}
+    assert after.left_at_ms == {}
+    assert after.attempted_signals_ms == {"KAITOUSDT": signal_ts_ms}
+
+
+def test_the_same_signal_cannot_be_reauthorized_after_expiry() -> None:
+    signal_ts_ms = NOW_MS - 60_000
+    state = LongBookState(attempted_signals_ms={"KAITOUSDT": signal_ts_ms})
+
+    repeated = _advance(
+        state,
+        candidates=[_candidate("KAITOUSDT", signal_ts_ms=signal_ts_ms)],
+    )
+    newer = _advance(
+        state,
+        candidates=[_candidate("KAITOUSDT", signal_ts_ms=signal_ts_ms + 1)],
+    )
+
+    assert repeated.held == {}
+    assert list(newer.held) == ["KAITOUSDT"]
+
+
 def test_an_engine_that_says_nothing_leaves_the_whole_record_alone() -> None:
     """No heartbeat, a stale one, an engine too old to publish positions. That
     is not "holds nothing", and reading it that way drops the whole book."""
@@ -419,8 +483,9 @@ def test_being_confirmed_once_is_remembered_across_cycles() -> None:
     # still there -- the flag must not flap, or the next cycle reads a
     # never-filled entry and never drops it.
     state = _advance(
-        LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT")}),
+        LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT", seen_held=False)}),
         held_symbols=frozenset({"KAITOUSDT"}),
+        venue_holdings={"KAITOUSDT": ("long", 50.0, 10.0)},
     )
     assert state.held["KAITOUSDT"].seen_held is True
 

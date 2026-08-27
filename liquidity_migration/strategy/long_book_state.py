@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -59,7 +60,7 @@ LONG_BOOK_STATE_PATH_ENV = "LONG_ENGINE_BOOK_STATE_PATH"
 #: refused read fails the cycle -- the engine holds what it holds -- because
 #: reading a record this producer cannot parse as "hold nothing" would
 #: market-close every open position at once.
-BOOK_STATE_VERSION = 1
+BOOK_STATE_VERSION = 2
 
 
 class BookStateError(RuntimeError):
@@ -80,9 +81,10 @@ class LongBookEntry:
     notional_usdt: float
     stop_loss_fraction: float
     leverage: float
-    #: When this name first entered the book. Every clock is anchored here.
+    #: When the engine first confirmed the position. Zero while the entry is
+    #: merely working; every hold/stop clock starts at the first confirmation.
     entered_ts_ms: int
-    #: The price it was decided against, for the decayed-stop comparison.
+    #: Venue average entry once confirmed; the decision mark while pending.
     entry_price: float
     max_hold_deadline_ts_ms: int
     #: Whether the engine has ever reported this name as actually held.
@@ -107,6 +109,11 @@ class LongBookEntry:
     venue_qty: float = 0.0
     venue_avg_entry_px: float = 0.0
     venue_ts_ms: int = 0
+    #: Original publication window. A pending ask is never granted a fresh
+    #: validity window merely because another producer cycle ran.
+    requested_ts_ms: int = 0
+    entry_valid_until_ms: int = 0
+    max_hold_duration_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +123,10 @@ class LongBookState:
     held: dict[str, LongBookEntry] = field(default_factory=dict)
     #: Symbol to the moment it left the book, for the cooldown.
     left_at_ms: dict[str, int] = field(default_factory=dict)
+    #: Last signal generation submitted per symbol. This prevents an expired
+    #: or rejected request from being re-authorized by the next cycle while a
+    #: genuinely newer signal remains eligible.
+    attempted_signals_ms: dict[str, int] = field(default_factory=dict)
 
     def as_trade_rows(self) -> pl.DataFrame:
         """Return the table consumed by LONG's exit and capacity logic.
@@ -133,7 +144,7 @@ class LongBookState:
                     "symbol": entry.symbol,
                     "strategy_id": entry.strategy_id,
                     "side": "long",
-                    "status": "open",
+                    "status": "open" if entry.seen_held else "pending",
                     # The exit planner reads this as a string and only asks
                     # whether it is above zero: it is the engine that sizes.
                     "qty": f"{entry.notional_usdt / entry.entry_price:.10f}"
@@ -263,6 +274,9 @@ def read_book_state(path: str | Path) -> LongBookState:
                 venue_qty=float(row.get("venue_qty") or 0.0),
                 venue_avg_entry_px=float(row.get("venue_avg_entry_px") or 0.0),
                 venue_ts_ms=int(row.get("venue_ts_ms") or 0),
+                requested_ts_ms=int(row.get("requested_ts_ms") or 0),
+                entry_valid_until_ms=int(row.get("entry_valid_until_ms") or 0),
+                max_hold_duration_ms=int(row.get("max_hold_duration_ms") or 0),
             )
         except (KeyError, TypeError, ValueError) as exc:
             # One row this producer cannot parse means it cannot say whether
@@ -271,6 +285,35 @@ def read_book_state(path: str | Path) -> LongBookState:
             raise BookStateError(
                 f"{resolved}: held row {index} ({row.get('symbol')!r}) unreadable: {exc}"
             ) from exc
+        if (
+            not entry.trade_id
+            or not entry.symbol
+            or entry.symbol != str(row["symbol"])
+            or not entry.symbol.isalnum()
+            or not math.isfinite(entry.notional_usdt)
+            or entry.notional_usdt <= 0.0
+            or not math.isfinite(entry.stop_loss_fraction)
+            or not 0.0 < entry.stop_loss_fraction < 1.0
+            or not math.isfinite(entry.leverage)
+            or entry.leverage <= 0.0
+            or not math.isfinite(entry.entry_price)
+            or entry.entry_price <= 0.0
+            or entry.requested_ts_ms <= 0
+            or entry.entry_valid_until_ms <= entry.requested_ts_ms
+            or entry.max_hold_duration_ms <= 0
+        ):
+            raise BookStateError(f"{resolved}: held row {index} violates the LONG book invariants")
+        if entry.seen_held:
+            if entry.entered_ts_ms <= 0 or entry.max_hold_deadline_ts_ms <= entry.entered_ts_ms:
+                raise BookStateError(
+                    f"{resolved}: held row {index} has no valid fill-anchored hold window"
+                )
+        elif entry.entered_ts_ms != 0 or entry.max_hold_deadline_ts_ms != 0:
+            raise BookStateError(
+                f"{resolved}: pending row {index} starts a clock before a confirmed fill"
+            )
+        if entry.symbol in held:
+            raise BookStateError(f"{resolved}: held row {index} repeats {entry.symbol}")
         held[entry.symbol] = entry
 
     left_at_ms: dict[str, int] = {}
@@ -287,7 +330,24 @@ def read_book_state(path: str | Path) -> LongBookState:
                 when,
             )
             continue
-    return LongBookState(held=held, left_at_ms=left_at_ms)
+    attempted_signals_ms: dict[str, int] = {}
+    raw_attempts = payload.get("attempted_signals_ms") or {}
+    if not isinstance(raw_attempts, dict):
+        raise BookStateError(f"{resolved}: attempted_signals_ms is not an object")
+    for symbol, signal_ts_ms in raw_attempts.items():
+        name = str(symbol)
+        try:
+            stamp = int(signal_ts_ms)
+        except (TypeError, ValueError) as exc:
+            raise BookStateError(f"{resolved}: invalid attempt stamp for {name!r}") from exc
+        if not name or name != name.upper() or not name.isalnum() or stamp <= 0:
+            raise BookStateError(f"{resolved}: invalid attempted signal {name!r}={stamp!r}")
+        attempted_signals_ms[name] = stamp
+    return LongBookState(
+        held=held,
+        left_at_ms=left_at_ms,
+        attempted_signals_ms=attempted_signals_ms,
+    )
 
 
 def write_book_state(path: str | Path, state: LongBookState) -> None:
@@ -305,6 +365,7 @@ def write_book_state(path: str | Path, state: LongBookState) -> None:
         "version": BOOK_STATE_VERSION,
         "held": [asdict(entry) for entry in sorted(state.held.values(), key=lambda e: e.symbol)],
         "left_at_ms": dict(sorted(state.left_at_ms.items())),
+        "attempted_signals_ms": dict(sorted(state.attempted_signals_ms.items())),
     }
     durable_atomic_replace(
         resolved,

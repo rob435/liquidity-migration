@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from liquidity_migration.rules.engine_targets import EngineTarget, render_target_book, write_target_book
+from liquidity_migration.rules.engine_targets import (
+    EngineTarget,
+    publish_target_book,
+    render_target_book,
+    write_target_book,
+)
 from liquidity_migration.strategy.strategy_event_clock import StrategyEvent
 from liquidity_migration.strategy.target_book_evidence import (
     JsonlTargetBookCaptureTape,
@@ -83,3 +89,27 @@ def test_capture_chain_rejects_a_partial_tail(tmp_path) -> None:
     path.write_bytes(b'{"partial":true}')
     with pytest.raises(ValueError, match="partial line"):
         JsonlTargetBookCaptureTape(path)
+
+
+def test_capture_points_to_replayable_immutable_book_bytes(tmp_path) -> None:
+    book = tmp_path / "book.json"
+    published = publish_target_book(
+        book,
+        render_target_book(
+            source="carry_v1",
+            decision_ts_ms=1_000,
+            valid_until_ms=2_000,
+            targets=[EngineTarget("BTCUSDT", -50.0, 0.35, 2.0)],
+        ),
+    )
+    payload = PublishedTargetCyclePayload(
+        {},
+        target_book_path=book,
+        target_book_object_path=published.object_path,
+    )
+    tape_path = tmp_path / "captures.jsonl"
+    JsonlTargetBookCaptureTape(tape_path).append_from_cycle(_event(), payload, sleeve="carry")
+    row = json.loads(tape_path.read_text(encoding="utf-8"))
+
+    object_path = row["capture"]["target_book_object"]
+    assert Path(object_path).read_bytes() == book.read_bytes()

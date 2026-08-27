@@ -34,6 +34,7 @@ construct a sleeve-private execution stream.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import select
 import signal
@@ -43,6 +44,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from liquidity_migration.core.env_flags import validate_systemd_invocation_id
+from liquidity_migration.core.artifact_snapshot import read_stable_file
+from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.fs_watch import DirectoryRenameWatch
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData, BybitPublicTickerStream
 from liquidity_migration.core.config import ResearchConfig
@@ -181,6 +184,11 @@ class StrategyHostDaemon:
         # account refreshes instead of waiting for the idle-floor pass.
         self._engine_change_wake_dir = (
             Path(engine_change_wake_dir).expanduser() if engine_change_wake_dir is not None else None
+        )
+        self._engine_heartbeat_file = (
+            self._engine_change_wake_dir / engine_heartbeat_path(demo_config.execution_environment).name
+            if self._engine_change_wake_dir is not None
+            else None
         )
         self._engine_wake_pending = False
         self._engine_watch_thread: threading.Thread | None = None
@@ -874,6 +882,7 @@ class StrategyHostDaemon:
             return
         watch: DirectoryRenameWatch | None = None
         last_mtime_ns: int | None = None
+        last_projection = self._engine_wake_projection()
         inotify_unavailable = False
         try:
             while not self._engine_watch_stop.is_set():
@@ -911,6 +920,10 @@ class StrategyHostDaemon:
                     if current is not None:
                         last_mtime_ns = current
                 if arrived:
+                    projection = self._engine_wake_projection()
+                    if projection is None or projection == last_projection:
+                        continue
+                    last_projection = projection
                     # Flag before event: the wait reads the flag only after
                     # the event woke it.
                     self._engine_wake_pending = True
@@ -924,6 +937,45 @@ class StrategyHostDaemon:
         try:
             return os.stat(directory).st_mtime_ns
         except OSError:
+            return None
+
+    def _engine_wake_projection(self) -> bytes | None:
+        """Account facts that can change a strategy book, excluding telemetry.
+
+        The engine replaces its heartbeat on a fixed cadence even when these
+        facts are unchanged. Comparing this projection prevents that cadence
+        from turning a 100-day feature build into a five-second polling loop.
+        """
+
+        path = self._engine_heartbeat_file
+        if path is None:
+            return None
+        try:
+            snapshot = read_stable_file(
+                path,
+                label="engine heartbeat wake source",
+                reject_empty=True,
+                require_single_link=True,
+                max_bytes=1024 * 1024,
+            )
+            payload = json.loads(snapshot.data)
+            if not isinstance(payload, Mapping):
+                return None
+            return canonical_json(
+                {
+                    key: payload.get(key)
+                    for key in (
+                        "account_user_id",
+                        "engine_version",
+                        "entry_blockers",
+                        "may_open",
+                        "positions",
+                        "realm",
+                        "strategies",
+                    )
+                }
+            )
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             return None
 
     def _sleep_interruptible(self, seconds: float) -> None:

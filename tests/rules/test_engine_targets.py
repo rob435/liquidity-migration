@@ -7,6 +7,7 @@ import pytest
 from liquidity_migration.rules.engine_targets import (
     TARGET_BOOK_VERSION,
     EngineTarget,
+    publish_target_book,
     render_target_book,
     write_target_book,
 )
@@ -100,3 +101,18 @@ def test_a_rewrite_replaces_the_previous_book_whole(tmp_path) -> None:
     write_target_book(path, _book(targets=[EngineTarget("KAITOUSDT", 12.0, 0.35)]))
     parsed = json.loads(path.read_text(encoding="utf-8"))
     assert [row["symbol"] for row in parsed["targets"]] == ["KAITOUSDT"]
+
+
+def test_publication_archives_exact_content_before_activation(tmp_path) -> None:
+    path = tmp_path / "carry.json"
+    first = publish_target_book(path, _book())
+    first_bytes = first.object_path.read_bytes()
+
+    second = publish_target_book(
+        path,
+        _book(targets=[EngineTarget("KAITOUSDT", 12.0, 0.35)]),
+    )
+
+    assert first.object_path != second.object_path
+    assert first.object_path.read_bytes() == first_bytes
+    assert second.object_path.read_bytes() == path.read_bytes()

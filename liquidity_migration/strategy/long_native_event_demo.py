@@ -104,8 +104,8 @@ from liquidity_migration.strategy.strategy_funnel import (
 )
 from liquidity_migration.rules.engine_targets import (
     EngineTarget,
+    publish_target_book,
     render_target_book,
-    write_target_book,
 )
 from liquidity_migration.strategy.long_book_state import (
     LongBookEntry,
@@ -473,30 +473,6 @@ def run_long_native_demo_cycle(
         mark_stage("features")
 
         book_state = read_book_state(book_state_path)
-        engine_blocked_asks = 0
-        if engine_reading is not None and engine_reading.entry_blockers:
-            blocked_asks = {
-                symbol: reason
-                for symbol, reason in sorted(engine_reading.entry_blockers.items())
-                if symbol in book_state.held and not book_state.held[symbol].seen_held
-            }
-            for symbol, reason in blocked_asks.items():
-                _LOGGER.warning(
-                    "long book: %s was asked for but the engine will not open it (%s); "
-                    "the ask leaves the book",
-                    symbol,
-                    reason,
-                )
-            if blocked_asks:
-                engine_blocked_asks = len(blocked_asks)
-                book_state = LongBookState(
-                    held={
-                        symbol: entry
-                        for symbol, entry in book_state.held.items()
-                        if symbol not in blocked_asks
-                    },
-                    left_at_ms=book_state.left_at_ms,
-                )
         all_trades = book_state.as_trade_rows()
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
@@ -546,34 +522,93 @@ def run_long_native_demo_cycle(
                 if candidate["symbol"] not in gate_symbols
             ] + gate_candidates
             candidates = candidates[: max(demo.max_new_entries_per_cycle, 0)]
-        if engine_reading is not None and engine_reading.entry_blockers:
-            # An ask the engine is refusing right now is not re-asked this
-            # cycle: it would be dropped from the record again on the next
-            # one. Counted, so a standing refusal is visible instead of a
-            # candidate count that never becomes a position.
-            still_blocked = [
+        repeated_attempts = [
+            candidate
+            for candidate in candidates
+            if int(candidate.get("signal_ts_ms") or 0)
+            <= book_state.attempted_signals_ms.get(
+                str(candidate.get("symbol") or "").upper(),
+                0,
+            )
+        ]
+        if repeated_attempts:
+            skip_counts["already_attempted"] = len(repeated_attempts)
+            repeated_ids = {
+                (
+                    str(candidate.get("symbol") or "").upper(),
+                    int(candidate.get("signal_ts_ms") or 0),
+                )
+                for candidate in repeated_attempts
+            }
+            candidates = [
                 candidate
                 for candidate in candidates
-                if str(candidate.get("symbol") or "").upper() in engine_reading.entry_blockers
+                if (
+                    str(candidate.get("symbol") or "").upper(),
+                    int(candidate.get("signal_ts_ms") or 0),
+                )
+                not in repeated_ids
             ]
-            if still_blocked:
-                skip_counts["engine_blocked"] = len(still_blocked)
-                blocked_symbols = {str(c.get("symbol") or "").upper() for c in still_blocked}
+        # Risk authority is sampled again at the commit boundary. A cold
+        # feature build may take longer than the account freshness budget;
+        # sizing or ownership inference from the cycle-start sample would then
+        # be stale even though it was fresh when computation began.
+        engine_reading = require_recent_engine_account(
+            owner_environment,
+            max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+            now_ns=time.time_ns(),
+        )
+        equity_usdt = float(engine_reading.equity_usdt)
+        engine_account_health_error = ""
+        mark_stage("commit_account_health")
+
+        engine_blocked_asks = 0
+        if engine_reading.entry_blockers:
+            blocked_asks = {
+                symbol: reason
+                for symbol, reason in sorted(engine_reading.entry_blockers.items())
+                if symbol in book_state.held and not book_state.held[symbol].seen_held
+            }
+            for symbol, reason in blocked_asks.items():
+                _LOGGER.warning(
+                    "long book: %s was asked for but the engine will not open it (%s); "
+                    "the ask leaves the book",
+                    symbol,
+                    reason,
+                )
+            if blocked_asks:
+                engine_blocked_asks = len(blocked_asks)
+                book_state = LongBookState(
+                    held={
+                        symbol: entry
+                        for symbol, entry in book_state.held.items()
+                        if symbol not in blocked_asks
+                    },
+                    left_at_ms=book_state.left_at_ms,
+                    attempted_signals_ms=book_state.attempted_signals_ms,
+                )
+            blocked_symbols = set(engine_reading.entry_blockers)
+            blocked_candidates = [
+                candidate
+                for candidate in candidates
+                if str(candidate.get("symbol") or "").upper() in blocked_symbols
+            ]
+            if blocked_candidates:
+                skip_counts["engine_blocked"] = len(blocked_candidates)
                 candidates = [
                     candidate
                     for candidate in candidates
                     if str(candidate.get("symbol") or "").upper() not in blocked_symbols
                 ]
+
+        current_trades = book_state.as_trade_rows()
         free_slots = max(
-            strategy.max_concurrent_positions - _count_long_target_reservations(all_trades),
+            strategy.max_concurrent_positions - _count_long_target_reservations(current_trades),
             0,
         )
         candidates = candidates[:free_slots]
         entry_candidates = len(candidates)
         skipped_engine_account_health = 0
-        if engine_account_health_error:
-            skipped_engine_account_health = len(candidates)
-            candidates = []
 
         asked_before = set(book_state.held)
         book_state, engine_resized_symbols = _advance_long_book_state(
@@ -593,7 +628,7 @@ def run_long_native_demo_cycle(
         # State lands before its matching book. If the process dies between the
         # two writes, the old book is conservative and the next cycle repairs it.
         write_book_state(book_state_path, book_state)
-        write_target_book(
+        published_target_book = publish_target_book(
             engine_book_path,
             _long_engine_target_book(
                 book_state,
@@ -745,6 +780,7 @@ def run_long_native_demo_cycle(
     return PublishedTargetCyclePayload(
         payload,
         target_book_path=engine_book_path,
+        target_book_object_path=published_target_book.object_path,
     )
 
 
@@ -825,7 +861,9 @@ def _open_long_trades(trades: pl.DataFrame) -> pl.DataFrame:
 def _long_target_reservations(trades: pl.DataFrame) -> pl.DataFrame:
     """Outstanding LONG asks that reserve admission capacity."""
 
-    reserved = _open_long_trades(trades)
+    if trades.is_empty() or "status" not in trades.columns:
+        return trades
+    reserved = trades.filter(pl.col("status").is_in(["open", "pending"]))
     if "side" in reserved.columns:
         return reserved.filter(pl.col("side") == "long")
     return reserved
@@ -1580,7 +1618,17 @@ def _advance_long_book_state(
                 "asked for closed it, so it leaves the book",
                 symbol,
             )
-    gone = exited | closed_elsewhere
+    expired_unfilled = {
+        symbol
+        for symbol, entry in state.held.items()
+        if not entry.seen_held
+        and entry.entry_valid_until_ms > 0
+        and now_ms >= entry.entry_valid_until_ms
+        and (held_symbols is None or symbol not in held_symbols)
+    }
+    for symbol in sorted(expired_unfilled):
+        _LOGGER.warning("long book: unfilled ask for %s expired; it leaves the book", symbol)
+    gone = exited | closed_elsewhere | expired_unfilled
 
     held = {}
     engine_resized: list[str] = []
@@ -1590,7 +1638,22 @@ def _advance_long_book_state(
         # Confirmed once, remembered for good: an entry that fills and is later
         # closed must read differently from one that never filled at all.
         if not entry.seen_held and held_symbols is not None and symbol in held_symbols:
-            entry = replace(entry, seen_held=True)
+            venue = venue_holdings.get(symbol)
+            if venue is None or venue[0] != "long" or venue[1] <= 0.0:
+                _LOGGER.warning(
+                    "long book: %s appeared held without an attributable long position; "
+                    "the fill clock stays stopped",
+                    symbol,
+                )
+            else:
+                venue_entry_px = venue[2] if venue[2] > 0.0 else entry.entry_price
+                entry = replace(
+                    entry,
+                    seen_held=True,
+                    entered_ts_ms=now_ms,
+                    entry_price=venue_entry_px,
+                    max_hold_deadline_ts_ms=now_ms + entry.max_hold_duration_ms,
+                )
         if venue_holdings and entry.seen_held and symbol in venue_holdings:
             entry = _reconcile_entry_with_venue(
                 entry,
@@ -1601,14 +1664,23 @@ def _advance_long_book_state(
             )
         held[symbol] = entry
     left_at_ms = dict(state.left_at_ms)
-    for symbol in gone:
+    for symbol in exited | closed_elsewhere:
         left_at_ms[symbol] = now_ms
+    attempted_signals_ms = dict(state.attempted_signals_ms)
 
     for candidate in candidates:
         trade_id = str(candidate.get("trade_id") or "")
         symbol = str(candidate.get("symbol") or "").upper()
+        signal_ts_ms = int(candidate.get("signal_ts_ms") or 0)
         price = price_by_symbol.get(symbol, _float(candidate.get("live_price")))
-        if not trade_id or not symbol or price <= 0.0 or symbol in held:
+        if (
+            not trade_id
+            or not symbol
+            or signal_ts_ms <= 0
+            or signal_ts_ms <= attempted_signals_ms.get(symbol, 0)
+            or price <= 0.0
+            or symbol in held
+        ):
             continue
         stop_loss_fraction = _float(candidate.get("stop_loss_pct"))
         # `render_target_book` refuses a stop outside (0, 1), and a target with
@@ -1630,6 +1702,14 @@ def _advance_long_book_state(
         if notional <= 0.0:
             continue
         max_hold_days = _float(candidate.get("max_hold_days") or 3.0)
+        max_hold_duration_ms = exact_duration_ms(days=max_hold_days)
+        entry_valid_until_ms = min(
+            now_ms + LONG_BOOK_VALIDITY_MS,
+            signal_ts_ms + SIGNAL_FRESHNESS_MS,
+        )
+        if max_hold_duration_ms <= 0 or entry_valid_until_ms <= now_ms:
+            attempted_signals_ms[symbol] = signal_ts_ms
+            continue
         held[symbol] = LongBookEntry(
             trade_id=trade_id,
             symbol=symbol,
@@ -1637,16 +1717,20 @@ def _advance_long_book_state(
             notional_usdt=notional,
             stop_loss_fraction=stop_loss_fraction,
             leverage=float(demo.entry_leverage),
-            entered_ts_ms=now_ms,
+            entered_ts_ms=0,
             entry_price=price,
-            max_hold_deadline_ts_ms=now_ms + exact_duration_ms(days=max_hold_days),
-            signal_ts_ms=int(candidate.get("signal_ts_ms") or 0),
+            max_hold_deadline_ts_ms=0,
+            signal_ts_ms=signal_ts_ms,
             stop_decay_after_ms=int(_float(candidate.get("stop_decay_after_ms"))),
             decayed_stop_loss_pct=_float(candidate.get("decayed_stop_loss_pct")),
             atr_14d_pct=_float(candidate.get("atr_14d_pct")),
             pattern=str(candidate.get("pattern") or ""),
             entry_reason=str(candidate.get("entry_reason") or "long_entry"),
+            requested_ts_ms=now_ms,
+            entry_valid_until_ms=entry_valid_until_ms,
+            max_hold_duration_ms=max_hold_duration_ms,
         )
+        attempted_signals_ms[symbol] = signal_ts_ms
         left_at_ms.pop(symbol, None)
 
     # A name out of cooldown no longer changes any decision, and keeping every
@@ -1655,7 +1739,17 @@ def _advance_long_book_state(
     left_at_ms = {
         symbol: when for symbol, when in left_at_ms.items() if when >= horizon_ms
     }
-    return LongBookState(held=held, left_at_ms=left_at_ms), engine_resized
+    attempt_horizon_ms = now_ms - 2 * SIGNAL_FRESHNESS_MS
+    attempted_signals_ms = {
+        symbol: stamp
+        for symbol, stamp in attempted_signals_ms.items()
+        if stamp >= attempt_horizon_ms
+    }
+    return LongBookState(
+        held=held,
+        left_at_ms=left_at_ms,
+        attempted_signals_ms=attempted_signals_ms,
+    ), engine_resized
 
 
 def _reconcile_entry_with_venue(

@@ -17,11 +17,13 @@ whole book or the previous one, never half of either.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from liquidity_migration.core.durable_file import durable_atomic_replace
+from liquidity_migration.core.artifact_snapshot import read_stable_file
+from liquidity_migration.core.durable_file import durable_atomic_replace, durable_create
 
 #: Bumped when the shape changes in a way an old reader would misread. The
 #: engine refuses a version it does not know rather than guessing.
@@ -42,6 +44,23 @@ class EngineTarget:
     notional_usdt: float
     stop_loss_fraction: float
     leverage: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedTargetBook:
+    """Engine-visible publication backed by immutable exact bytes."""
+
+    engine_path: Path
+    object_path: Path
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedTargetBook:
+    source: str
+    decision_ts_ms: int
+    valid_until_ms: int
+    targets: tuple[EngineTarget, ...]
 
 
 def render_target_book(
@@ -100,7 +119,140 @@ def render_target_book(
     return json.dumps(book, indent=2, sort_keys=True) + "\n"
 
 
+def parse_target_book_bytes(data: bytes) -> ParsedTargetBook:
+    """Strictly parse the exact schema understood by the Rust follower."""
+
+    try:
+        payload = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"engine target book is not JSON: {exc}") from exc
+    expected = {"version", "source", "decision_ts_ms", "valid_until_ms", "targets"}
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise ValueError("engine target book has unexpected or missing fields")
+    if (
+        type(payload["version"]) is not int
+        or payload["version"] != TARGET_BOOK_VERSION
+        or type(payload["source"]) is not str
+        or type(payload["decision_ts_ms"]) is not int
+        or type(payload["valid_until_ms"]) is not int
+        or not isinstance(payload["targets"], list)
+    ):
+        raise ValueError("engine target book has an unsupported schema")
+    targets: list[EngineTarget] = []
+    target_fields = {"symbol", "notional_usdt", "stop_loss_fraction", "leverage"}
+    for index, row in enumerate(payload["targets"]):
+        if not isinstance(row, dict) or set(row) != target_fields:
+            raise ValueError(f"engine target book target {index} has invalid fields")
+        if (
+            type(row["symbol"]) is not str
+            or type(row["notional_usdt"]) not in {int, float}
+            or type(row["stop_loss_fraction"]) not in {int, float}
+            or type(row["leverage"]) not in {int, float}
+        ):
+            raise ValueError(f"engine target book target {index} has invalid types")
+        try:
+            targets.append(
+                EngineTarget(
+                    symbol=str(row["symbol"]),
+                    notional_usdt=float(row["notional_usdt"]),
+                    stop_loss_fraction=float(row["stop_loss_fraction"]),
+                    leverage=float(row["leverage"]),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"engine target book target {index} is invalid") from exc
+    rendered = render_target_book(
+        source=str(payload["source"]),
+        decision_ts_ms=int(payload["decision_ts_ms"]),
+        valid_until_ms=int(payload["valid_until_ms"]),
+        targets=targets,
+    )
+    if json.loads(rendered) != payload:
+        raise ValueError("engine target book values do not match the canonical schema")
+    return ParsedTargetBook(
+        source=str(payload["source"]),
+        decision_ts_ms=int(payload["decision_ts_ms"]),
+        valid_until_ms=int(payload["valid_until_ms"]),
+        targets=tuple(sorted(targets, key=lambda target: target.symbol)),
+    )
+
+
+def read_target_book(path: str | Path) -> ParsedTargetBook:
+    snapshot = read_stable_file(
+        path,
+        label="engine target book",
+        reject_empty=True,
+        require_single_link=True,
+        max_bytes=16 * 1024 * 1024,
+    )
+    return parse_target_book_bytes(snapshot.data)
+
+
 def write_target_book(path: Path, text: str) -> None:
     """Durably publish a rendered book without exposing partial contents."""
 
     durable_atomic_replace(path, text.encode("utf-8"), label="engine target book")
+
+
+def publish_target_book(path: Path, text: str) -> PublishedTargetBook:
+    """Archive exact bytes, then atomically activate them for the engine."""
+
+    data = text.encode("utf-8")
+    digest = hashlib.sha256(data).hexdigest()
+    object_path = path.parent / ".target-book-objects" / f"{digest}.json"
+    try:
+        durable_create(object_path, data, label="target-book object")
+    except FileExistsError:
+        existing = read_stable_file(
+            object_path,
+            label="target-book object",
+            reject_empty=True,
+            require_single_link=True,
+            max_bytes=16 * 1024 * 1024,
+        )
+        if existing.data != data:
+            raise RuntimeError(f"target-book object hash collision at {object_path}") from None
+    try:
+        active = read_stable_file(
+            path,
+            label="active engine target book",
+            reject_empty=True,
+            require_single_link=True,
+            max_bytes=16 * 1024 * 1024,
+        )
+    except (OSError, RuntimeError, ValueError):
+        active = None
+    if active is not None and active.data == data:
+        return PublishedTargetBook(
+            engine_path=active.path,
+            object_path=object_path.absolute(),
+            sha256=digest,
+        )
+    durable_atomic_replace(path, data, label="engine target book")
+    active = read_stable_file(
+        path,
+        label="active engine target book",
+        reject_empty=True,
+        require_single_link=True,
+        max_bytes=16 * 1024 * 1024,
+    )
+    if active.data != data:
+        raise RuntimeError("active engine target book differs from its immutable object")
+    return PublishedTargetBook(
+        engine_path=active.path,
+        object_path=object_path.absolute(),
+        sha256=digest,
+    )
+
+
+__all__ = [
+    "EngineTarget",
+    "ParsedTargetBook",
+    "PublishedTargetBook",
+    "TARGET_BOOK_VERSION",
+    "publish_target_book",
+    "parse_target_book_bytes",
+    "read_target_book",
+    "render_target_book",
+    "write_target_book",
+]
