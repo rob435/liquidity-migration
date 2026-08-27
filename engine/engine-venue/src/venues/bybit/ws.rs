@@ -261,7 +261,7 @@ impl Worker {
     /// `Ok` means dial again.
     async fn pump(&mut self, mut socket: Socket, tx: &mpsc::Sender<Handover>) -> Result<(), Gone> {
         let mut next_ping_at = Instant::now() + PING_EVERY;
-        let mut pong_deadline = None;
+        let mut pong_deadline: Option<Instant> = None;
         loop {
             let deadline = pong_deadline
                 .map(|deadline| deadline.min(next_ping_at))

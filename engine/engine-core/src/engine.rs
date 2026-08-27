@@ -38,7 +38,7 @@ use std::time::Duration;
 use engine_types::{
     quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, InstrumentRule, Intent,
     MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate,
-    RiskKernel, RiskVerdict, StopSpec, Strategy, StrategyId, Subscription, SymbolId, SymbolTable,
+    RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyId, Subscription, SymbolId, SymbolTable,
     TargetBook, TimeInForce, VenueError, VenueGateway, Wal, WalError, WalRecord, WorkPolicy,
 };
 
@@ -698,14 +698,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 return Ok(Vec::new());
             }
         };
-        let mut delivered: std::collections::HashMap<(&str, i64, u64), usize> =
+        let mut delivered: std::collections::HashMap<(String, i64, u64), usize> =
             std::collections::HashMap::new();
         for record in replayed {
             if let WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill { exec_id, client_order_id, venue_ts_ms, qty, .. },
             } = record {
                 if exec_id.is_empty() && *venue_ts_ms >= since {
-                    *delivered.entry((client_order_id.as_str(), *venue_ts_ms, qty.to_bits())).or_default() += 1;
+                    *delivered
+                        .entry((client_order_id.clone(), *venue_ts_ms, qty.to_bits()))
+                        .or_default() += 1;
                 }
             }
         }
@@ -715,7 +717,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if execution_ids.contains(&exec.exec_id, now_ms) {
                 continue;
             }
-            let key = (exec.client_order_id.as_str(), exec.venue_ts_ms, exec.qty.to_bits());
+            let key = (
+                exec.client_order_id.clone(),
+                exec.venue_ts_ms,
+                exec.qty.to_bits(),
+            );
             let same_delivered = delivered.get_mut(&key).is_some_and(|count| {
                 if *count == 0 { false } else { *count -= 1; true }
             });
@@ -2736,7 +2742,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 /// deliberately per (strategy, symbol), preserving the first reason each
 /// strategy reports because target-book followers put kernel refusals before
 /// weaker planner skips.
-fn named_entry_blockers(
+pub(crate) fn named_entry_blockers(
     strategies: &[Box<dyn Strategy>],
     names: &[String],
 ) -> Vec<(String, String, String)> {

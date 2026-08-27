@@ -21,7 +21,7 @@ use engine_types::{
 use crate::bench::{self, BenchOptions};
 use crate::clock;
 use crate::config::EngineSection;
-use crate::engine::Engine;
+use crate::engine::{Engine, EngineError, StopReason};
 use crate::heartbeat::Heartbeat;
 use crate::testpath::temp_path;
 
