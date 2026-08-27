@@ -24,7 +24,7 @@ use engine_types::risk::PositionView;
 use engine_types::VenueError;
 use serde_json::Value;
 
-use crate::json::num_field;
+use crate::json::{num_field, str_field};
 
 use super::contracts::Contracts;
 
@@ -169,7 +169,11 @@ pub(crate) fn parse_positions(
         let side = match row.get("positionType").and_then(Value::as_i64) {
             Some(1) => Side::Buy,
             Some(2) => Side::Sell,
-            _ => continue,
+            other => {
+                return Err(VenueError::BadReply(format!(
+                    "nonzero position in {venue_symbol} has unknown positionType {other:?}"
+                )))
+            }
         };
         let stop_px = id_text(row, "positionId")
             .and_then(|pid| stops.get(&pid).copied())
@@ -191,34 +195,48 @@ pub(crate) fn parse_positions(
 pub(crate) fn parse_open_orders(
     data: &Value,
     contracts: &Contracts,
-) -> Result<Vec<VenueOrder>, VenueError> {
+) -> Result<(Vec<VenueOrder>, usize), VenueError> {
     let rows = rows_of(data)
         .ok_or_else(|| VenueError::BadReply("open orders carried no rows".into()))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let Some(venue_symbol) = row.get("symbol").and_then(Value::as_str) else { continue };
-        let Some(symbol) = contracts.symbol_of(venue_symbol) else { continue };
-        let Some(contract) = contracts.any(symbol) else { continue };
-        let Some((side, is_close)) = row.get("side").and_then(Value::as_i64).and_then(side_of)
-        else {
-            continue;
-        };
-        let vol = row.get("vol").and_then(Value::as_f64).unwrap_or(0.0);
-        let deal_vol = row.get("dealVol").and_then(Value::as_f64).unwrap_or(0.0);
+        let client_order_id = str_field(row, "externalOid")?;
+        if client_order_id.trim().is_empty() {
+            return Err(VenueError::BadReply(
+                "a working order has no attributable externalOid".into(),
+            ));
+        }
+        let venue_symbol = str_field(row, "symbol")?;
+        let symbol = contracts.symbol_of(&venue_symbol).ok_or_else(|| {
+            VenueError::BadReply(format!("working order names unknown contract {venue_symbol}"))
+        })?;
+        let contract = contracts
+            .any(symbol)
+            .ok_or_else(|| VenueError::BadReply(format!("contract metadata vanished for {symbol}")))?;
+        let side_raw = row
+            .get("side")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| VenueError::BadReply(format!("working order {client_order_id} has no integer side")))?;
+        let (side, is_close) = side_of(side_raw).ok_or_else(|| {
+            VenueError::BadReply(format!("working order {client_order_id} has unknown side {side_raw}"))
+        })?;
+        let vol = num_field(row, "vol")?;
+        let deal_vol = num_field(row, "dealVol")?;
+        if vol <= 0.0 || deal_vol < 0.0 || deal_vol > vol {
+            return Err(VenueError::BadReply(format!(
+                "working order {client_order_id} has invalid volume {vol} or filled volume {deal_vol}"
+            )));
+        }
         out.push(VenueOrder {
-            client_order_id: row
-                .get("externalOid")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            symbol: venue_symbol.to_string(),
+            client_order_id,
+            symbol: venue_symbol,
             side,
             qty: contract.base_for(vol),
             filled_qty: contract.base_for(deal_vol),
             reduce_only: is_close,
         });
     }
-    Ok(out)
+    Ok((out, rows.len()))
 }
 
 /// One page of the venue's own fill history.
@@ -456,12 +474,42 @@ mod tests {
             "orderId": "739113577038255616", "symbol": "BTC_USDT", "side": 4,
             "vol": 10, "dealVol": 3, "price": 77500.1, "externalOid": "eng-7", "state": 2
         }]});
-        let out = parse_open_orders(&data, &contracts()).unwrap();
+        let (out, raw_count) = parse_open_orders(&data, &contracts()).unwrap();
+        assert_eq!(raw_count, 1);
         assert_eq!(out[0].client_order_id, "eng-7");
         assert_eq!(out[0].qty, 0.001);
         assert_eq!(out[0].filled_qty, 0.0003);
         assert_eq!(out[0].side, Side::Sell);
         assert!(out[0].reduce_only, "side 4 is a close");
+    }
+
+    #[test]
+    fn an_unattributable_open_order_invalidates_the_snapshot() {
+        for external_oid in [Value::Null, json!(7), json!("")] {
+            let data = json!({"resultList": [{
+                "symbol": "BTC_USDT", "side": 1, "vol": 1, "dealVol": 0,
+                "externalOid": external_oid
+            }]});
+            assert!(matches!(
+                parse_open_orders(&data, &contracts()),
+                Err(VenueError::BadReply(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_full_open_order_page_reports_raw_venue_cardinality() {
+        let rows: Vec<Value> = (0..100)
+            .map(|id| {
+                json!({
+                    "symbol": "BTC_USDT", "side": 1, "vol": 1, "dealVol": 0,
+                    "externalOid": format!("eng-{id}")
+                })
+            })
+            .collect();
+        let (parsed, raw_count) = parse_open_orders(&json!({"resultList": rows}), &contracts()).unwrap();
+        assert_eq!(raw_count, 100, "a full page was mistaken for the end");
+        assert_eq!(parsed.len(), raw_count, "the strict parser silently dropped a row");
     }
 
     #[test]
@@ -486,5 +534,18 @@ mod tests {
         assert!(parse_positions(&flat, &contracts(), &ids(), &HashMap::new())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn a_nonzero_position_with_unknown_direction_invalidates_the_snapshot() {
+        for position_type in [Value::Null, json!(3), json!("1")] {
+            let data = json!([{
+                "symbol": "BTC_USDT", "holdVol": 5, "positionType": position_type
+            }]);
+            assert!(matches!(
+                parse_positions(&data, &contracts(), &ids(), &HashMap::new()),
+                Err(VenueError::BadReply(_))
+            ));
+        }
     }
 }

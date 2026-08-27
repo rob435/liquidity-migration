@@ -275,16 +275,26 @@ pub(crate) fn parse_working_orders(orders: &Value) -> Result<Vec<VenueOrder>, Ve
         let coin = str_field(row, "coin")?;
         let remaining = num_field(row, "sz")?;
         let original = opt_num_field(row, "origSz")?.unwrap_or(remaining);
-        // Three cases, and they are not the same. No cloid at all is the
-        // venue's own doing — the stop this adapter attaches to a position
-        // carries none — and reconcile reads an empty id as exactly that. A
-        // cloid that decodes is ours. A cloid that does NOT decode is somebody
-        // else writing to this account, and it is carried through as itself so
-        // reconcile can say so; flattening it to empty would hide the second
-        // writer the check exists to find.
-        let client_order_id = match row.get("cloid").and_then(Value::as_str) {
-            None => String::new(),
-            Some(raw) => cloid::from_cloid(raw).unwrap_or_else(|| raw.to_string()),
+        // A foreign cloid remains visible to reconciliation. No readable
+        // cloid is allowed only on the exact native stop shape this adapter
+        // places; otherwise an unattributable live order invalidates the read.
+        let client_order_id = match row.get("cloid") {
+            Some(Value::String(raw)) if !raw.trim().is_empty() => {
+                cloid::from_cloid(raw).unwrap_or_else(|| raw.to_string())
+            }
+            None | Some(Value::Null) | Some(Value::String(_)) if is_supported_native_stop(row)? => {
+                String::new()
+            }
+            Some(Value::String(_)) | None | Some(Value::Null) => {
+                return Err(VenueError::BadReply(format!(
+                    "working order in {coin} has no readable cloid and is not a supported native stop"
+                )))
+            }
+            Some(_) => {
+                return Err(VenueError::BadReply(format!(
+                    "working order in {coin} has a cloid that is not a string"
+                )))
+            }
         };
         out.push(VenueOrder {
             client_order_id,
@@ -296,6 +306,20 @@ pub(crate) fn parse_working_orders(orders: &Value) -> Result<Vec<VenueOrder>, Ve
         });
     }
     Ok(out)
+}
+
+fn is_supported_native_stop(row: &Value) -> Result<bool, VenueError> {
+    if row.get("isTrigger").and_then(Value::as_bool) != Some(true)
+        || row.get("reduceOnly").and_then(Value::as_bool) != Some(true)
+    {
+        return Ok(false);
+    }
+    let kind = row.get("orderType").and_then(Value::as_str).unwrap_or_default();
+    let Some(trigger) = opt_num_field(row, "triggerPx")? else { return Ok(false) };
+    Ok(
+        (kind.eq_ignore_ascii_case("Stop Market") || kind.eq_ignore_ascii_case("Stop Limit"))
+            && trigger > 0.0,
+    )
 }
 
 /// Fills out of a `userFillsByTime` reply.
@@ -529,7 +553,8 @@ mod tests {
         let orders = json!([
             {"coin": "BTC", "side": "B", "sz": "1", "origSz": "1", "reduceOnly": false,
              "cloid": "0x0102030405060708090a0b0c0d0e0f10"},
-            {"coin": "ETH", "side": "A", "sz": "1", "origSz": "1", "reduceOnly": true}
+            {"coin": "ETH", "side": "A", "sz": "1", "origSz": "1", "reduceOnly": true,
+             "isTrigger": true, "orderType": "Stop Market", "triggerPx": "3000"}
         ]);
         let rows = parse_working_orders(&orders).unwrap();
         assert_eq!(
@@ -543,12 +568,32 @@ mod tests {
     }
 
     #[test]
+    fn an_unattributable_non_stop_order_invalidates_the_snapshot() {
+        for row in [
+            json!({"coin": "ETH", "side": "A", "sz": "1", "reduceOnly": false}),
+            // Even an otherwise valid native-stop shape cannot excuse a cloid
+            // of the wrong JSON type.
+            json!({"coin": "ETH", "side": "A", "sz": "1", "reduceOnly": true,
+                   "isTrigger": true, "orderType": "Stop Market", "triggerPx": "3000",
+                   "cloid": 7}),
+            json!({"coin": "ETH", "side": "A", "sz": "1", "reduceOnly": false,
+                   "cloid": ""}),
+        ] {
+            assert!(matches!(
+                parse_working_orders(&json!([row])),
+                Err(VenueError::BadReply(_))
+            ));
+        }
+    }
+
+    #[test]
     fn a_working_order_carries_the_engine_id_it_was_sent_with() {
         let our_cloid = cloid::to_cloid("eng-1700000000000-4");
         let orders = json!([
             {"coin": "BTC", "side": "B", "sz": "0.004", "origSz": "0.01",
              "cloid": our_cloid, "reduceOnly": false},
-            {"coin": "ETH", "side": "A", "sz": "1", "origSz": "1", "reduceOnly": true}
+            {"coin": "ETH", "side": "A", "sz": "1", "origSz": "1", "reduceOnly": true,
+             "isTrigger": true, "orderType": "Stop Market", "triggerPx": "3000"}
         ]);
         let rows = parse_working_orders(&orders).unwrap();
         assert_eq!(rows[0].client_order_id, "eng-1700000000000-4");

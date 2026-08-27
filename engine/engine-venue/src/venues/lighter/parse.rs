@@ -155,16 +155,18 @@ pub(crate) fn parse_working_orders(
             .unwrap_or_else(|| format!("market-{market_index}"));
         let original = num_field(row, "initial_base_amount")?;
         let remaining = num_field(row, "remaining_base_amount")?;
+        let client_order_index = int_field(row, "client_order_index")?;
+        let client_order_id = match order_index::from_index(client_order_index) {
+            Some(id) => id,
+            None if is_supported_native_stop(row)? => String::new(),
+            None => {
+                return Err(VenueError::BadReply(format!(
+                    "working order in {symbol} has undecodable client order index {client_order_index} and is not a supported native stop"
+                )))
+            }
+        };
         out.push(VenueOrder {
-            // An index that does not unpack is left empty, which reconcile
-            // reads as "the venue's own" and trades through. That is right for
-            // the stops this adapter places — their index is hashed and no
-            // longer says who made it — and it is the cost: a second writer on
-            // this account is not visible here the way it is on Bybit and
-            // Hyperliquid, where our own stops carry no id at all and a
-            // stranger's does.
-            client_order_id: order_index::from_index(int_field(row, "client_order_index")?)
-                .unwrap_or_default(),
+            client_order_id,
             symbol,
             side: if row.get("is_ask").and_then(Value::as_bool).unwrap_or(false) {
                 Side::Sell
@@ -177,6 +179,19 @@ pub(crate) fn parse_working_orders(
         });
     }
     Ok(out)
+}
+
+fn is_supported_native_stop(row: &Value) -> Result<bool, VenueError> {
+    if row.get("reduce_only").and_then(Value::as_bool) != Some(true)
+        || !row
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .eq_ignore_ascii_case("stop_loss")
+    {
+        return Ok(false);
+    }
+    Ok(opt_num_field(row, "trigger_price")?.is_some_and(|trigger| trigger > 0.0))
 }
 
 /// The stops standing against each market, read off the open orders.
@@ -435,16 +450,29 @@ mod tests {
              "reduce_only": false, "type": "limit"},
             {"market_index": 0, "client_order_index": 5, "is_ask": true,
              "initial_base_amount": "1", "remaining_base_amount": "1",
-             "reduce_only": true, "type": "limit"}
+             "reduce_only": true, "type": "stop_loss", "trigger_price": "93000"}
         ]});
         let rows = parse_working_orders(&reply, &markets()).unwrap();
         assert_eq!(rows[0].client_order_id, "eng-1700000000000-4");
         assert_eq!(rows[0].symbol, "BTCUSDT");
         assert_eq!(rows[0].side, Side::Buy);
         assert!((rows[0].filled_qty - 0.006).abs() < 1e-12);
-        // An order nobody here placed has no id of ours.
+        // The adapter's hashed native stop is positively identified by shape.
         assert_eq!(rows[1].client_order_id, "");
         assert_eq!(rows[1].side, Side::Sell);
+    }
+
+    #[test]
+    fn an_undecodable_non_stop_order_invalidates_the_snapshot() {
+        let reply = json!({"code": 200, "orders": [{
+            "market_index": 0, "client_order_index": 5, "is_ask": false,
+            "initial_base_amount": "1", "remaining_base_amount": "1",
+            "reduce_only": false, "type": "limit"
+        }]});
+        assert!(matches!(
+            parse_working_orders(&reply, &markets()),
+            Err(VenueError::BadReply(_))
+        ));
     }
 
     #[test]

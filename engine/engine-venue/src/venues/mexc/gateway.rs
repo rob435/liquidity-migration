@@ -487,14 +487,15 @@ impl VenueGateway for MexcGateway {
                 .await?;
             let data = venue_result(&body)?.clone();
             let contracts = self.contracts().await?;
-            let rows = parse_open_orders(&data, contracts)?;
-            let short_page = rows.len() < PAGE_SIZE as usize;
+            let (rows, raw_count) = parse_open_orders(&data, contracts)?;
             out.extend(rows);
-            if short_page {
-                break;
+            if raw_count < PAGE_SIZE as usize {
+                return Ok(out);
             }
         }
-        Ok(out)
+        Err(VenueError::BadReply(format!(
+            "working-order listing still had pages after {MAX_PAGES}"
+        )))
     }
 
     async fn executions(
