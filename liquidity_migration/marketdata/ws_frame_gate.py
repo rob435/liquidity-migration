@@ -13,17 +13,12 @@ bar.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from typing import Any
 
 
 CONFIRM_TRUE = '"confirm":true'
 CONFIRM_FALSE = '"confirm":false'
-TICKER_TOPIC_PREFIX = '{"topic":"tickers.'
-TICKER_DELTA_TYPE = '"type":"delta"'
-
-
 def kline_frame_needs_decode(raw: Any) -> bool:
     """False only for a kline frame whose every bar is still open.
 
@@ -66,60 +61,6 @@ class KlineFrameGate:
         if hook is not None:
             hook()
         return False
-
-    def stats(self) -> dict[str, int]:
-        return {"frames_seen": self.frames_seen, "frames_dropped": self.frames_dropped}
-
-
-class TickerFrameSampler:
-    """Passes at most one ticker delta per symbol per ``min_interval_seconds``.
-
-    Snapshot frames always pass: pybit rebuilds its per-topic row from them,
-    and a dropped snapshot would leave the next delta writing into an empty
-    list. The per-symbol map is bounded by the subscribed universe.
-    """
-
-    __slots__ = (
-        "min_interval_seconds",
-        "frames_seen",
-        "frames_dropped",
-        "_monotonic",
-        "_last_by_symbol",
-    )
-
-    def __init__(
-        self,
-        *,
-        min_interval_seconds: float = 5.0,
-        monotonic: Callable[[], float] = time.monotonic,
-    ) -> None:
-        if min_interval_seconds < 0.0:
-            raise ValueError("min_interval_seconds must be non-negative")
-        self.min_interval_seconds = float(min_interval_seconds)
-        self.frames_seen = 0
-        self.frames_dropped = 0
-        self._monotonic = monotonic
-        self._last_by_symbol: dict[str, float] = {}
-
-    def accepts(self, raw: Any) -> bool:
-        self.frames_seen += 1
-        if self.min_interval_seconds <= 0.0 or not isinstance(raw, str):
-            return True
-        if not raw.startswith(TICKER_TOPIC_PREFIX):
-            return True
-        if TICKER_DELTA_TYPE not in raw:
-            return True
-        end = raw.find('"', len(TICKER_TOPIC_PREFIX))
-        if end < 0:
-            return True
-        symbol = raw[len(TICKER_TOPIC_PREFIX) : end]
-        now = self._monotonic()
-        last = self._last_by_symbol.get(symbol)
-        if last is not None and now - last < self.min_interval_seconds:
-            self.frames_dropped += 1
-            return False
-        self._last_by_symbol[symbol] = now
-        return True
 
     def stats(self) -> dict[str, int]:
         return {"frames_seen": self.frames_seen, "frames_dropped": self.frames_dropped}

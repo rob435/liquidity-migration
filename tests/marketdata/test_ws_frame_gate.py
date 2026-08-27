@@ -12,7 +12,6 @@ import pytest
 
 from liquidity_migration.marketdata.ws_frame_gate import (
     KlineFrameGate,
-    TickerFrameSampler,
     kline_frame_needs_decode,
 )
 
@@ -33,28 +32,6 @@ HOUR_BOUNDARY_KLINE = (
 )
 SUBSCRIBE_ACK = '{"success":true,"ret_msg":"","conn_id":"abc-123","req_id":"r1","op":"subscribe"}'
 CUSTOM_PONG = '{"success":true,"ret_msg":"pong","conn_id":"abc-123","op":"ping"}'
-
-TICKER_DELTA = (
-    '{"topic":"tickers.BTCUSDT","type":"delta","data":{"symbol":"BTCUSDT","lastPrice":"115100"},'
-    '"cs":123456789,"ts":1754201234567}'
-)
-TICKER_SNAPSHOT = (
-    '{"topic":"tickers.BTCUSDT","type":"snapshot","data":{"symbol":"BTCUSDT","lastPrice":"115100",'
-    '"markPrice":"115098"},"cs":123456788,"ts":1754201234000}'
-)
-
-
-def _ticker_delta(symbol: str) -> str:
-    return TICKER_DELTA.replace("BTCUSDT", symbol)
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
 
 def test_unconfirmed_kline_frame_is_dropped() -> None:
     gate = KlineFrameGate()
@@ -108,40 +85,3 @@ def test_drop_hook_fires_only_on_the_drop_path() -> None:
     assert calls == []
     gate.accepts(UNCONFIRMED_KLINE)
     assert calls == [1]
-
-
-def test_sampler_passes_one_delta_per_symbol_per_interval() -> None:
-    clock = _FakeClock()
-    sampler = TickerFrameSampler(min_interval_seconds=5.0, monotonic=clock)
-    assert sampler.accepts(_ticker_delta("AAAUSDT")) is True
-    clock.now = 1.0
-    assert sampler.accepts(_ticker_delta("AAAUSDT")) is False
-    # A different symbol has its own clock.
-    assert sampler.accepts(_ticker_delta("BBBUSDT")) is True
-    clock.now = 6.0
-    assert sampler.accepts(_ticker_delta("AAAUSDT")) is True
-    assert sampler.stats() == {"frames_seen": 4, "frames_dropped": 1}
-
-
-def test_sampler_never_drops_snapshots_or_other_topics() -> None:
-    clock = _FakeClock()
-    sampler = TickerFrameSampler(min_interval_seconds=5.0, monotonic=clock)
-    assert sampler.accepts(TICKER_SNAPSHOT) is True
-    assert sampler.accepts(TICKER_SNAPSHOT) is True
-    assert sampler.accepts(UNCONFIRMED_KLINE) is True
-    assert sampler.accepts(SUBSCRIBE_ACK) is True
-    assert sampler.accepts(b'{"topic":"tickers.BTCUSDT","type":"delta"}') is True
-    assert sampler.stats()["frames_dropped"] == 0
-
-
-def test_sampler_with_zero_interval_is_disabled() -> None:
-    clock = _FakeClock()
-    sampler = TickerFrameSampler(min_interval_seconds=0.0, monotonic=clock)
-    assert sampler.accepts(_ticker_delta("AAAUSDT")) is True
-    assert sampler.accepts(_ticker_delta("AAAUSDT")) is True
-    assert sampler.stats() == {"frames_seen": 2, "frames_dropped": 0}
-
-
-def test_sampler_rejects_a_negative_interval() -> None:
-    with pytest.raises(ValueError, match="non-negative"):
-        TickerFrameSampler(min_interval_seconds=-1.0)

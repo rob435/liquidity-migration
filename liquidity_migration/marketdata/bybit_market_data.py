@@ -20,7 +20,7 @@ from liquidity_migration.marketdata.bybit_errors import (
     is_rate_limit as _is_rate_limit,
     is_transient_venue_fault as _is_transient_venue_fault,
 )
-from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate, TickerFrameSampler
+from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate
 
 try:
     from pybit.unified_trading import HTTP, WebSocket
@@ -473,25 +473,15 @@ class BybitPublicTickerStream:
     # against the same WebSocket — pybit queues multiple subscribe frames
     # on the same connection.
     subscribe_args_per_message: int = 10
-    # One delta per symbol every this many seconds is enough: the cycle reads
-    # the cache once a minute and a REST snapshot replaces the whole cache every
-    # 60 s. 0 disables the sampler.
-    sample_interval_seconds: float = 5.0
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if WebSocket is None:
             raise RuntimeError("pybit is required for BybitPublicTickerStream")
         _patch_pybit_daemon_ping_timer()
-        if self.sample_interval_seconds > 0.0 and _websocket_supports_frame_gate():
-            self._client = _gated_websocket_class()(
-                frame_gate=TickerFrameSampler(min_interval_seconds=self.sample_interval_seconds),
-                testnet=self.testnet,
-                demo=self.demo,
-                channel_type=self.category,
-            )
-        else:
-            self._client = WebSocket(testnet=self.testnet, demo=self.demo, channel_type=self.category)
+        # Ticker messages are deltas. Every one must reach pybit so its cached
+        # row remains a complete view of the latest venue state.
+        self._client = WebSocket(testnet=self.testnet, demo=self.demo, channel_type=self.category)
 
     def subscribe_tickers(self, symbols: str | list[str], callback: Any) -> None:
         if isinstance(symbols, str):
@@ -504,9 +494,7 @@ class BybitPublicTickerStream:
             self._client.ticker_stream(symbol=slice_, callback=callback)
 
     def stats(self) -> dict[str, int]:
-        """Frames the sampler saw and dropped before decode; zeros when ungated."""
-        frames_seen, frames_dropped = _frame_gate_stats(self._client)
-        return {"frames_seen": frames_seen, "frames_dropped_pre_decode": frames_dropped}
+        return {"frames_seen": 0, "frames_dropped_pre_decode": 0}
 
     def close(self) -> None:
         _close_ws_client(self._client)

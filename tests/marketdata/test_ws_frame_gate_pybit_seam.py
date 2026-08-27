@@ -13,7 +13,7 @@ import pytest
 
 from liquidity_migration.marketdata import bybit_market_data
 from liquidity_migration.marketdata.bybit_market_data import _FrameGatedWebSocketMixin
-from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate, TickerFrameSampler
+from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate
 
 pybit_stream = pytest.importorskip("pybit._websocket_stream")
 unified_trading = pytest.importorskip("pybit.unified_trading")
@@ -61,9 +61,8 @@ def test_gated_class_puts_the_override_ahead_of_pybit() -> None:
     assert bybit_market_data._gated_websocket_class() is gated  # built once
 
 
-def test_both_producers_install_a_gate_on_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A fake pybit that has the decode seam: klines get a KlineFrameGate, tickers a
-    sampler. Without this the gates could quietly stop being installed at all."""
+def test_only_complete_kline_frames_are_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ticker deltas all reach pybit; only incomplete kline frames are dropped."""
 
     class _FakeBase:
         def __init__(self, **kwargs: object) -> None:
@@ -81,8 +80,8 @@ def test_both_producers_install_a_gate_on_the_client(monkeypatch: pytest.MonkeyP
     assert kline_client.kwargs == {"testnet": True, "demo": True, "channel_type": "linear"}
 
     stream = bybit_market_data.BybitPublicTickerStream(testnet=True, demo=False)
-    assert isinstance(stream._client.frame_gate, TickerFrameSampler)
-    assert stream._client.frame_gate.min_interval_seconds == 5.0
+    assert type(stream._client) is _FakeBase
+    assert stream._client.kwargs == {"testnet": True, "demo": False, "channel_type": "linear"}
 
 
 def test_pybit_still_decodes_inside_the_method_we_override() -> None:

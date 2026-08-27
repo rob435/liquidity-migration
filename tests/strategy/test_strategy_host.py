@@ -317,6 +317,24 @@ def test_an_unwatched_symbol_never_wakes_the_loop(tmp_path: Path) -> None:
     assert daemon._bar_event.is_set() is False
 
 
+def test_distinct_crossed_symbols_are_not_globally_debounced(tmp_path: Path) -> None:
+    daemon, reported = _price_wake_host(tmp_path)
+    reported["levels"] = [
+        {"symbol": "AAAUSDT", "at_or_below": 100.0},
+        {"symbol": "BBBUSDT", "at_or_below": 50.0},
+    ]
+    daemon._run_one_cycle()
+    daemon._bar_event.clear()
+
+    daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.0))
+    assert daemon._bar_event.is_set() is True
+    daemon._bar_event.clear()
+
+    daemon._handle_ticker_message(_ticker_push("BBBUSDT", 49.0))
+    assert daemon._bar_event.is_set() is True
+    assert set(daemon._price_wake_fired) == {"AAAUSDT", "BBBUSDT"}
+
+
 def test_a_churning_tick_stream_cannot_spin_cycles(tmp_path: Path) -> None:
     daemon, reported = _price_wake_host(tmp_path)
     reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
@@ -327,17 +345,13 @@ def test_a_churning_tick_stream_cannot_spin_cycles(tmp_path: Path) -> None:
     assert daemon._bar_event.is_set() is True
 
     # A cycle consumes the wake; the next hundred ticks are all still below
-    # the level and must not re-arm it inside the debounce window.
+    # the same registered level and must not re-arm it.
     daemon._bar_event.clear()
     for tick in range(100):
         daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.0 - tick * 0.001))
     assert daemon._bar_event.is_set() is False
 
-    # Even past the debounce window the same registration stays silent: it
-    # already woke a cycle, and until a cycle re-arms the symbol the idle
-    # grid owns the retries. Without the latch a level that cannot clear
-    # would re-fire every debounce interval for a whole owner outage.
-    daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
+    # The same registration stays silent until a cycle changes the level.
     daemon._handle_ticker_message(_ticker_push("AAAUSDT", 98.0))
     assert daemon._bar_event.is_set() is False
 
@@ -363,7 +377,6 @@ def test_a_level_that_cannot_clear_wakes_once_until_it_is_rearmed(tmp_path: Path
     daemon._bar_event.clear()
     daemon._run_one_cycle()
     daemon._bar_event.clear()
-    daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
     daemon._handle_ticker_message(_ticker_push("AAAUSDT", 93.0))
     assert daemon._bar_event.is_set() is False
 
@@ -371,7 +384,6 @@ def test_a_level_that_cannot_clear_wakes_once_until_it_is_rearmed(tmp_path: Path
     reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 92.0}]
     daemon._run_one_cycle()
     daemon._bar_event.clear()
-    daemon._last_price_wake_monotonic -= daemon._price_wake_min_interval_seconds
     daemon._handle_ticker_message(_ticker_push("AAAUSDT", 91.0))
     assert daemon._bar_event.is_set() is True
 

@@ -71,7 +71,6 @@ _logger = logging.getLogger("liquidity_migration.strategy.strategy_host")
 # A churning tick stream must not spin cycles: at most one price wake per
 # this window, timed from the last one that ended a wait. A touch suppressed
 # inside the window stays registered, so the next tick past it still wakes.
-PRICE_WAKE_MIN_INTERVAL_SECONDS = 2.0
 
 
 class HostedCycleConfig(Protocol):
@@ -224,8 +223,6 @@ class StrategyHostDaemon:
         # until a cycle re-arms the symbol with a different pair.
         self._price_wake_fired: dict[str, tuple[float | None, float | None]] = {}
         self._price_wake_pending = False
-        self._price_wake_min_interval_seconds = PRICE_WAKE_MIN_INTERVAL_SECONDS
-        self._last_price_wake_monotonic = 0.0
         self._cycles_price_triggered = 0
         self._cycles_run = 0
         self._cycle_errors = 0
@@ -326,10 +323,6 @@ class StrategyHostDaemon:
                 break
         if touched_symbol is None:
             return
-        now = time.monotonic()
-        if now - self._last_price_wake_monotonic < self._price_wake_min_interval_seconds:
-            return
-        self._last_price_wake_monotonic = now
         # Rebind, never mutate: the cycle thread iterates this dict without a
         # lock, and an in-place insert from this WS thread can kill its pass
         # mid-comprehension ("dictionary changed size during iteration").
