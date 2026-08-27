@@ -365,16 +365,18 @@ def test_summary_formatter_renders_flat_payload() -> None:
             "desired_gross_weight": 0.1375,
             "standing_symbols": 2,
             "open_positions": 2,
-            "exit_targets_queued": 1,
-            "entry_targets_queued": 2,
-            "resize_targets_queued": 1,
+            "exit_book_removals": 1,
+            "entry_book_additions": 2,
+            "book_resizes": 1,
+            "book_written": True,
             "equity_usdt": 10_000.0,
         }
     )
 
     assert line.startswith("carry target producer")
     assert "decision_day=2024-10-04" in line
-    assert "pub exit/entry/resize=1/2/1" in line
+    assert "book_delta exit/entry/resize=1/2/1" in line
+    assert "written=True" in line
     assert "err=none" in line
 
 
