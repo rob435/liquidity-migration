@@ -4,8 +4,7 @@
 //! carries a [`WorkPolicy`] instead goes out as a limit at the touch, and this
 //! supervisor advances it: it moves with the book, escalates as the window
 //! runs out, crosses at the end, and pulls the order if the cross cannot clear
-//! it. This is a port of the Python fleet's
-//! `liquidity_migration/venue/entry_quote_manager.py`.
+//! it. The Rust tests in this module are the executable policy contract.
 //!
 //! It lives in the core rather than in a strategy on purpose. Every strategy
 //! should get this, and no strategy should be writing a repricing loop — a

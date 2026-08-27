@@ -4,9 +4,8 @@
 //! order's own price and counters, and the policy are all arguments, so every
 //! rule here can be read off a test instead of out of a running engine.
 //!
-//! The whole recipe is a port of the Python fleet's
-//! `liquidity_migration/venue/entry_quote_manager.py`, whose numbers come from
-//! a 34-symbol night replay of recorded books (199,785 paired attempts, fill
+//! The recipe's numbers come from a 34-symbol night replay of recorded books
+//! (199,785 paired attempts, fill
 //! bounds that respect queue position). It measured 0.36 bp per entry cheaper
 //! than plainly joining the touch and repricing on a timer, with deadline
 //! crosses halved.
