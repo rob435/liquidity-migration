@@ -140,12 +140,7 @@ def test_one_unreadable_row_fails_the_whole_read(tmp_path: Path) -> None:
         read_book_state(path)
 
 
-def test_a_bad_cooldown_stamp_is_skipped_loudly_and_the_record_survives(
-    tmp_path: Path,
-) -> None:
-    """A cooldown stamp gates nothing but re-entry timing; it can be skipped
-    without risking a position. The rest of the record stays usable."""
-
+def test_a_bad_cooldown_stamp_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "cooldown.json"
     payload = {
         "version": 2,
@@ -155,9 +150,53 @@ def test_a_bad_cooldown_stamp_is_skipped_loudly_and_the_record_survives(
     }
     path.write_text(json.dumps(payload))
 
-    back = read_book_state(path)
-    assert list(back.held) == ["KAITOUSDT"]
-    assert back.left_at_ms == {}
+    with pytest.raises(BookStateError, match="cooldown stamp"):
+        read_book_state(path)
+
+
+def test_a_missing_held_collection_cannot_be_read_as_flat(tmp_path: Path) -> None:
+    path = tmp_path / "missing-held.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "left_at_ms": {},
+                "attempted_signals_ms": {},
+            }
+        )
+    )
+
+    with pytest.raises(BookStateError, match="unexpected or missing fields"):
+        read_book_state(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("seen_held", "false"),
+        ("notional_usdt", "120.0"),
+        ("entered_ts_ms", 1.5),
+    ],
+)
+def test_a_held_row_does_not_coerce_schema_types(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    path = tmp_path / "coerced.json"
+    row = asdict(_entry("KAITOUSDT"))
+    row[field] = value
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "held": [row],
+                "left_at_ms": {},
+                "attempted_signals_ms": {},
+            }
+        )
+    )
+
+    with pytest.raises(BookStateError, match="unreadable"):
+        read_book_state(path)
 
 
 def test_venue_truth_written_on_an_entry_reads_back(tmp_path: Path) -> None:

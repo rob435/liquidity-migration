@@ -27,10 +27,9 @@ as "holds nothing" would drop every open name at once.
 from __future__ import annotations
 
 import json
-import logging
 import math
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +37,6 @@ import polars as pl
 
 from liquidity_migration.core.artifact_snapshot import read_stable_file
 from liquidity_migration.core.durable_file import durable_atomic_replace
-
-_LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "BOOK_STATE_VERSION",
@@ -114,6 +111,9 @@ class LongBookEntry:
     requested_ts_ms: int = 0
     entry_valid_until_ms: int = 0
     max_hold_duration_ms: int = 0
+
+
+_ENTRY_FIELDS = frozenset(item.name for item in fields(LongBookEntry))
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,39 +244,87 @@ def read_book_state(path: str | Path) -> LongBookState:
     if not isinstance(payload, dict):
         raise BookStateError(f"{resolved}: payload is {type(payload).__name__}, not an object")
     version = payload.get("version")
-    if version != BOOK_STATE_VERSION:
+    if type(version) is not int or version != BOOK_STATE_VERSION:
         raise BookStateError(
             f"{resolved}: version {version!r}, and this reader only knows {BOOK_STATE_VERSION}"
         )
+    expected_fields = {"version", "held", "left_at_ms", "attempted_signals_ms"}
+    if set(payload) != expected_fields:
+        raise BookStateError(f"{resolved}: state has unexpected or missing fields")
+    raw_held = payload["held"]
+    raw_left = payload["left_at_ms"]
+    raw_attempts = payload["attempted_signals_ms"]
+    if not isinstance(raw_held, list):
+        raise BookStateError(f"{resolved}: held is not an array")
+    if not isinstance(raw_left, dict):
+        raise BookStateError(f"{resolved}: left_at_ms is not an object")
+    if not isinstance(raw_attempts, dict):
+        raise BookStateError(f"{resolved}: attempted_signals_ms is not an object")
 
     held: dict[str, LongBookEntry] = {}
-    for index, row in enumerate(payload.get("held") or []):
+    text_fields = {"trade_id", "symbol", "strategy_id", "pattern", "entry_reason"}
+    number_fields = {
+        "notional_usdt",
+        "stop_loss_fraction",
+        "leverage",
+        "entry_price",
+        "decayed_stop_loss_pct",
+        "atr_14d_pct",
+        "venue_qty",
+        "venue_avg_entry_px",
+    }
+    integer_fields = {
+        "entered_ts_ms",
+        "max_hold_deadline_ts_ms",
+        "signal_ts_ms",
+        "stop_decay_after_ms",
+        "venue_ts_ms",
+        "requested_ts_ms",
+        "entry_valid_until_ms",
+        "max_hold_duration_ms",
+    }
+    for index, row in enumerate(raw_held):
         if not isinstance(row, dict):
             raise BookStateError(f"{resolved}: held row {index} is not an object")
+        if set(row) != _ENTRY_FIELDS:
+            raise BookStateError(
+                f"{resolved}: held row {index} ({row.get('symbol')!r}) has unexpected or missing fields"
+            )
         try:
+            if any(not isinstance(row[name], str) for name in text_fields):
+                raise TypeError("text field is not a string")
+            if any(
+                isinstance(row[name], bool) or not isinstance(row[name], (int, float))
+                for name in number_fields
+            ):
+                raise TypeError("numeric field is not a JSON number")
+            if any(isinstance(row[name], bool) or not isinstance(row[name], int) for name in integer_fields):
+                raise TypeError("timestamp or duration field is not a JSON integer")
+            if not isinstance(row["seen_held"], bool):
+                raise TypeError("seen_held is not a JSON boolean")
             entry = LongBookEntry(
-                trade_id=str(row["trade_id"]),
-                symbol=str(row["symbol"]).upper(),
-                strategy_id=str(row.get("strategy_id") or ""),
+                trade_id=row["trade_id"],
+                symbol=row["symbol"],
+                strategy_id=row["strategy_id"],
                 notional_usdt=float(row["notional_usdt"]),
                 stop_loss_fraction=float(row["stop_loss_fraction"]),
-                leverage=float(row.get("leverage") or 1.0),
+                leverage=float(row["leverage"]),
                 entered_ts_ms=int(row["entered_ts_ms"]),
-                entry_price=float(row.get("entry_price") or 0.0),
-                max_hold_deadline_ts_ms=int(row.get("max_hold_deadline_ts_ms") or 0),
-                signal_ts_ms=int(row.get("signal_ts_ms") or 0),
-                seen_held=bool(row.get("seen_held")),
-                stop_decay_after_ms=int(row.get("stop_decay_after_ms") or 0),
-                decayed_stop_loss_pct=float(row.get("decayed_stop_loss_pct") or 0.0),
-                atr_14d_pct=float(row.get("atr_14d_pct") or 0.0),
-                pattern=str(row.get("pattern") or ""),
-                entry_reason=str(row.get("entry_reason") or ""),
-                venue_qty=float(row.get("venue_qty") or 0.0),
-                venue_avg_entry_px=float(row.get("venue_avg_entry_px") or 0.0),
-                venue_ts_ms=int(row.get("venue_ts_ms") or 0),
-                requested_ts_ms=int(row.get("requested_ts_ms") or 0),
-                entry_valid_until_ms=int(row.get("entry_valid_until_ms") or 0),
-                max_hold_duration_ms=int(row.get("max_hold_duration_ms") or 0),
+                entry_price=float(row["entry_price"]),
+                max_hold_deadline_ts_ms=int(row["max_hold_deadline_ts_ms"]),
+                signal_ts_ms=int(row["signal_ts_ms"]),
+                seen_held=row["seen_held"],
+                stop_decay_after_ms=int(row["stop_decay_after_ms"]),
+                decayed_stop_loss_pct=float(row["decayed_stop_loss_pct"]),
+                atr_14d_pct=float(row["atr_14d_pct"]),
+                pattern=row["pattern"],
+                entry_reason=row["entry_reason"],
+                venue_qty=float(row["venue_qty"]),
+                venue_avg_entry_px=float(row["venue_avg_entry_px"]),
+                venue_ts_ms=int(row["venue_ts_ms"]),
+                requested_ts_ms=int(row["requested_ts_ms"]),
+                entry_valid_until_ms=int(row["entry_valid_until_ms"]),
+                max_hold_duration_ms=int(row["max_hold_duration_ms"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             # One row this producer cannot parse means it cannot say whether
@@ -288,8 +336,9 @@ def read_book_state(path: str | Path) -> LongBookState:
         if (
             not entry.trade_id
             or not entry.symbol
-            or entry.symbol != str(row["symbol"])
+            or entry.symbol != entry.symbol.upper()
             or not entry.symbol.isalnum()
+            or not entry.strategy_id
             or not math.isfinite(entry.notional_usdt)
             or entry.notional_usdt <= 0.0
             or not math.isfinite(entry.stop_loss_fraction)
@@ -317,32 +366,33 @@ def read_book_state(path: str | Path) -> LongBookState:
         held[entry.symbol] = entry
 
     left_at_ms: dict[str, int] = {}
-    for symbol, when in (payload.get("left_at_ms") or {}).items():
-        try:
-            left_at_ms[str(symbol).upper()] = int(when)
-        except (TypeError, ValueError):
-            # Only gates a cooldown, never a holding: skip it loudly and
-            # keep the rest of the record usable.
-            _LOGGER.warning(
-                "long book state %s: cooldown stamp for %s is %r; skipping it",
-                resolved,
-                symbol,
-                when,
-            )
-            continue
+    for symbol, when in raw_left.items():
+        if (
+            not isinstance(symbol, str)
+            or not symbol
+            or symbol != symbol.upper()
+            or not symbol.isalnum()
+            or isinstance(when, bool)
+            or not isinstance(when, int)
+            or when <= 0
+        ):
+            raise BookStateError(f"{resolved}: invalid cooldown stamp for {symbol!r}")
+        left_at_ms[symbol] = when
     attempted_signals_ms: dict[str, int] = {}
-    raw_attempts = payload.get("attempted_signals_ms") or {}
-    if not isinstance(raw_attempts, dict):
-        raise BookStateError(f"{resolved}: attempted_signals_ms is not an object")
     for symbol, signal_ts_ms in raw_attempts.items():
-        name = str(symbol)
-        try:
-            stamp = int(signal_ts_ms)
-        except (TypeError, ValueError) as exc:
-            raise BookStateError(f"{resolved}: invalid attempt stamp for {name!r}") from exc
-        if not name or name != name.upper() or not name.isalnum() or stamp <= 0:
-            raise BookStateError(f"{resolved}: invalid attempted signal {name!r}={stamp!r}")
-        attempted_signals_ms[name] = stamp
+        if (
+            not isinstance(symbol, str)
+            or not symbol
+            or symbol != symbol.upper()
+            or not symbol.isalnum()
+            or isinstance(signal_ts_ms, bool)
+            or not isinstance(signal_ts_ms, int)
+            or signal_ts_ms <= 0
+        ):
+            raise BookStateError(
+                f"{resolved}: invalid attempted signal {symbol!r}={signal_ts_ms!r}"
+            )
+        attempted_signals_ms[symbol] = signal_ts_ms
     return LongBookState(
         held=held,
         left_at_ms=left_at_ms,
