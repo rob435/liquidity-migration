@@ -43,7 +43,6 @@ cd "$ROOT_DIR"
 MYPY_TARGETS=(
   liquidity_migration
   scripts/devtools/repo_doctor.py
-  scripts/research/build_trade_diagnostics.py
   scripts/data/build_candidate_tape.py
   scripts/runtime/check_fleet_liveness.py
 )

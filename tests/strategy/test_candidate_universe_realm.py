@@ -24,7 +24,6 @@ from liquidity_migration.core.venue_realm import VenueRealm
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOT_NS = 1_800_000_000_000_000_000
 PRODUCER_MODULES = (
-    "liquidity_migration/ops/candidate_rule_coverage.py",
     "liquidity_migration/strategy/carry_demo.py",
     "liquidity_migration/strategy/event_demo_data.py",
     "liquidity_migration/strategy/long_native_event_demo.py",

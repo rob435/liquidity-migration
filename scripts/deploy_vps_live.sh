@@ -145,18 +145,6 @@ if [ "$("${LOCAL_GIT[@]}" cat-file -t "$EXPECTED_COMMIT" 2>/dev/null || true)" !
     echo "EXPECTED_COMMIT is not a local commit object: $EXPECTED_COMMIT" >&2
     exit 1
 fi
-if ! MAINTENANCE_LOCK_HELPER_B64="$(
-    "${LOCAL_GIT[@]}" show \
-        "$EXPECTED_COMMIT:liquidity_migration/ops/maintenance_lock.py" \
-    | /usr/bin/python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))'
-)"; then
-    echo "expected commit does not contain the maintenance lock helper: $EXPECTED_COMMIT" >&2
-    exit 1
-fi
-[[ -n "$MAINTENANCE_LOCK_HELPER_B64" ]] || {
-    echo "expected commit returned an empty maintenance lock helper" >&2
-    exit 1
-}
 read -r -a SSH_ARGS <<< "$SSH_OPTS"
 {
     printf 'MODE=%q\n' "$MODE"
@@ -170,7 +158,6 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
     printf 'STOP_FIRST=%q\n' "$STOP_FIRST"
     printf 'REQUIRE_FLAT=%q\n' "$REQUIRE_FLAT"
-    printf 'MAINTENANCE_LOCK_HELPER_B64=%q\n' "$MAINTENANCE_LOCK_HELPER_B64"
 	cat <<'REMOTE_SCRIPT'
 # `-E` propagates the ERR trap into shell functions so a strict phase can still
 # report which phase died; see run_strict_phase below.
@@ -287,46 +274,39 @@ safe_git_with_index() {
 }
 
 acquire_maintenance_locks() {
-    local lock_dir=/run/liquidity-migration helper_output
-    local maintenance_device maintenance_inode deploy_device deploy_inode reset_device reset_inode
+    local lock_dir=/run/liquidity-migration lock_path
     # maintenance.lock is the canonical mutex; the two retired leaves stay
     # nested so an old deploy or reset process is still excluded.
-    helper_output="$(maintenance_lock_helper prepare-host)" \
-        || fail "cannot prepare persistent host maintenance locks safely"
-    IFS=$'\t' read -r \
-        maintenance_device maintenance_inode deploy_device deploy_inode reset_device reset_inode \
-        <<< "$helper_output"
-    for value in \
-        "$maintenance_device" "$maintenance_inode" "$deploy_device" \
-        "$deploy_inode" "$reset_device" "$reset_inode"; do
-        [[ "$value" =~ ^[0-9]+$ ]] \
-            || fail "maintenance lock helper returned invalid identity metadata"
+    command -v flock >/dev/null 2>&1 || fail "flock is required for deploy serialization"
+    install -d -o root -g root -m 0755 "$lock_dir" \
+        || fail "cannot prepare the maintenance lock directory"
+    for lock_path in \
+        "$lock_dir/maintenance.lock" \
+        "$lock_dir/deploy.lock" \
+        /run/lock/liquidity-migration-ledger-reset.lock; do
+        [ ! -L "$lock_path" ] || fail "maintenance lock path is a symlink: $lock_path"
+        if [ ! -e "$lock_path" ]; then
+            (umask 077; : > "$lock_path") \
+                || fail "cannot create maintenance lock: $lock_path"
+        fi
+        [ -f "$lock_path" ] && [ ! -L "$lock_path" ] \
+            || fail "maintenance lock is not a regular file: $lock_path"
+        [ "$(stat -c %u "$lock_path")" -eq 0 ] \
+            || fail "maintenance lock is not root-owned: $lock_path"
+        chmod 0600 "$lock_path" || fail "cannot secure maintenance lock: $lock_path"
     done
-    exec 9<"$lock_dir/maintenance.lock" \
+    exec 9<>"$lock_dir/maintenance.lock" \
         || fail "cannot open canonical maintenance lock without truncation"
-    exec 8<"$lock_dir/deploy.lock" \
+    exec 8<>"$lock_dir/deploy.lock" \
         || fail "cannot open legacy deploy lock without truncation"
-    exec 7</run/lock/liquidity-migration-ledger-reset.lock \
+    exec 7<>/run/lock/liquidity-migration-ledger-reset.lock \
         || fail "cannot open legacy reset lock without truncation"
-    maintenance_lock_helper acquire-inherited \
-        --lock 9 "$lock_dir/maintenance.lock" "$maintenance_device" "$maintenance_inode" \
-        --lock 8 "$lock_dir/deploy.lock" "$deploy_device" "$deploy_inode" \
-        --lock 7 /run/lock/liquidity-migration-ledger-reset.lock "$reset_device" "$reset_inode" \
-        || fail "another maintenance operation is active or a lock path changed"
-}
-
-maintenance_lock_helper() {
-    /usr/bin/python3 -c '
-import base64
-import sys
-
-encoded = sys.argv[1]
-arguments = sys.argv[2:]
-source = base64.b64decode(encoded, validate=True)
-sys.argv = ["maintenance_lock.py", *arguments]
-namespace = {"__file__": "<transmitted-maintenance-lock-helper>", "__name__": "__main__"}
-exec(compile(source, namespace["__file__"], "exec"), namespace)
-' "$MAINTENANCE_LOCK_HELPER_B64" "$@"
+    flock --exclusive --nonblock 9 \
+        || fail "another maintenance operation holds maintenance.lock"
+    flock --exclusive --nonblock 8 \
+        || fail "another maintenance operation holds the legacy deploy lock"
+    flock --exclusive --nonblock 7 \
+        || fail "another maintenance operation holds the legacy reset lock"
 }
 
 PROFILE_MARKER=/etc/liquidity-migration/profile
@@ -386,7 +366,7 @@ target = Path(sys.argv[2])
 allowed = {
     "CANDIDATE_UNIVERSE_FILE", "CARRY_NOTIONAL_MULTIPLIER",
     "EXODUS_NOTIONAL_MULTIPLIER", "LONG_NOTIONAL_MULTIPLIER",
-    "OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM", "VENUE_RULES_FILE",
+    "OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM",
 }
 values = load_private_systemd_environment(source)
 forbidden = {
@@ -400,7 +380,7 @@ if leaked:
 filtered = {key: value for key, value in values.items() if key in allowed}
 if filtered.get("PRODUCER_REALM") not in {"demo", "mainnet"}:
     raise SystemExit(f"{source}: PRODUCER_REALM must be demo or mainnet")
-for required in ("CANDIDATE_UNIVERSE_FILE", "OPERATIONAL_PROFILE_FILE", "VENUE_RULES_FILE"):
+for required in ("CANDIDATE_UNIVERSE_FILE", "OPERATIONAL_PROFILE_FILE"):
     value = str(filtered.get(required) or "")
     if not value or not Path(value).is_absolute():
         raise SystemExit(f"{source}: {required} must be an absolute path")
@@ -425,11 +405,11 @@ except BaseException:
 PY
     chown root:"$RUNTIME_GROUP" "$target" && chmod 0640 "$target" \
         || fail "cannot secure producer environment $target"
-    unset OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE VENUE_RULES_FILE
+    unset OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
     lm_load_private_systemd_environment "$PYTHON" "$source" \
-        OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE VENUE_RULES_FILE
+        OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
     local input
-    for input in "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE" "$VENUE_RULES_FILE"; do
+    for input in "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE"; do
         [ -f "$input" ] && [ ! -L "$input" ] \
             || fail "producer input is missing or linked: $input"
         chown root:"$RUNTIME_GROUP" "$input" && chmod 0640 "$input" \
@@ -438,8 +418,7 @@ PY
     # Grant producer traversal only along the declared inputs, never across every
     # credential/config directory under /etc/liquidity-migration.
     local directory
-    for input in "$target" "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE" \
-        "$VENUE_RULES_FILE"; do
+    for input in "$target" "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE"; do
         directory="$(dirname "$input")"
         case "$directory" in
             /etc/liquidity-migration|/etc/liquidity-migration/*) ;;
@@ -496,6 +475,7 @@ retire_paper_host_config() {
 }
 
 prepare_demo_runtime_config() {
+    local demo_candidate demo_profile root
     [ "$REPO_DIR" = /opt/liquidity-migration ] \
         || fail "systemd runtime paths require REPO_DIR=/opt/liquidity-migration"
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 /var/lib/liquidity-migration/targets
@@ -511,12 +491,11 @@ prepare_demo_runtime_config() {
     done
     lm_load_private_systemd_environment "$PYTHON" \
         "$PRODUCER_DEMO_SOURCE_ENV" \
-        PRODUCER_REALM CANDIDATE_UNIVERSE_FILE VENUE_RULES_FILE OPERATIONAL_PROFILE_FILE
+        PRODUCER_REALM CANDIDATE_UNIVERSE_FILE OPERATIONAL_PROFILE_FILE
     [ "$PRODUCER_REALM" = demo ] || fail "demo producer source must declare PRODUCER_REALM=demo"
     demo_candidate="$CANDIDATE_UNIVERSE_FILE"
-    demo_rules="$VENUE_RULES_FILE"
     demo_profile="$OPERATIONAL_PROFILE_FILE"
-    for path in "$demo_candidate" "$demo_rules" "$demo_profile"; do
+    for path in "$demo_candidate" "$demo_profile"; do
         [ "${path#/}" != "$path" ] || fail "demo producer input must be absolute: $path"
     done
     operational_profile_source="$REPO_DIR/configs/operational.demo.json"
@@ -532,37 +511,25 @@ PY
     install -o root -g root -m 0600 "$operational_profile_source" "$demo_profile"
     [ -f "$demo_candidate" ] && [ ! -L "$demo_candidate" ] \
         || fail "install a reviewed demo candidate universe: $demo_candidate"
-    [ -f "$demo_rules" ] && [ ! -L "$demo_rules" ] \
-        || fail "install reviewed read-only demo venue rules: $demo_rules"
     install -d -o root -g root -m 0700 /etc/liquidity-migration
     chown root:root /etc/liquidity-migration/sleeves.resolved.env
     chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
     write_producer_environment "$PRODUCER_DEMO_SOURCE_ENV" "$PRODUCER_DEMO_ENV"
     retire_paper_host_config
 
-    producer_uid="$(id -u "$PRODUCER_USER")"
-    runtime_gid="$(getent group "$RUNTIME_GROUP" | cut -d: -f3)"
-
-    demo_tree_preflight_phase() {
-        "$PYTHON" -m liquidity_migration.ops.reset_path_safety preflight-demo \
-            --anchor "$REPO_DIR/data" \
-            --root "$LONG_DEMO_ROOT" \
-            --root "$CARRY_DEMO_ROOT"
-    }
-    demo_tree_normalize_phase() {
-        "$PYTHON" -m liquidity_migration.ops.reset_path_safety normalize-demo \
-            --anchor "$REPO_DIR/data" \
-            --root "$LONG_DEMO_ROOT" \
-            --root "$CARRY_DEMO_ROOT" \
-            --uid "$producer_uid" --gid "$runtime_gid" --create-missing
-    }
-
-    # The normalizer performs a full read-only descriptor-rooted plan first and
-    # an independent final rescan after mutating.
-    run_phase demo-tree-preflight demo_tree_preflight_phase \
-        || fail "demo runtime descriptor/mount preflight failed"
-    run_phase demo-tree-normalize demo_tree_normalize_phase \
-        || fail "descriptor-rooted demo runtime normalization failed"
+    [ ! -L "$REPO_DIR/data" ] || fail "demo runtime data directory must not be a symlink"
+    for root in "$LONG_DEMO_ROOT" "$CARRY_DEMO_ROOT"; do
+        case "$root" in
+            "$REPO_DIR"/data/*) ;;
+            *) fail "demo runtime root escapes the checkout data directory: $root" ;;
+        esac
+        [ ! -L "$root" ] || fail "demo runtime root must not be a symlink: $root"
+        install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 "$root" \
+            || fail "cannot create demo runtime root: $root"
+        chown -R --no-dereference "$PRODUCER_USER:$RUNTIME_GROUP" "$root" \
+            || fail "cannot assign demo runtime root: $root"
+        chmod 0750 "$root" || fail "cannot secure demo runtime root: $root"
+    done
     chown root:root "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
     chmod 0600 "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
 }
@@ -701,31 +668,6 @@ git_fetch() {
     fi
 }
 
-# Rules are operator-supplied read-only evidence. Deployment validates freshness
-# and coverage but never mutates venue state or manufactures a new receipt.
-validate_declared_demo_rules() {
-    local demo_rules demo_candidate
-    lm_load_private_systemd_environment "$PYTHON" \
-        "$PRODUCER_DEMO_SOURCE_ENV" VENUE_RULES_FILE CANDIDATE_UNIVERSE_FILE
-    demo_rules="$VENUE_RULES_FILE"
-    demo_candidate="$CANDIDATE_UNIVERSE_FILE"
-    "$PYTHON" - "$demo_rules" "$demo_candidate" <<'PY'
-import sys
-from liquidity_migration.core.artifact_snapshot import read_stable_file
-from liquidity_migration.ops.candidate_rule_coverage import (
-    REGISTERED_MAX_RULE_AGE_SECONDS,
-    build_candidate_rule_coverage,
-)
-from liquidity_migration.venue.venue_instrument_rules import load_demo_rules_bytes
-rules, candidate = sys.argv[1:]
-load_demo_rules_bytes(
-    read_stable_file(rules, label="declared demo venue rules", require_single_link=False).data,
-    max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
-)
-build_candidate_rule_coverage(candidate, rules)
-PY
-    echo "demo-rule-validation-ok path=$demo_rules candidate=$demo_candidate source=declared-read-only"
-}
 install_mode() {
     local installed_head
     require_checkout
@@ -786,8 +728,6 @@ install_mode() {
         systemctl disable --now "$unit" 2>/dev/null || true
     done
     require_quiescent
-    run_phase validate-declared-demo-rules validate_declared_demo_rules
-
     lm_load_sleeve_toggles
     # The writer is atomic (mktemp + mv), so re-reading what this process just
     # wrote proves nothing; load_authorization validates the file a *previous*
@@ -1419,16 +1359,15 @@ provision_mainnet_prerequisites() {
     "$PYTHON" -m liquidity_migration.policy.real_money_arming default-telegram \
         --from-env "$MAINNET_DEMO_TELEGRAM_ENV" --execute \
         || fail "cannot default the mainnet Telegram pair"
-    local risk_policy_file="" universe_file="" rules_file=""
+    local risk_policy_file="" universe_file=""
 
     lm_load_private_systemd_environment "$PYTHON" "$PRODUCER_MAINNET_SOURCE_ENV" \
-        PRODUCER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE VENUE_RULES_FILE \
+        PRODUCER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE \
         || fail "cannot read producer inputs from $PRODUCER_MAINNET_SOURCE_ENV"
     [ "$PRODUCER_REALM" = mainnet ] \
         || fail "funded producer source must declare PRODUCER_REALM=mainnet"
     risk_policy_file="$OPERATIONAL_PROFILE_FILE"
     universe_file="$CANDIDATE_UNIVERSE_FILE"
-    rules_file="$VENUE_RULES_FILE"
 
     mkdir -p "$(dirname "$risk_policy_file")"
     chmod 700 "$(dirname "$risk_policy_file")" 2>/dev/null || true
@@ -1439,37 +1378,10 @@ provision_mainnet_prerequisites() {
         || fail "mainnet dials do not render a loadable profile"
     [ -f "$universe_file" ] && [ ! -L "$universe_file" ] \
         || fail "install a reviewed mainnet candidate-universe artifact before activation: $universe_file"
-    [ -f "$rules_file" ] && [ ! -L "$rules_file" ] \
-        || fail "install reviewed read-only venue rules before activation: $rules_file"
-    validate_declared_mainnet_venue_rules "$universe_file" "$rules_file"
     write_producer_environment "$PRODUCER_MAINNET_SOURCE_ENV" "$PRODUCER_MAINNET_ENV"
     project_mainnet_telegram_environment
 }
 
-# Mainnet rules are a reviewed, externally supplied read-only receipt. A deploy
-# proves its freshness and candidate coverage but never calls a mutating venue
-# tool or silently renews evidence. Expiry therefore blocks activation until an
-# operator installs a fresh receipt from an approved read-only source.
-validate_declared_mainnet_venue_rules() {
-    local universe_file="$1" rules_file="$2"
-    "$PYTHON" - "$universe_file" "$rules_file" <<'PY'
-import sys
-from liquidity_migration.core.artifact_snapshot import read_stable_file
-from liquidity_migration.ops.candidate_rule_coverage import (
-    REGISTERED_MAX_RULE_AGE_SECONDS,
-    build_candidate_rule_coverage,
-)
-from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes
-universe, rules = sys.argv[1:]
-load_venue_rules_bytes(
-    read_stable_file(rules, label="declared mainnet venue rules", require_single_link=False).data,
-    realm="mainnet",
-    max_age_seconds=REGISTERED_MAX_RULE_AGE_SECONDS,
-)
-build_candidate_rule_coverage(universe, rules, realm="mainnet")
-PY
-    echo "mainnet-rule-validation-ok path=$rules_file candidate=$universe_file source=declared-read-only"
-}
 # The single gate between a code change and a funded account: every remaining
 # precondition is reported, and any one of them outstanding stops the deploy.
 require_mainnet_preflight() {

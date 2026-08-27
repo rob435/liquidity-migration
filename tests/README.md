@@ -6,7 +6,7 @@ no package counterpart:
 
 | Path | Subject |
 | --- | --- |
-| `scripts/` | shell and entry-script contracts under `scripts/` and `deploy/` — the systemd wrappers, `ops.sh`, `deploy_vps_live.sh`, `lib_sleeves.sh`, the reset path, and the Python scripts run as jobs |
+| `scripts/` | shell and entry-script contracts under `scripts/` and `deploy/` — the systemd wrappers, `ops.sh`, `deploy_vps_live.sh`, `lib_sleeves.sh`, and the Python scripts run as jobs |
 | `repo/` | repo-wide invariants that belong to no module: cold-import integrity, markdown links, Codex/Claude skill mirroring, property invariants, dev tooling |
 
 ## Conventions
@@ -18,7 +18,7 @@ no package counterpart:
   applies to every subdirectory. `tests/scripts/conftest.py` adds an autouse
   fixture that fences git — each test runs chdir'd into its own tmp dir with
   git discovery and host config blocked, because those tests run the real
-  `git` the deploy and reset scripts call.
+  `git` the deploy scripts call.
 - A test computes the repository root from its own depth, so a test in
   `tests/account/` uses `parents[2]` and one in `tests/research/backtest/`
   uses `parents[3]`. Getting this wrong resolves the repo to `tests/` and the

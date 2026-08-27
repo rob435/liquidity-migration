@@ -39,7 +39,6 @@ Operator commands:
                                not disabled -- turn the sleeve off to make it
                                stick across a deploy
   research-refresh [ARGS...]   append-first data/features/backtest workflow
-  reset [ARGS...]              remote ledger-reset preview (dry-run by default)
   real-money preflight         report every remaining arming step (read-only)
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
@@ -104,28 +103,6 @@ qualified_units() {
   done
 }
 
-remote_reset() {
-  local -a reset_args=("$@")
-  local arg has_execute=0 has_dry_run=0
-  for arg in ${reset_args[@]+"${reset_args[@]}"}; do
-    if [[ "$arg" == "--execute" ]]; then
-      has_execute=1
-    elif [[ "$arg" == "--dry-run" ]]; then
-      has_dry_run=1
-    fi
-  done
-
-  # Make the safe default explicit at the remote boundary. The canonical reset
-  # script independently defaults to dry-run and requires --execute as well.
-  if (( has_execute == 0 && has_dry_run == 0 )); then
-    reset_args=(--dry-run ${reset_args[@]+"${reset_args[@]}"})
-  fi
-
-  remote_exec 'cd "$REPO_DIR"
-exec bash scripts/maintain/reset_demo_ledgers.sh "${REMOTE_ARGS[@]}"' \
-    ${reset_args[@]+"${reset_args[@]}"}
-}
-
 remote_python_module() {
   local module="$1"
   shift
@@ -164,9 +141,6 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
     ;;
   research-refresh)
     exec bash "$ROOT_DIR/scripts/research/research_refresh.sh" "$@"
-    ;;
-  reset)
-    remote_reset "$@"
     ;;
   real-money)
     # The arming surface. `preflight` reads only and never prints

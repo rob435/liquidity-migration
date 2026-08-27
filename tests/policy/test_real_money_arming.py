@@ -46,13 +46,11 @@ def _credential(tmp_path: Path, **overrides: str) -> Path:
 
 def _producer_source(tmp_path: Path, profile: Path, *, realm: str = "mainnet") -> Path:
     candidate = _private_file(tmp_path / "candidate.json", "{}\n")
-    rules = _private_file(tmp_path / "rules.json", "{}\n")
     return _private_file(
         tmp_path / "producer-mainnet-source.env",
         (
             f"PRODUCER_REALM={realm}\n"
             f"CANDIDATE_UNIVERSE_FILE={candidate}\n"
-            f"VENUE_RULES_FILE={rules}\n"
             f"OPERATIONAL_PROFILE_FILE={profile}\n"
         ),
     )
@@ -76,7 +74,6 @@ def test_templates_are_strict_and_ship_disarmed_without_secrets() -> None:
     assert producer["PRODUCER_REALM"] == "mainnet"
     assert {
         "CANDIDATE_UNIVERSE_FILE",
-        "VENUE_RULES_FILE",
         "OPERATIONAL_PROFILE_FILE",
     } <= producer.keys()
     keys = "\n".join(producer)
@@ -116,12 +113,12 @@ def test_preflight_rejects_wrong_realm_missing_input_and_profile_drift(tmp_path:
     credential = _credential(tmp_path)
     profile = _private_file(tmp_path / "profile.json", "{}\n")
     producer = _producer_source(tmp_path, profile, realm="demo")
-    (tmp_path / "rules.json").unlink()
+    (tmp_path / "candidate.json").unlink()
 
     rows = preflight(credential_env=credential, producer_env=producer)
 
     failed = {row.name for row in rows if not row.ok}
-    assert {"PRODUCER_REALM", "VENUE_RULES_FILE", "profile matches dials"} <= failed
+    assert {"PRODUCER_REALM", "CANDIDATE_UNIVERSE_FILE", "profile matches dials"} <= failed
 
 
 def test_preflight_json_is_machine_readable(

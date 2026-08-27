@@ -32,7 +32,6 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
     for relative in (
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
-        Path("liquidity_migration/ops/maintenance_lock.py"),
     ):
         target = checkout / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -65,14 +64,19 @@ def test_help_lists_only_current_operator_routes() -> None:
     assert result.returncode == 0
     for command in (
         "status",
+        "units",
+        "logs",
+        "restart",
+        "stop",
+        "start",
         "equity",
         "research-refresh",
-        "reset",
-        "venue-accounting",
-        "test",
+        "flatten",
+        "real-money",
         "deploy",
     ):
         assert command in result.stdout
+    assert "reset" not in result.stdout
 
 
 def test_unknown_command_fails_with_usage() -> None:
@@ -80,43 +84,6 @@ def test_unknown_command_fails_with_usage() -> None:
     assert result.returncode == 2
     assert "unknown command" in result.stderr
     assert "Usage:" in result.stderr
-
-
-def test_reset_defaults_to_remote_dry_run(tmp_path: Path) -> None:
-    capture = tmp_path / "capture"
-    ssh = tmp_path / "ssh"
-    ssh.write_text(
-        "#!/usr/bin/env bash\ncat > \"$CAPTURE\"\nprintf '%s\\n' \"$*\" >> \"$CAPTURE\"\n",
-        encoding="utf-8",
-    )
-    ssh.chmod(0o700)
-    result = _run(
-        "reset",
-        "--scope",
-        "long",
-        env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "CAPTURE": str(capture)},
-    )
-    assert result.returncode == 0, result.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert "--dry-run" in payload
-    assert "reset_demo_ledgers.sh" in payload
-    assert "--scope long" in payload
-
-
-def test_reset_execute_is_forwarded_without_added_dry_run(tmp_path: Path) -> None:
-    capture = tmp_path / "capture"
-    ssh = tmp_path / "ssh"
-    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
-    ssh.chmod(0o700)
-    result = _run(
-        "reset",
-        "--execute",
-        env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "CAPTURE": str(capture)},
-    )
-    assert result.returncode == 0, result.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert "--execute" in payload
-    assert "--dry-run" not in payload
 
 
 def test_deploy_allowlists_modes_and_no_longer_demands_execute() -> None:
@@ -348,48 +315,6 @@ def test_expected_commit_defaults_to_the_known_branch_tip(tmp_path: Path) -> Non
     assert "(origin/main)" in with_remote.stderr
 
 
-def test_the_demo_rule_refresh_is_reachable_by_flag_and_by_the_old_env_var(
-    tmp_path: Path,
-) -> None:
-    """The refresh places live PostOnly orders (<=200 USDT/symbol), so it stays opt-in;
-    it was only ever reachable through an undocumented environment variable.
-    """
-
-    checkout, _commit, capture, environment = _deploy_harness(tmp_path)
-    default = subprocess.run(
-        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install"],
-        cwd=checkout,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert default.returncode == 0, default.stderr
-    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=0" in capture.read_text(encoding="utf-8")
-
-    by_flag = subprocess.run(
-        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install", "--refresh-demo-rules"],
-        cwd=checkout,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert by_flag.returncode == 0, by_flag.stderr
-    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in capture.read_text(encoding="utf-8")
-
-    by_env = subprocess.run(
-        ["bash", str(checkout / "scripts/ops.sh"), "deploy", "install"],
-        cwd=checkout,
-        env={**environment, "ROLLOUT_REFRESH_STALE_DEMO_RULES": "1"},
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert by_env.returncode == 0, by_env.stderr
-    assert "ROLLOUT_REFRESH_STALE_DEMO_RULES=1" in capture.read_text(encoding="utf-8")
-
-
 def test_an_explicit_expected_commit_is_still_validated(tmp_path: Path) -> None:
     checkout, _commit, capture, environment = _deploy_harness(tmp_path)
     result = subprocess.run(
@@ -488,7 +413,7 @@ def test_remote_clean_check_ignores_current_index_flags(
     index_flag: str,
 ) -> None:
     checkout, commit = _isolated_deploy_checkout(tmp_path)
-    helper = checkout / "liquidity_migration/ops/maintenance_lock.py"
+    helper = checkout / "scripts/deploy_vps_live.sh"
     subprocess.run(
         [
             "git",
@@ -497,7 +422,7 @@ def test_remote_clean_check_ignores_current_index_flags(
             "update-index",
             index_flag,
             "--",
-            "liquidity_migration/ops/maintenance_lock.py",
+            "scripts/deploy_vps_live.sh",
         ],
         check=True,
     )
@@ -540,7 +465,7 @@ def test_remote_helpers_tolerate_an_empty_argument_array_under_set_u() -> None:
     """
 
     text = (Path(__file__).resolve().parents[2] / "scripts" / "ops.sh").read_text(encoding="utf-8")
-    for array in ("reset_args", "remote_args"):
+    for array in ("remote_args",):
         assert f'"${{{array}[@]}}"' not in text.replace(f'${{{array}[@]+"${{{array}[@]}}"}}', "")
         assert f'${{{array}[@]+"${{{array}[@]}}"}}' in text
 
@@ -552,14 +477,13 @@ def test_remote_helpers_tolerate_an_empty_argument_array_under_set_u() -> None:
             'set -euo pipefail\n'
             'declare -a a=()\n'
             'for x in ${a[@]+"${a[@]}"}; do echo "unexpected $x"; done\n'
-            'b=(--dry-run ${a[@]+"${a[@]}"})\n'
-            'printf "%s\\n" "${b[@]}"\n',
+            'printf "%s\\n" ${a[@]+"${a[@]}"}\n',
         ],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "--dry-run"
+    assert result.stdout == ""
 
 
 def test_authenticated_fetch_keeps_the_github_token_off_argv() -> None:
@@ -571,7 +495,7 @@ def test_authenticated_fetch_keeps_the_github_token_off_argv() -> None:
         Path(__file__).resolve().parents[2] / "scripts" / "deploy_vps_live.sh"
     ).read_text(encoding="utf-8")
     fetch = deploy[
-        deploy.index("git_fetch() {") : deploy.index("refresh_stale_demo_rules_if_requested() {")
+        deploy.index("git_fetch() {") : deploy.index("install_mode() {")
     ]
     code = "\n".join(
         line for line in fetch.splitlines() if not line.lstrip().startswith("#")

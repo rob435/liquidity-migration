@@ -88,7 +88,6 @@ def test_producer_source_templates_are_non_secret_and_realm_bound() -> None:
         assert f"PRODUCER_REALM={realm}" in body
         for key in (
             "CANDIDATE_UNIVERSE_FILE",
-            "VENUE_RULES_FILE",
             "OPERATIONAL_PROFILE_FILE",
         ):
             assert f"{key}=/" in body
@@ -97,7 +96,8 @@ def test_producer_source_templates_are_non_secret_and_realm_bound() -> None:
 
 def test_producer_projection_is_an_explicit_non_secret_allowlist() -> None:
     block = _function(DEPLOY.read_text(encoding="utf-8"), "write_producer_environment", "project_mainnet_telegram_environment")
-    assert '"OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM", "VENUE_RULES_FILE"' in block
+    assert '"OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM"' in block
+    assert "VENUE_RULES_FILE" not in block
     assert "producer source contains forbidden secret/control keys" in block
     assert "os.replace(temporary, target)" in block
     assert "os.fsync(directory)" in block
@@ -253,7 +253,7 @@ def test_remote_git_transport_ignores_host_configuration_and_hides_token() -> No
     assert "GIT_CONFIG_NOSYSTEM=1" in text
     assert "GIT_ENV=(\n    /usr/bin/env -i" in text
     assert "GIT_TERMINAL_PROMPT=0" in text
-    fetch = _function(text, "git_fetch", "validate_declared_demo_rules")
+    fetch = _function(text, "git_fetch", "install_mode")
     assert 'GIT_CONFIG_GLOBAL="$config_file"' in fetch
     assert "AUTHORIZATION: Basic %s" in fetch
     assert "chmod 0600" in fetch
@@ -265,7 +265,101 @@ def test_every_remote_mode_shares_the_maintenance_locks() -> None:
     dispatch = text.rindex('case "$MODE" in')
     assert call < dispatch
     assert "maintenance.lock" in text and "deploy.lock" in text
-    assert "acquire-inherited" in text
+    lock = _function(text, "acquire_maintenance_locks", "ensure_runtime_identities")
+    for descriptor in ("9", "8", "7"):
+        assert f"flock --exclusive --nonblock {descriptor}" in lock
+    assert "maintenance_lock.py" not in text
+
+
+def test_deploy_python_modules_resolve_in_the_checkout() -> None:
+    sources = [DEPLOY, *sorted((ROOT / "deploy").rglob("*.sh"))]
+    discovered: dict[str, set[str]] = {}
+    for source in sources:
+        text = source.read_text(encoding="utf-8")
+        modules = set(
+            re.findall(
+                r"-m\s+(liquidity_migration(?:\.[A-Za-z_][A-Za-z0-9_]*)+)",
+                text,
+            )
+        )
+        modules.update(
+            re.findall(
+                r"^\s*(?:from|import)\s+"
+                r"(liquidity_migration(?:\.[A-Za-z_][A-Za-z0-9_]*)+)",
+                text,
+                flags=re.MULTILINE,
+            )
+        )
+        for module in modules:
+            discovered.setdefault(module, set()).add(str(source.relative_to(ROOT)))
+
+    assert discovered
+    missing = {}
+    for module, owners in discovered.items():
+        relative = Path(*module.split("."))
+        if not (ROOT / relative).with_suffix(".py").is_file() and not (
+            ROOT / relative / "__init__.py"
+        ).is_file():
+            missing[module] = sorted(owners)
+    assert not missing
+
+
+def test_operational_surface_has_no_deleted_repo_references() -> None:
+    paths = [
+        DEPLOY,
+        ROOT / "scripts" / "ops.sh",
+        ROOT / "scripts" / "dev.sh",
+        ROOT / "scripts" / "README.md",
+        ROOT / "deploy" / "producer-demo-source.env.template",
+        ROOT / "deploy" / "producer-mainnet-source.env.template",
+    ]
+    text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    for retired in (
+        "candidate_rule_coverage",
+        "venue_instrument_rules",
+        "reset_path_safety",
+        "maintenance_lock.py",
+        "reset_demo_ledgers.sh",
+        "build_trade_diagnostics.py",
+        "run_with_stub.py",
+        "VENUE_RULES_FILE",
+    ):
+        assert retired not in text
+
+
+def test_operational_literal_script_references_exist() -> None:
+    sources = [
+        DEPLOY,
+        ROOT / "scripts" / "ops.sh",
+        ROOT / "scripts" / "dev.sh",
+        ROOT / "scripts" / "run_authorized_runtime.sh",
+        *sorted((ROOT / "deploy").rglob("*.sh")),
+    ]
+    owners: dict[str, set[str]] = {}
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_.-])"
+        r"((?:liquidity_migration|scripts|deploy)/"
+        r"[A-Za-z0-9_./-]+\.(?:py|sh|command))"
+    )
+    for source in sources:
+        for relative in pattern.findall(source.read_text(encoding="utf-8")):
+            owners.setdefault(relative, set()).add(str(source.relative_to(ROOT)))
+
+    assert owners
+    missing = {
+        relative: sorted(references)
+        for relative, references in owners.items()
+        if not (ROOT / relative).is_file()
+    }
+    assert not missing
+
+
+def test_rust_engine_is_the_only_live_instrument_rule_source() -> None:
+    engine = _read("engine/engine-core/src/engine.rs")
+    bybit = _read("engine/engine-venue/src/venues/bybit/gateway.rs")
+    assert "for (name, rule) in venue.instrument_rules().await?" in engine
+    assert "self.venue.instrument_rules().await" in engine
+    assert "self.rest.get_public(PATH_INSTRUMENTS, &query).await?" in bybit
 
 
 def test_ci_tests_and_builds_the_exact_locked_release_shape() -> None:
