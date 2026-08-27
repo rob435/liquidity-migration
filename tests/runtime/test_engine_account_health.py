@@ -1,11 +1,4 @@
-"""`engine_held_symbols` answers None for every kind of not-knowing.
-
-The producers treat None as "no news" and leave their records alone; an
-exception escaping instead crashes a producer pass that has no per-cycle
-catch. The mid-read replacement case is the one that shipped wrong: the
-engine rewrites its heartbeat every few seconds, so `read_stable_file`'s
-RuntimeError ("changed while it was read") is an ordinary race, not a fault.
-"""
+"""The producer consumes exact, fresh Rust heartbeat account truth."""
 
 from __future__ import annotations
 
@@ -16,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from liquidity_migration.runtime import engine_account_health
-from liquidity_migration.runtime.engine_account_health import engine_held_symbols
 
 HOUR_NS = 3_600 * 10**9
 
@@ -56,29 +48,13 @@ def test_held_symbols_come_from_a_recent_heartbeat(tmp_path: Path) -> None:
             },
         ],
     )
-    held = engine_held_symbols(
+    reading = engine_account_health.require_recent_engine_account(
         "demo",
         max_age_ns=HOUR_NS,
         path=heartbeat,
         expected_account_user_id="555899665",
     )
-    assert held == frozenset({"HOMEUSDT", "KAITOUSDT"})
-
-
-def test_missing_heartbeat_is_none(tmp_path: Path) -> None:
-    absent = tmp_path / "absent.json"
-    assert engine_held_symbols("demo", max_age_ns=HOUR_NS, path=absent) is None
-
-
-def test_mid_read_replacement_is_none(tmp_path: Path, monkeypatch) -> None:
-    heartbeat = tmp_path / "heartbeat.json"
-    _write_heartbeat(heartbeat)
-
-    def replaced_mid_read(*args: object, **kwargs: object) -> object:
-        raise RuntimeError("engine heartbeat changed while it was read")
-
-    monkeypatch.setattr(engine_account_health, "read_stable_file", replaced_mid_read)
-    assert engine_held_symbols("demo", max_age_ns=HOUR_NS, path=heartbeat) is None
+    assert reading.held_symbols == frozenset({"HOMEUSDT", "KAITOUSDT"})
 
 
 def test_recent_reading_requires_an_expected_account_id(tmp_path: Path, monkeypatch) -> None:
@@ -140,12 +116,35 @@ def test_holdings_and_blockers_are_sleeve_scoped(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("account_equity_usdt", "1412.58"),
+        ("account_available_usdt", True),
+        ("account_observed_wall_ts_ms", 1.5),
+        ("realm", "paper"),
+    ],
+)
+def test_account_scalar_coercions_fail_closed(tmp_path: Path, field: str, value: object) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    _write_heartbeat(heartbeat, positions=[])
+    payload = json.loads(heartbeat.read_text(encoding="utf-8"))
+    payload[field] = value
+    heartbeat.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="heartbeat"):
+        engine_account_health.read_engine_account(heartbeat)
+
+
+@pytest.mark.parametrize(
     "positions",
     [
         [{}],
+        [{"symbol": 123, "side": "long", "qty": 1.0, "entry_px": 1.0}],
         [{"symbol": "btcusdt", "side": "long", "qty": 1.0, "entry_px": 1.0}],
         [{"symbol": "BTCUSDT", "side": "buy", "qty": 1.0, "entry_px": 1.0}],
+        [{"symbol": "BTCUSDT", "side": "long", "qty": True, "entry_px": 1.0}],
         [{"symbol": "BTCUSDT", "side": "long", "qty": 0.0, "entry_px": 1.0}],
+        [{"symbol": "BTCUSDT", "side": "long", "qty": 1.0, "entry_px": True}],
         [{"symbol": "BTCUSDT", "side": "long", "qty": 1.0, "entry_px": 0.0}],
     ],
 )

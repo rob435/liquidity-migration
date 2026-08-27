@@ -33,8 +33,6 @@ __all__ = [
     "EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV",
     "ENGINE_HEARTBEAT_PATH_ENV",
     "TARGET_PRODUCER_HEALTH_MAX_AGE_NS",
-    "engine_held_symbols",
-    "engine_entry_blockers",
     "EngineAccountReading",
     "engine_heartbeat_path",
     "read_engine_account",
@@ -165,6 +163,15 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
             "engine heartbeat carries no account reading yet "
             "(equity/available/observed fields must all be present)"
         )
+    if (
+        isinstance(equity, bool)
+        or not isinstance(equity, (int, float))
+        or isinstance(available, bool)
+        or not isinstance(available, (int, float))
+    ):
+        raise ValueError("engine heartbeat equity and available margin must be JSON numbers")
+    if isinstance(observed, bool) or not isinstance(observed, int):
+        raise ValueError("engine heartbeat account_observed_wall_ts_ms must be an integer")
     equity_usdt = float(equity)
     available_usdt = float(available)
     observed_wall_ts_ms = int(observed)
@@ -179,8 +186,8 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         raise ValueError("engine heartbeat account_observed_wall_ts_ms must be positive")
     if not isinstance(account_user_id, str) or not account_user_id:
         raise ValueError("engine heartbeat carries no account_user_id")
-    if not isinstance(realm, str) or not realm:
-        raise ValueError("engine heartbeat carries no realm")
+    if not isinstance(realm, str) or realm not in DEFAULT_ENGINE_HEARTBEAT:
+        raise ValueError("engine heartbeat carries no supported realm")
     if not isinstance(raw_strategies, list):
         raise ValueError("engine heartbeat strategies must be an array")
     strategies: set[str] = set()
@@ -200,20 +207,31 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         for index, row in enumerate(positions):
             if not isinstance(row, Mapping):
                 raise ValueError(f"engine heartbeat position {index} is not an object")
-            symbol = str(row.get("symbol") or "")
-            if not symbol or symbol != symbol.upper() or not symbol.isalnum():
+            symbol = row.get("symbol")
+            if (
+                not isinstance(symbol, str)
+                or not symbol
+                or symbol != symbol.upper()
+                or not symbol.isalnum()
+            ):
                 raise ValueError(f"engine heartbeat position {index} has invalid symbol")
             if symbol in named:
                 raise ValueError(f"engine heartbeat repeats position {symbol}")
             qty = row.get("qty")
-            if not isinstance(qty, (int, float)) or not math.isfinite(float(qty)) or float(qty) <= 0.0:
+            if (
+                isinstance(qty, bool)
+                or not isinstance(qty, (int, float))
+                or not math.isfinite(float(qty))
+                or float(qty) <= 0.0
+            ):
                 raise ValueError(f"engine heartbeat position {symbol} has invalid qty")
-            side = str(row.get("side") or "")
-            if side not in {"long", "short"}:
+            side = row.get("side")
+            if not isinstance(side, str) or side not in {"long", "short"}:
                 raise ValueError(f"engine heartbeat position {symbol} has invalid side")
             entry_px = row.get("entry_px")
             if (
-                not isinstance(entry_px, (int, float))
+                isinstance(entry_px, bool)
+                or not isinstance(entry_px, (int, float))
                 or not math.isfinite(float(entry_px))
                 or float(entry_px) <= 0.0
             ):
@@ -323,61 +341,3 @@ def require_recent_engine_account(
             f"(bound {int(max_age_ns) / 1e9:.1f}s); the engine is not reading the venue"
         )
     return reading
-
-
-def engine_held_symbols(
-    environment: str,
-    *,
-    max_age_ns: int,
-    path: str | Path | None = None,
-    expected_account_user_id: str | None = None,
-) -> frozenset[str] | None:
-    """What the engine says is held, or `None` when it did not say.
-
-    `None` is the answer for every kind of not-knowing: no heartbeat, an
-    unreadable one, a stale reading, an engine too old to publish positions.
-    A producer must treat that as "no news" and leave its record alone --
-    reading it as "holds nothing" would drop every open name at once, which is
-    exactly the mistake this exists to prevent in the other direction.
-    """
-
-    try:
-        return require_recent_engine_account(
-            environment,
-            max_age_ns=max_age_ns,
-            path=path,
-            expected_account_user_id=expected_account_user_id,
-        ).held_symbols
-    except (OSError, RuntimeError, ValueError):
-        # RuntimeError is read_stable_file's "changed while it was read" — the
-        # engine rewrites the heartbeat every few seconds, so a mid-read
-        # replacement is ordinary not-knowing, not a crash.
-        return None
-
-
-def engine_entry_blockers(
-    environment: str,
-    *,
-    strategy: str,
-    max_age_ns: int,
-    path: str | Path | None = None,
-    expected_account_user_id: str | None = None,
-) -> dict[str, str]:
-    """Why the engine is not opening each asked-for name, or `{}` when it did not say.
-
-    Same not-knowing as :func:`engine_held_symbols`: no heartbeat, a stale
-    one, or an engine too old to publish the field all read as "no news",
-    which is not the same as "nothing is blocked".
-    """
-
-    try:
-        return dict(
-            require_recent_engine_account(
-                environment,
-                max_age_ns=max_age_ns,
-                path=path,
-                expected_account_user_id=expected_account_user_id,
-            ).entry_blockers_for_strategy(strategy)
-        )
-    except (OSError, RuntimeError, ValueError):
-        return {}
