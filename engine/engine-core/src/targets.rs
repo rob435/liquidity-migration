@@ -20,7 +20,8 @@
 //! Getting those two the wrong way round flattens a live book the moment
 //! research stops writing, which is exactly when it should not.
 
-use std::path::PathBuf;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use engine_types::{BookTarget, StrategyId, TargetBook};
@@ -41,6 +42,9 @@ pub const DEFAULT_POLL: Duration = Duration::from_secs(2);
 /// Books are rare and small. A queue this shallow is enough, and a full one
 /// simply makes the worker wait, which is back-pressure and not a lost book.
 const QUEUE_DEPTH: usize = 4;
+/// Same ceiling as the Python producer/evidence reader. A corrupt path must
+/// not make the watcher allocate an arbitrarily large file every two seconds.
+const MAX_BOOK_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Why a file was not a book.
 #[derive(Clone, Debug, PartialEq)]
@@ -105,9 +109,67 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
     let raw: RawBook =
         serde_json::from_value(value).map_err(|e| BookError::Malformed(e.to_string()))?;
 
-    // Nothing checks the numbers for being real here, because nothing can
-    // arrive unreal: JSON has no word for infinity, and a literal too big for
-    // an f64 is refused by the parse above, out of range.
+    if raw.source.is_empty()
+        || !raw
+            .source
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || !raw.source.bytes().any(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(BookError::Malformed(
+            "source is not a plain non-empty identifier".to_string(),
+        ));
+    }
+    if raw.decision_ts_ms <= 0 {
+        return Err(BookError::Malformed(
+            "decision_ts_ms must be positive".to_string(),
+        ));
+    }
+    if raw.valid_until_ms <= raw.decision_ts_ms {
+        return Err(BookError::Malformed(
+            "valid_until_ms must be after decision_ts_ms".to_string(),
+        ));
+    }
+    let mut symbols = std::collections::HashSet::with_capacity(raw.targets.len());
+    for target in &raw.targets {
+        if target.symbol.is_empty()
+            || !target.symbol.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            || target.symbol.bytes().any(|byte| byte.is_ascii_lowercase())
+        {
+            return Err(BookError::Malformed(format!(
+                "symbol {:?} is not a plain upper-case venue symbol",
+                target.symbol
+            )));
+        }
+        if !symbols.insert(target.symbol.as_str()) {
+            return Err(BookError::Malformed(format!(
+                "symbol {:?} appears twice in an absolute book",
+                target.symbol
+            )));
+        }
+        if !target.notional_usdt.is_finite() {
+            return Err(BookError::Malformed(format!(
+                "{} notional_usdt is not finite",
+                target.symbol
+            )));
+        }
+        if !target.stop_loss_fraction.is_finite()
+            || !(0.0..1.0).contains(&target.stop_loss_fraction)
+            || target.stop_loss_fraction == 0.0
+        {
+            return Err(BookError::Malformed(format!(
+                "{} stop_loss_fraction must be between zero and one",
+                target.symbol
+            )));
+        }
+        if !target.leverage.is_finite() || target.leverage <= 0.0 {
+            return Err(BookError::Malformed(format!(
+                "{} leverage must be positive and finite",
+                target.symbol
+            )));
+        }
+    }
+
     Ok(TargetBook {
         source: raw.source,
         decision_ts_ms: raw.decision_ts_ms,
@@ -123,6 +185,28 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
             })
             .collect(),
     })
+}
+
+fn read_book_file(path: &Path) -> io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let advertised = file.metadata()?.len();
+    if advertised > MAX_BOOK_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("target book is larger than {MAX_BOOK_BYTES} bytes"),
+        ));
+    }
+    // The file can grow after metadata. `take` keeps that race bounded too;
+    // one extra byte distinguishes an exactly-full valid file from overflow.
+    let mut bytes = Vec::with_capacity(advertised as usize);
+    file.take(MAX_BOOK_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BOOK_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("target book is larger than {MAX_BOOK_BYTES} bytes"),
+        ));
+    }
+    Ok(bytes)
 }
 
 /// The running watcher: where its books land, and the handle that stops it.
@@ -285,7 +369,7 @@ impl BookWorker {
     /// quiet exactly when the next good book was about to land.
     async fn look(&mut self) -> Option<TargetBook> {
         let path = self.path.clone();
-        let bytes = match tokio::task::spawn_blocking(move || std::fs::read(path)).await {
+        let bytes = match tokio::task::spawn_blocking(move || read_book_file(&path)).await {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(e)) => {
                 self.complain(format!("no target book to read ({e})"));
@@ -423,6 +507,35 @@ mod tests {
         let err = parse_book(text.as_bytes()).expect_err("infinity is not a size");
         assert!(matches!(err, BookError::Malformed(_)), "{err}");
         assert!(err.to_string().contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn producer_invariants_are_enforced_again_at_the_engine_boundary() {
+        let bad = [
+            GOOD.replace("\"source\": \"carry\"", "\"source\": \"\""),
+            GOOD.replace("\"source\": \"carry\"", "\"source\": \"--\""),
+            GOOD.replace("1700000000000", "0"),
+            GOOD.replace("1700086400000", "1699999999999"),
+            GOOD.replace("KAITOUSDT", "kaito-usdt"),
+            GOOD.replace("\"COTIUSDT\"", "\"KAITOUSDT\""),
+            GOOD.replace("\"stop_loss_fraction\": 0.35", "\"stop_loss_fraction\": 1.0"),
+            GOOD.replace("\"leverage\": 2.0", "\"leverage\": 0.0"),
+        ];
+        for text in bad {
+            assert!(
+                matches!(parse_book(text.as_bytes()), Err(BookError::Malformed(_))),
+                "unsafe book parsed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_reader_is_bounded_before_json_parsing() {
+        let path = temp_path("book-oversized");
+        std::fs::write(path.path(), vec![b' '; MAX_BOOK_BYTES as usize + 1])
+            .expect("writes oversized fixture");
+        let error = read_book_file(path.path()).expect_err("oversized book is refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

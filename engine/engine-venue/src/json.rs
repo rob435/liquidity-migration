@@ -28,11 +28,12 @@ pub(crate) fn opt_num_field(obj: &Value, name: &str) -> Result<Option<f64>, Venu
     match obj.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
-        Some(Value::String(s)) => s
-            .trim()
-            .parse::<f64>()
-            .map(Some)
-            .map_err(|_| VenueError::BadReply(format!("field {name} is not a number: {s:?}"))),
+        Some(Value::String(s)) => match s.trim().parse::<f64>() {
+            Ok(value) if value.is_finite() => Ok(Some(value)),
+            _ => Err(VenueError::BadReply(format!(
+                "field {name} is not a finite number: {s:?}"
+            ))),
+        },
         Some(Value::Number(n)) => n
             .as_f64()
             .map(Some)
@@ -80,12 +81,17 @@ mod tests {
 
     #[test]
     fn a_blank_string_is_absent_and_a_bad_one_is_an_error() {
-        let row = json!({"blank": "", "good": "1.5", "bad": "abc", "n": 2});
+        let row = json!({
+            "blank": "", "good": "1.5", "bad": "abc", "n": 2,
+            "nan": "NaN", "infinity": "inf"
+        });
         assert_eq!(opt_num_field(&row, "blank").unwrap(), None);
         assert_eq!(opt_num_field(&row, "missing").unwrap(), None);
         assert_eq!(opt_num_field(&row, "good").unwrap(), Some(1.5));
         assert_eq!(opt_num_field(&row, "n").unwrap(), Some(2.0));
         assert!(opt_num_field(&row, "bad").is_err());
+        assert!(opt_num_field(&row, "nan").is_err());
+        assert!(opt_num_field(&row, "infinity").is_err());
         // The required form refuses what the optional one calls absent.
         assert!(num_field(&row, "blank").is_err());
     }

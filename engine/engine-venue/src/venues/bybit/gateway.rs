@@ -515,12 +515,22 @@ fn validate_server_clock(envelope: &Value, sent_ms: i64, received_ms: i64) -> Re
     let recv_window_ms = RECV_WINDOW_MS
         .parse::<i64>()
         .expect("Bybit receive window is a decimal integer");
+    if received_ms < sent_ms {
+        return Err(VenueError::Credentials(
+            "host wall clock moved backwards during Bybit's clock check".to_string(),
+        ));
+    }
+    // The server stamps its reply between our send and receive. Comparing it
+    // with one edge mistakes network delay for clock skew; the midpoint is
+    // the standard bounded estimate and catches an ahead clock that a slow
+    // outbound request can otherwise hide.
+    let local_ms = sent_ms.saturating_add(received_ms.saturating_sub(sent_ms) / 2);
 
-    if sent_ms >= server_ms.saturating_add(1_000)
-        || server_ms.saturating_sub(sent_ms) > recv_window_ms
+    if local_ms >= server_ms.saturating_add(1_000)
+        || server_ms.saturating_sub(local_ms) > recv_window_ms
     {
         return Err(VenueError::Credentials(format!(
-            "host clock is outside Bybit's signing window: sent={sent_ms}, server={server_ms}, received={received_ms}"
+            "host clock is outside Bybit's signing window: local_midpoint={local_ms}, server={server_ms}, sent={sent_ms}, received={received_ms}"
         )));
     }
     Ok(())
@@ -590,8 +600,14 @@ mod tests {
     fn clock_check_enforces_the_venue_signing_window() {
         let reply = |time| serde_json::json!({"time": time});
         assert!(validate_server_clock(&reply(10_000), 9_999, 10_001).is_ok());
-        assert!(validate_server_clock(&reply(10_000), 11_000, 11_001).is_err());
-        assert!(validate_server_clock(&reply(10_000), 4_999, 5_001).is_err());
+        assert!(validate_server_clock(&reply(10_000), 10_999, 11_001).is_err());
+        assert!(validate_server_clock(&reply(10_000), 4_998, 5_000).is_err());
+        assert!(
+            validate_server_clock(&reply(13_000), 12_000, 18_000).is_err(),
+            "outbound delay must not hide a host clock that is two seconds ahead"
+        );
+        assert!(validate_server_clock(&reply(13_000), 10_000, 16_000).is_ok());
+        assert!(validate_server_clock(&reply(10_000), 10_001, 10_000).is_err());
     }
 
     #[test]

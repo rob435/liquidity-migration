@@ -27,12 +27,12 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 use crate::{mono_ns, wall_ms};
 use crate::creds::Credentials;
-use crate::json::{num_field, opt_num_field, str_field};
+use crate::json::{int_field, num_field, opt_num_field, str_field};
 use super::realm::VenueRealm;
 use super::sign::ws_signature;
 
@@ -42,6 +42,8 @@ const AUTH_WINDOW_MS: i64 = 5_000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIBE_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 /// A socket that lasted this long was a real connection, so the wait between
@@ -258,23 +260,35 @@ impl Worker {
     /// Read one socket until it dies. `Err(Gone)` means the feed was dropped;
     /// `Ok` means dial again.
     async fn pump(&mut self, mut socket: Socket, tx: &mpsc::Sender<Handover>) -> Result<(), Gone> {
-        let mut last_ping = Instant::now();
+        let mut next_ping_at = Instant::now() + PING_EVERY;
+        let mut pong_deadline = None;
         loop {
-            let deadline = tokio::time::Instant::from_std(last_ping + PING_EVERY);
+            let deadline = pong_deadline
+                .map(|deadline| deadline.min(next_ping_at))
+                .unwrap_or(next_ping_at);
             let wake = tokio::select! {
                 frame = socket.next() => Wake::Frame(frame),
-                _ = tokio::time::sleep_until(deadline) => Wake::Ping,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Wake::Timer,
             };
             let step = match wake {
-                Wake::Ping => match send(&mut socket, r#"{"op":"ping"}"#.to_string()).await {
+                Wake::Timer if pong_deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
+                    Step::Dropped("private stream keep-alive unanswered".to_string())
+                }
+                Wake::Timer => match send(&mut socket, r#"{"op":"ping"}"#.to_string()).await {
                     Ok(()) => Step::Pinged,
                     Err(e) => Step::Dropped(e.to_string()),
                 },
-                Wake::Frame(Some(Ok(Message::Text(text)))) => Step::Text(text.as_str().to_string()),
-                Wake::Frame(Some(Ok(Message::Ping(payload)))) => {
-                    let _ = socket.send(Message::Pong(payload)).await;
-                    Step::Idle
-                }
+                Wake::Frame(Some(Ok(Message::Text(text)))) => Step::Text(text),
+                Wake::Frame(Some(Ok(Message::Ping(payload)))) => match send_message(
+                    &mut socket,
+                    Message::Pong(payload),
+                )
+                .await
+                {
+                    Ok(()) => Step::Idle,
+                    Err(e) => Step::Dropped(e.to_string()),
+                },
+                Wake::Frame(Some(Ok(Message::Pong(_)))) => Step::Ponged,
                 Wake::Frame(Some(Ok(Message::Close(_)))) => {
                     Step::Dropped("venue closed the socket".to_string())
                 }
@@ -285,9 +299,17 @@ impl Worker {
 
             match step {
                 Step::Idle => (),
-                Step::Pinged => last_ping = Instant::now(),
+                Step::Pinged => {
+                    let now = Instant::now();
+                    next_ping_at = now + PING_EVERY;
+                    pong_deadline = Some(now + PONG_TIMEOUT);
+                }
+                Step::Ponged => pong_deadline = None,
                 Step::Text(text) => {
-                    let read = self.decoder.ingest(&text);
+                    let read = self.decoder.ingest(text.as_str());
+                    if matches!(&read, Ok(true)) {
+                        pong_deadline = None;
+                    }
                     while let Some(update) = self.decoder.pending.pop_front() {
                         hand_over(tx, Ok(update)).await?;
                     }
@@ -336,7 +358,7 @@ impl Decoder {
     }
 
     /// Turn one frame into updates and queue them.
-    fn ingest(&mut self, text: &str) -> Result<(), FeedError> {
+    fn ingest(&mut self, text: &str) -> Result<bool, FeedError> {
         let frame: Value = serde_json::from_str(text)
             .map_err(|e| FeedError::BadMessage(format!("{e}: {}", first_chars(text))))?;
 
@@ -346,7 +368,10 @@ impl Decoder {
                 let why = frame.get("ret_msg").and_then(Value::as_str).unwrap_or("no reason");
                 return Err(FeedError::Transport(format!("venue refused an op: {why}")));
             }
-            return Ok(());
+            return Ok(matches!(
+                frame.get("op").and_then(Value::as_str),
+                Some("ping" | "pong")
+            ));
         };
         let rows = frame.get("data").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
         let recv_ns = mono_ns();
@@ -387,7 +412,7 @@ impl Decoder {
         if execution_row_failed {
             self.pending.push_back(OrderUpdate::StreamReset { recv_ns });
         }
-        first_error.map_or(Ok(()), Err)
+        first_error.map_or(Ok(false), Err)
     }
 
     /// False if this order has already been acked.
@@ -407,20 +432,25 @@ impl Decoder {
 
 enum Wake {
     Frame(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
-    Ping,
+    Timer,
 }
 
 enum Step {
     Idle,
     Pinged,
-    Text(String),
+    Ponged,
+    Text(Utf8Bytes),
     Dropped(String),
 }
 
 async fn send(socket: &mut Socket, text: String) -> Result<(), FeedError> {
-    socket
-        .send(Message::text(text))
+    send_message(socket, Message::text(text)).await
+}
+
+async fn send_message(socket: &mut Socket, message: Message) -> Result<(), FeedError> {
+    tokio::time::timeout(SOCKET_WRITE_TIMEOUT, socket.send(message))
         .await
+        .map_err(|_| FeedError::Transport("private stream write timed out".to_string()))?
         .map_err(|e| FeedError::Transport(e.to_string()))
 }
 
@@ -435,10 +465,7 @@ async fn await_op(socket: &mut Socket, op: &str, timeout: Duration) -> Result<()
             let frame = frame.map_err(|e| FeedError::Transport(e.to_string()))?;
             let text = match frame {
                 Message::Ping(payload) => {
-                    socket
-                        .send(Message::Pong(payload))
-                        .await
-                        .map_err(|e| FeedError::Transport(e.to_string()))?;
+                    send_message(socket, Message::Pong(payload)).await?;
                     continue;
                 }
                 Message::Text(text) => text,
@@ -534,20 +561,28 @@ pub(crate) fn map_execution_row(
             )))
         }
     };
+    let qty = number(row, "execQty")?;
+    let px = number(row, "execPrice")?;
+    let venue_ts_ms = int_field(row, "execTime").map_err(bad_field)?;
+    if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
+        return Err(FeedError::BadMessage(format!(
+            "execution {exec_id} on {symbol_name} has non-positive quantity, price, or timestamp"
+        )));
+    }
     Ok(Some(OrderUpdate::Fill {
         exec_id,
         client_order_id,
         symbol,
         side,
-        qty: number(row, "execQty")?,
-        px: number(row, "execPrice")?,
+        qty,
+        px,
         // A maker rebate comes back negative; it is a fee either way.
         fee: opt_num_field(row, "execFee").map_err(bad_field)?.unwrap_or(0.0),
         // Absent means taker. The venue sends this on every execution, so an
         // absent one is a message shape we do not know — and the expensive
         // side is the safe thing to assume about a fill we cannot classify.
         is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
-        venue_ts_ms: number(row, "execTime")? as i64,
+        venue_ts_ms,
         recv_ns,
     }))
 }
@@ -786,6 +821,27 @@ mod tests {
             other => panic!("expected Fill, got {other:?}"),
         }
         assert!(map_execution_row(&base, &resolve, 1).is_err());
+
+        let mut zero_qty = no_fee;
+        zero_qty["execQty"] = json!("0");
+        assert!(map_execution_row(&zero_qty, &resolve, 1).is_err());
+
+        let mut fractional_time = base;
+        fractional_time["execPrice"] = json!("100");
+        fractional_time["execTime"] = json!("1.5");
+        assert!(map_execution_row(&fractional_time, &resolve, 1).is_err());
+    }
+
+    #[test]
+    fn both_bybit_keep_alive_reply_shapes_are_recognized() {
+        let mut feed = decoder_for(&[]);
+        assert!(feed.ingest(r#"{"op":"pong"}"#).unwrap());
+        assert!(
+            feed.ingest(r#"{"success":true,"ret_msg":"pong","op":"ping"}"#)
+                .unwrap()
+        );
+        assert!(!feed.ingest(r#"{"op":"subscribe","success":true}"#).unwrap());
+        assert!(feed.ingest("not json").is_err());
     }
 
     #[test]

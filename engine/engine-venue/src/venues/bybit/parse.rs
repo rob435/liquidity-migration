@@ -11,7 +11,7 @@ use engine_types::risk::PositionView;
 use engine_types::{Side, VenueError};
 use serde_json::Value;
 
-use crate::json::{kind_of, num_field, opt_num_field, str_field};
+use crate::json::{int_field, kind_of, num_field, opt_num_field, str_field};
 
 /// Unwrap the `retCode` envelope every v5 endpoint shares.
 pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
@@ -226,16 +226,30 @@ pub(crate) fn parse_executions(
                 )))
             }
         };
+        let exec_id = str_field(row, "execId")?;
+        if exec_id.is_empty() {
+            return Err(VenueError::BadReply(format!(
+                "quantity-moving execution in {symbol} has no execId"
+            )));
+        }
+        let qty = num_field(row, "execQty")?;
+        let px = num_field(row, "execPrice")?;
+        let venue_ts_ms = int_field(row, "execTime")?;
+        if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
+            return Err(VenueError::BadReply(format!(
+                "execution {exec_id} in {symbol} has non-positive quantity, price, or timestamp"
+            )));
+        }
         out.push(VenueExecution {
-            exec_id: str_field(row, "execId")?,
+            exec_id,
             client_order_id: str_field(row, "orderLinkId").unwrap_or_default(),
             symbol,
             side,
-            qty: num_field(row, "execQty")?,
-            px: num_field(row, "execPrice")?,
+            qty,
+            px,
             fee: opt_num_field(row, "execFee")?.unwrap_or(0.0),
             is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
-            venue_ts_ms: num_field(row, "execTime")? as i64,
+            venue_ts_ms,
         });
     }
     Ok((out, next_cursor(result)))
@@ -520,5 +534,21 @@ mod tests {
         assert!(!rows[0].is_maker);
         assert_eq!(rows[1].client_order_id, "");
         assert!(rows[1].is_maker);
+    }
+
+    #[test]
+    fn recovery_refuses_a_fill_without_a_stable_identity_or_real_quantity() {
+        let page = |exec_id: &str, qty: &str| {
+            json!({
+                "list": [{
+                    "execId": exec_id, "orderLinkId": "eng-9", "symbol": "ACEUSDT",
+                    "side": "Sell", "execQty": qty, "execPrice": "0.05413",
+                    "execFee": "0", "execTime": "1787176627876", "execType": "Trade"
+                }],
+                "nextPageCursor": ""
+            })
+        };
+        assert!(parse_executions(&page("", "1")).is_err());
+        assert!(parse_executions(&page("e-zero", "0")).is_err());
     }
 }

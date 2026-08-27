@@ -45,6 +45,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIBE_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(8);
 /// Bybit caps the size of one request frame, not the number of topics.
@@ -565,9 +566,21 @@ impl FeedWorker {
         if now < self.next_ping_at {
             return Ok(Step::Idle);
         }
-        if let Err(e) = socket.send(Message::text(PING_PAYLOAD)).await {
-            warn!("market feed ping failed: {e}");
-            return Ok(Step::Reconnect);
+        match tokio::time::timeout(
+            SOCKET_WRITE_TIMEOUT,
+            socket.send(Message::text(PING_PAYLOAD)),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "market feed ping failed");
+                return Ok(Step::Reconnect);
+            }
+            Err(_) => {
+                warn!("market feed ping timed out");
+                return Ok(Step::Reconnect);
+            }
         }
         self.next_ping_at = now + PING_INTERVAL;
         if self.pong_deadline.is_none() {
