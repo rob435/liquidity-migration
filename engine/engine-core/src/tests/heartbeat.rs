@@ -99,6 +99,58 @@ fn heartbeat_at(path: &std::path::Path) -> serde_json::Map<String, serde_json::V
         .clone()
 }
 
+struct BlockedStrategy {
+    rows: Vec<(String, String)>,
+}
+
+impl Strategy for BlockedStrategy {
+    fn name(&self) -> &str {
+        "blocked_test"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        Vec::new()
+    }
+
+    fn entry_blockers(&self) -> Vec<(String, String)> {
+        self.rows.clone()
+    }
+}
+
+#[test]
+fn blockers_are_deduplicated_per_configured_strategy_and_symbol() {
+    let strategies: Vec<Box<dyn Strategy>> = vec![
+        Box::new(BlockedStrategy {
+            rows: vec![
+                ("BTCUSDT".to_string(), "kernel_refusal".to_string()),
+                ("BTCUSDT".to_string(), "planner_skip".to_string()),
+            ],
+        }),
+        Box::new(BlockedStrategy {
+            rows: vec![("BTCUSDT".to_string(), "carry_skip".to_string())],
+        }),
+    ];
+    let configured = vec!["target_book_long".to_string(), "target_book_carry".to_string()];
+
+    let rows = crate::engine::named_entry_blockers(&strategies, &configured);
+
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "target_book_carry".to_string(),
+                "BTCUSDT".to_string(),
+                "carry_skip".to_string(),
+            ),
+            (
+                "target_book_long".to_string(),
+                "BTCUSDT".to_string(),
+                "kernel_refusal".to_string(),
+            ),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_running_engine_leaves_a_heartbeat_saying_how_it_is() {
     let path = temp_path("heartbeat-running");

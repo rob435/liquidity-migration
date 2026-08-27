@@ -1487,18 +1487,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // strategies. A target producer learns what became of its ask only
         // through this file, and an ask the engine refuses or cannot size is
         // the difference between "on its way" and "squatting on a slot".
-        // One reason per symbol: the first strategy that names one wins, and
-        // a kernel refusal outranks a planner skip because the follower
-        // reports refusals first.
-        let mut blockers: Vec<(String, String)> = Vec::new();
-        for strategy in strategies.iter() {
-            for (symbol, reason) in strategy.entry_blockers() {
-                if !blockers.iter().any(|(seen, _)| seen == &symbol) {
-                    blockers.push((symbol, reason));
-                }
-            }
-        }
-        blockers.sort_by(|a, b| a.0.cmp(&b.0));
+        // Strategy identity is part of the key: two sleeves may ask for the
+        // same symbol and need their own answer. Within one sleeve the first
+        // reason wins, so its kernel refusal still outranks a planner skip.
+        let blockers = named_entry_blockers(strategies, names);
         // Named, because the producers that read this file know symbols by
         // name and nothing else. Flat rows are dropped the way every other
         // reader of this view drops them: flat is not a holding.
@@ -2715,6 +2707,34 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .collect(),
         }
     }
+}
+
+/// Entry blockers with the configured sleeve name that owns each one.
+///
+/// A symbol is not a unique key on a multi-sleeve account. Deduplication is
+/// deliberately per (strategy, symbol), preserving the first reason each
+/// strategy reports because target-book followers put kernel refusals before
+/// weaker planner skips.
+fn named_entry_blockers(
+    strategies: &[Box<dyn Strategy>],
+    names: &[String],
+) -> Vec<(String, String, String)> {
+    let mut blockers: Vec<(String, String, String)> = Vec::new();
+    for (index, strategy) in strategies.iter().enumerate() {
+        let Some(strategy_name) = names.get(index) else {
+            tracing::error!(index, "strategy has no configured name; omitting its entry blockers");
+            continue;
+        };
+        for (symbol, reason) in strategy.entry_blockers() {
+            if !blockers.iter().any(|(seen_strategy, seen_symbol, _)| {
+                seen_strategy == strategy_name && seen_symbol == &symbol
+            }) {
+                blockers.push((strategy_name.clone(), symbol, reason));
+            }
+        }
+    }
+    blockers.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    blockers
 }
 
 #[allow(clippy::too_many_arguments)]

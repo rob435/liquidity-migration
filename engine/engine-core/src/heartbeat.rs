@@ -103,14 +103,14 @@ pub struct Facts<'a> {
     /// holding. Attribution is rebuilt from the WAL before the first beat.
     pub holdings: &'a [(String, Side, f64, f64, Option<String>)],
     /// Why each asked-for name is not being opened right now, as
-    /// (symbol, reason) pairs gathered from the strategies.
+    /// (strategy, symbol, reason) rows gathered from the strategies.
     ///
     /// Also read by the target producers, not telemetry: an ask the kernel
     /// refused or a size below the entry floor never becomes a position, and
     /// a producer that cannot tell that from "on its way" holds the slot for
     /// its whole deadline. Empty is a real answer — everything asked for is
     /// either held, being worked, or not blocked at all.
-    pub entry_blockers: &'a [(String, String)],
+    pub entry_blockers: &'a [(String, String, String)],
     /// What the fills have cost so far this run.
     ///
     /// Five numbers, and they answer the question the latency pair beside them
@@ -396,12 +396,14 @@ fn list(names: &[String]) -> String {
 /// Why the asked-for names are not being opened, as an array of objects.
 /// Empty is a real answer and means nothing is blocked -- not the same as the
 /// key being absent, which would mean an engine too old to say.
-fn blockers(rows: &[(String, String)]) -> String {
+fn blockers(rows: &[(String, String, String)]) -> String {
     let items: Vec<String> = rows
         .iter()
-        .map(|(symbol, reason)| {
+        .map(|(strategy, symbol, reason)| {
             format!(
-                "{{{}: {}, {}: {}}}",
+                "{{{}: {}, {}: {}, {}: {}}}",
+                quoted("strategy"),
+                quoted(strategy),
                 quoted("symbol"),
                 quoted(symbol),
                 quoted("reason"),
@@ -479,7 +481,8 @@ mod tests {
         // An engine that has not filled anything, which is what every test
         // that is not about fill costs means.
         static NOTHING_YET: std::sync::OnceLock<Costs> = std::sync::OnceLock::new();
-        static NO_BLOCKERS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+        static NO_BLOCKERS: std::sync::OnceLock<Vec<(String, String, String)>> =
+            std::sync::OnceLock::new();
         Facts {
             costs: NOTHING_YET.get_or_init(Costs::default),
             may_open: true,
@@ -592,8 +595,13 @@ mod tests {
         let names = vec!["target_book".to_string()];
         let held = one_holding();
         let blockers = vec![
-            ("KAITOUSDT".to_string(), "below_entry_floor".to_string()),
             (
+                "target_book_long".to_string(),
+                "KAITOUSDT".to_string(),
+                "below_entry_floor".to_string(),
+            ),
+            (
+                "target_book_long".to_string(),
                 "SOMIUSDT".to_string(),
                 "AvailableMarginExhausted { additional_margin_usdt: 12.0, available_usdt: 0.5 }"
                     .to_string(),
@@ -606,6 +614,7 @@ mod tests {
 
         let rows = fields["entry_blockers"].as_array().expect("an array");
         assert_eq!(rows.len(), 2, "one reason per blocked name");
+        assert_eq!(rows[0]["strategy"], "target_book_long");
         assert_eq!(rows[0]["symbol"], "KAITOUSDT");
         assert_eq!(rows[0]["reason"], "below_entry_floor");
         assert_eq!(rows[1]["symbol"], "SOMIUSDT");
@@ -614,6 +623,36 @@ mod tests {
             "the kernel's own reason text crosses: {}",
             rows[1]["reason"]
         );
+    }
+
+    #[test]
+    fn same_symbol_blockers_keep_their_strategy_identity() {
+        let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
+        let names = vec!["target_book_long".to_string(), "target_book_carry".to_string()];
+        let held = one_holding();
+        let blockers = vec![
+            (
+                "target_book_long".to_string(),
+                "KAITOUSDT".to_string(),
+                "below_entry_floor".to_string(),
+            ),
+            (
+                "target_book_carry".to_string(),
+                "KAITOUSDT".to_string(),
+                "available_margin_exhausted".to_string(),
+            ),
+        ];
+        let mut facts = facts(&names, &held);
+        facts.entry_blockers = &blockers;
+
+        let fields = parsed(&beat.render(&facts, 1_755_000_000_000));
+        let rows = fields["entry_blockers"].as_array().expect("an array");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["symbol"], "KAITOUSDT");
+        assert_eq!(rows[1]["symbol"], "KAITOUSDT");
+        assert_eq!(rows[0]["strategy"], "target_book_long");
+        assert_eq!(rows[1]["strategy"], "target_book_carry");
     }
 
     #[test]
