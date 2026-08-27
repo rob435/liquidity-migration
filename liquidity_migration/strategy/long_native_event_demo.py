@@ -1644,7 +1644,7 @@ def _advance_long_book_state(
         # Confirmed once, remembered for good: an entry that fills and is later
         # closed must read differently from one that never filled at all.
         if not entry.seen_held and held_symbols is not None and symbol in held_symbols:
-            venue = venue_holdings.get(symbol)
+            venue = None if venue_holdings is None else venue_holdings.get(symbol)
             if venue is None or venue[0] != "long" or venue[1] <= 0.0:
                 _LOGGER.warning(
                     "long book: %s appeared held without an attributable long position; "

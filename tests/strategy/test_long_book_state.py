@@ -398,6 +398,20 @@ def test_a_name_the_engine_confirms_is_marked_as_actually_held() -> None:
     assert after.held["KAITOUSDT"].max_hold_deadline_ts_ms == NOW_MS + exact_duration_ms(days=3)
 
 
+def test_a_symbol_without_attributable_venue_detail_does_not_start_the_fill_clock() -> None:
+    before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT", seen_held=False)})
+
+    after = _advance(
+        before,
+        held_symbols=frozenset({"KAITOUSDT"}),
+        venue_holdings=None,
+    )
+
+    assert after.held["KAITOUSDT"].seen_held is False
+    assert after.held["KAITOUSDT"].entered_ts_ms == 0
+    assert after.held["KAITOUSDT"].max_hold_deadline_ts_ms == 0
+
+
 def test_a_name_that_was_held_and_is_gone_leaves_the_book() -> None:
     """A stop fired, or somebody closed it. Nothing this producer asked for
     did, so the name leaves the record and starts its cooldown."""

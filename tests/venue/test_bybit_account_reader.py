@@ -58,6 +58,14 @@ def test_cursor_reads_every_page_once(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
+def test_cursor_rejects_a_non_object_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = reader(monkeypatch)
+    client._client.position_pages = [{"retCode": 0, "result": None}]
+
+    with pytest.raises(bybit.BybitDataError, match="invalid result object"):
+        client.get_positions(settle_coin="USDT")
+
+
 def test_wallet_read_preserves_result(monkeypatch: pytest.MonkeyPatch) -> None:
     client = reader(monkeypatch)
     assert client.get_wallet_balance() == {"list": [{"totalEquity": "100"}]}

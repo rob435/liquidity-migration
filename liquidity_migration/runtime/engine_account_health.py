@@ -244,27 +244,27 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     for index, row in enumerate(raw_blockers):
         if not isinstance(row, Mapping):
             raise ValueError(f"engine heartbeat entry blocker {index} is not an object")
-        symbol = row.get("symbol")
+        blocker_symbol = row.get("symbol")
         reason = row.get("reason")
         strategy = row.get("strategy")
         if (
-            not isinstance(symbol, str)
-            or not symbol
-            or symbol != symbol.upper()
-            or not symbol.isalnum()
+            not isinstance(blocker_symbol, str)
+            or not blocker_symbol
+            or blocker_symbol != blocker_symbol.upper()
+            or not blocker_symbol.isalnum()
             or not isinstance(reason, str)
             or not reason
             or not isinstance(strategy, str)
             or strategy not in strategies
         ):
             raise ValueError(f"engine heartbeat entry blocker {index} is invalid")
-        key = (strategy, symbol)
+        key = (strategy, blocker_symbol)
         if key in blocker_keys:
             raise ValueError(
-                f"engine heartbeat repeats entry blocker for {strategy}:{symbol}"
+                f"engine heartbeat repeats entry blocker for {strategy}:{blocker_symbol}"
             )
         blocker_keys.add(key)
-        entry_blockers_by_strategy[strategy][symbol] = reason
+        entry_blockers_by_strategy[strategy][blocker_symbol] = reason
     return EngineAccountReading(
         equity_usdt=equity_usdt,
         available_usdt=available_usdt,

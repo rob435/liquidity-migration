@@ -190,7 +190,9 @@ class BybitAccountReader:
             if payload is None:
                 return rows
             result = payload.get("result")
-            page = result.get("list") if isinstance(result, Mapping) else None
+            if not isinstance(result, Mapping):
+                raise BybitDataError(f"Bybit {method_names[0]} returned an invalid result object")
+            page = result.get("list")
             if not isinstance(page, list) or any(not isinstance(row, Mapping) for row in page):
                 raise BybitDataError(f"Bybit {method_names[0]} returned an invalid result list")
             rows.extend(dict(row) for row in page)
