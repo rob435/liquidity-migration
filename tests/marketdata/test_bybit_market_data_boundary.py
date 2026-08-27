@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import importlib
 import subprocess
 import sys
 from pathlib import Path
@@ -83,7 +82,9 @@ def test_public_and_target_modules_do_not_transitively_load_private_execution(mo
         "liquidity_migration.venue.bybit_execution_adapter",
     )
     code = (
-        "import importlib, sys; "
+        "import importlib, importlib.util, sys, types; "
+        "sys.modules['fcntl']=types.SimpleNamespace() if importlib.util.find_spec('fcntl') is None "
+        "else importlib.import_module('fcntl'); "
         f"importlib.import_module({module!r}); "
         f"forbidden={forbidden!r}; "
         "present=[name for name in forbidden if name in sys.modules]; "
@@ -122,25 +123,35 @@ def test_shared_policy_does_not_load_private_execution(module: str) -> None:
     assert proc.returncode == 0, f"{module}: {proc.stderr or proc.stdout}"
 
 
-def test_account_reader_does_not_export_public_market_data_or_mutations() -> None:
-    private = importlib.import_module("liquidity_migration.venue.bybit")
-    public_names = {
-        "INTERVAL_MS",
-        "BybitKlineStreamPool",
-        "BybitMarketData",
-        "BybitPublicTickerStream",
-        "BybitRestRateLimiter",
+def test_python_private_account_rest_surface_is_absent() -> None:
+    assert not (REPO / "liquidity_migration" / "venue" / "bybit.py").exists()
+
+    forbidden = {
+        "BybitAccountReader",
+        "get_api_key_information",
+        "get_closed_pnl",
+        "get_executions",
+        "get_open_orders",
+        "get_order_history",
+        "get_positions",
+        "get_trade_history",
+        "get_transaction_log",
+        "get_wallet_balance",
+        "resolve_demo_credentials",
+        "resolve_private_credentials",
     }
-    assert public_names.isdisjoint(private.__all__)
-    assert not {name for name in public_names if hasattr(private, name)}
-    reader = private.BybitAccountReader
-    assert not {
-        "place_order",
-        "place_orders_batch",
-        "amend_order",
-        "cancel_order",
-        "set_leverage",
-        "set_trading_stop",
-    }.intersection(vars(reader))
+    for path in (REPO / "liquidity_migration").rglob("*.py"):
+        tree = _tree(path)
+        defined_names = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        called_attributes = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        assert forbidden.isdisjoint(defined_names | called_attributes), path.relative_to(REPO)
 
 

@@ -6,9 +6,8 @@
 //! and asks here, so there is a single answer to "where do real orders go" and
 //! a single place to read it.
 //!
-//! The rules are the Python fleet's, ported so both halves behave the same way
-//! while both are running (`liquidity_migration/core/venue_realm.py` and the
-//! arming checks in `liquidity_migration/venue/bybit.py`):
+//! The arming and credential rules live entirely in this Rust engine. Python's
+//! `liquidity_migration/core/venue_realm.py` names public-data endpoints only:
 //!
 //! - **A realm is always named.** There is no default. A config that does not
 //!   say which account it trades does not get one picked for it.

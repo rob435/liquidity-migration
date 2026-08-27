@@ -54,10 +54,10 @@ def test_package_logger_records_keep_their_formatting() -> None:
     stderr = _run(
         """
         ensure_default_log_handler()
-        logging.getLogger("liquidity_migration.venue.bybit.account_reader").info("stream connected")
+        logging.getLogger("liquidity_migration.marketdata.bybit_market_data").info("stream connected")
         """
     )
-    assert "[INFO] liquidity_migration.venue.bybit.account_reader: stream connected" in stderr
+    assert "[INFO] liquidity_migration.marketdata.bybit_market_data: stream connected" in stderr
 
 
 def test_existing_logging_setup_is_never_overridden() -> None:

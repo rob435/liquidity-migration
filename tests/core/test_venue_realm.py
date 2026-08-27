@@ -14,7 +14,6 @@ from liquidity_migration.policy.execution_environment import (
     execution_environment,
 )
 from liquidity_migration.core.venue_realm import (
-    REALM_CREDENTIAL_VARIABLES,
     REALM_REST_ENDPOINTS,
     VenueRealm,
     venue_realm,
@@ -44,14 +43,9 @@ def test_environment_and_realm_parsers_reject_every_fallback() -> None:
     assert venue_realm(" Demo ") is VenueRealm.DEMO
 
 
-def test_each_realm_has_a_distinct_endpoint_and_credential_pair() -> None:
+def test_each_realm_has_a_distinct_public_endpoint() -> None:
     assert set(REALM_REST_ENDPOINTS) == set(VenueRealm)
     assert len(set(REALM_REST_ENDPOINTS.values())) == len(VenueRealm)
-    assert set(REALM_CREDENTIAL_VARIABLES) == set(VenueRealm)
-    demo_vars = set(REALM_CREDENTIAL_VARIABLES[VenueRealm.DEMO])
-    mainnet_vars = set(REALM_CREDENTIAL_VARIABLES[VenueRealm.MAINNET])
-    # Disjoint on purpose: a stale demo key cannot authenticate a mainnet run.
-    assert not demo_vars & mainnet_vars
 
 
 def test_mainnet_is_a_choice_only_for_the_funded_sleeves_and_never_a_default() -> None:
