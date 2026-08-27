@@ -20,7 +20,6 @@ ACTIVE_MARKET_DATA_PRODUCERS = (
 )
 PUBLIC_PROCESS_MODULES = (
     "liquidity_migration.marketdata.bybit_market_data",
-    "liquidity_migration.account.execution_adapters",
     "liquidity_migration.rules.long_native",
     "liquidity_migration.strategy.long_native_event_demo",
     "liquidity_migration.strategy.long_native_event_demo_daemon",
@@ -47,8 +46,7 @@ def test_public_market_data_module_has_no_private_account_surface() -> None:
 
     assert "liquidity_migration.account.account_owner_lease" not in imported_modules
     assert "liquidity_migration.venue.bybit" not in imported_modules
-    assert "BybitPrivateClient" not in class_names
-    assert "BybitPrivateWebSocketStream" not in class_names
+    assert "BybitAccountReader" not in class_names
     assert not {
         "place_order",
         "amend_order",
@@ -127,7 +125,7 @@ def test_shared_config_does_not_load_demo_owner(module: str) -> None:
     assert proc.returncode == 0, f"{module}: {proc.stderr or proc.stdout}"
 
 
-def test_private_bybit_module_does_not_export_public_market_data() -> None:
+def test_account_reader_does_not_export_public_market_data_or_mutations() -> None:
     private = importlib.import_module("liquidity_migration.venue.bybit")
     public_names = {
         "INTERVAL_MS",
@@ -138,5 +136,14 @@ def test_private_bybit_module_does_not_export_public_market_data() -> None:
     }
     assert public_names.isdisjoint(private.__all__)
     assert not {name for name in public_names if hasattr(private, name)}
+    reader = private.BybitAccountReader
+    assert not {
+        "place_order",
+        "place_orders_batch",
+        "amend_order",
+        "cancel_order",
+        "set_leverage",
+        "set_trading_stop",
+    }.intersection(vars(reader))
 
 

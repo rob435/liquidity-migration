@@ -31,12 +31,12 @@ from typing import Any, Mapping
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from liquidity_migration.account.engine_account_health import (  # noqa: E402
+from liquidity_migration.runtime.engine_account_health import (  # noqa: E402
     require_recent_engine_account,
 )
 from liquidity_migration.core.venue_realm import client_venue_realm  # noqa: E402
 from liquidity_migration.venue.bybit import (  # noqa: E402
-    BybitPrivateClient,
+    BybitAccountReader,
     resolve_demo_credentials,
 )
 
@@ -185,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("demo credentials are unavailable")
         readiness = require_rollout_readiness(
             head_binding=args.head_binding,
-            client=BybitPrivateClient(
+            client=BybitAccountReader(
                 api_key=api_key,
                 api_secret=api_secret,
                 demo=True,

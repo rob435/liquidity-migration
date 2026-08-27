@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import hashlib
 
 from liquidity_migration.venue.bybit import (
-    BybitPrivateClient,
+    BybitAccountReader,
     resolve_private_credentials,
 )
 from liquidity_migration.core.logging_setup import ensure_default_log_handler
@@ -30,7 +30,7 @@ from liquidity_migration.strategy.account_candidate_universe import (
     load_candidate_universe,
 )
 from liquidity_migration.account.account_route import require_account_route
-from liquidity_migration.account.execution_environment import (
+from liquidity_migration.policy.execution_environment import (
     EXECUTION_ENVIRONMENT_VALUES,
     account_id_for_environment,
 )
@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         key_variable, secret_variable = REALM_CREDENTIAL_VARIABLES[realm]
         parser.error(f"{key_variable} and {secret_variable} are required")
 
-    client = BybitPrivateClient(
+    client = BybitAccountReader(
         category="linear",
         testnet=False,
         demo=realm is VenueRealm.DEMO,

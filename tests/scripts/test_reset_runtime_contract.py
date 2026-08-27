@@ -441,7 +441,7 @@ def test_flatness_guard_reports_conditional_orders(
                 return [{"orderId": "c1", "symbol": "TESTUSDT", "orderStatus": "Untriggered"}]
             return []
 
-    monkeypatch.setattr(bybit, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(bybit, "BybitAccountReader", FakeClient)
     monkeypatch.setattr(bybit, "resolve_demo_credentials", lambda: ("k", "s"))
     with pytest.raises(ResetError, match="not flat"):
         reset.verify_demo_account_flat()
@@ -465,7 +465,7 @@ def test_flatness_guard_passes_a_flat_account(
         def get_open_orders(self, **_kwargs: object) -> list[dict]:
             return []
 
-    monkeypatch.setattr(bybit, "BybitPrivateClient", FakeClient)
+    monkeypatch.setattr(bybit, "BybitAccountReader", FakeClient)
     monkeypatch.setattr(bybit, "resolve_demo_credentials", lambda: ("k", "s"))
     reset.verify_demo_account_flat()
     assert "demo-account-flat-ok positions=0 open_orders=0" in capsys.readouterr().out

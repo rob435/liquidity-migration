@@ -74,7 +74,7 @@ def test_accounting_script_is_owner_serialized_and_read_only(
     )
     monkeypatch.setattr(
         accounting_script,
-        "BybitPrivateClient",
+        "BybitAccountReader",
         lambda **_kwargs: client,
     )
 

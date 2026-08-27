@@ -648,12 +648,12 @@ def _position_amount(row: dict) -> float:
 
 
 def resolve_demo_account_lease_path() -> str:
-    from liquidity_migration.venue.bybit import BybitPrivateClient, resolve_demo_credentials
+    from liquidity_migration.venue.bybit import BybitAccountReader, resolve_demo_credentials
 
     api_key, api_secret = resolve_demo_credentials()
     if not api_key or not api_secret:
         _die("cannot derive the authenticated canonical demo-account lease")
-    client = BybitPrivateClient(api_key=api_key, api_secret=api_secret, demo=True)
+    client = BybitAccountReader(api_key=api_key, api_secret=api_secret, demo=True)
     identity = DemoAccountIdentity.from_api_key_info(
         api_key=api_key,
         api_key_info=client.get_api_key_information(),
@@ -662,14 +662,14 @@ def resolve_demo_account_lease_path() -> str:
 
 
 def verify_demo_account_flat() -> None:
-    from liquidity_migration.venue.bybit import BybitPrivateClient, resolve_demo_credentials
+    from liquidity_migration.venue.bybit import BybitAccountReader, resolve_demo_credentials
 
     api_key, api_secret = resolve_demo_credentials()
     if not api_key or not api_secret:
         _die(
             "missing BYBIT_DEMO_API_KEY/BYBIT_DEMO_API_SECRET; cannot prove account is flat"
         )
-    client = BybitPrivateClient(api_key=api_key, api_secret=api_secret, demo=True)
+    client = BybitAccountReader(api_key=api_key, api_secret=api_secret, demo=True)
     positions = [
         row for row in client.get_positions(settle_coin="USDT") if _position_amount(row) > 0.0
     ]

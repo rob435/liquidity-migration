@@ -25,7 +25,7 @@ from liquidity_migration.research.execution.account_venue_accounting import (  #
     write_venue_accounting_receipt,
 )
 from liquidity_migration.venue.bybit import (  # noqa: E402
-    BybitPrivateClient,
+    BybitAccountReader,
     resolve_demo_credentials,
 )
 
@@ -118,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError(
             "BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET are required"
         )
-    client = BybitPrivateClient(
+    client = BybitAccountReader(
         category="linear",
         testnet=False,
         demo=True,
