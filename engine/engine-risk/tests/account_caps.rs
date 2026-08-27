@@ -1,5 +1,5 @@
 //! The account-wide capital caps, against the same rules as the account-level
-//! checks in account_kernel.py: `component_gross_limit`,
+//! account-level gross, margin, and availability checks:
 //! `initial_margin_limit`, and the pair `negative_available_margin` /
 //! `available_margin_limit`.
 //!
@@ -133,7 +133,7 @@ fn split_gross_config() -> KernelConfig {
 }
 
 #[test]
-// account_kernel.py:3121. Spread across two symbols so neither symbol cap
+// Spread across two symbols so neither symbol cap
 // fires first.
 fn a_book_exactly_at_the_second_gross_ceiling_is_allowed() {
     let mut k = kernel(split_gross_config());
@@ -208,7 +208,7 @@ fn margin_capped_config() -> KernelConfig {
 }
 
 #[test]
-// account_kernel.py:3125. 80 USDT of gross at leverage 2 is 40 of margin.
+// 80 USDT of gross at leverage 2 is 40 of margin.
 fn a_book_exactly_at_the_account_margin_cap_is_allowed() {
     let mut k = kernel(margin_capped_config());
     assert_eq!(
@@ -253,7 +253,7 @@ fn the_account_margin_cap_follows_the_capital_reference() {
 // --------------------------------------------------------------------------
 
 #[test]
-// account_kernel.py:3145. 40 USDT of gross at leverage 2 needs 20 of margin.
+// 40 USDT of gross at leverage 2 needs 20 of margin.
 fn an_increase_the_spare_margin_exactly_covers_is_allowed() {
     let mut k = kernel(mainnet_config());
     assert_eq!(
@@ -281,7 +281,7 @@ fn an_increase_larger_than_the_spare_margin_is_refused() {
 }
 
 #[test]
-// account_kernel.py:3022 refuses a non-risk-reducing batch outright on a
+// A non-risk-reducing order is refused outright on a
 // negative reading. Here one order is the whole increase and its margin is
 // always positive, so the increase test above already refuses it.
 fn a_negative_spare_margin_refuses_every_entry() {
@@ -383,7 +383,7 @@ fn an_account_cap_is_reported_before_the_partition_clamps() {
 
 #[test]
 // Risk-reducing orders flow past every cap here, exactly as a risk-reducing
-// batch skips them all in account_kernel.py.
+// batch skips them all.
 fn an_exit_is_never_blocked_by_the_account_caps() {
     let mut cfg = mainnet_config();
     cfg.envelope.max_component_gross_notional_usdt = 1.0;

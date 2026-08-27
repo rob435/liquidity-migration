@@ -303,7 +303,7 @@ fn a_reduce_only_order_that_does_not_reduce_refuses() {
 }
 
 #[test]
-// account_kernel.py sizes a reduction against the reconstructed position
+// A reduction is sized against the reconstructed position
 // alone; asking to close more than is provably open is clamped to it.
 fn an_oversized_exit_is_clamped_to_the_position() {
     let mut kernel = kernel();

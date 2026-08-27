@@ -104,7 +104,6 @@ def test_shared_policy_does_not_load_private_execution(module: str) -> None:
     forbidden = (
         "liquidity_migration.venue.bybit",
         "liquidity_migration.venue.bybit_execution_adapter",
-        "liquidity_migration.runtime.account_service_runner",
     )
     code = (
         "import importlib, sys; "

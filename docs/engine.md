@@ -222,9 +222,7 @@ parallel and integrate by type-check.
   order.** The equity-anchored envelope and the stop-attach discipline live in
   `engine-risk`, each with table-driven tests over its decision semantics.
   Every cap is account-wide: no sleeve holds a private share, so any one of
-  them can spend the lot. Read those tests and
-  `engine-risk/PORT_NOTES.md` together: the notes carry every rule, its
-  defaults, and every place this kernel is deliberately stricter.
+  them can spend the lot. The tests are the executable decision contract.
 - **One writer per account.** The engine takes the fleet's own lease: one
   kernel `flock` per venue account, at
   `/run/lock/liquidity-migration/{venue}-{realm}-user-{account}.lock`, joined
@@ -661,8 +659,8 @@ Six steps, five in `engine-venue` and one next door:
 | Capability | State |
 | --- | --- |
 | Decide, gate, make durable, sign, send | Done, and measured |
-| The capital controls | In the kernel, with every load-time proof, down to the proof that the account gross cap sits inside what the reference could fund. `engine-risk/PORT_NOTES.md` has the line-by-line |
-| The fleet's own risk limits | Done. `[risk] operational_profile_path` loads `configs/operational.mainnet.json` itself, so a cap the owner tightens tightens for both halves. Measured: the Python and Rust loaders read that file identically, field for field |
+| The capital controls | In the kernel, with every load-time proof, down to the proof that the account gross cap sits inside what the reference could fund. The `engine-risk` tests are the executable contract. |
+| The fleet's own risk limits | Done. `[risk] operational_profile_path` loads `configs/operational.mainnet.json` itself, so a reviewed cap change binds the Rust owner directly. |
 | Quantizing to tick and step, venue minimums | Done |
 | Following a research target book | Done, and run against the demo account. The engine remembers what each strategy sent until the account reading shows it, so the window between a fill and the next reading cannot become a second entry — see the in-flight row below |
 | One account, more than one sleeve | Done. Each sleeve names its own book path and that book reaches that sleeve only |

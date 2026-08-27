@@ -40,9 +40,9 @@ Environment=LONG_STRATEGY_PROFILE=v12
 # re-enter every name it holds, for ever. The book path must match the long
 # sleeve's `book_path` in /etc/liquidity-migration/engine.toml.
 #
-# The state file is this producer's memory and replaces the account journal,
-# which the deleted Python owner used to write. It is not in the deployed
-# checkout: the deploy proves that tree clean at every exact-commit step.
+# The state file is this producer's durable request/fill-clock memory. It is
+# not in the deployed checkout: deployment proves that tree clean at every
+# exact-commit step.
 Environment=LONG_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/long-demo.json
 Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/long-demo-state.json
 # The LLM gate's judged candidates (written hourly by the llm-ledger service)

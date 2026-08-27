@@ -1,5 +1,5 @@
 //! The stop-attach discipline: the decision half of venue_protection.py and of
-//! the entry-protection reducer in account_kernel.py.
+//! the engine's entry-protection reducer.
 //!
 //! Baselines from tests/venue/test_venue_protection.py: reference price 10.0,
 //! fallback stop fraction 0.07, so a long stop sits at 9.3 and a short at 10.7.
