@@ -51,7 +51,7 @@ class _PybitRateLimitLogFilter(logging.Filter):
 logging.getLogger("pybit._http_manager").addFilter(_PybitRateLimitLogFilter())
 
 
-_logger_market_data = logging.getLogger("liquidity_migration.venue.bybit.market_data")
+_logger_market_data = logging.getLogger("liquidity_migration.marketdata.bybit")
 
 
 class BybitRestRateLimiter:
@@ -537,7 +537,7 @@ def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
         try:
             closer()
         except Exception as exc:
-            logging.getLogger("liquidity_migration.venue.bybit").debug(
+            logging.getLogger("liquidity_migration.marketdata.bybit").debug(
                 "ws close raised: %s",
                 exc,
             )
@@ -546,7 +546,7 @@ def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
     thread.start()
     thread.join(timeout=timeout_seconds)
     if thread.is_alive():
-        logging.getLogger("liquidity_migration.venue.bybit").warning(
+        logging.getLogger("liquidity_migration.marketdata.bybit").warning(
             "ws close did not return within %.1fs; abandoning thread",
             timeout_seconds,
         )
@@ -597,7 +597,7 @@ def _patch_pybit_daemon_ping_timer() -> None:
     manager._agc_daemon_ping_timer = True
 
 
-_logger_ws_klines = logging.getLogger("liquidity_migration.venue.bybit.ws_klines")
+_logger_ws_klines = logging.getLogger("liquidity_migration.marketdata.bybit.ws_klines")
 
 
 class _FrameGatedWebSocketMixin:
