@@ -96,12 +96,12 @@ pub struct Facts<'a> {
     /// name, the engine refuses to buy it back, and the slot stays occupied
     /// until the producer's own deadline drops it, up to three days later.
     ///
-    /// The venue's own per-symbol reading is published rather than the
-    /// engine's per-strategy attribution, and that is the conservative choice.
-    /// Attribution is summed from the log and starts empty on a fresh one, so
-    /// a restart would report every position closed and every producer would
-    /// drop its whole book at once. The venue's answer cannot do that.
-    pub holdings: &'a [(String, Side, f64, f64)],
+    /// The venue's own per-symbol reading is published, plus the configured
+    /// strategy name only when the fill ledger proves that exactly one sleeve
+    /// owns the symbol. An inherited, manual, or shared position is `null`:
+    /// assigning it by guess would let one producer close another sleeve's
+    /// holding. Attribution is rebuilt from the WAL before the first beat.
+    pub holdings: &'a [(String, Side, f64, f64, Option<String>)],
     /// Why each asked-for name is not being opened right now, as
     /// (symbol, reason) pairs gathered from the strategies.
     ///
@@ -363,12 +363,12 @@ fn figure(count: u64, ns: u64) -> String {
 /// What is held, as an array of objects. Empty is a real answer and means
 /// the account holds nothing -- not the same as the key being absent, which
 /// would mean an engine too old to say.
-fn positions(held: &[(String, Side, f64, f64)]) -> String {
+fn positions(held: &[(String, Side, f64, f64, Option<String>)]) -> String {
     let rows: Vec<String> = held
         .iter()
-        .map(|(symbol, side, qty, entry_px)| {
+        .map(|(symbol, side, qty, entry_px, strategy)| {
             format!(
-                "{{{}: {}, {}: {}, {}: {}, {}: {}}}",
+                "{{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}}}",
                 quoted("symbol"),
                 quoted(symbol),
                 quoted("side"),
@@ -380,6 +380,8 @@ fn positions(held: &[(String, Side, f64, f64)]) -> String {
                 amount(*qty),
                 quoted("entry_px"),
                 amount(*entry_px),
+                quoted("strategy"),
+                or_null(strategy.as_ref().map(|name| quoted(name))),
             )
         })
         .collect();
@@ -470,7 +472,10 @@ mod tests {
         fills.total()
     }
 
-    fn facts<'a>(strategies: &'a [String], held: &'a [(String, Side, f64, f64)]) -> Facts<'a> {
+    fn facts<'a>(
+        strategies: &'a [String],
+        held: &'a [(String, Side, f64, f64, Option<String>)],
+    ) -> Facts<'a> {
         // An engine that has not filled anything, which is what every test
         // that is not about fill costs means.
         static NOTHING_YET: std::sync::OnceLock<Costs> = std::sync::OnceLock::new();
@@ -494,8 +499,14 @@ mod tests {
 
     /// One position, so the shape of the array is exercised rather than only
     /// the empty case.
-    fn one_holding() -> Vec<(String, Side, f64, f64)> {
-        vec![("HOMEUSDT".to_string(), Side::Buy, 14_110.0, 0.009_7)]
+    fn one_holding() -> Vec<(String, Side, f64, f64, Option<String>)> {
+        vec![(
+            "HOMEUSDT".to_string(),
+            Side::Buy,
+            14_110.0,
+            0.009_7,
+            Some("target_book_long".to_string()),
+        )]
     }
 
     #[test]
@@ -540,6 +551,18 @@ mod tests {
         assert_eq!(rows[0]["side"], "long");
         assert_eq!(rows[0]["qty"].as_f64(), Some(14_110.0));
         assert!(rows[0]["entry_px"].as_f64().is_some_and(|px| px > 0.0));
+        assert_eq!(rows[0]["strategy"], "target_book_long");
+    }
+
+    #[test]
+    fn an_unattributed_account_position_does_not_guess_a_strategy() {
+        let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
+        let names = vec!["target_book_long".to_string(), "target_book_carry".to_string()];
+        let held = vec![("HOMEUSDT".to_string(), Side::Buy, 14_110.0, 0.009_7, None)];
+
+        let fields = parsed(&beat.render(&facts(&names, &held), 1_755_000_000_000));
+
+        assert!(fields["positions"][0]["strategy"].is_null());
     }
 
     #[test]

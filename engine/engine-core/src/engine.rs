@@ -1474,6 +1474,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             account,
             market,
             strategies,
+            attribution,
             ..
         } = self;
         let Some(heartbeat) = heartbeat.as_mut() else {
@@ -1501,7 +1502,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // Named, because the producers that read this file know symbols by
         // name and nothing else. Flat rows are dropped the way every other
         // reader of this view drops them: flat is not a holding.
-        let holdings: Vec<(String, engine_types::Side, f64, f64)> = account
+        let holdings: Vec<(String, engine_types::Side, f64, f64, Option<String>)> = account
             .positions
             .iter()
             .filter(|p| p.qty > 0.0)
@@ -1511,6 +1512,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     p.side,
                     p.qty,
                     p.entry_px,
+                    attribution
+                        .sole_owner(p.symbol)
+                        .filter(|owner| {
+                            let venue_signed = match p.side {
+                                engine_types::Side::Buy => p.qty,
+                                engine_types::Side::Sell => -p.qty,
+                            };
+                            (attribution.signed(*owner, p.symbol) - venue_signed).abs() < 1e-9
+                        })
+                        .and_then(|owner| names.get(usize::from(owner.0)))
+                        .cloned(),
                 )
             })
             .collect();
