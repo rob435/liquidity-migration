@@ -312,6 +312,7 @@ _logger = logging.getLogger(__name__)
 
 #: Stable source id. The version lives in the registered strategy profile.
 CARRY_STRATEGY_ID = "carry_hold"
+ENGINE_CARRY_SLEEVE = "carry"
 CARRY_CYCLES_DATASET = "carry_hold_demo_cycles"
 CARRY_MAINNET_CYCLES_DATASET = "carry_hold_mainnet_cycles"
 CARRY_FUNDING_DATASET = "carry_funding_events"
@@ -2252,7 +2253,11 @@ def run_carry_demo_cycle(
             equity_usdt = 0.0
             engine_account_health_error = str(exc)
             _logger.warning("CARRY engine account reading unavailable; book held: %s", exc)
-        standing_rows = engine_reading.holdings if engine_reading is not None else {}
+        standing_rows = (
+            engine_reading.holdings_for_strategy(ENGINE_CARRY_SLEEVE)
+            if engine_reading is not None
+            else {}
+        )
         standing_symbols = set(standing_rows)
 
         decision: CarryDecision | None = None
@@ -2529,7 +2534,7 @@ def run_carry_demo_cycle(
             )
             equity_usdt = float(engine_reading.equity_usdt)
             engine_account_health_error = ""
-            standing_rows = engine_reading.holdings
+            standing_rows = engine_reading.holdings_for_strategy(ENGINE_CARRY_SLEEVE)
             standing_symbols = set(standing_rows)
         except (OSError, RuntimeError, ValueError) as exc:
             engine_reading = None
@@ -2575,7 +2580,11 @@ def run_carry_demo_cycle(
             demo=demo,
             equity_usdt=equity_usdt,
             engine_account_health_error=engine_account_health_error,
-            entry_blockers=(engine_reading.entry_blockers if engine_reading is not None else {}),
+            entry_blockers=(
+                engine_reading.entry_blockers_for_strategy(ENGINE_CARRY_SLEEVE)
+                if engine_reading is not None
+                else {}
+            ),
             cycle_now_ms=cycle_now_ms,
             cycle_state=state,
         )

@@ -86,10 +86,34 @@ class EngineAccountReading:
     #: Empty when the engine said nothing about positions; the side is the
     #: venue's own "long"/"short" spelling.
     holdings: Mapping[str, tuple[str, float, float]]
-    #: Why the engine is not opening each name a producer asked for, from the
-    #: same beat: symbol -> reason. Empty means nothing is blocked -- or that
-    #: an older engine, which publishes no such field, said nothing at all.
-    entry_blockers: Mapping[str, str]
+    #: Unique Rust fill-ledger owner for each venue holding. ``None`` means the
+    #: position is manual, inherited, or shared and cannot be claimed by a
+    #: producer.
+    holding_strategies: Mapping[str, str | None]
+    #: Why each configured sleeve cannot open each requested name.
+    entry_blockers_by_strategy: Mapping[str, Mapping[str, str]]
+    #: Configured stable Rust sleeve names carried by this heartbeat.
+    strategies: frozenset[str]
+
+    def holdings_for_strategy(self, strategy: str) -> dict[str, tuple[str, float, float]]:
+        """Venue holdings uniquely attributable to one configured sleeve."""
+
+        sleeve = str(strategy)
+        if sleeve not in self.strategies:
+            raise ValueError(f"engine heartbeat does not configure strategy {sleeve!r}")
+        return {
+            symbol: row
+            for symbol, row in self.holdings.items()
+            if self.holding_strategies.get(symbol) == sleeve
+        }
+
+    def entry_blockers_for_strategy(self, strategy: str) -> dict[str, str]:
+        """Entry refusals scoped to one configured sleeve."""
+
+        sleeve = str(strategy)
+        if sleeve not in self.strategies:
+            raise ValueError(f"engine heartbeat does not configure strategy {sleeve!r}")
+        return dict(self.entry_blockers_by_strategy.get(sleeve, {}))
 
 
 def engine_heartbeat_path(environment: str) -> Path:
@@ -135,6 +159,7 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     account_user_id = payload.get("account_user_id")
     realm = payload.get("realm")
     positions = payload.get("positions")
+    raw_strategies = payload.get("strategies")
     if equity is None or available is None or observed is None:
         raise ValueError(
             "engine heartbeat carries no account reading yet "
@@ -156,8 +181,18 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         raise ValueError("engine heartbeat carries no account_user_id")
     if not isinstance(realm, str) or not realm:
         raise ValueError("engine heartbeat carries no realm")
+    if not isinstance(raw_strategies, list):
+        raise ValueError("engine heartbeat strategies must be an array")
+    strategies: set[str] = set()
+    for index, strategy in enumerate(raw_strategies):
+        if not isinstance(strategy, str) or not strategy or strategy in strategies:
+            raise ValueError(f"engine heartbeat strategy {index} is invalid or duplicated")
+        strategies.add(strategy)
+    if not strategies:
+        raise ValueError("engine heartbeat configures no strategies")
     held_symbols: frozenset[str] | None = None
     holdings: dict[str, tuple[str, float, float]] = {}
+    holding_strategies: dict[str, str | None] = {}
     if positions is not None:
         if not isinstance(positions, list):
             raise ValueError("engine heartbeat positions must be an array or null")
@@ -183,24 +218,53 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
                 or float(entry_px) <= 0.0
             ):
                 raise ValueError(f"engine heartbeat position {symbol} has invalid entry_px")
+            if "strategy" not in row:
+                raise ValueError(f"engine heartbeat position {symbol} has no strategy attribution")
+            owner = row["strategy"]
+            if owner is not None and (not isinstance(owner, str) or owner not in strategies):
+                raise ValueError(
+                    f"engine heartbeat position {symbol} has invalid strategy attribution"
+                )
             named.add(symbol)
             holdings[symbol] = (
                 side,
                 float(qty),
                 float(entry_px),
             )
+            holding_strategies[symbol] = owner
         held_symbols = frozenset(named)
 
-    entry_blockers: dict[str, str] = {}
+    entry_blockers_by_strategy: dict[str, dict[str, str]] = {
+        strategy: {} for strategy in strategies
+    }
     raw_blockers = payload.get("entry_blockers")
-    if isinstance(raw_blockers, list):
-        for row in raw_blockers:
-            if not isinstance(row, Mapping):
-                continue
-            symbol = str(row.get("symbol") or "").upper()
-            reason = str(row.get("reason") or "")
-            if symbol and reason:
-                entry_blockers[symbol] = reason
+    if not isinstance(raw_blockers, list):
+        raise ValueError("engine heartbeat entry_blockers must be an array")
+    blocker_keys: set[tuple[str, str]] = set()
+    for index, row in enumerate(raw_blockers):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"engine heartbeat entry blocker {index} is not an object")
+        symbol = row.get("symbol")
+        reason = row.get("reason")
+        strategy = row.get("strategy")
+        if (
+            not isinstance(symbol, str)
+            or not symbol
+            or symbol != symbol.upper()
+            or not symbol.isalnum()
+            or not isinstance(reason, str)
+            or not reason
+            or not isinstance(strategy, str)
+            or strategy not in strategies
+        ):
+            raise ValueError(f"engine heartbeat entry blocker {index} is invalid")
+        key = (strategy, symbol)
+        if key in blocker_keys:
+            raise ValueError(
+                f"engine heartbeat repeats entry blocker for {strategy}:{symbol}"
+            )
+        blocker_keys.add(key)
+        entry_blockers_by_strategy[strategy][symbol] = reason
     return EngineAccountReading(
         equity_usdt=equity_usdt,
         available_usdt=available_usdt,
@@ -209,7 +273,9 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         realm=realm,
         held_symbols=held_symbols,
         holdings=holdings,
-        entry_blockers=entry_blockers,
+        holding_strategies=holding_strategies,
+        entry_blockers_by_strategy=entry_blockers_by_strategy,
+        strategies=frozenset(strategies),
     )
 
 
@@ -292,6 +358,7 @@ def engine_held_symbols(
 def engine_entry_blockers(
     environment: str,
     *,
+    strategy: str,
     max_age_ns: int,
     path: str | Path | None = None,
     expected_account_user_id: str | None = None,
@@ -310,7 +377,7 @@ def engine_entry_blockers(
                 max_age_ns=max_age_ns,
                 path=path,
                 expected_account_user_id=expected_account_user_id,
-            ).entry_blockers
+            ).entry_blockers_for_strategy(strategy)
         )
     except (OSError, RuntimeError, ValueError):
         return {}

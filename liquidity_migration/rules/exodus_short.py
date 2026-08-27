@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +107,7 @@ class ExodusShortRecord:
 
 def records_to_payload(records: list[ExodusShortRecord]) -> dict[str, Any]:
     return {
+        "schema_version": 1,
         "open": [
             {
                 "symbol": r.symbol,
@@ -118,22 +121,64 @@ def records_to_payload(records: list[ExodusShortRecord]) -> dict[str, Any]:
 
 
 def records_from_payload(raw: Any) -> list[ExodusShortRecord]:
-    """A torn or half-written state file reads as empty, which the book
-    turns into covers — losing state closes shorts, never strands them."""
+    """Strictly decode durable open-short state.
+
+    Corruption is unknown state, not an empty book. Raising leaves the last
+    engine-visible target untouched; silently flattening could close exposure
+    from a torn local file without a strategy decision.
+    """
+
+    if not isinstance(raw, Mapping) or set(raw) != {"schema_version", "open"}:
+        raise ValueError("exodus state must contain exactly schema_version and open")
+    if raw["schema_version"] != 1 or isinstance(raw["schema_version"], bool):
+        raise ValueError("unsupported exodus state schema_version")
+    rows = raw["open"]
+    if not isinstance(rows, list):
+        raise ValueError("exodus state open must be an array")
     records: list[ExodusShortRecord] = []
-    try:
-        for row in raw.get("open", []):
-            records.append(
-                ExodusShortRecord(
-                    symbol=str(row["symbol"]),
-                    notional_usdt=float(row["notional_usdt"]),
-                    settlement_ts_ms=int(row["settlement_ts_ms"]),
-                    fired_ts_ms=int(row["fired_ts_ms"]),
-                )
+    symbols: set[str] = set()
+    expected = {"symbol", "notional_usdt", "settlement_ts_ms", "fired_ts_ms"}
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping) or set(row) != expected:
+            raise ValueError(f"exodus state row {index} has an invalid shape")
+        symbol = row["symbol"]
+        if (
+            not isinstance(symbol, str)
+            or not symbol
+            or symbol != symbol.upper()
+            or not symbol.isalnum()
+            or symbol in symbols
+        ):
+            raise ValueError(f"exodus state row {index} has an invalid or duplicate symbol")
+        notional = row["notional_usdt"]
+        if (
+            isinstance(notional, bool)
+            or not isinstance(notional, (int, float))
+            or not math.isfinite(float(notional))
+            or float(notional) <= 0.0
+        ):
+            raise ValueError(f"exodus state row {index} has invalid notional_usdt")
+        settlement = row["settlement_ts_ms"]
+        fired = row["fired_ts_ms"]
+        if (
+            isinstance(settlement, bool)
+            or not isinstance(settlement, int)
+            or settlement <= 0
+            or isinstance(fired, bool)
+            or not isinstance(fired, int)
+            or fired <= 0
+        ):
+            raise ValueError(f"exodus state row {index} has invalid timestamps")
+        symbols.add(symbol)
+        records.append(
+            ExodusShortRecord(
+                symbol=symbol,
+                notional_usdt=float(notional),
+                settlement_ts_ms=settlement,
+                fired_ts_ms=fired,
             )
-    except Exception:  # noqa: BLE001 - unreadable state fails toward flat
-        return []
-    return records
+        )
+    return sorted(records, key=lambda record: record.symbol)
 
 
 def split_due_covers(

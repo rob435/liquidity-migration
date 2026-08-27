@@ -22,15 +22,14 @@ _RANKS = {
     "core": 0,
     "marketdata": 1,
     "data": 2,
-    "account": 3,
-    "rules": 4,
-    "research": 5,
-    "strategy": 6,
-    "venue": 7,
-    "policy": 8,
+    "rules": 3,
+    "research": 4,
+    "venue": 5,
+    "policy": 6,
+    "runtime": 7,
+    "strategy": 8,
     "ops": 9,
     "cli": 9,
-    "runtime": 10,
 }
 
 

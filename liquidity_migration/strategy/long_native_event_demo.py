@@ -124,6 +124,7 @@ SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
 
 #: Where this producer writes the mandatory book the engine follows.
 ENGINE_TARGET_BOOK_PATH_ENV = "LONG_ENGINE_TARGET_BOOK_PATH"
+ENGINE_LONG_SLEEVE = "long"
 
 #: How long a LONG book may be acted on. It must clear the engine's own
 #: fifteen-minute entry cutoff by enough to be useful, and it is the answer to
@@ -563,10 +564,11 @@ def run_long_native_demo_cycle(
         mark_stage("commit_account_health")
 
         engine_blocked_asks = 0
-        if engine_reading.entry_blockers:
+        long_entry_blockers = engine_reading.entry_blockers_for_strategy(ENGINE_LONG_SLEEVE)
+        if long_entry_blockers:
             blocked_asks = {
                 symbol: reason
-                for symbol, reason in sorted(engine_reading.entry_blockers.items())
+                for symbol, reason in sorted(long_entry_blockers.items())
                 if symbol in book_state.held and not book_state.held[symbol].seen_held
             }
             for symbol, reason in blocked_asks.items():
@@ -587,7 +589,7 @@ def run_long_native_demo_cycle(
                     left_at_ms=book_state.left_at_ms,
                     attempted_signals_ms=book_state.attempted_signals_ms,
                 )
-            blocked_symbols = set(engine_reading.entry_blockers)
+            blocked_symbols = set(long_entry_blockers)
             blocked_candidates = [
                 candidate
                 for candidate in candidates
@@ -623,7 +625,11 @@ def run_long_native_demo_cycle(
             now_ms=cycle_now_ms,
             cooldown_days=int(strategy.cooldown_days),
             held_symbols=(engine_reading.held_symbols if engine_reading is not None else None),
-            venue_holdings=(engine_reading.holdings if engine_reading is not None else {}),
+            venue_holdings=(
+                engine_reading.holdings_for_strategy(ENGINE_LONG_SLEEVE)
+                if engine_reading is not None
+                else {}
+            ),
         )
         # State lands before its matching book. If the process dies between the
         # two writes, the old book is conservative and the next cycle repairs it.

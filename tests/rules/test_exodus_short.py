@@ -127,9 +127,14 @@ class TestStateFile:
             records, key=lambda r: r.symbol
         )
 
-    def test_a_torn_state_file_reads_as_flat(self) -> None:
-        # Losing state must cover every open short, never strand one: an
-        # unreadable payload is an empty book, and absence is the exit.
-        assert records_from_payload({"open": [{"symbol": "AUSDT"}]}) == []
-        assert records_from_payload("not a mapping") == []
-        assert records_from_payload({"open": "not a list"}) == []
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"schema_version": 1, "open": [{"symbol": "AUSDT"}]},
+            "not a mapping",
+            {"schema_version": 1, "open": "not a list"},
+        ],
+    )
+    def test_a_torn_state_file_fails_closed(self, payload) -> None:
+        with pytest.raises(ValueError):
+            records_from_payload(payload)

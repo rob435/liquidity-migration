@@ -29,6 +29,8 @@ def _write_heartbeat(path: Path, *, positions: list | None = None, account_user_
         "account_user_id": account_user_id,
         "realm": "demo",
         "positions": positions,
+        "entry_blockers": [],
+        "strategies": ["carry", "long"],
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -38,8 +40,20 @@ def test_held_symbols_come_from_a_recent_heartbeat(tmp_path: Path) -> None:
     _write_heartbeat(
         heartbeat,
         positions=[
-            {"symbol": "HOMEUSDT", "side": "long", "qty": 10.0, "entry_px": 0.5},
-            {"symbol": "KAITOUSDT", "side": "short", "qty": 2.0, "entry_px": 1.2},
+            {
+                "symbol": "HOMEUSDT",
+                "side": "long",
+                "qty": 10.0,
+                "entry_px": 0.5,
+                "strategy": "long",
+            },
+            {
+                "symbol": "KAITOUSDT",
+                "side": "short",
+                "qty": 2.0,
+                "entry_px": 1.2,
+                "strategy": None,
+            },
         ],
     )
     held = engine_held_symbols(
@@ -87,6 +101,42 @@ def test_recent_reading_rejects_a_different_account(tmp_path: Path) -> None:
             path=heartbeat,
             expected_account_user_id="555899665",
         )
+
+
+def test_holdings_and_blockers_are_sleeve_scoped(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    _write_heartbeat(
+        heartbeat,
+        positions=[
+            {
+                "symbol": "HOMEUSDT",
+                "side": "long",
+                "qty": 10.0,
+                "entry_px": 0.5,
+                "strategy": "long",
+            },
+            {
+                "symbol": "KAITOUSDT",
+                "side": "short",
+                "qty": 2.0,
+                "entry_px": 1.2,
+                "strategy": "carry",
+            },
+        ],
+    )
+    payload = json.loads(heartbeat.read_text(encoding="utf-8"))
+    payload["entry_blockers"] = [
+        {"strategy": "long", "symbol": "XUSDT", "reason": "risk"},
+        {"strategy": "carry", "symbol": "XUSDT", "reason": "floor"},
+    ]
+    heartbeat.write_text(json.dumps(payload), encoding="utf-8")
+
+    reading = engine_account_health.read_engine_account(heartbeat)
+
+    assert set(reading.holdings_for_strategy("long")) == {"HOMEUSDT"}
+    assert set(reading.holdings_for_strategy("carry")) == {"KAITOUSDT"}
+    assert reading.entry_blockers_for_strategy("long") == {"XUSDT": "risk"}
+    assert reading.entry_blockers_for_strategy("carry") == {"XUSDT": "floor"}
 
 
 @pytest.mark.parametrize(

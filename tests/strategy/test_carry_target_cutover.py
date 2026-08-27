@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import liquidity_migration.strategy.carry_demo as carry_module
 from liquidity_migration.rules.engine_targets import (
     EngineTarget,
     read_target_book,
@@ -12,11 +13,15 @@ from liquidity_migration.rules.engine_targets import (
 )
 from liquidity_migration.strategy.carry_demo import (
     ENGINE_TARGET_BOOK_PATH_ENV,
+    EXODUS_PROFILE_ENV,
+    EXODUS_TARGET_BOOK_PATH_ENV,
     CarryCycleState,
     CarryDecision,
     CarryDemoCycleConfig,
     _carry_target_plan,
+    _run_exodus_short,
 )
+from liquidity_migration.rules.exodus_short import ExodusShortRecord
 
 
 NOW_MS = 1_755_000_000_000
@@ -109,3 +114,35 @@ def test_engine_blocker_does_not_starve_later_carry_candidates(tmp_path, monkeyp
     assert plan.engine_blocked_entries == 1
     assert plan.planned_entries == 2
     assert [target.symbol for target in active.targets] == ["BUSDT", "CUSDT"]
+
+
+def test_exodus_state_write_failure_cannot_advance_memory_or_book(tmp_path, monkeypatch) -> None:
+    book_path = tmp_path / "exodus.json"
+    monkeypatch.delenv(EXODUS_PROFILE_ENV, raising=False)
+    monkeypatch.setenv(EXODUS_TARGET_BOOK_PATH_ENV, str(book_path))
+    original = ExodusShortRecord(
+        symbol="AUSDT",
+        notional_usdt=25.0,
+        settlement_ts_ms=DECISION_MS,
+        fired_ts_ms=DECISION_MS - 60_000,
+    )
+    state = CarryCycleState()
+    state.exodus_shorts = [original]
+
+    def fail_save(*_args, **_kwargs) -> None:
+        raise OSError("injected durable-state failure")
+
+    monkeypatch.setattr(carry_module, "_save_exodus_shorts", fail_save)
+    receipt = _run_exodus_short(
+        state=state,
+        root=tmp_path,
+        fires=[],
+        sizing_equity_usdt=None,
+        notional_multiplier=1.0,
+        entry_leverage=2.0,
+        now_ms=NOW_MS,
+    )
+
+    assert state.exodus_shorts == [original]
+    assert not book_path.exists()
+    assert "injected durable-state failure" in receipt["exodus_error"]
