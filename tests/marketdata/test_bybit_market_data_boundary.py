@@ -24,8 +24,8 @@ PUBLIC_PROCESS_MODULES = (
     "liquidity_migration.strategy.long_native_event_demo",
     "liquidity_migration.strategy.long_native_event_demo_daemon",
 )
-NEUTRAL_ACCOUNT_MODULES = (
-    "liquidity_migration.policy.account_execution_config",
+NEUTRAL_POLICY_MODULES = (
+    "liquidity_migration.policy.operational_profile",
 )
 
 
@@ -44,7 +44,6 @@ def test_public_market_data_module_has_no_private_account_surface() -> None:
     }
     referenced_names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 
-    assert "liquidity_migration.account.account_owner_lease" not in imported_modules
     assert "liquidity_migration.venue.bybit" not in imported_modules
     assert "BybitAccountReader" not in class_names
     assert not {
@@ -81,7 +80,6 @@ def test_active_market_data_producers_import_the_public_plane_directly() -> None
 def test_public_and_target_modules_do_not_transitively_load_private_execution(module: str) -> None:
     forbidden = (
         "liquidity_migration.venue.bybit",
-        "liquidity_migration.account.account_owner_lease",
         "liquidity_migration.venue.bybit_execution_adapter",
     )
     code = (
@@ -101,8 +99,8 @@ def test_public_and_target_modules_do_not_transitively_load_private_execution(mo
     assert proc.returncode == 0, f"{module}: {proc.stderr or proc.stdout}"
 
 
-@pytest.mark.parametrize("module", NEUTRAL_ACCOUNT_MODULES)
-def test_shared_config_does_not_load_demo_owner(module: str) -> None:
+@pytest.mark.parametrize("module", NEUTRAL_POLICY_MODULES)
+def test_shared_policy_does_not_load_private_execution(module: str) -> None:
     forbidden = (
         "liquidity_migration.venue.bybit",
         "liquidity_migration.venue.bybit_execution_adapter",

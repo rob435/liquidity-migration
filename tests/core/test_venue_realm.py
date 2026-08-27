@@ -7,9 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.account.account_route import derive_account_route
-from liquidity_migration.account.execution_environment import (
-    EXECUTION_ENVIRONMENT_CHOICES,
+from liquidity_migration.policy.execution_environment import (
     ExecutionEnvironment,
     account_id_for_environment,
     candidate_universe_realm,
@@ -56,34 +54,8 @@ def test_each_realm_has_a_distinct_endpoint_and_credential_pair() -> None:
     assert not demo_vars & mainnet_vars
 
 
-def test_the_durable_route_identity_carries_the_realm(tmp_path: Path) -> None:
-    """The mainnet owner necessarily gets its own journal root."""
-
-    roots = {
-        environment: derive_account_route(
-            account_id=account_id_for_environment(environment),
-            environment=environment,
-            account_root=tmp_path / "account",
-            inbox_root=tmp_path / "inbox",
-        )
-        for environment in EXECUTION_ENVIRONMENT_CHOICES
-    }
-    # Same roots, different environments -> different route ids, so
-    # ensure_account_route refuses to bind one owner's root to another realm.
-    assert len({route.route_id for route in roots.values()}) == len(roots)
-    with pytest.raises(Exception, match="exactly one of"):
-        derive_account_route(
-            account_id="bybit-demo-unified",
-            environment="live",
-            account_root=tmp_path / "account",
-            inbox_root=tmp_path / "inbox",
-        )
-
-
-
-
 def test_mainnet_is_a_choice_only_for_the_funded_sleeves_and_never_a_default() -> None:
-    """CARRY and LONG may address the mainnet owner; nothing defaults to it.
+    """CARRY and LONG may address mainnet; nothing defaults to it.
 
     CONTINUOUS is retired and stays ``demo``-only.
     """

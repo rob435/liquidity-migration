@@ -12,28 +12,18 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import math
 import os
-import time
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import polars as pl
 import pytest
 
 import liquidity_migration.strategy.long_native_event_demo as lnd
-import liquidity_migration.strategy.strategy_planning as planning_module
-
 
 from liquidity_migration.core._common import MS_PER_DAY, MS_PER_HOUR, exact_duration_ms
-from liquidity_migration.account.account_route import (
-    AccountRoute,
-    AccountRouteMismatchError,
-    ensure_account_route,
-)
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.rules.long_identity import (
     LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
@@ -46,18 +36,16 @@ from liquidity_migration.strategy.long_native_event_demo import (
     _open_long_trades,
     _plan_time_stop_exits,
     _select_long_entry_candidates,
-    _validate_long_demo_config,
     _vol_parity_weight,
     format_long_demo_cycle_summary,
     run_long_native_demo_cycle,
     target_long_order_notional_pct_equity,
 )
-from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
 
 
 @pytest.fixture(autouse=True)
 def _no_leaked_heartbeat_path() -> Any:
-    """`_write_owner_health` points the producer at a tmp heartbeat; a path
+    """Tests may point the producer at a temporary heartbeat; a path
     left in the environment would follow the next test into a deleted tmp dir
     and read as "the engine is down" rather than as this test's own mess."""
 
@@ -93,40 +81,8 @@ def test_demo_default_notional_multiplier_is_research_1x() -> None:
     )
 
 
-def test_a_large_levered_multiplier_validates_without_a_margin_refusal() -> None:
-    """Sizing is the owner's dial: no load-time projection refuses it.
-
-    Per-position risk is bounded by each position's own venue-native stop;
-    there is no book-level margin ceiling to trip.
-    """
-
-    strategy = long_v11a_profile()
-    big = LongNativeDemoCycleConfig(
-        notional_multiplier=10.0,
-        execution_environment="demo",
-        account_intent_inbox_root="inbox",
-        account_execution_root="account",
-    )
-    _validate_long_demo_config(big, strategy)
 
 
-@pytest.mark.parametrize("missing_root", [None, "", "   "])
-def test_submit_mode_requires_account_owner_route(
-    tmp_path: Path,
-    missing_root: str | None,
-) -> None:
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=missing_root,
-        account_execution_root=missing_root,
-    )
-
-    with pytest.raises(ValueError, match="direct sleeve order authority is retired"):
-        run_long_native_demo_cycle(
-            tmp_path,
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=demo,
-        )
 
 
 def test_long_config_has_no_direct_execution_or_telegram_fields() -> None:
@@ -639,7 +595,7 @@ def test_long_demo_cycle_summary_includes_key_fields() -> None:
             "exit_targets_queued": 0,
             "open_long_components": 1,
             "equity_usdt": 10_000.0,
-            "account_owner_health_error": "",
+            "engine_account_health_error": "",
             "cycle_elapsed_pre_persist_ms": 500.0,
         }
     }
@@ -785,70 +741,6 @@ def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists()
     assert notional == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * expected_scale)
 
 
-def test_long_entry_and_exit_adapters_share_stable_component_target_key() -> None:
-    now_ms = 1_700_000_000_000
-    strategy_id = "long-v11a"
-    candidate = {
-        "trade_id": "long-trade-1",
-        "symbol": "ABCUSDT",
-        "signal_ts_ms": now_ms - 60_000,
-        "entry_reason": "fomo_chase",
-        "position_weight": 0.5,
-        "stop_loss_pct": 0.03,
-        "take_profit_pct": 0.08,
-        "max_hold_days": 3,
-    }
-    demo = LongNativeDemoCycleConfig(entry_leverage=10.0)
-
-    entries = lnd._long_entry_target_intents(
-        [candidate],
-        demo=demo,
-        equity_usdt=10_000.0,
-        order_notional_pct_equity=0.10,
-        price_by_symbol={"ABCUSDT": 2.0},
-        now_ms=now_ms,
-        strategy_id=strategy_id,
-    )
-    assert len(entries) == 1
-    entry = entries[0].intent
-    # Raw strategy notional is preserved. Venue step/minimum decisions happen
-    # later in the account kernel using verified demo rules.
-    assert entry.signed_notional_usdt == 500.0
-    assert entry.leverage == 10.0
-    assert entry.metadata["quantity_authority"] == "account_kernel_demo_rules"
-    assert entry.metadata["entry_attempt_key"] == f"entry-attempt/{entry.target_key}"
-    assert entry.metadata["signal_valid_until_ms"] == (candidate["signal_ts_ms"] + lnd.SIGNAL_FRESHNESS_MS)
-    assert entry.metadata["stop_loss_pct"] == pytest.approx(0.03)
-    assert entry.metadata["take_profit_pct"] == pytest.approx(0.08)
-    assert entry.metadata["max_hold_duration_ms"] == 3 * lnd.MS_PER_DAY
-    assert {
-        "stop_price",
-        "take_profit_price",
-        "max_hold_deadline_ts_ms",
-    }.isdisjoint(entry.metadata)
-
-    trades = pl.DataFrame(
-        [
-            {
-                "trade_id": "long-trade-1",
-                "symbol": "ABCUSDT",
-                "entry_leverage": 10.0,
-                "max_hold_deadline_ts_ms": now_ms,
-            }
-        ]
-    )
-    exits = lnd._long_exit_target_intents(
-        [{"trade_id": "long-trade-1", "symbol": "ABCUSDT", "exit_reason": "time_stop"}],
-        trades,
-        strategy_id=strategy_id,
-        now_ms=now_ms + 1,
-        default_leverage=10.0,
-    )
-    assert len(exits) == 1
-    exit_intent = exits[0].intent
-    assert exit_intent.signed_notional_usdt == 0.0
-    assert exit_intent.target_key == entry.target_key
-    assert exit_intent.reason == "time_stop"
 
 
 def test_registered_long_profile_carries_live_kernel_identity_and_leverage() -> None:
@@ -1210,387 +1102,21 @@ def _candidate(symbol: str, signal_ts_ms: int = 1_700_000_000_000) -> dict[str, 
     }
 
 
-def _stub_cycle_dependencies(monkeypatch: pytest.MonkeyPatch, *, candidates: list[dict]) -> None:
-    """Patch public-market collaborators so target publication is offline."""
-    universe = pl.DataFrame({"symbol": [c["symbol"] for c in candidates] or ["AAAUSDT"]})
-
-    monkeypatch.setattr(lnd, "_demo_instruments", lambda *a, **k: pl.DataFrame())
-    monkeypatch.setattr(lnd, "_resolve_ticker_snapshot", lambda *a, **k: ([], "rest"))
-    monkeypatch.setattr(lnd, "_normalize_tickers", lambda *a, **k: pl.DataFrame())
-    monkeypatch.setattr(lnd, "_build_long_universe", lambda *a, **k: universe)
-    monkeypatch.setattr(
-        lnd,
-        "_download_recent_1h_klines",
-        lambda *a, **k: (
-            pl.DataFrame(),
-            {"cache_rows": 0, "fetched_rows": 0, "store_rows": 0, "store_symbols": 0},
-        ),
-    )
-    monkeypatch.setattr(lnd, "build_long_features", lambda *a, **k: pl.DataFrame())
-    monkeypatch.setattr(lnd, "_apply_median_universe_selection", lambda features, **k: (features, 0))
-    monkeypatch.setattr(
-        lnd,
-        "_price_lookup_from_tickers_and_klines",
-        lambda *a, **k: {c["symbol"]: c["live_price"] for c in candidates},
-    )
-    monkeypatch.setattr(
-        lnd,
-        "_select_long_entry_candidates",
-        lambda **k: (list(candidates), {"no_signal": 0}),
-    )
 
 
-def _run_cycle(tmp_path: Path, demo: LongNativeDemoCycleConfig) -> dict[str, Any]:
-    return run_long_native_demo_cycle(
-        tmp_path,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=demo,
-        now_ms=1_700_000_300_000,
-    )
 
 
-def _ensure_owner_route(
-    account_root: Path,
-    inbox_root: Path,
-    *,
-    environment: str,
-) -> AccountRoute:
-    account_id = "bybit-demo-unified" if environment == "demo" else "bybit-mainnet-unified"
-    return ensure_account_route(
-        account_id=account_id,
-        environment=environment,
-        account_root=account_root,
-        inbox_root=inbox_root,
-    )
 
 
-def _write_owner_health(
-    account_root: Path,
-    inbox_root: Path,
-    *,
-    environment: str,
-    equity_usdt: float = 10_000.0,
-    now_ms: int | None = None,
-) -> None:
-    """Write the account reading a producer sizes from.
-
-    This used to write the Python owner's ``account_owner_health.json``. The
-    engine owns the account now and says the same thing in its heartbeat, so
-    this writes one of those and points the producer at it. The keys are the
-    ones ``engine-core/src/heartbeat.rs`` renders.
-    """
-
-    route = _ensure_owner_route(
-        account_root,
-        inbox_root,
-        environment=environment,
-    )
-    observed_wall_ts_ms = time.time_ns() // 1_000_000 if now_ms is None else int(now_ms)
-    heartbeat = account_root / "engine-heartbeat.json"
-    heartbeat.parent.mkdir(parents=True, exist_ok=True)
-    heartbeat.write_text(
-        json.dumps(
-            {
-                "account_available_usdt": equity_usdt,
-                "account_equity_usdt": equity_usdt,
-                "account_observed_wall_ts_ms": observed_wall_ts_ms,
-                "account_user_id": route.account_id,
-                "realm": environment,
-                "may_open": True,
-                "mode": "live",
-            }
-        )
-    )
-    os.environ["ENGINE_ACCOUNT_HEARTBEAT_FILE"] = str(heartbeat)
 
 
-def test_submit_cycle_with_account_inbox_never_calls_direct_executor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidate = _candidate("AAAUSDT")
-    _stub_cycle_dependencies(monkeypatch, candidates=[candidate])
-    inbox = tmp_path / "account-inbox"
-    account_root = tmp_path / "account"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox),
-        account_execution_root=str(account_root),
-        ws_klines_enabled=False,
-    )
-    _write_owner_health(
-        account_root,
-        inbox,
-        environment="demo",
-        equity_usdt=12_345.0,
-    )
-    real_health_check = planning_module.require_recent_engine_account
-    owner_health_call: dict[str, Any] = {}
-
-    def owner_health(*args: Any, **kwargs: Any) -> Any:
-        owner_health_call.update(kwargs)
-        return real_health_check(*args, **kwargs)
-
-    monkeypatch.setattr(planning_module, "require_recent_engine_account", owner_health)
-
-    payload = _run_cycle(tmp_path / "long", demo)
-
-    assert type(payload) is PublishedTargetCyclePayload
-    assert len(payload.publication.entry_requests) == 1
-    assert payload.route.environment == "demo"
-    assert payload["cycle"]["account_target_route"] is True
-    assert payload["cycle"]["entry_targets_queued"] == 1
-    assert payload["cycle"]["equity_usdt"] == pytest.approx(12_345.0)
-    assert payload["cycle"]["account_state_source"] == "account_owner_health:demo"
-    # The fleet watchdog's WS-staleness alarm reads this column from the
-    # cycles dataset; it must exist even when the WS store served nothing.
-    assert "kline_store_max_ts_ms" in payload["cycle"]
-    assert "now_ns" not in owner_health_call
-    assert "entries_executed" not in payload["cycle"]
-    assert "bybit_positions" not in payload
-    assert payload["account_target_requests"]["entry_requests"][0]["intent_count"] == 1
-    assert payload["account_target_requests"]["exit_request_ids"] == []
-    pending = list((inbox / "pending").glob("*.json"))
-    assert len(pending) == 1
-    request = json.loads(pending[0].read_bytes())["request"]
-    intent = request["intents"][0]["intent"]
-    assert intent["target_key"].startswith("long/")
-    assert intent["signed_notional_usdt"] > 0.0
 
 
 # --------------------------------------------------------------------------- #
 # The cycle context a fast wake needs                                           #
 # --------------------------------------------------------------------------- #
-class _CountingTimeModule:
-    """`time` stand-in for strategy_planning: sleeps counted, rest passed through."""
-
-    def __init__(self) -> None:
-        self.sleeps: list[float] = []
-
-    def sleep(self, seconds: float) -> None:
-        self.sleeps.append(float(seconds))
-
-    def __getattr__(self, name: str) -> Any:
-        import time as real_time
-
-        return getattr(real_time, name)
 
 
-class TestFastWakeSpendsTheStoredHealthReading:
-    """A wake that exists to act fast must not spend its first seconds on the
-    owner-health read, whose retry ladder sleeps a second between attempts
-    when the owner's receipt is mid-publish. LONG had no cycle context at
-    all, so every wake paid it."""
-
-    def _cycle(
-        self,
-        tmp_path: Path,
-        demo: LongNativeDemoCycleConfig,
-        *,
-        now_ms: int,
-        state: lnd.LongCycleState,
-        cycle_kind: str = "timer",
-    ) -> Any:
-        return run_long_native_demo_cycle(
-            tmp_path / "long",
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=demo,
-            now_ms=now_ms,
-            cycle_state=state,
-            cycle_kind=cycle_kind,
-        )
-
-    def _demo(self, tmp_path: Path) -> LongNativeDemoCycleConfig:
-        inbox = tmp_path / "account-inbox"
-        account_root = tmp_path / "account"
-        _ensure_owner_route(account_root, inbox, environment="demo")
-        return LongNativeDemoCycleConfig(
-            execution_environment="demo",
-            account_intent_inbox_root=str(inbox),
-            account_execution_root=str(account_root),
-            ws_klines_enabled=False,
-        )
-
-    def test_a_price_touch_wake_does_zero_health_reads_or_sleeps(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _stub_cycle_dependencies(monkeypatch, candidates=[])
-        demo = self._demo(tmp_path)
-        now = 1_700_000_300_000
-        monkeypatch.setattr(
-            planning_module,
-            "require_recent_engine_account",
-            lambda *_a, **_k: SimpleNamespace(equity_usdt=10_000.0, observed_wall_ts_ms=1_700_000_300_000),
-        )
-
-        # An ordinary cycle takes the reading the fast wake will spend.
-        state = lnd.LongCycleState()
-        self._cycle(tmp_path, demo, now_ms=now, state=state)
-        assert state.owner_health_reading is not None
-        assert state.owner_health_reading.read_wall_ts_ns == now * 1_000_000
-        assert state.owner_health_reading.equity_usdt == pytest.approx(10_000.0)
-
-        # From here a live read fails. There is no retry ladder to walk any
-        # more -- the engine heartbeat is one file replaced by rename, so a
-        # read either lands or it does not -- but a failed read still costs the
-        # wake a read, which is the thing this test is about.
-        live_reads: list[str] = []
-
-        def unreadable(*_args: Any, **_kwargs: Any) -> Any:
-            live_reads.append("read")
-            raise OSError("synthetic unreadable heartbeat")
-
-        monkeypatch.setattr(planning_module, "require_recent_engine_account", unreadable)
-        counting_time = _CountingTimeModule()
-        monkeypatch.setattr(planning_module, "time", counting_time)
-
-        # CONTROL — no stored reading, so the wake pays the live read.
-        control = self._cycle(
-            tmp_path,
-            demo,
-            now_ms=now + 10_000,
-            state=lnd.LongCycleState(),
-            cycle_kind="price_touch",
-        )
-        assert len(live_reads) == 1
-        assert counting_time.sleeps == []
-        assert control["cycle"]["equity_usdt"] is None
-
-        # TREATED — the reading is 10s old, inside the same 30s freshness
-        # bound a live read enforces: zero reads, zero sleeps.
-        live_reads.clear()
-        counting_time.sleeps.clear()
-        wake = self._cycle(
-            tmp_path, demo, now_ms=now + 10_000, state=state, cycle_kind="price_touch"
-        )
-
-        assert live_reads == []
-        assert counting_time.sleeps == []
-        assert wake["cycle"]["equity_usdt"] == pytest.approx(10_000.0)
-
-    def test_a_reading_older_than_a_live_read_would_allow_falls_through(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Nothing is widened: past 30s the stored reading is worth no more
-        than it would be to a live read, so the cycle reads live."""
-
-        _stub_cycle_dependencies(monkeypatch, candidates=[])
-        demo = self._demo(tmp_path)
-        now = 1_700_000_300_000
-        live_reads: list[str] = []
-
-        def live_health(*_args: Any, **_kwargs: Any) -> Any:
-            live_reads.append("read")
-            return SimpleNamespace(equity_usdt=10_000.0, observed_wall_ts_ms=1_700_000_300_000)
-
-        monkeypatch.setattr(planning_module, "require_recent_engine_account", live_health)
-        state = lnd.LongCycleState()
-        self._cycle(tmp_path, demo, now_ms=now, state=state)
-
-        live_reads.clear()
-        self._cycle(
-            tmp_path,
-            demo,
-            now_ms=now + 30_001,
-            state=state,
-            cycle_kind="market_boundary",
-        )
-
-        assert live_reads  # the wake paid its own live read
-        assert state.owner_health_reading.read_wall_ts_ns == (now + 30_001) * 1_000_000
-
-    def test_a_served_reading_never_outlives_its_receipt(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Ages never stack: a reading taken off an already-old receipt is
-        refused as soon as a live read would refuse that receipt, not a full
-        reading-lifetime later."""
-
-        _stub_cycle_dependencies(monkeypatch, candidates=[])
-        demo = self._demo(tmp_path)
-        now = 1_700_000_300_000
-        live_reads: list[str] = []
-
-        def aged_receipt(*_args: Any, **_kwargs: Any) -> Any:
-            live_reads.append("read")
-            return SimpleNamespace(
-                equity_usdt=10_000.0,
-                observed_wall_ts_ms=now - 25_000,
-            )
-
-        monkeypatch.setattr(planning_module, "require_recent_engine_account", aged_receipt)
-        state = lnd.LongCycleState()
-        self._cycle(tmp_path, demo, now_ms=now, state=state)
-        assert live_reads == ["read"]
-        stored = state.owner_health_reading
-        assert stored is not None
-        assert stored.receipt_wall_ts_ns == (now - 25_000) * 1_000_000
-
-        # Six seconds later the reading is young (6 s) but its receipt is 31 s
-        # old -- a live read would refuse it, so the fast wake must read live.
-        self._cycle(
-            tmp_path,
-            demo,
-            now_ms=now + 6_000,
-            state=state,
-            cycle_kind="price_touch",
-        )
-        assert live_reads == ["read", "read"]
-
-    def test_a_journal_change_wake_reads_live_even_with_a_fresh_reading(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A journal wake fires BECAUSE the journal moved, so a stored reading
-        could predate the very fill that woke it."""
-
-        _stub_cycle_dependencies(monkeypatch, candidates=[])
-        demo = self._demo(tmp_path)
-        now = 1_700_000_300_000
-        live_reads: list[str] = []
-
-        def live_health(*_args: Any, **_kwargs: Any) -> Any:
-            live_reads.append("read")
-            return SimpleNamespace(equity_usdt=10_000.0, observed_wall_ts_ms=1_700_000_300_000)
-
-        monkeypatch.setattr(planning_module, "require_recent_engine_account", live_health)
-        state = lnd.LongCycleState()
-        self._cycle(tmp_path, demo, now_ms=now, state=state)
-        assert state.owner_health_reading is not None
-
-        live_reads.clear()
-        self._cycle(
-            tmp_path, demo, now_ms=now + 5_000, state=state, cycle_kind="journal_change"
-        )
-
-        assert live_reads
-
-    def test_the_daemon_hands_its_cycles_the_wake_reason_and_one_state(
-        self, tmp_path: Path
-    ) -> None:
-        from liquidity_migration.strategy.long_native_event_demo_daemon import (
-            LongNativeDemoDaemon,
-        )
-
-        daemon = LongNativeDemoDaemon(
-            tmp_path,
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=LongNativeDemoCycleConfig(
-                execution_environment="demo",
-                account_intent_inbox_root=str(tmp_path / "inbox"),
-                account_execution_root=str(tmp_path / "account"),
-                ws_klines_enabled=False,
-            ),
-            cycle_runner=lambda *a, **k: None,
-        )
-
-        daemon._pending_cycle_kind = "price_touch"
-        first = daemon._extra_cycle_kwargs()
-        second = daemon._extra_cycle_kwargs()
-
-        assert first["cycle_kind"] == "price_touch"
-        # One state for the daemon's life, or a reading could never outlive
-        # the cycle that took it.
-        assert first["cycle_state"] is second["cycle_state"]
-        assert type(first["cycle_state"]) is lnd.LongCycleState
 
 
 # --------------------------------------------------------------------------- #
@@ -1739,274 +1265,18 @@ def test_trades_a_decay_exit_could_not_act_on_are_not_watched() -> None:
     assert lnd._long_price_wake_levels(pl.DataFrame(), retrace_watch=[], now_ms=now) == []
 
 
-def test_the_cycle_payload_carries_the_prices_the_daemon_should_watch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Fails without the fix: the payload had no price levels at all, so the
-    daemon could only ever notice a retrace on whatever cycle came next."""
-
-    _stub_cycle_dependencies(monkeypatch, candidates=[_candidate("AAAUSDT")])
-
-    def waiting_on_a_retrace(**kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, int]]:
-        kwargs["retrace_watch"].append({"symbol": "AAAUSDT", "at_or_below": 42.5})
-        return [], {"no_retrace_yet": 1}
-
-    monkeypatch.setattr(lnd, "_select_long_entry_candidates", waiting_on_a_retrace)
-    inbox = tmp_path / "account-inbox"
-    account_root = tmp_path / "account"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox),
-        account_execution_root=str(account_root),
-        ws_klines_enabled=False,
-    )
-    _write_owner_health(account_root, inbox, environment="demo")
-
-    payload = _run_cycle(tmp_path / "long", demo)
-
-    assert payload["price_wake_levels"] == [{"symbol": "AAAUSDT", "at_or_below": 42.5}]
 
 
-def test_long_producer_rejects_cross_wired_route_before_cycle_resources(
-    tmp_path: Path,
-) -> None:
-    account_a = tmp_path / "account-a"
-    inbox_a = tmp_path / "inbox-a"
-    account_b = tmp_path / "account-b"
-    inbox_b = tmp_path / "inbox-b"
-    _ensure_owner_route(account_a, inbox_a, environment="demo")
-    _ensure_owner_route(account_b, inbox_b, environment="demo")
-    cycle_root = tmp_path / "long-cycle"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox_b),
-        account_execution_root=str(account_a),
-        ws_klines_enabled=False,
-    )
-
-    with pytest.raises(AccountRouteMismatchError, match="manifests disagree"):
-        run_long_native_demo_cycle(
-            cycle_root,
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=demo,
-            now_ms=1_700_000_300_000,
-        )
-
-    assert not cycle_root.exists()
 
 
-def test_account_route_blocks_risk_increase_without_fresh_owner_health(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _stub_cycle_dependencies(monkeypatch, candidates=[_candidate("AAAUSDT")])
-    inbox = tmp_path / "account-inbox"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox),
-        account_execution_root=str(tmp_path / "missing-account"),
-        ws_klines_enabled=False,
-    )
-    _ensure_owner_route(
-        tmp_path / "missing-account",
-        inbox,
-        environment="demo",
-    )
-
-    payload = _run_cycle(tmp_path / "long", demo)
-
-    assert payload["cycle"]["entry_targets_queued"] == 0
-    assert payload["cycle"]["skipped_account_owner_health"] == 1
-    # Null, not a 0.0 sentinel: cycles-derived equity curves must not read a
-    # blocked-owner cycle as a -100% equity spike.
-    assert payload["cycle"]["equity_usdt"] is None
-    assert payload["cycle"]["account_owner_health_error"]
-    assert list((inbox / "pending").glob("*.json")) == []
 
 
-def test_account_route_pending_entry_is_not_republished_on_next_cycle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidates = [_candidate("AAAUSDT")]
-    _stub_cycle_dependencies(monkeypatch, candidates=candidates)
-    inbox = tmp_path / "account-inbox"
-    account_root = tmp_path / "account"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox),
-        account_execution_root=str(account_root),
-        ws_klines_enabled=False,
-    )
-    _write_owner_health(account_root, inbox, environment="demo")
-
-    first = _run_cycle(tmp_path / "long", demo)
-    second = _run_cycle(tmp_path / "long", demo)
-
-    assert first["cycle"]["entry_targets_queued"] == 1
-    assert second["cycle"]["entry_targets_queued"] == 0
-    assert second["cycle"]["unresolved_entry_target_suppressions"] == 1
-    assert len(list((inbox / "pending").glob("*.json"))) == 1
 
 
-def test_account_route_new_signal_key_remains_eligible_while_prior_is_pending(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    candidates = [_candidate("AAAUSDT")]
-    _stub_cycle_dependencies(monkeypatch, candidates=candidates)
-    inbox = tmp_path / "account-inbox"
-    account_root = tmp_path / "account"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox),
-        account_execution_root=str(account_root),
-        ws_klines_enabled=False,
-    )
-    _write_owner_health(account_root, inbox, environment="demo")
-    _run_cycle(tmp_path / "long", demo)
-
-    candidates[:] = [_candidate("AAAUSDT", signal_ts_ms=1_700_000_060_000)]
-    second = _run_cycle(tmp_path / "long", demo)
-
-    assert second["cycle"]["entry_targets_queued"] == 1
-    assert second["cycle"]["unresolved_entry_target_suppressions"] == 0
-    assert len(list((inbox / "pending").glob("*.json"))) == 2
 
 
-def test_account_risk_rejected_exact_entry_attempt_is_not_republished(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from liquidity_migration.account.account_kernel import (
-        AccountExecutionKernel,
-        AccountRiskPolicy,
-        AccountRiskSnapshot,
-        DesiredTarget,
-        InstrumentRules,
-        MarketInputRef,
-    )
-    from liquidity_migration.core.deterministic_runtime import VirtualClock
-
-    candidate = _candidate("AAAUSDT")
-    candidates = [candidate]
-    _stub_cycle_dependencies(monkeypatch, candidates=candidates)
-    inbox = tmp_path / "account-inbox"
-    account_root = tmp_path / "account"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox),
-        account_execution_root=str(account_root),
-        ws_klines_enabled=False,
-    )
-    strategy_id = long_v11a_profile().execution_strategy_id
-    route = _ensure_owner_route(account_root, inbox, environment="demo")
-    proposed = lnd._long_entry_target_intents(
-        candidates,
-        demo=demo,
-        equity_usdt=10_000.0,
-        order_notional_pct_equity=0.10,
-        price_by_symbol={"AAAUSDT": 99.0},
-        now_ms=1_700_000_300_000,
-        strategy_id=strategy_id,
-    )[0].intent
-    clock = VirtualClock(
-        current_wall_ns=1_700_000_300_000_000_000,
-        current_monotonic_ns=1,
-    )
-    kernel = AccountExecutionKernel(
-        route.account_path,
-        account_id=route.account_id,
-        clock=clock,
-    )
-    result = kernel.submit_targets(
-        batch_id="risk-rejected-entry",
-        market_inputs=[MarketInputRef("book", "AAAUSDT", 1, 2, 99.0)],
-        targets=[
-            DesiredTarget(
-                decision_key=proposed.decision_key,
-                target_key=proposed.target_key,
-                sleeve="long",
-                strategy_id=proposed.strategy_id,
-                component_id=proposed.component_id,
-                symbol="AAAUSDT",
-                signed_qty=1_000.0,
-                reference_price=99.0,
-                leverage=10.0,
-                reason=proposed.reason,
-                metadata=proposed.metadata,
-            )
-        ],
-        risk_snapshot=AccountRiskSnapshot(10_000.0, 10_000.0, "wallet", 3),
-        risk_policy=AccountRiskPolicy(100.0, 100.0, 100.0, 10.0),
-        instrument_rules={"AAAUSDT": InstrumentRules("AAAUSDT", 0.1, 0.1, 1.0)},
-    )
-    assert not result.accepted
-    _write_owner_health(account_root, inbox, environment="demo")
-
-    payload = _run_cycle(tmp_path / "long", demo)
-
-    assert payload["cycle"]["entry_targets_queued"] == 0
-    assert payload["cycle"]["terminal_entry_attempt_suppressions"] == 1
-    assert list((inbox / "pending").glob("*.json")) == []
 
 
-def test_service_expired_entry_receipt_suppresses_same_attempt_after_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from liquidity_migration.account.account_intent_client import AccountTargetPublisher
-    from liquidity_migration.account.account_service import AccountServiceReceipt
-
-    candidate = _candidate(
-        "AAAUSDT",
-        signal_ts_ms=1_700_000_300_000 - 25 * MS_PER_HOUR,
-    )
-    candidates = [candidate]
-    _stub_cycle_dependencies(monkeypatch, candidates=candidates)
-    inbox_root = tmp_path / "account-inbox"
-    account_root = tmp_path / "account"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox_root),
-        account_execution_root=str(account_root),
-        ws_klines_enabled=False,
-    )
-    route = _ensure_owner_route(account_root, inbox_root, environment="demo")
-    strategy_id = long_v11a_profile().execution_strategy_id
-    proposed = lnd._long_entry_target_intents(
-        candidates,
-        demo=demo,
-        equity_usdt=10_000.0,
-        order_notional_pct_equity=0.10,
-        price_by_symbol={"AAAUSDT": 99.0},
-        now_ms=1_700_000_300_000,
-        strategy_id=strategy_id,
-    )[0]
-    publisher = AccountTargetPublisher(route)
-    published = publisher.publish(
-        batch_id="expired-before-restart",
-        intents=(proposed,),
-        created_ts_ns=1_700_000_299_000_000_000,
-    )
-    claimed = publisher.inbox.claim_next()
-    assert claimed is not None
-    publisher.inbox.complete(
-        claimed[0],
-        AccountServiceReceipt(
-            request_id=published.request.request_id,
-            request_hash=published.request.content_hash(),
-            batch_id=published.request.batch_id,
-            accepted=False,
-            rejection_keys=(f"account-service:entry-signal-expired:{proposed.intent.metadata['entry_attempt_key']}",),
-            command_ids=(),
-            execution_event_ids=(),
-            final_state_hash="0" * 64,
-            disposition="expired",
-        ),
-    )
-    _write_owner_health(account_root, inbox_root, environment="demo")
-
-    payload = _run_cycle(tmp_path / "long", demo)
-
-    assert payload["cycle"]["entry_targets_queued"] == 0
-    assert payload["cycle"]["terminal_entry_attempt_suppressions"] == 1
-    assert list((inbox_root / "pending").glob("*.json")) == []
 
 
 def _fc_signal_features(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:
@@ -2185,72 +1455,8 @@ def test_v11a_candidates_do_not_carry_stop_decay_contract() -> None:
     assert "decayed_stop_loss_pct" not in candidates[0]
 
 
-def test_entry_intent_metadata_freezes_decay_contract() -> None:
-    now_ms = 1_700_000_000_000
-    base_candidate = {
-        "trade_id": "long-trade-1",
-        "symbol": "ABCUSDT",
-        "signal_ts_ms": now_ms - 60_000,
-        "entry_reason": "fomo_chase",
-        "position_weight": 0.5,
-        "stop_loss_pct": 0.15,
-        "take_profit_pct": 0.20,
-        "max_hold_days": 3,
-        "atr_14d_pct": 0.05,
-    }
-    demo = LongNativeDemoCycleConfig(entry_leverage=10.0)
-    with_contract = dict(
-        base_candidate,
-        stop_decay_after_ms=48 * MS_PER_HOUR,
-        decayed_stop_loss_pct=0.075,
-    )
-    entries = lnd._long_entry_target_intents(
-        [with_contract],
-        demo=demo,
-        equity_usdt=10_000.0,
-        order_notional_pct_equity=0.10,
-        price_by_symbol={"ABCUSDT": 2.0},
-        now_ms=now_ms,
-        strategy_id=LONG_V12_WIDE_STOP_STRATEGY_ID,
-    )
-    assert len(entries) == 1
-    metadata = entries[0].intent.metadata
-    assert metadata["stop_decay_after_ms"] == 48 * MS_PER_HOUR
-    assert metadata["decayed_stop_loss_pct"] == pytest.approx(0.075)
-    assert metadata["atr_14d_pct"] == pytest.approx(0.05)
-
-    plain = lnd._long_entry_target_intents(
-        [dict(base_candidate)],
-        demo=demo,
-        equity_usdt=10_000.0,
-        order_notional_pct_equity=0.10,
-        price_by_symbol={"ABCUSDT": 2.0},
-        now_ms=now_ms,
-        strategy_id=LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
-    )
-    assert {"stop_decay_after_ms", "decayed_stop_loss_pct", "atr_14d_pct"}.isdisjoint(
-        plain[0].intent.metadata
-    )
 
 
-def test_planning_metadata_whitelist_round_trips_decay_contract() -> None:
-    from liquidity_migration.strategy.account_strategy_state import _planning_metadata
-
-    surviving = _planning_metadata(
-        {
-            "stop_loss_pct": 0.15,
-            "stop_decay_after_ms": 48 * MS_PER_HOUR,
-            "decayed_stop_loss_pct": 0.075,
-            "atr_14d_pct": 0.05,
-            "unrelated_key": "dropped",
-        }
-    )
-    assert surviving == {
-        "stop_loss_pct": 0.15,
-        "stop_decay_after_ms": 48 * MS_PER_HOUR,
-        "decayed_stop_loss_pct": 0.075,
-        "atr_14d_pct": 0.05,
-    }
 
 
 def test_plan_decayed_stop_fires_only_after_decay_age_and_breach() -> None:
@@ -2346,162 +1552,12 @@ def test_time_stop_wins_over_decayed_stop() -> None:
     assert [p["exit_reason"] for p in plans] == ["time_stop"]
 
 
-def test_exit_intents_keyed_by_owning_trade_strategy_id() -> None:
-    now = 2_000_000_000_000
-    trades = pl.DataFrame(
-        [
-            _open_trade_row(
-                trade_id="long-OLD-1",
-                symbol="OLDUSDT",
-                strategy_id=LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
-                entry_ts_ms=now - 80 * MS_PER_HOUR,
-                entry_price=100.0,
-                with_decay_contract=False,
-                max_hold_deadline_ts_ms=now - MS_PER_HOUR,
-            ),
-            _open_trade_row(
-                trade_id="long-NEW-1",
-                symbol="NEWUSDT",
-                strategy_id=LONG_V12_WIDE_STOP_STRATEGY_ID,
-                entry_ts_ms=now - 50 * MS_PER_HOUR,
-                entry_price=100.0,
-            ),
-        ]
-    )
-    plans = _plan_time_stop_exits(
-        trades, now_ms=now, price_by_symbol={"OLDUSDT": 99.0, "NEWUSDT": 92.0}
-    )
-    assert {p["exit_reason"] for p in plans} == {"time_stop", "decayed_stop_loss"}
-    intents = lnd._long_exit_target_intents(
-        plans,
-        trades,
-        strategy_id=LONG_V12_WIDE_STOP_STRATEGY_ID,
-        now_ms=now,
-        default_leverage=10.0,
-    )
-    keys_by_symbol = {intent.intent.symbol: intent.intent.target_key for intent in intents}
-    # A v11a residue component exits under the v11a identity even though the
-    # producer now runs v12 — the target key must match the standing target.
-    assert LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID in keys_by_symbol["OLDUSDT"]
-    assert LONG_V12_WIDE_STOP_STRATEGY_ID in keys_by_symbol["NEWUSDT"]
-    decayed = [i for i in intents if i.intent.symbol == "NEWUSDT"]
-    assert decayed[0].intent.reason == "decayed_stop_loss"
-    assert decayed[0].intent.metadata["decayed_stop_price"] == pytest.approx(92.5)
 
 
-def test_validate_rejects_unregistered_strategy_identity() -> None:
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root="/tmp/inbox",
-        account_execution_root="/tmp/account",
-    )
-    rogue = replace(long_v12_profile(), execution_strategy_id="long_native_v13_unregistered")
-    with pytest.raises(ValueError, match="unsupported LONG execution_strategy_id"):
-        _validate_long_demo_config(demo, rogue)
 
 
-class _HealthSentinel(RuntimeError):
-    """Marks that the cycle reached the owner-health read past the gate."""
 
 
-def test_retiring_symbol_with_exposure_does_not_wedge_the_cycle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A scheduled retirement with live exposure must not fail the cycle.
-
-    The pre-2026-08-13 gate raised before exit planning, so the one producer
-    able to publish the flattening exits refused to run — a deadlock broken
-    only by venue settlement or an operator flatten. The cycle now reports the
-    draining symbol and keeps going: with the fix, execution reaches the
-    owner-health read (the sentinel below); without it, the flatness
-    RuntimeError fires first and this test fails.
-    """
-
-    from liquidity_migration.account.account_intent_client import (
-        AccountTargetPublisher,
-        requested_target,
-    )
-    from liquidity_migration.account.account_service import SleeveAdapterKind
-    from liquidity_migration.strategy.account_candidate_universe import (
-        build_candidate_universe_artifact,
-        write_candidate_universe,
-    )
-    from tests.strategy.test_account_candidate_universe import (
-        SNAPSHOT_NS,
-        _instrument,
-        _ticker,
-    )
-
-    now_ms = SNAPSHOT_NS // 1_000_000 + 60_000
-    # Both symbols clear every LONG population filter at freeze time, so the
-    # frozen long profile holds both and BBBUSDT's later delivery evidence is
-    # a scheduled retirement rather than a never-member.
-    artifact = write_candidate_universe(
-        tmp_path / "candidate.json",
-        build_candidate_universe_artifact(
-            [_instrument("AAAUSDT"), _instrument("BBBUSDT")],
-            [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "4000000")],
-            snapshot_ts_ns=SNAPSHOT_NS,
-            long_config=LongNativeDemoCycleConfig(),
-        ),
-    )
-
-    class _PublicClient:
-        def get_instruments_info(self) -> list[dict[str, Any]]:
-            # The venue has announced BBBUSDT's retirement: still trading,
-            # delivery in the future.
-            return [
-                _instrument("AAAUSDT"),
-                _instrument("BBBUSDT", delivery_time=str(now_ms + 86_400_000)),
-            ]
-
-        def get_tickers(self) -> list[dict[str, Any]]:
-            return [_ticker("AAAUSDT", "3000000"), _ticker("BBBUSDT", "4000000")]
-
-    route = ensure_account_route(
-        account_id="bybit-demo-unified",
-        environment="demo",
-        account_root=tmp_path / "account",
-        inbox_root=tmp_path / "inbox",
-    )
-    AccountTargetPublisher(route).publish(
-        batch_id="bbb-standing-exposure",
-        intents=(
-            requested_target(
-                adapter_kind=SleeveAdapterKind.HEDGE,
-                decision_key="bbb-standing-exposure/BBBUSDT",
-                target_key="hedge/test/bbb/BBBUSDT",
-                strategy_id="test",
-                component_id="bbb",
-                symbol="BBBUSDT",
-                signed_notional_usdt=100.0,
-                leverage=2.0,
-                reason="test",
-            ),
-        ),
-        created_ts_ns=now_ms * 1_000_000,
-    )
-
-    def _sentinel_health(*args: Any, **kwargs: Any) -> Any:
-        raise _HealthSentinel("cycle proceeded past the retirement gate")
-
-    monkeypatch.setattr(lnd, "account_owner_health_reading", _sentinel_health)
-
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_execution_root=str(tmp_path / "account"),
-        account_intent_inbox_root=str(tmp_path / "inbox"),
-        candidate_universe_file=str(artifact),
-    )
-    with pytest.raises(_HealthSentinel):
-        run_long_native_demo_cycle(
-            tmp_path,
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=demo,
-            market_client=_PublicClient(),
-            now_ms=now_ms,
-        )
 
 
 # --------------------------------------------------------------------------- #
@@ -2540,298 +1596,20 @@ def test_regime_blocked_pumps_count_separately_from_no_signal() -> None:
     assert skips["regime_eth_off"] == 1
 
 
-def test_regime_anchors_are_fetched_even_when_the_universe_lacks_them(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With BTC or ETH missing from the frame both regime flags read false and
-    every native entry stops without a word. The two anchors are fetched for
-    the regime join whatever the frozen artifact says, their absence is said
-    out loud, and a force-added anchor never becomes a candidate."""
-    candidate = _candidate("AAAUSDT")
-    _stub_cycle_dependencies(monkeypatch, candidates=[candidate])
-    fetched: list[list[str]] = []
-
-    def _capture_klines(symbols: list[str], *args: Any, **kwargs: Any) -> tuple[pl.DataFrame, dict[str, int]]:
-        fetched.append(list(symbols))
-        return pl.DataFrame(), {
-            "cache_rows": 0,
-            "fetched_rows": 0,
-            "store_rows": 0,
-            "store_symbols": 0,
-        }
-
-    def _features_without_anchors(klines: pl.DataFrame, config: Any = None) -> pl.DataFrame:
-        # The universe row arrived; the two regime anchors did not.
-        return pl.DataFrame(
-            {
-                "ts_ms": [1_700_000_000_000],
-                "symbol": ["AAAUSDT"],
-                "regime_on": [True],
-                "eth_regime_on": [True],
-            }
-        )
-
-    monkeypatch.setattr(lnd, "_download_recent_1h_klines", _capture_klines)
-    monkeypatch.setattr(lnd, "build_long_features", _features_without_anchors)
-
-    inbox = tmp_path / "account-inbox"
-    account_root = tmp_path / "account"
-    demo = LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(inbox),
-        account_execution_root=str(account_root),
-        ws_klines_enabled=False,
-    )
-    _write_owner_health(account_root, inbox, environment="demo")
-
-    payload = _run_cycle(tmp_path / "long", demo)
-
-    assert {"BTCUSDT", "ETHUSDT"} <= set(fetched[0]), "anchors are always fetched"
-    cycle = payload["cycle"]
-    assert cycle["regime_btc_on"] is None
-    assert json.loads(cycle["regime_anchors_missing_json"]) == ["BTCUSDT", "ETHUSDT"]
-    # The anchor rows themselves are gone from candidacy; only AAA was asked.
-    assert [c["symbol"] for c in payload["candidates"]] == ["AAAUSDT"]
 
 
-def _write_engine_heartbeat(
-    account_root: Path,
-    inbox_root: Path,
-    *,
-    environment: str = "demo",
-    equity_usdt: float = 10_000.0,
-    positions: list[dict[str, Any]] | None = None,
-    entry_blockers: list[dict[str, str]] | None = None,
-) -> None:
-    """The engine heartbeat, with the position and refusal arrays it renders."""
-    route = _ensure_owner_route(account_root, inbox_root, environment=environment)
-    heartbeat = account_root / "engine-heartbeat.json"
-    heartbeat.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {
-        "account_available_usdt": equity_usdt,
-        "account_equity_usdt": equity_usdt,
-        "account_observed_wall_ts_ms": time.time_ns() // 1_000_000,
-        "account_user_id": route.account_id,
-        "realm": environment,
-        "may_open": True,
-        "mode": "live",
-    }
-    if positions is not None:
-        payload["positions"] = positions
-    if entry_blockers is not None:
-        payload["entry_blockers"] = entry_blockers
-    heartbeat.write_text(json.dumps(payload))
-    os.environ["ENGINE_ACCOUNT_HEARTBEAT_FILE"] = str(heartbeat)
 
 
-def _book_mode_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    from liquidity_migration.strategy.long_book_state import LONG_BOOK_STATE_PATH_ENV
-
-    book = tmp_path / "targets" / "long-demo.json"
-    state = tmp_path / "targets" / "long-demo-state.json"
-    monkeypatch.setenv(lnd.ENGINE_TARGET_BOOK_PATH_ENV, str(book))
-    monkeypatch.setenv(LONG_BOOK_STATE_PATH_ENV, str(state))
-    return book, state
 
 
-def _book_demo_config(tmp_path: Path) -> LongNativeDemoCycleConfig:
-    return LongNativeDemoCycleConfig(
-        execution_environment="demo",
-        account_intent_inbox_root=str(tmp_path / "account-inbox"),
-        account_execution_root=str(tmp_path / "account"),
-        ws_klines_enabled=False,
-    )
 
 
-def test_book_mode_counts_what_the_book_took_in_and_let_go(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """In book mode nothing is published to the inbox, so the queued counters
-    read what the book itself did. They used to be zero on every cycle for
-    ever, including the journald summary line."""
-    from liquidity_migration.strategy.long_book_state import (
-        LongBookEntry,
-        LongBookState,
-        read_book_state,
-        write_book_state,
-    )
-
-    _stub_cycle_dependencies(monkeypatch, candidates=[])
-    _book_mode_paths(tmp_path, monkeypatch)
-    account_root = tmp_path / "account"
-    _write_engine_heartbeat(account_root, tmp_path / "account-inbox")
-
-    now_ms = 1_700_000_300_000
-    expired = LongBookEntry(
-        trade_id="long-KAITOUSDT-1",
-        symbol="KAITOUSDT",
-        strategy_id="long_v11a_div_weekend_vol",
-        notional_usdt=500.0,
-        stop_loss_fraction=0.15,
-        leverage=2.0,
-        entered_ts_ms=now_ms - exact_duration_ms(days=4),
-        entry_price=10.0,
-        max_hold_deadline_ts_ms=now_ms - 1_000,
-        seen_held=True,
-    )
-    write_book_state(
-        tmp_path / "targets" / "long-demo-state.json",
-        LongBookState(held={"KAITOUSDT": expired}),
-    )
-
-    payload = run_long_native_demo_cycle(
-        tmp_path,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=_book_demo_config(tmp_path),
-        now_ms=now_ms,
-    )
-    cycle = payload["cycle"]
-
-    assert cycle["exit_targets_queued"] == 1, "the time stop left the book"
-    assert cycle["entry_targets_queued"] == 0
-    assert cycle["book_targets"] == 0
-    back = read_book_state(tmp_path / "targets" / "long-demo-state.json")
-    assert back.held == {}
 
 
-def test_book_mode_drops_a_never_held_ask_the_engine_refuses(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An ask the kernel refused never becomes a position, but it reserved a
-    slot until its three-day deadline -- closed_elsewhere could not free it
-    because it never became seen_held. The refusal now crosses the heartbeat
-    and the ask leaves the record the same cycle, with no cooldown: the name
-    never held."""
-    from liquidity_migration.strategy.long_book_state import (
-        LongBookEntry,
-        LongBookState,
-        read_book_state,
-        write_book_state,
-    )
-
-    _stub_cycle_dependencies(monkeypatch, candidates=[])
-    _book_mode_paths(tmp_path, monkeypatch)
-    _write_engine_heartbeat(
-        tmp_path / "account",
-        tmp_path / "account-inbox",
-        positions=[],
-        entry_blockers=[
-            {"symbol": "KAITOUSDT", "reason": "AvailableMarginExhausted { available_usdt: 0.5 }"}
-        ],
-    )
-
-    now_ms = 1_700_000_300_000
-    pending = LongBookEntry(
-        trade_id="long-KAITOUSDT-1",
-        symbol="KAITOUSDT",
-        strategy_id="long_v11a_div_weekend_vol",
-        notional_usdt=500.0,
-        stop_loss_fraction=0.15,
-        leverage=2.0,
-        entered_ts_ms=now_ms - exact_duration_ms(hours=2),
-        entry_price=10.0,
-        max_hold_deadline_ts_ms=now_ms + exact_duration_ms(days=3),
-        seen_held=False,
-    )
-    state_path = tmp_path / "targets" / "long-demo-state.json"
-    write_book_state(state_path, LongBookState(held={"KAITOUSDT": pending}))
-
-    payload = run_long_native_demo_cycle(
-        tmp_path,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=_book_demo_config(tmp_path),
-        now_ms=now_ms,
-    )
-    cycle = payload["cycle"]
-
-    assert cycle["engine_blocked_asks"] == 1
-    back = read_book_state(state_path)
-    assert back.held == {}, "the refused ask left the record"
-    assert back.left_at_ms == {}, "no cooldown: the name never held"
 
 
-def test_book_mode_does_not_drop_a_confirmed_holding_the_engine_refuses(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A blocker on a name the engine HAS confirmed is exit business, not
-    entry bookkeeping: the holding stays in the record until its own exit or
-    a confirmed close says otherwise."""
-    from liquidity_migration.strategy.long_book_state import (
-        LongBookEntry,
-        LongBookState,
-        read_book_state,
-        write_book_state,
-    )
-
-    _stub_cycle_dependencies(monkeypatch, candidates=[])
-    _book_mode_paths(tmp_path, monkeypatch)
-    _write_engine_heartbeat(
-        tmp_path / "account",
-        tmp_path / "account-inbox",
-        positions=[{"symbol": "KAITOUSDT", "side": "long", "qty": 50.0, "entry_px": 10.0}],
-        entry_blockers=[{"symbol": "KAITOUSDT", "reason": "stale_quote"}],
-    )
-
-    now_ms = 1_700_000_300_000
-    held = LongBookEntry(
-        trade_id="long-KAITOUSDT-1",
-        symbol="KAITOUSDT",
-        strategy_id="long_v11a_div_weekend_vol",
-        notional_usdt=500.0,
-        stop_loss_fraction=0.15,
-        leverage=2.0,
-        entered_ts_ms=now_ms - exact_duration_ms(hours=2),
-        entry_price=10.0,
-        max_hold_deadline_ts_ms=now_ms + exact_duration_ms(days=3),
-        seen_held=True,
-    )
-    state_path = tmp_path / "targets" / "long-demo-state.json"
-    write_book_state(state_path, LongBookState(held={"KAITOUSDT": held}))
-
-    payload = run_long_native_demo_cycle(
-        tmp_path,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=_book_demo_config(tmp_path),
-        now_ms=now_ms,
-    )
-
-    assert payload["cycle"]["engine_blocked_asks"] == 0
-    back = read_book_state(state_path)
-    assert list(back.held) == ["KAITOUSDT"], "a confirmed holding is not an ask"
-    assert back.held["KAITOUSDT"].venue_qty == 50.0, "and its venue truth is recorded"
 
 
-def test_book_mode_skips_a_candidate_the_engine_is_refusing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Re-asking a standing refusal every cycle would write the ask into the
-    book only to drop it again on the next one. It is skipped and counted
-    instead, which frees the slot for a candidate that can actually fill."""
-    blocked = _candidate("AAAUSDT")
-    free = _candidate("BBBUSDT")
-    _stub_cycle_dependencies(monkeypatch, candidates=[blocked, free])
-    _book_mode_paths(tmp_path, monkeypatch)
-    _write_engine_heartbeat(
-        tmp_path / "account",
-        tmp_path / "account-inbox",
-        positions=[],
-        entry_blockers=[{"symbol": "AAAUSDT", "reason": "below_entry_floor"}],
-    )
-
-    payload = run_long_native_demo_cycle(
-        tmp_path,
-        config=ResearchConfig(data_root=tmp_path),
-        demo_config=_book_demo_config(tmp_path),
-        now_ms=1_700_000_300_000,
-    )
-    cycle = payload["cycle"]
-
-    assert cycle["skipped_engine_blocked"] == 1
-    from liquidity_migration.strategy.long_book_state import read_book_state
-
-    back = read_book_state(tmp_path / "targets" / "long-demo-state.json")
-    assert sorted(back.held) == ["BBBUSDT"]
-    assert cycle["entry_targets_queued"] == 1
 
 
 class TestBookDeclaresTheDecayedStop:

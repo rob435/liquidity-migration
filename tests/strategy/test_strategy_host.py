@@ -1,5 +1,4 @@
-"""Host-level wake behavior: deadlines outrank the debounce, journal
-commits end the wait, and wake labeling stays clean."""
+"""Host-level wake behavior: deadlines outrank debounce and engine heartbeats."""
 
 from __future__ import annotations
 
@@ -10,7 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.rules.engine_targets import render_target_book, write_target_book
+from liquidity_migration.strategy.strategy_event_clock import StrategyEvent
 from liquidity_migration.strategy.strategy_host import StrategyHostDaemon
+from liquidity_migration.strategy.target_book_evidence import PublishedTargetCyclePayload
 
 
 @dataclass
@@ -74,7 +76,7 @@ def test_a_due_deadline_outranks_a_pending_bar_wake(tmp_path: Path) -> None:
     assert daemon._deadline_fired_ts_ms == daemon._next_wake_deadline_ts_ms
 
 
-def test_bar_wake_without_journal_flag_labels_confirmed_bar(tmp_path: Path) -> None:
+def test_bar_wake_without_engine_flag_labels_confirmed_bar(tmp_path: Path) -> None:
     daemon = _host(tmp_path)
     daemon._bar_event.set()
 
@@ -82,19 +84,19 @@ def test_bar_wake_without_journal_flag_labels_confirmed_bar(tmp_path: Path) -> N
 
     assert daemon._pending_cycle_kind == "confirmed_bar"
     assert daemon._cycles_kline_triggered == 1
-    assert daemon._cycles_journal_triggered == 0
+    assert daemon._cycles_engine_triggered == 0
 
 
-def test_journal_flagged_wake_labels_journal_change_and_clears_the_flag(tmp_path: Path) -> None:
+def test_engine_flagged_wake_labels_engine_change_and_clears_the_flag(tmp_path: Path) -> None:
     daemon = _host(tmp_path)
-    daemon._journal_wake_pending = True
+    daemon._engine_wake_pending = True
     daemon._bar_event.set()
 
     daemon._wait_for_next_cycle_event()
 
-    assert daemon._pending_cycle_kind == "journal_change"
-    assert daemon._cycles_journal_triggered == 1
-    assert daemon._journal_wake_pending is False
+    assert daemon._pending_cycle_kind == "engine_change"
+    assert daemon._cycles_engine_triggered == 1
+    assert daemon._engine_wake_pending is False
 
     # The consumed flag must not relabel the next plain bar wake.
     daemon._bar_event.clear()
@@ -103,44 +105,44 @@ def test_journal_flagged_wake_labels_journal_change_and_clears_the_flag(tmp_path
     assert daemon._pending_cycle_kind == "confirmed_bar"
 
 
-def test_journal_commit_rename_ends_the_event_wait(tmp_path: Path) -> None:
-    journal_dir = tmp_path / "account" / "journal" / "transactions"
-    journal_dir.mkdir(parents=True)
+def test_engine_heartbeat_rename_ends_the_event_wait(tmp_path: Path) -> None:
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir(parents=True)
     # Short idle floor: a broken wake fails this test in seconds as kind
     # "timer" instead of hanging out the production 60s floor.
-    daemon = _host(tmp_path, journal_change_wake_dir=journal_dir, interval_seconds=6.0)
-    daemon._start_journal_watch_thread()
+    daemon = _host(tmp_path, engine_change_wake_dir=engine_dir, interval_seconds=6.0)
+    daemon._start_engine_watch_thread()
     try:
         # Let the watch adopt the directory (inotify) or take its mtime
         # baseline (poll fallback) before the commit lands.
         time.sleep(0.6)
-        tmp = journal_dir / ".segment.tmp"
+        tmp = engine_dir / ".engine-heartbeat.json.tmp"
         tmp.write_bytes(b"{}\n")
-        os.replace(tmp, journal_dir / "00000001-00000001-abcd.json")
+        os.replace(tmp, engine_dir / "engine-heartbeat-demo.json")
 
         started = time.monotonic()
         daemon._wait_for_next_cycle_event()
         elapsed = time.monotonic() - started
 
-        assert daemon._pending_cycle_kind == "journal_change"
-        assert daemon._cycles_journal_triggered == 1
+        assert daemon._pending_cycle_kind == "engine_change"
+        assert daemon._cycles_engine_triggered == 1
         # Idle floor is 60s; the wake must beat it by an order of magnitude.
-        assert elapsed < 5.0, f"journal wake took {elapsed:.2f}s"
+        assert elapsed < 5.0, f"engine wake took {elapsed:.2f}s"
     finally:
-        daemon._stop_journal_watch_thread()
+        daemon._stop_engine_watch_thread()
 
 
-def test_no_journal_watch_thread_without_a_wake_dir_or_in_timer_mode(tmp_path: Path) -> None:
+def test_no_engine_watch_thread_without_a_wake_dir_or_in_timer_mode(tmp_path: Path) -> None:
     event_mode = _host(tmp_path)
-    event_mode._start_journal_watch_thread()
-    assert event_mode._journal_watch_thread is None
+    event_mode._start_engine_watch_thread()
+    assert event_mode._engine_watch_thread is None
 
-    timer_mode = _host(tmp_path, event_driven_cycle=False, journal_change_wake_dir=tmp_path / "j")
-    timer_mode._start_journal_watch_thread()
-    assert timer_mode._journal_watch_thread is None
+    timer_mode = _host(tmp_path, event_driven_cycle=False, engine_change_wake_dir=tmp_path / "e")
+    timer_mode._start_engine_watch_thread()
+    assert timer_mode._engine_watch_thread is None
 
 
-def test_journal_watch_select_failure_degrades_to_poll_pace_not_a_hot_loop(
+def test_engine_watch_select_failure_degrades_to_poll_pace_not_a_hot_loop(
     tmp_path: Path, monkeypatch: __import__("pytest").MonkeyPatch
 ) -> None:
     import liquidity_migration.strategy.strategy_host as host_module
@@ -166,14 +168,14 @@ def test_journal_watch_select_failure_degrades_to_poll_pace_not_a_hot_loop(
     monkeypatch.setattr(host_module, "DirectoryRenameWatch", _FakeWatch)
     monkeypatch.setattr(host_module, "select", _FailingSelect)
 
-    journal_dir = tmp_path / "journal"
-    journal_dir.mkdir()
-    daemon = _host(tmp_path, journal_change_wake_dir=journal_dir)
-    daemon._start_journal_watch_thread()
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir()
+    daemon = _host(tmp_path, engine_change_wake_dir=engine_dir)
+    daemon._start_engine_watch_thread()
     try:
         time.sleep(0.6)
     finally:
-        daemon._stop_journal_watch_thread()
+        daemon._stop_engine_watch_thread()
 
     # Rebuild-after-failure must run at the poll cadence (~0.25s), never a
     # full-speed construct/select/close spin.
@@ -191,17 +193,17 @@ def test_a_wake_landing_at_the_deadline_instant_folds_into_the_boundary(tmp_path
     real_wait = daemon._bar_event.wait
 
     def wake_as_the_deadline_passes(timeout: float | None = None) -> bool:
-        # The journal commit and the deadline instant coincide: by the time
+        # The engine heartbeat and deadline instant coincide: by the time
         # the wait returns for the wake, the deadline is already due.
         clock.advance_ns(200 * 1_000_000)
-        daemon._journal_wake_pending = True
+        daemon._engine_wake_pending = True
         daemon._bar_event.set()
         return real_wait(0)
 
     daemon._bar_event.wait = wake_as_the_deadline_passes  # type: ignore[method-assign]
     daemon._wait_for_next_cycle_event()
 
-    # The boundary must not queue behind a full journal-change cycle; the
+    # The boundary must not queue behind a full engine-change cycle; the
     # pending wake is consumed by the boundary cycle itself.
     assert daemon._pending_cycle_kind == "market_boundary"
     assert daemon._deadline_fired_ts_ms == deadline_ms
@@ -225,17 +227,15 @@ def _price_wake_host(tmp_path: Path, **kwargs: Any) -> tuple[_Host, Any]:
     poking the registry, so the test exercises what production runs.
     """
 
-    from liquidity_migration.account.account_intent_client import ExitFirstPublication
-    from liquidity_migration.account.account_route import derive_account_route
-    from liquidity_migration.strategy.strategy_target_replay import (
-        PublishedTargetCyclePayload,
-    )
-
-    route = derive_account_route(
-        account_id="price-wake-test",
-        environment="demo",
-        account_root=tmp_path / "account",
-        inbox_root=tmp_path / "inbox",
+    book = tmp_path / "price-wake-targets.json"
+    write_target_book(
+        book,
+        render_target_book(
+            source="hosttest",
+            decision_ts_ms=1,
+            valid_until_ms=2,
+            targets=[],
+        ),
     )
     reported: dict[str, Any] = {"levels": []}
 
@@ -246,8 +246,7 @@ def _price_wake_host(tmp_path: Path, **kwargs: Any) -> tuple[_Host, Any]:
                 "ts_ms": 1,
                 "price_wake_levels": list(reported["levels"]),
             },
-            publication=ExitFirstPublication(exit_requests=(), entry_requests=(), errors=()),
-            route=route,
+            target_book_path=book,
         )
 
     kwargs.setdefault("min_cycle_interval_seconds", 0.05)
@@ -432,20 +431,20 @@ def test_a_rising_price_level_wakes_on_the_way_up(tmp_path: Path) -> None:
     assert daemon._bar_event.is_set() is True
 
 
-def test_a_journal_commit_outranks_a_price_touch(tmp_path: Path) -> None:
+def test_an_engine_change_outranks_a_price_touch(tmp_path: Path) -> None:
     daemon, reported = _price_wake_host(tmp_path)
     reported["levels"] = [{"symbol": "AAAUSDT", "at_or_below": 100.0}]
     daemon._run_one_cycle()
     daemon._bar_event.clear()
 
     daemon._handle_ticker_message(_ticker_push("AAAUSDT", 99.0))
-    daemon._journal_wake_pending = True
+    daemon._engine_wake_pending = True
 
     daemon._wait_for_next_cycle_event()
 
     # The commit means the book itself moved; its cycle reads the touched
     # price anyway.
-    assert daemon._pending_cycle_kind == "journal_change"
+    assert daemon._pending_cycle_kind == "engine_change"
     # The consumed price flag must not relabel the next plain bar wake.
     daemon._bar_event.clear()
     daemon._bar_event.set()
@@ -489,13 +488,6 @@ def test_cycle_payload_is_not_decorated_with_ws_plane_stats(tmp_path: Path) -> N
     the payload, and no formatter, capture, or watchdog column read the keys.
     The host must neither attach them nor pay the manager stats() call."""
 
-    from liquidity_migration.account.account_intent_client import ExitFirstPublication
-    from liquidity_migration.account.account_route import derive_account_route
-    from liquidity_migration.account.strategy_event_clock import StrategyEvent
-    from liquidity_migration.strategy.strategy_target_replay import (
-        PublishedTargetCyclePayload,
-    )
-
     class _FakeKlineManager:
         def __init__(self) -> None:
             self.stats_calls = 0
@@ -513,19 +505,21 @@ def test_cycle_payload_is_not_decorated_with_ws_plane_stats(tmp_path: Path) -> N
         def stop(self) -> None:
             return None
 
-    route = derive_account_route(
-        account_id="host-attach-test",
-        environment="demo",
-        account_root=tmp_path / "account",
-        inbox_root=tmp_path / "inbox",
+    book = tmp_path / "host-attach-targets.json"
+    write_target_book(
+        book,
+        render_target_book(
+            source="hosttest",
+            decision_ts_ms=1,
+            valid_until_ms=2,
+            targets=[],
+        ),
     )
-    publication = ExitFirstPublication(exit_requests=(), entry_requests=(), errors=())
 
     def runner(*_args: Any, **_kwargs: Any) -> PublishedTargetCyclePayload:
         return PublishedTargetCyclePayload(
             {"cycle_id": "host-attach-1", "ts_ms": 1},
-            publication=publication,
-            route=route,
+            target_book_path=book,
         )
 
     manager = _FakeKlineManager()

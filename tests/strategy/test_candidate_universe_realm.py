@@ -16,7 +16,7 @@ from liquidity_migration.strategy.account_candidate_universe import (
     write_candidate_universe,
 )
 from liquidity_migration.strategy.carry_demo import _candidate_filtered_universe
-from liquidity_migration.account.execution_environment import candidate_universe_realm
+from liquidity_migration.policy.execution_environment import candidate_universe_realm
 from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 from liquidity_migration.core.venue_realm import VenueRealm
 
