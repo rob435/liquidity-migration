@@ -1,12 +1,4 @@
-"""Report every remaining arming precondition in one read-only pass.
-
-``preflight`` reports each step, its status, and its fix. Two commands mutate:
-``render-profile`` writes the operational profile derived from the env-file
-dials, refusing dials that fail the same envelope proof the account owner
-applies at load time, and ``create-state-roots`` creates the mainnet journal
-directories. Credentials are reported present/absent by variable name; their
-values are never read into the report.
-"""
+"""Report funded-engine arming inputs without exposing credential values."""
 
 from __future__ import annotations
 
@@ -15,7 +7,7 @@ import json
 import os
 import stat
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -31,30 +23,15 @@ from liquidity_migration.policy.systemd_environment import parse_systemd_environ
 __all__ = ["CheckResult", "preflight", "main"]
 
 MAINNET_CREDENTIAL_ENV = Path("/etc/liquidity-migration/bybit-mainnet.env")
-MAINNET_OWNER_ENV = Path("/etc/liquidity-migration/account-execution-mainnet.env")
-DEMO_OWNER_ENV = Path("/etc/liquidity-migration/account-execution.env")
-
-_CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
-
-_STATE_ROOT_KEYS = (
-    "ACCOUNT_EXECUTION_ROOT",
-    "ACCOUNT_INTENT_INBOX_ROOT",
-    "ACCOUNT_CAPTURE_ROOT",
+MAINNET_PRODUCER_SOURCE_ENV = Path(
+    "/etc/liquidity-migration/producer-mainnet-source.env"
 )
 
-_OWNER_ENV_KEYS = (
-    "ACCOUNT_EXECUTION_KERNEL_REQUIRED",
-    "ACCOUNT_VENUE_REALM",
-    "ACCOUNT_RAW_MARKET_PERSISTENCE",
-    "ACCOUNT_EXECUTION_ROOT",
-    "ACCOUNT_INTENT_INBOX_ROOT",
-    "ACCOUNT_CAPTURE_ROOT",
-    "STRATEGY_TARGET_CAPTURE_PATH",
+_CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
+_PRODUCER_PATH_KEYS = (
     "CANDIDATE_UNIVERSE_FILE",
-    "ACCOUNT_SYMBOLS_FILE",
-    "ACCOUNT_DEMO_RULES_FILE",
-    "ACCOUNT_RISK_POLICY_FILE",
-    "DISASTER_STOP_FRACTION",
+    "VENUE_RULES_FILE",
+    "OPERATIONAL_PROFILE_FILE",
 )
 
 
@@ -84,10 +61,8 @@ def _read_environment(path: Path) -> tuple[Mapping[str, str] | None, CheckResult
             f"install the template: deploy/{path.name}.template",
         )
     if not stat.S_ISREG(metadata.st_mode):
-        return None, CheckResult(path.name, False, f"{path} is not a regular file", "")
+        return None, CheckResult(path.name, False, f"{path} is not a regular file")
     mode = stat.S_IMODE(metadata.st_mode)
-    # Caller-owned is accepted so a non-root dry run reports what the VPS will;
-    # root ownership on the deployed host is enforced by the owner runner.
     if metadata.st_uid not in {0, os.geteuid()} or mode != 0o600:
         return None, CheckResult(
             path.name,
@@ -102,14 +77,12 @@ def _read_environment(path: Path) -> tuple[Mapping[str, str] | None, CheckResult
             path.name,
             False,
             f"{path} is unreadable: {exc}",
-            "strict KEY=value lines only -- no quotes, no inline comments",
+            "use strict KEY=value lines only",
         )
     return values, CheckResult(path.name, True, f"{path} is root-owned 0600 and parses")
 
 
 def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
-    """Report credential presence by variable name; values are never read."""
-
     results: list[CheckResult] = []
     for key in _CREDENTIAL_KEYS:
         present = bool(values.get(key, "").strip())
@@ -118,12 +91,7 @@ def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 key,
                 present,
                 "set" if present else "empty",
-                (
-                    ""
-                    if present
-                    else f"paste the mainnet key into {key}= (contract trading only, "
-                    "withdrawal DISABLED, IP-allowlisted to this host)"
-                ),
+                "" if present else f"set {key} in the mainnet credential file",
             )
         )
     for key in ("BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET"):
@@ -133,39 +101,34 @@ def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 key,
                 absent,
                 "absent, as required" if absent else "present in the mainnet file",
-                "" if absent else f"remove {key} -- demo keys must never reach a funded run",
+                "" if absent else f"remove {key}",
             )
         )
     raw = values.get("REAL_MONEY", "").strip().lower()
     armed = raw in TRUE_ENV_VALUES
     if raw and raw not in TRUE_ENV_VALUES and raw not in FALSE_ENV_VALUES:
-        detail = "REAL_MONEY is set to an unrecognised value; refusing to guess"
+        detail = "REAL_MONEY has an unrecognised value"
         fix = f"use one of {sorted(TRUE_ENV_VALUES)} to arm"
     elif armed:
         detail = "armed by the owner"
         fix = ""
     else:
-        detail = "not armed -- this is the switch that means 'trade my money'"
-        fix = "set REAL_MONEY=true, by hand, when you intend to trade real capital"
+        detail = "not armed"
+        fix = "set REAL_MONEY=true by hand when funded trading is intended"
     results.append(CheckResult("REAL_MONEY", armed, detail, fix))
-    # The mainnet liveness watchdog runs with --telegram and sends through this
-    # pair, so an empty one silences every funded alert.
-    telegram = [
-        key for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not values.get(key, "").strip()
+    missing_alert = [
+        key
+        for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+        if not values.get(key, "").strip()
     ]
     results.append(
         CheckResult(
             "notifications",
-            not telegram,
+            not missing_alert,
             "Telegram is configured"
-            if not telegram
-            else f"the owner unit enables Telegram but {', '.join(telegram)} is empty",
-            ""
-            if not telegram
-            else (
-                "fill both in, or the owner will refuse to start; there is no "
-                "mainnet watchdog unit, so this is the only alive signal"
-            ),
+            if not missing_alert
+            else f"missing: {', '.join(missing_alert)}",
+            "" if not missing_alert else "set both values before activation",
         )
     )
     return results
@@ -175,35 +138,16 @@ def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
     declared = sum(1 for key in dial_environment_keys() if key in values)
     try:
         dials = parse_real_money_dials(values)
-    except ValueError as exc:
-        return [
-            CheckResult(
-                "dials",
-                False,
-                str(exc),
-                "fix the dial in the env file; see deploy/bybit-mainnet.env.template",
-            )
-        ]
-    try:
         _data, profile = render_real_money_profile(dials)
     except ValueError as exc:
-        return [
-            CheckResult(
-                "dials",
-                False,
-                f"these dials do not produce a provable envelope: {exc}",
-                "adjust the dial the message names, then re-run preflight",
-            )
-        ]
+        return [CheckResult("dials", False, str(exc), "fix the named dial")]
     return [
         CheckResult(
             "dials",
             True,
             (
-                f"{declared} set explicitly, rest defaulted; "
-                f"leverage {profile.account_risk.max_leverage:g}, "
-                f"gross {profile.account_risk.max_account_gross_notional_usdt / profile.capital_reference_usdt:g}x "
-                f"equity, one shared envelope"
+                f"{declared} set explicitly; leverage {profile.account_risk.max_leverage:g}, "
+                f"gross {profile.account_risk.max_account_gross_notional_usdt / profile.capital_reference_usdt:g}x equity"
             ),
         )
     ]
@@ -212,114 +156,48 @@ def _dial_checks(values: Mapping[str, str]) -> list[CheckResult]:
 def _installed_profile_matches_dials(
     *, dial_values: Mapping[str, str], installed_path: str
 ) -> CheckResult:
-    """Check the installed profile is the render of the current dials.
-
-    Otherwise the report shows a dial-derived envelope while a different one is
-    enforced (dial edited, re-render forgotten).
-    """
-
     path = Path(installed_path)
     try:
         installed = path.read_bytes()
-    except OSError:
+        rendered, _profile = render_real_money_profile(parse_real_money_dials(dial_values))
+    except (OSError, ValueError) as exc:
         return CheckResult(
             "profile matches dials",
             False,
-            f"{path} cannot be read, so the dials cannot be compared to it",
-            "render it: scripts/ops.sh real-money render-profile --execute --output <path>",
+            f"cannot compare {path}: {exc}",
+            "render the profile from the mainnet credential env",
         )
-    try:
-        rendered, _profile = render_real_money_profile(parse_real_money_dials(dial_values))
-    except ValueError as exc:
-        return CheckResult("profile matches dials", False, str(exc), "fix the dial, then re-render")
     if rendered == installed:
-        return CheckResult(
-            "profile matches dials", True, "the installed profile is the render of these dials"
-        )
+        return CheckResult("profile matches dials", True, "installed bytes match the dials")
     return CheckResult(
         "profile matches dials",
         False,
-        f"{path} is NOT the render of the dials in the env file; the envelope "
-        "reported above is not the one that would be enforced",
-        "re-render it: scripts/ops.sh real-money render-profile --execute "
-        f"--output {path} --overwrite, then reinstall",
+        f"{path} is not the render of the current dials",
+        "re-render and reinstall the profile",
     )
 
 
-def _path_checks(values: Mapping[str, str]) -> list[CheckResult]:
+def _producer_checks(values: Mapping[str, str]) -> list[CheckResult]:
     results: list[CheckResult] = []
-    missing = [key for key in _OWNER_ENV_KEYS if not values.get(key, "").strip()]
+    realm = values.get("PRODUCER_REALM", "").strip()
     results.append(
         CheckResult(
-            "owner route",
-            not missing,
-            "every route and input path is declared"
-            if not missing
-            else f"missing: {', '.join(missing)}",
-            "" if not missing else "copy deploy/account-execution-mainnet.env.template",
+            "PRODUCER_REALM",
+            realm == "mainnet",
+            f"is {realm!r}",
+            "set PRODUCER_REALM=mainnet" if realm != "mainnet" else "",
         )
     )
-    if values.get("ACCOUNT_VENUE_REALM", "") != "mainnet":
+    for key in _PRODUCER_PATH_KEYS:
+        raw = values.get(key, "").strip()
+        path = Path(raw) if raw else None
+        valid = bool(path and path.is_absolute() and path.is_file() and not path.is_symlink())
         results.append(
             CheckResult(
-                "ACCOUNT_VENUE_REALM",
-                False,
-                f"is {values.get('ACCOUNT_VENUE_REALM', '')!r}, must be 'mainnet'",
-                "set ACCOUNT_VENUE_REALM=mainnet",
-            )
-        )
-    candidate = values.get("CANDIDATE_UNIVERSE_FILE", "")
-    symbols = values.get("ACCOUNT_SYMBOLS_FILE", "")
-    if candidate and symbols and candidate != symbols:
-        results.append(
-            CheckResult(
-                "candidate universe",
-                False,
-                "CANDIDATE_UNIVERSE_FILE and ACCOUNT_SYMBOLS_FILE differ",
-                "they must name the same frozen artifact",
-            )
-        )
-    # Issuance requires these directories to exist and be owned by the issuing user.
-    missing_roots = [
-        key for key in _STATE_ROOT_KEYS if values.get(key, "").strip() and not Path(values[key]).is_dir()
-    ]
-    results.append(
-        CheckResult(
-            "state roots",
-            not missing_roots,
-            "every mainnet root exists"
-            if not missing_roots
-            else f"missing directories: {', '.join(missing_roots)}",
-            ""
-            if not missing_roots
-            else "create them: scripts/ops.sh real-money create-state-roots --execute",
-        )
-    )
-    artifacts = {
-        "candidate universe": (
-            values.get("ACCOUNT_SYMBOLS_FILE", ""),
-            "scripts/maintain/freeze_account_candidate_universe.py --realm mainnet",
-        ),
-        "instrument rules": (
-            values.get("ACCOUNT_DEMO_RULES_FILE", ""),
-            "scripts/maintain/freeze_venue_instrument_rules.py --realm mainnet",
-        ),
-        "operational profile": (
-            values.get("ACCOUNT_RISK_POLICY_FILE", ""),
-            "scripts/ops.sh real-money render-profile --execute --output <path>",
-        ),
-    }
-    for name, (raw, fix) in artifacts.items():
-        if not raw:
-            continue
-        path = Path(raw)
-        exists = path.is_file()
-        results.append(
-            CheckResult(
-                name,
-                exists,
-                f"{path} is present" if exists else f"{path} is missing",
-                "" if exists else f"freeze it: {fix}",
+                key,
+                valid,
+                f"{path} is present" if valid else f"{raw or '<empty>'} is not a regular absolute file",
+                f"install the reviewed {key.lower()} artifact",
             )
         )
     return results
@@ -328,9 +206,9 @@ def _path_checks(values: Mapping[str, str]) -> list[CheckResult]:
 def preflight(
     *,
     credential_env: Path = MAINNET_CREDENTIAL_ENV,
-    owner_env: Path = MAINNET_OWNER_ENV,
+    producer_env: Path = MAINNET_PRODUCER_SOURCE_ENV,
 ) -> list[CheckResult]:
-    """Every arming precondition, reported at once. Reads only; writes nothing."""
+    """Read every funded-engine arming input and report all failures."""
 
     results: list[CheckResult] = []
     credentials, credential_result = _read_environment(credential_env)
@@ -338,11 +216,12 @@ def preflight(
     if credentials is not None:
         results.extend(_credential_checks(credentials))
         results.extend(_dial_checks(credentials))
-    owner, owner_result = _read_environment(owner_env)
-    results.append(owner_result)
-    if owner is not None:
-        results.extend(_path_checks(owner))
-        installed_profile = owner.get("ACCOUNT_RISK_POLICY_FILE", "").strip()
+
+    producer, producer_result = _read_environment(producer_env)
+    results.append(producer_result)
+    if producer is not None:
+        results.extend(_producer_checks(producer))
+        installed_profile = producer.get("OPERATIONAL_PROFILE_FILE", "").strip()
         if credentials is not None and installed_profile:
             results.append(
                 _installed_profile_matches_dials(
@@ -352,118 +231,7 @@ def preflight(
     return results
 
 
-def _declared_roots(path: Path) -> list[Path]:
-    """Absolute ``*_ROOT`` values from another realm's env file. Not installed: none."""
-
-    if not path.exists():
-        return []
-    try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise ValueError(
-            f"{path} is installed but unreadable, so its roots cannot be excluded: {exc}"
-        ) from exc
-    values = parse_systemd_environment_bytes(data, label=str(path))
-    return [
-        Path(value)
-        for key, value in values.items()
-        if key.endswith("_ROOT") and value.startswith("/")
-    ]
-
-
-def _state_root_targets(values: Mapping[str, str]) -> list[Path]:
-    targets: list[Path] = []
-    for key in _STATE_ROOT_KEYS:
-        raw = values.get(key, "").strip()
-        if not raw:
-            raise ValueError(f"{key} is not declared in the owner env file")
-        if not Path(raw).is_absolute():
-            raise ValueError(f"{key}={raw} is not an absolute path")
-        targets.append(Path(raw))
-    # A file path: its parent is ours to create, the file itself never is.
-    capture = values.get("STRATEGY_TARGET_CAPTURE_PATH", "").strip()
-    if capture:
-        if not Path(capture).is_absolute():
-            raise ValueError(f"STRATEGY_TARGET_CAPTURE_PATH={capture} is not an absolute path")
-        targets.append(Path(capture).parent)
-    ordered: list[Path] = []
-    for target in targets:
-        if target not in ordered:
-            ordered.append(target)
-    return ordered
-
-
-def _create_state_roots(args: argparse.Namespace) -> int:
-    owner_env = Path(args.owner_env)
-    values, result = _read_environment(owner_env)
-    if values is None:
-        print(result.render(), file=sys.stderr)
-        return 2
-    targets = _state_root_targets(values)
-    # Resolved on both sides: a lexical compare misses a symlinked or ``..`` path
-    # that lands in another realm's tree.
-    resolved = {target: target.resolve() for target in targets}
-    for other in (DEMO_OWNER_ENV,):
-        for root in _declared_roots(other):
-            here = root.resolve()
-            for target, full in resolved.items():
-                if full == here or here in full.parents:
-                    raise ValueError(f"{target} is at or inside {root}, declared in {other.name}")
-
-    existing: list[Path] = []
-    missing: list[Path] = []
-    for target in targets:
-        try:
-            metadata = target.stat()  # follows symlinks, as the preflight check does
-        except FileNotFoundError:
-            if target.is_symlink():
-                raise ValueError(f"{target} is a symlink to nothing; repoint it by hand") from None
-            missing.append(target)
-            continue
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise ValueError(f"{target} exists and is not a directory; move it aside by hand")
-        existing.append(target)
-
-    if not args.execute:
-        for target in existing:
-            print(f"[have] {target}")
-        for target in missing:
-            print(f"[make] {target} mode 0700")
-        print(
-            f"\n# dry run -- {len(missing)} directory(ies) to create; pass --execute",
-            file=sys.stderr,
-        )
-        return 0
-
-    for target in missing:
-        # exist_ok: one missing root can be the parent of another, and creating the
-        # child materialises it first. A non-directory still raises.
-        target.mkdir(mode=0o700, parents=True, exist_ok=True)
-        target.chmod(0o700)  # mkdir's mode is masked by the umask; chmod is not
-    summary: dict[str, Any] = {
-        "owner_env": str(owner_env),
-        "created": [str(target) for target in missing],
-        "already_present": [str(target) for target in existing],
-        "roots": {
-            str(target): {
-                "mode": f"{stat.S_IMODE(target.stat().st_mode):04o}",
-                "uid": target.stat().st_uid,
-            }
-            for target in targets
-        },
-    }
-    print(json.dumps(summary, sort_keys=True, indent=2))
-    return 0
-
-
 def _default_telegram(args: argparse.Namespace) -> int:
-    """Copy a missing Telegram pair into the credential file from another env.
-
-    A funded book that cannot page is a hazard, so activation defaults the
-    pair from the demo file when the owner left it out. Existing values are
-    never touched, values are never printed, and the append preserves the
-    file's strict format (the parser accepts comments and blank lines).
-    """
     credential = Path(args.credential_env)
     source = Path(args.from_env)
     values, check = _read_environment(credential)
@@ -473,39 +241,27 @@ def _default_telegram(args: argparse.Namespace) -> int:
     missing = [
         key
         for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
-        if not str(values.get(key) or "").strip()
+        if not values.get(key, "").strip()
     ]
     if not missing:
-        print(f"{credential.name}: telegram pair already present; nothing to do")
+        print(f"{credential.name}: Telegram pair already present")
         return 0
     source_values, source_check = _read_environment(source)
     if source_values is None:
-        print(
-            f"{credential.name} has no telegram pair and the fallback is unusable:",
-            file=sys.stderr,
-        )
         print(source_check.render(), file=sys.stderr)
         return 2
-    additions: dict[str, str] = {}
-    for key in missing:
-        value = str(source_values.get(key) or "").strip()
-        if not value:
-            print(
-                f"{source} does not hold {key}; set the pair by hand in {credential}",
-                file=sys.stderr,
-            )
-            return 2
-        additions[key] = value
-    alert_chat = str(source_values.get("TELEGRAM_ALERT_CHAT_ID") or "").strip()
-    if alert_chat and not str(values.get("TELEGRAM_ALERT_CHAT_ID") or "").strip():
+    additions = {key: source_values.get(key, "").strip() for key in missing}
+    if any(not value for value in additions.values()):
+        print(f"{source} does not hold the complete Telegram pair", file=sys.stderr)
+        return 2
+    alert_chat = source_values.get("TELEGRAM_ALERT_CHAT_ID", "").strip()
+    if alert_chat and not values.get("TELEGRAM_ALERT_CHAT_ID", "").strip():
         additions["TELEGRAM_ALERT_CHAT_ID"] = alert_chat
     names = ", ".join(sorted(additions))
     if not args.execute:
         print(f"dry-run: would set {names} in {credential} from {source.name}")
         return 0
-    # The template ships the keys as empty assignments, so a plain append would
-    # duplicate them and the strict parser refuses duplicates: replace existing
-    # assignments in place and append only keys the file does not carry at all.
+
     lines = credential.read_bytes().decode("utf-8").splitlines()
     remaining = dict(additions)
     for index, raw_line in enumerate(lines):
@@ -515,16 +271,15 @@ def _default_telegram(args: argparse.Namespace) -> int:
         key = stripped.partition("=")[0]
         if key in remaining:
             lines[index] = f"{key}={remaining.pop(key)}"
-    body = "\n".join(lines)
     if remaining:
-        body += "\n# Telegram pair defaulted from the demo env at activation.\n"
-        body += "\n".join(f"{key}={remaining[key]}" for key in sorted(remaining))
-    if not body.endswith("\n"):
-        body += "\n"
-    parse_systemd_environment_bytes(body.encode("utf-8"), label=str(credential))
+        lines.extend(f"{key}={remaining[key]}" for key in sorted(remaining))
+    body = "\n".join(lines) + "\n"
+    parse_systemd_environment_bytes(body.encode(), label=str(credential))
     scratch = credential.with_name(credential.name + ".tmp")
     descriptor = os.open(
-        scratch, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600
+        scratch,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -532,10 +287,15 @@ def _default_telegram(args: argparse.Namespace) -> int:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(scratch, credential)
+        directory = os.open(credential.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except BaseException:
         scratch.unlink(missing_ok=True)
         raise
-    print(f"set {names} in {credential} (values from {source.name}, never printed)")
+    print(f"set {names} in {credential} (values not printed)")
     return 0
 
 
@@ -549,40 +309,29 @@ def _render(args: argparse.Namespace) -> int:
         source = str(path)
     data, profile = render_real_money_profile(dials)
     if not args.execute:
-        sys.stdout.write(data.decode("utf-8"))
-        print(
-            f"\n# dry run -- dials from {source}; pass --execute --output PATH to write",
-            file=sys.stderr,
-        )
+        sys.stdout.write(data.decode())
+        print(f"\n# dry run -- dials from {source}", file=sys.stderr)
         return 0
     output = Path(args.output).expanduser()
     if output.exists() and not args.overwrite:
         print(f"refusing to overwrite {output}; pass --overwrite", file=sys.stderr)
         return 2
     output.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(
-        str(output),
-        os.O_CREAT | os.O_WRONLY | os.O_TRUNC | (0 if args.overwrite else os.O_EXCL),
-        0o600,
-    )
+    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+    if not args.overwrite:
+        flags |= os.O_EXCL
+    descriptor = os.open(output, flags, 0o600)
     try:
         os.write(descriptor, data)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    # The document's internal render scale is not owner-facing: every cap is a
-    # ratio of live wallet equity at runtime, so the summary speaks in ratios.
-    # An absolute here reads like a capital decision and is not one.
     summary: dict[str, Any] = {
         "output": str(output),
         "dials": source,
-        "capital_reference": (
-            "tracks wallet equity"
-            if profile.capital_reference.tracks_equity
-            else f"fixed {profile.capital_reference_usdt:g} USDT"
-        ),
         "gross_multiple_of_equity": (
-            profile.account_risk.max_account_gross_notional_usdt / profile.capital_reference_usdt
+            profile.account_risk.max_account_gross_notional_usdt
+            / profile.capital_reference_usdt
         ),
     }
     print(json.dumps(summary, sort_keys=True, indent=2))
@@ -593,36 +342,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    check = subparsers.add_parser(
-        "preflight", help="Report every arming precondition. Read-only."
-    )
+    check = subparsers.add_parser("preflight", help="Report every arming input")
     check.add_argument("--credential-env", default=str(MAINNET_CREDENTIAL_ENV))
-    check.add_argument("--owner-env", default=str(MAINNET_OWNER_ENV))
+    check.add_argument("--producer-env", default=str(MAINNET_PRODUCER_SOURCE_ENV))
     check.add_argument("--json", action="store_true")
 
-    render = subparsers.add_parser(
-        "render-profile",
-        help="Render the operational profile from the env dials, and prove it.",
-    )
-    render.add_argument(
-        "--from-env",
-        default=str(MAINNET_CREDENTIAL_ENV),
-        help="Env file holding the RM_* dials. Its credentials are never read.",
-    )
+    render = subparsers.add_parser("render-profile", help="Render the operational profile")
+    render.add_argument("--from-env", default=str(MAINNET_CREDENTIAL_ENV))
     render.add_argument("--execute", action="store_true")
     render.add_argument("--output", default="")
     render.add_argument("--overwrite", action="store_true")
 
-    roots = subparsers.add_parser(
-        "create-state-roots",
-        help="Create the mainnet journal directories the owner env file declares.",
-    )
-    roots.add_argument("--owner-env", default=str(MAINNET_OWNER_ENV))
-    roots.add_argument("--execute", action="store_true")
-
     telegram = subparsers.add_parser(
-        "default-telegram",
-        help="Copy a missing Telegram pair into the credential file from another env file.",
+        "default-telegram", help="Copy a missing Telegram pair from another env"
     )
     telegram.add_argument("--credential-env", default=str(MAINNET_CREDENTIAL_ENV))
     telegram.add_argument("--from-env", required=True)
@@ -635,12 +367,6 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as exc:
             print(f"default-telegram failed: {exc}", file=sys.stderr)
             return 2
-    if args.command == "create-state-roots":
-        try:
-            return _create_state_roots(args)
-        except (OSError, ValueError) as exc:
-            print(f"create-state-roots failed: {exc}", file=sys.stderr)
-            return 2
     if args.command == "render-profile":
         if args.execute and not args.output:
             parser.error("--execute requires --output")
@@ -652,30 +378,20 @@ def main(argv: list[str] | None = None) -> int:
 
     results = preflight(
         credential_env=Path(args.credential_env),
-        owner_env=Path(args.owner_env),
+        producer_env=Path(args.producer_env),
     )
     if args.json:
-        print(
-            json.dumps(
-                [
-                    {"name": row.name, "ok": row.ok, "detail": row.detail, "fix": row.fix}
-                    for row in results
-                ],
-                indent=2,
-            )
-        )
+        print(json.dumps([asdict(row) for row in results], indent=2))
     else:
         for row in results:
             print(row.render())
-        outstanding = [row for row in results if not row.ok]
         print()
-        if outstanding:
-            print(f"{len(outstanding)} step(s) remaining before real money can trade.")
-        else:
-            print(
-                "Every precondition is met. Remaining owner act: activate the "
-                "mainnet units."
-            )
+        outstanding = sum(not row.ok for row in results)
+        print(
+            f"{outstanding} step(s) remaining before real money can trade."
+            if outstanding
+            else "Every precondition is met."
+        )
     return 0 if all(row.ok for row in results) else 1
 
 

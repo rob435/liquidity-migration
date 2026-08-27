@@ -3,7 +3,7 @@
 Sizing lives in three env dials the producers read directly
 (``CARRY_NOTIONAL_MULTIPLIER``, ``LONG_NOTIONAL_MULTIPLIER``,
 ``EXODUS_NOTIONAL_MULTIPLIER``). They sit in the file each producer unit loads:
-``bybit-demo.env`` on demo, ``deploy/account-execution-mainnet.env.template``
+``producer-demo.env`` on demo, ``producer-mainnet.env``
 on the funded fleet — never ``bybit-mainnet.env``, which no producer loads.
 This module only builds the account document: caps, partition, entry leverage,
 and each strategy's default multiplier. It is static — no dial math — so the

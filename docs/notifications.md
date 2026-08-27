@@ -145,9 +145,9 @@ bot did not react, press again.
 
 [`scripts/runtime/check_fleet_liveness.py`](../scripts/runtime/check_fleet_liveness.py), one oneshot per
 timer fire, every 3 minutes — the first run lands one minute after the timer is enabled.
-`--account-scope` selects `demo` or `mainnet`; the mainnet scope runs only the mainnet owner and
-producers against roots disjoint from demo. A unit restart opens a per-check startup grace (owner-health,
-capture and cycle-age checks all honor it), so routine restarts do not page.
+`--account-scope` selects `demo` or `mainnet`; the mainnet scope checks only the
+mainnet engine and producers. A unit restart opens a per-check startup grace, so
+routine restarts do not page.
 
 It **always exits 0**. A watchdog that crash-loops is a watchdog that is off, so a failure to verify
 degrades to an alert instead of a non-zero exit. The unit's `TimeoutStartSec=120` sits under the 3-minute

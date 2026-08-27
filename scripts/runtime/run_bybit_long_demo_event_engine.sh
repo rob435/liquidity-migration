@@ -2,8 +2,8 @@
 # Long-sleeve target producer (uni50 sniper retrace 1%/6h fall-through).
 # LONG_STRATEGY_PROFILE selects the registered profile: v11a
 # (LongV11aDivWeekendVol) or v12 (LongV12WideStop, the 3x-ATR stop decayed to
-# 1.5x after 48h). The account owner handles credentials, orders, fills, and
-# Telegram. EXECUTION_ENVIRONMENT is explicit and requires its owner route.
+# 1.5x after 48h). The Rust engine handles credentials, orders, fills, and
+# Telegram. EXECUTION_ENVIRONMENT is explicit.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -15,9 +15,6 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="$(command -v python3 || command -v python)"
 fi
 
-# The route a producer publishes onto is EXECUTION_ENVIRONMENT plus its owner
-# roots. The kernel-latch variables restate what the unit files already
-# hard-code, so they are not re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
     demo) ;;
     mainnet)
@@ -40,12 +37,17 @@ case "${EXECUTION_ENVIRONMENT:-}" in
         ;;
 esac
 
-for required_name in LONG_ENGINE_TARGET_BOOK_PATH LONG_ENGINE_BOOK_STATE_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID; do
+for required_name in LONG_ENGINE_TARGET_BOOK_PATH LONG_ENGINE_BOOK_STATE_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID OPERATIONAL_PROFILE_FILE PRODUCER_REALM; do
     if [[ -z "${!required_name:-}" ]]; then
         echo "$required_name is required: this producer supports only Rust target-book execution." >&2
         exit 2
     fi
 done
+[ "$PRODUCER_REALM" = "$EXECUTION_ENVIRONMENT" ] || {
+    echo "PRODUCER_REALM must equal EXECUTION_ENVIRONMENT." >&2
+    exit 2
+}
+export ENGINE_ACCOUNT_HEARTBEAT_FILE="$LIVENESS_ENGINE_HEARTBEAT_FILE"
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-long-demo-event}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
@@ -66,9 +68,8 @@ case "$LONG_STRATEGY_PROFILE" in
         exit 2
         ;;
 esac
-OPERATIONAL_PROFILE_FILE="${ACCOUNT_RISK_POLICY_FILE:-}"
 if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; then
-    echo "ACCOUNT_RISK_POLICY_FILE must name the shared operational profile." >&2
+    echo "OPERATIONAL_PROFILE_FILE must name the shared operational profile." >&2
     exit 2
 fi
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"

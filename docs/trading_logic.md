@@ -230,7 +230,7 @@ the live mark: sizing off the live mark makes the day's target a function of the
 unrealized P&L, and the book churns itself. A 5%-of-standing / $1 dead-band is the
 backstop; entries below $10 notional are skipped.
 
-**Exit — the v7 clock.** Exits and resizes are a diff against the account owner's
+**Exit — the v7 clock.** Exits and resizes are a diff against the Rust engine's
 accepted reservations, published exit-first. Entry intents expire 6h after the
 decision bar and are not published inside the last 15 minutes of that window.
 A declared 35% stop backstops each position at the venue. No time stop.

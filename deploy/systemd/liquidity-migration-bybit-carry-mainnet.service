@@ -1,10 +1,8 @@
 [Unit]
 Description=liquidity-migration Bybit carry-hold MAINNET target producer (v7 pre-settle exit clock on the lane2_carry_hold_v7 rule)
 Wants=network-online.target
-# No account owner to depend on any more. This producer's whole output is a
-# target book on disk; the engine reads that book and owns the account. The old
-# Requires= existed so a dead owner stopped the producer feeding it; with the
-# owner gone there is nothing here to bind to.
+# This producer writes a target book; the Rust engine reads it and owns the
+# venue account. There is no process-ordering edge between them.
 After=network-online.target
 
 [Service]

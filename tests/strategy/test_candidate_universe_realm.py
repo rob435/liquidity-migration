@@ -28,8 +28,6 @@ PRODUCER_MODULES = (
     "liquidity_migration/strategy/carry_demo.py",
     "liquidity_migration/strategy/event_demo_data.py",
     "liquidity_migration/strategy/long_native_event_demo.py",
-    "scripts/maintain/freeze_venue_instrument_rules.py",
-    "scripts/maintain/probe_bybit_demo_rules.py",
 )
 
 

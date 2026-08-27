@@ -251,8 +251,6 @@ lm_verify_guarded_unit_surfaces() {
                 return 1
                 ;;
         esac
-        # No unit keeps an ExecStartPost readiness gate any more. The only one
-        # that ever did was the mainnet account owner, and it is gone.
     done
 }
 

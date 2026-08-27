@@ -55,8 +55,9 @@ file.
   most 10% of equity) × its multiplier. LONG sits at **6.0** (~60% of equity
   per entry before LONG's own vol/weekend scaling — the measured
   double-LONG-at-no-Sharpe-cost lever, research_findings §3), carry and exodus
-  at **3.0** (~30% per name). On demo the dials are in `bybit-demo.env`; on
-  the funded fleet the LONG line is in `account-execution-mainnet.env` and
+  at **3.0** (~30% per name). On demo the dials are in
+  `producer-demo-source.env`; on the funded fleet the LONG line is in
+  `producer-mainnet-source.env` and
   carry sizes from the committed profile (see Risk envelope §Real money).
   There is no book-level margin ceiling in the way: what bounds a loss is the
   venue-native stop on each position. Held components keep their
@@ -259,7 +260,7 @@ file.
 - **A resting entry waits the full 120 s.** That is the engine's
   `WorkPolicy::default().window_ms` (`engine-types/src/orders.rs`); the order
   moves every 15 s and nothing crosses it early. 180 s was cheaper on tape but
-  does not fit the account owner's 120 s sibling-batch freshness budget.
+  does not fit the Rust engine's 120 s sibling-batch freshness budget.
   `hold_decision_price` and `give_up_instead_of_crossing` are the only two
   dials a strategy block can set, both off by default — the tape sweep says
   cross at the deadline rather than give up. Measured on 15 live resting
@@ -294,7 +295,7 @@ leverage-needing entry, where paying that round trip cost ~169 ms median.
 
 ## Topology
 
-Seven daemons run continuously: the demo engine (the account owner, LIVE), the
+Seven daemons run continuously: the demo Rust engine (LIVE), the
 mainnet engine, demo LONG and CARRY producers, mainnet LONG and CARRY
 producers, and the Telegram controls. Four timers drive four oneshots beside
 them — demo liveness, mainnet liveness, the LLM ledger, and the trade notifier.
@@ -320,7 +321,7 @@ by each venue-native stop.
 
 **Real money**: the funded fleet sizes LONG at 6.0 and CARRY at 3.0. LONG's
 6.0 is set both in the committed profile and as `LONG_NOTIONAL_MULTIPLIER=6.0`
-in `account-execution-mainnet.env`, the no-secrets file the two mainnet
+in `producer-mainnet-source.env`, the no-secrets file the two mainnet
 producer units load; they do not load `bybit-mainnet.env`, which holds the
 key. Carry sizes from the committed profile's 3.0 with no env line.
 `RM_CARRY_STOP_LOSS_FRACTION` (**0.35**) is the protection dial and is the

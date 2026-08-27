@@ -1,10 +1,8 @@
 [Unit]
 Description=liquidity-migration LONG demo target producer (LongV12WideStop)
 Wants=network-online.target
-# No account owner to depend on any more. This producer's whole output is a
-# target book on disk; the engine reads that book and owns the account. A
-# producer running while the engine is down just writes a book nobody has read
-# yet, which is why there is no ordering between them.
+# This producer writes a target book; the Rust engine reads it and owns the
+# venue account. There is no process-ordering edge between them.
 After=network-online.target
 
 [Service]

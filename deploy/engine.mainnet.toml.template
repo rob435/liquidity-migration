@@ -70,8 +70,7 @@ operational_profile_path = "/opt/liquidity-migration/configs/operational.mainnet
 # The two numbers the profile does not carry.
 #
 # How far a position may move against it before its stop ends it. Same value as
-# DISASTER_STOP_FRACTION in the Python owner's env file — keep them equal or
-# the two halves are sizing worst-case loss differently.
+# The operational profile uses the same value when sizing worst-case loss.
 disaster_stop_fraction = 0.35
 # An account reading older than this is not evidence about the account now.
 max_account_view_age_s = 120

@@ -32,7 +32,6 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
     for relative in (
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
-        Path("scripts/vps/check_deploy_rollout_readiness.py"),
         Path("liquidity_migration/ops/maintenance_lock.py"),
     ):
         target = checkout / relative
@@ -147,28 +146,6 @@ def _ssh_capture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     return capture, {"PATH": f"{tmp_path}:{os.environ['PATH']}", "CAPTURE": str(capture)}
 
 
-def test_wedged_command_passes_its_subcommand_through_untouched(tmp_path: Path) -> None:
-    """The module's own venue-evidence refusal is the guard: `resolve` will not
-    terminalize a command the venue still holds. A second `--execute` word in front of
-    it proved nothing and only made the documented command line longer.
-    """
-
-    capture, environment = _ssh_capture(tmp_path)
-    result = _run("wedged-command", "resolve", "--command-id", "abc 123", env=environment)
-    assert result.returncode == 0, result.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert "REMOTE_ARGS=( resolve --command-id abc\\ 123 )" in payload
-    assert "wedged_command_resolution" in payload
-    assert "--realm demo" in payload
-    # The demo owner's credentials are loaded exactly as the unit loads them.
-    assert ". /etc/liquidity-migration/bybit-demo.env" in payload
-    assert ". /etc/liquidity-migration/account-execution.env" in payload
-
-    report = _run("wedged-command", "report", env=environment)
-    assert report.returncode == 0, report.stderr
-    assert "REMOTE_ARGS=( report )" in capture.read_text(encoding="utf-8")
-
-
 def test_flatten_payload_hands_its_arguments_to_the_remote_script(tmp_path: Path) -> None:
     """The bug this pins: the flatten script body was the bare script path, so the
     remote host ran flatten_account.sh with zero argv and it refused every call —
@@ -190,21 +167,6 @@ def test_flatten_payload_hands_its_arguments_to_the_remote_script(tmp_path: Path
     assert "--dry-run" not in executed
 
 
-def test_venue_accounting_runs_on_the_host_where_the_evidence_is(tmp_path: Path) -> None:
-    """Locally there is neither an account journal nor a credential, so the local exec
-    could only ever fail. LOCAL=1 keeps the old behavior for a checkout that has both.
-    """
-
-    capture, environment = _ssh_capture(tmp_path)
-    result = _run("venue-accounting", "--start-time-ms", "17", env=environment)
-    assert result.returncode == 0, result.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert "reconcile_bybit_demo_accounting.py" in payload
-    assert "--account-root data/bybit-account-execution" in payload
-    assert "REMOTE_ARGS=( --start-time-ms 17 )" in payload
-    assert ". /etc/liquidity-migration/bybit-demo.env" in payload
-
-
 def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> None:
     capture, environment = _ssh_capture(tmp_path)
 
@@ -219,13 +181,13 @@ def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> Non
     assert "journalctl -u" in payload
 
     assert (
-        _run("logs", "liquidity-migration-account-execution.service", "40", env=environment)
+        _run("logs", "liquidity-migration-engine.service", "40", env=environment)
         .returncode
         == 0
     )
     payload = capture.read_text(encoding="utf-8")
     # An already-qualified name is not prefixed twice.
-    assert "REMOTE_ARGS=( liquidity-migration-account-execution.service 40 )" in payload
+    assert "REMOTE_ARGS=( liquidity-migration-engine.service 40 )" in payload
 
     for verb in ("restart", "stop", "start"):
         assert _run(verb, "bybit-long-demo.service", env=environment).returncode == 0
@@ -238,34 +200,11 @@ def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> Non
 def test_real_money_allowlist_covers_the_arming_subcommands() -> None:
     rejected = _run("real-money", "arm-it")
     assert rejected.returncode == 2
-    assert "preflight, render-profile, or create-state-roots" in rejected.stderr
+    assert "preflight or render-profile" in rejected.stderr
     help_text = _run("help").stdout
-    assert "real-money create-state-roots [--execute]" in help_text
+    assert "create-state-roots" not in help_text
     assert "stop-mainnet" in help_text
     assert "activate-mainnet" not in help_text
-
-
-def test_real_money_create_state_roots_defaults_to_a_remote_dry_run(tmp_path: Path) -> None:
-    capture = tmp_path / "capture"
-    ssh = tmp_path / "ssh"
-    ssh.write_text("#!/usr/bin/env bash\ncat > \"$CAPTURE\"\n", encoding="utf-8")
-    ssh.chmod(0o700)
-    environment = {"PATH": f"{tmp_path}:{os.environ['PATH']}", "CAPTURE": str(capture)}
-
-    dry = _run("real-money", "create-state-roots", env=environment)
-    assert dry.returncode == 0, dry.stderr
-    payload = capture.read_text(encoding="utf-8")
-    # The module name is the first serialized argument of `python -m`.
-    assert (
-        "REMOTE_ARGS=( liquidity_migration.policy.real_money_arming create-state-roots )"
-        in payload
-    )
-    assert 'exec .venv/bin/python -m "${REMOTE_ARGS[@]}"' in payload
-    assert "--execute" not in payload
-
-    executing = _run("real-money", "create-state-roots", "--execute", env=environment)
-    assert executing.returncode == 0, executing.stderr
-    assert "--execute" in capture.read_text(encoding="utf-8")
 
 
 def _deploy_harness(tmp_path: Path) -> tuple[Path, str, Path, dict[str, str]]:

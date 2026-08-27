@@ -348,6 +348,8 @@ OBSERVER_USER=liquidity-observer
 LLM_USER=liquidity-llm
 PRODUCER_DEMO_ENV=/etc/liquidity-migration/producer-demo.env
 PRODUCER_MAINNET_ENV=/etc/liquidity-migration/producer-mainnet.env
+PRODUCER_DEMO_SOURCE_ENV=/etc/liquidity-migration/producer-demo-source.env
+PRODUCER_MAINNET_SOURCE_ENV=/etc/liquidity-migration/producer-mainnet-source.env
 MAINNET_TELEGRAM_ENV=/etc/liquidity-migration/telegram-mainnet.env
 
 ensure_runtime_identities() {
@@ -382,13 +384,23 @@ from liquidity_migration.policy.systemd_environment import load_private_systemd_
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
 allowed = {
-    "ACCOUNT_DEMO_RULES_FILE", "ACCOUNT_RISK_POLICY_FILE", "ACCOUNT_SYMBOLS_FILE",
-    "ACCOUNT_VENUE_REALM", "CANDIDATE_UNIVERSE_FILE", "CARRY_NOTIONAL_MULTIPLIER",
-    "DISASTER_STOP_FRACTION", "EXODUS_NOTIONAL_MULTIPLIER", "LONG_NOTIONAL_MULTIPLIER",
+    "CANDIDATE_UNIVERSE_FILE", "CARRY_NOTIONAL_MULTIPLIER",
+    "EXODUS_NOTIONAL_MULTIPLIER", "LONG_NOTIONAL_MULTIPLIER",
+    "OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM", "VENUE_RULES_FILE",
 }
 values = load_private_systemd_environment(source)
+forbidden = {
+    "BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET", "BYBIT_REAL_API_KEY",
+    "BYBIT_REAL_API_SECRET", "REAL_MONEY", "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID", "TELEGRAM_ALERT_CHAT_ID",
+}
+leaked = sorted(key for key in forbidden if str(values.get(key) or "").strip())
+if leaked:
+    raise SystemExit(f"{source}: producer source contains forbidden secret/control keys: {', '.join(leaked)}")
 filtered = {key: value for key, value in values.items() if key in allowed}
-for required in ("ACCOUNT_DEMO_RULES_FILE", "ACCOUNT_RISK_POLICY_FILE", "ACCOUNT_SYMBOLS_FILE", "CANDIDATE_UNIVERSE_FILE"):
+if filtered.get("PRODUCER_REALM") not in {"demo", "mainnet"}:
+    raise SystemExit(f"{source}: PRODUCER_REALM must be demo or mainnet")
+for required in ("CANDIDATE_UNIVERSE_FILE", "OPERATIONAL_PROFILE_FILE", "VENUE_RULES_FILE"):
     value = str(filtered.get(required) or "")
     if not value or not Path(value).is_absolute():
         raise SystemExit(f"{source}: {required} must be an absolute path")
@@ -413,13 +425,11 @@ except BaseException:
 PY
     chown root:"$RUNTIME_GROUP" "$target" && chmod 0640 "$target" \
         || fail "cannot secure producer environment $target"
-    unset ACCOUNT_RISK_POLICY_FILE ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE ACCOUNT_DEMO_RULES_FILE
+    unset OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE VENUE_RULES_FILE
     lm_load_private_systemd_environment "$PYTHON" "$source" \
-        ACCOUNT_RISK_POLICY_FILE ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE ACCOUNT_DEMO_RULES_FILE
+        OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE VENUE_RULES_FILE
     local input
-    for input in "$ACCOUNT_RISK_POLICY_FILE" "$ACCOUNT_SYMBOLS_FILE" \
-        "$CANDIDATE_UNIVERSE_FILE" "${ACCOUNT_DEMO_RULES_FILE:-}"; do
-        [ -z "$input" ] && continue
+    for input in "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE" "$VENUE_RULES_FILE"; do
         [ -f "$input" ] && [ ! -L "$input" ] \
             || fail "producer input is missing or linked: $input"
         chown root:"$RUNTIME_GROUP" "$input" && chmod 0640 "$input" \
@@ -428,8 +438,8 @@ PY
     # Grant producer traversal only along the declared inputs, never across every
     # credential/config directory under /etc/liquidity-migration.
     local directory
-    for input in "$target" "$ACCOUNT_RISK_POLICY_FILE" "$ACCOUNT_SYMBOLS_FILE" \
-        "$CANDIDATE_UNIVERSE_FILE" "$ACCOUNT_DEMO_RULES_FILE"; do
+    for input in "$target" "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE" \
+        "$VENUE_RULES_FILE"; do
         directory="$(dirname "$input")"
         case "$directory" in
             /etc/liquidity-migration|/etc/liquidity-migration/*) ;;
@@ -488,32 +498,26 @@ retire_paper_host_config() {
 prepare_demo_runtime_config() {
     [ "$REPO_DIR" = /opt/liquidity-migration ] \
         || fail "systemd runtime paths require REPO_DIR=/opt/liquidity-migration"
-    # Where the producers write their books and the engine reads them. Made
-    # here because both halves need it to exist before either runs, and the
-    # producer that creates it on first write would create it after the engine
-    # has already logged that it cannot find its book.
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 /var/lib/liquidity-migration/targets
-    for path in \
-        /etc/liquidity-migration/account-execution.env \
-        /etc/liquidity-migration/bybit-demo.env; do
+    if [ ! -f "$PRODUCER_DEMO_SOURCE_ENV" ]; then
+        install -o root -g root -m 0600 \
+            "$REPO_DIR/deploy/producer-demo-source.env.template" "$PRODUCER_DEMO_SOURCE_ENV" \
+            || fail "cannot install the demo producer source env"
+    fi
+    for path in "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env; do
         [ -f "$path" ] && [ ! -L "$path" ] || fail "missing real private config: $path"
         chown root:root "$path"
         chmod 0600 "$path"
     done
     lm_load_private_systemd_environment "$PYTHON" \
-        /etc/liquidity-migration/account-execution.env \
-        ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE \
-        ACCOUNT_DEMO_RULES_FILE ACCOUNT_RISK_POLICY_FILE
-    demo_symbols="$ACCOUNT_SYMBOLS_FILE"
-    demo_candidate="${CANDIDATE_UNIVERSE_FILE:-}"
-    demo_rules="$ACCOUNT_DEMO_RULES_FILE"
-    demo_risk="$ACCOUNT_RISK_POLICY_FILE"
-
-    for path in "$demo_symbols" "$demo_rules" "$demo_risk"; do
-        [ "${path#/}" != "$path" ] || fail "demo account input must be absolute: $path"
-        [ -f "$path" ] && [ ! -L "$path" ] || fail "missing real demo account input: $path"
-        chown root:root "$path"
-        chmod 0600 "$path"
+        "$PRODUCER_DEMO_SOURCE_ENV" \
+        PRODUCER_REALM CANDIDATE_UNIVERSE_FILE VENUE_RULES_FILE OPERATIONAL_PROFILE_FILE
+    [ "$PRODUCER_REALM" = demo ] || fail "demo producer source must declare PRODUCER_REALM=demo"
+    demo_candidate="$CANDIDATE_UNIVERSE_FILE"
+    demo_rules="$VENUE_RULES_FILE"
+    demo_profile="$OPERATIONAL_PROFILE_FILE"
+    for path in "$demo_candidate" "$demo_rules" "$demo_profile"; do
+        [ "${path#/}" != "$path" ] || fail "demo producer input must be absolute: $path"
     done
     operational_profile_source="$REPO_DIR/configs/operational.demo.json"
     [ -f "$operational_profile_source" ] && [ ! -L "$operational_profile_source" ] \
@@ -524,54 +528,16 @@ from liquidity_migration.policy.operational_profile import load_operational_prof
 
 load_operational_profile(sys.argv[1])
 PY
-    # Install only while units are quiescent (install_mode enforces that). The
-    # owner and all producers then read these bytes via ACCOUNT_RISK_POLICY_FILE.
-    install -o root -g root -m 0600 "$operational_profile_source" "$demo_risk"
-    "$PYTHON" - "$demo_risk" <<'PY'
-import sys
-from liquidity_migration.policy.operational_profile import load_operational_profile
-
-load_operational_profile(sys.argv[1])
-PY
-    if [ -z "$demo_candidate" ]; then
-        "$PYTHON" - /etc/liquidity-migration/account-execution.env "$demo_symbols" <<'PY'
-import os
-import shlex
-import sys
-import tempfile
-from pathlib import Path
-
-from liquidity_migration.strategy.account_candidate_universe import load_candidate_universe
-from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
-
-path = Path(sys.argv[1])
-symbols = str(Path(sys.argv[2]))
-load_candidate_universe(symbols)
-values = load_private_systemd_environment(path)
-values["CANDIDATE_UNIVERSE_FILE"] = symbols
-descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-try:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        for key, value in sorted(values.items()):
-            handle.write(f"{key}={shlex.quote(value)}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-except BaseException:
-    Path(temporary).unlink(missing_ok=True)
-    raise
-PY
-        demo_candidate="$demo_symbols"
-    fi
-    [ "$demo_candidate" = "$demo_symbols" ] \
-        || fail "demo candidate universe is not the owner symbols file"
-
-
+    install -d -o root -g root -m 0700 "$(dirname "$demo_profile")"
+    install -o root -g root -m 0600 "$operational_profile_source" "$demo_profile"
+    [ -f "$demo_candidate" ] && [ ! -L "$demo_candidate" ] \
+        || fail "install a reviewed demo candidate universe: $demo_candidate"
+    [ -f "$demo_rules" ] && [ ! -L "$demo_rules" ] \
+        || fail "install reviewed read-only demo venue rules: $demo_rules"
     install -d -o root -g root -m 0700 /etc/liquidity-migration
     chown root:root /etc/liquidity-migration/sleeves.resolved.env
     chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
-    write_producer_environment /etc/liquidity-migration/account-execution.env "$PRODUCER_DEMO_ENV"
+    write_producer_environment "$PRODUCER_DEMO_SOURCE_ENV" "$PRODUCER_DEMO_ENV"
     retire_paper_host_config
 
     producer_uid="$(id -u "$PRODUCER_USER")"
@@ -597,12 +563,8 @@ PY
         || fail "demo runtime descriptor/mount preflight failed"
     run_phase demo-tree-normalize demo_tree_normalize_phase \
         || fail "descriptor-rooted demo runtime normalization failed"
-    chown root:root \
-        /etc/liquidity-migration/account-execution.env \
-        /etc/liquidity-migration/bybit-demo.env
-    chmod 0600 \
-        /etc/liquidity-migration/account-execution.env \
-        /etc/liquidity-migration/bybit-demo.env
+    chown root:root "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
+    chmod 0600 "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
 }
 
 require_checkout() {
@@ -742,14 +704,11 @@ git_fetch() {
 # Rules are operator-supplied read-only evidence. Deployment validates freshness
 # and coverage but never mutates venue state or manufactures a new receipt.
 validate_declared_demo_rules() {
-    local demo_rules demo_symbols demo_candidate
+    local demo_rules demo_candidate
     lm_load_private_systemd_environment "$PYTHON" \
-        /etc/liquidity-migration/account-execution.env \
-        ACCOUNT_DEMO_RULES_FILE ACCOUNT_SYMBOLS_FILE CANDIDATE_UNIVERSE_FILE
-    demo_rules="$ACCOUNT_DEMO_RULES_FILE"
-    demo_symbols="$ACCOUNT_SYMBOLS_FILE"
+        "$PRODUCER_DEMO_SOURCE_ENV" VENUE_RULES_FILE CANDIDATE_UNIVERSE_FILE
+    demo_rules="$VENUE_RULES_FILE"
     demo_candidate="$CANDIDATE_UNIVERSE_FILE"
-    [ -n "$demo_candidate" ] || demo_candidate="$demo_symbols"
     "$PYTHON" - "$demo_rules" "$demo_candidate" <<'PY'
 import sys
 from liquidity_migration.core.artifact_snapshot import read_stable_file
@@ -1438,45 +1397,38 @@ activate_mode() {
 # unless REAL_MONEY is set in the host credential file by the account owner,
 # so the worst this can do is start a process that reads and reports.
 MAINNET_OWNER_UNIT=liquidity-migration-engine-mainnet.service
-# Stopped, never started: a host that has not been through this deploy may
-# still be running it, and it must not be left holding the account.
-RETIRED_MAINNET_OWNER_UNIT=liquidity-migration-account-execution-mainnet.service
 MAINNET_LIVENESS_TIMER=liquidity-migration-mainnet-liveness.timer
 MAINNET_LIVENESS_SERVICE=liquidity-migration-mainnet-liveness.service
 
-MAINNET_ROUTE_ENV=/etc/liquidity-migration/account-execution-mainnet.env
 MAINNET_DEMO_TELEGRAM_ENV=/etc/liquidity-migration/bybit-demo.env
 
 # The owner writes one file: the credential env (key, secret, REAL_MONEY,
 # optional dials). Everything else is derived here at activation, and
 # preflight still gates below.
 provision_mainnet_prerequisites() {
-    if [ ! -f "$MAINNET_ROUTE_ENV" ]; then
-        # Fully static committed template, no secrets. Installed only when
-        # absent so a hand-edited copy is never overwritten.
+    if [ ! -f "$PRODUCER_MAINNET_SOURCE_ENV" ]; then
         install -o root -g root -m 600 \
-            "$REPO_DIR/deploy/account-execution-mainnet.env.template" "$MAINNET_ROUTE_ENV" \
-            || fail "cannot install the mainnet route env from the template"
-        echo "provision: installed $MAINNET_ROUTE_ENV from the committed template"
+            "$REPO_DIR/deploy/producer-mainnet-source.env.template" "$PRODUCER_MAINNET_SOURCE_ENV" \
+            || fail "cannot install the mainnet producer source env"
+        echo "provision: installed $PRODUCER_MAINNET_SOURCE_ENV from the committed template"
     fi
-    # The strict loader's ownership and mode demands are mechanical: normalize
-    # them instead of failing an activation over a chmod.
-    chown root:root "$MAINNET_CREDENTIAL_ENV" "$MAINNET_ROUTE_ENV" 2>/dev/null || true
-    chmod 600 "$MAINNET_CREDENTIAL_ENV" "$MAINNET_ROUTE_ENV" 2>/dev/null || true
+    chown root:root "$MAINNET_CREDENTIAL_ENV" "$PRODUCER_MAINNET_SOURCE_ENV" 2>/dev/null || true
+    chmod 600 "$MAINNET_CREDENTIAL_ENV" "$PRODUCER_MAINNET_SOURCE_ENV" 2>/dev/null || true
     # A funded book that cannot page is a hazard: default a missing Telegram
     # pair from the demo file (existing values are never touched).
     "$PYTHON" -m liquidity_migration.policy.real_money_arming default-telegram \
         --from-env "$MAINNET_DEMO_TELEGRAM_ENV" --execute \
         || fail "cannot default the mainnet Telegram pair"
-    # Artifact paths come from the route file itself, not from copies here.
     local risk_policy_file="" universe_file="" rules_file=""
 
-    lm_load_private_systemd_environment "$PYTHON" "$MAINNET_ROUTE_ENV" \
-        ACCOUNT_RISK_POLICY_FILE ACCOUNT_SYMBOLS_FILE ACCOUNT_DEMO_RULES_FILE \
-        || fail "cannot read artifact paths from $MAINNET_ROUTE_ENV"
-    risk_policy_file="$ACCOUNT_RISK_POLICY_FILE"
-    universe_file="$ACCOUNT_SYMBOLS_FILE"
-    rules_file="$ACCOUNT_DEMO_RULES_FILE"
+    lm_load_private_systemd_environment "$PYTHON" "$PRODUCER_MAINNET_SOURCE_ENV" \
+        PRODUCER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE VENUE_RULES_FILE \
+        || fail "cannot read producer inputs from $PRODUCER_MAINNET_SOURCE_ENV"
+    [ "$PRODUCER_REALM" = mainnet ] \
+        || fail "funded producer source must declare PRODUCER_REALM=mainnet"
+    risk_policy_file="$OPERATIONAL_PROFILE_FILE"
+    universe_file="$CANDIDATE_UNIVERSE_FILE"
+    rules_file="$VENUE_RULES_FILE"
 
     mkdir -p "$(dirname "$risk_policy_file")"
     chmod 700 "$(dirname "$risk_policy_file")" 2>/dev/null || true
@@ -1490,7 +1442,7 @@ provision_mainnet_prerequisites() {
     [ -f "$rules_file" ] && [ ! -L "$rules_file" ] \
         || fail "install reviewed read-only venue rules before activation: $rules_file"
     validate_declared_mainnet_venue_rules "$universe_file" "$rules_file"
-    write_producer_environment "$MAINNET_ROUTE_ENV" "$PRODUCER_MAINNET_ENV"
+    write_producer_environment "$PRODUCER_MAINNET_SOURCE_ENV" "$PRODUCER_MAINNET_ENV"
     project_mainnet_telegram_environment
 }
 
@@ -1518,11 +1470,6 @@ build_candidate_rule_coverage(universe, rules, realm="mainnet")
 PY
     echo "mainnet-rule-validation-ok path=$rules_file candidate=$universe_file source=declared-read-only"
 }
-ensure_mainnet_state_roots() {
-    "$PYTHON" -m liquidity_migration.policy.real_money_arming create-state-roots --execute \
-        || fail "mainnet state root creation failed"
-}
-
 # The single gate between a code change and a funded account: every remaining
 # precondition is reported, and any one of them outstanding stops the deploy.
 require_mainnet_preflight() {
@@ -1538,7 +1485,6 @@ require_mainnet_preflight() {
 start_mainnet_fleet() {
     local producer_started_ns root
     provision_mainnet_prerequisites
-    ensure_mainnet_state_roots
     require_mainnet_preflight
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets
@@ -1546,12 +1492,6 @@ start_mainnet_fleet() {
         chown -R --no-dereference "$PRODUCER_USER:$RUNTIME_GROUP" "$root" \
             || fail "cannot assign mainnet producer state to $PRODUCER_USER: $root"
     done
-    if systemctl cat "$RETIRED_MAINNET_OWNER_UNIT" >/dev/null 2>&1; then
-        systemctl disable --now "$RETIRED_MAINNET_OWNER_UNIT" \
-            || fail "cannot stop the retired funded account owner"
-        ! systemctl is-active --quiet "$RETIRED_MAINNET_OWNER_UNIT" \
-            || fail "retired funded account owner remains active"
-    fi
     start_required_engine "$MAINNET_OWNER_UNIT" /etc/liquidity-migration/engine-mainnet.env mainnet
     producer_started_ns="$(date +%s%N)"
     systemctl enable --now liquidity-migration-bybit-carry-mainnet.service \
@@ -1616,7 +1556,7 @@ PY
         "$MAINNET_LIVENESS_TIMER" "$MAINNET_LIVENESS_SERVICE" \
         liquidity-migration-bybit-carry-mainnet.service \
         liquidity-migration-bybit-long-mainnet.service \
-        "$MAINNET_OWNER_UNIT" "$RETIRED_MAINNET_OWNER_UNIT"; do
+        "$MAINNET_OWNER_UNIT"; do
         if systemctl cat "$unit" >/dev/null 2>&1; then
             systemctl disable --now "$unit" \
                 || fail "failed to stop or disable disarmed unit: $unit"
@@ -1641,7 +1581,6 @@ stop_mainnet_mode() {
         liquidity-migration-bybit-carry-mainnet.service
         liquidity-migration-bybit-long-mainnet.service
         "$MAINNET_OWNER_UNIT"
-        "$RETIRED_MAINNET_OWNER_UNIT"
     )
     for unit in "${units[@]}"; do
         if systemctl cat "$unit" >/dev/null 2>&1; then
@@ -1695,15 +1634,10 @@ ROLLOUT_DOWNSTREAM_UNITS=(
 # nobody owns is the state this ordering exists to keep short. They are also
 # what `require_quiescent` needs named, since it refuses to install while any
 # liquidity-migration-* unit is running and stop-first only stops what these
-# lists name. The retired Python owners stay listed so a rollout onto a host
-# still running them stops them before the manifest install removes their unit
-# files for good.
+# lists name.
 ROLLOUT_OWNER_UNITS=(
     liquidity-migration-engine.service
     liquidity-migration-engine-mainnet.service
-    liquidity-migration-account-execution.service
-    liquidity-migration-account-paper-execution.service
-    liquidity-migration-account-execution-mainnet.service
 )
 ROLLOUT_STOPPED=0
 ROLLOUT_IRREVERSIBLE=0

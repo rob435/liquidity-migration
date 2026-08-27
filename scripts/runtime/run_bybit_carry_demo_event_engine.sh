@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Carry-hold demo sleeve — daily-decision target producer on a 60s diff loop.
 #
-# Whether it runs is toggled per-sleeve in deploy/sleeves.env. The account
-# owner handles execution and fills.
+# Whether it runs is toggled per-sleeve in deploy/sleeves.env. The Rust engine
+# handles execution and fills.
 #
 # The daemon wakes every INTERVAL_SECONDS, but the decision is DAILY: computed
 # for the current 00:00 UTC boundary once klines allow (00:20); every other
 # cycle is an idempotent diff against the standing book.
 #
-# EXECUTION_ENVIRONMENT is explicit and requires its account-owner route. Sizing
-# comes from the shared operational profile (ACCOUNT_RISK_POLICY_FILE); the rule
+# EXECUTION_ENVIRONMENT is explicit. Sizing comes from the shared operational
+# profile (OPERATIONAL_PROFILE_FILE); the rule
 # file follows CARRY_STRATEGY_PROFILE (v7 trades v6's registered file with
 # the pre-settlement exit read on top).
 set -euo pipefail
@@ -23,9 +23,6 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="$(command -v python3 || command -v python)"
 fi
 
-# The route a producer publishes onto is EXECUTION_ENVIRONMENT plus its owner
-# roots. The kernel-latch variables restate what the unit files already
-# hard-code, so they are not re-derived or cross-checked here.
 case "${EXECUTION_ENVIRONMENT:-}" in
     demo) ;;
     mainnet)
@@ -48,12 +45,17 @@ case "${EXECUTION_ENVIRONMENT:-}" in
         ;;
 esac
 
-for required_name in CARRY_ENGINE_TARGET_BOOK_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID; do
+for required_name in CARRY_ENGINE_TARGET_BOOK_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID OPERATIONAL_PROFILE_FILE PRODUCER_REALM; do
     if [[ -z "${!required_name:-}" ]]; then
         echo "$required_name is required: this producer supports only Rust target-book execution." >&2
         exit 2
     fi
 done
+[ "$PRODUCER_REALM" = "$EXECUTION_ENVIRONMENT" ] || {
+    echo "PRODUCER_REALM must equal EXECUTION_ENVIRONMENT." >&2
+    exit 2
+}
+export ENGINE_ACCOUNT_HEARTBEAT_FILE="$LIVENESS_ENGINE_HEARTBEAT_FILE"
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-carry-demo-event}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
@@ -91,9 +93,8 @@ esac
 # stream and returns to REST-on-cycle.
 WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
 WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
-OPERATIONAL_PROFILE_FILE="${ACCOUNT_RISK_POLICY_FILE:-}"
 if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; then
-    echo "ACCOUNT_RISK_POLICY_FILE must name the shared operational profile." >&2
+    echo "OPERATIONAL_PROFILE_FILE must name the shared operational profile." >&2
     exit 2
 fi
 

@@ -43,10 +43,7 @@ Operator commands:
   real-money preflight         report every remaining arming step (read-only)
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
-                               RM_* dials in the owner's env file
-  real-money create-state-roots [--execute]
-                               create the mainnet state roots; dry run without
-                               --execute
+                               RM_* dials in the funded credential file
   deploy MODE [ARGS...]        MODE is install|activate|staged|rollout|
                                stop-mainnet|disarm-mainnet
   help                         show this help and do nothing else
@@ -172,22 +169,19 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
     remote_reset "$@"
     ;;
   real-money)
-    # The owner-facing arming surface. `preflight` reads only and never prints
+    # The arming surface. `preflight` reads only and never prints
     # a secret. `render-profile` without --execute prints the profile to
     # stdout; with --execute it writes exactly one non-secret artifact and
     # refuses any dial set that does not pass the load-time envelope proof.
-    # `create-state-roots` without --execute lists the directories it would
-    # create; with --execute it creates them. None of them sets REAL_MONEY,
-    # writes a credential, or starts a unit -- every one of those is the
-    # owner's own act.
+    # Neither command sets REAL_MONEY, writes a credential, or starts a unit.
     # No argument means preflight, and it must be passed: an empty argv reaches
     # the module with no subcommand and argparse answers with a usage error.
     if [[ "$#" -eq 0 ]]; then
       set -- preflight
     fi
     case "${1:-}" in
-      preflight|render-profile|create-state-roots) ;;
-      *) die_usage "real-money subcommand must be preflight, render-profile, or create-state-roots" ;;
+      preflight|render-profile) ;;
+      *) die_usage "real-money subcommand must be preflight or render-profile" ;;
     esac
     # LOCAL=1 runs it against this checkout instead of the VPS, so the dials
     # can be proved before anything is copied to the host.

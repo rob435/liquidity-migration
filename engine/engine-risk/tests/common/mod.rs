@@ -14,7 +14,7 @@ pub const SEC: u64 = 1_000_000_000;
 
 /// The kernel's `max_account_view_age_ns`, as both operational profiles set it.
 pub const MAX_VIEW_AGE_NS: u64 = 120 * SEC;
-/// deploy/account-execution-mainnet.env.template: DISASTER_STOP_FRACTION.
+/// deploy/engine.mainnet.toml.template: disaster_stop_fraction.
 pub const DISASTER_STOP_FRACTION: f64 = 0.35;
 /// account_contracts.py: AccountRiskPolicy.quantity_tolerance.
 pub const QTY_TOLERANCE: f64 = 1e-12;
