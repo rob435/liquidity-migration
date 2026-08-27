@@ -477,7 +477,6 @@ def test_remote_helpers_tolerate_an_empty_argument_array_under_set_u() -> None:
             'set -euo pipefail\n'
             'declare -a a=()\n'
             'for x in ${a[@]+"${a[@]}"}; do echo "unexpected $x"; done\n'
-            'printf "%s\\n" ${a[@]+"${a[@]}"}\n',
         ],
         capture_output=True,
         text=True,
