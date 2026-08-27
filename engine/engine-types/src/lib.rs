@@ -34,7 +34,8 @@ pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{EngineEvent, Strategy, StrategyCtx};
 pub use targets::{BookTarget, TargetBook};
 pub use wal::{
-    AnchorState, FilledTotal, IntendedStop, OpenOrderState, SymbolTotal, Wal, WalError, WalRecord,
+    AnchorState, FilledTotal, IntendedStop, OpenOrderState, RecentExecutionId, SymbolTotal, Wal,
+    WalError, WalRecord,
 };
 
 /// Which venue account a gateway's credentials actually reach, as the venue

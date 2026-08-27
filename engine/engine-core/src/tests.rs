@@ -928,6 +928,7 @@ fn allow_all() -> RiskVerdict {
 }
 
 mod covers;
+mod boot_rules;
 mod order_path;
 mod quote_staleness;
 mod resting_orders;

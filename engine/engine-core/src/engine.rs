@@ -48,6 +48,7 @@ use crate::config::EngineSection;
 use crate::covers::CoverBook;
 use crate::ctx::{Ctx, Timers};
 use crate::execution::{self, Fills};
+use crate::execution_ids::{ExecutionIds, RECOVERY_PAD_MS, RECOVERY_REACH_MS};
 use crate::heartbeat::{self, Heartbeat};
 use crate::trades::Trades;
 use crate::inflight::{self, LedgerOfOrders, OrderRegistry};
@@ -64,16 +65,6 @@ use crate::working::{self, WorkingOrders};
 pub const MAX_INTENTS_PER_WAKE: usize = 64;
 
 pub const ENGINE_VERSION: &str = concat!("engine-core ", env!("CARGO_PKG_VERSION"));
-
-/// Pad both ends of a fill-recovery window: clocks differ and an execution
-/// can land on the boundary. Overlap is safe — recovery dedups by the
-/// venue's own execution id — and a miss is not.
-const RECOVERY_PAD_MS: i64 = 120_000;
-
-/// How far back the venue serves execution history (Bybit: about a week).
-/// A log further behind than this cannot be completed by recovery, and
-/// `engine reconcile-clear` is the tool for what the findings still name.
-const RECOVERY_REACH_MS: i64 = 7 * 86_400_000;
 
 /// How many recently journaled fills to remember for gap-recovery dedup.
 /// A gap plus its pads spans minutes; this covers hours of fills.
@@ -110,6 +101,7 @@ pub enum EngineError {
     Wal(WalError),
     Venue(VenueError),
     Boot(String),
+    State(String),
 }
 
 impl std::fmt::Display for EngineError {
@@ -118,6 +110,7 @@ impl std::fmt::Display for EngineError {
             EngineError::Wal(e) => write!(f, "log: {e}"),
             EngineError::Venue(e) => write!(f, "venue: {e}"),
             EngineError::Boot(m) => write!(f, "boot: {m}"),
+            EngineError::State(m) => write!(f, "state: {m}"),
         }
     }
 }
@@ -238,9 +231,9 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Advanced only when a recovery pass completes, and it is where the
     /// next gap recovery starts reading.
     recovered_until_ms: i64,
-    /// Venue execution ids already recovered, so overlapping recovery
-    /// windows cannot write the same fill twice.
-    recovered_exec_ids: std::collections::HashSet<String>,
+    /// Venue execution ids inside the history window, so overlapping
+    /// recovery cannot write the same fill twice.
+    recovered_exec_ids: ExecutionIds,
     /// Recently journaled delivered fills (order id, venue stamp, qty) —
     /// the other half of that dedup: a fill the stream DID deliver near a
     /// gap's edge must not come back as recovered.
@@ -365,15 +358,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 rules[id.0 as usize] = Some(rule);
             }
         }
-        let missing: Vec<&str> = (0..market.table.len())
-            .filter(|i| rules[*i].is_none())
-            .map(|i| market.table.name(SymbolId(i as u16)))
-            .collect();
+        let mut missing: Vec<&str> = Vec::new();
+        for subscription in &subscriptions {
+            let Some(id) = market.table.get(&subscription.symbol) else {
+                continue;
+            };
+            if rules[id.0 as usize].is_none() && !missing.contains(&subscription.symbol.as_str()) {
+                missing.push(subscription.symbol.as_str());
+            }
+        }
         if !missing.is_empty() {
-            // No rule means no way to quantize, which means nothing can be
-            // sent for that symbol. Say so now rather than at the first
-            // intent.
-            tracing::warn!(symbols = ?missing, "no instrument rules; these symbols cannot trade");
+            return Err(EngineError::Boot(format!(
+                "venue returned no instrument rules for configured symbols: {}",
+                missing.join(", ")
+            )));
         }
 
         // The newest control anchor per source, restored before anything is
@@ -407,7 +405,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // Recovered from the venue's own history and made durable before the
         // log is compared to the venue, so what actually traded is a fill in
         // the log rather than a finding against it.
-        let recovered_fills = Self::recover_missed_fills(&mut wal, &mut venue, replayed, &market.table).await;
+        let mut recovered_exec_ids = ExecutionIds::from_records(replayed, boot_ms)
+            .map_err(|e| EngineError::State(e.to_string()))?;
+        let recovered_fills = Self::recover_missed_fills(
+            &mut wal,
+            &mut venue,
+            replayed,
+            &market.table,
+            &mut recovered_exec_ids,
+        )
+        .await?;
         let effective_owned: Vec<WalRecord>;
         let effective: &[WalRecord] = if recovered_fills.is_empty() {
             replayed
@@ -427,15 +434,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // record and must say exactly what a replay would have said.
         let logged_exposure = crate::reconcile::logged_exposure(effective);
         let intended_stops = crate::reconcile::intended_stops(effective);
-        let recovered_exec_ids: std::collections::HashSet<String> = effective
-            .iter()
-            .filter_map(|record| match record {
-                WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.clone()),
-                WalRecord::OrderUpdate { update: OrderUpdate::Fill { exec_id, .. } }
-                    if !exec_id.is_empty() => Some(exec_id.clone()),
-                _ => None,
-            })
-            .collect();
         // A gap-recovery pass reaches back past this boot, and the venue hands
         // back everything in that window — the last run's ordinary fills
         // included. A delivered fill carries no venue execution id, so only
@@ -670,13 +668,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         venue: &mut V,
         replayed: &[WalRecord],
         table: &SymbolTable,
-    ) -> Vec<WalRecord> {
+        execution_ids: &mut ExecutionIds,
+    ) -> Result<Vec<WalRecord>, EngineError> {
         let now_ms = clock::wall_ms();
         let Some(newest) = newest_stamp_ms(replayed) else {
             // A fresh log has nothing to be behind on. Whatever the account
             // already holds predates this engine, and reconcile is what says
             // so.
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let mut since = newest - RECOVERY_PAD_MS;
         if since < now_ms - RECOVERY_REACH_MS {
@@ -690,24 +689,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             since = now_ms - RECOVERY_REACH_MS;
         }
         if since >= now_ms {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut execs = match venue.executions(since, now_ms).await {
             Ok(execs) => execs,
             Err(e) => {
                 tracing::warn!(error = %e, "no execution history; fills in gaps stay unrecovered");
-                return Vec::new();
+                return Ok(Vec::new());
             }
         };
-        let known_ids: std::collections::HashSet<&str> = replayed
-            .iter()
-            .filter_map(|record| match record {
-                WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.as_str()),
-                WalRecord::OrderUpdate { update: OrderUpdate::Fill { exec_id, .. } }
-                    if !exec_id.is_empty() => Some(exec_id.as_str()),
-                _ => None,
-            })
-            .collect();
         let mut delivered: std::collections::HashMap<(&str, i64, u64), usize> =
             std::collections::HashMap::new();
         for record in replayed {
@@ -722,7 +712,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         execs.sort_by_key(|exec| exec.venue_ts_ms);
         let mut out = Vec::new();
         for exec in execs {
-            if known_ids.contains(exec.exec_id.as_str()) {
+            if execution_ids.contains(&exec.exec_id, now_ms) {
                 continue;
             }
             let key = (exec.client_order_id.as_str(), exec.venue_ts_ms, exec.qty.to_bits());
@@ -738,6 +728,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // to absorb.
                 continue;
             };
+            execution_ids
+                .can_insert(&exec.exec_id, now_ms)
+                .map_err(|e| EngineError::State(e.to_string()))?;
+            let dedup_id = exec.exec_id.clone();
             let record = WalRecord::RecoveredFill {
                 exec_id: exec.exec_id,
                 client_order_id: exec.client_order_id,
@@ -754,6 +748,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tracing::error!(error = %e, "could not write a recovered fill; stopping recovery");
                 break;
             }
+            execution_ids.insert(dedup_id, now_ms);
             out.push(record);
         }
         if !out.is_empty() {
@@ -765,7 +760,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tracing::error!(error = %e, "recovered fills are written but not yet durable");
             }
         }
-        out
+        Ok(out)
     }
 
     /// Compare the log against the venue, write down what was found, and say
@@ -2178,11 +2173,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// a delivered fill feeds. Failure leaves things exactly as they stood
     /// before this existed — the gap stays a gap, and boot's own recovery
     /// reads the same history at the next start.
-    async fn recover_gap_fills(&mut self) {
+    async fn recover_gap_fills(&mut self) -> Result<(), EngineError> {
         let now_ms = clock::wall_ms();
         let since = (self.recovered_until_ms - RECOVERY_PAD_MS).max(now_ms - RECOVERY_REACH_MS);
         if since >= now_ms {
-            return;
+            return Ok(());
         }
         let mut execs = match self.venue.executions(since, now_ms).await {
             Ok(execs) => execs,
@@ -2191,7 +2186,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     error = %e,
                     "no execution history after the gap; fills inside it stay unrecovered"
                 );
-                return;
+                return Ok(());
             }
         };
         execs.sort_by_key(|exec| exec.venue_ts_ms);
@@ -2202,7 +2197,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let mut recovered = 0usize;
         for exec in execs {
-            if self.recovered_exec_ids.contains(exec.exec_id.as_str()) {
+            if self.recovered_exec_ids.contains(&exec.exec_id, now_ms) {
                 continue;
             }
             let key = (exec.client_order_id.clone(), exec.venue_ts_ms, exec.qty.to_bits());
@@ -2218,6 +2213,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // absorb.
                 continue;
             };
+            self.recovered_exec_ids
+                .can_insert(&exec.exec_id, now_ms)
+                .map_err(|e| EngineError::State(e.to_string()))?;
             let record = WalRecord::RecoveredFill {
                 exec_id: exec.exec_id.clone(),
                 client_order_id: exec.client_order_id.clone(),
@@ -2232,9 +2230,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             };
             if let Err(e) = self.wal.append(&record) {
                 tracing::error!(error = %e, "could not write a recovered fill; stopping this pass");
-                return;
+                return Ok(());
             }
-            self.recovered_exec_ids.insert(exec.exec_id.clone());
+            self.recovered_exec_ids
+                .insert(exec.exec_id.clone(), now_ms);
             self.orders.apply(&record);
             reconcile::note_fill(&mut self.logged_exposure, symbol, exec.side, exec.qty);
             // Through the order that produced it, exactly like a delivered
@@ -2305,6 +2304,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         self.recovered_until_ms = now_ms;
+        Ok(())
     }
 
     /// Every order update, wherever it came from, goes through here.
@@ -2319,14 +2319,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             OrderUpdate::Fill { exec_id, .. } if !exec_id.is_empty() => Some(exec_id.clone()),
             _ => None,
         };
-        if delivered_exec_id.as_ref().is_some_and(|id| self.recovered_exec_ids.contains(id)) {
-            tracing::warn!(exec_id = delivered_exec_id.as_deref().unwrap_or_default(), "duplicate fill ignored");
-            return Ok(());
+        let dedup_seen_ms = clock::wall_ms();
+        if let Some(exec_id) = delivered_exec_id.as_deref() {
+            if !self
+                .recovered_exec_ids
+                .can_insert(exec_id, dedup_seen_ms)
+                .map_err(|e| EngineError::State(e.to_string()))?
+            {
+                tracing::warn!(exec_id, "duplicate fill ignored");
+                return Ok(());
+            }
         }
         self.wal.append(&WalRecord::OrderUpdate {
             update: update.clone(),
         })?;
-        if let Some(exec_id) = delivered_exec_id { self.recovered_exec_ids.insert(exec_id); }
+        if let Some(exec_id) = delivered_exec_id {
+            self.recovered_exec_ids.insert(exec_id, dedup_seen_ms);
+        }
         self.risk.on_update(&update);
         self.orders.apply_update(&update);
         // Every fill record in the log is in this total — strangers'
@@ -2398,7 +2407,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // The fills themselves CAN be repaired from the venue: its
             // execution history is asked for the gap, so the log keeps
             // accounting for what actually traded.
-            self.recover_gap_fills().await;
+            self.recover_gap_fills().await?;
         }
 
         let now = clock::now_ns();
@@ -2651,10 +2660,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Each field is maintained by the same arithmetic the boot-time scan
     /// for it uses — the order ledger and attribution apply every record as
     /// it is written, the exposure and stop maps go through `reconcile`'s
-    /// own helpers, the anchor map mirrors every anchor written — so
-    /// replaying the old segments and replaying this record recover the
-    /// same engine. The equivalence test in `tests/rotation.rs` holds the
-    /// two sides together.
+    /// own helpers, the anchor map mirrors every anchor written, and recent
+    /// execution ids come from the same bounded dedup set used live — so
+    /// replaying the old segments and replaying this record recover the same
+    /// engine. The equivalence test in `tests/rotation.rs` holds the two sides
+    /// together.
     ///
     /// Deliberately NOT restated, because boot does not rebuild them either:
     /// covers and working-order supervision (boot starts them empty and
@@ -2703,6 +2713,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     trigger_px: *trigger_px,
                 })
                 .collect(),
+            recent_execution_ids: self.recovered_exec_ids.rows(wall_ts_ms),
             open_orders: self
                 .orders
                 .in_flight()

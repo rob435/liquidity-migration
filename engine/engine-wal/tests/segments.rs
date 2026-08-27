@@ -28,6 +28,7 @@ fn base(mark: &str) -> WalRecord {
         attribution: Vec::new(),
         logged_exposure: Vec::new(),
         intended_stops: Vec::new(),
+        recent_execution_ids: Vec::new(),
         open_orders: Vec::new(),
     }
 }

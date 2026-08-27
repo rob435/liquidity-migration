@@ -253,6 +253,10 @@ pub enum WalRecord {
         /// The stop each symbol's newest opening order asked for, so a stop
         /// the venue drops can still be put back after a rotation.
         intended_stops: Vec<IntendedStop>,
+        /// Venue execution ids still inside the recovery horizon. Bounded in
+        /// memory and restated so rotating cannot make an old fill new again.
+        #[serde(default)]
+        recent_execution_ids: Vec<RecentExecutionId>,
         /// Every order still in flight, with the fields its own records
         /// carried.
         open_orders: Vec<OpenOrderState>,
@@ -286,6 +290,14 @@ pub struct SymbolTotal {
 pub struct IntendedStop {
     pub symbol: SymbolId,
     pub trigger_px: f64,
+}
+
+/// One execution-id dedup entry inside [`WalRecord::SegmentBase`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecentExecutionId {
+    pub exec_id: String,
+    /// Wall-clock milliseconds when the engine first learned this id.
+    pub seen_ms: i64,
 }
 
 /// One still-open order inside [`WalRecord::SegmentBase`]: what its own
