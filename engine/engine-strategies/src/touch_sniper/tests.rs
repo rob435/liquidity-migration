@@ -223,6 +223,36 @@ fn a_concurrent_entry_fill_gets_a_residual_exit() {
 }
 
 #[test]
+fn a_cancelled_partial_exit_retries_only_the_residual() {
+    let mut h = entered("buy", "take_px = 110.0");
+    h.quote(SYM, 110.0, 110.2);
+    h.drain();
+    h.ack("x1");
+    h.fill("x1", SYM, Side::Sell, 0.75, 110.0);
+    h.cancelled("x1");
+
+    h.quote(SYM, 109.0, 109.2);
+    let retry = h.one_intent();
+    assert!(retry.reduce_only);
+    assert_eq!(retry.qty, 1.25);
+}
+
+#[test]
+fn a_late_entry_cancel_is_not_mistaken_for_the_unacked_exit() {
+    let mut h = build("buy", "take_px = 110.0");
+    h.quote(SYM, 99.9, 100.0);
+    h.drain();
+    h.ack("c1");
+    h.fill("c1", SYM, Side::Buy, 0.5, 100.0);
+    h.quote(SYM, 110.0, 110.2);
+    assert_eq!(h.one_intent().qty, 0.5);
+
+    h.cancelled("c1");
+    h.quote(SYM, 109.0, 109.2);
+    assert!(h.drain().is_empty(), "the first exit is still with the venue");
+}
+
+#[test]
 fn an_engine_refused_exit_is_retried() {
     let mut h = entered("buy", "take_px = 110.0");
     h.quote(SYM, 110.0, 110.2); h.drain();
@@ -341,6 +371,19 @@ fn a_rejected_entry_ends_the_plug() {
     h.quote(SYM, 90.0, 90.5);
     h.quote(SYM, 110.0, 110.2);
     assert!(h.drain().is_empty(), "a refused touch is not chased");
+}
+
+#[test]
+fn a_cancelled_entry_ends_the_plug_without_chasing() {
+    let mut h = build("buy", "take_px = 110.0");
+    h.quote(SYM, 99.9, 100.0);
+    h.drain();
+    h.ack("c1");
+    h.cancelled("c1");
+
+    h.quote(SYM, 99.0, 99.5);
+    h.quote(SYM, 110.0, 110.2);
+    assert!(h.drain().is_empty());
 }
 
 /// Not chasing is only half of it: the plug has to be finished, so that late

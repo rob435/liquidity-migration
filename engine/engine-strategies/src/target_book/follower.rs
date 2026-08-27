@@ -97,6 +97,9 @@ pub struct TargetBookFollower {
     /// asks again, forever. Entries only — an exit is always retried.
     /// Cleared by the next book.
     refused_entries: Vec<(String, String)>,
+    /// Working entries whose target changed while they were live. Kept until
+    /// the order leaves the working set, including across repeated books.
+    revoked_entries: Vec<String>,
     /// Entry-blocking skips from the latest plan, with the skip's name: a
     /// size below the entry floor, one the venue would round to nothing, a
     /// price or instrument rule missing. The producer reads these through
@@ -177,6 +180,7 @@ impl TargetBookFollower {
             others_held_said: Vec::new(),
             closed_under_us: Vec::new(),
             refused_entries: Vec::new(),
+            revoked_entries: Vec::new(),
             skipped_entries: Vec::new(),
             was_held: Vec::new(),
             we_reduced: Vec::new(),
@@ -204,11 +208,20 @@ impl TargetBookFollower {
         // an old touch can fill after the producer deliberately removed it.
         let mut working = Vec::new();
         ctx.resting(&mut working);
+        self.revoked_entries.retain(|id| {
+            working
+                .iter()
+                .any(|order| order.client_order_id == id.as_str())
+        });
         let cancelled_entries: Vec<(SymbolId, String)> = working
             .iter()
             .filter(|order| {
                 !order.reduce_only
-                    && (!entries_allowed
+                    && (self
+                        .revoked_entries
+                        .iter()
+                        .any(|id| id == order.client_order_id)
+                        || !entries_allowed
                         || !book.targets.iter().any(|target| {
                             target.notional_usdt != 0.0
                                 && ctx.symbol_id(&target.symbol) == Some(order.symbol)
@@ -216,15 +229,7 @@ impl TargetBookFollower {
             })
             .map(|order| (order.symbol, order.client_order_id.to_string()))
             .collect();
-        let busy: Vec<SymbolId> = working
-            .iter()
-            .filter(|order| {
-                !cancelled_entries
-                    .iter()
-                    .any(|(_, id)| id == order.client_order_id)
-            })
-            .map(|order| order.symbol)
-            .collect();
+        let busy: Vec<SymbolId> = working.iter().map(|order| order.symbol).collect();
         drop(working);
         for (symbol, client_order_id) in cancelled_entries {
             ctx.cancel(symbol, &client_order_id);
@@ -617,6 +622,29 @@ impl Strategy for TargetBookFollower {
     }
 
     fn on_targets(&mut self, book: &TargetBook, ctx: &mut dyn StrategyCtx) {
+        if let Some(previous) = &self.book {
+            let mut working = Vec::new();
+            ctx.resting(&mut working);
+            for order in working.iter().filter(|order| !order.reduce_only) {
+                let old_target = previous
+                    .targets
+                    .iter()
+                    .find(|target| ctx.symbol_id(&target.symbol) == Some(order.symbol));
+                let new_target = book
+                    .targets
+                    .iter()
+                    .find(|target| ctx.symbol_id(&target.symbol) == Some(order.symbol));
+                if old_target != new_target
+                    && !self
+                        .revoked_entries
+                        .iter()
+                        .any(|id| id == order.client_order_id)
+                {
+                    self.revoked_entries
+                        .push(order.client_order_id.to_string());
+                }
+            }
+        }
         self.book = Some(book.clone());
         // A new book earns a fresh hearing, including for the names it could
         // not reach last time and the entries the kernel refused.

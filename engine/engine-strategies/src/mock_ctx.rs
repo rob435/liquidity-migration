@@ -432,6 +432,13 @@ impl Harness {
         }));
     }
 
+    pub fn cancelled(&mut self, client_order_id: &str) {
+        self.deliver(EngineEvent::Order(OrderUpdate::Cancelled {
+            client_order_id: client_order_id.to_string(),
+            recv_ns: self.ctx.now_ns,
+        }));
+    }
+
     /// Move the clock to the next armed timer and fire it. Returns false when
     /// nothing was waiting.
     pub fn fire_next_timer(&mut self) -> bool {

@@ -101,6 +101,78 @@ async fn a_recovered_fill_reaches_the_risk_kernel() {
 }
 
 #[tokio::test]
+async fn a_recovered_native_stop_fill_reduces_its_sleeves_position() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    let sent = h.sends.borrow()[0].client_order_id.clone();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::Fill {
+                exec_id: "entry-exec".into(),
+                client_order_id: sent,
+                symbol,
+                side: Side::Buy,
+                qty: 0.01,
+                px: 30_000.0,
+                fee: 0.18,
+                is_maker: false,
+                venue_ts_ms: clock::wall_ms(),
+                recv_ns: clock::now_ns(),
+            }]),
+            tokio::time::sleep(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+    let attributed_qty = |engine: &Engine<MockWal, MockRisk, MockVenue>| {
+        let WalRecord::SegmentBase { attribution, .. } = engine.rotation_base(1) else {
+            unreachable!()
+        };
+        attribution
+            .into_iter()
+            .find(|row| row.strategy == StrategyId(0) && row.symbol == symbol)
+            .map(|row| row.signed_qty)
+            .unwrap_or(0.0)
+    };
+    assert_eq!(attributed_qty(&engine), 0.01);
+
+    *h.executions.borrow_mut() = Some(vec![VenueExecution {
+        exec_id: "native-stop-exec".into(),
+        client_order_id: String::new(),
+        symbol: "BTCUSDT".into(),
+        side: Side::Sell,
+        qty: 0.004,
+        px: 29_000.0,
+        fee: 0.07,
+        is_maker: false,
+        venue_ts_ms: clock::wall_ms(),
+    }]);
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            until_recovered(h.records.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        (attributed_qty(&engine) - 0.006).abs() < 1e-12,
+        "an unlinked venue stop is still attributable when one sleeve owns the symbol"
+    );
+}
+
+#[tokio::test]
 async fn a_repeated_live_exec_id_mutates_the_engine_once() {
     let (mut engine, h) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();

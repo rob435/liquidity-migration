@@ -221,6 +221,44 @@ fn removing_a_target_cancels_its_working_entry() {
 }
 
 #[test]
+fn changing_a_target_cancels_the_old_entry_before_replacing_it() {
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert_eq!(h.drain().len(), 1, "the first book starts a long entry");
+
+    let symbol = h.ctx.id_of("KAITOUSDT");
+    h.rest(RestingSeed {
+        client_order_id: "eng-old-target".to_string(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit {
+            px: 9.5,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
+        qty: 10.0,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+
+    h.targets(book(vec![target("KAITOUSDT", -100.0)]));
+    assert_eq!(
+        h.drain_actions(),
+        vec![Action::Cancel {
+            symbol,
+            client_order_id: "eng-old-target".to_string(),
+        }],
+        "the replacement must wait until the old authorization is terminal"
+    );
+
+    h.ctx.resting.clear();
+    h.quote("KAITOUSDT", 9.5, 10.5);
+    let replacement = h.one_intent();
+    assert_eq!(replacement.side, Side::Sell);
+    assert!(!replacement.reduce_only);
+}
+
+#[test]
 fn expiry_cancels_a_working_entry_before_it_can_fill_late() {
     let mut h = resting_bench(&["KAITOUSDT"], 10.0);
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));

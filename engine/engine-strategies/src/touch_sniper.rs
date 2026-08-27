@@ -218,7 +218,12 @@ impl TouchSniper {
                         ctx.arm_timer(TTL_TIMER, ttl_ns);
                     }
                 }
-                OrderUpdate::Reject { client_order_id, .. }
+                OrderUpdate::Reject {
+                    client_order_id, ..
+                }
+                | OrderUpdate::Cancelled {
+                    client_order_id, ..
+                }
                     if is_ours(&self.entry_order, client_order_id) =>
                 {
                     // Sending the same entry again at the same level is how you
@@ -237,6 +242,8 @@ impl TouchSniper {
                 }
             }
             State::ExitSent => match update {
+                OrderUpdate::Ack(ack)
+                    if self.entry_order.as_deref() == Some(ack.client_order_id.as_str()) => {}
                 OrderUpdate::Ack(ack) if is_ours(&self.exit_order, &ack.client_order_id) => {
                     self.exit_order = Some(ack.client_order_id.clone());
                 }
@@ -253,6 +260,22 @@ impl TouchSniper {
                     if self.entry_filled_qty - self.exit_filled_qty <= tolerance {
                         self.state = State::Done;
                     } else if self.exit_filled_qty + tolerance >= self.exit_working_until {
+                        self.resend_exit_on_next_quote = true;
+                    }
+                }
+                OrderUpdate::Cancelled {
+                    client_order_id, ..
+                } if self.entry_order.as_deref() == Some(client_order_id.as_str()) => {}
+                OrderUpdate::Reject {
+                    client_order_id, ..
+                } if self.entry_order.as_deref() == Some(client_order_id.as_str()) => {}
+                OrderUpdate::Cancelled {
+                    client_order_id, ..
+                } if is_ours(&self.exit_order, client_order_id) => {
+                    let tolerance = self.qty.max(1.0) * 1e-12;
+                    if self.entry_filled_qty - self.exit_filled_qty <= tolerance {
+                        self.state = State::Done;
+                    } else {
                         self.resend_exit_on_next_quote = true;
                     }
                 }
@@ -353,8 +376,9 @@ impl Strategy for TouchSniper {
     }
 }
 
-/// One order of ours is with the venue at a time. Until an update teaches us
-/// its id, whatever the engine routes here belongs to that order.
+/// Until an update teaches us the current order's id, whatever the engine
+/// routes here belongs to it. Exit handling checks the known entry first,
+/// because a partial entry can end after its exit is already in flight.
 fn is_ours(known: &Option<String>, client_order_id: &str) -> bool {
     match known {
         Some(ours) => ours == client_order_id,

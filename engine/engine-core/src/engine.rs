@@ -2234,12 +2234,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tracing::error!(error = %e, "could not write a recovered fill; stopping this pass");
                 return;
             }
-            self.recovered_exec_ids.insert(exec.exec_id);
+            self.recovered_exec_ids.insert(exec.exec_id.clone());
             self.orders.apply(&record);
             reconcile::note_fill(&mut self.logged_exposure, symbol, exec.side, exec.qty);
             // Through the order that produced it, exactly like a delivered
-            // fill; one with no order of ours is charged to nobody.
-            if let Some(sid) = self.orders.owner_of(&exec.client_order_id) {
+            // fill. A venue-native stop has no order link, so it belongs to
+            // the sole sleeve already holding this symbol when there is one.
+            let native_stop_owner = exec
+                .client_order_id
+                .is_empty()
+                .then(|| self.attribution.sole_owner(symbol))
+                .flatten();
+            if let Some(sid) = self
+                .orders
+                .owner_of(&exec.client_order_id)
+                .or(native_stop_owner)
+            {
                 self.attribution.note(sid, symbol, exec.side, exec.qty);
                 // What it cost is the same question whichever way it arrived,
                 // and the anchor is the book its own order left at.
