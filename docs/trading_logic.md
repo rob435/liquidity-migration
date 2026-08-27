@@ -440,15 +440,13 @@ normal risk or venue-rule rejection when live account state differs from the val
 reference is a safety decision, not configuration drift — do not "fix" it by raising caps.
 
 Both operational profiles carry a `hedge` block — an empty seat, so adding a hedge needs
-no schema change. `btc_risk_decision_evidence` is defined in `account/entry_attempts.py`
-beside the other metadata keys, so an entry's evidence copies forward onto its close.
+no schema change.
 
 **Universe membership.** Turnover, listing age, and rank are re-evaluated every cycle, so a
 symbol can be skipped without disappearing. A newly observed future `deliveryTime` drops it
-from new-entry membership, and retiring it requires position, component targets, component
-desires, working orders, the aggregate target, **and** the unresolved inbox all flat for that
-symbol (`require_scheduled_retirements_flat` in `account_candidate_universe.py`);
-any remainder raises `scheduled-retirement symbols are not account-flat`. The private
+from new-entry membership. Producer cycles keep publishing exits while the Rust heartbeat
+reports exposure; offline retirement checks require the Rust engine to report the symbol flat
+(`require_scheduled_retirements_flat` in `account_candidate_universe.py`). The private
 retirement registry preserves the delivery observation after the venue removes the instrument
 row; a moved delivery date updates the record in place, keeping the original first-observed
 timestamp as the causal anchor. A symbol that leaves the live population *without* delivery
@@ -474,14 +472,6 @@ Convert an installed schema-4 artifact with
 [`migrate_candidate_universe_schema.py`](../scripts/maintain/migrate_candidate_universe_schema.py),
 which rebuilds offline from the raw snapshot, refuses if one symbol would change, and
 re-keys the retirement registry to the artifact's new hash.
-
-Bybit's demo realm rejects orders its own published `minNotionalValue` accepts, so
-[`demo_rule_probe.py`](../liquidity_migration/venue/demo_rule_probe.py) measures the
-executable minimum with bounded probe orders (≤200 USDT, 100 bps away) and caches it per
-symbol; entry dust skips key off that. A component below 4× that minimum is
-quantization-distorted, so a day where such components carry >20% of gross exposure measures
-plumbing rather than economics
-([`research_findings.md`](research/research_findings.md)).
 
 The negative results relevant to each sleeve are stated in that sleeve's section
 above — the no-take-profit finding, the cross-venue non-replication, and the

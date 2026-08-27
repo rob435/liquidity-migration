@@ -141,36 +141,6 @@ numeric user ids) in the host env file — with no allow-list, every press in a 
 queued while the daemon was down are dropped at startup, so a stale button can never fire late; if the
 bot did not react, press again.
 
-## The hourly digest
-
-There is no hourly digest. Nothing writes
-`<ACCOUNT_EXECUTION_ROOT>/account_notifications.json`, and the watchdog does not
-read it. `--account-notification-state` defaults to empty; pointing it at a file
-is opt-in, for whenever a digest comes back.
-
-**What is covered is the closed side**: every position that ends is reported as it
-ends, and a daily summary adds them up (§The trading story). What is not covered
-is the *open* side — what is held right now, what it is worth, and whether the
-account and the journal agree about it. The engine's heartbeat carries the open
-positions but nothing turns them into a page; it covers liveness, not accounting.
-
-The rest of this section is the shape of what is still missing — the specification
-for whatever fills it.
-
-- **Hourly summary** on the UTC hour boundary: open positions with side, quantity, price, open P&L and
-  stop; account health; entry-block counts. When journal and venue disagree the summary shows both sides
-  rather than picking one ("Exchange:" vs "Our records:"). Realized P&L is the one part already
-  answered, per trade and per day.
-- **Event notices** as they commit, for `FILL`, `PNL`, `PROTECTION`, and `RISK_DECISION`. Everything
-  else is left to the hourly roll-up. Bookkeeping detail (component ids, accounting provenance) goes to
-  the owner's service journal, not the chat.
-- Position truth is five-valued — `healthy`, `settling`, `mismatch`, `stale`, `unavailable`. Only the
-  first two count as healthy; `settling` means venue and journal disagree by less than a settlement
-  window.
-- State lives at `<ACCOUNT_EXECUTION_ROOT>/account_notifications.json` (schema 3) and is committed
-  **only after every page delivers**, so a stalled `last_hour_bucket` is direct evidence a digest never
-  arrived.
-
 ## The liveness watchdog
 
 [`scripts/runtime/check_fleet_liveness.py`](../scripts/runtime/check_fleet_liveness.py), one oneshot per
@@ -184,9 +154,9 @@ degrades to an alert instead of a non-zero exit. The unit's `TimeoutStartSec=120
 timer so a hung run goes `failed` rather than silently never re-firing.
 
 What it checks: systemd unit states — including a service that is enabled but not active (debounced one
-interval, then CRITICAL); readiness and live-L2 capture freshness; per-sleeve producer cycle age; the
-frozen mainnet venue-rule receipt's remaining life; free disk; and the engine's own heartbeat file, including how
-old the engine's reading of the account is. It reads no execution WAL and no digest state — see
+interval, then CRITICAL); readiness and live-L2 capture freshness; per-sleeve producer cycle age; free
+disk; and the engine's own heartbeat file, including how old the engine's reading of the account is. It
+reads no execution WAL — see
 [§What is not watched](#what-is-not-watched).
 
 | Threshold | Default | Meaning |
@@ -234,19 +204,10 @@ engine writes is ignored.
 
 **Nothing watches venue and our records disagreeing.** Freshness is covered —
 `engine_account_view_stale`, off the engine's heartbeat — but agreement is not: the engine reconciles
-and publishes no mismatch. That is a real gap, not a tidy-up. `gather_account_health_alerts()` is kept
-in the watchdog, uncalled, because it is the specification for whatever writes that evidence next: it
-already knows the five-valued position truth and how to say which side disagrees. Reviving it needs the
-engine to publish a reconciliation mismatch, which is a design question, not a wiring one.
+and publishes no mismatch. That is a real gap, not a tidy-up. Closing it requires the engine to publish
+reconciliation evidence; the retired Python account journal is not an authority and must not be revived.
 
 Nothing watches a digest arriving either, deliberately: there is no digest.
-
-Demo rule-receipt freshness does not alert. Nothing in the demo runtime path reads the receipt —
-`run_authorized_runtime.sh` has no rule gate, neither producer script mentions one, and the engine
-takes instrument rules straight off the venue. A demo receipt in the back half of its life renews
-itself on the next rollout (`ROLLOUT_REFRESH_STALE_DEMO_RULES=1`), so a demo WARNING only taught
-operators to ignore a WARNING. Only the mainnet receipt is watched: it genuinely does gate the
-funded owner, every deploy renews it, and an expired one pages CRITICAL (`venue_rules_age`).
 
 ### How an alert behaves
 

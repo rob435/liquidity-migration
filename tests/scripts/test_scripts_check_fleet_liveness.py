@@ -60,49 +60,6 @@ def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
     assert future is not None and "future-dated" in future.message
 
 
-def test_mainnet_rule_age_gates_fresh_warn_expire_future() -> None:
-    """The mainnet receipt is the one that must not expire unseen.
-
-    Its receipt really does gate the funded owner, and every deploy renews it
-    (read-only freeze), so an expired one pages CRITICAL on the venue key.
-    """
-    hour_ns = 3_600_000_000_000
-    verified = 1_000 * hour_ns
-
-    # Fresh: no alert until the maintenance window opens.
-    assert M.evaluate_demo_rule_age(
-        verified_ts_ns=verified,
-        now_ns=verified + 143 * hour_ns,
-    ) is None
-
-    warning = M.evaluate_demo_rule_age(
-        verified_ts_ns=verified,
-        now_ns=verified + 144 * hour_ns,
-    )
-    assert warning is not None
-    assert warning.key == "venue_rules_age"
-    assert warning.severity == M.WARNING
-    assert "24.0h" in warning.message
-    assert "any deploy renews it" in warning.message
-
-    expired = M.evaluate_demo_rule_age(
-        verified_ts_ns=verified,
-        now_ns=verified + 169 * hour_ns,
-    )
-    assert expired is not None
-    assert expired.severity == M.CRITICAL
-    assert "expired 1.0h ago" in expired.message
-    assert "the funded owner will refuse to start" in expired.message
-
-    future = M.evaluate_demo_rule_age(
-        verified_ts_ns=verified,
-        now_ns=verified - hour_ns,
-    )
-    assert future is not None
-    assert future.severity == M.CRITICAL
-    assert "future-dated" in future.message
-
-
 def test_unit_states_alert_only_on_terminal_failed_without_install_state() -> None:
     # With no `systemctl is-enabled` reading available, a service's transient
     # restart states (activating/deactivating/inactive) cannot be told apart from
@@ -991,7 +948,7 @@ def test_mainnet_account_scope_monitors_the_whole_registered_fleet(monkeypatch) 
     assert not [unit for unit in units if "demo" in unit]
 
 
-def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) -> None:
+def test_mainnet_account_scope_gathers_only_mainnet_producers(tmp_path, monkeypatch) -> None:
     """The mainnet watchdog must page on its own fleet only.
 
     Several demo gathers are otherwise unconditional, and a mainnet run
@@ -1006,18 +963,6 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
     monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
     monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
-    # The rules gather is deliberately NOT skipped on mainnet since
-    # 2026-08-13: only mainnet holds the 168h ceiling as a hard start
-    # refusal, and its receipt expired unwatched until then. The recorder
-    # keeps the realm so the assertion proves the mainnet loader is asked.
-    monkeypatch.setattr(
-        M,
-        "gather_demo_rule_alerts",
-        lambda **kwargs: calls.append(
-            ("demo_rules", Path(kwargs["rules_path"]).name)
-        )
-        or [],
-    )
     # Each gather also reports the root it was handed: a mainnet-labelled call
     # against a demo root is the silent failure this scope exists to avoid.
     for name, root_kwarg in (
@@ -1038,8 +983,6 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
             "check_fleet_liveness.py",
             "--account-scope",
             "mainnet",
-            "--demo-rules-file",
-            str(tmp_path / "demo-rules.json"),
             "--state-file",
             str(tmp_path / "state.json"),
         ],
@@ -1047,7 +990,6 @@ def test_mainnet_account_scope_skips_every_demo_gather(tmp_path, monkeypatch) ->
 
     assert M.main() == 0
     assert calls == [
-        ("demo_rules", "demo-rules.json"),
         ("gather_carry_alerts:mainnet", "bybit-carry-mainnet-event"),
         ("gather_long_alerts:mainnet", "bybit-long-mainnet-event"),
     ]
@@ -1465,35 +1407,6 @@ def test_disk_space_alert_thresholds(monkeypatch, tmp_path: Path) -> None:
     assert critical is not None and critical.severity == M.CRITICAL
 
 
-def test_notification_delivery_staleness(tmp_path: Path) -> None:
-    state = tmp_path / "account_notifications.json"
-    hour_ns = 3_600_000_000_000
-    now_ns = 500_000 * hour_ns
-
-    # Missing file: owner without Telegram, never alerts.
-    assert M.evaluate_notification_delivery(state_path=state, now_ns=now_ns) is None
-
-    # Fresh bucket (current hour) and last hour are both quiet.
-    for offset in (0, 1, 2):
-        state.write_text('{"last_hour_bucket": %d}' % (500_000 - offset))
-        assert (
-            M.evaluate_notification_delivery(state_path=state, now_ns=now_ns) is None
-        ), offset
-
-    # Two full missed hourly digests alert.
-    state.write_text('{"last_hour_bucket": %d}' % (500_000 - 3))
-    stale = M.evaluate_notification_delivery(state_path=state, now_ns=now_ns)
-    assert stale is not None
-    assert stale.key == "account_digest_stale"
-    assert stale.severity == M.WARNING
-    assert "2 full hour(s)" in stale.message
-
-    # Corrupt state is itself worth a warning.
-    state.write_text("{not json")
-    corrupt = M.evaluate_notification_delivery(state_path=state, now_ns=now_ns)
-    assert corrupt is not None and "unreadable" in corrupt.message
-
-
 def _heartbeat_argv(state_file, heartbeat_url: str) -> list[str]:
     return [
         "check_fleet_liveness.py",
@@ -1555,43 +1468,6 @@ def test_main_suppresses_the_heartbeat_while_a_critical_alert_fires(tmp_path, mo
     monkeypatch.setattr("sys.argv", argv)
     assert M.main() == 0  # second consecutive run escalates to CRITICAL
     assert pings == []
-
-
-def test_mainnet_venue_rule_age_alerts_use_their_own_key_and_remedy() -> None:
-    """The funded receipt's expiry pages with the deploy remedy, not the probe.
-
-    Mainnet renewal is a read-only freeze on any deploy; telling the operator
-    to plan a flat-account probe window would be the wrong instruction.
-    """
-
-    hour_ns = 3_600_000_000_000
-    now_ns = 1_800_000_000_000_000_000
-    fresh_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS - 100) * hour_ns)
-    assert (
-        M.evaluate_demo_rule_age(
-            verified_ts_ns=fresh_ns, now_ns=now_ns
-        )
-        is None
-    )
-
-    warning_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS - 10) * hour_ns)
-    warning = M.evaluate_demo_rule_age(
-        verified_ts_ns=warning_ns, now_ns=now_ns
-    )
-    assert warning is not None
-    assert warning.key == "venue_rules_age"
-    assert warning.severity == M.WARNING
-    assert "any deploy renews it" in warning.message
-    assert "maintenance window" not in warning.message
-
-    expired_ns = now_ns - int((M.REGISTERED_MAX_DEMO_RULE_AGE_HOURS + 1) * hour_ns)
-    expired = M.evaluate_demo_rule_age(
-        verified_ts_ns=expired_ns, now_ns=now_ns
-    )
-    assert expired is not None
-    assert expired.key == "venue_rules_age"
-    assert expired.severity == M.CRITICAL
-    assert "the funded owner will refuse to start" in expired.message
 
 
 # --------------------------------------------------------------------------- #
@@ -1912,18 +1788,14 @@ def test_main_pages_every_broken_heartbeat_and_still_exits_zero(tmp_path, monkey
             assert "engine_heartbeat" not in out, path
 
 
-def test_the_retired_digest_has_no_implicit_default(monkeypatch) -> None:
-    assert M.build_arg_parser().parse_args([]).account_notification_state == ""
-
-    explicit = M.build_arg_parser().parse_args(["--account-notification-state", "/tmp/digest.json"])
-    assert explicit.account_notification_state == "/tmp/digest.json"
-
-
 def test_runtime_has_no_legacy_account_journal_surface() -> None:
     text = SCRIPT_PATH.read_text(encoding="utf-8")
     assert "gather_account_health_alerts" not in text
     assert "ACCOUNT_EXECUTION_ROOT" not in text
     assert "--account-root" not in text
+    help_text = M.build_arg_parser().format_help()
+    assert "account-notification" not in help_text
+    assert "demo-rule" not in help_text
 
 def test_engine_account_view_lag_is_measured_between_the_engine_s_own_two_stamps(tmp_path) -> None:
     """How old the engine's reading of the account is, on the engine's clock.

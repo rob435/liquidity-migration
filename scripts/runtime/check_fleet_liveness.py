@@ -48,12 +48,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration.core._common import exact_duration_ms  # noqa: E402
-from liquidity_migration.core.artifact_snapshot import read_stable_file  # noqa: E402
-from liquidity_migration.policy.account_execution_config import (  # noqa: E402
-    REGISTERED_MAX_DEMO_RULE_AGE_HOURS,
-)
 from liquidity_migration.core.env_flags import validate_systemd_invocation_id  # noqa: E402
-from liquidity_migration.venue.venue_instrument_rules import load_venue_rules_bytes  # noqa: E402
 from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
 from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
     StrategyCycleHealth,
@@ -72,8 +67,6 @@ def _plain_name(label: str) -> str:
     name = name.removesuffix(".service").removesuffix(".timer")
     name = name.removeprefix("bybit-").removesuffix("-event")
     return name.replace("-", " ") or label
-DEMO_RULE_MAINTENANCE_WARNING_HOURS = 24.0
-
 _DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-engine.service"
 _MAINNET_ACCOUNT_OWNER_UNIT = "liquidity-migration-engine-mainnet.service"
 _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT,)
@@ -316,101 +309,6 @@ def evaluate_ws_staleness(
     return None
 
 
-def evaluate_demo_rule_age(
-    *,
-    verified_ts_ns: int,
-    now_ns: int,
-) -> Alert | None:
-    """Warn before the mainnet venue-rules evidence expires and the next start fails closed.
-
-    Demo receipt freshness is deliberately not alerted: the demo runtime never
-    enforces the age and nothing in the runtime path reads it, so a demo
-    WARNING only taught operators to ignore a WARNING. Only mainnet holds the
-    168h ceiling as a hard start refusal, so its receipt is the one that must
-    never expire unseen.
-    """
-    key = "venue_rules_age"
-    label = "mainnet venue-rule"
-    age_hours = (now_ns - verified_ts_ns) / 3_600_000_000_000.0
-    remaining_hours = REGISTERED_MAX_DEMO_RULE_AGE_HOURS - age_hours
-    if age_hours < 0.0:
-        return Alert(
-            key=key,
-            severity=CRITICAL,
-            message=(
-                f"{label} evidence is {-age_hours:.1f}h future-dated; "
-                "runtime quantity authority is invalid."
-            ),
-            headline="The trading-rules receipt is future-dated — invalid.",
-        )
-    if remaining_hours <= 0.0:
-        # Mainnet's receipt gates the funded owner, so expiry is a genuine
-        # CRITICAL until an operator installs fresh reviewed evidence.
-        return Alert(
-            key=key,
-            severity=CRITICAL,
-            message=(
-                f"{label} evidence expired {abs(remaining_hours):.1f}h ago; "
-                "the funded owner will refuse to start; install fresh reviewed read-only evidence."
-            ),
-            headline="The trading-rules receipt has expired — the next restart will refuse to start.",
-        )
-    if remaining_hours <= DEMO_RULE_MAINTENANCE_WARNING_HOURS:
-        return Alert(
-            key=key,
-            severity=WARNING,
-            message=(
-                f"{label} evidence expires in {remaining_hours:.1f}h; "
-                "install fresh reviewed read-only evidence before expiry."
-            ),
-            headline=f"The trading-rules receipt expires in {remaining_hours:.0f}h — plan the refresh.",
-        )
-    return None
-
-
-def gather_demo_rule_alerts(
-    *,
-    rules_path: Path,
-    now_ns: int | None = None,
-) -> list[Alert]:
-    """Reopen the bound mainnet receipt and report corruption, future dating, or expiry.
-
-    Demo receipt freshness is not checked here: the demo runtime never enforces
-    the age and nothing in the runtime path reads it, so demo alerting only
-    taught operators to ignore a WARNING. Only mainnet holds the registered
-    168-hour ceiling as a hard start refusal, so it is exactly the receipt that
-    must not reach that cliff unwatched (it did, silently, until 2026-08-13).
-    """
-    try:
-        snapshot = read_stable_file(
-            rules_path,
-            label="mainnet venue-rule receipt",
-            reject_empty=True,
-            require_mode=0o600,
-            require_owner=True,
-        )
-        load_venue_rules_bytes(snapshot.data, realm="mainnet", max_age_seconds=None)
-        payload = json.loads(snapshot.data)
-        verified_ts_ns = int(payload.get("verified_ts_ns") or 0)
-        alert = evaluate_demo_rule_age(
-            verified_ts_ns=verified_ts_ns,
-            now_ns=time.time_ns() if now_ns is None else now_ns,
-        )
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        return [
-            Alert(
-                key="venue_rules_invalid",
-                severity=CRITICAL,
-                message=(
-                    "bound venue-rule evidence is unreadable or invalid: "
-                    f"{type(exc).__name__}: {str(exc)[:300]}"
-                ),
-                headline="The trading-rules receipt cannot be read.",
-            )
-        ]
-    return [] if alert is None else [alert]
-
-
 def evaluate_disk_space(
     *,
     path: str,
@@ -446,53 +344,6 @@ def evaluate_disk_space(
         headline=(
             f"The disk is {used_fraction:.0%} full ({available / 1e9:.1f} GB free) — "
             "trading stops if it fills."
-        ),
-    )
-
-
-def evaluate_notification_delivery(
-    *,
-    state_path: Path,
-    now_ns: int,
-    max_missed_hours: int = 2,
-) -> Alert | None:
-    """Alert when the demo owner's hourly digest has stopped committing.
-
-    The notifier commits state only after every Telegram page delivers, so a
-    stalled last_hour_bucket is direct evidence the digest never arrived.
-    """
-    try:
-        payload = json.loads(state_path.read_bytes())
-        last_hour_bucket = int(payload.get("last_hour_bucket") or 0)
-    except FileNotFoundError:
-        return None  # owner runs without Telegram, or has not sent yet
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        return Alert(
-            key="account_digest_stale",
-            severity=WARNING,
-            message=(
-                "account notification state is unreadable: "
-                f"{type(exc).__name__}: {str(exc)[:200]}"
-            ),
-            headline="The digest bookkeeping file cannot be read.",
-        )
-    if last_hour_bucket <= 0:
-        return None
-    now_bucket = int(now_ns // 3_600_000_000_000)
-    missed = now_bucket - last_hour_bucket - 1  # a 0-1 bucket gap is normal
-    if missed < max_missed_hours:
-        return None
-    return Alert(
-        key="account_digest_stale",
-        severity=WARNING,
-        message=(
-            f"account Telegram digest has not committed for {missed} full hour(s); "
-            "the notification channel may be dead (token/chat change or API outage) "
-            "while the fleet looks healthy"
-        ),
-        headline=(
-            f"The hourly digest has not arrived for {missed} hour(s) — "
-            "the main Telegram line may be dead."
         ),
     )
 
@@ -1390,11 +1241,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="long-native mainnet root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
-        "--demo-rules-file",
-        default=os.environ.get("ACCOUNT_DEMO_RULES_FILE") or "",
-        help="bound empirical demo-rule receipt; warns during its final 24 hours ('' to skip)",
-    )
-    p.add_argument(
         "--max-account-health-age-min",
         type=float,
         default=1.0,
@@ -1441,16 +1287,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=os.environ.get("LIVENESS_HEARTBEAT_URL") or None,
         help="ping this URL on a healthy run (external dead-man's-switch); "
         "defaults to the LIVENESS_HEARTBEAT_URL env var so the unit can wire it via EnvironmentFile",
-    )
-    p.add_argument(
-        "--account-notification-state",
-        # Empty by default: the hourly digest is retired and nothing writes
-        # this file. The flag remains only for an explicitly configured digest.
-        default="",
-        help=(
-            "committed notification state to age-check; alerts when the digest stalls. Empty by "
-            "default: the digest is retired and nothing writes this file"
-        ),
     )
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")
     p.add_argument(
@@ -1542,18 +1378,6 @@ def main() -> int:
             required_units=required_account_owner_units,
         )
     )
-    # Demo receipt freshness does not alert: the demo runtime never enforces it
-    # and nothing in the runtime path reads the age, so the weekly WARNING only
-    # taught operators to ignore a WARNING. Only mainnet holds the 168h ceiling
-    # as a hard start refusal, so its receipt is the one that must never expire
-    # unseen — that one stays CRITICAL.
-    if mainnet and str(args.demo_rules_file).strip():
-        alerts.extend(
-            gather_demo_rule_alerts(
-                rules_path=Path(args.demo_rules_file),
-                now_ns=now_ms * 1_000_000,
-            )
-        )
     if not mainnet and long_root is not None:
         alerts.extend(
             gather_long_alerts(
@@ -1617,13 +1441,6 @@ def main() -> int:
                 # so the age cannot go negative unless a clock really is wrong.
             )
         )
-    if str(args.account_notification_state).strip():
-        digest_alert = evaluate_notification_delivery(
-            state_path=Path(args.account_notification_state),
-            now_ns=time.time_ns(),
-        )
-        if digest_alert is not None:
-            alerts.append(digest_alert)
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min
     )
