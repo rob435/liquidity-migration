@@ -17,7 +17,7 @@
 //! does not guess whose it is, does not cancel it, and does not trade on top
 //! of it. It says so and stops opening.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use engine_types::{AccountView, OrderRequest, OrderUpdate, Side, SymbolId, WalRecord, VenueOrder};
 
@@ -66,6 +66,9 @@ pub enum Finding {
     /// The venue holds more (or less) in a symbol than the log's own fills
     /// account for. Somebody else is trading this symbol.
     UnaccountedExposure { symbol: SymbolId, venue_qty: f64, logged_qty: f64 },
+    /// The private stream or execution history reported a fill whose order
+    /// this log never recorded sending.
+    ForeignFill { client_order_id: String, symbol: SymbolId },
 }
 
 impl Finding {
@@ -78,6 +81,7 @@ impl Finding {
     pub fn stops_opening(&self) -> bool {
         match self {
             Finding::ForeignOrder { ours_to_trade, .. } => *ours_to_trade,
+            Finding::ForeignFill { .. } => true,
             Finding::UnaccountedExposure { .. } => true,
             // Only when the log cannot say where the stop belongs. A stop it
             // can put back is a repair, not a reason to stop trading.
@@ -159,6 +163,11 @@ fn describe(finding: &Finding) -> String {
             "symbol {}: the venue holds {venue_qty} and this log accounts for {logged_qty}",
             symbol.0
         ),
+        Finding::ForeignFill { client_order_id, symbol } => format!(
+            "symbol {}: a fill names an order this engine did not send ({})",
+            symbol.0,
+            if client_order_id.is_empty() { "blank client id" } else { client_order_id }
+        ),
     }
 }
 
@@ -205,6 +214,8 @@ pub fn reconcile(
         });
     }
 
+    findings.extend(foreign_fills(replayed));
+
     let logged = logged_exposure(replayed);
     let intended = intended_stops(replayed);
 
@@ -232,6 +243,42 @@ pub fn reconcile(
     Reconciliation { findings }
 }
 
+/// Fills that cannot join to an order this log sent since its latest compact
+/// state. A clear accepts earlier account history; a segment base carries the
+/// durable latch and only keeps ids for orders still open at that boundary.
+fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
+    let mut sent: HashSet<String> = HashSet::new();
+    let mut findings = Vec::new();
+    for record in replayed {
+        match record {
+            WalRecord::OrderSent { request, .. } => {
+                sent.insert(request.client_order_id.clone());
+            }
+            WalRecord::OrderUpdate {
+                update: OrderUpdate::Fill { client_order_id, symbol, .. },
+            }
+            | WalRecord::RecoveredFill { client_order_id, symbol, .. } => {
+                if client_order_id.is_empty() || !sent.contains(client_order_id) {
+                    findings.push(Finding::ForeignFill {
+                        client_order_id: client_order_id.clone(),
+                        symbol: *symbol,
+                    });
+                }
+            }
+            WalRecord::LatchCleared { .. } => findings.clear(),
+            WalRecord::SegmentBase { open_orders, .. } => {
+                sent = open_orders
+                    .iter()
+                    .map(|order| order.request.client_order_id.clone())
+                    .collect();
+                findings.clear();
+            }
+            _ => {}
+        }
+    }
+    findings
+}
+
 /// Fold one fill into a per-symbol running total — the one arithmetic behind
 /// [`logged_exposure`], used by the boot scan and by the engine's own live
 /// copy, so a segment restated at rotation cannot drift from a replay.
@@ -256,28 +303,34 @@ pub(crate) fn note_intended_stop(out: &mut BTreeMap<u16, f64>, request: &OrderRe
     out.insert(symbol.0, stop.trigger_px);
 }
 
-/// Signed quantity per symbol from every fill in the log, across every boot it
-/// covers. This is what the engine's own trading accounts for; anything the
-/// venue holds beyond it came from somewhere else. A segment restatement is
-/// "set", not "add": at its place in the stream it is exactly what the
-/// records before it added up to.
+/// Signed quantity per symbol from fills that join to orders this log sent.
+/// Foreign fills remain durable records but never become trusted engine
+/// exposure. A segment restatement is "set", not "add": at its place in the
+/// stream it is exactly what the records before it added up to.
 pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
     let mut out: BTreeMap<u16, f64> = BTreeMap::new();
+    let mut sent: HashSet<String> = HashSet::new();
     for record in replayed {
         match record {
-            WalRecord::OrderUpdate { update: OrderUpdate::Fill { symbol, side, qty, .. } } => {
-                note_fill(&mut out, *symbol, *side, *qty);
+            WalRecord::OrderSent { request, .. } => {
+                sent.insert(request.client_order_id.clone());
             }
-            // A fill recovered from the venue's history counts exactly like a
-            // delivered one: it moved the position whether or not the stream
-            // was up to say so.
-            WalRecord::RecoveredFill { symbol, side, qty, .. } => {
-                note_fill(&mut out, *symbol, *side, *qty);
+            WalRecord::OrderUpdate {
+                update: OrderUpdate::Fill { client_order_id, symbol, side, qty, .. },
             }
-            WalRecord::SegmentBase { logged_exposure, .. } => {
+            | WalRecord::RecoveredFill { client_order_id, symbol, side, qty, .. } => {
+                if !client_order_id.is_empty() && sent.contains(client_order_id) {
+                    note_fill(&mut out, *symbol, *side, *qty);
+                }
+            }
+            WalRecord::SegmentBase { logged_exposure, open_orders, .. } => {
                 out = logged_exposure
                     .iter()
                     .map(|row| (row.symbol.0, row.signed_qty))
+                    .collect();
+                sent = open_orders
+                    .iter()
+                    .map(|order| order.request.client_order_id.clone())
                     .collect();
             }
             // An operator restated the ledger to the venue's positions after
@@ -607,6 +660,47 @@ mod tests {
             "{:?}",
             out.findings
         );
+    }
+
+    #[test]
+    fn a_foreign_recovered_fill_cannot_square_trusted_exposure() {
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 2.0, Some(90.0)),
+            fill("eng-1", 3, Side::Buy, 2.0),
+            recovered("manual-exec", "manual-order", 3, Side::Buy, 1.0),
+        ];
+        let out = run(&log, &[], &account(vec![held(3, Side::Buy, 3.0, true)]));
+
+        assert_eq!(logged_exposure(&log).get(&3), Some(&2.0));
+        assert!(out.findings.iter().any(|finding| matches!(
+            finding,
+            Finding::ForeignFill { client_order_id, symbol }
+                if client_order_id == "manual-order" && *symbol == SymbolId(3)
+        )));
+        assert!(out.findings.iter().any(|finding| matches!(
+            finding,
+            Finding::UnaccountedExposure { symbol, logged_qty, .. }
+                if *symbol == SymbolId(3) && *logged_qty == 2.0
+        )));
+        assert!(out.must_not_open());
+    }
+
+    #[test]
+    fn a_blank_recovered_fill_is_foreign_even_with_one_known_owner() {
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 2.0, Some(90.0)),
+            fill("eng-1", 3, Side::Buy, 2.0),
+            recovered("blank-exec", "", 3, Side::Sell, 1.0),
+        ];
+        let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.0, true)]));
+
+        assert_eq!(logged_exposure(&log).get(&3), Some(&2.0));
+        assert!(out.findings.iter().any(|finding| matches!(
+            finding,
+            Finding::ForeignFill { client_order_id, symbol }
+                if client_order_id.is_empty() && *symbol == SymbolId(3)
+        )));
+        assert!(out.must_not_open());
     }
 
     #[test]

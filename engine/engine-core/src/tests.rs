@@ -21,7 +21,7 @@ use engine_types::{
 use crate::bench::{self, BenchOptions};
 use crate::clock;
 use crate::config::EngineSection;
-use crate::engine::{Engine, EngineError, StopReason};
+use crate::engine::{Engine, EngineError, StopReason, ENGINE_VERSION};
 use crate::heartbeat::Heartbeat;
 use crate::testpath::temp_path;
 
@@ -224,9 +224,7 @@ struct MockVenue {
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Make set_leverage refuse, so a test can watch the order not go.
     leverage_refuses: bool,
-    /// What the venue's execution history reports. `None` — the default —
-    /// is a venue that cannot serve one at all, which is what every test that
-    /// does not care about gap recovery wants.
+    /// What the venue's execution history reports. `None` makes the read fail.
     executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
 }
 
@@ -261,7 +259,7 @@ impl MockVenue {
                 account_readings: Rc::new(RefCell::new(VecDeque::new())),
                 leverages: Rc::new(RefCell::new(Vec::new())),
                 leverage_refuses: false,
-                executions: Rc::new(RefCell::new(None)),
+                executions: Rc::new(RefCell::new(Some(Vec::new()))),
             },
             sends,
         )

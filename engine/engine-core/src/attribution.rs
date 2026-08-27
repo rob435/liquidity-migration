@@ -65,11 +65,7 @@ impl Attribution {
                     // nobody on purpose: the engine does not guess whose it
                     // is, and `reconcile` is what notices the account holds
                     // more than the log accounts for.
-                    let strategy = sender.get(id).copied().or_else(|| match update {
-                        OrderUpdate::Fill { client_order_id, symbol, .. }
-                            if client_order_id.is_empty() => me.sole_owner(*symbol),
-                        _ => None,
-                    });
+                    let strategy = sender.get(id).copied();
                     let Some(strategy) = strategy else {
                         continue;
                     };
@@ -80,9 +76,7 @@ impl Attribution {
                 // without an order of ours — a hand trade, a venue stop with
                 // no id — is charged to nobody, exactly like a foreign fill.
                 WalRecord::RecoveredFill { client_order_id, symbol, side, qty, .. } => {
-                    let strategy = sender.get(client_order_id.as_str()).copied().or_else(|| {
-                        client_order_id.is_empty().then(|| me.sole_owner(*symbol)).flatten()
-                    });
+                    let strategy = sender.get(client_order_id.as_str()).copied();
                     let Some(strategy) = strategy else {
                         continue;
                     };
@@ -181,9 +175,7 @@ impl Attribution {
             .unwrap_or(0.0)
     }
 
-    /// The only sleeve with a non-flat claim on this symbol. Native
-    /// position-stop executions carry no client order id, so symbol ownership
-    /// is the only truthful attribution when it is unambiguous.
+    /// The only sleeve with a non-flat claim on this symbol.
     pub fn sole_owner(&self, symbol: SymbolId) -> Option<StrategyId> {
         let mut owners = self.filled.iter().filter_map(|((strategy, held), qty)| {
             (*held == symbol.0 && qty.abs() >= FLAT).then_some(StrategyId(*strategy))
@@ -314,6 +306,29 @@ mod tests {
         assert_eq!(a.signed(CARRY, BTC), 0.0);
         assert_eq!(a.signed(LONG, BTC), 0.0);
         assert!(!a.held_by_another(LONG, BTC));
+    }
+
+    #[test]
+    fn a_blank_fill_is_not_assigned_to_the_only_sleeve_in_the_symbol() {
+        let log = vec![
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 2.0),
+            WalRecord::RecoveredFill {
+                exec_id: "native-or-manual".into(),
+                client_order_id: String::new(),
+                symbol: BTC,
+                side: Side::Sell,
+                qty: 1.0,
+                px: 99.0,
+                fee: 0.0,
+                is_maker: false,
+                venue_ts_ms: 2,
+                recovered_wall_ts_ms: 3,
+            },
+        ];
+        let a = Attribution::from_records(&log);
+        assert_eq!(a.signed(CARRY, BTC), 2.0);
+        assert_eq!(a.signed(LONG, BTC), 0.0);
     }
 
     #[test]

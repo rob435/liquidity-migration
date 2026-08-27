@@ -658,11 +658,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Ask the venue what traded on this account since the log's newest
     /// stamp, and write down every execution the log has never seen.
     ///
-    /// Failure is "history unavailable": boot proceeds exactly as it did
-    /// before this existed, and reconcile says whatever the venue's
-    /// positions force it to say. Success is durable before the reconcile
-    /// that would otherwise have read what actually traded as somebody
-    /// else's trading.
+    /// Success is durable before the reconcile that would otherwise have
+    /// read what actually traded as somebody else's trading. Failure aborts
+    /// boot: without the missing interval the log cannot prove its exposure.
     async fn recover_missed_fills(
         wal: &mut W,
         venue: &mut V,
@@ -691,13 +689,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if since >= now_ms {
             return Ok(Vec::new());
         }
-        let mut execs = match venue.executions(since, now_ms).await {
-            Ok(execs) => execs,
-            Err(e) => {
-                tracing::warn!(error = %e, "no execution history; fills in gaps stay unrecovered");
-                return Ok(Vec::new());
-            }
-        };
+        let mut execs = venue.executions(since, now_ms).await.map_err(|e| {
+            EngineError::Boot(format!(
+                "cannot read execution history for the recovery interval: {e}"
+            ))
+        })?;
         let mut delivered: std::collections::HashMap<(String, i64, u64), usize> =
             std::collections::HashMap::new();
         for record in replayed {
@@ -750,10 +746,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 venue_ts_ms: exec.venue_ts_ms,
                 recovered_wall_ts_ms: now_ms,
             };
-            if let Err(e) = wal.append(&record) {
-                tracing::error!(error = %e, "could not write a recovered fill; stopping recovery");
-                break;
-            }
+            wal.append(&record)?;
             execution_ids.insert(dedup_id, now_ms);
             out.push(record);
         }
@@ -762,9 +755,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 count = out.len(),
                 "recovered fills the private stream never delivered"
             );
-            if let Err(e) = wal.barrier() {
-                tracing::error!(error = %e, "recovered fills are written but not yet durable");
-            }
+            wal.barrier()?;
         }
         Ok(out)
     }
@@ -2176,9 +2167,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// After a private-stream gap: ask the venue what traded while the
     /// stream was away and fold anything the log missed into the same books
-    /// a delivered fill feeds. Failure leaves things exactly as they stood
-    /// before this existed — the gap stays a gap, and boot's own recovery
-    /// reads the same history at the next start.
+    /// a delivered fill feeds. Failure stops the run because the missing
+    /// interval makes the exposure state unknown.
     async fn recover_gap_fills(&mut self) -> Result<(), EngineError> {
         let now_ms = clock::wall_ms();
         let since = (self.recovered_until_ms - RECOVERY_PAD_MS).max(now_ms - RECOVERY_REACH_MS);
@@ -2187,12 +2177,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let mut execs = match self.venue.executions(since, now_ms).await {
             Ok(execs) => execs,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "no execution history after the gap; fills inside it stay unrecovered"
-                );
-                return Ok(());
+            Err(error) => {
+                self.may_open = false;
+                self.wal.append(&WalRecord::Reconciled {
+                    wall_ts_ms: now_ms,
+                    findings: vec![format!(
+                        "execution history is unavailable after a private-stream gap: {error}"
+                    )],
+                    may_open: false,
+                })?;
+                self.wal.barrier()?;
+                return Err(EngineError::Venue(error));
             }
         };
         execs.sort_by_key(|exec| exec.venue_ts_ms);
@@ -2202,6 +2197,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             *delivered_counts.entry((id.clone(), *ts, qty.to_bits())).or_default() += 1;
         }
         let mut recovered = 0usize;
+        let mut foreign = Vec::new();
         for exec in execs {
             if self.recovered_exec_ids.contains(&exec.exec_id, now_ms) {
                 continue;
@@ -2234,27 +2230,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 venue_ts_ms: exec.venue_ts_ms,
                 recovered_wall_ts_ms: now_ms,
             };
-            if let Err(e) = self.wal.append(&record) {
-                tracing::error!(error = %e, "could not write a recovered fill; stopping this pass");
-                return Ok(());
-            }
+            self.wal.append(&record)?;
             self.recovered_exec_ids
                 .insert(exec.exec_id.clone(), now_ms);
+            let owner = self.orders.owner_of(&exec.client_order_id);
             self.orders.apply(&record);
-            reconcile::note_fill(&mut self.logged_exposure, symbol, exec.side, exec.qty);
-            // Through the order that produced it, exactly like a delivered
-            // fill. A venue-native stop has no order link, so it belongs to
-            // the sole sleeve already holding this symbol when there is one.
-            let native_stop_owner = exec
-                .client_order_id
-                .is_empty()
-                .then(|| self.attribution.sole_owner(symbol))
-                .flatten();
-            if let Some(sid) = self
-                .orders
-                .owner_of(&exec.client_order_id)
-                .or(native_stop_owner)
-            {
+            if let Some(sid) = owner {
+                reconcile::note_fill(&mut self.logged_exposure, symbol, exec.side, exec.qty);
                 self.attribution.note(sid, symbol, exec.side, exec.qty);
                 // What it cost is the same question whichever way it arrived,
                 // and the anchor is the book its own order left at.
@@ -2280,6 +2262,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     },
                     clock::now_ns().checked_sub(late_ns),
                 );
+            } else {
+                foreign.push(Self::foreign_fill_line(&exec.client_order_id, symbol));
             }
             // The kernel reserved this order's size when it approved it, and
             // only a fill releases the reservation. Skipping it here leaves the
@@ -2305,20 +2289,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         if recovered > 0 {
             tracing::warn!(count = recovered, "recovered fills from the stream gap");
-            if let Err(e) = self.wal.barrier() {
-                tracing::error!(error = %e, "recovered fills are written but not yet durable");
+            if !foreign.is_empty() {
+                self.may_open = false;
+                self.wal.append(&WalRecord::Reconciled {
+                    wall_ts_ms: now_ms,
+                    findings: foreign,
+                    may_open: false,
+                })?;
             }
+            self.wal.barrier()?;
         }
         self.recovered_until_ms = now_ms;
         Ok(())
     }
 
+    fn foreign_fill_line(client_order_id: &str, symbol: SymbolId) -> String {
+        format!(
+            "symbol {}: a fill names an order this engine did not send ({})",
+            symbol.0,
+            if client_order_id.is_empty() { "blank client id" } else { client_order_id }
+        )
+    }
+
     /// Every order update, wherever it came from, goes through here.
     async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
-        let native_stop_owner = match &update {
-            OrderUpdate::Fill { client_order_id, symbol, .. } if client_order_id.is_empty() => {
-                self.attribution.sole_owner(*symbol)
-            }
+        let fill_owner = match &update {
+            OrderUpdate::Fill { client_order_id, .. } => self.orders.owner_of(client_order_id),
             _ => None,
         };
         let delivered_exec_id = match &update {
@@ -2344,10 +2340,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.risk.on_update(&update);
         self.orders.apply_update(&update);
-        // Every fill record in the log is in this total — strangers'
-        // included, exactly as reconcile's boot scan reads it — kept live so
-        // a rotation can restate it.
-        if let OrderUpdate::Fill { symbol, side, qty, .. } = &update {
+        // Only fills joined to orders this log sent enter trusted exposure.
+        // Foreign fills remain durable records and latch entries off below.
+        if let (Some(_), OrderUpdate::Fill { symbol, side, qty, .. }) =
+            (fill_owner, &update)
+        {
             reconcile::note_fill(&mut self.logged_exposure, *symbol, *side, *qty);
         }
         // Remembered for gap recovery's dedup: a fill the stream DID deliver
@@ -2359,13 +2356,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.recent_fills.pop_front();
             }
         }
+        if let OrderUpdate::Fill { client_order_id, symbol, .. } = &update {
+            if fill_owner.is_none() {
+                self.may_open = false;
+                self.wal.append(&WalRecord::Reconciled {
+                    wall_ts_ms: dedup_seen_ms,
+                    findings: vec![Self::foreign_fill_line(client_order_id, *symbol)],
+                    may_open: false,
+                })?;
+                self.wal.barrier()?;
+            }
+        }
         // Whose fill it was, before any strategy is woken, so the one that
         // placed the order sees its own position already changed. The ledger
         // is asked rather than the registry: the registry knows only this
         // boot's ids and the ones in flight when it started, and a fill can
         // still arrive for an order older than either.
         if let Some(id) = inflight::client_order_id(&update) {
-            match self.orders.owner_of(id).or(native_stop_owner) {
+            match self.orders.owner_of(id) {
                 Some(sid) => {
                     self.attribution.on_update(sid, &update);
                     self.price_fill(sid, &update);
@@ -2420,8 +2428,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let event = EngineEvent::Order(update.clone());
         match inflight::client_order_id(&update) {
             Some(id) => match self.registry.owner_of(id)
-                .or_else(|| self.orders.owner_of(id))
-                .or(native_stop_owner) {
+                .or_else(|| self.orders.owner_of(id)) {
                 Some(sid) => {
                     let Engine {
                         strategies,

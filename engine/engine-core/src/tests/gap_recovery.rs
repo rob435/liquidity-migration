@@ -101,7 +101,7 @@ async fn a_recovered_fill_reaches_the_risk_kernel() {
 }
 
 #[tokio::test]
-async fn a_recovered_native_stop_fill_reduces_its_sleeves_position() {
+async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
@@ -166,10 +166,18 @@ async fn a_recovered_native_stop_fill_reduces_its_sleeves_position() {
         .await
         .unwrap();
 
-    assert!(
-        (attributed_qty(&engine) - 0.006).abs() < 1e-12,
-        "an unlinked venue stop is still attributable when one sleeve owns the symbol"
-    );
+    assert_eq!(attributed_qty(&engine), 0.01);
+    assert!(h.records.borrow().iter().any(|record| matches!(
+        record,
+        WalRecord::Reconciled { may_open: false, findings, .. }
+            if findings.iter().any(|line| line.contains("blank client id"))
+    )));
+    let WalRecord::SegmentBase { may_open, logged_exposure, .. } = engine.rotation_base(2) else {
+        unreachable!()
+    };
+    assert!(!may_open);
+    assert_eq!(logged_exposure.len(), 1);
+    assert_eq!(logged_exposure[0].signed_qty, 0.01);
 }
 
 #[tokio::test]
@@ -192,6 +200,65 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
     )).count();
     assert_eq!(journaled, 1);
     assert_eq!(h.risk_saw.borrow().iter().filter(|u| matches!(u, OrderUpdate::Fill { .. })).count(), 1);
+    let WalRecord::SegmentBase { may_open, logged_exposure, .. } = engine.rotation_base(1) else {
+        unreachable!()
+    };
+    assert!(!may_open, "an unowned live fill latches entries off");
+    assert!(logged_exposure.is_empty(), "an unowned fill is not trusted exposure");
+}
+
+#[tokio::test]
+async fn execution_history_failure_after_a_gap_stops_the_run_and_latches_entries() {
+    let (mut engine, h) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    *h.executions.borrow_mut() = None;
+
+    let result = engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            std::future::pending::<()>(),
+        )
+        .await;
+
+    assert!(matches!(result, Err(EngineError::Venue(_))));
+    assert!(h.records.borrow().iter().any(|record| matches!(
+        record,
+        WalRecord::Reconciled { may_open: false, findings, .. }
+            if findings.iter().any(|line| line.contains("execution history is unavailable"))
+    )));
+    let WalRecord::SegmentBase { may_open, .. } = engine.rotation_base(1) else {
+        unreachable!()
+    };
+    assert!(!may_open);
+}
+
+#[tokio::test]
+async fn execution_history_failure_aborts_boot() {
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    *venue.executions.borrow_mut() = None;
+    let (risk, _) = MockRisk::with(allow_all());
+    let (buyer, _) = Buyer::new("BTCUSDT", 0, 0.01);
+    let replayed = vec![WalRecord::Boot {
+        version: ENGINE_VERSION.into(),
+        config_sha256: "old".into(),
+        wall_ts_ms: clock::wall_ms() - 1_000,
+    }];
+
+    let result = Engine::boot(
+        &settings(),
+        "new",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &replayed,
+    )
+    .await;
+
+    assert!(matches!(result, Err(EngineError::Boot(message)) if message.contains("execution history")));
 }
 
 #[tokio::test]

@@ -76,8 +76,8 @@ fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
 
 /// A previous run's log with everything a restatement has to carry: an id
 /// table, a control anchor, a closed order whose fills ARE the position, an
-/// order still in flight and part-filled, and a stranger's fill that counts
-/// toward exposure but belongs to no strategy.
+/// order still in flight and part-filled, and a stranger's durable fill that
+/// belongs to neither trusted exposure nor a strategy.
 fn previous_log() -> Vec<WalRecord> {
     vec![
         WalRecord::Names {
@@ -89,7 +89,7 @@ fn previous_log() -> Vec<WalRecord> {
         fill("eng-a", 0, 2.0),
         sent("eng-b", 1, 1.0, STOP_ETH),
         fill("eng-b", 1, 0.4),
-        // Somebody else's fill: exposure the log knows about, owned by nobody.
+        // Somebody else's fill: observed by the log, owned by nobody.
         fill("stranger-1", 0, 5.0),
     ]
 }
@@ -135,8 +135,8 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     let base = engine_a.rotation_base(7);
 
     // The restatement says what the log said, in full: names, latch, anchor,
-    // whose fills built what, the whole per-symbol fill total (the
-    // stranger's included), the intended stops, and the one open order with
+    // whose fills built what, the trusted per-symbol fill total, the intended
+    // stops, and the one open order with
     // its partial fill.
     let WalRecord::SegmentBase {
         strategies,
@@ -154,7 +154,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     };
     assert_eq!(strategies, &["buyer".to_string()]);
     assert_eq!(symbols, &["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-    assert!(*may_open, "nothing here stops opening");
+    assert!(!*may_open, "the foreign fill latches opening off");
     assert_eq!(control_anchors.len(), 1);
     assert_eq!(control_anchors[0].state, "anchor-1");
     let attributed: Vec<(u16, u16, f64)> = attribution
@@ -166,7 +166,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
         .iter()
         .map(|row| (row.symbol.0, row.signed_qty))
         .collect();
-    assert_eq!(exposure, vec![(0, 7.0), (1, 0.4)], "the stranger's 5 BTC count here");
+    assert_eq!(exposure, vec![(0, 2.0), (1, 0.4)], "the stranger's 5 BTC stay untrusted");
     let stops: Vec<(u16, f64)> = intended_stops
         .iter()
         .map(|row| (row.symbol.0, row.trigger_px))
