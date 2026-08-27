@@ -39,7 +39,9 @@ use super::sign::ws_signature;
 /// Bybit drops a private socket that goes quiet for 30 seconds.
 const PING_EVERY: Duration = Duration::from_secs(20);
 const AUTH_WINDOW_MS: i64 = 5_000;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+const SUBSCRIBE_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 /// A socket that lasted this long was a real connection, so the wait between
@@ -229,9 +231,13 @@ impl Worker {
 
         // Nagle off: an order update held back for coalescing is an order
         // update arriving late.
-        let (mut socket, _) = connect_async_with_config(self.url.as_str(), None, true)
-            .await
-            .map_err(|e| FeedError::Transport(e.to_string()))?;
+        let connected = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            connect_async_with_config(self.url.as_str(), None, true),
+        )
+        .await
+        .map_err(|_| FeedError::Transport("private stream dial timed out".to_string()))?;
+        let (mut socket, _) = connected.map_err(|e| FeedError::Transport(e.to_string()))?;
 
         let expires = wall_ms() + AUTH_WINDOW_MS;
         let auth = json!({
@@ -243,6 +249,7 @@ impl Worker {
 
         let subscribe = json!({"op": "subscribe", "args": ["order", "execution"]});
         send(&mut socket, subscribe.to_string()).await?;
+        await_op(&mut socket, "subscribe", SUBSCRIBE_REPLY_TIMEOUT).await?;
 
         tracing::info!("private stream authenticated and subscribed");
         Ok(socket)
@@ -343,15 +350,28 @@ impl Decoder {
         };
         let rows = frame.get("data").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
         let recv_ns = mono_ns();
+        let execution_topic = topic.starts_with("execution");
+        let mut first_error = None;
+        let mut execution_row_failed = false;
 
         for row in rows {
-            let update = if topic.starts_with("order") {
-                map_order_row(row, recv_ns)?
-            } else if topic.starts_with("execution") {
+            let mapped = if topic.starts_with("order") {
+                map_order_row(row, recv_ns)
+            } else if execution_topic {
                 let ids = self.ids.read().expect("the symbol map lock is poisoned");
-                map_execution_row(row, &|name: &str| ids.get(name).copied(), recv_ns)?
+                map_execution_row(row, &|name: &str| ids.get(name).copied(), recv_ns)
             } else {
-                None
+                Ok(None)
+            };
+            let update = match mapped {
+                Ok(update) => update,
+                Err(error) => {
+                    execution_row_failed |= execution_topic;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
             };
             if let Some(update) = update {
                 if let OrderUpdate::Ack(ref ack) = update {
@@ -364,7 +384,10 @@ impl Decoder {
                 self.pending.push_back(update);
             }
         }
-        Ok(())
+        if execution_row_failed {
+            self.pending.push_back(OrderUpdate::StreamReset { recv_ns });
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// False if this order has already been acked.
@@ -403,30 +426,44 @@ async fn send(socket: &mut Socket, text: String) -> Result<(), FeedError> {
 
 /// Read frames until the venue answers the auth op.
 async fn await_auth(socket: &mut Socket) -> Result<(), FeedError> {
-    let reply = tokio::time::timeout(AUTH_REPLY_TIMEOUT, async {
+    await_op(socket, "auth", AUTH_REPLY_TIMEOUT).await
+}
+
+async fn await_op(socket: &mut Socket, op: &str, timeout: Duration) -> Result<(), FeedError> {
+    let reply = tokio::time::timeout(timeout, async {
         while let Some(frame) = socket.next().await {
             let frame = frame.map_err(|e| FeedError::Transport(e.to_string()))?;
-            let Message::Text(text) = frame else { continue };
+            let text = match frame {
+                Message::Ping(payload) => {
+                    socket
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|e| FeedError::Transport(e.to_string()))?;
+                    continue;
+                }
+                Message::Text(text) => text,
+                _ => continue,
+            };
             let value: Value = serde_json::from_str(text.as_str())
                 .map_err(|e| FeedError::BadMessage(e.to_string()))?;
-            if value.get("op").and_then(Value::as_str) == Some("auth") {
+            if value.get("op").and_then(Value::as_str) == Some(op) {
                 return Ok(value);
             }
         }
         // The venue hung up mid-handshake. That is a hiccup to dial through,
         // not the end of the feed.
         Err(FeedError::Transport(
-            "the venue closed the socket during auth".to_string(),
+            format!("the venue closed the socket during {op}"),
         ))
     })
     .await
-    .map_err(|_| FeedError::Transport("no auth reply from the venue".to_string()))??;
+    .map_err(|_| FeedError::Transport(format!("no {op} reply from the venue")))??;
 
     if reply.get("success").and_then(Value::as_bool) == Some(true) {
         return Ok(());
     }
     let why = reply.get("ret_msg").and_then(Value::as_str).unwrap_or("no reason");
-    Err(FeedError::Transport(format!("private stream auth refused: {why}")))
+    Err(FeedError::Transport(format!("private stream {op} refused: {why}")))
 }
 
 /// One `order` row. `None` for rows that say nothing the engine acts on.
@@ -476,8 +513,11 @@ pub(crate) fn map_execution_row(
         return Ok(None);
     }
     let client_order_id = field(row, "orderLinkId")?;
-    if client_order_id.is_empty() {
-        return Ok(None);
+    let exec_id = field(row, "execId")?;
+    if exec_id.is_empty() {
+        return Err(FeedError::BadMessage(
+            "a quantity-moving execution has no execId".to_string(),
+        ));
     }
     let symbol_name = field(row, "symbol")?;
     let symbol = resolve(&symbol_name).ok_or_else(|| {
@@ -495,6 +535,7 @@ pub(crate) fn map_execution_row(
         }
     };
     Ok(Some(OrderUpdate::Fill {
+        exec_id,
         client_order_id,
         symbol,
         side,
@@ -649,6 +690,7 @@ mod tests {
         });
         match map_execution_row(&row, &resolve, 99).unwrap().unwrap() {
             OrderUpdate::Fill {
+                exec_id,
                 client_order_id,
                 symbol,
                 side,
@@ -659,6 +701,7 @@ mod tests {
                 venue_ts_ms,
                 recv_ns,
             } => {
+                assert_eq!(exec_id, "0ab1bdf7-4219-438b-b30a-32ec863018f7");
                 assert_eq!(client_order_id, "eng-11");
                 assert_eq!(symbol, SymbolId(0));
                 assert_eq!(side, Side::Sell);
@@ -680,6 +723,7 @@ mod tests {
         let resolve = |name: &str| (name == "BTCUSDT").then_some(SymbolId(0));
         let row = |is_maker: bool| {
             json!({
+                "execId": format!("exec-{is_maker}"),
                 "execPrice": "95900.1", "execQty": "0.5", "execFee": "26.37",
                 "execTime": "1746270400353", "orderLinkId": "eng-11",
                 "symbol": "BTCUSDT", "side": "Sell", "execType": "Trade",
@@ -701,6 +745,7 @@ mod tests {
     fn funding_and_settlement_rows_are_not_fills() {
         for exec_type in ["Funding", "Settle", "SessionSettlePnl", "BustTrade"] {
             let row = json!({
+                "execId": format!("exec-{exec_type}"),
                 "execPrice": "1", "execQty": "1", "execFee": "0", "execTime": "1",
                 "orderLinkId": "eng-1", "symbol": "BTCUSDT", "side": "Buy",
                 "execType": exec_type
@@ -717,6 +762,7 @@ mod tests {
     #[test]
     fn a_fill_on_an_unknown_symbol_is_a_bad_message() {
         let row = json!({
+            "execId": "unknown-symbol",
             "execPrice": "1", "execQty": "1", "execFee": "0", "execTime": "1",
             "orderLinkId": "eng-1", "symbol": "VANRYUSDT", "side": "Buy", "execType": "Trade"
         });
@@ -729,6 +775,7 @@ mod tests {
     #[test]
     fn a_missing_fee_reads_as_zero_but_a_missing_price_does_not() {
         let base = json!({
+            "execId": "missing-field",
             "execQty": "1", "execTime": "1", "orderLinkId": "eng-1",
             "symbol": "BTCUSDT", "side": "Buy", "execType": "Trade"
         });
@@ -762,6 +809,43 @@ mod tests {
         // A later frame repeating New for eng-1 adds nothing.
         feed.ingest(&frame).unwrap();
         assert_eq!(feed.pending.len(), 2);
+    }
+
+    #[test]
+    fn a_native_stop_fill_keeps_venue_identity_without_a_link_id() {
+        let row = json!({
+            "execId": "native-stop-1", "execPrice": "100", "execQty": "1",
+            "execFee": "0.01", "execTime": "5", "orderLinkId": "",
+            "symbol": "BTCUSDT", "side": "Sell", "execType": "Trade"
+        });
+        match map_execution_row(&row, &resolve, 7).unwrap().unwrap() {
+            OrderUpdate::Fill { exec_id, client_order_id, symbol, .. } => {
+                assert_eq!(exec_id, "native-stop-1");
+                assert!(client_order_id.is_empty());
+                assert_eq!(symbol, SymbolId(0));
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bad_execution_row_does_not_hide_later_fills_and_requests_recovery() {
+        let mut feed = decoder_for(&["BTCUSDT"]);
+        let frame = json!({
+            "topic": "execution",
+            "data": [
+                {"execId": "bad", "execQty": "not-a-number", "execPrice": "1",
+                 "execTime": "1", "orderLinkId": "eng-1", "symbol": "BTCUSDT",
+                 "side": "Buy", "execType": "Trade"},
+                {"execId": "good", "execQty": "2", "execPrice": "3", "execFee": "0",
+                 "execTime": "2", "orderLinkId": "eng-2", "symbol": "BTCUSDT",
+                 "side": "Buy", "execType": "Trade"}
+            ]
+        }).to_string();
+
+        assert!(feed.ingest(&frame).is_err());
+        assert!(matches!(feed.pending.pop_front(), Some(OrderUpdate::Fill { exec_id, .. }) if exec_id == "good"));
+        assert!(matches!(feed.pending.pop_front(), Some(OrderUpdate::StreamReset { .. })));
     }
 
     #[test]

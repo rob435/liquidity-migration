@@ -26,7 +26,9 @@ use super::parse::{
 };
 use super::realm::VenueRealm;
 use super::rest::RestClient;
+use super::sign::RECV_WINDOW_MS;
 use super::CATEGORY;
+use crate::wall_ms;
 
 const PATH_TIME: &str = "/v5/market/time";
 const PATH_ORDER_CREATE: &str = "/v5/order/create";
@@ -50,6 +52,7 @@ pub struct BybitGateway {
     rest: RestClient,
     names: Vec<Symbol>,
     ids: HashMap<Symbol, SymbolId>,
+    clock_checked: bool,
 }
 
 impl BybitGateway {
@@ -121,13 +124,21 @@ impl BybitGateway {
             rest: RestClient::new(base_url, creds),
             names: symbols,
             ids,
+            clock_checked: false,
         }
     }
 
     /// Open the TLS session before an order needs it.
     pub async fn warm(&mut self) -> Result<(), VenueError> {
+        if self.clock_checked {
+            return Ok(());
+        }
+        let sent_ms = wall_ms();
         let envelope = self.rest.get_public(PATH_TIME, "").await?;
+        let received_ms = wall_ms();
+        validate_server_clock(&envelope, sent_ms, received_ms)?;
         venue_result(envelope)?;
+        self.clock_checked = true;
         Ok(())
     }
 
@@ -197,6 +208,9 @@ impl VenueGateway for BybitGateway {
             if !req.reduce_only {
                 body.insert("tpslMode".into(), "Full".into());
                 body.insert("stopLoss".into(), venue_num(stop.trigger_px)?.into());
+                body.insert("slTriggerBy".into(), "MarkPrice".into());
+                body.insert("slOrderType".into(), "Market".into());
+                body.insert("positionIdx".into(), 0.into());
             }
         }
 
@@ -260,6 +274,8 @@ impl VenueGateway for BybitGateway {
         // mode, which is how the demo account is configured.
         body.insert("tpslMode".into(), "Full".into());
         body.insert("positionIdx".into(), 0.into());
+        body.insert("slTriggerBy".into(), "MarkPrice".into());
+        body.insert("slOrderType".into(), "Market".into());
 
         let envelope = self.rest.post_signed(PATH_TRADING_STOP, &Value::Object(body)).await?;
         venue_result(envelope)?;
@@ -295,6 +311,7 @@ impl VenueGateway for BybitGateway {
     }
 
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        self.warm().await?;
         let envelope = self.rest.get_signed(PATH_QUERY_API, "").await?;
         let result = venue_result(envelope)?;
 
@@ -488,6 +505,27 @@ impl VenueGateway for BybitGateway {
     }
 }
 
+fn validate_server_clock(envelope: &Value, sent_ms: i64, received_ms: i64) -> Result<(), VenueError> {
+    let server_ms = match envelope.get("time") {
+        Some(Value::Number(value)) => value.as_i64(),
+        Some(Value::String(value)) => value.parse().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| VenueError::BadReply("time reply has no millisecond server clock".to_string()))?;
+    let recv_window_ms = RECV_WINDOW_MS
+        .parse::<i64>()
+        .expect("Bybit receive window is a decimal integer");
+
+    if sent_ms >= server_ms.saturating_add(1_000)
+        || server_ms.saturating_sub(sent_ms) > recv_window_ms
+    {
+        return Err(VenueError::Credentials(format!(
+            "host clock is outside Bybit's signing window: sent={sent_ms}, server={server_ms}, received={received_ms}"
+        )));
+    }
+    Ok(())
+}
+
 fn side_str(side: Side) -> &'static str {
     match side {
         Side::Buy => "Buy",
@@ -546,6 +584,14 @@ mod tests {
         assert_eq!(tif_str(TimeInForce::Gtc), "GTC");
         assert_eq!(tif_str(TimeInForce::Ioc), "IOC");
         assert_eq!(tif_str(TimeInForce::PostOnly), "PostOnly");
+    }
+
+    #[test]
+    fn clock_check_enforces_the_venue_signing_window() {
+        let reply = |time| serde_json::json!({"time": time});
+        assert!(validate_server_clock(&reply(10_000), 9_999, 10_001).is_ok());
+        assert!(validate_server_clock(&reply(10_000), 11_000, 11_001).is_err());
+        assert!(validate_server_clock(&reply(10_000), 4_999, 5_001).is_err());
     }
 
     #[test]

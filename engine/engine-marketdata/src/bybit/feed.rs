@@ -14,16 +14,17 @@
 //! safe. It posts finished events down a channel, and `next_event` is only a
 //! channel receive — a receive that is dropped part-way loses nothing.
 
-use std::sync::Once;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId, SymbolTable};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
 use crate::bybit::parse::{parse_frame, parse_frame_bytes, ParsedFrame};
@@ -42,14 +43,13 @@ pub fn bybit_public_linear_url() -> &'static str {
 
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SUBSCRIBE_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(8);
 /// Bybit caps the size of one request frame, not the number of topics.
 const TOPICS_PER_MESSAGE: usize = 100;
-/// Room for a burst while the engine is busy elsewhere. A full queue makes
-/// the worker wait before it reads the socket again, which is back-pressure,
-/// not a lost price.
-const QUEUE_DEPTH: usize = 4096;
+const MAX_PENDING_EPOCHS: usize = 64;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -92,8 +92,84 @@ pub struct BybitPublicFeed {
 
 /// The running worker: where its events land, and the handle that stops it.
 struct Inbox {
-    events: mpsc::Receiver<Result<MarketEvent, FeedError>>,
+    events: Arc<Handoff>,
     worker: JoinHandle<()>,
+}
+
+struct Handoff {
+    state: Mutex<HandoffState>,
+    ready: Notify,
+}
+
+#[derive(Default)]
+struct HandoffState {
+    items: VecDeque<Result<MarketEvent, FeedError>>,
+    closed: bool,
+}
+
+impl Handoff {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(HandoffState::default()),
+            ready: Notify::new(),
+        }
+    }
+
+    fn push(&self, item: Result<MarketEvent, FeedError>) -> bool {
+        let mut state = self.state.lock().expect("market handoff lock is poisoned");
+        if state.closed {
+            return false;
+        }
+        if let Some(key) = market_key(&item) {
+            for queued in state.items.iter_mut().rev() {
+                let Some(queued_key) = market_key(queued) else { break };
+                if queued_key == key {
+                    *queued = item;
+                    return true;
+                }
+            }
+        } else {
+            let controls = state.items.iter().filter(|item| market_key(item).is_none()).count();
+            if controls >= MAX_PENDING_EPOCHS {
+                state.items.clear();
+            }
+        }
+        state.items.push_back(item);
+        drop(state);
+        self.ready.notify_one();
+        true
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().expect("market handoff lock is poisoned");
+        state.closed = true;
+        drop(state);
+        self.ready.notify_waiters();
+    }
+
+    async fn recv(&self) -> Option<Result<MarketEvent, FeedError>> {
+        loop {
+            let notified = self.ready.notified();
+            {
+                let mut state = self.state.lock().expect("market handoff lock is poisoned");
+                if let Some(item) = state.items.pop_front() {
+                    return Some(item);
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+fn market_key(item: &Result<MarketEvent, FeedError>) -> Option<(u16, bool)> {
+    match item {
+        Ok(MarketEvent::Quote { symbol, .. }) => Some((symbol.0, false)),
+        Ok(MarketEvent::Ticker { symbol, .. }) => Some((symbol.0, true)),
+        Ok(MarketEvent::FeedReset { .. }) | Err(_) => None,
+    }
 }
 
 enum Step {
@@ -176,7 +252,7 @@ impl BybitPublicFeed {
     /// Start the socket worker. Called on the first `next_event`, so nothing
     /// is dialled until somebody asks for a price.
     fn start(&mut self) {
-        let (events, inbox) = mpsc::channel(QUEUE_DEPTH);
+        let events = Arc::new(Handoff::new());
         let (admit_tx, admit_rx) = mpsc::unbounded_channel();
         self.admissions = Some(admit_tx);
         let worker = FeedWorker {
@@ -184,7 +260,7 @@ impl BybitPublicFeed {
             topics: self.topics.clone(),
             state: FeedState::new(&self.subs),
             clock: self.clock,
-            events,
+            events: events.clone(),
             backoff: BACKOFF_START,
             epochs: 0,
             next_ping_at: Instant::now() + PING_INTERVAL,
@@ -194,7 +270,7 @@ impl BybitPublicFeed {
         // The engine runs one thread, so this stays on it.
         let worker = tokio::spawn(worker.run());
         self.inbox = Some(Inbox {
-            events: inbox,
+            events,
             worker,
         });
     }
@@ -217,7 +293,7 @@ struct FeedWorker {
     topics: Vec<String>,
     state: FeedState,
     clock: MonoClock,
-    events: mpsc::Sender<Result<MarketEvent, FeedError>>,
+    events: Arc<Handoff>,
     backoff: Duration,
     /// How many sockets this worker has opened. Past the first, a new one is a
     /// reconnect and owes the strategies a `FeedReset`.
@@ -232,18 +308,24 @@ impl FeedWorker {
     async fn run(mut self) {
         loop {
             let reconnected = self.epochs > 0;
-            let mut socket = self.connect().await;
+            let mut socket = match self.connect().await {
+                Ok(socket) => socket,
+                Err(error) => {
+                    let _ = self.emit(Err(error));
+                    return;
+                }
+            };
             // The break is announced before any price off the new socket.
             if reconnected {
                 let recv_ns = self.clock.now_ns();
-                if !self.emit(Ok(MarketEvent::FeedReset { recv_ns })).await {
+                if !self.emit(Ok(MarketEvent::FeedReset { recv_ns })) {
                     return;
                 }
             }
             loop {
                 match self.step(&mut socket).await {
                     Ok(Step::Event(event)) => {
-                        if !self.emit(Ok(event)).await {
+                        if !self.emit(Ok(event)) {
                             return;
                         }
                     }
@@ -254,7 +336,7 @@ impl FeedWorker {
                     }
                     // Nothing a fresh socket can fix. Say so and stop.
                     Err(e) => {
-                        let _ = self.emit(Err(e)).await;
+                        let _ = self.emit(Err(e));
                         return;
                     }
                 }
@@ -263,13 +345,13 @@ impl FeedWorker {
     }
 
     /// False once nobody is listening, which is the worker's cue to stop.
-    async fn emit(&self, item: Result<MarketEvent, FeedError>) -> bool {
-        self.events.send(item).await.is_ok()
+    fn emit(&self, item: Result<MarketEvent, FeedError>) -> bool {
+        self.events.push(item)
     }
 
     /// Dial, subscribe, and start a fresh epoch. Retries with capped backoff
     /// until it succeeds; a market feed that gives up is worse than a slow one.
-    async fn connect(&mut self) -> Socket {
+    async fn connect(&mut self) -> Result<Socket, FeedError> {
         loop {
             if self.epochs > 0 {
                 tokio::time::sleep(self.backoff).await;
@@ -289,9 +371,12 @@ impl FeedWorker {
                         epoch = self.epochs,
                         "market feed connected"
                     );
-                    return socket;
+                    return Ok(socket);
                 }
                 Err(e) => {
+                    if matches!(&e, FeedError::Transport(text) if text.starts_with("subscribe refused:")) {
+                        return Err(e);
+                    }
                     warn!(url = %self.url, backoff = ?self.backoff, "market feed dial failed: {e}");
                     self.bump_backoff();
                 }
@@ -301,15 +386,16 @@ impl FeedWorker {
 
     async fn dial(&self) -> Result<Socket, FeedError> {
         install_crypto_provider();
-        let (mut socket, _) = connect_async(self.url.as_str())
-            .await
-            .map_err(|e| FeedError::Transport(e.to_string()))?;
+        let connected = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            connect_async_with_config(self.url.as_str(), None, true),
+        )
+        .await
+        .map_err(|_| FeedError::Transport("market feed dial timed out".to_string()))?;
+        let (mut socket, _) = connected.map_err(|e| FeedError::Transport(e.to_string()))?;
         for chunk in self.topics.chunks(TOPICS_PER_MESSAGE) {
             let payload = subscribe_payload(chunk);
-            socket
-                .send(Message::text(payload))
-                .await
-                .map_err(|e| FeedError::Transport(e.to_string()))?;
+            send_subscription(&mut socket, payload).await?;
         }
         Ok(socket)
     }
@@ -340,12 +426,44 @@ impl FeedWorker {
         info!(topics = fresh.len(), "subscribing to symbols taken on since boot");
         for chunk in fresh.chunks(TOPICS_PER_MESSAGE) {
             let payload = subscribe_payload(chunk);
-            socket
-                .send(Message::text(payload))
+            tokio::time::timeout(SUBSCRIBE_REPLY_TIMEOUT, socket.send(Message::text(payload)))
                 .await
+                .map_err(|_| FeedError::Transport("market subscription send timed out".to_string()))?
                 .map_err(|e| FeedError::Transport(e.to_string()))?;
+            self.await_admission_ack(socket).await?;
         }
         Ok(())
+    }
+
+    async fn await_admission_ack(&mut self, socket: &mut Socket) -> Result<(), FeedError> {
+        tokio::time::timeout(SUBSCRIBE_REPLY_TIMEOUT, async {
+            loop {
+                let message = socket
+                    .next()
+                    .await
+                    .ok_or_else(|| FeedError::Transport("market socket closed before subscription ack".to_string()))?
+                    .map_err(|e| FeedError::Transport(e.to_string()))?;
+                if let Some((success, ret_msg)) = subscription_ack(&message)? {
+                    return if success {
+                        Ok(())
+                    } else {
+                        Err(FeedError::Transport(format!("subscribe refused: {ret_msg}")))
+                    };
+                }
+                let recv_ns = self.clock.now_ns();
+                match self.on_message(message, recv_ns)? {
+                    Step::Event(event) if !self.emit(Ok(event)) => return Err(FeedError::Closed),
+                    Step::Reconnect => {
+                        return Err(FeedError::Transport(
+                            "market socket lost continuity before subscription ack".to_string(),
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| FeedError::Transport("no market subscription ack from the venue".to_string()))?
     }
 
     fn bump_backoff(&mut self) {
@@ -459,6 +577,12 @@ impl FeedWorker {
     }
 }
 
+impl Drop for FeedWorker {
+    fn drop(&mut self) {
+        self.events.close();
+    }
+}
+
 impl MarketFeed for BybitPublicFeed {
     /// One receive, nothing else. Dropped part-way it loses nothing, which is
     /// what the engine core's `select!` needs.
@@ -498,6 +622,68 @@ fn topic_for(sub: &Subscription) -> String {
 
 fn subscribe_payload(topics: &[String]) -> String {
     serde_json::json!({ "op": "subscribe", "args": topics }).to_string()
+}
+
+async fn send_subscription(socket: &mut Socket, payload: String) -> Result<(), FeedError> {
+    tokio::time::timeout(SUBSCRIBE_REPLY_TIMEOUT, async {
+        socket
+            .send(Message::text(payload))
+            .await
+            .map_err(|e| FeedError::Transport(e.to_string()))?;
+        loop {
+            let message = socket
+                .next()
+                .await
+                .ok_or_else(|| FeedError::Transport("market socket closed before subscription ack".to_string()))?
+                .map_err(|e| FeedError::Transport(e.to_string()))?;
+            if let Message::Ping(payload) = &message {
+                socket
+                    .send(Message::Pong(payload.clone()))
+                    .await
+                    .map_err(|e| FeedError::Transport(e.to_string()))?;
+                continue;
+            }
+            match subscription_ack(&message)? {
+                Some((true, _)) => return Ok(()),
+                Some((false, ret_msg)) => {
+                    return Err(FeedError::Transport(format!("subscribe refused: {ret_msg}")))
+                }
+                None => {
+                    let is_market_data = matches!(
+                        &message,
+                        Message::Text(text)
+                            if matches!(parse_frame(text.as_str()), Ok(ParsedFrame::Book(_) | ParsedFrame::Ticker(_)))
+                    ) || matches!(
+                        &message,
+                        Message::Binary(bytes)
+                            if matches!(parse_frame_bytes(bytes), Ok(ParsedFrame::Book(_) | ParsedFrame::Ticker(_)))
+                    );
+                    if is_market_data {
+                        return Err(FeedError::Transport(
+                            "market data arrived before the subscription was acknowledged".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| FeedError::Transport("market subscription phase timed out".to_string()))?
+}
+
+fn subscription_ack(message: &Message) -> Result<Option<(bool, String)>, FeedError> {
+    let parsed = match message {
+        Message::Text(text) => parse_frame(text.as_str()),
+        Message::Binary(bytes) => parse_frame_bytes(bytes),
+        _ => return Ok(None),
+    }
+    .map_err(|e| FeedError::BadMessage(e.to_string()))?;
+    match parsed {
+        ParsedFrame::Ack { op, success, ret_msg } if op == "subscribe" => {
+            Ok(Some((success, ret_msg.to_string())))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -564,6 +750,25 @@ mod tests {
         let first = clock.now_ns();
         let second = clock.now_ns();
         assert!(second >= first);
+    }
+
+    #[tokio::test]
+    async fn the_handoff_coalesces_l1_without_crossing_an_epoch_reset() {
+        let handoff = Handoff::new();
+        let quote = |symbol, bid_px| MarketEvent::Quote {
+            symbol: SymbolId(symbol),
+            quote: engine_types::Quote { bid_px, ..engine_types::Quote::default() },
+        };
+        assert!(handoff.push(Ok(quote(0, 10.0))));
+        assert!(handoff.push(Ok(quote(0, 11.0))));
+        assert!(handoff.push(Ok(quote(1, 20.0))));
+        assert!(handoff.push(Ok(MarketEvent::FeedReset { recv_ns: 7 })));
+        assert!(handoff.push(Ok(quote(0, 12.0))));
+
+        assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(0), quote })) if quote.bid_px == 11.0));
+        assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(1), quote })) if quote.bid_px == 20.0));
+        assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::FeedReset { recv_ns: 7 }))));
+        assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(0), quote })) if quote.bid_px == 12.0));
     }
 
     const ACK: &str =

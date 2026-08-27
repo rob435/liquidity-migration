@@ -38,7 +38,11 @@ fn market_order() -> OrderRequest {
 }
 
 fn ok(result: &str) -> (u16, String) {
-    (200, format!(r#"{{"retCode":0,"retMsg":"OK","result":{result},"time":1700000000000}}"#))
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    (200, format!(r#"{{"retCode":0,"retMsg":"OK","result":{result},"time":{now}}}"#))
 }
 
 /// Recompute the signature here, from the timestamp and payload the gateway
@@ -89,6 +93,9 @@ async fn send_order_posts_the_documented_shape() {
     // The stop rides with the entry: one round trip, position protected.
     assert_eq!(body["tpslMode"], "Full");
     assert_eq!(body["stopLoss"], "93000.5");
+    assert_eq!(body["slTriggerBy"], "MarkPrice");
+    assert_eq!(body["slOrderType"], "Market");
+    assert_eq!(body["positionIdx"], 0);
     // A market order carries no price and lets the venue apply its own IOC.
     assert!(body.get("price").is_none());
     assert!(body.get("timeInForce").is_none());
@@ -310,6 +317,8 @@ async fn set_stop_uses_full_mode_on_the_one_way_position() {
     assert_eq!(body["stopLoss"], "2950");
     assert_eq!(body["tpslMode"], "Full");
     assert_eq!(body["positionIdx"], 0);
+    assert_eq!(body["slTriggerBy"], "MarkPrice");
+    assert_eq!(body["slOrderType"], "Market");
 }
 
 #[tokio::test]

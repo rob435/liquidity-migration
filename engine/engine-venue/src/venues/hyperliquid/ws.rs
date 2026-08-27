@@ -423,11 +423,6 @@ impl Decoder {
         for row in fills {
             let execution =
                 parse_execution(row).map_err(|e| FeedError::BadMessage(e.to_string()))?;
-            if execution.client_order_id.is_empty() {
-                // A hand trade, or the venue's own stop firing. Real, and not
-                // this engine's to attribute to a strategy.
-                continue;
-            }
             let Some(symbol) = self.symbol_id(&execution.symbol) else {
                 // A fill on a symbol the engine has no id for cannot be
                 // routed. It is still a real fill, so it is said out loud.
@@ -438,6 +433,7 @@ impl Decoder {
                 continue;
             };
             self.pending.push_back(OrderUpdate::Fill {
+                exec_id: execution.exec_id,
                 client_order_id: execution.client_order_id,
                 symbol,
                 side: execution.side,
@@ -613,7 +609,8 @@ mod tests {
         ))
         .unwrap();
         match d.pending.pop_front() {
-            Some(OrderUpdate::Fill { symbol, side, qty, px, fee, is_maker, venue_ts_ms, .. }) => {
+            Some(OrderUpdate::Fill { exec_id, symbol, side, qty, px, fee, is_maker, venue_ts_ms, .. }) => {
+                assert_eq!(exec_id, "12");
                 assert_eq!(symbol, SymbolId(1));
                 assert_eq!(side, Side::Sell);
                 assert_eq!(qty, 1.5);
@@ -624,6 +621,23 @@ mod tests {
             }
             other => panic!("expected a fill, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_unnamed_live_fill_on_a_known_symbol_is_retained() {
+        let mut d = decoder();
+        d.awaiting_snapshot = false;
+        d.ingest(
+            r#"{"channel":"userFills","data":{"user":"0x1","fills":[
+               {"coin":"BTC","px":"100","sz":"1","side":"A","time":1701,"fee":"0.01",
+                "tid":13,"crossed":true,"oid":2}]}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            d.pending.pop_front(),
+            Some(OrderUpdate::Fill { exec_id, client_order_id, symbol: SymbolId(0), .. })
+                if exec_id == "13" && client_order_id.is_empty()
+        ));
     }
 
     #[test]

@@ -340,6 +340,12 @@ pub enum OrderUpdate {
         reason: String,
     },
     Fill {
+        /// The venue's unique identity for this execution. Empty only when a
+        /// legacy log predates execution identity.
+        #[serde(default)]
+        exec_id: String,
+        /// Empty for a venue-native position stop, which belongs to the
+        /// symbol's current position rather than to the entry order.
         client_order_id: String,
         symbol: SymbolId,
         side: Side,

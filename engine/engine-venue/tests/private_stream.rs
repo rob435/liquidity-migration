@@ -323,6 +323,7 @@ async fn the_feed_authenticates_subscribes_and_maps_what_arrives() {
     }
     match feed.next_update().await.unwrap() {
         OrderUpdate::Fill {
+            exec_id,
             client_order_id,
             symbol,
             side,
@@ -332,6 +333,7 @@ async fn the_feed_authenticates_subscribes_and_maps_what_arrives() {
             venue_ts_ms,
             ..
         } => {
+            assert_eq!(exec_id, "exec-1");
             assert_eq!(client_order_id, "eng-1");
             assert_eq!(symbol, SymbolId(0));
             assert_eq!(side, Side::Buy);

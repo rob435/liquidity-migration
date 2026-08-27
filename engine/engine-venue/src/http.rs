@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use engine_types::VenueError;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::Body;
 use hyper::{Request, Response};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -25,10 +26,12 @@ use serde_json::Value;
 /// A reply this slow is no use to a trading loop; the caller is told the
 /// send failed and the log already holds the intent.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct HttpClient {
     client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
     base: String,
+    request_timeout: Duration,
 }
 
 impl HttpClient {
@@ -61,6 +64,7 @@ impl HttpClient {
         Self {
             client,
             base: base.into(),
+            request_timeout: REQUEST_TIMEOUT,
         }
     }
 
@@ -117,25 +121,33 @@ impl HttpClient {
     }
 
     async fn send(&self, req: Request<Full<Bytes>>) -> Result<Value, VenueError> {
-        let sent = self.client.request(req);
-        let resp = match tokio::time::timeout(REQUEST_TIMEOUT, sent).await {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => return Err(VenueError::Transport(e.to_string())),
+        let exchange = async {
+            let resp = self
+                .client
+                .request(req)
+                .await
+                .map_err(|e| VenueError::Transport(e.to_string()))?;
+            read_json(resp).await
+        };
+        match tokio::time::timeout(self.request_timeout, exchange).await {
+            Ok(result) => result,
             Err(_) => {
-                return Err(VenueError::Transport(format!(
-                    "no reply within {}s",
-                    REQUEST_TIMEOUT.as_secs()
+                Err(VenueError::Transport(format!(
+                    "request did not complete within {:?}",
+                    self.request_timeout
                 )))
             }
-        };
-        read_json(resp).await
+        }
     }
 }
 
-async fn read_json(resp: Response<hyper::body::Incoming>) -> Result<Value, VenueError> {
+async fn read_json<B>(resp: Response<B>) -> Result<Value, VenueError>
+where
+    B: Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let status = resp.status();
-    let bytes = resp
-        .into_body()
+    let bytes = Limited::new(resp.into_body(), MAX_RESPONSE_BYTES)
         .collect()
         .await
         .map_err(|e| VenueError::Transport(format!("reply body: {e}")))?
@@ -181,6 +193,8 @@ pub(crate) fn percent_encode(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn query_values_are_escaped_for_the_query_string() {
@@ -194,5 +208,34 @@ mod tests {
         let client = HttpClient::new("http://127.0.0.1:1");
         assert_eq!(client.url("/v5/x", ""), "http://127.0.0.1:1/v5/x");
         assert_eq!(client.url("/v5/x", "a=1"), "http://127.0.0.1:1/v5/x?a=1");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_reply_is_rejected_before_json_parsing() {
+        let body = Full::new(Bytes::from(vec![b'x'; MAX_RESPONSE_BYTES + 1]));
+        let err = read_json(Response::new(body)).await.unwrap_err();
+        assert!(matches!(err, VenueError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn the_deadline_includes_a_stalled_reply_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let mut client = HttpClient::new(format!("http://{addr}"));
+        client.request_timeout = Duration::from_millis(50);
+        let err = client.get("/stall", "", &[]).await.unwrap_err();
+        assert!(matches!(err, VenueError::Transport(ref text) if text.contains("did not complete")));
+        server.abort();
     }
 }
