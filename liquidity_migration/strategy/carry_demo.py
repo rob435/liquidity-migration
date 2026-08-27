@@ -550,10 +550,23 @@ class CarryCycleState:
             raise ValueError(f"CARRY sizing anchors are not JSON: {exc}") from exc
         if not isinstance(payload, dict) or set(payload) != {"schema_version", "anchors"}:
             raise ValueError("CARRY sizing anchors have invalid fields")
-        if payload["schema_version"] != 1 or not isinstance(payload["anchors"], dict):
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["schema_version"] != 1
+            or not isinstance(payload["anchors"], dict)
+        ):
             raise ValueError("CARRY sizing anchors have an unsupported schema")
         loaded: dict[int, float] = {}
         for raw_key, raw_value in payload["anchors"].items():
+            if (
+                not isinstance(raw_key, str)
+                or not raw_key.isascii()
+                or not raw_key.isdigit()
+                or raw_key.startswith("0")
+                or isinstance(raw_value, bool)
+                or not isinstance(raw_value, (int, float))
+            ):
+                raise ValueError("CARRY sizing anchors contain an invalid value")
             key = int(raw_key)
             value = float(raw_value)
             if key <= 0 or not math.isfinite(value) or value <= 0.0:
@@ -938,12 +951,19 @@ def _load_early_exits(root: Path) -> dict[str, int]:
     raw = json.loads(snapshot.data)
     if not isinstance(raw, dict) or set(raw) != {"fired"} or not isinstance(raw["fired"], dict):
         raise ValueError("CARRY early-exit state has invalid fields")
-    fired = {str(symbol): int(ts) for symbol, ts in raw["fired"].items()}
-    if any(
-        not symbol or symbol != symbol.upper() or not symbol.isalnum() or ts <= 0
-        for symbol, ts in fired.items()
-    ):
-        raise ValueError("CARRY early-exit state contains an invalid row")
+    fired: dict[str, int] = {}
+    for symbol, ts in raw["fired"].items():
+        if (
+            not isinstance(symbol, str)
+            or not symbol
+            or symbol != symbol.upper()
+            or not symbol.isalnum()
+            or isinstance(ts, bool)
+            or not isinstance(ts, int)
+            or ts <= 0
+        ):
+            raise ValueError("CARRY early-exit state contains an invalid row")
+        fired[symbol] = ts
     return fired
 
 

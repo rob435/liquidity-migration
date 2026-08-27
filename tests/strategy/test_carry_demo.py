@@ -1119,6 +1119,16 @@ class TestPresettleExit:
         reloaded = module._load_early_exits(tmp_path)
         assert reloaded == {DEEP_A: D0}
 
+    @pytest.mark.parametrize("stamp", [str(D0), True, 1.5])
+    def test_early_exit_state_does_not_coerce_stamps(
+        self, tmp_path: Path, stamp: object
+    ) -> None:
+        path = module._early_exit_state_path(tmp_path)
+        path.write_text(json.dumps({"fired": {DEEP_A: stamp}}))
+
+        with pytest.raises(ValueError, match="invalid row"):
+            module._load_early_exits(tmp_path)
+
     def test_boundary_matches_the_registered_state_machine(self, tmp_path: Path) -> None:
         # Identical boundary to the settled-print path: a running rate
         # EXACTLY at -3 bp fires, one strictly below holds.

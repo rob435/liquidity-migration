@@ -57,6 +57,23 @@ def test_malformed_sizing_anchor_fails_closed_instead_of_reanchoring(tmp_path) -
         CarryCycleState().bind_sizing_anchors(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema_version": True, "anchors": {str(DECISION_MS): 1_000.0}},
+        {"schema_version": 1, "anchors": {str(DECISION_MS): "1000.0"}},
+        {"schema_version": 1, "anchors": {f"0{DECISION_MS}": 1_000.0}},
+    ],
+)
+def test_sizing_anchor_schema_does_not_coerce_types(tmp_path, payload) -> None:
+    path = tmp_path / ".cache" / "carry_sizing_anchors.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="sizing anchors"):
+        CarryCycleState().bind_sizing_anchors(tmp_path)
+
+
 def test_stale_health_can_publish_removals_but_not_add_or_resize(tmp_path, monkeypatch) -> None:
     path = tmp_path / "carry.json"
     monkeypatch.setenv(ENGINE_TARGET_BOOK_PATH_ENV, str(path))
