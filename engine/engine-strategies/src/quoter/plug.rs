@@ -289,6 +289,16 @@ impl Quoter {
         }
     }
 
+    fn pull_all_on_feed_reset(&mut self, ctx: &mut dyn StrategyCtx) {
+        let mut resting = Vec::new();
+        ctx.resting(&mut resting);
+        let mine: Vec<(SymbolId, String)> = resting.iter()
+            .filter(|order| self.mine(order.symbol))
+            .map(|order| (order.symbol, order.client_order_id.to_string())).collect();
+        let now_ns = ctx.now_ns();
+        for (symbol, id) in mine { self.pull(symbol, &id, now_ns, ctx); }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn place(
         &self,
@@ -345,6 +355,10 @@ impl Strategy for Quoter {
         self.resolve(&*ctx);
         let symbol = match event {
             EngineEvent::Market(MarketEvent::Quote { symbol, .. }) => *symbol,
+            EngineEvent::Market(MarketEvent::FeedReset { .. }) => {
+                self.pull_all_on_feed_reset(ctx);
+                return;
+            }
             // A fill changed the inventory and took a quote out of the book.
             // Waiting for the next price to notice would leave the maker
             // one-sided for as long as the market is quiet — which is exactly

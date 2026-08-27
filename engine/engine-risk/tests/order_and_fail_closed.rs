@@ -90,6 +90,20 @@ fn a_stale_reading_still_lets_a_genuine_exit_through() {
     ));
 }
 
+#[test]
+fn a_fresh_fill_is_immediately_available_to_a_reduce_only_exit() {
+    use engine_types::orders::OrderUpdate;
+    let mut k = kernel();
+    let filled = entry(CARRY, BUSDT, Side::Buy, 3.0, 10.0, 9.0, SEC);
+    k.register_order("fresh-entry", &filled, 3.0);
+    k.on_update(&OrderUpdate::Fill {
+        client_order_id: "fresh-entry".to_string(), symbol: BUSDT, side: Side::Buy,
+        qty: 3.0, px: 10.0, fee: 0.0, is_maker: false, venue_ts_ms: 0, recv_ns: 2 * SEC,
+    });
+    let out = exit(CARRY, BUSDT, Side::Sell, 9.0, 10.0, 3 * SEC);
+    assert_eq!(k.assess(&out, &flat(1_000.0, SEC)), RiskVerdict::Allow { qty: 3.0 });
+}
+
 fn kernel() -> Kernel {
     Kernel::new(demo_config()).expect("config")
 }

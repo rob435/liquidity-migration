@@ -217,7 +217,7 @@ fn zero_filled_tail_is_cut() {
 }
 
 #[test]
-fn corrupt_checksum_in_last_frame_drops_it() {
+fn corrupt_checksum_in_last_frame_is_refused_and_left_untouched() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
     let records: Vec<WalRecord> = (1..=3).map(|i| note(&format!("r{i}"))).collect();
@@ -228,20 +228,16 @@ fn corrupt_checksum_in_last_frame_drops_it() {
     // untouched, so only the checksum can catch this.
     flip_byte(&path, spans[2].0 + 4);
 
-    let (mut wal, replayed) = WalWriter::open(&path).unwrap();
-    assert_eq!(replayed.len(), 2);
-    assert_eq!(fs::metadata(&path).unwrap().len(), spans[2].0);
-    assert_eq!(wal.append(&note("r3-again")).unwrap(), 3);
-    wal.barrier().unwrap();
-    drop(wal);
-
-    let seen = replay(&path).unwrap();
-    assert_eq!(seen.len(), 3);
-    assert_eq!(seen[2], (3, note("r3-again")));
+    let before = fs::read(&path).unwrap();
+    assert!(matches!(
+        WalWriter::open(&path),
+        Err(WalError::Corrupt { offset, .. }) if offset == spans[2].0
+    ));
+    assert_eq!(fs::read(&path).unwrap(), before);
 }
 
 #[test]
-fn corrupt_checksum_in_middle_frame_drops_everything_after_it() {
+fn corrupt_checksum_in_middle_frame_is_refused_and_left_untouched() {
     // Documented behaviour: the log is read front to back, so a bad frame in
     // the middle ends the replay. Every record after it is dropped, even
     // though those bytes are still on disk — there is no way to trust a
@@ -256,11 +252,12 @@ fn corrupt_checksum_in_middle_frame_drops_everything_after_it() {
     // checksum does not match.
     flip_byte(&path, spans[1].0 + 8 + 2);
 
-    let (mut wal, replayed) = WalWriter::open(&path).unwrap();
-    assert_eq!(replayed.len(), 1);
-    assert_eq!(replayed[0], (1, note("r1")));
-    assert_eq!(fs::metadata(&path).unwrap().len(), spans[1].0);
-    assert_eq!(wal.append(&note("fresh")).unwrap(), 2);
+    let before = fs::read(&path).unwrap();
+    assert!(matches!(
+        WalWriter::open(&path),
+        Err(WalError::Corrupt { offset, .. }) if offset == spans[1].0
+    ));
+    assert_eq!(fs::read(&path).unwrap(), before);
 }
 
 #[test]

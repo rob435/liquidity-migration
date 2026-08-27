@@ -84,6 +84,10 @@ impl WalWriter {
 
         let scan = if len == 0 {
             file.write_all(&MAGIC)?;
+            file.sync_data()?;
+            if let Some(dir) = path.parent() {
+                File::open(dir)?.sync_all()?;
+            }
             Scan { records: Vec::new(), good_end: HEADER_LEN }
         } else {
             scan_file(&mut file, len)?
@@ -617,7 +621,10 @@ fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
         payload.resize(payload_len as usize, 0);
         reader.read_exact(&mut payload)?;
         if crc32c::crc32c(&payload) != want_crc {
-            break;
+            return Err(WalError::Corrupt {
+                offset,
+                detail: "frame checksum does not match".to_string(),
+            });
         }
 
         // Checksum good but the bytes are not a record we understand: the disk

@@ -21,10 +21,11 @@
 //! research stops writing, which is exactly when it should not.
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use engine_types::{BookTarget, StrategyId, TargetBook};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -143,7 +144,7 @@ impl TargetBookWatcher {
             path,
             poll,
             books,
-            last_stamp: None,
+            last_digest: None,
             last_complaint: None,
         };
         TargetBookWatcher {
@@ -258,7 +259,7 @@ struct BookWorker {
     /// Modification time and length of the file the last delivered book came
     /// from. Length as well as time because a filesystem's modification stamp
     /// can be coarser than the gap between two writes.
-    last_stamp: Option<(SystemTime, u64)>,
+    last_digest: Option<[u8; 32]>,
     /// The last thing that went wrong, so a book that is simply not there yet
     /// does not write the same line every couple of seconds forever.
     last_complaint: Option<String>,
@@ -267,7 +268,7 @@ struct BookWorker {
 impl BookWorker {
     async fn run(mut self) {
         loop {
-            if let Some(book) = self.look() {
+            if let Some(book) = self.look().await {
                 // A closed channel means the engine is gone.
                 if self.books.send(book).await.is_err() {
                     return;
@@ -282,36 +283,24 @@ impl BookWorker {
     /// do not know. Nothing here ever ends the task — research writes on its
     /// own clock, and a watcher that gave up on the first bad read would go
     /// quiet exactly when the next good book was about to land.
-    fn look(&mut self) -> Option<TargetBook> {
-        let metadata = match std::fs::metadata(&self.path) {
-            Ok(metadata) => metadata,
-            Err(e) => {
+    async fn look(&mut self) -> Option<TargetBook> {
+        let path = self.path.clone();
+        let bytes = match tokio::task::spawn_blocking(move || std::fs::read(path)).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
                 self.complain(format!("no target book to read ({e})"));
                 return None;
             }
-        };
-        let modified = match metadata.modified() {
-            Ok(modified) => modified,
             Err(e) => {
-                self.complain(format!("this filesystem reports no modification time ({e})"));
+                self.complain(format!("target book read worker stopped ({e})"));
                 return None;
             }
         };
-        let stamp = (modified, metadata.len());
-        if self.last_stamp == Some(stamp) {
-            return None;
-        }
-
-        let bytes = match std::fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                self.complain(format!("cannot read the target book ({e})"));
-                return None;
-            }
-        };
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if self.last_digest == Some(digest) { return None; }
         match parse_book(&bytes) {
             Ok(book) => {
-                self.last_stamp = Some(stamp);
+                self.last_digest = Some(digest);
                 self.last_complaint = None;
                 tracing::info!(
                     path = %self.path.display(),

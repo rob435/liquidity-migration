@@ -52,6 +52,8 @@ pub struct TouchSniper {
     entry_order: Option<String>,
     exit_order: Option<String>,
     entry_filled_qty: f64,
+    exit_filled_qty: f64,
+    exit_working_until: f64,
     exit_rejects: u8,
     resend_exit_on_next_quote: bool,
 }
@@ -94,6 +96,8 @@ impl TouchSniper {
             entry_order: None,
             exit_order: None,
             entry_filled_qty: 0.0,
+            exit_filled_qty: 0.0,
+            exit_working_until: 0.0,
             exit_rejects: 0,
             resend_exit_on_next_quote: false,
         })
@@ -153,7 +157,8 @@ impl TouchSniper {
         let decided_ns = ctx.now_ns();
         // Leave what we actually got filled. The configured size is only a
         // fallback for the case where the fill news has not reached us.
-        let qty = if self.entry_filled_qty > 0.0 { self.entry_filled_qty } else { self.qty };
+        let qty = (self.entry_filled_qty - self.exit_filled_qty).max(0.0);
+        if qty <= self.qty.max(1.0) * 1e-12 { self.state = State::Done; return; }
         ctx.place(Intent {
             strategy: self.id,
             symbol,
@@ -170,6 +175,7 @@ impl TouchSniper {
             leverage: None,
         });
         self.exit_order = None;
+        self.exit_working_until = self.exit_filled_qty + qty;
         self.resend_exit_on_next_quote = false;
         self.state = State::ExitSent;
     }
@@ -234,10 +240,21 @@ impl TouchSniper {
                 OrderUpdate::Ack(ack) if is_ours(&self.exit_order, &ack.client_order_id) => {
                     self.exit_order = Some(ack.client_order_id.clone());
                 }
-                OrderUpdate::Fill { client_order_id, .. }
+                OrderUpdate::Fill { client_order_id, qty, .. }
+                    if is_ours(&self.entry_order, client_order_id) =>
+                {
+                    self.entry_filled_qty += qty;
+                }
+                OrderUpdate::Fill { client_order_id, qty, .. }
                     if is_ours(&self.exit_order, client_order_id) =>
                 {
-                    self.state = State::Done;
+                    self.exit_filled_qty += qty;
+                    let tolerance = self.qty.max(1.0) * 1e-12;
+                    if self.entry_filled_qty - self.exit_filled_qty <= tolerance {
+                        self.state = State::Done;
+                    } else if self.exit_filled_qty + tolerance >= self.exit_working_until {
+                        self.resend_exit_on_next_quote = true;
+                    }
                 }
                 OrderUpdate::Reject { client_order_id, .. }
                     if is_ours(&self.exit_order, client_order_id) =>
@@ -254,7 +271,18 @@ impl TouchSniper {
                 }
                 _ => {}
             },
-            State::Armed | State::Done => {}
+            State::Done => {
+                if let OrderUpdate::Fill { client_order_id, qty, .. } = update {
+                    if is_ours(&self.entry_order, client_order_id) {
+                        self.entry_filled_qty += qty;
+                        if self.entry_filled_qty > self.exit_filled_qty + self.qty.max(1.0) * 1e-12 {
+                            self.state = State::ExitSent;
+                            self.resend_exit_on_next_quote = true;
+                        }
+                    }
+                }
+            }
+            State::Armed => {}
         }
     }
 }
@@ -307,13 +335,21 @@ impl Strategy for TouchSniper {
     }
 
     fn on_order(&mut self, update: &OrderUpdate, ctx: &mut dyn StrategyCtx) {
-        if self.state == State::Done {
-            return;
-        }
         if self.resolve(&*ctx).is_none() {
             return;
         }
         self.order_news(update, ctx);
+    }
+
+    fn on_intent_refused(&mut self, symbol: SymbolId, reduce_only: bool, _reason: &str, ctx: &mut dyn StrategyCtx) {
+        if self.resolve(&*ctx) != Some(symbol) { return; }
+        if !reduce_only && self.state == State::EntrySent {
+            self.state = State::Done;
+        } else if reduce_only && self.state == State::ExitSent {
+            self.exit_rejects += 1;
+            if self.exit_rejects >= 2 { self.state = State::Done; }
+            else { self.resend_exit_on_next_quote = true; }
+        }
     }
 }
 

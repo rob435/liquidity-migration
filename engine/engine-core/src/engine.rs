@@ -303,16 +303,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // every book the same way a delivered one would have.
 
         let boot_ms = clock::wall_ms();
-        wal.append(&WalRecord::Boot {
-            version: ENGINE_VERSION.to_string(),
-            config_sha256: config_sha256.to_string(),
-            wall_ts_ms: boot_ms,
-        })?;
-        wal.append(&WalRecord::Note {
-            source: "engine".into(),
-            text: "live: orders are sent, each one gated by the risk kernel".to_string(),
-        })?;
-
         let mut market = MarketState::default();
         // Ids are interning positions, so the previous run's table is
         // re-interned first, in its own order: every id the replayed records
@@ -344,7 +334,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
             }
         }
+        let prior_names = crate::replay::LogNames::of_log(replayed).strategies;
+        if !sleeves.is_empty() && !prior_names.is_empty() && prior_names != names {
+            return Err(EngineError::Boot(format!(
+                "configured strategy identity/order {:?} does not match the WAL {:?}", names, prior_names
+            )));
+        }
+        let mut distinct = std::collections::HashSet::new();
+        if !sleeves.is_empty() && names.iter().any(|name| name.is_empty() || !distinct.insert(name)) {
+            return Err(EngineError::Boot("strategy sleeve names must be non-empty and unique".to_string()));
+        }
         routing.size_to(market.table.len());
+        wal.append(&WalRecord::Boot {
+            version: ENGINE_VERSION.to_string(),
+            config_sha256: config_sha256.to_string(),
+            wall_ts_ms: boot_ms,
+        })?;
+        wal.append(&WalRecord::Note {
+            source: "engine".into(),
+            text: "live: orders are sent, each one gated by the risk kernel".to_string(),
+        })?;
         // Say what the ids mean before any record uses one. Without this every
         // later line names a number, and a log read a week later cannot say
         // which coin an order was for.
@@ -916,7 +925,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut flush_tick = tokio::time::interval(self.group_flush);
         flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut stopped_by = StopReason::Shutdown;
-        let mut order_feed_open = true;
         // Out of `self` for the length of the run: a select! branch waiting
         // on it must not borrow the engine the other branches need.
         let mut targets = std::mem::replace(&mut self.targets, TargetBooks::new(Vec::new()));
@@ -943,15 +951,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                 },
-                update = order_feed.next_update(), if order_feed_open => match update {
+                update = order_feed.next_update() => match update {
                     Ok(update) => {
                         let now = clock::now_ns();
                         self.take_update(update).await?;
                         self.drain(now).await?;
                     }
                     Err(engine_types::FeedError::Closed) => {
-                        tracing::warn!("order feed closed; order news now only comes from replies");
-                        order_feed_open = false;
+                        tracing::error!("order feed closed; stopping for supervised recovery");
+                        stopped_by = StopReason::FeedClosed;
+                        break;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "order feed hiccup");
@@ -1948,11 +1957,47 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         symbol: SymbolId,
         trigger_px: f64,
     ) -> Result<(), EngineError> {
+        let symbol_name = self.market.table.name(symbol).to_string();
+        let refuse = |reason: &str| WalRecord::Note {
+            source: "engine".into(),
+            text: format!("stop on {symbol_name} not moved to {trigger_px}: {reason}"),
+        };
+        if !trigger_px.is_finite() || trigger_px <= 0.0 {
+            self.wal.append(&refuse("trigger is not a positive finite price"))?;
+            return Ok(());
+        }
+        let mut held = self.account.positions.iter().filter(|p| p.symbol == symbol);
+        let Some(position) = held.next() else {
+            self.wal.append(&refuse("the latest account view has no held position"))?;
+            return Ok(());
+        };
+        if held.next().is_some() || !position.qty.is_finite() || position.qty <= 0.0 {
+            self.wal.append(&refuse("the latest position state is ambiguous or unreadable"))?;
+            return Ok(());
+        }
+        let remembered = self.intended_stops.get(&symbol.0).copied();
+        let venue_stop = (position.stop_attached && position.stop_px.is_finite() && position.stop_px > 0.0)
+            .then_some(position.stop_px);
+        let baseline = match (position.side, remembered, venue_stop) {
+            (Side::Buy, Some(a), Some(b)) => Some(a.max(b)),
+            (Side::Sell, Some(a), Some(b)) => Some(a.min(b)),
+            (_, a, b) => a.or(b),
+        };
+        let loosens = match (position.side, baseline) {
+            (Side::Buy, Some(old)) => trigger_px < old,
+            (Side::Sell, Some(old)) => trigger_px > old,
+            (_, None) => false,
+        };
+        if loosens {
+            self.wal.append(&refuse("the requested stop would loosen protection"))?;
+            return Ok(());
+        }
         self.wal.append(&WalRecord::StopSet {
             symbol,
             trigger_px,
             wall_ts_ms: clock::wall_ms(),
         })?;
+        self.intended_stops.insert(symbol.0, trigger_px);
         match self.venue.set_stop(symbol, trigger_px).await {
             Ok(()) => {
                 tracing::info!(
@@ -2051,6 +2096,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         spec: AmendSpec,
         _origin_ns: u64,
     ) -> Result<bool, EngineError> {
+        if spec.qty.is_some() {
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!("{client_order_id} not amended: quantity changes are unsupported until risk and ledger reservations can be resized atomically"),
+            })?;
+            return Ok(false);
+        }
+        if spec.px.is_none_or(|px| !px.is_finite() || px <= 0.0) {
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!("{client_order_id} not amended: price is not positive and finite"),
+            })?;
+            return Ok(false);
+        }
         if !self.venue.caps().amend_in_place {
             // No quiet fallback to cancel-and-replace. A replaced order is a
             // new order at the back of the queue at a fresh price — a

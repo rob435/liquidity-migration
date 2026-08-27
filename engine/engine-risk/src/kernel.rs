@@ -94,7 +94,9 @@ impl Kernel {
         //    enforcement bounds an exit sized from an old reading. Stale
         //    equity is NOT folded into the envelope here — only entries
         //    observe.
-        let net_qty = view.net_qty(intent.symbol);
+        let recent = self.book.fills_after(account.observed_ns);
+        let net_qty = view.net_qty(intent.symbol)
+            + recent.get(&intent.symbol.0).copied().unwrap_or(0.0);
         let delta = signed(intent.side, ask_qty);
         let reduces = net_qty.abs() > self.cfg.qty_tolerance && delta * net_qty < 0.0;
         if intent.reduce_only {
