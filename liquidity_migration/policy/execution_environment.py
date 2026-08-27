@@ -1,13 +1,10 @@
-"""Which account owner a producer's targets are routed to.
+"""Which venue realm a producer and Rust engine operate in.
 
 ``demo``
     Bybit's api-demo realm: real prices, simulated fills, no capital.
 ``mainnet``
     The funded Bybit account. Selecting it is not sufficient; ``REAL_MONEY`` is
     the separate arming switch.
-
-The credential-free ``paper`` twin was retired 2026-08-03; its journals remain
-on disk but nothing routes to it.
 
 Import ``EXECUTION_ENVIRONMENT_VALUES`` instead of restating the member set, so
 adding a member does not leave stale literals behind.

@@ -1,4 +1,4 @@
-"""The account reading the target producers size from.
+"""The Rust engine account reading target producers size from.
 
 The engine owns the account and says this in its heartbeat: what the venue last
 reported as equity and spare margin, and **when that reading was taken at the
@@ -13,15 +13,8 @@ counts from an arbitrary instant near its boot -- so it converts the reading's
 *age* into a stamp on the same clock it writes ``wall_ts_ms`` with, and both
 halves have a test that says which clock it is.
 
-**What is checked is the realm, not the account id.** A route names an account
-logically (``bybit-mainnet-unified``); the engine reports the venue's own user
-number (``552445993``, the same one its lease file is named after). They are
-two id spaces and never match, so comparing them would block every entry on
-every cycle -- fail-closed and silent. Realm is the comparison that carries the
-real risk anyway: what must never happen is a demo heartbeat sizing a mainnet
-producer. The venue user id is still read and still reported in errors, because
-when something is wrong it is the number that identifies which account you are
-actually looking at.
+The expected venue user id can be bound independently from the logical realm;
+both checks fail closed before a producer sizes new risk.
 """
 
 from __future__ import annotations
@@ -37,6 +30,7 @@ from pathlib import Path
 from liquidity_migration.core.artifact_snapshot import read_stable_file
 
 __all__ = [
+    "EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV",
     "ENGINE_HEARTBEAT_PATH_ENV",
     "TARGET_PRODUCER_HEALTH_MAX_AGE_NS",
     "engine_held_symbols",
@@ -54,6 +48,10 @@ TARGET_PRODUCER_HEALTH_MAX_AGE_NS = 30_000_000_000
 #: Override for the engine heartbeat this producer reads. The unit sets it when
 #: the engine writes somewhere other than the per-realm default below.
 ENGINE_HEARTBEAT_PATH_ENV = "ENGINE_ACCOUNT_HEARTBEAT_FILE"
+
+#: Venue user id the producer is allowed to size against. Realm alone is not
+#: an account identity: two funded accounts can both report ``mainnet``.
+EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV = "EXPECTED_ENGINE_ACCOUNT_USER_ID"
 
 #: One heartbeat per realm, because one engine owns one account. These match
 #: `StateDirectory` in the two engine units; two realms sharing a path would
@@ -122,6 +120,7 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         label="engine heartbeat",
         reject_empty=True,
         require_single_link=True,
+        max_bytes=1024 * 1024,
     )
     try:
         payload = json.loads(snapshot.data)
@@ -136,13 +135,13 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     account_user_id = payload.get("account_user_id")
     realm = payload.get("realm")
     positions = payload.get("positions")
-    if equity is None or observed is None:
+    if equity is None or available is None or observed is None:
         raise ValueError(
             "engine heartbeat carries no account reading yet "
-            "(account_equity_usdt/account_observed_wall_ts_ms are null)"
+            "(equity/available/observed fields must all be present)"
         )
     equity_usdt = float(equity)
-    available_usdt = float(available) if available is not None else 0.0
+    available_usdt = float(available)
     observed_wall_ts_ms = int(observed)
     if not math.isfinite(equity_usdt) or equity_usdt <= 0.0:
         raise ValueError("engine heartbeat equity must be finite and positive")
@@ -159,24 +158,36 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         raise ValueError("engine heartbeat carries no realm")
     held_symbols: frozenset[str] | None = None
     holdings: dict[str, tuple[str, float, float]] = {}
-    if isinstance(positions, list):
+    if positions is not None:
+        if not isinstance(positions, list):
+            raise ValueError("engine heartbeat positions must be an array or null")
         named: set[str] = set()
-        for row in positions:
+        for index, row in enumerate(positions):
             if not isinstance(row, Mapping):
-                continue
-            symbol = str(row.get("symbol") or "").upper()
-            if not symbol:
-                continue
-            named.add(symbol)
+                raise ValueError(f"engine heartbeat position {index} is not an object")
+            symbol = str(row.get("symbol") or "")
+            if not symbol or symbol != symbol.upper() or not symbol.isalnum():
+                raise ValueError(f"engine heartbeat position {index} has invalid symbol")
+            if symbol in named:
+                raise ValueError(f"engine heartbeat repeats position {symbol}")
             qty = row.get("qty")
-            if not isinstance(qty, (int, float)):
-                continue
+            if not isinstance(qty, (int, float)) or not math.isfinite(float(qty)) or float(qty) <= 0.0:
+                raise ValueError(f"engine heartbeat position {symbol} has invalid qty")
             side = str(row.get("side") or "")
+            if side not in {"long", "short"}:
+                raise ValueError(f"engine heartbeat position {symbol} has invalid side")
             entry_px = row.get("entry_px")
+            if (
+                not isinstance(entry_px, (int, float))
+                or not math.isfinite(float(entry_px))
+                or float(entry_px) <= 0.0
+            ):
+                raise ValueError(f"engine heartbeat position {symbol} has invalid entry_px")
+            named.add(symbol)
             holdings[symbol] = (
                 side,
                 float(qty),
-                float(entry_px) if isinstance(entry_px, (int, float)) else 0.0,
+                float(entry_px),
             )
         held_symbols = frozenset(named)
 
@@ -208,8 +219,9 @@ def require_recent_engine_account(
     max_age_ns: int,
     now_ns: int | None = None,
     path: str | Path | None = None,
+    expected_account_user_id: str | None = None,
 ) -> EngineAccountReading:
-    """The reading, if it is recent and about the realm the caller means."""
+    """Return a recent reading for the exact realm and venue account."""
 
     resolved = Path(path) if path is not None else engine_heartbeat_path(environment)
     reading = read_engine_account(resolved)
@@ -217,6 +229,21 @@ def require_recent_engine_account(
         raise ValueError(
             f"engine heartbeat is for the {reading.realm!r} realm, not {environment!r} "
             f"(that engine is on venue account {reading.account_user_id})"
+        )
+    expected_user_id = str(
+        expected_account_user_id
+        if expected_account_user_id is not None
+        else os.environ.get(EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV, "")
+    ).strip()
+    if not expected_user_id:
+        raise ValueError(
+            f"{EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV} must name the venue account "
+            "the producer is allowed to size against"
+        )
+    if reading.account_user_id != expected_user_id:
+        raise ValueError(
+            f"engine heartbeat is for venue account {reading.account_user_id!r}, "
+            f"not expected account {expected_user_id!r}"
         )
     stamp_ns = time.time_ns() if now_ns is None else int(now_ns)
     age_ns = stamp_ns - reading.observed_wall_ts_ms * 1_000_000
@@ -237,6 +264,7 @@ def engine_held_symbols(
     *,
     max_age_ns: int,
     path: str | Path | None = None,
+    expected_account_user_id: str | None = None,
 ) -> frozenset[str] | None:
     """What the engine says is held, or `None` when it did not say.
 
@@ -249,7 +277,10 @@ def engine_held_symbols(
 
     try:
         return require_recent_engine_account(
-            environment, max_age_ns=max_age_ns, path=path
+            environment,
+            max_age_ns=max_age_ns,
+            path=path,
+            expected_account_user_id=expected_account_user_id,
         ).held_symbols
     except (OSError, RuntimeError, ValueError):
         # RuntimeError is read_stable_file's "changed while it was read" — the
@@ -263,6 +294,7 @@ def engine_entry_blockers(
     *,
     max_age_ns: int,
     path: str | Path | None = None,
+    expected_account_user_id: str | None = None,
 ) -> dict[str, str]:
     """Why the engine is not opening each asked-for name, or `{}` when it did not say.
 
@@ -274,7 +306,10 @@ def engine_entry_blockers(
     try:
         return dict(
             require_recent_engine_account(
-                environment, max_age_ns=max_age_ns, path=path
+                environment,
+                max_age_ns=max_age_ns,
+                path=path,
+                expected_account_user_id=expected_account_user_id,
             ).entry_blockers
         )
     except (OSError, RuntimeError, ValueError):

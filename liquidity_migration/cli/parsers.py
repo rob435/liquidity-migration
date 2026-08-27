@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from liquidity_migration.data.archive_manifest import DEFAULT_BYBIT_V5_KLINE_URL
-from liquidity_migration.account.execution_environment import EXECUTION_ENVIRONMENT_CHOICES
+from liquidity_migration.policy.execution_environment import EXECUTION_ENVIRONMENT_CHOICES
 from liquidity_migration.data.downloaders import BINANCE_PROXY_DATASET_MAP
 
 
@@ -236,17 +236,7 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         "--execution-environment",
         required=True,
         choices=EXECUTION_ENVIRONMENT_CHOICES,
-        help="Select exactly one account target owner; producers never submit orders.",
-    )
-    long_demo.add_argument(
-        "--account-intent-inbox-root",
-        default=None,
-        help="Publish DesiredTarget batches to the single account execution owner.",
-    )
-    long_demo.add_argument(
-        "--account-execution-root",
-        default=None,
-        help="Read canonical accepted targets for LONG planning; required with the inbox.",
+        help="Select the exact Rust engine venue realm; producers never submit orders.",
     )
     long_demo.add_argument(
         "--candidate-universe-file",
@@ -392,17 +382,7 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         "--execution-environment",
         required=True,
         choices=EXECUTION_ENVIRONMENT_CHOICES,
-        help="Select exactly one account target owner; producers never submit orders.",
-    )
-    p.add_argument(
-        "--account-intent-inbox-root",
-        default=None,
-        help="Publish DesiredTarget batches to the single account execution owner.",
-    )
-    p.add_argument(
-        "--account-execution-root",
-        default=None,
-        help="Read canonical accepted targets for CARRY planning; required with the inbox.",
+        help="Select the exact Rust engine venue realm; producers never submit orders.",
     )
     p.add_argument(
         "--candidate-universe-file",

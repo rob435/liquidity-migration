@@ -11,11 +11,9 @@ import pytest
 from liquidity_migration.core._common import MS_PER_HOUR
 from liquidity_migration.rules.long_native import long_v11a_profile
 from liquidity_migration.strategy.long_native_event_demo import (
-    LongNativeDemoCycleConfig,
-    _long_entry_target_intents,
     _select_long_entry_candidates,
 )
-from liquidity_migration.account.strategy_funnel import (
+from liquidity_migration.strategy.strategy_funnel import (
     FunnelJsonlWriter,
     finalize_funnel_row,
 )
@@ -87,18 +85,6 @@ def test_long_writer_on_off_preserves_candidates_order_and_numbers() -> None:
 
     assert candidates_on == candidates_off
     assert skips_on == skips_off
-    target_args = {
-        "demo": LongNativeDemoCycleConfig(entry_leverage=10.0),
-        "equity_usdt": 10_000.0,
-        "order_notional_pct_equity": 0.10,
-        "price_by_symbol": {"ABCUSDT": 98.5},
-        "now_ms": now_ms,
-        "strategy_id": "long_native_v11a_div_weekend_vol",
-    }
-    assert _long_entry_target_intents(candidates_on, **target_args) == _long_entry_target_intents(
-        candidates_off,
-        **target_args,
-    )
     assert [row["source_key"] for row in collector.rows] == [
         f"long:bybit:ABCUSDT:{signal_ts_ms}"
     ]

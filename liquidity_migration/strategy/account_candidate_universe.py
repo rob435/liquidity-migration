@@ -1351,113 +1351,12 @@ def enforce_frozen_candidate_frames(
     )
 
 
-def account_exposure_labels(
-    *,
-    route: object,
-    tolerance: float = 1e-12,
-    journal_cursor: object | None = None,
-    symbols: Iterable[str] | None = None,
-) -> dict[str, tuple[str, ...]]:
-    """Symbols with live account or queue exposure, labeled by where it sits.
-
-    ``symbols=None`` reports every exposed symbol on the account; a caller
-    with a specific population passes it to restrict the scan. A per-cycle
-    caller passes its resumable ``journal_cursor`` so the account state comes
-    from an incremental verified read; without one the check pays a full cold
-    journal read, which is fine for CLI and offline callers.
-    """
-
-    from liquidity_migration.account.account_kernel import (
-        AccountJournalCursor,
-        read_account_journal,
-        reduce_account_events,
-    )
-    from liquidity_migration.account.account_service import AccountIntentInbox
-
-    account_path = getattr(route, "account_path", None)
-    if not isinstance(account_path, Path):
-        raise TypeError("account exposure requires a verified AccountRoute")
-    inbox = AccountIntentInbox(route)  # type: ignore[arg-type]
-    unresolved = inbox.unresolved_requests()
-    # An unresolved request is exposure at ANY notional: the owner must claim
-    # and process it, and processing reads that symbol's rules — a queued
-    # ZERO target (every exit and flatten is one) for an already-flat symbol
-    # was the one runtime rules-consumer the scan could not see, and a
-    # receipt frozen without it wedges the request on restart.
-    pending_any: set[str] = set()
-    pending_nonzero: set[str] = set()
-    for request in unresolved:
-        for item in request.intents:
-            symbol = item.intent.symbol.upper()
-            pending_any.add(symbol)
-            if abs(float(item.intent.signed_notional_usdt)) > tolerance:
-                pending_nonzero.add(symbol)
-    if isinstance(journal_cursor, AccountJournalCursor):
-        state = journal_cursor.read(account_path).state
-    else:
-        state = reduce_account_events(read_account_journal(account_path, verify=True))
-    if symbols is None:
-        candidates = {
-            symbol
-            for symbol, position in state.positions.items()
-            if abs(position.signed_qty) > tolerance
-        }
-        candidates |= {
-            symbol
-            for symbol, target in state.aggregate_targets.items()
-            if abs(float(target)) > tolerance
-        }
-        candidates |= state.working_symbols(tolerance=tolerance)
-        for targets in (state.component_targets, state.component_target_desires):
-            candidates |= {
-                str(target.get("symbol") or "").upper()
-                for target in targets.values()
-                if abs(float(target.get("signed_qty") or 0.0)) > tolerance
-            }
-        candidates |= pending_any
-        candidates = {_symbol(symbol) for symbol in candidates if symbol}
-    else:
-        candidates = {_symbol(symbol) for symbol in symbols}
-    # Per-order, not netted: two live opposite-sign orders net to zero but
-    # each still needs its symbol's rules at the venue, and the owner's own
-    # account-wide input check counts them per order.
-    live_order_symbols = state.working_symbols(tolerance=tolerance)
-    problems: dict[str, list[str]] = {symbol: [] for symbol in candidates}
-    for symbol in sorted(candidates):
-        position = state.positions.get(symbol)
-        if position is not None and abs(position.signed_qty) > tolerance:
-            problems[symbol].append("position")
-        if abs(float(state.aggregate_targets.get(symbol, 0.0))) > tolerance:
-            problems[symbol].append("aggregate_target")
-        if symbol in live_order_symbols:
-            problems[symbol].append("working_order")
-        for label, targets in (
-            ("component_target", state.component_targets),
-            ("component_desire", state.component_target_desires),
-        ):
-            if any(
-                str(target.get("symbol") or "").upper() == symbol
-                and abs(float(target.get("signed_qty") or 0.0)) > tolerance
-                for target in targets.values()
-            ):
-                problems[symbol].append(label)
-        if symbol in pending_nonzero:
-            problems[symbol].append("unresolved_nonzero_request")
-        elif symbol in pending_any:
-            problems[symbol].append("unresolved_request")
-    return {
-        symbol: tuple(labels) for symbol, labels in problems.items() if labels
-    }
-
-
 def scheduled_retirement_exposure(
     reconciliation: CandidatePopulationReconciliation,
     *,
-    route: object,
-    tolerance: float = 1e-12,
-    journal_cursor: object | None = None,
+    held_symbols: Iterable[str] | None,
 ) -> dict[str, tuple[str, ...]]:
-    """Exposure still standing on scheduled-retirement symbols, by source.
+    """Rust-engine exposure still standing on scheduled-retirement symbols.
 
     The per-cycle report form: a retiring symbol with exposure is a normal
     draining state, not a fault. Entries for it are already suppressed by the
@@ -1469,24 +1368,23 @@ def scheduled_retirement_exposure(
 
     if not reconciliation.scheduled_retirements:
         return {}
-    retired = {row.symbol for row in reconciliation.scheduled_retirements}
-    return account_exposure_labels(
-        route=route,
-        tolerance=tolerance,
-        journal_cursor=journal_cursor,
-        symbols=retired,
-    )
+    retired = {_symbol(row.symbol) for row in reconciliation.scheduled_retirements}
+    if held_symbols is None:
+        return {symbol: ("engine_positions_unknown",) for symbol in sorted(retired)}
+    held = {_symbol(symbol) for symbol in held_symbols}
+    return {
+        symbol: ("engine_position",)
+        for symbol in sorted(retired & held)
+    }
 
 
 def require_scheduled_retirements_flat(
     reconciliation: CandidatePopulationReconciliation,
     *,
-    route: object,
+    held_symbols: Iterable[str] | None,
     context: str,
-    tolerance: float = 1e-12,
-    journal_cursor: object | None = None,
 ) -> None:
-    """Fail closed if a retired entry symbol has any account or queue exposure.
+    """Fail closed unless Rust reports every retired entry symbol flat.
 
     The raising form is for callers proving a precondition — retiring a
     symbol from an artifact, an offline audit. Producer cycles must use
@@ -1497,14 +1395,12 @@ def require_scheduled_retirements_flat(
 
     active = scheduled_retirement_exposure(
         reconciliation,
-        route=route,
-        tolerance=tolerance,
-        journal_cursor=journal_cursor,
+        held_symbols=held_symbols,
     )
     if active:
         detail = "; ".join(
             f"{symbol}={','.join(labels)}" for symbol, labels in sorted(active.items())
         )
         raise RuntimeError(
-            f"{context}: scheduled-retirement symbols are not account-flat: {detail}"
+            f"{context}: scheduled-retirement symbols are not engine-flat: {detail}"
         )

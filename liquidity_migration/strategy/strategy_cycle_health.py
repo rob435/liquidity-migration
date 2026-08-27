@@ -10,9 +10,6 @@ state and never participates in replay, accounting, or decision hashes.
 from __future__ import annotations
 
 import json
-import os
-import threading
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,7 +17,8 @@ from typing import Any, Mapping
 from liquidity_migration.core.env_flags import validate_systemd_invocation_id
 from liquidity_migration.core.artifact_snapshot import read_stable_file
 from liquidity_migration.core.deterministic_serialization import canonical_json
-from liquidity_migration.account.execution_environment import EXECUTION_ENVIRONMENT_VALUES
+from liquidity_migration.core.durable_file import durable_atomic_replace
+from liquidity_migration.policy.execution_environment import EXECUTION_ENVIRONMENT_VALUES
 
 
 STRATEGY_CYCLE_HEALTH_SCHEMA_VERSION = 1
@@ -99,35 +97,7 @@ def strategy_cycle_health_path(root: str | Path) -> Path:
 def _atomic_private_replace(path: Path, data: bytes) -> None:
     """Replace one private projection without exposing a torn target."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    created = False
-    try:
-        descriptor = os.open(str(temporary), flags, 0o600)
-        created = True
-        try:
-            os.fchmod(descriptor, 0o600)
-            view = memoryview(data)
-            offset = 0
-            while offset < len(data):
-                written = os.write(descriptor, view[offset:])
-                if written <= 0:
-                    raise OSError("strategy-cycle health write made no progress")
-                offset += written
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, path)
-        directory_descriptor = os.open(str(path.parent), os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    except BaseException:
-        if created:
-            temporary.unlink(missing_ok=True)
-        raise
+    durable_atomic_replace(path, data, label="strategy-cycle health")
 
 
 def write_strategy_cycle_health(

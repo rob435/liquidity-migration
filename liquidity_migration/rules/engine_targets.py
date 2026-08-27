@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from liquidity_migration.core.durable_file import durable_atomic_replace
 
 #: Bumped when the shape changes in a way an old reader would misread. The
 #: engine refuses a version it does not know rather than guessing.
@@ -100,8 +101,6 @@ def render_target_book(
 
 
 def write_target_book(path: Path, text: str) -> None:
-    """Write a rendered book so a reader never sees a partial one."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    """Durably publish a rendered book without exposing partial contents."""
+
+    durable_atomic_replace(path, text.encode("utf-8"), label="engine target book")

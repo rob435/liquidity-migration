@@ -36,7 +36,8 @@ def test_round_trip_is_private_atomic_and_replaces_latest(tmp_path: Path) -> Non
     path = write_strategy_cycle_health(tmp_path, _health())
 
     assert path == strategy_cycle_health_path(tmp_path)
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert path.stat().st_nlink == 1
     assert read_strategy_cycle_health(tmp_path) == _health()
 

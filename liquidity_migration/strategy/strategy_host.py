@@ -16,8 +16,7 @@ A strategy plugs in as a small subclass. The whole contract:
   itself; False when the cycle object sits under a ``"cycle"`` key.
 * ``_strategy_profile_name()`` — the registered profile the daemon runs.
 * ``_extra_cycle_kwargs()`` — kwargs the cycle runner needs beyond the
-  shared market/config set (a journal cursor, sleeve state). The host
-  provides ``{"journal_cursor": ...}`` by default.
+  shared market/config set (normally only sleeve-local state).
 * ``_format_cycle_summary(payload)`` — the one-line stdout receipt.
 * ``_pre_resource_teardown()`` — quiesce sleeve workers before the shared
   public planes close.
@@ -43,7 +42,6 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
-from liquidity_migration.account.account_kernel import account_transactions_path
 from liquidity_migration.core.env_flags import validate_systemd_invocation_id
 from liquidity_migration.core.fs_watch import DirectoryRenameWatch
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData, BybitPublicTickerStream
@@ -51,16 +49,16 @@ from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.core.deterministic_runtime import Clock, SystemClock
 from liquidity_migration.core.logging_setup import ensure_default_log_handler
 from liquidity_migration.strategy.strategy_cycle_health import StrategyCycleHealth, write_strategy_cycle_health
-from liquidity_migration.strategy.strategy_planning import new_planning_journal_cursor
-from liquidity_migration.account.strategy_event_clock import (
+from liquidity_migration.runtime.engine_account_health import engine_heartbeat_path
+from liquidity_migration.strategy.strategy_event_clock import (
     DeterministicEventClock,
     JsonlStrategyEventTape,
     StrategyEvent,
     StrategyEventRecorder,
 )
 from liquidity_migration.strategy.strategy_event_outcome import JsonlStrategyEventDecisionTape
-from liquidity_migration.strategy.strategy_target_replay import (
-    JsonlTargetSchedulingCaptureTape,
+from liquidity_migration.strategy.target_book_evidence import (
+    JsonlTargetBookCaptureTape,
     PublishedTargetCyclePayload,
 )
 from liquidity_migration.marketdata.ws_state_cache import TickerCache, _message_rows
@@ -120,12 +118,12 @@ class StrategyHostDaemon:
         state_cache_stale_seconds: float = 120.0,
         event_driven_cycle: bool = True,
         min_cycle_interval_seconds: float = 2.0,
-        journal_change_wake_dir: str | Path | None = None,
+        engine_change_wake_dir: str | Path | None = None,
         clock: Clock | None = None,
         strategy_event_recorder: StrategyEventRecorder | None = None,
         strategy_decision_recorder: JsonlStrategyEventDecisionTape | None = None,
         strategy_target_capture_path: str | Path | None = None,
-        strategy_target_capture_recorder: JsonlTargetSchedulingCaptureTape | None = None,
+        strategy_target_capture_recorder: JsonlTargetBookCaptureTape | None = None,
         strategy_invocation_id: str | None = None,
         completion_clock_ns: Callable[[], int] = time.time_ns,
     ) -> None:
@@ -136,9 +134,6 @@ class StrategyHostDaemon:
         self.demo_config = demo_config
         self.interval_seconds = float(interval_seconds)
         self._cycle_runner = cycle_runner
-        # Cross-cycle read position into the append-only account journal. A
-        # daemon owns exactly one; losing it (restart) costs one cold read.
-        self._journal_cursor = new_planning_journal_cursor()
         self._clock = clock or SystemClock()
         recorder = strategy_event_recorder or JsonlStrategyEventTape(self.data_root / "strategy_event_tape.jsonl")
         self._event_clock: DeterministicEventClock[PublishedTargetCyclePayload | None] = DeterministicEventClock(
@@ -150,8 +145,8 @@ class StrategyHostDaemon:
         )
         if strategy_target_capture_path is not None and strategy_target_capture_recorder is not None:
             raise ValueError("strategy_target_capture_path and strategy_target_capture_recorder are mutually exclusive")
-        self._target_capture_recorder = strategy_target_capture_recorder or JsonlTargetSchedulingCaptureTape(
-            strategy_target_capture_path or self.data_root / "strategy_target_scheduling_capture.jsonl"
+        self._target_capture_recorder = strategy_target_capture_recorder or JsonlTargetBookCaptureTape(
+            strategy_target_capture_path or self.data_root / "strategy_target_book_capture.jsonl"
         )
         self._strategy_evidence_errors = 0
         self._strategy_health_errors = 0
@@ -182,18 +177,15 @@ class StrategyHostDaemon:
         self._max_idle_seconds = self.interval_seconds if self.interval_seconds > 0.0 else 60.0
         self._cycles_kline_triggered = 0
         self._cycles_timer_triggered = 0
-        # Account-journal change wake: a watch on the journal's transaction
-        # directory ends the event wait the instant a fill, receipt, or any
-        # other account event commits, instead of on the next idle-floor pass.
-        # An accelerator, not a correctness gate: a commit that lands while
-        # the watch is down is picked up by the idle-floor cycle.
-        self._journal_change_wake_dir = (
-            Path(journal_change_wake_dir).expanduser() if journal_change_wake_dir is not None else None
+        # Heartbeat replacement ends the event wait after fills, refusals, and
+        # account refreshes instead of waiting for the idle-floor pass.
+        self._engine_change_wake_dir = (
+            Path(engine_change_wake_dir).expanduser() if engine_change_wake_dir is not None else None
         )
-        self._journal_wake_pending = False
-        self._journal_watch_thread: threading.Thread | None = None
-        self._journal_watch_stop = threading.Event()
-        self._cycles_journal_triggered = 0
+        self._engine_wake_pending = False
+        self._engine_watch_thread: threading.Thread | None = None
+        self._engine_watch_stop = threading.Event()
+        self._cycles_engine_triggered = 0
         # Deadline-driven passes: each cycle reports the earliest future
         # instant a time rule can change its book (a max-hold stop coming
         # due, carry's daily decision boundary), and the wait below is cut
@@ -330,7 +322,7 @@ class StrategyHostDaemon:
             **self._price_wake_fired,
             touched_symbol: (floors.get(touched_symbol), ceilings.get(touched_symbol)),
         }
-        # Flag before event, as the journal watch does: the wait reads the
+        # Flag before event, as the engine watch does: the wait reads the
         # flag only after the event woke it.
         self._price_wake_pending = True
         self._bar_event.set()
@@ -374,13 +366,13 @@ class StrategyHostDaemon:
         # the reconcile thread handles subsequent REST refreshes.
         self._seed_public_ticker_cache()
         self._start_reconcile_thread()
-        self._start_journal_watch_thread()
+        self._start_engine_watch_thread()
         try:
             self._next_cycle_at = time.monotonic()
             while not self._shutdown.is_set():
                 # Flag before event: an arrival racing this clear is folded
                 # into the cycle about to run, same as a bar arrival.
-                self._journal_wake_pending = False
+                self._engine_wake_pending = False
                 self._price_wake_pending = False
                 self._bar_event.clear()
                 self._run_one_cycle()
@@ -399,14 +391,14 @@ class StrategyHostDaemon:
                 seed.join(timeout=5.0)
             # Let plugs quiesce before shared public resources close.
             self._pre_resource_teardown()
-            self._stop_journal_watch_thread()
+            self._stop_engine_watch_thread()
             self._stop_reconcile_thread()
             self._close_ticker_stream()
             self._stop_kline_stream_manager()
         _logger.info(
             "%s strategy host stopped cycles_run=%d cycle_errors=%d "
             "cycle_overruns=%d max_cycle_seconds=%.1f cycles_kline_triggered=%d "
-            "cycles_journal_triggered=%d cycles_timer_triggered=%d "
+            "cycles_engine_triggered=%d cycles_timer_triggered=%d "
             "cycles_deadline_triggered=%d cycles_price_triggered=%d "
             "reconciles_total=%d reconcile_errors=%d ws_ticker_stale_ticks=%d",
             self._sleeve_label,
@@ -415,7 +407,7 @@ class StrategyHostDaemon:
             self._cycle_overruns,
             self._max_cycle_seconds,
             self._cycles_kline_triggered,
-            self._cycles_journal_triggered,
+            self._cycles_engine_triggered,
             self._cycles_timer_triggered,
             self._cycles_deadline_triggered,
             self._cycles_price_triggered,
@@ -429,7 +421,7 @@ class StrategyHostDaemon:
             "cycle_overruns": self._cycle_overruns,
             "max_cycle_seconds": self._max_cycle_seconds,
             "cycles_kline_triggered": self._cycles_kline_triggered,
-            "cycles_journal_triggered": self._cycles_journal_triggered,
+            "cycles_engine_triggered": self._cycles_engine_triggered,
             "cycles_timer_triggered": self._cycles_timer_triggered,
             "cycles_deadline_triggered": self._cycles_deadline_triggered,
             "cycles_price_triggered": self._cycles_price_triggered,
@@ -441,12 +433,9 @@ class StrategyHostDaemon:
         }
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
-        """Extra kwargs a plug injects into the cycle runner. The host provides the resumable
-        journal cursor; the LONG plug adds its strategy config, and the carry plug replaces the
-        lot with a ``cycle_state`` that already owns a cursor. Keeping it a hook means a plug
-        need not duplicate the whole telemetry-laden
-        ``_run_one_cycle`` to add one kwarg."""
-        return {"journal_cursor": self._journal_cursor}
+        """Extra kwargs a plug injects into the cycle runner."""
+
+        return {}
 
     def _run_one_cycle(self) -> None:
         """Dispatch a live arrival through the shared replay/event-clock path."""
@@ -852,42 +841,42 @@ class StrategyHostDaemon:
         except Exception as exc:
             _logger.warning("%s kline_stream_manager.stop failed: %s", self._sleeve_label, exc)
 
-    # -- account-journal change wake ----------------------------------
+    # -- engine heartbeat change wake ---------------------------------
 
-    def _start_journal_watch_thread(self) -> None:
-        """Watch the account journal's transaction directory and end the
-        event wait the instant a commit renames a segment into place.
+    def _start_engine_watch_thread(self) -> None:
+        """Watch the engine heartbeat directory and end the event wait when
+        the engine atomically replaces its heartbeat.
 
         Only meaningful in event mode: the timer grid ignores the wake
         event. Uses inotify where available; elsewhere a coarse mtime poll
         carries the same signal a little later."""
-        if not self._event_driven_cycle or self._journal_change_wake_dir is None:
+        if not self._event_driven_cycle or self._engine_change_wake_dir is None:
             return
-        self._journal_watch_stop.clear()
-        self._journal_watch_thread = threading.Thread(
-            target=self._journal_watch_loop,
-            name=f"{self._sleeve_label}-journal-watch",
+        self._engine_watch_stop.clear()
+        self._engine_watch_thread = threading.Thread(
+            target=self._engine_watch_loop,
+            name=f"{self._sleeve_label}-engine-watch",
             daemon=True,
         )
-        self._journal_watch_thread.start()
+        self._engine_watch_thread.start()
 
-    def _stop_journal_watch_thread(self) -> None:
-        thread = self._journal_watch_thread
-        self._journal_watch_thread = None
+    def _stop_engine_watch_thread(self) -> None:
+        thread = self._engine_watch_thread
+        self._engine_watch_thread = None
         if thread is None:
             return
-        self._journal_watch_stop.set()
+        self._engine_watch_stop.set()
         thread.join(timeout=5.0)
 
-    def _journal_watch_loop(self) -> None:
-        directory = self._journal_change_wake_dir
+    def _engine_watch_loop(self) -> None:
+        directory = self._engine_change_wake_dir
         if directory is None:  # pragma: no cover - guarded by the starter
             return
         watch: DirectoryRenameWatch | None = None
         last_mtime_ns: int | None = None
         inotify_unavailable = False
         try:
-            while not self._journal_watch_stop.is_set():
+            while not self._engine_watch_stop.is_set():
                 if watch is None and not inotify_unavailable and directory.is_dir():
                     try:
                         watch = DirectoryRenameWatch(directory)
@@ -910,13 +899,13 @@ class StrategyHostDaemon:
                         # Pace the rebuild: a persistently failing select
                         # (fd budget, dead descriptor) must degrade to the
                         # poll cadence, never a hot loop.
-                        if self._journal_watch_stop.wait(timeout=0.25):
+                        if self._engine_watch_stop.wait(timeout=0.25):
                             return
                         continue
                 else:
-                    if self._journal_watch_stop.wait(timeout=0.25):
+                    if self._engine_watch_stop.wait(timeout=0.25):
                         return
-                    current = self._journal_dir_mtime_ns(directory)
+                    current = self._engine_dir_mtime_ns(directory)
                     # First observation is the baseline, not an arrival.
                     arrived = current is not None and last_mtime_ns is not None and current != last_mtime_ns
                     if current is not None:
@@ -924,14 +913,14 @@ class StrategyHostDaemon:
                 if arrived:
                     # Flag before event: the wait reads the flag only after
                     # the event woke it.
-                    self._journal_wake_pending = True
+                    self._engine_wake_pending = True
                     self._bar_event.set()
         finally:
             if watch is not None:
                 watch.close()
 
     @staticmethod
-    def _journal_dir_mtime_ns(directory: Path) -> int | None:
+    def _engine_dir_mtime_ns(directory: Path) -> int | None:
         try:
             return os.stat(directory).st_mtime_ns
         except OSError:
@@ -1068,12 +1057,12 @@ class StrategyHostDaemon:
 
     def _wait_for_next_cycle_event(self) -> None:
         """Event-driven wait: wake on a new confirmed-bar boundary, an
-        account-journal commit, a due time deadline, the safety heartbeat,
+        Rust-engine heartbeat replacement, a due time deadline, the safety heartbeat,
         or shutdown, with a min-interval debounce floor.
 
         The debounce coalesces event bursts but never delays a deadline:
         the pre-sleep is clamped to the deadline and a due deadline fires
-        before the event wait, ahead of any pending bar or journal wake
+        before the event wait, ahead of any pending bar or engine wake
         (whose data the deadline cycle reads anyway)."""
         deadline_wait = self._seconds_until_time_deadline()
         debounce = self._min_cycle_interval_seconds
@@ -1081,7 +1070,7 @@ class StrategyHostDaemon:
             self._sleep_interruptible(debounce if deadline_wait is None else min(debounce, deadline_wait))
             if self._shutdown.is_set():
                 return
-        # A due deadline outranks pending bar/journal wakes at every debounce
+        # A due deadline outranks pending bar/engine wakes at every debounce
         # setting — the deadline cycle reads the same fresh data they announce.
         fired = self._time_deadline_reached()
         if fired is not None:
@@ -1107,16 +1096,16 @@ class StrategyHostDaemon:
             self._pending_cycle_kind = "market_boundary"
             return
         if woke:
-            journal_woke = self._journal_wake_pending
+            engine_woke = self._engine_wake_pending
             price_woke = self._price_wake_pending
-            self._journal_wake_pending = False
+            self._engine_wake_pending = False
             self._price_wake_pending = False
             # Account news outranks a price touch: a commit means the book
             # itself moved, and the cycle it starts reads the touched price
             # anyway.
-            if journal_woke:
-                self._cycles_journal_triggered += 1
-                self._pending_cycle_kind = "journal_change"
+            if engine_woke:
+                self._cycles_engine_triggered += 1
+                self._pending_cycle_kind = "engine_change"
             elif price_woke:
                 self._cycles_price_triggered += 1
                 self._pending_cycle_kind = "price_touch"
@@ -1173,14 +1162,11 @@ def _default_public_ticker_stream_factory(config: ResearchConfig) -> BybitPublic
     )
 
 
-def default_journal_change_wake_dir(kwargs: dict[str, Any], demo_config: Any) -> None:
-    """Point the journal-change wake at the sleeve's account root.
+def default_engine_change_wake_dir(kwargs: dict[str, Any], demo_config: Any) -> None:
+    """Point the engine-change wake at the configured heartbeat directory."""
 
-    Called by plug constructors ahead of ``super().__init__``; an explicit
-    ``journal_change_wake_dir`` in ``kwargs`` wins, and a config without an
-    account root (research/local shapes) simply gets no journal wake."""
-    if "journal_change_wake_dir" in kwargs:
+    if "engine_change_wake_dir" in kwargs:
         return
-    account_root = getattr(demo_config, "account_execution_root", None)
-    if account_root:
-        kwargs["journal_change_wake_dir"] = account_transactions_path(Path(str(account_root)).expanduser())
+    environment = str(getattr(demo_config, "execution_environment", "") or "")
+    if environment:
+        kwargs["engine_change_wake_dir"] = engine_heartbeat_path(environment).parent

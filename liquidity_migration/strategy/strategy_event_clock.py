@@ -26,9 +26,9 @@ _PHASES = {
     "startup": 0,
     "market_boundary": 10,
     "confirmed_bar": 10,
-    # An account-journal commit (fill, receipt, protection event) ended the
-    # producer's wait. Same phase tier as the other data arrivals.
-    "journal_change": 10,
+    # An engine heartbeat update ended the producer's wait. Same phase tier as
+    # the other data arrivals.
+    "engine_change": 10,
     # A watched price level was hit and woke the producer — a data arrival
     # like the rest.
     "price_touch": 10,
@@ -128,7 +128,11 @@ def _append_private_line(path: Path, data: bytes) -> None:
     """Append one durable evidence row and force owner-only permissions."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    descriptor = os.open(
+        str(path),
+        os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_BINARY", 0),
+        0o600,
+    )
     try:
         os.fchmod(descriptor, 0o600)
         view = memoryview(data)

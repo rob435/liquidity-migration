@@ -309,8 +309,6 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
             operational_profile.source_sha256 if operational_profile else ""
         ),
         execution_environment=args.execution_environment,
-        account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
-        account_execution_root=getattr(args, "account_execution_root", None),
         candidate_universe_file=candidate_universe_file,
         data_name=args.data_name,
         ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
@@ -397,8 +395,6 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
     exodus_multiplier_dial = env_positive_float("EXODUS_NOTIONAL_MULTIPLIER")
     carry_demo_config = CarryDemoCycleConfig(
         execution_environment=args.execution_environment,
-        account_intent_inbox_root=getattr(args, "account_intent_inbox_root", None),
-        account_execution_root=getattr(args, "account_execution_root", None),
         candidate_universe_file=getattr(args, "candidate_universe_file", ""),
         strategy_profile=args.strategy_profile,
         early_exit_enabled=getattr(args, "early_exit_enabled", False),

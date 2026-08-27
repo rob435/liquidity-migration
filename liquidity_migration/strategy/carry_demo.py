@@ -75,14 +75,6 @@ from liquidity_migration.strategy.account_candidate_universe import (
     load_candidate_universe,
     require_profile_binding,
 )
-from liquidity_migration.account.account_intent_client import (
-    ENTRY_ATTEMPT_METADATA_KEY,
-    ExitFirstPublication,
-    publish_exit_first_target_requests,
-)
-from liquidity_migration.account.account_route import require_account_route
-from liquidity_migration.account.account_service import RequestedIntent, SleeveAdapterKind
-from liquidity_migration.strategy.account_strategy_state import target_reservation_rows
 from liquidity_migration.marketdata.binance import BinanceDataError, BinanceUSDMData
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.core.config import ResearchConfig
@@ -95,9 +87,8 @@ from liquidity_migration.strategy.event_demo_data import (
     _utc_now_ms,
     rank_top_turnover_symbols,
 )
-from liquidity_migration.account.execution_environment import (
+from liquidity_migration.policy.execution_environment import (
     ExecutionEnvironment,
-    account_id_for_environment,
     candidate_universe_realm,
     execution_environment,
 )
@@ -123,15 +114,12 @@ from liquidity_migration.data.storage import (
     read_dataset_columns,
     write_dataset,
 )
-from liquidity_migration.strategy.strategy_planning import (
-    OwnerHealthReading,
-    account_owner_equity_or_error,
-    new_planning_journal_cursor,
-    sleeve_planning_snapshot,
-    suppress_target_intents,
+from liquidity_migration.runtime.engine_account_health import (
+    EngineAccountReading,
+    TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+    require_recent_engine_account,
 )
-from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
-from liquidity_migration.account.strategy_targets import component_target_intent
+from liquidity_migration.strategy.target_book_evidence import PublishedTargetCyclePayload
 from liquidity_migration.core.venue_realm import VenueRealm
 
 DAY_MS = 86_400_000
@@ -310,30 +298,13 @@ def decide_book(
 
 
 # ---------------------------------------------------------------------------
-# Cycle layer: the deployed CARRY target producer.
-#
-# Publishes only the difference between the desired book and the owner's
-# accepted reservations, exit-first. No diff means no publication, which is
-# what makes a 60-second cadence safe for a daily strategy.
+# Cycle layer: the deployed CARRY target-book producer.
 # ---------------------------------------------------------------------------
 
 _logger = logging.getLogger(__name__)
 
-#: Persisted journal filing key, version-free on purpose. The VERSION lives in
-#: the strategy profile (``--strategy-profile`` / ``CARRY_STRATEGY_PROFILE``);
-#: reservations, component targets and planning snapshots all file under this
-#: lineage id, which never changes again. A component keeps the id it was born
-#: with for life: the diff machine reads standing state across this id plus
-#: ``CARRY_LEGACY_STRATEGY_IDS`` and revises or exits each component under its
-#: own id, while new components open under this one.
+#: Stable source id. The version lives in the registered strategy profile.
 CARRY_STRATEGY_ID = "carry_hold"
-#: Filing ids of earlier deployments, still read (and drained) from standing
-#: state.
-CARRY_LEGACY_STRATEGY_IDS: tuple[str, ...] = ("carry_hold_v3",)
-#: One stable component per symbol. Unlike the continuous sleeve (one
-#: component per signal), carry manages a persistent per-symbol target that is
-#: revised in place, so the component key never needs a fresh identity.
-CARRY_COMPONENT_ID = "carry_hold"
 CARRY_CYCLES_DATASET = "carry_hold_demo_cycles"
 CARRY_MAINNET_CYCLES_DATASET = "carry_hold_mainnet_cycles"
 CARRY_FUNDING_DATASET = "carry_funding_events"
@@ -354,26 +325,16 @@ DECISION_KLINE_LAG_MS = 20 * 60 * 1000
 #: cached when it opens; one 60-second grid cycle always lands in
 #: 90 seconds, which is what lets the deadline wake publish instead of compute.
 FREEZE_AHEAD_WINDOW_MS = 90 * 1000
-# The boundary may serve any owner-health reading taken inside the freeze
-# window (that IS the declared freeze-time-equity trade); the slack covers
-# stamp-to-deadline scheduling jitter. Deliberately wider than the live
-# read's 30s owner-receipt bound, and only ever applied to the stored copy.
-_BOUNDARY_STORED_HEALTH_MAX_AGE_NS = (FREEZE_AHEAD_WINDOW_MS + 5_000) * 1_000_000
-#: Entry-signal validity. The decision is a daily state, but an entry request
-#: that has not been accepted within 6h belongs to a stale book; the account
-#: service expires it rather than executing it late.
+#: Entry-signal validity. A new name not admitted within six hours belongs to
+#: a stale decision and must wait for the next daily book.
 SIGNAL_VALIDITY_MS = 6 * HOUR_MS
-#: Producer-side guard band before ``signal_valid_until_ms``. Expiry is a
-#: TERMINAL attempt and, with carry's stable per-symbol component ids, terminal
-#: attempts suppress that symbol's entries permanently, so never hand the
-#: service an entry it can only expire.
+#: Producer-side guard band before ``signal_valid_until_ms``. The engine's own
+#: stale-entry cutoff is stricter; this prevents adding a name
+#: to a producer book that is already too old to act on.
 ENTRY_PUBLISH_GUARD_MS = 15 * 60 * 1000
 #: Where to write the decided book for the Rust execution engine to follow.
 #: Set on the fleet's units: the engine owns the account and this book is how
-#: a carry decision reaches it. Setting it also stops the cycle publishing
-#: intents to the inbox — nothing drains the inbox, so those requests would
-#: sit unclaimed forever. Unset means write no book and publish intents,
-#: which no deployed unit does.
+#: a carry decision reaches it. It is mandatory for every cycle.
 ENGINE_TARGET_BOOK_PATH_ENV = "CARRY_ENGINE_TARGET_BOOK_PATH"
 #: A sleeve whose newest successful decision is older than this is loudly
 #: stale: today's decision still failing past 06:00 the next day.
@@ -421,12 +382,11 @@ class CarryCycleState:
     would be ~200k pointless REST calls/day), the newest successful decision
     (so the ``decision_stale`` alarm does not need to re-read the cycles
     dataset on every failing cycle), the equity this decision was first sized
-    against, and the account-journal read position (so a cycle verifies the
-    segments written since the last one instead of the whole account history).
+    against.
 
     Losing this object (restart, ``--once``) costs one extra funding sweep, one
-    cycles-dataset read, one cold journal read, and one re-anchor of the sizing
-    equity to the current mark. The re-anchor can move the day's targets by
+    cycles-dataset read, and one re-anchor of the sizing equity to the current
+    mark. The re-anchor can move the day's targets by
     however much equity moved since the decision; the resize dead-band absorbs
     that unless the move is large.
     """
@@ -435,9 +395,7 @@ class CarryCycleState:
         "frozen_ahead_bar_ts_ms",
         "frozen_decisions",
         "funding_swept_hour_ts",
-        "journal_cursor",
         "last_successful_decision_ts_ms",
-        "owner_health_reading",
         "sizing_equity_by_decision",
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
@@ -456,12 +414,7 @@ class CarryCycleState:
         self.frozen_decisions: dict[int, tuple[CarryDecision, dict[str, float], int]] = {}
         self.frozen_ahead_bar_ts_ms: int | None = None
         self.funding_swept_hour_ts: int | None = None
-        self.journal_cursor = new_planning_journal_cursor()
         self.last_successful_decision_ts_ms: int | None = None
-        # Owner-health reading taken off the boundary path (freeze window),
-        # served to boundary/journal wakes while inside the live freshness
-        # bound so those wakes pay no health I/O and no head-retry sleep.
-        self.owner_health_reading: OwnerHealthReading | None = None
         # Sizing anchors keyed by decision bar, two-day retention for the same
         # reason as ``frozen_decisions``: the freeze-ahead pass anchors
         # TOMORROW's equity while cycles before the boundary still size
@@ -575,8 +528,6 @@ class CarryDemoCycleConfig:
 
     # --- environment / wiring ---
     execution_environment: str = ""
-    account_intent_inbox_root: str | None = None
-    account_execution_root: str | None = None
     candidate_universe_file: str = ""
     #: Registered deployment version (``resolve_carry_strategy_profile``).
     strategy_profile: str = DEFAULT_CARRY_STRATEGY_PROFILE
@@ -594,7 +545,7 @@ class CarryDemoCycleConfig:
     declared_stop_loss_fraction: float = 0.35
     max_new_entries_per_cycle: int = 10
     #: Ceiling on the equity this producer may size against, from the profile's
-    #: ``capital_reference_usdt``. The owner's pre-trade caps are absolute USDT
+    #: ``capital_reference_usdt``. The engine's pre-trade caps are absolute USDT
     #: numbers calibrated against that reference while sizing reads live equity,
     #: so without a clamp the two drift apart and the load-time envelope proof
     #: in ``operational_profile`` stops holding. 0.0 disables the clamp.
@@ -617,29 +568,14 @@ class CarryDemoCycleConfig:
 
 
 def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
-    """Validate target routing and sizing before any shared resource opens.
-
-    Producers are target-only: every environment requires its canonical
-    account-owner route, and sleeve-side Telegram stays retired.
-    """
+    """Validate target routing and sizing before any shared resource opens."""
 
     execution_environment(config.execution_environment)
     resolve_carry_strategy_profile(config.strategy_profile)
-    has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
-    has_account_execution_root = bool(str(config.account_execution_root or "").strip())
-    if has_account_inbox != has_account_execution_root:
-        raise ValueError(
-            "account_intent_inbox_root and account_execution_root must be configured together"
-        )
-    if not has_account_inbox:
-        raise ValueError(
-            "operational target mode requires account_intent_inbox_root and "
-            "account_execution_root; direct sleeve order authority is retired"
-        )
+    if not os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip():
+        raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust engine target book")
     if bool(getattr(config, "telegram", False)):
-        raise ValueError(
-            "account target route delegates Telegram exclusively to the account owner"
-        )
+        raise ValueError("strategy producers do not own Telegram controls")
     if not math.isfinite(config.notional_multiplier) or config.notional_multiplier <= 0.0:
         raise ValueError("notional_multiplier must be positive")
     if config.exodus_notional_multiplier is not None and (
@@ -1214,7 +1150,7 @@ def _run_exodus_short(
     the clock, publish the book. Runs on EVERY cycle — covers must drain even
     when the carry decision is unavailable, so nothing here depends on it.
 
-    ``sizing_equity_usdt`` is ``None`` when the owner-health read failed; a
+    ``sizing_equity_usdt`` is ``None`` when the engine-health read failed; a
     fire arriving in that state is skipped for good (one-shot, like the fire
     itself) and receipted, mirroring carry's own entry gate.
     """
@@ -1612,124 +1548,10 @@ def _freeze_decision_ahead(
     return True
 
 
-def _carry_standing_rows(reservations: pl.DataFrame) -> dict[str, tuple[float, float, str]]:
-    """Accepted (signed notional, signed quantity, filing id) per reservation.
-
-    Reservations are accepted desired targets (``open`` or ``target_pending``),
-    not fills: the diff compares desire against desire, or a target accepted but
-    unfilled is re-proposed every cycle. Notional is reconstructed as
-    ``signed_qty x target_reference_price``, the pair the kernel stamped.
-
-    Quantity comes along because zero is meaningful: a reservation for an
-    already-zero target is a completed exit desire with nothing left to reduce,
-    and re-exiting it loops forever.
-
-    The filing id (``strategy_id``) comes along because a component is revised
-    under the id it was born with: a legacy-id component drains under its own
-    key while new entries file under ``CARRY_STRATEGY_ID``. Carry keeps one
-    component per symbol, so one symbol standing under two filing ids is
-    unknown safety-critical state and fails closed.
-    """
-
-    if reservations.is_empty():
-        return {}
-    required = {"symbol", "signed_qty", "target_reference_price", "strategy_id"}
-    missing = sorted(required - set(reservations.columns))
-    if missing:
-        raise RuntimeError(f"carry reservations lack expected columns: {missing}")
-    # Prefer the notional the strategy actually asked for. Rebuilding it from
-    # the quantized quantity leaves the diff below comparing an unrounded desire
-    # against a venue-rounded one, so whenever a single quantity step is worth
-    # more than the resize threshold the gap can never close: the resize is
-    # re-proposed every cycle and the kernel emits no order for it. Targets
-    # written before the raw notional was stamped carry 0.0 and fall back to the
-    # reconstruction.
-    reconstructed = pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(
-        0.0
-    ) * pl.col("target_reference_price").cast(pl.Float64, strict=False).fill_null(0.0)
-    raw_notional = (
-        pl.col("raw_target_notional_usdt").cast(pl.Float64, strict=False).fill_null(0.0)
-        if "raw_target_notional_usdt" in reservations.columns
-        else pl.lit(0.0)
-    )
-    frame = reservations.select(
-        pl.col("symbol").cast(pl.String),
-        pl.col("strategy_id").cast(pl.String),
-        pl.col("signed_qty").cast(pl.Float64, strict=False).fill_null(0.0).alias("signed_qty"),
-        pl.when(raw_notional != 0.0)
-        .then(raw_notional)
-        .otherwise(reconstructed)
-        .alias("standing_notional_usdt"),
-    )
-    sums = frame.group_by("symbol", "strategy_id").agg(
-        pl.col("standing_notional_usdt").sum(), pl.col("signed_qty").sum()
-    )
-    split = sums.group_by("symbol").len().filter(pl.col("len") > 1)
-    if not split.is_empty():
-        symbols = sorted(str(value) for value in split["symbol"].to_list())
-        raise RuntimeError(
-            f"carry symbols standing under more than one filing id: {symbols}"
-        )
-    return {
-        str(row["symbol"]): (
-            float(row["standing_notional_usdt"]),
-            float(row["signed_qty"]),
-            str(row["strategy_id"]),
-        )
-        for row in sums.iter_rows(named=True)
-    }
-
-
-def _carry_component_intent(
-    *,
-    action: str,
-    cycle_now_ms: int,
-    symbol: str,
-    strategy_id: str,
-    signed_notional_usdt: float,
-    leverage: float,
-    reason: str,
-    metadata: dict[str, Any],
-) -> RequestedIntent:
-    """Build one carry component target with a symbol-qualified decision key.
-
-    The shared grammar in :func:`component_target_intent` derives the decision
-    key from ``(sleeve, strategy, ts, action, component)`` — which is unique
-    for sleeves that mint one component id per signal, but carry deliberately
-    keeps ONE stable component id per symbol. Without qualification, two
-    same-cycle exits would share a decision key: the account kernel rejects a
-    reused decision key whose content changed, and the daemon's capture tape
-    rejects a repeated key outright. The target key (which embeds the symbol)
-    and all entry-attempt metadata are built and validated by the shared
-    helper; only the decision key is suffixed here.
-    """
-
-    base = component_target_intent(
-        adapter_kind=SleeveAdapterKind.CARRY,
-        action=action,
-        decision_ts_ms=cycle_now_ms,
-        strategy_id=strategy_id,
-        component_id=CARRY_COMPONENT_ID,
-        symbol=symbol,
-        signed_notional_usdt=signed_notional_usdt,
-        leverage=leverage,
-        reason=reason,
-        metadata=metadata,
-    )
-    qualified = dataclasses.replace(
-        base.intent,
-        decision_key=f"{base.intent.decision_key}/{base.intent.symbol}",
-    )
-    return RequestedIntent(adapter_kind=base.adapter_kind, intent=qualified)
-
-
 @dataclasses.dataclass(frozen=True, slots=True)
 class CarryTargetPlan:
-    """Diffed intents plus the exact per-reason skip counts for the journal."""
+    """The exact absolute book and its per-reason admission counts."""
 
-    exit_intents: list[RequestedIntent]
-    entry_intents: list[RequestedIntent]
-    resize_intents: list[RequestedIntent]
     desired_book_size: int
     desired_gross_weight: float
     planned_exits: int
@@ -1739,14 +1561,11 @@ class CarryTargetPlan:
     entry_validity_expired_skips: int
     entry_dust_skips: int
     entry_blocked_reason: str
-    stranded_zero_quantity_reservations: int = 0
+    book_written: bool
 
 
 def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
     return CarryTargetPlan(
-        exit_intents=[],
-        entry_intents=[],
-        resize_intents=[],
         desired_book_size=0,
         desired_gross_weight=0.0,
         planned_exits=0,
@@ -1756,7 +1575,7 @@ def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
         entry_validity_expired_skips=0,
         entry_dust_skips=0,
         entry_blocked_reason=entry_blocked_reason,
-        stranded_zero_quantity_reservations=0,
+        book_written=False,
     )
 
 
@@ -1770,82 +1589,65 @@ def _write_engine_target_book(
     entry_leverage: float,
     strategy_profile: str,
 ) -> None:
-    """Record the decided book where the Rust engine can follow it.
-
-    Off unless ``CARRY_ENGINE_TARGET_BOOK_PATH`` names a file. It writes what
-    was decided and nothing else: no order, no change to any decision, and no
-    exception out of here — a book that cannot be written must never stop the
-    sleeve that is trading.
-
-    An unusable sizing equity writes NOTHING. Every notional would render 0.0,
-    and the engine reads a zero notional as an explicit exit, before any
-    validity window — so a failed equity read would flatten the whole sleeve at
-    market. A read that failed is not a decision to hold nothing; the last book
-    stands until one can be sized.
-    """
+    """Durably publish one decided absolute book to the Rust engine."""
     path_text = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
     if not path_text:
-        return
+        raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust target book")
     if not sizing_equity_usdt > 0.0:
-        _logger.warning(
-            "sizing equity is %r; leaving the standing engine target book alone",
-            sizing_equity_usdt,
+        raise ValueError("cannot write a target book without positive sizing equity")
+    targets = [
+        EngineTarget(
+            symbol=symbol,
+            notional_usdt=float(weight) * sizing_equity_usdt * notional_multiplier,
+            stop_loss_fraction=stop_loss_fraction,
+            leverage=entry_leverage,
         )
-        return
-    try:
-        targets = [
-            EngineTarget(
-                symbol=symbol,
-                notional_usdt=float(weight) * sizing_equity_usdt * notional_multiplier,
-                stop_loss_fraction=stop_loss_fraction,
-                leverage=entry_leverage,
-            )
-            for symbol, weight in sorted(desired.items())
-        ]
-        write_target_book(
-            Path(path_text),
-            render_target_book(
-                source=strategy_profile,
-                decision_ts_ms=decision_ts_ms,
-                valid_until_ms=decision_ts_ms + SIGNAL_VALIDITY_MS,
-                targets=targets,
-            ),
-        )
-    except Exception:  # noqa: BLE001 - never let bookkeeping stop the sleeve
-        _logger.exception("could not write the engine target book at %s", path_text)
+        for symbol, weight in sorted(desired.items())
+    ]
+    write_target_book(
+        Path(path_text),
+        render_target_book(
+            source=strategy_profile,
+            decision_ts_ms=decision_ts_ms,
+            valid_until_ms=decision_ts_ms + SIGNAL_VALIDITY_MS,
+            targets=targets,
+        ),
+    )
 
 
 def _carry_target_plan(
     *,
     decision: CarryDecision | None,
-    rule: CarryHoldConfig,
-    standing_rows: dict[str, tuple[float, float, str]],
+    standing_rows: Mapping[str, tuple[str, float, float]],
     trail_by_symbol: dict[str, float],
     demo: CarryDemoCycleConfig,
     equity_usdt: float,
-    account_owner_health_error: str,
+    engine_account_health_error: str,
     cycle_now_ms: int,
     cycle_state: CarryCycleState | None = None,
 ) -> CarryTargetPlan:
-    """Diff the desired book against the standing book into target intents.
-
-    Exit-first by design: exits are zero targets needing no equity, so they
-    publish even when the owner-health read failed, while entries and resizes
-    are blocked without it. When the decision itself is unavailable NOTHING is
-    planned -- a data hiccup holds the standing book, never flattens it.
-
-    Sizing uses :meth:`CarryCycleState.sizing_equity` rather than the live mark
-    in ``equity_usdt``. Callers without cross-cycle state size off the live
-    value, which for one cycle is the same thing.
-    """
+    """Build and publish the paced absolute book for one decision."""
 
     if decision is None:
         return _empty_carry_plan(entry_blocked_reason="decision_unavailable")
 
     decision_ts_ms = decision.decision_ts_ms
     desired = decision.weights
-    entry_health_ok = not account_owner_health_error and equity_usdt > 0.0
-    entry_blocked_reason = "" if entry_health_ok else "account_owner_health_unavailable"
+    entry_health_ok = not engine_account_health_error and equity_usdt > 0.0
+    entry_blocked_reason = "" if entry_health_ok else "engine_account_health_unavailable"
+    if not entry_health_ok:
+        return CarryTargetPlan(
+            desired_book_size=len(desired),
+            desired_gross_weight=float(decision.gross),
+            planned_exits=0,
+            planned_entries=0,
+            planned_resizes=0,
+            entry_cap_deferrals=0,
+            entry_validity_expired_skips=0,
+            entry_dust_skips=0,
+            entry_blocked_reason=entry_blocked_reason,
+            book_written=False,
+        )
     sizing_equity_usdt = (
         cycle_state.sizing_equity(decision_ts_ms=decision_ts_ms, equity_usdt=equity_usdt)
         if cycle_state is not None
@@ -1857,8 +1659,56 @@ def _carry_target_plan(
     if demo.capital_reference_usdt > 0.0:
         sizing_equity_usdt = min(sizing_equity_usdt, float(demo.capital_reference_usdt))
 
+    standing_notional = {
+        symbol: (-1.0 if side.lower() == "short" else 1.0) * abs(qty) * entry_px
+        for symbol, (side, qty, entry_px) in standing_rows.items()
+        if qty != 0.0 and entry_px > 0.0
+    }
+    standing_symbols = set(standing_notional)
+    book_desired = {
+        symbol: float(weight)
+        for symbol, weight in desired.items()
+        if symbol in standing_symbols
+    }
+    entry_cap_deferrals = 0
+    entry_validity_expired_skips = 0
+    entry_dust_skips = 0
+    entry_symbols = sorted(
+        (symbol for symbol in desired if symbol not in standing_symbols),
+        key=lambda symbol: (trail_by_symbol.get(symbol, 0.0), symbol),
+    )
+    if cycle_now_ms >= decision_ts_ms + SIGNAL_VALIDITY_MS - ENTRY_PUBLISH_GUARD_MS:
+        entry_validity_expired_skips = len(entry_symbols)
+        entry_symbols = []
+    planned_entries = 0
+    for symbol in entry_symbols:
+        target_notional = (
+            float(desired[symbol]) * sizing_equity_usdt * demo.notional_multiplier
+        )
+        if abs(target_notional) < ENTRY_MIN_NOTIONAL_USDT:
+            entry_dust_skips += 1
+            continue
+        if planned_entries >= demo.max_new_entries_per_cycle:
+            entry_cap_deferrals += 1
+            continue
+        book_desired[symbol] = float(desired[symbol])
+        planned_entries += 1
+
+    planned_resizes = 0
+    for symbol in sorted(set(book_desired) & standing_symbols):
+        target_notional = (
+            book_desired[symbol] * sizing_equity_usdt * demo.notional_multiplier
+        )
+        standing = standing_notional[symbol]
+        threshold = max(
+            RESIZE_MIN_NOTIONAL_USDT,
+            RESIZE_MIN_FRACTION_OF_STANDING * abs(standing),
+        )
+        if abs(target_notional - standing) > threshold:
+            planned_resizes += 1
+
     _write_engine_target_book(
-        desired=desired,
+        desired=book_desired,
         decision_ts_ms=decision_ts_ms,
         sizing_equity_usdt=sizing_equity_usdt,
         notional_multiplier=float(demo.notional_multiplier),
@@ -1867,154 +1717,17 @@ def _carry_target_plan(
         strategy_profile=str(demo.strategy_profile),
     )
 
-    # A reservation whose accepted quantity is already ZERO is a completed exit
-    # desire, not exposure: re-publishing a zero target converges nothing and
-    # just re-creates the pending reservation next cycle, forever.
-    #
-    # Such a reservation is INERT on every path. Excluding it from exits alone
-    # would let a still-desired name escape through the resize branch, where a
-    # zero standing notional clears any dead-band and republishes the whole
-    # target every cycle. It still counts for ADMISSION, so the name is not
-    # re-entered underneath its own unconverged target. Resolving it needs an
-    # operator (``scripts/ops.sh wedged-command``), hence the count.
-    stranded_count = sum(
-        1 for _symbol, (_notional, qty, _sid) in standing_rows.items() if qty == 0.0
-    )
-    # A standing component is revised under the filing id it was born with;
-    # only NEW components file under CARRY_STRATEGY_ID.
-    live_standing = {
-        symbol: (notional, strategy_id)
-        for symbol, (notional, qty, strategy_id) in standing_rows.items()
-        if qty != 0.0
-    }
-    exit_symbols = sorted(set(live_standing) - set(desired))
-    exit_intents = [
-        _carry_component_intent(
-            action="exit",
-            cycle_now_ms=cycle_now_ms,
-            symbol=symbol,
-            strategy_id=live_standing[symbol][1],
-            signed_notional_usdt=0.0,
-            leverage=demo.entry_leverage,
-            reason="carry exit: funding normalized or velocity exit",
-            metadata={
-                "source": "carry_target_adapter",
-                "owner_sleeve": SleeveAdapterKind.CARRY.value,
-                "prior_trade_id": CARRY_COMPONENT_ID,
-                "decision_day_ts_ms": decision_ts_ms,
-            },
-        )
-        for symbol in exit_symbols
-    ]
-
-    entry_intents: list[RequestedIntent] = []
-    resize_intents: list[RequestedIntent] = []
-    planned_entries = 0
-    planned_resizes = 0
-    entry_cap_deferrals = 0
-    entry_validity_expired_skips = 0
-    entry_dust_skips = 0
-    if entry_health_ok:
-        signal_valid_until_ms = decision_ts_ms + SIGNAL_VALIDITY_MS
-        entry_symbols = sorted(
-            (symbol for symbol in desired if symbol not in standing_rows),
-            # Deepest trailing crowd payment first: the trail is negative for
-            # the prints this strategy collects, so ascending is deepest-first.
-            # The symbol tiebreak keeps the order deterministic.
-            key=lambda symbol: (trail_by_symbol.get(symbol, 0.0), symbol),
-        )
-        if cycle_now_ms >= signal_valid_until_ms - ENTRY_PUBLISH_GUARD_MS:
-            # Too late to open NEW risk: the service would expire these on
-            # arrival, and an expiry permanently suppresses the symbol.
-            # Tomorrow's decision re-desires them.
-            entry_validity_expired_skips = len(entry_symbols)
-            entry_symbols = []
-        for symbol in entry_symbols:
-            if planned_entries >= demo.max_new_entries_per_cycle:
-                entry_cap_deferrals += 1
-                continue
-            weight = float(desired[symbol])
-            target_notional = weight * sizing_equity_usdt * demo.notional_multiplier
-            if target_notional < ENTRY_MIN_NOTIONAL_USDT:
-                entry_dust_skips += 1
-                continue
-            metadata: dict[str, Any] = {
-                "source": "carry_target_adapter",
-                "signal_ts_ms": decision_ts_ms,
-                "signal_valid_until_ms": signal_valid_until_ms,
-                "stop_loss_pct": demo.declared_stop_loss_fraction,
-                "target_weight": weight,
-                "raw_target_notional_usdt": target_notional,
-                "quantity_authority": "account_kernel_demo_rules",
-            }
-            trail = trail_by_symbol.get(symbol)
-            if trail is not None:
-                metadata["trail_fund_24h"] = float(trail)
-            entry_intents.append(
-                _carry_component_intent(
-                    action="entry",
-                    cycle_now_ms=cycle_now_ms,
-                    symbol=symbol,
-                    strategy_id=CARRY_STRATEGY_ID,
-                    signed_notional_usdt=target_notional,
-                    leverage=demo.entry_leverage,
-                    reason=(
-                        f"carry entry: settled print < -{rule.enter_bp:g}bp, filters pass"
-                    ),
-                    metadata=metadata,
-                )
-            )
-            planned_entries += 1
-        for symbol in sorted(set(desired) & set(live_standing)):
-            weight = float(desired[symbol])
-            target_notional = weight * sizing_equity_usdt * demo.notional_multiplier
-            standing, standing_strategy_id = live_standing[symbol]
-            delta = target_notional - standing
-            threshold = max(
-                RESIZE_MIN_NOTIONAL_USDT,
-                RESIZE_MIN_FRACTION_OF_STANDING * abs(standing),
-            )
-            if abs(delta) <= threshold:
-                continue
-            resize_intents.append(
-                _carry_component_intent(
-                    action="resize",
-                    cycle_now_ms=cycle_now_ms,
-                    symbol=symbol,
-                    strategy_id=standing_strategy_id,
-                    signed_notional_usdt=target_notional,
-                    leverage=demo.entry_leverage,
-                    reason="carry resize: depth rescale",
-                    metadata={
-                        "source": "carry_target_adapter",
-                        # Protection stays declared across revisions: the
-                        # kernel derives the venue stop from the outermost
-                        # component-declared fraction.
-                        "stop_loss_pct": demo.declared_stop_loss_fraction,
-                        "decision_day_ts_ms": decision_ts_ms,
-                        "target_weight": weight,
-                        "raw_target_notional_usdt": target_notional,
-                        "prior_standing_notional_usdt": standing,
-                        "quantity_authority": "account_kernel_demo_rules",
-                    },
-                )
-            )
-            planned_resizes += 1
-
     return CarryTargetPlan(
-        exit_intents=exit_intents,
-        entry_intents=entry_intents,
-        resize_intents=resize_intents,
         desired_book_size=len(desired),
         desired_gross_weight=float(decision.gross),
-        planned_exits=len(exit_intents),
+        planned_exits=len(standing_symbols - set(book_desired)),
         planned_entries=planned_entries,
         planned_resizes=planned_resizes,
         entry_cap_deferrals=entry_cap_deferrals,
         entry_validity_expired_skips=entry_validity_expired_skips,
         entry_dust_skips=entry_dust_skips,
         entry_blocked_reason=entry_blocked_reason,
-        stranded_zero_quantity_reservations=stranded_count,
+        book_written=True,
     )
 
 
@@ -2338,12 +2051,12 @@ def run_carry_demo_cycle(
     cycle_kind: str = "timer",
     freeze_ahead_decision_ts_ms: int | None = None,
 ) -> PublishedTargetCyclePayload:
-    """Plan one CARRY cycle and publish immutable account targets.
+    """Plan one CARRY cycle and publish an immutable Rust target book.
 
     Every cycle: rebuild the venue view, replay the registered rule to today's
-    desired book, read the account owner's accepted reservations, and publish
-    only the exit-first difference. Failure policy is HOLD-STEADY: a data-build
-    or decision failure publishes nothing and never flattens, while
+    desired book, read the Rust engine heartbeat, and publish the absolute
+    position request. Failure policy is HOLD-STEADY: a data-build or decision
+    failure leaves the last book untouched and never flattens, while
     ``decision_error``/``decision_stale`` make the outage loud.
 
     ``kline_store`` serves the cycle's close-keyed 1h bars from the daemon's
@@ -2365,12 +2078,7 @@ def run_carry_demo_cycle(
     _validate_carry_demo_config(demo)
     environment = execution_environment(demo.execution_environment).value
     root = Path(data_root).expanduser()
-    account_route = require_account_route(
-        account_id=account_id_for_environment(environment),
-        environment=environment,
-        account_root=Path(str(demo.account_execution_root)).expanduser(),
-        inbox_root=Path(str(demo.account_intent_inbox_root)).expanduser(),
-    )
+    engine_book_path = Path(os.environ[ENGINE_TARGET_BOOK_PATH_ENV]).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     cycle_now_ms = int(now_ms if now_ms is not None else _utc_now_ms())
     decision_ts_ms = carry_decision_ts_ms(cycle_now_ms)
@@ -2379,39 +2087,21 @@ def run_carry_demo_cycle(
     state = cycle_state if cycle_state is not None else CarryCycleState()
 
     with exclusive_file_lock(root / ".locks" / "carry_demo_cycle.lock", stale_seconds=900):
-        planning = sleeve_planning_snapshot(
-            account_route,
-            sleeve=SleeveAdapterKind.CARRY,
-            strategy_ids=(CARRY_STRATEGY_ID, *CARRY_LEGACY_STRATEGY_IDS),
-            journal_cursor=state.journal_cursor,
-            now_ms=cycle_now_ms,
-        )
-        reservations = target_reservation_rows(planning.canonical_trades)
-        standing_rows = _carry_standing_rows(reservations)
+        engine_reading: EngineAccountReading | None = None
+        try:
+            engine_reading = require_recent_engine_account(
+                environment,
+                max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+                now_ns=cycle_now_ms * 1_000_000,
+            )
+            equity_usdt = float(engine_reading.equity_usdt)
+            engine_account_health_error = ""
+        except (OSError, RuntimeError, ValueError) as exc:
+            equity_usdt = 0.0
+            engine_account_health_error = str(exc)
+            _logger.warning("CARRY engine account reading unavailable; book held: %s", exc)
+        standing_rows = engine_reading.holdings if engine_reading is not None else {}
         standing_symbols = set(standing_rows)
-        # Only the market-boundary wake serves the owner-health reading the
-        # freeze window stored: the day sizes off freeze-time equity, and any
-        # reading taken inside that window is exactly that. It skips the
-        # journal-head binding a live read enforces, so it can be ~2 minutes
-        # behind owner state (up to ~95s reading age plus the ~30s
-        # owner-receipt age); the resize dead-band absorbs that and the
-        # disaster stop never reads it. A journal-change wake always reads
-        # live — served equity there could predate the fill that woke it.
-        # Stale or absent falls through to the live read, which may sleep.
-        now_ns = cycle_now_ms * 1_000_000
-        freeze_reading = (
-            state.owner_health_reading if cycle_kind == "market_boundary" else None
-        )
-        equity_usdt, account_owner_health_error = account_owner_equity_or_error(
-            account_route,
-            environment=environment,
-            stored_reading=freeze_reading,
-            now_ns=now_ns,
-            stored_max_age_ns=_BOUNDARY_STORED_HEALTH_MAX_AGE_NS,
-        )
-        live_health_read = freeze_reading is None or not freeze_reading.is_fresh(
-            now_ns=now_ns, max_age_ns=_BOUNDARY_STORED_HEALTH_MAX_AGE_NS
-        )
 
         decision: CarryDecision | None = None
         decision_error: str | None = None
@@ -2431,14 +2121,14 @@ def run_carry_demo_cycle(
         # the frozen decision cannot read. Timer cycles keep the build (it IS
         # the cache maintenance: WS-store flush and the hourly funding sweep),
         # and an unfrozen deadline falls through to the full path below.
-        # Journal-change wakes exist to react to account news — fills,
-        # rejection receipts — with the same frozen decision, so they skip
+        # Engine-change wakes react to fills and refusals with the same frozen
+        # decision, so they skip
         # the build too UNLESS this cycle owes maintenance: the hourly
         # funding sweep is due, or the daemon asked it to freeze the next
         # day ahead of the boundary. Without that carve-out, a stream of
-        # owner commits would starve both.
+        # engine updates would starve both.
         skip_build = cycle_kind == "market_boundary" or (
-            cycle_kind == "journal_change"
+            cycle_kind == "engine_change"
             and freeze_ahead_decision_ts_ms is None
             and state.funding_swept_hour_ts == cycle_now_ms - cycle_now_ms % HOUR_MS
         )
@@ -2567,30 +2257,15 @@ def run_carry_demo_cycle(
         if (
             freeze_ahead_decision_ts_ms is not None
             and state.frozen_decision(int(freeze_ahead_decision_ts_ms)) is not None
+            and not engine_account_health_error
+            and equity_usdt > 0.0
         ):
-            # The boundary wake must not pay this cycle's health work: every
-            # pre-deadline cycle that finds the upcoming day frozen re-stamps
-            # the owner reading it just took, so the freshest pre-boundary
-            # reading is what the boundary serves. Live reads only — an
-            # injected value keeps its original timestamp, so age can never
-            # launder through a re-stamp. The upcoming day's sizing anchor is
-            # set here too, ~90 seconds before the boundary BY DESIGN: the
-            # day sizes off freeze-time equity and the resize dead-band
-            # absorbs the drift to boundary-time equity.
-            if live_health_read:
-                state.owner_health_reading = OwnerHealthReading(
-                    equity_usdt=float(equity_usdt),
-                    error=str(account_owner_health_error),
-                    read_wall_ts_ns=now_ns,
-                )
-                # The anchor is as live-only as the stamp: a served stored
-                # value must never set the day's sizing equity, or a reading
-                # could anchor a day it was never fresh for.
-                if not account_owner_health_error and equity_usdt > 0.0:
-                    state.sizing_equity(
-                        decision_ts_ms=int(freeze_ahead_decision_ts_ms),
-                        equity_usdt=float(equity_usdt),
-                    )
+            # Anchor tomorrow to the fresh engine account mark used to freeze
+            # it, so the boundary pass cannot introduce P&L feedback.
+            state.sizing_equity(
+                decision_ts_ms=int(freeze_ahead_decision_ts_ms),
+                equity_usdt=float(equity_usdt),
+            )
 
         if decision is not None:
             state.last_successful_decision_ts_ms = max(
@@ -2673,7 +2348,7 @@ def run_carry_demo_cycle(
 
         # The drop exit: mask the
         # names the UPCOMING frozen decision zeroes out of the served
-        # (old-day) book, so their exit intents publish this cycle — ~00:02,
+        # (old-day) book, so their removals publish this cycle — ~00:02,
         # before the post-settlement drift the 00:20 clock sells into.
         drop_exit_fires: list[str] = []
         drop_exit_masked = 0
@@ -2697,7 +2372,7 @@ def run_carry_demo_cycle(
         exodus_sizing_equity: float | None = None
         if (
             decision is not None
-            and not account_owner_health_error
+            and not engine_account_health_error
             and equity_usdt > 0.0
         ):
             exodus_sizing_equity = state.sizing_equity(
@@ -2723,114 +2398,19 @@ def run_carry_demo_cycle(
 
         plan = _carry_target_plan(
             decision=decision,
-            rule=rule,
             standing_rows=standing_rows,
             trail_by_symbol=trail_by_symbol,
             demo=demo,
             equity_usdt=equity_usdt,
-            account_owner_health_error=account_owner_health_error,
+            engine_account_health_error=engine_account_health_error,
             cycle_now_ms=cycle_now_ms,
             cycle_state=state,
         )
-        suppression = suppress_target_intents(
-            exit_intents=plan.exit_intents,
-            entry_intents=[*plan.entry_intents, *plan.resize_intents],
-            unresolved_target_keys=planning.unresolved_targets.target_keys,
-            terminal_entry_attempts=planning.terminal_entry_attempts,
-        )
-        kept_exits = suppression.exit_intents
-        kept_entries = [
-            item
-            for item in suppression.entry_intents
-            if ENTRY_ATTEMPT_METADATA_KEY in item.intent.metadata
-        ]
-        kept_resizes = [
-            item
-            for item in suppression.entry_intents
-            if ENTRY_ATTEMPT_METADATA_KEY not in item.intent.metadata
-        ]
-        target_keys = [
-            item.intent.target_key for item in (*kept_exits, *kept_entries, *kept_resizes)
-        ]
-        if len(set(target_keys)) != len(target_keys):
-            raise RuntimeError("carry planner proposed duplicate component target keys")
-        if os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip():
-            # The engine follows the absolute book this cycle already wrote,
-            # and nothing drains the inbox any more. Publishing would only
-            # grow a queue of never-claimed requests (and past the queued-cache
-            # limit, re-parse the lot every pass). The same gate LONG runs
-            # under; the plan and its suppression accounting still run, so
-            # the cycle receipt says what was decided.
-            publication = ExitFirstPublication(
-                exit_requests=(), entry_requests=(), errors=()
-            )
-        else:
-            publication = publish_exit_first_target_requests(
-                planning.publisher,
-                batch_prefix=f"carry/{cycle_id}",
-                exit_intents=kept_exits,
-                # One grouped request, entries before resizes: the cycle's
-                # whole risk-increasing side reaches the owner in a single
-                # request.
-                entry_intents=[*kept_entries, *kept_resizes],
-                created_ts_ns=cycle_now_ms * 1_000_000,
-            )
-        # Exits normally arrive as ONE grouped all-flat request, so queued
-        # exits are counted as intents, not requests; the count is identical
-        # under the per-exit fallback, where each request carries one intent.
-        published_exit_targets = sum(len(item.request.intents) for item in publication.exit_requests)
-        # The grouped entry request is all-or-nothing: either every kept entry
-        # and resize published, or none did.
-        published_entry_targets = len(kept_entries) if publication.entry_requests else 0
-        published_resize_targets = len(kept_resizes) if publication.entry_requests else 0
-        # Telemetry only, so it runs after the publish: nothing between the
-        # boundary signal and the inbox needs it.
-        open_trades = (
-            planning.canonical_trades.filter(pl.col("status") == "open")
-            if not planning.canonical_trades.is_empty()
-            and "status" in planning.canonical_trades.columns
-            else pl.DataFrame()
-        )
-
-        account_target_requests = {
-            "exit_publication_mode": publication.exit_publication_mode,
-            "exit_request_ids": list(publication.exit_request_ids),
-            "exit_requests": [
-                {
-                    "request_id": item.request.request_id,
-                    "batch_id": item.request.batch_id,
-                    # The grouped request carries every exit; a single
-                    # target_key would silently drop the rest (LONG precedent).
-                    "intent_count": len(item.request.intents),
-                }
-                for item in publication.exit_requests
-            ],
-            "entry_request_ids": list(publication.entry_request_ids),
-            "entry_requests": [
-                {
-                    "request_id": item.request.request_id,
-                    "batch_id": item.request.batch_id,
-                    # The grouped request carries every entry+resize; a single
-                    # target_key would silently drop the rest (LONG precedent).
-                    "intent_count": len(item.request.intents),
-                }
-                for item in publication.entry_requests
-            ],
-            "publication_errors": [
-                {
-                    "stage": error.stage,
-                    "target_key": error.target_key,
-                    "error_type": error.error_type,
-                    "message": error.message,
-                }
-                for error in publication.errors
-            ],
-        }
         payload: dict[str, Any] = {
             "cycle_id": cycle_id,
             "ts_ms": cycle_now_ms,
             "sleeve": "carry",
-            "mode": f"{environment}_target",
+            "mode": f"{environment}_rust_target_book",
             "environment": environment,
             "strategy_id": CARRY_STRATEGY_ID,
             "strategy_profile": strategy_profile.profile_name,
@@ -2896,8 +2476,7 @@ def run_carry_demo_cycle(
             "exodus_entry_blocked": exodus_receipt.get("exodus_entry_blocked"),
             "exodus_open_names": exodus_receipt.get("exodus_open_names"),
             "exodus_error": exodus_receipt.get("exodus_error"),
-            "open_positions": open_trades.height,
-            "target_reservations": reservations.height,
+            "open_positions": len(standing_symbols),
             "standing_symbols": len(standing_symbols),
             "planned_exits": plan.planned_exits,
             "planned_entries": plan.planned_entries,
@@ -2906,27 +2485,20 @@ def run_carry_demo_cycle(
             "entry_validity_expired_skips": plan.entry_validity_expired_skips,
             "entry_dust_skips": plan.entry_dust_skips,
             "entry_blocked_reason": plan.entry_blocked_reason,
-            "stranded_zero_quantity_reservations": plan.stranded_zero_quantity_reservations,
-            "exit_targets_queued": published_exit_targets,
-            "entry_targets_queued": published_entry_targets,
-            "resize_targets_queued": published_resize_targets,
-            "target_intents_queued": (
-                published_exit_targets + published_entry_targets + published_resize_targets
-            ),
-            "unresolved_exit_target_suppressions": suppression.unresolved_exit_suppressions,
-            "unresolved_entry_target_suppressions": suppression.unresolved_entry_suppressions,
-            "terminal_entry_attempt_suppressions": suppression.terminal_entry_attempt_suppressions,
-            "simultaneous_exit_entry_suppressions": suppression.simultaneous_exit_suppressions,
-            # Null, not 0.0, when owner health is unavailable: a literal zero
+            "exit_book_removals": plan.planned_exits,
+            "entry_book_additions": plan.planned_entries,
+            "book_resizes": plan.planned_resizes,
+            "book_written": plan.book_written,
+            "target_book_path": str(engine_book_path),
+            # Null, not 0.0, when engine health is unavailable: a literal zero
             # reads as a -100% equity spike in every cycles-derived curve.
-            "equity_usdt": equity_usdt if not account_owner_health_error else None,
+            "equity_usdt": equity_usdt if not engine_account_health_error else None,
             # The mark above is descriptive; this is what the day's targets
             # were sized against and the only one that explains a notional.
             "sizing_equity_usdt": state.sizing_equity_usdt,
             "sizing_equity_decision_ts_ms": state.sizing_equity_decision_ts_ms,
-            "account_owner_health_error": account_owner_health_error,
-            "wallet_error": account_owner_health_error,
-            "entry_risk_health_ok": not account_owner_health_error and equity_usdt > 0.0,
+            "engine_account_health_error": engine_account_health_error,
+            "entry_risk_health_ok": not engine_account_health_error and equity_usdt > 0.0,
             "kline_cache_rows": int(build_stats.get("kline_cache_rows", 0)),
             "kline_fetched_rows": int(build_stats.get("kline_fetched_rows", 0)),
             "kline_output_rows": int(build_stats.get("kline_output_rows", 0)),
@@ -2938,15 +2510,6 @@ def run_carry_demo_cycle(
             "funding_failed_symbols": str(build_stats.get("funding_failed_symbols", "")),
             "funding_cache_rows": int(build_stats.get("funding_cache_rows", 0)),
             "funding_max_ts_ms": int(build_stats.get("funding_max_ts_ms", 0)),
-            "account_target_route": True,
-            "account_target_exit_request_ids": list(publication.exit_request_ids),
-            "account_target_entry_request_ids": list(publication.entry_request_ids),
-            "account_target_publication_error_count": len(publication.errors),
-            "account_target_requests_json": json.dumps(
-                account_target_requests,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
         }
         # storage day-buckets registered cycle ledgers regardless of what we pass
         # here. Naming the day partition anyway means an unregistered dataset
@@ -2969,8 +2532,7 @@ def run_carry_demo_cycle(
         payload["next_time_deadline_ts_ms"] = next_deadline_ts_ms
     return PublishedTargetCyclePayload(
         payload,
-        publication=publication,
-        route=planning.publisher.route,
+        target_book_path=engine_book_path,
     )
 
 
@@ -2985,20 +2547,8 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
     )
     equity = payload.get("equity_usdt")
     equity_text = f"${float(equity):,.2f}" if isinstance(equity, (int, float)) else "unavailable"
-    suppressed = sum(
-        int(payload.get(field, 0) or 0)
-        for field in (
-            "unresolved_exit_target_suppressions",
-            "unresolved_entry_target_suppressions",
-            "terminal_entry_attempt_suppressions",
-            "simultaneous_exit_entry_suppressions",
-        )
-    )
     gross = payload.get("desired_gross_weight")
     gross_text = f"{float(gross):.3f}" if isinstance(gross, (int, float)) else "?"
-    stranded = int(payload.get("stranded_zero_quantity_reservations", 0) or 0)
-    # Only rendered when non-zero: a stranded reservation needs an operator.
-    stranded_text = f" stranded={stranded}" if stranded else ""
     # Only rendered when non-zero: entries skipped as too small to place.
     # Without this the line reads suppressed=0 err=none while the whole
     # book silently fails to enter.
@@ -3024,8 +2574,8 @@ def format_carry_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"frozen={payload.get('decision_frozen')}{fast_path_text} "
         f"book={payload.get('desired_book_size')} gross={gross_text} "
         f"standing={payload.get('standing_symbols')} open={payload.get('open_positions')} "
-        f"pub exit/entry/resize={payload.get('exit_targets_queued')}/"
-        f"{payload.get('entry_targets_queued')}/{payload.get('resize_targets_queued')} "
-        f"suppressed={suppressed}{stranded_text}{dust_text} equity={equity_text} "
+        f"book_delta exit/entry/resize={payload.get('exit_book_removals')}/"
+        f"{payload.get('entry_book_additions')}/{payload.get('book_resizes')} "
+        f"written={payload.get('book_written')}{dust_text} equity={equity_text} "
         f"err={payload.get('decision_error') or 'none'}"
     )

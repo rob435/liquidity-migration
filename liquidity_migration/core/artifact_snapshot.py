@@ -60,7 +60,7 @@ class StableFileSnapshot:
 
 
 def _signature(metadata: os.stat_result) -> tuple[int, ...]:
-    return (
+    signature = (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_mode,
@@ -69,8 +69,11 @@ def _signature(metadata: os.stat_result) -> tuple[int, ...]:
         metadata.st_nlink,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
     )
+    # Windows reports a different ctime for a descriptor than for the path
+    # naming that descriptor, even when the file is unchanged. Device/inode,
+    # size and mtime still provide the identity/content checks used here.
+    return signature if os.name == "nt" else (*signature, metadata.st_ctime_ns)
 
 
 def read_stable_file(
@@ -103,6 +106,7 @@ def read_stable_file(
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
     )
     try:
         descriptor = os.open(str(candidate), flags)
@@ -116,9 +120,13 @@ def read_stable_file(
             raise ValueError(f"{label} must be a regular file: {candidate}")
         if require_single_link and before_descriptor.st_nlink != 1:
             raise ValueError(f"{label} must not be hard-linked: {candidate}")
-        if require_mode is not None and stat.S_IMODE(before_descriptor.st_mode) != require_mode:
+        if (
+            require_mode is not None
+            and os.name != "nt"
+            and stat.S_IMODE(before_descriptor.st_mode) != require_mode
+        ):
             raise ValueError(f"{label} must have mode {require_mode:04o}: {candidate}")
-        if require_owner and before_descriptor.st_uid != os.geteuid():
+        if require_owner and os.name != "nt" and before_descriptor.st_uid != os.geteuid():
             raise ValueError(f"{label} must be owned by the current user: {candidate}")
         if max_bytes is not None and before_descriptor.st_size > max_bytes:
             raise ValueError(f"{label} exceeds the {max_bytes}-byte size limit: {candidate}")

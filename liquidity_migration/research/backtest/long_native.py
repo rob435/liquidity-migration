@@ -1,8 +1,8 @@
 """Historical runner and report writer for the registered LONG rule.
 
 The rule itself — profiles, features, signal — lives in
-``liquidity_migration/rules/long_native.py``; this module replays it through
-the historical account kernel and renders the equity evidence.
+``liquidity_migration/rules/long_native.py``; this module replays its
+chronological lifecycle and renders the equity evidence.
 """
 
 from __future__ import annotations
@@ -31,9 +31,6 @@ from liquidity_migration.core._common import (
     is_weekend_ms,
     pct,
 )
-from liquidity_migration.account.account_contracts import AccountRiskPolicy
-from liquidity_migration.account.account_kernel import verify_account_journal
-from liquidity_migration.account.account_service import SleeveAdapterKind
 from liquidity_migration.core.config import CostConfig, TradeLifecycleConfig
 from liquidity_migration.rules.long_native import (
     LongNativeConfig,
@@ -53,19 +50,7 @@ from liquidity_migration.data.trade_lifecycle import (
     summarize_baskets,
     summarize_trade_backtest,
 )
-from liquidity_migration.account.execution_adapters import ExecutionTwinConfig, LatencyProfile
-from liquidity_migration.research.backtest.historical_account_replay import (
-    HistoricalAccountSession,
-    HistoricalTargetDecision,
-    neutralize_rejected_entry_decisions,
-    submit_historical_decisions,
-    synthetic_historical_rules_for_symbols,
-)
-from liquidity_migration.rules.long_identity import (
-    SUPPORTED_LONG_STRATEGY_IDS,
-    long_trade_id,
-)
-from liquidity_migration.account.strategy_targets import component_target_intent
+from liquidity_migration.rules.long_identity import SUPPORTED_LONG_STRATEGY_IDS
 from liquidity_migration.research.backtest.volume_events_charts import _write_equity_benchmark_chart
 from liquidity_migration.data.volume_events_pit import (
     _covered_kline_date_symbol_set,
@@ -73,9 +58,6 @@ from liquidity_migration.data.volume_events_pit import (
     _pit_manifest_metadata,
     filter_klines_to_pit_membership,
 )
-
-LONG_HISTORICAL_KERNEL_EQUITY_USDT = 1_000_000.0
-
 
 def _diagnostic_data_end(exclusive_end: str) -> str | None:
     """Translate the strategy's exclusive end into an inclusive data date."""
@@ -355,7 +337,7 @@ def _long_equity_chart_metrics(summary: dict[str, Any], equity: pl.DataFrame) ->
     return metrics
 
 
-def _long_kernel_strategy_id(config: LongNativeConfig) -> str:
+def _long_strategy_id(config: LongNativeConfig) -> str:
     strategy_id = config.execution_strategy_id.strip()
     if strategy_id not in SUPPORTED_LONG_STRATEGY_IDS:
         raise ValueError(
@@ -390,41 +372,13 @@ def run_long_native_research(
     pit_required_date_symbols = inputs["pit_required_date_symbols"]
     pit_filter_receipt = inputs["pit_filter_receipt"]
 
-    lifecycle_strategy_id = _long_kernel_strategy_id(cfg)
-    lifecycle_root = output_dir / "common_kernel_execution"
-    replay_policy = AccountRiskPolicy(
-        max_component_gross_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 10.0,
-        max_account_gross_notional_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 100.0,
-        max_initial_margin_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT * 100.0,
-        max_leverage=max(float(cfg.execution_leverage), 1.0),
-    )
-    execution_config = ExecutionTwinConfig(
-        fee_bps=costs.base_entry_exit_cost_bps * cfg.cost_multiplier / 2.0,
-        latency=LatencyProfile(0, 0, 0),
-        max_decision_age_ns=0,
-    )
-    observed_ts_ns = max(int(features["ts_ms"].min() or 0) * 1_000_000, 1)
-    online_session = HistoricalAccountSession(
-        lifecycle_root,
-        account_id=lifecycle_strategy_id,
-        risk_policy=replay_policy,
-        instrument_rules=synthetic_historical_rules_for_symbols(
-            list(bars_by_symbol),
-            max_leverage=max(float(cfg.execution_leverage), 1.0),
-            observed_ts_ns=observed_ts_ns,
-        ),
-        execution_config=execution_config,
-        id_seed=f"{lifecycle_strategy_id}:historical",
-    )
-    kernel_decisions: list[HistoricalTargetDecision] = []
+    lifecycle_strategy_id = _long_strategy_id(cfg)
     trades, lifecycle_stats, event_counts = _run_long_pipeline(
         features=features,
         bars_by_symbol=bars_by_symbol,
         funding_lookup=funding_lookup,
         config=cfg,
         costs=costs,
-        kernel_decision_sink=kernel_decisions,
-        kernel_session=online_session,
     )
 
     bt_config = TradeLifecycleConfig(
@@ -441,26 +395,17 @@ def run_long_native_research(
     summary = summarize_trade_backtest(trades, baskets, equity, config=bt_config)
     monthly = _monthly_returns(baskets)
     funding_mode = summary.get("funding_mode", "missing")
-    replay_batches = len(online_session.outputs)
-    final_state_hash = online_session.final_state_hash
-    evidence_label = "chronological_strategy_targets_through_live_common_account_kernel"
-    lifecycle_receipt = verify_account_journal(lifecycle_root)
-    lifecycle_receipt.update(
-        {
-            "batches": replay_batches,
-            "strategy_targets": len(kernel_decisions),
-            "final_state_hash": final_state_hash,
-            "evidence_label": evidence_label,
-            "historical_strategy_runtime_is_sequential": True,
-            "account_kernel_feedback_online": True,
-            "same_timestamp_strategy_batching": True,
-            "entry_capacity_evaluated_at_actual_entry_boundary": True,
-            "strategy_runtime_shared_across_environments": False,
-            "market_tape_shared_across_environments": False,
-            "cross_environment_strategy_parity": False,
-            "venue_rule_parity": False,
-        }
-    )
+    execution_evidence = {
+        "strategy_id": lifecycle_strategy_id,
+        "evidence_label": "chronological_native_strategy_replay",
+        "historical_strategy_runtime_is_sequential": True,
+        "same_timestamp_strategy_batching": True,
+        "entry_capacity_evaluated_at_actual_entry_boundary": True,
+        "strategy_runtime_shared_across_environments": False,
+        "market_tape_shared_across_environments": False,
+        "cross_environment_strategy_parity": False,
+        "venue_rule_parity": False,
+    }
 
     if not trades.is_empty():
         trades.write_csv(output_dir / "long_native_trades.csv")
@@ -549,7 +494,7 @@ def run_long_native_research(
         "tainted": is_tainted(warnings),
         "equity_chart": chart_metadata,
         "equity_mtm": mtm_metadata,
-        "account_journal": lifecycle_receipt,
+        "execution_evidence": execution_evidence,
     }
     (output_dir / "long_native_research_report.json").write_text(
         json.dumps(metadata, indent=2, default=str), encoding="utf-8"
@@ -598,8 +543,6 @@ def _run_long_pipeline(
     funding_lookup: dict[str, dict[str, Any]] | None,
     config: LongNativeConfig,
     costs: CostConfig,
-    kernel_session: HistoricalAccountSession,
-    kernel_decision_sink: list[HistoricalTargetDecision] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int], dict[str, int]]:
     dates_all = sorted(int(ts) for ts in features["ts_ms"].unique().to_list())
     features_by_date: dict[int, list[dict[str, Any]]] = {}
@@ -618,7 +561,6 @@ def _run_long_pipeline(
         "exits_stop": 0,
         "exits_take_profit": 0,
         "exits_time": 0,
-        "skipped_account_kernel": 0,
     }
     event_counts = {"fomo_chase": 0}
     round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
@@ -626,96 +568,7 @@ def _run_long_pipeline(
     if not math.isfinite(config.execution_leverage) or config.execution_leverage <= 0.0:
         raise ValueError("long-native execution_leverage must be finite and positive")
     window_end_ts_ms = date_ms(config.end_date) if config.end_date else None
-    kernel_strategy_id = _long_kernel_strategy_id(config)
-
-    def _target_component_id(pos: dict[str, Any]) -> str:
-        return long_trade_id(
-            symbol=str(pos["symbol"]),
-            signal_ts_ms=int(pos["entry_signal_ts_ms"]),
-        )
-
-    def _entry_target(pos: dict[str, Any]) -> HistoricalTargetDecision:
-        trade_id = _target_component_id(pos)
-        entry_ts_ms = int(pos["entry_ts_ms"])
-        target_notional = (
-            LONG_HISTORICAL_KERNEL_EQUITY_USDT
-            * notional_weight
-            * float(pos["position_weight"])
-            * config.notional_multiplier
-        )
-        return HistoricalTargetDecision(
-            wall_ts_ns=entry_ts_ms * 1_000_000,
-            reference_price=float(pos["entry_price"]),
-            intent=component_target_intent(
-                adapter_kind=SleeveAdapterKind.LONG,
-                action="entry",
-                decision_ts_ms=entry_ts_ms,
-                strategy_id=kernel_strategy_id,
-                component_id=trade_id,
-                symbol=str(pos["symbol"]),
-                signed_notional_usdt=target_notional,
-                leverage=max(float(config.execution_leverage), 1.0),
-                reason="fomo_chase",
-                metadata={
-                    "source": "long_native_in_engine_target",
-                    "signal_ts_ms": int(pos["entry_signal_ts_ms"]),
-                    "signal_valid_until_ms": entry_ts_ms + MS_PER_HOUR,
-                    "stop_loss_pct": float(pos["stop_pct"]),
-                    "take_profit_pct": float(pos["tp_pct"]),
-                    "max_hold_duration_ms": int(pos["planned_exit_ts_ms"]) - entry_ts_ms,
-                    "position_weight": float(pos["position_weight"]),
-                },
-            ),
-        )
-
-    def _market_prices(through_ts_ms: int) -> dict[str, float]:
-        prices: dict[str, float] = {}
-        for symbol, pos in open_positions.items():
-            bars = bars_by_symbol.get(symbol)
-            price = float(pos["entry_price"])
-            if bars is not None:
-                index = bisect_right(bars["ends"], int(through_ts_ms)) - 1
-                if index >= 0:
-                    candidate = float(bars["close"][index])
-                    if math.isfinite(candidate) and candidate > 0.0:
-                        price = candidate
-            prices[symbol] = price
-        return prices
-
-    def _submit_kernel_decisions(
-        decisions: list[HistoricalTargetDecision],
-        *,
-        batch_prefix: str,
-    ) -> tuple[bool, tuple[str, ...], bool]:
-        def _marks(decision_symbols: set[str]) -> dict[str, float]:
-            market_prices = _market_prices(
-                max(decision.wall_ts_ns for decision in decisions) // 1_000_000
-            )
-            for symbol in decision_symbols:
-                market_prices.pop(symbol, None)
-            return market_prices
-
-        return submit_historical_decisions(
-            decisions,
-            kernel_session=kernel_session,
-            kernel_decision_sink=kernel_decision_sink,
-            equity_usdt=LONG_HISTORICAL_KERNEL_EQUITY_USDT,
-            batch_prefix=batch_prefix,
-            market_prices_for=_marks,
-        )
-
-    def _neutralize_rejected_entries(decisions: list[HistoricalTargetDecision]) -> None:
-        neutralize_rejected_entry_decisions(
-            decisions,
-            source="long_native_execution_rejection_compensation",
-            error_label="historical LONG account kernel could not neutralize rejected entries",
-            submit=lambda cancellations: _submit_kernel_decisions(
-                cancellations,
-                batch_prefix="long-native-entry-compensation",
-            ),
-        )
-
-    pending_exits: list[tuple[dict[str, Any], HistoricalTargetDecision]] = []
+    pending_exits: list[tuple[dict[str, Any], int, str]] = []
 
     def _record_exit_target(
         pos: dict[str, Any],
@@ -734,28 +587,7 @@ def _run_long_pipeline(
             funding_lookup=funding_lookup,
             notional_multiplier=config.notional_multiplier,
         )
-        trade_id = _target_component_id(pos)
-        decision = HistoricalTargetDecision(
-            wall_ts_ns=int(exit_ts_ms) * 1_000_000,
-            reference_price=float(exit_price),
-            intent=component_target_intent(
-                adapter_kind=SleeveAdapterKind.LONG,
-                action="exit",
-                decision_ts_ms=exit_ts_ms,
-                strategy_id=kernel_strategy_id,
-                component_id=trade_id,
-                symbol=str(pos["symbol"]),
-                signed_notional_usdt=0.0,
-                leverage=max(float(config.execution_leverage), 1.0),
-                reason=reason,
-                metadata={
-                    "source": "long_native_in_engine_target",
-                    "owner_sleeve": "long",
-                    "prior_trade_id": trade_id,
-                },
-            ),
-        )
-        pending_exits.append((trade, decision))
+        pending_exits.append((trade, int(exit_ts_ms), str(pos["symbol"])))
         return trade
 
     def _scan_position_exit(symbol: str, pos: dict[str, Any], through_ts: int) -> bool:
@@ -819,26 +651,8 @@ def _run_long_pipeline(
     def _flush_exits() -> None:
         if not pending_exits:
             return
-        grouped: dict[int, list[tuple[dict[str, Any], HistoricalTargetDecision]]] = {}
-        for trade, decision in pending_exits:
-            grouped.setdefault(decision.wall_ts_ns, []).append((trade, decision))
-        for items in (grouped[key] for key in sorted(grouped)):
-            ordered = sorted(
-                items,
-                key=lambda item: (
-                    item[1].intent.intent.symbol,
-                    item[1].intent.intent.target_key,
-                ),
-            )
-            accepted, rejection_keys, _ = _submit_kernel_decisions(
-                [decision for _, decision in ordered],
-                batch_prefix="long-native-exit",
-            )
-            if not accepted:
-                raise RuntimeError(
-                    "historical LONG account kernel rejected a strategy exit batch: " + ", ".join(rejection_keys)
-                )
-            trade_rows.extend(trade for trade, _ in ordered)
+        pending_exits.sort(key=lambda item: (item[1], item[2]))
+        trade_rows.extend(trade for trade, _, _ in pending_exits)
         pending_exits.clear()
 
     def _scan_all_positions(through_ts: int) -> None:
@@ -847,9 +661,8 @@ def _run_long_pipeline(
             if _scan_position_exit(symbol, open_positions[symbol], through_ts):
                 exited.append(symbol)
         # Keep just-exited positions available as mark sources until the
-        # chronological exit groups are submitted: a wide scan can discover
-        # exits at several timestamps, and the earliest batch needs prices for
-        # the ones that close later.
+        # chronological exit groups are recorded: a wide scan can discover
+        # exits at several timestamps.
         _flush_exits()
         for symbol in exited:
             del open_positions[symbol]
@@ -867,7 +680,7 @@ def _run_long_pipeline(
 
         _scan_all_positions(int(ts + exact_duration_ms(hours=config.entry_delay_hours)))
         candidates.sort(key=lambda candidate: -(_safe_float(candidate[0].get("log_return")) or 0.0))
-        pending_entries: list[tuple[str, dict[str, Any], HistoricalTargetDecision]] = []
+        pending_entries: list[tuple[str, dict[str, Any]]] = []
         for row, stop_pct, take_profit_pct, hold_days in candidates:
             symbol = str(row["symbol"])
             entry_ts_ms = ts + exact_duration_ms(hours=config.entry_delay_hours)
@@ -949,16 +762,14 @@ def _run_long_pipeline(
                 "max_hold_days": int(hold_days),
                 "basket_id": f"native-{_iso_date(int(ts))}-{symbol}",
             }
-            pending_entries.append((symbol, position, _entry_target(position)))
+            pending_entries.append((symbol, position))
 
-        grouped_entries: dict[int, list[tuple[str, dict[str, Any], HistoricalTargetDecision]]] = {}
+        grouped_entries: dict[int, list[tuple[str, dict[str, Any]]]] = {}
         for item in pending_entries:
-            grouped_entries.setdefault(item[2].wall_ts_ns, []).append(item)
-        for wall_ts_ns, items in sorted(grouped_entries.items()):
-            entry_ts_ms = int(wall_ts_ns // 1_000_000)
+            grouped_entries.setdefault(int(item[1]["entry_ts_ms"]), []).append(item)
+        for entry_ts_ms, items in sorted(grouped_entries.items()):
             _scan_all_positions(entry_ts_ms)
-            admitted: list[tuple[str, dict[str, Any], HistoricalTargetDecision]] = []
-            for symbol, position, decision in items:
+            for symbol, position in sorted(items, key=lambda item: item[0]):
                 if symbol in open_positions:
                     stats["skipped_already_held"] += 1
                     continue
@@ -969,22 +780,6 @@ def _run_long_pipeline(
                     stats["skipped_capacity"] += 1
                     continue
                 open_positions[symbol] = position
-                admitted.append((symbol, position, decision))
-            if not admitted:
-                continue
-            decisions = [item[2] for item in admitted]
-            accepted, _rejection_keys, target_committed = _submit_kernel_decisions(
-                decisions,
-                batch_prefix="long-native-entry",
-            )
-            if accepted:
-                continue
-            if target_committed:
-                _neutralize_rejected_entries(decisions)
-            stats["skipped_account_kernel"] += len(admitted)
-            for symbol, position, _ in admitted:
-                if open_positions.get(symbol) is position:
-                    del open_positions[symbol]
 
     if open_positions:
         # Same mark-source invariant as `_scan_all_positions`: collect the scan

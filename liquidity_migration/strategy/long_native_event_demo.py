@@ -1,9 +1,8 @@
-"""LONG strategy target producer - forward counterpart to long_native research.
+"""LONG strategy target-book producer for the Rust execution engine.
 
 Runs the v11a long sleeve (uni50 FC sniper retrace 1%/6h fall-through),
-publishing desired component targets to the account owner. This
-module owns target-planning mechanics; the account owner owns execution and
-accounting. Profile guide: ``docs/trading_logic.md``.
+publishing an absolute desired book. This module owns strategy decisions; the
+Rust engine owns sizing enforcement, execution, venue state, and accounting.
 
 Operating model
 ---------------
@@ -48,10 +47,6 @@ import polars as pl
 
 from liquidity_migration.core._common import MS_PER_DAY, exact_duration_ms, is_weekend_ms
 from liquidity_migration.core.env_flags import env_flag
-from liquidity_migration.account.account_intent_client import (
-    ExitFirstPublication,
-    publish_exit_first_target_requests,
-)
 from liquidity_migration.strategy.account_candidate_universe import (
     enforce_frozen_candidate_frames,
     load_candidate_universe,
@@ -59,10 +54,6 @@ from liquidity_migration.strategy.account_candidate_universe import (
     require_profile_binding,
     scheduled_retirement_exposure,
 )
-from liquidity_migration.account.account_kernel import AccountJournalCursor
-from liquidity_migration.account.account_route import require_account_route
-from liquidity_migration.account.account_service import RequestedIntent, SleeveAdapterKind
-from liquidity_migration.strategy.account_strategy_state import target_reservation_rows
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.core.config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from liquidity_migration.data.downloaders import _normalize_tickers
@@ -80,9 +71,8 @@ from liquidity_migration.strategy.event_demo_data import (
     _utc_now_ms,
     _yyyymmddhhmmss,
 )
-from liquidity_migration.account.execution_environment import (
+from liquidity_migration.policy.execution_environment import (
     ExecutionEnvironment,
-    account_id_for_environment,
     candidate_universe_realm,
     execution_environment,
 )
@@ -101,24 +91,17 @@ from liquidity_migration.rules.long_identity import (
     long_profile_display_name,
     long_trade_id,
 )
-from liquidity_migration.account.engine_account_health import (
+from liquidity_migration.runtime.engine_account_health import (
     EngineAccountReading,
+    TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
     require_recent_engine_account,
 )
-from liquidity_migration.strategy.strategy_planning import (
-    TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-    OwnerHealthReading,
-    account_owner_health_reading,
-    sleeve_planning_snapshot,
-    suppress_target_intents,
-)
-from liquidity_migration.account.strategy_funnel import (
+from liquidity_migration.strategy.strategy_funnel import (
     DecisionFunnelObserver,
     finalize_funnel_row,
     gate_state,
     observe_funnel_rows_safely,
 )
-from liquidity_migration.account.strategy_targets import component_target_intent, exit_target_intents
 from liquidity_migration.rules.engine_targets import (
     EngineTarget,
     render_target_book,
@@ -131,7 +114,7 @@ from liquidity_migration.strategy.long_book_state import (
     read_book_state,
     write_book_state,
 )
-from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
+from liquidity_migration.strategy.target_book_evidence import PublishedTargetCyclePayload
 from liquidity_migration.data.universe import build_current_universe_table
 
 
@@ -139,8 +122,7 @@ from liquidity_migration.data.universe import build_current_universe_table
 # event would later trigger a stale fill long after the retrace window closed.
 SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
 
-#: Where this producer writes the book the engine follows. Unset means it
-#: writes none and publishes intents instead.
+#: Where this producer writes the mandatory book the engine follows.
 ENGINE_TARGET_BOOK_PATH_ENV = "LONG_ENGINE_TARGET_BOOK_PATH"
 
 #: How long a LONG book may be acted on. It must clear the engine's own
@@ -176,30 +158,7 @@ LLM_GATE_ENABLED_ENV = "LONG_ENGINE_LLM_GATE_ENABLED"
 _LLM_GATE_MAX_AGE_MS = exact_duration_ms(hours=1)
 _LLM_GATE_SIGNAL_MAX_AGE_MS = exact_duration_ms(hours=1)
 
-#: What the cycle reports when the book replaced the inbox. Nothing was
-#: published because nothing reads the inbox any more, and the summary fields
-#: that counted publications say zero rather than going missing.
-_EMPTY_PUBLICATION = ExitFirstPublication(exit_requests=(), entry_requests=(), errors=())
 _LOGGER = logging.getLogger(__name__)
-
-# The wakes whose whole point is speed: a time stop coming due, and a price
-# the cycle asked to be woken for. Those two spend the owner-health reading an
-# ordinary cycle already took instead of reading it again. Every other kind —
-# timer, confirmed bar, journal change, startup — reads live.
-_FAST_WAKE_CYCLE_KINDS = frozenset({"market_boundary", "price_touch"})
-
-
-@dataclass(slots=True)
-class LongCycleState:
-    """Operational hints a LONG daemon carries between its own cycles.
-
-    Never decision state: every cycle rebuilds features and re-decides from
-    scratch. It holds one thing — the owner-health reading an ordinary cycle
-    took — so a wake that exists to act fast can spend it instead of paying
-    the read and the head-retry sleeps behind it.
-    """
-
-    owner_health_reading: OwnerHealthReading | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,15 +179,8 @@ class LongNativeDemoCycleConfig:
     # SHA-256 of the shared operational profile when runtime sizing came from
     # that profile. Empty is retained for isolated diagnostics/tests.
     operational_profile_sha256: str = ""
-    # No default is intentional: runtime callers must select exactly one
-    # target owner. This producer has no order-submission capability.
+    # No default is intentional: runtime callers must select one venue realm.
     execution_environment: str = ""
-    # Targets are published to the selected account owner.
-    account_intent_inbox_root: str | None = None
-    # Canonical journal read model paired with the inbox above.  Both are
-    # required together so planning cannot mix account targets with stale
-    # sleeve-owned open rows.
-    account_execution_root: str | None = None
     # Optional frozen-population contract: post-freeze listings never enter, and
     # a frozen symbol that disappears becomes temporarily ineligible (or
     # scheduled for retirement on delivery evidence) without stopping the cycle.
@@ -259,8 +211,7 @@ def _validate_long_demo_config(
 ) -> None:
     strategy = strategy_config or long_v11a_profile()
     if strategy.execution_strategy_id not in SUPPORTED_LONG_STRATEGY_IDS:
-        # The id is a persisted account-journal key; an unregistered value
-        # would open components under an identity nothing else recognizes.
+        # The id is persisted in the target book and producer state.
         raise ValueError(
             f"unsupported LONG execution_strategy_id: {strategy.execution_strategy_id!r}"
         )
@@ -283,15 +234,10 @@ def _validate_long_demo_config(
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
     execution_environment(config.execution_environment)
-    has_account_inbox = bool(str(config.account_intent_inbox_root or "").strip())
-    has_account_execution_root = bool(str(config.account_execution_root or "").strip())
-    if has_account_inbox != has_account_execution_root:
-        raise ValueError("account_intent_inbox_root and account_execution_root must be configured together")
-    if not has_account_inbox:
-        raise ValueError(
-            "operational target mode requires account_intent_inbox_root and "
-            "account_execution_root; direct sleeve order authority is retired"
-        )
+    if not os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip():
+        raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust engine target book")
+    if long_book_state_path() is None:
+        raise ValueError("LONG_ENGINE_BOOK_STATE_PATH must name the producer's durable state")
 
 
 def target_long_order_notional_pct_equity(
@@ -349,22 +295,15 @@ def run_long_native_demo_cycle(
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
     funnel_observer: DecisionFunnelObserver | None = None,
-    journal_cursor: AccountJournalCursor | None = None,
-    cycle_state: LongCycleState | None = None,
-    cycle_kind: str = "timer",
 ) -> PublishedTargetCyclePayload:
     demo = demo_config or LongNativeDemoCycleConfig()
     strategy = strategy_config or long_v11a_profile()
-    state = cycle_state if cycle_state is not None else LongCycleState()
     strategy_id = strategy.execution_strategy_id
     _validate_long_demo_config(demo, strategy)
     owner_environment = execution_environment(demo.execution_environment).value
-    route = require_account_route(
-        account_id=account_id_for_environment(owner_environment),
-        environment=owner_environment,
-        account_root=Path(str(demo.account_execution_root)).expanduser(),
-        inbox_root=Path(str(demo.account_intent_inbox_root)).expanduser(),
-    )
+    engine_book_path = Path(os.environ[ENGINE_TARGET_BOOK_PATH_ENV]).expanduser()
+    book_state_path = long_book_state_path()
+    assert book_state_path is not None
     cycles_dataset = _long_cycle_dataset(demo)
 
     root = Path(data_root).expanduser()
@@ -386,6 +325,21 @@ def run_long_native_demo_cycle(
 
     with exclusive_file_lock(root / ".locks" / "long_native_event_demo_cycle.lock", stale_seconds=900):
         mark_stage("cycle_lock_wait")
+        engine_reading: EngineAccountReading | None = None
+        try:
+            engine_reading = require_recent_engine_account(
+                owner_environment,
+                max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+                now_ns=cycle_now_ms * 1_000_000,
+            )
+            equity_usdt = float(engine_reading.equity_usdt)
+            engine_account_health_error = ""
+        except (OSError, RuntimeError, ValueError) as exc:
+            equity_usdt = 0.0
+            engine_account_health_error = str(exc)
+            _LOGGER.warning("LONG engine account reading unavailable; new entries blocked: %s", exc)
+        account_state_source = f"rust_engine_heartbeat:{owner_environment}"
+        mark_stage("account_health")
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
         instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
         raw_tickers, ticker_source = _resolve_ticker_snapshot(
@@ -421,15 +375,11 @@ def run_long_native_demo_cycle(
                     / f"{candidate_universe.artifact_sha256}.json"
                 ),
             )
-            # A retiring symbol still holding exposure is a draining state,
-            # not a fault: entries for it are already suppressed below via
-            # active_symbols, and the exits that clear it are planned from the
-            # account journal further down this very cycle. Failing here would
-            # block the only publisher of those exits.
             retirement_exposure = scheduled_retirement_exposure(
                 candidate_reconciliation,
-                route=route,
-                journal_cursor=journal_cursor,
+                held_symbols=(
+                    engine_reading.held_symbols if engine_reading is not None else None
+                ),
             )
             if retirement_exposure:
                 _LOGGER.warning(
@@ -457,32 +407,6 @@ def run_long_native_demo_cycle(
         force_added_anchors = [symbol for symbol in regime_anchors if symbol not in set(symbols)]
         kline_symbols = symbols + force_added_anchors
         mark_stage("universe")
-
-        # A wake that exists to act fast must not spend its first seconds on
-        # the owner-health read, whose head-retry ladder sleeps a second
-        # between attempts when the owner's receipt is mid-publish. Those
-        # wakes serve the reading an ordinary cycle already took -- but only
-        # while the receipt BEHIND that reading is still young enough that a
-        # live read at this instant would accept it, so ages never stack:
-        # the equity a cycle plans on is the equity it would have read
-        # anyway. A journal-change wake always reads live — it fired BECAUSE
-        # the journal moved, so a stored reading could predate the very fill
-        # that woke it.
-        now_ns = cycle_now_ms * 1_000_000
-        stored_reading = state.owner_health_reading if cycle_kind in _FAST_WAKE_CYCLE_KINDS else None
-        reading = account_owner_health_reading(
-            route,
-            environment=owner_environment,
-            stored_reading=stored_reading,
-            now_ns=now_ns,
-        )
-        equity_usdt, account_owner_health_error = float(reading.equity_usdt), str(reading.error)
-        # A live read comes back freshly stamped; a served reading is the
-        # same object with its original stamp, so age can never launder
-        # itself through a re-stamp.
-        state.owner_health_reading = reading
-        account_state_source = f"account_owner_health:{owner_environment}"
-        mark_stage("account_health")
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
         klines, kline_cache_stats = _download_recent_1h_klines(
@@ -548,77 +472,32 @@ def run_long_native_demo_cycle(
         )
         mark_stage("features")
 
-        # Plan across every supported LONG identity, not just the active one:
-        # target keys embed the strategy id, so open components entered under a
-        # prior profile would otherwise lose their exits, capacity accounting,
-        # and cooldown history the moment the deployed profile changed.
-        planning = sleeve_planning_snapshot(
-            route,
-            sleeve=SleeveAdapterKind.LONG,
-            strategy_ids=tuple(sorted(SUPPORTED_LONG_STRATEGY_IDS)),
-            journal_cursor=journal_cursor,
-            now_ms=cycle_now_ms,
-        )
-        target_publisher = planning.publisher
-        unresolved_targets = planning.unresolved_targets
-        all_trades = planning.canonical_trades
-        terminal_entry_attempts = planning.terminal_entry_attempts
-
-        # Where the engine executes, this producer's own record replaces the
-        # account journal. The journal is written by an owner that no longer
-        # exists, so it is not empty -- it is frozen, which is worse: every
-        # name in it would be believed held for ever. See `long_book_state`.
-        engine_book_path = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
-        book_state: LongBookState | None = None
-        book_state_path: Path | None = None
-        engine_reading: EngineAccountReading | None = None
+        book_state = read_book_state(book_state_path)
         engine_blocked_asks = 0
-        if engine_book_path:
-            book_state_path = long_book_state_path()
-            if book_state_path is None:
-                raise ValueError(
-                    f"{ENGINE_TARGET_BOOK_PATH_ENV} is set but no book state path is; "
-                    "a producer that writes a book must remember what it asked for"
+        if engine_reading is not None and engine_reading.entry_blockers:
+            blocked_asks = {
+                symbol: reason
+                for symbol, reason in sorted(engine_reading.entry_blockers.items())
+                if symbol in book_state.held and not book_state.held[symbol].seen_held
+            }
+            for symbol, reason in blocked_asks.items():
+                _LOGGER.warning(
+                    "long book: %s was asked for but the engine will not open it (%s); "
+                    "the ask leaves the book",
+                    symbol,
+                    reason,
                 )
-            book_state = read_book_state(book_state_path)
-            try:
-                engine_reading = require_recent_engine_account(
-                    owner_environment, max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS
+            if blocked_asks:
+                engine_blocked_asks = len(blocked_asks)
+                book_state = LongBookState(
+                    held={
+                        symbol: entry
+                        for symbol, entry in book_state.held.items()
+                        if symbol not in blocked_asks
+                    },
+                    left_at_ms=book_state.left_at_ms,
                 )
-            except (OSError, RuntimeError, ValueError):
-                # No heartbeat, a stale one, an unreadable one: no news about
-                # what is held and no news about refusals. The record below is
-                # left exactly as it stands.
-                engine_reading = None
-            if engine_reading is not None and engine_reading.entry_blockers:
-                # An ask the engine refuses never becomes a position, but it
-                # reserves a slot until its deadline -- unless it leaves the
-                # record now. Only names the engine has never confirmed go;
-                # a confirmed holding with a refusal is exit business, not
-                # entry bookkeeping. No cooldown: the name never held.
-                blocked_asks = {
-                    symbol: reason
-                    for symbol, reason in sorted(engine_reading.entry_blockers.items())
-                    if symbol in book_state.held and not book_state.held[symbol].seen_held
-                }
-                for symbol, reason in blocked_asks.items():
-                    _LOGGER.warning(
-                        "long book: %s was asked for but the engine will not open it (%s); "
-                        "the ask leaves the book",
-                        symbol,
-                        reason,
-                    )
-                if blocked_asks:
-                    engine_blocked_asks = len(blocked_asks)
-                    book_state = LongBookState(
-                        held={
-                            symbol: entry
-                            for symbol, entry in book_state.held.items()
-                            if symbol not in blocked_asks
-                        },
-                        left_at_ms=book_state.left_at_ms,
-                    )
-            all_trades = book_state.as_trade_rows()
+        all_trades = book_state.as_trade_rows()
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
         )
@@ -628,13 +507,6 @@ def run_long_native_demo_cycle(
             all_trades,
             now_ms=cycle_now_ms,
             price_by_symbol=price_by_symbol,
-        )
-        exit_target_intents = _long_exit_target_intents(
-            exit_plans,
-            all_trades,
-            strategy_id=strategy_id,
-            now_ms=cycle_now_ms,
-            default_leverage=demo.entry_leverage,
         )
         mark_stage("exit_targets")
 
@@ -698,112 +570,46 @@ def run_long_native_demo_cycle(
         )
         candidates = candidates[:free_slots]
         entry_candidates = len(candidates)
-        skipped_account_owner_health = 0
-        if account_owner_health_error:
-            skipped_account_owner_health = len(candidates)
+        skipped_engine_account_health = 0
+        if engine_account_health_error:
+            skipped_engine_account_health = len(candidates)
             candidates = []
 
-        entry_target_intents = _long_entry_target_intents(
-            candidates,
+        asked_before = set(book_state.held)
+        book_state, engine_resized_symbols = _advance_long_book_state(
+            book_state,
+            exit_plans=exit_plans,
+            candidates=candidates,
             demo=demo,
             equity_usdt=equity_usdt,
             order_notional_pct_equity=order_notional_pct_equity,
             price_by_symbol=price_by_symbol,
-            now_ms=cycle_now_ms,
             strategy_id=strategy_id,
+            now_ms=cycle_now_ms,
+            cooldown_days=int(strategy.cooldown_days),
+            held_symbols=(engine_reading.held_symbols if engine_reading is not None else None),
+            venue_holdings=(engine_reading.holdings if engine_reading is not None else {}),
         )
-        suppression = suppress_target_intents(
-            exit_intents=exit_target_intents,
-            entry_intents=entry_target_intents,
-            unresolved_target_keys=unresolved_targets.target_keys,
-            terminal_entry_attempts=terminal_entry_attempts,
-        )
-        exit_target_intents = suppression.exit_intents
-        entry_target_intents = suppression.entry_intents
-        unresolved_exit_suppressions = suppression.unresolved_exit_suppressions
-        unresolved_entry_suppressions = suppression.unresolved_entry_suppressions
-        terminal_entry_suppressions = suppression.terminal_entry_attempt_suppressions
-        if book_state is not None:
-            # The book is absolute and replaces both halves at once: a name
-            # this producer stopped asking for is simply absent, which the
-            # engine reads as "hold none of it". Nothing is published to the
-            # inbox, because nothing reads the inbox any more.
-            asked_before = set(book_state.held)
-            book_state, engine_resized_symbols = _advance_long_book_state(
+        # State lands before its matching book. If the process dies between the
+        # two writes, the old book is conservative and the next cycle repairs it.
+        write_book_state(book_state_path, book_state)
+        write_target_book(
+            engine_book_path,
+            _long_engine_target_book(
                 book_state,
-                exit_plans=exit_plans,
-                candidates=candidates,
-                demo=demo,
-                equity_usdt=equity_usdt,
-                order_notional_pct_equity=order_notional_pct_equity,
-                price_by_symbol=price_by_symbol,
-                strategy_id=strategy_id,
-                now_ms=cycle_now_ms,
-                cooldown_days=int(strategy.cooldown_days),
-                held_symbols=(
-                    engine_reading.held_symbols if engine_reading is not None else None
-                ),
-                venue_holdings=(
-                    engine_reading.holdings if engine_reading is not None else {}
-                ),
-            )
-            # The record is written first. A book the record does not back
-            # would have this producer asking for a name it will not remember
-            # next cycle, and so re-entering it for ever.
-            assert book_state_path is not None  # set with book_state above
-            write_book_state(book_state_path, book_state)
-            write_target_book(
-                Path(engine_book_path),
-                _long_engine_target_book(
-                    book_state,
-                    decision_ts_ms=cycle_now_ms,
-                    strategy_profile=str(strategy_id),
-                ),
-            )
-            # Nothing reads the inbox in this mode, so "queued" counts what
-            # the book itself took in and let go: the summary line would
-            # otherwise read zero on every cycle for ever.
-            publication = _EMPTY_PUBLICATION
-            published_exit_intents = len(asked_before - set(book_state.held))
-            published_entry_intents = len(set(book_state.held) - asked_before)
-        else:
-            publication = publish_exit_first_target_requests(
-                target_publisher,
-                batch_prefix=f"long-target/{strategy_id}/{cycle_now_ms}",
-                exit_intents=exit_target_intents,
-                entry_intents=entry_target_intents,
-                created_ts_ns=cycle_now_ms * 1_000_000,
-            )
-            published_exit_intents = len(publication.exit_requests)
-            published_entry_intents = len(entry_target_intents) if publication.entry_requests else 0
-        account_target_requests = {
-            "exit_request_ids": list(publication.exit_request_ids),
-            "exit_requests": [
-                {
-                    "request_id": item.request.request_id,
-                    "batch_id": item.request.batch_id,
-                    "target_key": item.request.intents[0].intent.target_key,
-                }
-                for item in publication.exit_requests
-            ],
-            "entry_request_ids": list(publication.entry_request_ids),
-            "entry_requests": [
-                {
-                    "request_id": item.request.request_id,
-                    "batch_id": item.request.batch_id,
-                    "intent_count": len(item.request.intents),
-                }
-                for item in publication.entry_requests
-            ],
-            "publication_errors": [asdict(error) for error in publication.errors],
-        }
+                decision_ts_ms=cycle_now_ms,
+                strategy_profile=str(strategy_id),
+            ),
+        )
+        published_exit_intents = len(asked_before - set(book_state.held))
+        published_entry_intents = len(set(book_state.held) - asked_before)
         mark_stage("target_publish")
 
         cycle_row = {
             "cycle_id": cycle_id,
             "ts_ms": cycle_now_ms,
             "sleeve": "long",
-            "mode": f"{owner_environment}_target",
+            "mode": f"{owner_environment}_rust_target_book",
             "strategy_id": strategy_id,
             "strategy_profile": long_profile_display_name(strategy_id),
             "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
@@ -840,21 +646,14 @@ def run_long_native_demo_cycle(
             "feature_rows": features.height,
             "latest_feature_ts_ms": _max_int(features, "ts_ms"),
             "entry_candidates": entry_candidates,
-            "entry_targets_queued": published_entry_intents,
+            "entry_book_additions": published_entry_intents,
             "exit_candidates": len(exit_plans),
             "exit_decayed_stop_candidates": sum(
                 1 for plan in exit_plans if plan.get("exit_reason") == "decayed_stop_loss"
             ),
-            "exit_targets_queued": published_exit_intents,
-            "target_intents_queued": published_exit_intents + published_entry_intents,
-            "account_target_route": True,
-            "account_target_exit_request_ids": list(publication.exit_request_ids),
-            "account_target_entry_request_ids": list(publication.entry_request_ids),
-            "account_target_publication_error_count": len(publication.errors),
-            "unresolved_exit_target_suppressions": unresolved_exit_suppressions,
-            "unresolved_entry_target_suppressions": unresolved_entry_suppressions,
-            "terminal_entry_attempt_suppressions": terminal_entry_suppressions,
-            "account_owner_health_error": account_owner_health_error,
+            "exit_book_removals": published_exit_intents,
+            "book_changes": published_exit_intents + published_entry_intents,
+            "engine_account_health_error": engine_account_health_error,
             "open_long_components": _count_open_long_positions(all_trades),
             # The regime gate's two inputs, as the latest closed bars read
             # them. Null when the anchor produced no closed bar at all -- the
@@ -863,24 +662,19 @@ def run_long_native_demo_cycle(
             "regime_btc_on": regime_btc_on,
             "regime_eth_on": regime_eth_on,
             "regime_anchors_missing_json": json.dumps(missing_regime_anchors),
-            # Book mode only: asks dropped because the engine refuses them,
-            # names the engine moved against the record, and how many targets
-            # the book now carries. Inbox mode publishes requests instead and
-            # leaves these null.
-            "engine_blocked_asks": engine_blocked_asks if book_state is not None else None,
-            "engine_resized_symbols_json": (
-                json.dumps(engine_resized_symbols) if book_state is not None else None
-            ),
-            "book_targets": len(book_state.held) if book_state is not None else None,
-            # Null, not 0.0, when owner health is unavailable: a literal zero
+            "engine_blocked_asks": engine_blocked_asks,
+            "engine_resized_symbols_json": json.dumps(engine_resized_symbols),
+            "book_targets": len(book_state.held),
+            "target_book_path": str(engine_book_path),
+            # Null, not 0.0, when engine health is unavailable: a literal zero
             # reads as a -100% equity spike in every cycles-derived curve.
-            "equity_usdt": equity_usdt if not account_owner_health_error else None,
+            "equity_usdt": equity_usdt if not engine_account_health_error else None,
             "order_notional_pct_equity": order_notional_pct_equity,
             "llm_gate_events": llm_gate_event_count,
             "entry_leverage": demo.entry_leverage,
             "notional_multiplier": demo.notional_multiplier,
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
-            "skipped_account_owner_health": skipped_account_owner_health,
+            "skipped_engine_account_health": skipped_engine_account_health,
             **stage_timings_ms,
             "cycle_elapsed_pre_persist_ms": round((time.perf_counter() - cycle_perf_start) * 1000.0, 3),
         }
@@ -889,7 +683,6 @@ def run_long_native_demo_cycle(
             "cycle": cycle_row,
             "config": asdict(demo),
             "strategy_config": asdict(strategy),
-            "account_target_requests": account_target_requests,
             "candidates": candidates,
             "planned_exits": exit_plans,
             # The daemon bounds its next wait at this instant, so a time
@@ -951,8 +744,7 @@ def run_long_native_demo_cycle(
         payload["cycle"] = cycle_row
     return PublishedTargetCyclePayload(
         payload,
-        publication=publication,
-        route=target_publisher.route,
+        target_book_path=engine_book_path,
     )
 
 
@@ -1023,9 +815,7 @@ def _build_long_universe(
 def _open_long_trades(trades: pl.DataFrame) -> pl.DataFrame:
     if trades.is_empty() or "status" not in trades.columns:
         return trades
-    # Direct-route trade rows carry open/closed. The account read model also
-    # carries target_pending, excluded here because accepted desire is not fill
-    # evidence; admission reserves those via _long_target_reservations.
+    # The producer state carries both open asks and recent closed cooldown rows.
     open_only = trades.filter(pl.col("status") == "open")
     if "side" in open_only.columns:
         return open_only.filter(pl.col("side") == "long")
@@ -1033,9 +823,9 @@ def _open_long_trades(trades: pl.DataFrame) -> pl.DataFrame:
 
 
 def _long_target_reservations(trades: pl.DataFrame) -> pl.DataFrame:
-    """Long rows that reserve admission without asserting a confirmed fill."""
+    """Outstanding LONG asks that reserve admission capacity."""
 
-    reserved = target_reservation_rows(trades)
+    reserved = _open_long_trades(trades)
     if "side" in reserved.columns:
         return reserved.filter(pl.col("side") == "long")
     return reserved
@@ -1733,148 +1523,6 @@ def _long_price_wake_levels(
     return levels
 
 
-def _long_exit_target_intents(
-    exits: list[dict[str, Any]],
-    all_trades: pl.DataFrame,
-    *,
-    strategy_id: str,
-    now_ms: int,
-    default_leverage: float,
-) -> list[RequestedIntent]:
-    """Translate strategy exits to replacement zero targets without venue I/O.
-
-    Exits are keyed under each trade's OWN persisted strategy id, not the
-    producer's active one: the target key embeds the id, so a zero target
-    published under the wrong identity would open a stray component instead of
-    replacing the standing one. This is what lets a v12 producer drain the
-    v11a components that were open when the profile switched.
-    """
-
-    def _decay_extra(plan: Mapping[str, Any], trade: Mapping[str, Any]) -> dict[str, Any]:
-        extra: dict[str, Any] = {
-            "max_hold_deadline_ts_ms": int(_float(trade.get("max_hold_deadline_ts_ms"))),
-        }
-        if str(plan.get("exit_reason") or "") == "decayed_stop_loss":
-            extra.update(
-                {
-                    "decayed_stop_price": _float(plan.get("decayed_stop_price")),
-                    "decayed_stop_loss_pct": _float(plan.get("decayed_stop_loss_pct")),
-                    "stop_decay_deadline_ts_ms": int(_float(plan.get("stop_decay_deadline_ts_ms"))),
-                    "decision_reference_price": _float(plan.get("decision_reference_price")),
-                }
-            )
-        return extra
-
-    trade_strategy_by_id = (
-        {
-            str(row.get("trade_id") or ""): str(row.get("strategy_id") or "")
-            for row in all_trades.to_dicts()
-        }
-        if not all_trades.is_empty()
-        else {}
-    )
-    plans_by_strategy: dict[str, list[dict[str, Any]]] = {}
-    for plan in exits:
-        owning_strategy = trade_strategy_by_id.get(str(plan.get("trade_id") or "")) or strategy_id
-        plans_by_strategy.setdefault(owning_strategy, []).append(plan)
-    intents: list[RequestedIntent] = []
-    for owning_strategy in sorted(plans_by_strategy):
-        intents.extend(
-            exit_target_intents(
-                plans_by_strategy[owning_strategy],
-                all_trades,
-                adapter_kind=SleeveAdapterKind.LONG,
-                strategy_id=owning_strategy,
-                now_ms=now_ms,
-                default_leverage=default_leverage,
-                source="long_native_target_adapter",
-                default_reason="time_stop",
-                extra_metadata=_decay_extra,
-            )
-        )
-    return intents
-
-
-def _long_entry_target_intents(
-    candidates: list[dict[str, Any]],
-    *,
-    demo: LongNativeDemoCycleConfig,
-    equity_usdt: float,
-    order_notional_pct_equity: float,
-    price_by_symbol: dict[str, float],
-    now_ms: int,
-    strategy_id: str,
-) -> list[RequestedIntent]:
-    """Translate entry decisions to fill-anchored component targets.
-
-    Venue quantity steps and minimum notionals intentionally remain the account
-    kernel's responsibility. Protection percentages and hold duration remain
-    strategy decisions, while executable prices and lifecycle clocks are
-    derived by the account owner only after confirmed fills.
-    """
-
-    intents: list[RequestedIntent] = []
-    for candidate in candidates:
-        trade_id = str(candidate.get("trade_id") or "")
-        symbol = str(candidate.get("symbol") or "").upper()
-        price = price_by_symbol.get(symbol, _float(candidate.get("live_price")))
-        if not trade_id or not symbol or price <= 0.0:
-            continue
-        target_notional = (
-            equity_usdt
-            * demo.wallet_balance_fraction
-            * order_notional_pct_equity
-            * _float(candidate.get("position_weight") or 1.0)
-        )
-        stop_loss_pct = _float(candidate.get("stop_loss_pct"))
-        take_profit_pct = _float(candidate.get("take_profit_pct"))
-        max_hold_days = _float(candidate.get("max_hold_days") or 3.0)
-        max_hold_duration_ms = exact_duration_ms(
-            days=max_hold_days,
-        )
-        stop_decay_after_ms = int(_float(candidate.get("stop_decay_after_ms")))
-        decayed_stop_loss_pct = _float(candidate.get("decayed_stop_loss_pct"))
-        decay_metadata: dict[str, Any] = {}
-        if stop_decay_after_ms > 0 and 0.0 < decayed_stop_loss_pct < 1.0:
-            decay_metadata = {
-                "stop_decay_after_ms": stop_decay_after_ms,
-                "decayed_stop_loss_pct": decayed_stop_loss_pct,
-                "atr_14d_pct": _float(candidate.get("atr_14d_pct")),
-            }
-        intents.append(
-            component_target_intent(
-                adapter_kind=SleeveAdapterKind.LONG,
-                action="entry",
-                decision_ts_ms=now_ms,
-                strategy_id=strategy_id,
-                component_id=trade_id,
-                symbol=symbol,
-                signed_notional_usdt=target_notional,
-                leverage=demo.entry_leverage,
-                reason=str(candidate.get("entry_reason") or "long_entry"),
-                metadata={
-                    "source": "long_native_target_adapter",
-                    "decision_reference_price": price,
-                    "stop_loss_pct": stop_loss_pct,
-                    "take_profit_pct": take_profit_pct,
-                    "max_hold_duration_ms": max_hold_duration_ms,
-                    "signal_ts_ms": int(candidate.get("signal_ts_ms") or 0),
-                    "signal_valid_until_ms": (int(candidate.get("signal_ts_ms") or 0) + SIGNAL_FRESHNESS_MS),
-                    "position_weight": _float(candidate.get("position_weight") or 1.0),
-                    "max_hold_days": max_hold_days,
-                    "pattern": str(candidate.get("pattern") or ""),
-                    "entry_policy": str(candidate.get("entry_policy") or ""),
-                    "entry_rule": str(candidate.get("entry_rule") or ""),
-                    "entry_quality_tier": str(candidate.get("entry_quality_tier") or ""),
-                    "raw_target_notional_usdt": target_notional,
-                    "quantity_authority": "account_kernel_demo_rules",
-                    **decay_metadata,
-                },
-            )
-        )
-    return intents
-
-
 def _advance_long_book_state(
     state: LongBookState,
     *,
@@ -1892,9 +1540,7 @@ def _advance_long_book_state(
 ) -> tuple[LongBookState, list[str]]:
     """Move the record on by one cycle: drop what exited, add what entered.
 
-    The sizing is the same expression `_long_entry_target_intents` uses, on
-    purpose -- the book replaces those intents, and a second way of working out
-    a size would be a second strategy. A name already in the record keeps the
+    A name already in the record keeps the
     notional it entered with; re-sizing every open name off today's equity each
     cycle is a different strategy, not a translation of this one.
 
@@ -2156,7 +1802,7 @@ def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:
             "format_long_demo_cycle_summary received a FLAT payload with no 'cycle' key; wrong-sleeve formatter"
         )
     cycle = payload["cycle"]
-    health_error = str(cycle.get("account_owner_health_error") or "")
+    health_error = str(cycle.get("engine_account_health_error") or "")
     health = "healthy" if not health_error else f"blocked:{health_error[:120]}"
 
     def _flag(value: Any) -> str:

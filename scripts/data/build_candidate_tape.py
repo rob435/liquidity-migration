@@ -59,7 +59,7 @@ from liquidity_migration.rules.long_native import (  # noqa: E402
     long_v11a_profile,
 )
 from liquidity_migration.data.volume_events_pit import filter_klines_to_pit_membership  # noqa: E402
-from liquidity_migration.account.strategy_funnel import (  # noqa: E402
+from liquidity_migration.strategy.strategy_funnel import (  # noqa: E402
     canonical_payload,
     finalize_funnel_row,
     gate_state,

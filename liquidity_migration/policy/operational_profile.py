@@ -14,7 +14,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from liquidity_migration.account.account_contracts import AccountRiskPolicy
 from liquidity_migration.core.artifact_snapshot import StableFileSnapshot, read_stable_file
 
 
@@ -74,16 +73,6 @@ class AccountRiskSettings:
     max_initial_margin_usdt: float
     max_leverage: float
     quantity_tolerance: float
-
-    def to_policy(self) -> AccountRiskPolicy:
-        return AccountRiskPolicy(
-            max_component_gross_notional_usdt=self.max_component_gross_notional_usdt,
-            max_account_gross_notional_usdt=self.max_account_gross_notional_usdt,
-            max_initial_margin_usdt=self.max_initial_margin_usdt,
-            max_leverage=self.max_leverage,
-            quantity_tolerance=self.quantity_tolerance,
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class LongOperationalSettings:

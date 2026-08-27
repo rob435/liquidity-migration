@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
 from liquidity_migration.core.deterministic_runtime import VirtualClock
-from liquidity_migration.account.strategy_event_clock import (
+from liquidity_migration.strategy.strategy_event_clock import (
     DeterministicEventClock,
     JsonlStrategyEventTape,
     MemoryStrategyEventTape,
@@ -75,7 +76,8 @@ def test_jsonl_tape_round_trips_and_detects_tampering(tmp_path) -> None:
     loaded, tape_hash = load_strategy_event_tape(path)
     assert loaded == _events()
     assert tape_hash == dispatcher.tape_hash
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
 
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     rows[1]["event"]["payload"]["heartbeat"] = 2

@@ -3,8 +3,8 @@
 The LONG plug on :class:`StrategyHostDaemon`: the host owns the market
 planes, wake machinery, evidence tapes, and health receipts; this module
 adds the LONG cycle runner, its config validation, the v11a/v12 profile
-identity, and the LONG kline universe. Publishes desired targets to the
-account owner, which owns execution and account state. SIGTERM drains the
+identity, and the LONG kline universe. Publishes desired books to the Rust
+engine, which owns execution and account state. SIGTERM drains the
 current cycle and exits cleanly.
 """
 
@@ -22,21 +22,20 @@ from liquidity_migration.rules.long_identity import (
 )
 from liquidity_migration.rules.long_native import LongNativeConfig
 from liquidity_migration.strategy.long_native_event_demo import (
-    LongCycleState,
     LongNativeDemoCycleConfig,
     _validate_long_demo_config,
     format_long_demo_cycle_summary,
     run_long_native_demo_cycle,
 )
-from liquidity_migration.strategy.strategy_host import StrategyHostDaemon, default_journal_change_wake_dir
-from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
+from liquidity_migration.strategy.strategy_host import StrategyHostDaemon, default_engine_change_wake_dir
+from liquidity_migration.strategy.target_book_evidence import PublishedTargetCyclePayload
 
 
 def _validate_long_daemon_startup(
     config: LongNativeDemoCycleConfig,
     strategy_config: LongNativeConfig | None = None,
 ) -> None:
-    """Fail before resources unless LONG has one complete account-target route."""
+    """Fail before resources unless LONG has a complete Rust target route."""
 
     _validate_long_demo_config(config, strategy_config)
 
@@ -46,11 +45,9 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
 
     _sleeve_label = "long"
     _flat_cycle_payload = False
-    # Class-level defaults keep the cycle-kwargs contract intact for
-    # skeleton instances built without __init__ (the cursor contract test).
+    # Class-level defaults keep skeleton instances built without __init__ safe.
     _long_target_producer = False
     _strategy_config: LongNativeConfig | None = None
-    _long_cycle_state: LongCycleState | None = None
 
     def _strategy_profile_name(self) -> str:
         if self._strategy_config is not None:
@@ -83,7 +80,7 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
         # meaning "use the LONG default".
         if kwargs.get("kline_stream_manager_factory") is None:
             kwargs["kline_stream_manager_factory"] = _default_long_kline_stream_manager_factory
-        default_journal_change_wake_dir(kwargs, resolved_demo_config)
+        default_engine_change_wake_dir(kwargs, resolved_demo_config)
         super().__init__(
             data_root,
             config=config,
@@ -92,10 +89,6 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
             cycle_runner=cycle_runner,
             **kwargs,
         )
-        # Operational hints carried between this daemon's own cycles — today
-        # just the owner-health reading a fast wake spends. Only the LONG
-        # producer's runner accepts it; sleeve subclasses never pass it.
-        self._long_cycle_state = LongCycleState() if long_target_producer else None
 
     def run(self) -> dict[str, Any]:
         if self._long_target_producer:
@@ -108,19 +101,11 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
         return super().run()
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
-        # The host supplies the journal cursor; only the LONG runner accepts
-        # strategy_config, the cycle state, and the wake reason, so sleeve
-        # subclasses never see them here.
+        # Only the LONG runner accepts its registered strategy config.
         extra = super()._extra_cycle_kwargs()
         if self._long_target_producer:
             if self._strategy_config is not None:
                 extra["strategy_config"] = self._strategy_config
-            if self._long_cycle_state is not None:
-                extra["cycle_state"] = self._long_cycle_state
-            # The wake reason the host stamped on this cycle's strategy
-            # event. A wake that exists to act fast spends the stored
-            # owner-health reading instead of re-reading it.
-            extra["cycle_kind"] = self._pending_cycle_kind
         return extra
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:

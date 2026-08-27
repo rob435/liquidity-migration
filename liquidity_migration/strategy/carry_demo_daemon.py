@@ -45,8 +45,8 @@ from liquidity_migration.strategy.carry_demo import (
 )
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.strategy.event_demo_data import top_turnover_kline_universe
-from liquidity_migration.strategy.strategy_host import StrategyHostDaemon, default_journal_change_wake_dir
-from liquidity_migration.strategy.strategy_target_replay import PublishedTargetCyclePayload
+from liquidity_migration.strategy.strategy_host import StrategyHostDaemon, default_engine_change_wake_dir
+from liquidity_migration.strategy.target_book_evidence import PublishedTargetCyclePayload
 
 
 def _validate_carry_daemon_startup(config: CarryDemoCycleConfig) -> None:
@@ -113,7 +113,7 @@ class CarryDemoDaemon(StrategyHostDaemon):
         # With ws_klines_enabled the host builds a kline manager from the
         # factory below (carry's top-N universe, not LONG's).
         kwargs.setdefault("kline_stream_manager_factory", _default_carry_kline_stream_manager_factory)
-        default_journal_change_wake_dir(kwargs, resolved)
+        default_engine_change_wake_dir(kwargs, resolved)
         kwargs.setdefault("event_driven_cycle", True)
         super().__init__(
             data_root,

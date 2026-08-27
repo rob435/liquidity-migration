@@ -1,10 +1,5 @@
 """What LONG asked the engine to hold, and since when.
 
-Never read the account owner's journal for this. Nothing writes it any more,
-but the file is still on disk, so a producer that read it would go on believing
-it holds whatever was last written there, for ever, and every one of those
-ghosts would pass its deadline and occupy a slot nothing can free.
-
 The engine's contract is an *absolute* book. The producer says what it wants
 held; the engine works out the difference from what is actually there. So what
 the producer has to remember is not fills, it is its own asking: which symbol,
@@ -39,6 +34,9 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+
+from liquidity_migration.core.artifact_snapshot import read_stable_file
+from liquidity_migration.core.durable_file import durable_atomic_replace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -120,7 +118,7 @@ class LongBookState:
     left_at_ms: dict[str, int] = field(default_factory=dict)
 
     def as_trade_rows(self) -> pl.DataFrame:
-        """The same table the account journal used to hand back.
+        """Return the table consumed by LONG's exit and capacity logic.
 
         Only the columns LONG actually reads are here -- the exit planner, the
         entry screen, the cooldown and the capacity count -- because inventing
@@ -210,10 +208,23 @@ def read_book_state(path: str | Path) -> LongBookState:
 
     resolved = Path(path)
     try:
-        raw = resolved.read_text(encoding="utf-8")
+        resolved.lstat()
     except FileNotFoundError:
         return LongBookState()
     except OSError as exc:
+        raise BookStateError(f"{resolved}: unreadable ({exc})") from exc
+    try:
+        snapshot = read_stable_file(
+            resolved,
+            label="LONG book state",
+            reject_empty=True,
+            require_single_link=True,
+            max_bytes=16 * 1024 * 1024,
+        )
+        raw = snapshot.data.decode("utf-8")
+    except ValueError as exc:
+        raise BookStateError(str(exc)) from exc
+    except (OSError, UnicodeDecodeError) as exc:
         raise BookStateError(f"{resolved}: unreadable ({exc})") from exc
     try:
         payload = json.loads(raw)
@@ -295,14 +306,8 @@ def write_book_state(path: str | Path, state: LongBookState) -> None:
         "held": [asdict(entry) for entry in sorted(state.held.values(), key=lambda e: e.symbol)],
         "left_at_ms": dict(sorted(state.left_at_ms.items())),
     }
-    tmp = resolved.with_name(f".{resolved.name}.tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, resolved)
-    dir_fd = os.open(resolved.parent, os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    durable_atomic_replace(
+        resolved,
+        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        label="LONG book state",
+    )
