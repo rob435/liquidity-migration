@@ -467,10 +467,7 @@ def test_open_position_blocks_re_entry() -> None:
     assert skips["already_open"] == 1
 
 
-@pytest.mark.parametrize("target_action", ["open_or_resize", "close"])
-def test_pending_long_target_reserves_entry_but_is_not_exit_or_pnl_open(
-    target_action: str,
-) -> None:
+def test_pending_long_book_entry_reserves_admission_but_is_not_an_open_position() -> None:
     strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 2 * MS_PER_HOUR
@@ -487,10 +484,9 @@ def test_pending_long_target_reserves_entry_but_is_not_exit_or_pnl_open(
                 "strategy_id": "strategy",
                 "symbol": "BTCUSDT",
                 "side": "long",
-                "status": "target_pending",
-                "target_action": target_action,
+                "status": "pending",
                 "qty": "0.001",
-                "max_hold_deadline_ts_ms": now - MS_PER_HOUR,
+                "max_hold_deadline_ts_ms": 0,
             }
         ]
     )
