@@ -325,7 +325,7 @@ mod tests {
     fn the_settle_currency_row_is_chosen_by_name_not_by_position() {
         // Recorded shape: the reply lists every currency the account holds.
         let data = json!([
-            {"currency":"MX","equity":0.99647149,"availableBalance":0.99647149597724856},
+            {"currency":"MX","equity":0.99647149,"availableBalance":0.996_471_495_977_248_6},
             {"currency":"USDT","equity":32.80984793,"availableBalance":32.80984793658,
              "positionMargin":0,"frozenBalance":0,"unrealized":0}
         ]);

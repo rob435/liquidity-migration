@@ -58,8 +58,8 @@ fn external_linear_layer(state: &mut [u64; WIDTH]) {
 }
 
 fn add_round_constants(state: &mut [u64; WIDTH], round: usize) {
-    for lane in 0..WIDTH {
-        state[lane] = f::add(state[lane], f::canonical(EXTERNAL_CONSTANTS[round][lane]));
+    for (lane, value) in state.iter_mut().enumerate() {
+        *value = f::add(*value, f::canonical(EXTERNAL_CONSTANTS[round][lane]));
     }
 }
 

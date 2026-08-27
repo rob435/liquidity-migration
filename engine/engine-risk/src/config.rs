@@ -70,8 +70,9 @@ impl EnvelopeConfig {
         if !self.expand_dead_band_fraction.is_finite() || self.expand_dead_band_fraction < 0.0 {
             return Err(bad("expand_dead_band_fraction must not be negative"));
         }
-        if !self.disaster_stop_fraction.is_finite()
-            || !(self.disaster_stop_fraction > 0.0 && self.disaster_stop_fraction < 1.0)
+        if !(self.disaster_stop_fraction.is_finite()
+            && self.disaster_stop_fraction > 0.0
+            && self.disaster_stop_fraction < 1.0)
         {
             return Err(bad("disaster_stop_fraction must be a fraction in (0, 1)"));
         }

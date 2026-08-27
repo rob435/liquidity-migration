@@ -692,7 +692,11 @@ fn subscription_ack(message: &Message) -> Result<Option<(bool, String)>, FeedErr
     }
     .map_err(|e| FeedError::BadMessage(e.to_string()))?;
     match parsed {
-        ParsedFrame::Ack { op, success, ret_msg } if op == "subscribe" => {
+        ParsedFrame::Ack {
+            op: "subscribe",
+            success,
+            ret_msg,
+        } => {
             Ok(Some((success, ret_msg.to_string())))
         }
         _ => Ok(None),

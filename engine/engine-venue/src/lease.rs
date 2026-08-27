@@ -549,7 +549,7 @@ fn lstat(path: &Path) -> Option<libc::stat> {
 }
 
 fn is_regular(entry: &libc::stat) -> bool {
-    u32::from(entry.st_mode) & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
+    entry.st_mode & libc::S_IFMT == libc::S_IFREG
 }
 
 /// Replace the file's contents with the note and put it on the disk.
