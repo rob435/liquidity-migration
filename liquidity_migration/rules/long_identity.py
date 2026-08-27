@@ -7,8 +7,8 @@ LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID = "long_native_v11a_div_weekend_vol"
 LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME = "LongV11aDivWeekendVol"
 
 # v12 differs from v11a only in stop geometry. It gets its own identity because
-# the string is a persisted account-journal key, not a code reference: two
-# profiles sharing one id would merge their positions under a single component.
+# the string is a persisted target and attribution key, not a code reference:
+# two profiles sharing one id would merge their positions under one component.
 LONG_V12_WIDE_STOP_STRATEGY_ID = "long_native_v12_wide_stop"
 LONG_V12_WIDE_STOP_PROFILE_NAME = "LongV12WideStop"
 

@@ -1,71 +1,49 @@
-# liquidity_migration/
+# `liquidity_migration/`
 
-106 modules in twelve subpackages, not counting the seventeen `__init__.py`.
-The path tells you what a module is for; the import order tells you what it is
-allowed to know.
+Python is the research, market-data, strategy, and operations plane. It has no
+authenticated order path. The Rust workspace under `engine/` is the sole
+account and execution authority.
 
-## Where things are
+## Packages
 
-| Package | What lives here | What does not |
-| --- | --- | --- |
-| `core/` | Substrate with no business meaning: time and format helpers, YAML config, env flags, systemd logging, deterministic clocks and finite JSON, immutable-file snapshots, canonical symbol identity, the demo/mainnet realm enum | Anything naming an account, dataset, sleeve, or venue endpoint |
-| `marketdata/` | The credential-free public price plane: Bybit public REST/WS, the Binance public client, the WS kline pipeline, the ticker cache | Anything authenticated — that is `venue/` |
-| `data/` | The data root on disk and what fills or validates it: atomic dataset read/write, ingestion, archives and manifests, history fetchers, universe construction, PIT membership and coverage, the trade tape | Live sockets |
-| `account/` | The producers' library: contracts, the deterministic kernel, the filesystem route, leases, liveness, protection price math | Credentials, venue transport, strategy decisions, placing orders — turning a target into a command is the Rust engine's |
-| `rules/` | The registered decision rules production replays, and the target-book contract: the carry-hold rule and its live decision frame, the exodus short's sleeve surface, the LONG FC-v11a/v12 profiles with their features and signal, the persisted LONG identities, daily-bar feature math, the engine target-book writer | The historical engines and scorers that grade these rules — that is `research/backtest/` |
-| `venue/` | The credentialed Bybit edge the Python tools use: private transport, instrument rules, wedged-command resolution, market data with a key. The order adapter and quote manager here are fixtures for the kernel's tests | Anything usable without an API key; placing real orders — that is the engine's |
-| `strategy/` | What the fleet decides to hold right now: the two sleeve producers and daemons, plus shared per-cycle machinery — candidate population, public data plane, planning, scheduling replay, cycle health | The historical engine behind a sleeve — that is `research/backtest/` |
-| `research/panels/` | Causal point-in-time math: panel in, score out — feature panel, risk model, residual momentum, cross-venue substrate | |
-| `research/backtest/` | Every sleeve's historical equity engine and chart writers, replaying the registered rules from `rules/` | The rules themselves — that is `rules/` |
-| `research/execution/` | Measurement of what actually happened: trade diagnostics, the measured cost model, the passive-fill probe, venue accounting, and the quote lab | |
-| `policy/` | The dials: operational sizing profile, execution config, real-money profile and arming, systemd environment reading | The capital-preservation controls — the equity-anchored envelope and the stop discipline — live in the engine (`engine/engine-risk/`) |
-| `ops/` | The operator surface in both directions: Telegram and notifications, the destructive reset path and its archive, epoch reset, maintenance lock | |
-| `cli/` | `python -m liquidity_migration` — `commands.py` and its argparse builders in `parsers.py` | |
-| `runtime/` | Empty; kept as the import order's named sink | |
+| Package | Responsibility |
+| --- | --- |
+| `core/` | Business-neutral time, serialization, durable files, filesystem watches, logging, configuration, and venue-realm types |
+| `marketdata/` | Credential-free public REST and WebSocket feeds and caches |
+| `data/` | Point-in-time datasets, ingestion, manifests, histories, universes, and trade tapes |
+| `rules/` | Registered decision rules and the strict absolute target-book contract |
+| `research/` | Historical replay, panels, measurement, charts, and evidence reports |
+| `strategy/` | LONG and CARRY producers, persistent sleeve state, scheduling, account-heartbeat projection, and target evidence |
+| `venue/` | Read-only authenticated account observation used by operator diagnostics; never order mutation |
+| `policy/` | Execution environment, sizing profiles, and real-money arming checks |
+| `ops/` | Notifications and read-only operator reporting |
+| `cli/` | `python -m liquidity_migration` research/data command surface |
+| `runtime/` | Cross-package runtime health views, including strict engine heartbeat parsing |
 
 `__init__.py` and `__main__.py` are the only modules at the package root.
 
-## Import order
+## Dependency rule
 
-Measured from the AST, not asserted. Every import points down this list; there
-are no cycles between packages.
+Imports must follow the ranks enforced by
+[`tests/repo/test_import_order.py`](../tests/repo/test_import_order.py). Lower
+layers cannot import strategy or operations code, and registered rules cannot
+depend on historical research engines. Absolute imports are mandatory.
 
+The live seam is deliberately narrow:
+
+```text
+public data -> Python strategy -> durable absolute target book -> Rust engine
+private venue state --------------------------------------------> Rust engine
+Rust engine -> exact-identity heartbeat -> Python sizing and exit gates
 ```
-core → marketdata → data → account → rules → research → strategy → venue → policy → ops/cli → runtime
-```
 
-`rules/` may import only `core/`, `marketdata/`, `data/`, and `account/`: a
-registered decision rule that live sleeves replay must never pull research
-machinery. `tests/repo/test_import_order.py` holds the whole order.
+A strategy daemon is a plug on `strategy/strategy_host.py`. The host owns
+public caches, semantic account-change wakes, deadlines, price-touch wakes,
+event tapes, cycle health, and activation evidence. A plug supplies decision
+logic and publishes only its own target-book source.
 
-The two ends are the useful ones. **`core/` knows nothing** — change it and you
-can affect anything. **`runtime/` is a sink** — nothing imports it, so a change
-there cannot reach the rest of the package.
+## Entrypoints
 
-`account/` importing only `core/` and `data/` is load-bearing: the kernel stays
-independent of venue transport and of every strategy. If you find yourself
-adding a `venue/` or `strategy/` import to `account/`, the design is telling you
-the code belongs somewhere else.
-
-## Conventions
-
-- **Absolute imports only.** `from liquidity_migration.venue.bybit import ...`,
-  never `from ..venue.bybit import ...`. The group is visible at the top of every
-  file, and grep finds every caller.
-- A module's package is chosen by what it *is*, not by who calls it. `market_capture`
-  is in `account/` because only account owners use it, not in `marketdata/`.
-- `strategy/` is flat at 13 modules; filename prefixes (`carry_*`, `long_*`)
-  already group them. The next sleeve pushes it toward 20 — split
-  per-sleeve then, not on a new axis.
-- A sleeve daemon is a plug on `strategy/strategy_host.py`: the host owns the
-  market planes, wake machinery (bar, account-journal commit, time deadline,
-  idle floor), evidence tapes, and health receipts; a new strategy supplies the
-  plug surface documented in the host's module docstring plus one CLI wiring.
-
-## Entry points
-
-`python -m liquidity_migration` is the research and data CLI. Seven modules are
-run directly as `python -m liquidity_migration.<pkg>.<module>` from committed
-shell under `scripts/` and `deploy/`; no systemd unit names a Python module, so
-unit files never change when a module moves. See
-[`scripts/README.md`](../scripts/README.md) for who runs what.
+`python -m liquidity_migration` is the research and data CLI. Runtime wrappers
+live under `scripts/runtime/`; systemd units call those wrappers so module moves
+do not leak into unit files. See [`scripts/README.md`](../scripts/README.md).

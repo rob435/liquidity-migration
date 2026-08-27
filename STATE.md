@@ -91,15 +91,6 @@ file.
   never rewrite; backup beside it). Mainnet stays `"shared"` — the owner
   hand-trades there.
 
-  Six `account/` modules are the producers' library, not a dormant order path,
-  and every one is load-bearing: the producers, the watchdog and the kept
-  quote-lab tooling all reach them (`carry_demo` → `account_route`, the LONG
-  producer → `account_service`, `check_fleet_liveness` → `account_kernel` and
-  `account_owner_health`, quote lab → `market_capture`, and
-  `execution_adapters` carries the never-rename
-  `BybitDemoExecutionAdapter.name`). None is deletable at file level, and none
-  has a dedicated test file, so coverage there is thin — known and accepted.
-
   The chain runs end to end:
 
   - the engine reads the venue and writes `account_equity_usdt` into its
@@ -384,8 +375,8 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
 - Three delisting candidates (`HIGHUSDT`, `PUMPBTCUSDT`, `WHITEWHALEUSDT`) have
   venue `deliveryTime=1784538000000`, recorded prospectively with their
   first-observed anchors in LONG's private mode-0600 retirement registry; they
-  may retire only while positions, targets, orders, and inbox exposure are all
-  flat.
+  may retire only while venue positions, target books, and engine-owned orders
+  are all flat.
 
 ## Forward evidence stream
 
@@ -436,7 +427,7 @@ not show.
 
 Funded P&L before 2026-08-07 is overstated: funding was booked whole rather than
 by the share this book actually held. Five settlements totalling **+15.23 USDT**
-are on the funded journal and the ACEUSDT **+10.72** of that is ≈96% not the
+are on the funded execution record and the ACEUSDT **+10.72** of that is ≈96% not the
 bot's. Since 2026-08-07 each settlement is scaled by `owned_qty_at_settlement /
 venue_settled_size`, reconstructed from this book's own fills at the settlement
 instant, with the venue's raw numbers kept verbatim (`venue_funding_usdt`,
@@ -453,16 +444,10 @@ re-diagnose a page that has already been explained.
 | Alert shape | Diagnosed cause |
 | --- | --- |
 | `unowned_venue_order` after a stop triggers | Owner disowning its own just-consumed Full stop while Bybit's open-order cache still lists it. Bounded 10-minute terminal-visibility grace, identity evidence required. |
-| `account funding reconciliation is stale: age_ns~4-5e9` | Report timestamped itself before its paginated REST queries, then held to the shared 4-second position bound. Documented 30-second funding floor. |
 | `waiting for queue-head market data: X:stale_book` | Lost/rejected orderbook subscribe. Socket rebuilds after 30 frameless seconds for a new subscription. |
 | `latest cycle is 0.1 min future-dated` / `future_book` | Local read/update races sampling wall time before the snapshot. Ordering fixed; true future timestamps still page. |
-| `continuous-hedge.service FAILED` after an owner-health page | Duplicate of the owner-health root cause. A hedge run blocked by unhealthy owner health exits 0 with a blocked receipt. |
-| Negative owner-health ages | Strategy event time reused after concurrent heartbeats. Operational freshness now samples adjacent wall time. |
-| `account execution live L2 is N min stale` (~1.5×/day, 3–8 min) | Venue-side quiet subscription on the owner's single-topic BTCUSDT book feed — the socket stays up and answers pings, Bybit stops pushing frames. Not the host, not scheduled, not load. A single stall self-heals in ~2.5 min via the 120 s internal watchdog and never alerts; the alerted episodes are rebuilds that came up quiet again, stretched by a per-attempt clock reset that is now fixed. Fails closed; zero trades lost. If quiet-stalls persist, next lever is a second heartbeat topic or proactive resubscribe. |
-| `unadopted external execution: external protection fill is not position-reducing` | A hand-placed spot buy in the demo account UI. The kernel manages linear perps only, so with nothing to reduce it correctly refuses adoption and returns green; no reconciliation drift. An execution with nothing to reduce is logged as foreign and ignored, so the shape does not latch. |
 | `ignoring foreign … execution … with no owned position to reduce` | Normal: the owner trading by hand on the same venue account. Recorded, never traded. Only a `venue=…:reconstructed=…:unbacked=…` line is a real fault. |
 | `engine_heartbeat_stale: … dated 1s in the future`, firing and clearing all day | Not a clock fault: the watchdog sampled its clock at the top of a ~2 s run and compared it to a file the engine rewrites every 5 s. It reads the file, then the clock. If this shape returns, a clock really is wrong. |
-| `account_health_stale` / `account_digest_stale` on demo, never clearing | Both read files whose only writer, the Python account owner, is gone. Freshness comes from the engine's heartbeat; the digest check is unprovisioned. A check that cannot clear is broken, not informative. |
 
 **If the chat is loud and the fleet is green, treat the checks as the suspect.**
 The failure mode is not noise but blindness: one real signal in a stream of false
@@ -481,7 +466,7 @@ ones is indistinguishable from them.
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/research_findings.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/research_findings.md` states it rather than treating it as settled |
-| Nothing watches the venue and our records disagreeing | `account_health_unhealthy` had one writer, the deleted Python owner; the engine reconciles but publishes no mismatch. Freshness is retargeted at the engine's heartbeat, agreement is not. `gather_account_health_alerts()` is kept uncalled as the specification. Needs the engine to publish a mismatch — a design question, owner to decide ([`docs/notifications.md`](docs/notifications.md) §What is not watched) |
+| No independent venue/WAL agreement page | The engine reconciles and latches `may_open=false` on uncertainty, while the watchdog pages on that latch and heartbeat freshness. A separately rendered mismatch summary is still absent. |
 | No positive liveness signal reaches the chat | There is no hourly digest and the dead-man's switch URL is unprovisioned, so silence means either a healthy fleet or a dead box. The engine's heartbeat is checked on-box only, and an on-box watchdog cannot report that the box died |
 
 Audit reports are not kept as standing files. Their findings live in the topic

@@ -44,7 +44,7 @@ Demo is the only practice book. What each sleeve trades is in
 
 | Path | Contents |
 | --- | --- |
-| [`liquidity_migration/`](liquidity_migration/README.md) | the package, in twelve subpackages — `core`, `marketdata`, `data`, `account`, `rules`, `venue`, `strategy`, `research`, `policy`, `ops`, `cli`, `runtime` |
+| [`liquidity_migration/`](liquidity_migration/README.md) | the Python research, public-data, strategy, policy, and read-only operations plane; it has no order path |
 | [`engine/`](engine) | the Rust execution engine workspace — seven crates, from the shared types to the loop |
 | [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
 | [`deploy/`](deploy) | `sleeves.env`, systemd units, environment handling |
@@ -73,7 +73,7 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | [CHANGELOG.md](CHANGELOG.md) | the dated operational log: deploys, incidents, repairs, change points |
 | [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology |
 | [docs/notifications.md](docs/notifications.md) | the two Telegram channels, the pause/resume controls, watchdog alert cadence and escalation, the heartbeat dead-man's switch |
-| [docs/architecture.md](docs/architecture.md) | producers, journals, the engine seam — how a target becomes an order |
+| [docs/architecture.md](docs/architecture.md) | the target-book seam, durable state, evidence, and Rust execution authority |
 | [docs/engine.md](docs/engine.md) | the Rust execution engine: crate contracts, latency budget, crash safety, safety posture |
 | [docs/trading_logic.md](docs/trading_logic.md) | what each sleeve trades and why |
 | [docs/data.md](docs/data.md) | data roots, point-in-time boundaries, refresh workflow |

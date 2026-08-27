@@ -76,7 +76,7 @@ worst dip **−4.4% → −3.9%**, stop-outs 67 → 50, paired daily difference 
 
 Lane-1 evidence: simulated on the data that also chose the rule. Its identity
 `long_native_v12_wide_stop` is separate from v11a's because that string is a persisted
-account-journal key.
+target-book and execution-attribution key.
 
 **How v12 publishes.** The wide initial stop is the entry's `stop_loss_fraction` in the
 book, which the engine turns into a venue-native stop attached to the position. Each entry

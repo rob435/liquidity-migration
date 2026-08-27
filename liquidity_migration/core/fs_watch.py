@@ -1,9 +1,8 @@
 """Kernel-buffered watch for rename-into-place file arrivals.
 
-Both the account owner's intent inbox and the account journal's transaction
-segments publish by writing a dotted temp file and renaming it into the
-watched directory, so IN_MOVED_TO (plus IN_CLOSE_WRITE for direct writes)
-is exactly "a new durable artifact appeared". The kernel queues events
+Runtime artifacts publish by writing a dotted temporary file and renaming it
+into the watched directory, so IN_MOVED_TO (plus IN_CLOSE_WRITE for direct
+writes) is exactly "a new durable artifact appeared". The kernel queues events
 while the watcher works, so nothing that lands mid-pass is lost.
 
 Linux-only: construction raises OSError where inotify is unavailable
@@ -21,9 +20,8 @@ import select
 import struct
 from pathlib import Path
 
-# Only the ways a finished artifact appears. A consumer renames the file
-# *out* of the directory, which is IN_MOVED_FROM and deliberately unwatched:
-# consuming work must not look like new work.
+# Only the ways a finished artifact appears. A consumer may rename the file
+# out of the directory, which is IN_MOVED_FROM and deliberately unwatched.
 _IN_CLOSE_WRITE = 0x00000008
 _IN_MOVED_TO = 0x00000080
 _WATCH_MASK = _IN_CLOSE_WRITE | _IN_MOVED_TO

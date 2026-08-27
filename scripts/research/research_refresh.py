@@ -887,7 +887,7 @@ def _run_summary(
                     "warnings": payload.get("warnings"),
                     "date_range": payload.get("date_range"),
                     "pit_manifest": payload.get("pit_manifest"),
-                    "account_journal": payload.get("account_journal"),
+                    "execution_evidence": payload.get("execution_evidence"),
                     "report": str(path),
                 }
             elif sleeve == "carry":

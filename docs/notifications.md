@@ -186,7 +186,7 @@ timer so a hung run goes `failed` rather than silently never re-firing.
 What it checks: systemd unit states — including a service that is enabled but not active (debounced one
 interval, then CRITICAL); readiness and live-L2 capture freshness; per-sleeve producer cycle age; the
 frozen mainnet venue-rule receipt's remaining life; free disk; and the engine's own heartbeat file, including how
-old the engine's reading of the account is. It reads no account journal and no digest state — see
+old the engine's reading of the account is. It reads no execution WAL and no digest state — see
 [§What is not watched](#what-is-not-watched).
 
 | Threshold | Default | Meaning |
