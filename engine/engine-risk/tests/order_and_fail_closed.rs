@@ -97,6 +97,7 @@ fn a_fresh_fill_is_immediately_available_to_a_reduce_only_exit() {
     let filled = entry(CARRY, BUSDT, Side::Buy, 3.0, 10.0, 9.0, SEC);
     k.register_order("fresh-entry", &filled, 3.0);
     k.on_update(&OrderUpdate::Fill {
+        exec_id: String::new(),
         client_order_id: "fresh-entry".to_string(), symbol: BUSDT, side: Side::Buy,
         qty: 3.0, px: 10.0, fee: 0.0, is_maker: false, venue_ts_ms: 0, recv_ns: 2 * SEC,
     });

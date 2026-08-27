@@ -87,6 +87,7 @@ fn an_order_the_log_has_ended_stops_being_worked() {
         sent("a"),
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: "a".into(),
                 symbol: SYMBOL,
                 side: Side::Buy,

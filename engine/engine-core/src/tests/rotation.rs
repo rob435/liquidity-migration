@@ -10,6 +10,36 @@ use engine_types::PositionView;
 const STOP_BTC: f64 = 90.0;
 const STOP_ETH: f64 = 80.0;
 
+struct StopMover { symbol: String, stops: VecDeque<f64> }
+impl Strategy for StopMover {
+    fn name(&self) -> &str { "stop-mover" }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription { symbol: self.symbol.clone(), feed: Feed::Quote }]
+    }
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        if let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event {
+            if let Some(trigger_px) = self.stops.pop_front() {
+                ctx.emit(engine_types::Action::SetStop { symbol: *symbol, trigger_px });
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_live_stop_move_is_validated_and_survives_rotation() {
+    let mover = StopMover { symbol: "BTCUSDT".into(), stops: VecDeque::from(vec![70.0, f64::NAN, 90.0]) };
+    let held = vec![PositionView { symbol: SymbolId(0), side: Side::Buy, qty: 1.0,
+        entry_px: 100.0, stop_attached: true, stop_px: 80.0, leverage: None }];
+    let (mut engine, h) = build_with_venue_state(allow_all(), vec![Box::new(mover)],
+        &["BTCUSDT"], &[], Vec::new(), held).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine.run(&mut ScriptFeed::quotes(symbol, 3, true), &mut ScriptOrderFeed::empty(),
+        std::future::pending::<()>()).await.unwrap();
+    assert_eq!(*h.stops.borrow(), vec![(symbol, 90.0)]);
+    let WalRecord::SegmentBase { intended_stops, .. } = engine.rotation_base(7) else { panic!() };
+    assert_eq!(intended_stops[0].trigger_px, 90.0);
+}
+
 fn sent(id: &str, symbol: u16, qty: f64, stop: f64) -> WalRecord {
     WalRecord::OrderSent {
         request: OrderRequest {
@@ -30,6 +60,7 @@ fn sent(id: &str, symbol: u16, qty: f64, stop: f64) -> WalRecord {
 fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: id.to_string(),
             symbol: SymbolId(symbol),
             side: Side::Buy,

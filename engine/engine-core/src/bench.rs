@@ -323,6 +323,7 @@ impl OrderFeed for FillingOrderFeed {
             (OrderKind::Market, Side::Sell) => bid,
         };
         Ok(OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: request.client_order_id,
             symbol: request.symbol,
             side: request.side,

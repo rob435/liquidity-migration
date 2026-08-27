@@ -423,6 +423,19 @@ fn one_order_is_asked_to_cancel_once_however_many_prices_arrive() {
 }
 
 #[test]
+fn a_feed_reset_pulls_every_resting_quote() {
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    for (id, side, px) in [("eng-bid", Side::Buy, 99.9), ("eng-ask", Side::Sell, 100.1)] {
+        h.ctx.resting.push(RestingSeed { client_order_id: id.into(), symbol, side,
+            kind: OrderKind::Limit { px, tif: engine_types::TimeInForce::PostOnly }, qty: 0.1,
+            filled_qty: 0.0, reduce_only: false, acked: true });
+    }
+    h.feed_reset();
+    assert_eq!(cancel_count(&mut h), 2);
+}
+
+#[test]
 fn a_full_side_is_not_asked_to_cancel_on_every_price_either() {
     // The same hole on the path that predates the foreign-name branch: at the
     // inventory ceiling the planner pulls the side on every single requote.

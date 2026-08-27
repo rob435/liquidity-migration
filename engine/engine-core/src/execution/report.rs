@@ -351,6 +351,7 @@ mod tests {
             },
             WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill {
+                    exec_id: String::new(),
                     client_order_id: "eng-1".into(),
                     symbol: SymbolId(0),
                     side: Side::Buy,
@@ -430,6 +431,7 @@ mod tests {
         });
         records.push(WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: "eng-2".into(),
                 symbol: SymbolId(1),
                 side: Side::Buy,

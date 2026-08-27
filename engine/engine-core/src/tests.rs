@@ -209,6 +209,7 @@ struct MockVenue {
     sends: Rc<RefCell<Vec<OrderRequest>>>,
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
+    stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     caps: VenueCaps,
     reply: Option<VenueError>,
     /// What the venue would say it is working. Seeded by a test that wants
@@ -253,6 +254,7 @@ impl MockVenue {
                 sends: sends.clone(),
                 cancels: Rc::new(RefCell::new(Vec::new())),
                 amends: Rc::new(RefCell::new(Vec::new())),
+                stops: Rc::new(RefCell::new(Vec::new())),
                 caps: bybit_like_caps(),
                 reply: None,
                 working: Vec::new(),
@@ -330,7 +332,8 @@ impl VenueGateway for MockVenue {
         Ok(())
     }
 
-    async fn set_stop(&mut self, _symbol: SymbolId, _trigger_px: f64) -> Result<(), VenueError> {
+    async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
+        self.stops.borrow_mut().push((symbol, trigger_px));
         Ok(())
     }
 
@@ -740,6 +743,7 @@ struct Harness {
     sends: Rc<RefCell<Vec<OrderRequest>>>,
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
+    stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     risk_saw: Rc<RefCell<Vec<OrderUpdate>>>,
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Positions the venue's next account readings will report; see
@@ -809,6 +813,7 @@ async fn build_with_venue_state(
     venue.account_readings.borrow_mut().push_back(held);
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
+    let stops = venue.stops.clone();
     let leverages = venue.leverages.clone();
     let account_readings = venue.account_readings.clone();
     let executions = venue.executions.clone();
@@ -832,6 +837,7 @@ async fn build_with_venue_state(
             sends,
             cancels,
             amends,
+            stops,
             risk_saw,
             leverages,
             account_readings,
@@ -856,6 +862,7 @@ async fn build_inner(
     venue.leverage_refuses = leverage_refuses;
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
+    let stops = venue.stops.clone();
     let leverages = venue.leverages.clone();
     let account_readings = venue.account_readings.clone();
     let executions = venue.executions.clone();
@@ -879,6 +886,7 @@ async fn build_inner(
             sends,
             cancels,
             amends,
+            stops,
             risk_saw,
             leverages,
             account_readings,

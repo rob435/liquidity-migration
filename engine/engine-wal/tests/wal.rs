@@ -64,6 +64,7 @@ fn every_variant() -> Vec<WalRecord> {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: "eng-0001".to_string(),
                 symbol: SymbolId(11),
                 side: Side::Sell,
@@ -459,6 +460,7 @@ fn a_number_that_is_not_a_number_is_refused_instead_of_bricking_the_log() {
         let err = wal
             .append(&WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill {
+                    exec_id: String::new(),
                     client_order_id: "eng-1-1".to_string(),
                     symbol: SymbolId(3),
                     side: Side::Buy,

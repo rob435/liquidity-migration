@@ -431,6 +431,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .iter()
             .filter_map(|record| match record {
                 WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.clone()),
+                WalRecord::OrderUpdate { update: OrderUpdate::Fill { exec_id, .. } }
+                    if !exec_id.is_empty() => Some(exec_id.clone()),
                 _ => None,
             })
             .collect();
@@ -701,30 +703,31 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .iter()
             .filter_map(|record| match record {
                 WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.as_str()),
+                WalRecord::OrderUpdate { update: OrderUpdate::Fill { exec_id, .. } }
+                    if !exec_id.is_empty() => Some(exec_id.as_str()),
                 _ => None,
             })
             .collect();
-        let delivered: Vec<(&str, i64, f64)> = replayed
-            .iter()
-            .filter_map(|record| match record {
-                WalRecord::OrderUpdate {
-                    update: OrderUpdate::Fill { client_order_id, venue_ts_ms, qty, .. },
-                } if *venue_ts_ms >= since => {
-                    Some((client_order_id.as_str(), *venue_ts_ms, *qty))
+        let mut delivered: std::collections::HashMap<(&str, i64, u64), usize> =
+            std::collections::HashMap::new();
+        for record in replayed {
+            if let WalRecord::OrderUpdate {
+                update: OrderUpdate::Fill { exec_id, client_order_id, venue_ts_ms, qty, .. },
+            } = record {
+                if exec_id.is_empty() && *venue_ts_ms >= since {
+                    *delivered.entry((client_order_id.as_str(), *venue_ts_ms, qty.to_bits())).or_default() += 1;
                 }
-                _ => None,
-            })
-            .collect();
+            }
+        }
         execs.sort_by_key(|exec| exec.venue_ts_ms);
         let mut out = Vec::new();
         for exec in execs {
             if known_ids.contains(exec.exec_id.as_str()) {
                 continue;
             }
-            let same_delivered = delivered.iter().any(|(id, ts, qty)| {
-                *id == exec.client_order_id
-                    && *ts == exec.venue_ts_ms
-                    && (*qty - exec.qty).abs() <= 1e-9
+            let key = (exec.client_order_id.as_str(), exec.venue_ts_ms, exec.qty.to_bits());
+            let same_delivered = delivered.get_mut(&key).is_some_and(|count| {
+                if *count == 0 { false } else { *count -= 1; true }
             });
             if same_delivered {
                 continue;
@@ -2188,15 +2191,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         };
         execs.sort_by_key(|exec| exec.venue_ts_ms);
+        let mut delivered_counts: std::collections::HashMap<(String, i64, u64), usize> =
+            std::collections::HashMap::new();
+        for (id, ts, qty) in &self.recent_fills {
+            *delivered_counts.entry((id.clone(), *ts, qty.to_bits())).or_default() += 1;
+        }
         let mut recovered = 0usize;
         for exec in execs {
             if self.recovered_exec_ids.contains(exec.exec_id.as_str()) {
                 continue;
             }
-            let same_delivered = self.recent_fills.iter().any(|(id, ts, qty)| {
-                *id == exec.client_order_id
-                    && *ts == exec.venue_ts_ms
-                    && (*qty - exec.qty).abs() <= 1e-9
+            let key = (exec.client_order_id.clone(), exec.venue_ts_ms, exec.qty.to_bits());
+            let same_delivered = delivered_counts.get_mut(&key).is_some_and(|count| {
+                if *count == 0 { false } else { *count -= 1; true }
             });
             if same_delivered {
                 continue;
@@ -2261,6 +2268,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // once in the account view — and every later entry judged against
             // the sum.
             self.risk.on_update(&OrderUpdate::Fill {
+                exec_id: exec.exec_id.clone(),
                 client_order_id: exec.client_order_id.clone(),
                 symbol,
                 side: exec.side,
@@ -2287,9 +2295,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Every order update, wherever it came from, goes through here.
     async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
+        let native_stop_owner = match &update {
+            OrderUpdate::Fill { client_order_id, symbol, .. } if client_order_id.is_empty() => {
+                self.attribution.sole_owner(*symbol)
+            }
+            _ => None,
+        };
+        let delivered_exec_id = match &update {
+            OrderUpdate::Fill { exec_id, .. } if !exec_id.is_empty() => Some(exec_id.clone()),
+            _ => None,
+        };
+        if delivered_exec_id.as_ref().is_some_and(|id| self.recovered_exec_ids.contains(id)) {
+            tracing::warn!(exec_id = delivered_exec_id.as_deref().unwrap_or_default(), "duplicate fill ignored");
+            return Ok(());
+        }
         self.wal.append(&WalRecord::OrderUpdate {
             update: update.clone(),
         })?;
+        if let Some(exec_id) = delivered_exec_id { self.recovered_exec_ids.insert(exec_id); }
         self.risk.on_update(&update);
         self.orders.apply_update(&update);
         // Every fill record in the log is in this total — strangers'
@@ -2313,7 +2336,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // boot's ids and the ones in flight when it started, and a fill can
         // still arrive for an order older than either.
         if let Some(id) = inflight::client_order_id(&update) {
-            match self.orders.owner_of(id) {
+            match self.orders.owner_of(id).or(native_stop_owner) {
                 Some(sid) => {
                     self.attribution.on_update(sid, &update);
                     self.price_fill(sid, &update);
@@ -2367,7 +2390,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let now = clock::now_ns();
         let event = EngineEvent::Order(update.clone());
         match inflight::client_order_id(&update) {
-            Some(id) => match self.registry.owner_of(id) {
+            Some(id) => match self.registry.owner_of(id)
+                .or_else(|| self.orders.owner_of(id))
+                .or(native_stop_owner) {
                 Some(sid) => {
                     let Engine {
                         strategies,

@@ -345,7 +345,7 @@ impl Strategy for Grower {
 }
 
 #[tokio::test]
-async fn an_amend_that_raises_the_size_is_durable_before_it_goes_out() {
+async fn a_quantity_amend_is_refused_until_risk_and_ledger_can_resize_together() {
     // Growing a resting order adds exposure, so it earns the same fsync a
     // send does: a crash in between must never leave the log describing a
     // smaller order than the one the venue is now working.
@@ -366,19 +366,9 @@ async fn an_amend_that_raises_the_size_is_durable_before_it_goes_out() {
         .await
         .unwrap();
 
-    let start = after_boot(&h.tape);
-    let written = at(&h.tape, &Step::Append("amend_sent".into())).unwrap();
-    let sent = at(&h.tape, &Step::Amend("eng-old-1".into())).unwrap();
-    let barrier = h
-        .tape
-        .borrow()
-        .iter()
-        .enumerate()
-        .find(|(i, s)| *i >= start && matches!(s, Step::Barrier))
-        .map(|(i, _)| i)
-        .expect("a size-raising amend must be made durable");
-    assert!(written < barrier, "the record is written before the fsync");
-    assert!(barrier < sent, "it is on disk before it is on the wire");
+    assert!(h.amends.borrow().is_empty());
+    assert!(h.records.borrow().iter().any(|record| matches!(record,
+        WalRecord::Note { text, .. } if text.contains("quantity changes are unsupported"))));
 }
 
 #[tokio::test]
@@ -539,6 +529,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: finished.client_order_id.clone(),
                 symbol: SymbolId(0),
                 side: Side::Buy,

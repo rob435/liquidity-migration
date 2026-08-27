@@ -379,6 +379,7 @@ mod tests {
             sent("mine-filled", StrategyId(1)),
             WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill {
+                    exec_id: String::new(),
                     client_order_id: "mine-filled".into(),
                     symbol: SymbolId(0),
                     side: Side::Buy,

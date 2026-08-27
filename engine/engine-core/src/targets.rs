@@ -503,4 +503,19 @@ mod tests {
         write(&path, EMPTY);
         assert!(next(&mut watcher).await.targets.is_empty());
     }
+
+    #[tokio::test]
+    async fn an_equal_length_replacement_is_identified_by_content() {
+        let path = temp_path("book-equal-length");
+        write(&path, GOOD);
+        let (books, _inbox) = mpsc::channel(1);
+        let mut worker = BookWorker { path: path.path().to_path_buf(), poll: Duration::from_secs(1),
+            books, last_digest: None, last_complaint: None };
+        assert_eq!(worker.look().await.unwrap().targets[0].notional_usdt, 120.0);
+        let replacement = GOOD.replace("120.0", "121.0");
+        assert_eq!(replacement.len(), GOOD.len());
+        write(&path, &replacement);
+        assert_eq!(worker.look().await.unwrap().targets[0].notional_usdt, 121.0);
+        assert!(worker.look().await.is_none());
+    }
 }

@@ -214,6 +214,7 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: "eng-old-1".to_string(),
                 symbol: SymbolId(0),
                 side: Side::Buy,
@@ -286,6 +287,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: "eng-old-1".to_string(),
                 symbol: SymbolId(0),
                 side: Side::Buy,
@@ -330,6 +332,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     });
     log.push(WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: "eng-new-1".to_string(),
             symbol: SymbolId(0),
             side: Side::Buy,

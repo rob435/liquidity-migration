@@ -101,6 +101,28 @@ async fn a_recovered_fill_reaches_the_risk_kernel() {
 }
 
 #[tokio::test]
+async fn a_repeated_live_exec_id_mutates_the_engine_once() {
+    let (mut engine, h) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let fill = OrderUpdate::Fill {
+        exec_id: "exec-once".to_string(), client_order_id: "external".to_string(),
+        symbol, side: Side::Buy, qty: 1.0, px: 100.0, fee: 0.0,
+        is_maker: false, venue_ts_ms: clock::wall_ms(), recv_ns: 1,
+    };
+    engine.run(
+        &mut ScriptFeed::quotes(symbol, 0, false),
+        &mut ScriptOrderFeed::playing(vec![fill.clone(), fill]),
+        tokio::time::sleep(Duration::from_millis(20)),
+    ).await.unwrap();
+    let journaled = h.records.borrow().iter().filter(|record| matches!(
+        record, WalRecord::OrderUpdate { update: OrderUpdate::Fill { exec_id, .. } }
+            if exec_id == "exec-once"
+    )).count();
+    assert_eq!(journaled, 1);
+    assert_eq!(h.risk_saw.borrow().iter().filter(|u| matches!(u, OrderUpdate::Fill { .. })).count(), 1);
+}
+
+#[tokio::test]
 async fn a_recovered_fill_is_in_what_the_trading_cost() {
     // It traded, so it cost something. Left out, the traded notional is short
     // by however much the stream missed and every mean taken over it is a
@@ -122,6 +144,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
     // ledger, all by a position that was never opened.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 0, 0.01);
     let already = OrderUpdate::Fill {
+        exec_id: String::new(),
         client_order_id: "eng-last-run-1".into(),
         symbol: SymbolId(0),
         side: Side::Buy,
@@ -147,6 +170,19 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
     *h.executions.borrow_mut() = Some(vec![
         VenueExecution {
             exec_id: "e-old".into(),
+            client_order_id: "eng-last-run-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            qty: 0.01,
+            px: 30_000.0,
+            fee: 0.18,
+            is_maker: false,
+            venue_ts_ms,
+        },
+        // Same legacy tuple, distinct venue execution. The one delivered log
+        // row may consume only one occurrence, not hide both.
+        VenueExecution {
+            exec_id: "e-old-2".into(),
             client_order_id: "eng-last-run-1".into(),
             symbol: "BTCUSDT".into(),
             side: Side::Buy,
@@ -186,5 +222,9 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
             _ => None,
         })
         .collect();
-    assert_eq!(recovered, vec!["e-new".to_string()], "the old fill was recovered a second time");
+    assert_eq!(
+        recovered,
+        vec!["e-old-2".to_string(), "e-new".to_string()],
+        "one legacy row consumes exactly one matching execution"
+    );
 }

@@ -5,6 +5,20 @@
 
 use super::*;
 
+struct ClosedOrderFeed;
+impl OrderFeed for ClosedOrderFeed {
+    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> { Err(FeedError::Closed) }
+}
+
+#[tokio::test]
+async fn a_dead_private_feed_stops_for_supervised_recovery() {
+    let (mut engine, _) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let outcome = engine.run(&mut ScriptFeed::quotes(symbol, 0, false), &mut ClosedOrderFeed,
+        std::future::pending::<()>()).await.unwrap();
+    assert_eq!(outcome.stopped_by, StopReason::FeedClosed);
+}
+
 #[tokio::test]
 async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
@@ -690,6 +704,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: finished.client_order_id.clone(),
                 symbol: SymbolId(0),
                 side: Side::Buy,
@@ -726,6 +741,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
         updates: VecDeque::from(vec![OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: stale.client_order_id.clone(),
             symbol,
             side: Side::Buy,

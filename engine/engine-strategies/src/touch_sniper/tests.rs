@@ -211,6 +211,27 @@ fn partial_entry_fills_add_up() {
 }
 
 #[test]
+fn a_concurrent_entry_fill_gets_a_residual_exit() {
+    let mut h = build("buy", "take_px = 110.0");
+    h.quote(SYM, 99.9, 100.0); h.drain(); h.ack("c1");
+    h.fill("c1", SYM, Side::Buy, 0.5, 100.0);
+    h.quote(SYM, 110.0, 110.2); assert_eq!(h.one_intent().qty, 0.5); h.ack("x1");
+    h.fill("c1", SYM, Side::Buy, 1.5, 100.0);
+    h.fill("x1", SYM, Side::Sell, 0.5, 110.0);
+    h.quote(SYM, 109.0, 109.2);
+    assert_eq!(h.one_intent().qty, 1.5);
+}
+
+#[test]
+fn an_engine_refused_exit_is_retried() {
+    let mut h = entered("buy", "take_px = 110.0");
+    h.quote(SYM, 110.0, 110.2); h.drain();
+    let symbol = h.ctx.id_of(SYM); h.refuse(symbol, true);
+    h.quote(SYM, 109.0, 109.2);
+    assert_eq!(h.one_intent().qty, 2.0);
+}
+
+#[test]
 fn ttl_is_armed_at_the_fill_and_exits_when_it_expires() {
     let mut h = build("buy", "ttl_s = 60");
     h.ctx.set_now(1_000_000_000);
@@ -326,7 +347,7 @@ fn a_rejected_entry_ends_the_plug() {
 /// news about the refused order cannot start it holding a position it never
 /// meant to have.
 #[test]
-fn a_rejected_entry_is_final_even_if_a_fill_arrives_afterwards() {
+fn a_late_fill_after_an_entry_reject_is_still_exited() {
     let mut h = build("buy", "take_px = 110.0");
     h.quote(SYM, 99.9, 100.0);
     h.drain();
@@ -335,7 +356,9 @@ fn a_rejected_entry_is_final_even_if_a_fill_arrives_afterwards() {
 
     h.fill("c1", SYM, Side::Buy, 2.0, 100.0);
     h.quote(SYM, 110.0, 110.2);
-    assert!(h.drain().is_empty(), "the plug was finished by the rejection");
+    let exit = h.one_intent();
+    assert!(exit.reduce_only);
+    assert_eq!(exit.qty, 2.0);
 }
 
 #[test]

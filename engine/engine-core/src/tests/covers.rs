@@ -288,6 +288,7 @@ async fn a_cancel_releases_only_the_unfilled_remainder() {
             &mut ScriptFeed::quotes(symbol, 0, false),
             &mut ScriptOrderFeed::playing(vec![
                 OrderUpdate::Fill {
+                    exec_id: String::new(),
                     client_order_id: id.clone(),
                     symbol,
                     side: Side::Buy,

@@ -65,7 +65,12 @@ impl Attribution {
                     // nobody on purpose: the engine does not guess whose it
                     // is, and `reconcile` is what notices the account holds
                     // more than the log accounts for.
-                    let Some(strategy) = sender.get(id).copied() else {
+                    let strategy = sender.get(id).copied().or_else(|| match update {
+                        OrderUpdate::Fill { client_order_id, symbol, .. }
+                            if client_order_id.is_empty() => me.sole_owner(*symbol),
+                        _ => None,
+                    });
+                    let Some(strategy) = strategy else {
                         continue;
                     };
                     me.on_update(strategy, update);
@@ -75,7 +80,10 @@ impl Attribution {
                 // without an order of ours — a hand trade, a venue stop with
                 // no id — is charged to nobody, exactly like a foreign fill.
                 WalRecord::RecoveredFill { client_order_id, symbol, side, qty, .. } => {
-                    let Some(strategy) = sender.get(client_order_id.as_str()).copied() else {
+                    let strategy = sender.get(client_order_id.as_str()).copied().or_else(|| {
+                        client_order_id.is_empty().then(|| me.sole_owner(*symbol)).flatten()
+                    });
+                    let Some(strategy) = strategy else {
                         continue;
                     };
                     me.note(strategy, *symbol, *side, *qty);
@@ -173,6 +181,17 @@ impl Attribution {
             .unwrap_or(0.0)
     }
 
+    /// The only sleeve with a non-flat claim on this symbol. Native
+    /// position-stop executions carry no client order id, so symbol ownership
+    /// is the only truthful attribution when it is unambiguous.
+    pub fn sole_owner(&self, symbol: SymbolId) -> Option<StrategyId> {
+        let mut owners = self.filled.iter().filter_map(|((strategy, held), qty)| {
+            (*held == symbol.0 && qty.abs() >= FLAT).then_some(StrategyId(*strategy))
+        });
+        let owner = owners.next()?;
+        owners.next().is_none().then_some(owner)
+    }
+
     /// Drop every row in the symbols the caller says are flat, returning
     /// what was dropped, sorted.
     ///
@@ -246,6 +265,7 @@ mod tests {
     fn fill(id: &str, symbol: SymbolId, side: Side, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: id.to_string(),
                 symbol,
                 side,

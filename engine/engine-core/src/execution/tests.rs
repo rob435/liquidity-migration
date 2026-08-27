@@ -451,6 +451,7 @@ fn sent(id: &str, strategy: StrategyId, arrival_mid: f64) -> WalRecord {
 fn filled(id: &str, px: f64, is_maker: bool) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: id.into(),
             symbol: BTC,
             side: Side::Buy,
@@ -635,6 +636,7 @@ fn sent_for(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
 fn filled_for(id: &str, symbol: SymbolId, px: f64) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: id.into(),
             symbol,
             side: Side::Buy,
@@ -824,6 +826,7 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
     fn traded(id: &str, symbol: SymbolId, side: Side, px: f64, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: id.into(),
                 symbol,
                 side,
@@ -922,6 +925,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
     fn traded(id: &str, side: Side, px: f64, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: id.into(),
                 symbol: BTC,
                 side,

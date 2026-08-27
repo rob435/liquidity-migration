@@ -69,6 +69,7 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
         updates: VecDeque::from(vec![OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: before.client_order_id.clone(),
             symbol,
             side: Side::Buy,
@@ -109,6 +110,7 @@ async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
         updates: VecDeque::from(vec![OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: "placed-by-hand".into(),
             symbol,
             side: Side::Buy,

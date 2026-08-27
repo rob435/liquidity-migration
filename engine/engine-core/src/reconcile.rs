@@ -355,6 +355,7 @@ mod tests {
     fn fill(id: &str, symbol: u16, side: Side, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                exec_id: String::new(),
                 client_order_id: id.into(),
                 symbol: SymbolId(symbol),
                 side,

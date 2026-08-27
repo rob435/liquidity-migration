@@ -411,6 +411,7 @@ impl Harness {
         // position inside the fill callback must already see the fill.
         self.ctx.charge_fill(id, side, qty);
         self.deliver(EngineEvent::Order(OrderUpdate::Fill {
+            exec_id: String::new(),
             client_order_id: client_order_id.to_string(),
             symbol: id,
             side,
