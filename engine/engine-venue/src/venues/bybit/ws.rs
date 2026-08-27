@@ -533,10 +533,13 @@ pub(crate) fn map_execution_row(
     resolve: &dyn Fn(&str) -> Option<SymbolId>,
     recv_ns: u64,
 ) -> Result<Option<OrderUpdate>, FeedError> {
-    // Funding and settlement rows also land here; they move money without
-    // being fills, and the engine would double-count them as trades.
+    // Funding and session-PnL rows also land here, but do not move quantity.
+    // `Settle` does move the position and must match REST gap recovery.
     let exec_type = field(row, "execType")?;
-    if !matches!(exec_type.as_str(), "Trade" | "AdlTrade" | "BustTrade") {
+    if !matches!(
+        exec_type.as_str(),
+        "Trade" | "AdlTrade" | "BustTrade" | "Settle"
+    ) {
         return Ok(None);
     }
     let client_order_id = field(row, "orderLinkId")?;
@@ -777,8 +780,8 @@ mod tests {
     }
 
     #[test]
-    fn funding_and_settlement_rows_are_not_fills() {
-        for exec_type in ["Funding", "Settle", "SessionSettlePnl", "BustTrade"] {
+    fn funding_and_session_settlement_rows_are_not_fills() {
+        for exec_type in ["Funding", "SessionSettlePnl", "BustTrade"] {
             let row = json!({
                 "execId": format!("exec-{exec_type}"),
                 "execPrice": "1", "execQty": "1", "execFee": "0", "execTime": "1",
@@ -791,6 +794,45 @@ mod tests {
             } else {
                 assert!(mapped.is_none(), "{exec_type} is not a fill");
             }
+        }
+    }
+
+    #[test]
+    fn a_settle_execution_is_a_fill_with_the_venue_dedup_identity() {
+        let row = json!({
+            "execId": "settle-position-1",
+            "execPrice": "95900.1",
+            "execQty": "0.5",
+            "execFee": "0",
+            "execTime": "1746270400353",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "execType": "Settle"
+        });
+
+        match map_execution_row(&row, &resolve, 99).unwrap().unwrap() {
+            OrderUpdate::Fill {
+                exec_id,
+                client_order_id,
+                symbol,
+                side,
+                qty,
+                px,
+                venue_ts_ms,
+                recv_ns,
+                ..
+            } => {
+                assert_eq!(exec_id, "settle-position-1");
+                assert!(client_order_id.is_empty());
+                assert_eq!(symbol, SymbolId(0));
+                assert_eq!(side, Side::Sell);
+                assert_eq!(qty, 0.5);
+                assert_eq!(px, 95900.1);
+                assert_eq!(venue_ts_ms, 1_746_270_400_353);
+                assert_eq!(recv_ns, 99);
+            }
+            other => panic!("expected Fill, got {other:?}"),
         }
     }
 
