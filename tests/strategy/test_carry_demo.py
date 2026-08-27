@@ -615,7 +615,7 @@ REFRESH_NOW = D0 + 20 * 60_000 - 10_000
 
 # ---------------------------------------------------------------------------
 # The engine target book: what research decided, written where the Rust engine
-# can follow it. Off unless the path is set; never able to stop the sleeve.
+# can follow it. Publication is required and failures stop the producer cycle.
 # ---------------------------------------------------------------------------
 
 
@@ -650,15 +650,16 @@ def test_target_book_records_the_decided_notionals(tmp_path, monkeypatch) -> Non
 
 def test_no_path_means_no_book(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv(module.ENGINE_TARGET_BOOK_PATH_ENV, raising=False)
-    module._write_engine_target_book(
-        desired={"KAITOUSDT": 0.1},
-        decision_ts_ms=1786665600000,
-        sizing_equity_usdt=1000.0,
-        notional_multiplier=1.0,
-        stop_loss_fraction=0.35,
-        entry_leverage=2.0,
-        strategy_profile="carry_hold_v4_live_v1",
-    )
+    with pytest.raises(ValueError, match=module.ENGINE_TARGET_BOOK_PATH_ENV):
+        module._write_engine_target_book(
+            desired={"KAITOUSDT": 0.1},
+            decision_ts_ms=1786665600000,
+            sizing_equity_usdt=1000.0,
+            notional_multiplier=1.0,
+            stop_loss_fraction=0.35,
+            entry_leverage=2.0,
+            strategy_profile="carry_hold_v4_live_v1",
+        )
     assert list(tmp_path.iterdir()) == []
 
 
@@ -672,7 +673,8 @@ def test_an_unusable_equity_leaves_the_standing_book_alone(tmp_path, monkeypatch
     # transient heartbeat gap, so nothing is written and the last book stands.
     path = tmp_path / "carry_targets.json"
     path.write_text('{"targets": "the standing book"}', encoding="utf-8")
-    _write_book(tmp_path, monkeypatch, sizing_equity_usdt=equity)
+    with pytest.raises(ValueError, match="positive sizing equity"):
+        _write_book(tmp_path, monkeypatch, sizing_equity_usdt=equity)
     assert path.read_text(encoding="utf-8") == '{"targets": "the standing book"}'
 
 
@@ -682,22 +684,21 @@ def test_an_empty_decision_writes_an_empty_book(tmp_path, monkeypatch) -> None:
     assert book["targets"] == []
 
 
-def test_a_book_that_cannot_be_written_never_stops_the_sleeve(tmp_path, monkeypatch) -> None:
-    # The sleeve is trading; bookkeeping for a component that trades nothing
-    # yet must not be able to raise into it.
+def test_a_book_that_cannot_be_written_fails_the_producer_cycle(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(module.ENGINE_TARGET_BOOK_PATH_ENV, str(tmp_path / "x.json"))
     monkeypatch.setattr(
-        module, "write_target_book", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+        module, "publish_target_book", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
     )
-    module._write_engine_target_book(
-        desired={"KAITOUSDT": 0.1},
-        decision_ts_ms=1786665600000,
-        sizing_equity_usdt=1000.0,
-        notional_multiplier=1.0,
-        stop_loss_fraction=0.35,
-        entry_leverage=2.0,
-        strategy_profile="carry_hold_v4_live_v1",
-    )
+    with pytest.raises(OSError, match="disk full"):
+        module._write_engine_target_book(
+            desired={"KAITOUSDT": 0.1},
+            decision_ts_ms=1786665600000,
+            sizing_equity_usdt=1000.0,
+            notional_multiplier=1.0,
+            stop_loss_fraction=0.35,
+            entry_leverage=2.0,
+            strategy_profile="carry_hold_v4_live_v1",
+        )
 
 
 # --- v6 (promoted 2026-08-19): the Binance whale feed and the live decision ---
