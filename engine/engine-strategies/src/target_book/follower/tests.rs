@@ -189,6 +189,71 @@ fn a_second_identical_book_does_not_resend_an_order_that_is_already_resting() {
 }
 
 #[test]
+fn removing_a_target_cancels_its_working_entry() {
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert_eq!(h.drain().len(), 1, "the first book starts an entry");
+
+    let symbol = h.ctx.id_of("KAITOUSDT");
+    h.rest(RestingSeed {
+        client_order_id: "eng-1".to_string(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit {
+            px: 9.5,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
+        qty: 10.0,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+
+    h.targets(book(vec![]));
+
+    assert_eq!(
+        h.one_action(),
+        Action::Cancel {
+            symbol,
+            client_order_id: "eng-1".to_string(),
+        }
+    );
+}
+
+#[test]
+fn expiry_cancels_a_working_entry_before_it_can_fill_late() {
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    h.targets(book(vec![target("KAITOUSDT", 100.0)]));
+    assert_eq!(h.drain().len(), 1, "the valid book starts an entry");
+
+    let symbol = h.ctx.id_of("KAITOUSDT");
+    h.rest(RestingSeed {
+        client_order_id: "eng-2".to_string(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit {
+            px: 9.5,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
+        qty: 10.0,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+
+    h.ctx.set_wall_ms(VALID_MS);
+    h.quote("KAITOUSDT", 9.5, 10.5);
+
+    assert_eq!(
+        h.one_action(),
+        Action::Cancel {
+            symbol,
+            client_order_id: "eng-2".to_string(),
+        }
+    );
+}
+
+#[test]
 fn an_entry_the_kernel_refused_is_not_re_emitted_on_every_quote() {
     // The shape that filled a trading box's disk: the funded engine wanted a
     // book it could never acquire, the kernel refused every entry for want of

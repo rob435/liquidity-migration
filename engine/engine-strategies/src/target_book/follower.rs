@@ -192,15 +192,44 @@ impl TargetBookFollower {
             return;
         };
 
+        let now_ms = ctx.wall_ms();
+        let entries_allowed =
+            now_ms < book.valid_until_ms.saturating_sub(self.rules.entry_cutoff_ms);
+
         // One order at a time per symbol. Without this the same entry goes
         // out again on every quote until the fill news gets back, which is
-        // several orders for one decision.
+        // several orders for one decision. A working entry is authorization
+        // to add exposure, though: withdraw it as soon as the newest book no
+        // longer names the target or its entry window has closed. Otherwise
+        // an old touch can fill after the producer deliberately removed it.
         let mut working = Vec::new();
         ctx.resting(&mut working);
-        let busy: Vec<SymbolId> = working.iter().map(|order| order.symbol).collect();
+        let cancelled_entries: Vec<(SymbolId, String)> = working
+            .iter()
+            .filter(|order| {
+                !order.reduce_only
+                    && (!entries_allowed
+                        || !book.targets.iter().any(|target| {
+                            target.notional_usdt != 0.0
+                                && ctx.symbol_id(&target.symbol) == Some(order.symbol)
+                        }))
+            })
+            .map(|order| (order.symbol, order.client_order_id.to_string()))
+            .collect();
+        let busy: Vec<SymbolId> = working
+            .iter()
+            .filter(|order| {
+                !cancelled_entries
+                    .iter()
+                    .any(|(_, id)| id == order.client_order_id)
+            })
+            .map(|order| order.symbol)
+            .collect();
         drop(working);
+        for (symbol, client_order_id) in cancelled_entries {
+            ctx.cancel(symbol, &client_order_id);
+        }
 
-        let now_ms = ctx.wall_ms();
         let valid_until_ms = book.valid_until_ms;
         let mut targets: Vec<Target> = book
             .targets
