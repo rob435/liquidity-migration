@@ -38,6 +38,12 @@ class DirectoryRenameWatch:
 
     __slots__ = ("_libc", "_fd", "_wd")
 
+    # Declared, not inferred: __init__ is unreachable to a type checker running
+    # off-Linux, which leaves these slots untyped everywhere they are read.
+    _libc: ctypes.CDLL
+    _fd: int
+    _wd: int
+
     def __init__(self, directory: Path) -> None:
         if sys.platform != "linux":
             raise OSError(errno.ENOSYS, "inotify is available only on Linux")
