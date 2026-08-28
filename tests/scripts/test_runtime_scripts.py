@@ -62,6 +62,20 @@ def test_manifest_contains_only_the_current_rust_owned_fleet() -> None:
     assert not any("account-execution" in name for name in units)
 
 
+def test_polars_producers_keep_cgroup_memory_visibility() -> None:
+    units = _units()
+    for name in (
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-long-mainnet.service",
+        "liquidity-migration-bybit-carry-demo.service",
+        "liquidity-migration-bybit-carry-mainnet.service",
+    ):
+        body = units[name]
+        assert "ProtectProc=invisible" in body
+        assert "ProcSubset=pid" not in body
+        assert "/proc/meminfo" in body
+
+
 def test_guarded_units_cross_the_installed_release_gate_before_checkout_code() -> None:
     guarded = [body for name, body in _units().items() if name.endswith(".service")]
     for body in guarded:

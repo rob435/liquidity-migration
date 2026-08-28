@@ -61,7 +61,8 @@ IOSchedulingPriority=7
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectProc=invisible
-ProcSubset=pid
+# Polars reads /proc/meminfo to size its cgroup-aware memory manager.  Keep
+# process metadata hidden, but retain the non-process kernel interfaces.
 ProtectSystem=strict
 ProtectHome=true
 UMask=0027

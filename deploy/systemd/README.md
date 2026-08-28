@@ -128,6 +128,12 @@ The engines are installed by the exact systemd manifest and run under distinct
 unprivileged identities. Their root-only credential files are loaded by PID 1;
 producer and observer processes receive only non-secret projections.
 
+The four Polars-backed target producers retain `ProtectProc=invisible` but do
+not set `ProcSubset=pid`. Polars reads `/proc/meminfo` when sizing its
+cgroup-aware memory manager; hiding non-process `/proc` files makes native
+Parquet writes fail before a target book can be published. Other users'
+process metadata remains hidden by `ProtectProc`.
+
 Before deploy trusts the checkout, and again before checkout code runs, the
 deploy preflight and trusted launcher reject group/world-writable or
 non-root-owned critical checkout ancestors. They also recursively require Git
