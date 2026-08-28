@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "kind": "liquidity_migration_operational_profile",
   "capital_reference_usdt": 250000.0,
   "account_risk": {
@@ -7,7 +7,6 @@
     "max_account_gross_notional_usdt": 1250000.0,
     "max_initial_margin_usdt": 250000.0,
     "max_leverage": 5.0,
-    "max_daily_loss_usdt": null,
     "quantity_tolerance": 1e-12
   },
   "long": {

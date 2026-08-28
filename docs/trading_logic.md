@@ -420,10 +420,9 @@ sizing surface. Caps are a fraction of observed wallet equity
 contraction immediate, expansion behind a dead band, unknown equity moves nothing).
 Every cap is account-wide: no sleeve holds a private share, so one sleeve may
 spend the account's whole envelope.
-The funded profile stops new risk when total venue account equity is at least 10 USDT below
-its UTC-day opening anchor. The durable trip does not block genuine reduce-only exits and
-requires the stopped-engine, flat-account `engine loss-reset` workflow to clear. Demo leaves
-this account-wide ceiling disabled with `max_daily_loss_usdt: null`.
+There is no account daily-loss circuit breaker; entry admission is bounded by
+the current equity envelope, gross, margin, freshness, ownership, and native-stop
+rules instead.
 
 **The venue stop is exchange-native, one Full-position stop per symbol.** The
 installer is the engine ([`gateway.rs`](../engine/engine-venue/src/venues/bybit/gateway.rs)

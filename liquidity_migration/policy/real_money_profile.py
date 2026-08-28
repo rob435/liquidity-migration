@@ -47,7 +47,6 @@ REAL_MONEY_DIAL_PREFIX = "RM_"
 _ENTRY_LEVERAGE = 5.0  # venue margin leverage requested per order
 _EQUITY_FLOOR_USDT = 100.0  # reference floor against unreadable balances
 _EXPAND_DEAD_BAND_FRACTION = 0.05  # envelope expands only past this band
-_DAILY_LOSS_FRACTION = 0.10
 _CARRY_MAX_NEW_ENTRIES_PER_CYCLE = 10
 _LONG_MAX_NEW_ENTRIES_PER_CYCLE = 5
 
@@ -153,7 +152,6 @@ def render_real_money_profile_json(
             "max_account_gross_notional_usdt": account_gross,
             "max_initial_margin_usdt": margin_cap,
             "max_leverage": _ENTRY_LEVERAGE,
-            "max_daily_loss_usdt": reference * _DAILY_LOSS_FRACTION,
             "quantity_tolerance": 1e-12,
         },
         "long": {

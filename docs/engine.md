@@ -248,7 +248,7 @@ parallel and integrate by type-check.
 | `engine-wal` | the append-only log: CRC-framed records, buffered appends, one explicit durability barrier per sibling placement group, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
 | `engine-marketdata` | every venue's public feed: subscribe or poll, parse once into flat per-symbol state, stamp arrival time. Bybit and MEXC enforce their numbered depth chains and resync on gaps; Lighter enforces its nonce chain; Hyperliquid rejects timestamp regression but its protocol cannot prove forward continuity. One enum is built from the same venue name as the gateway |
 | `engine-venue` | five venue adapters, one directory each: realm selection, signing, live instrument rules, pre-warmed keep-alive TLS, and the account, order, and stream capabilities that venue supports. Unsupported capabilities fail explicitly |
-| `engine-risk` | the capital controls: durable account daily-loss halt, equity-anchored envelope, account-wide caps, stop-attach discipline. Fail-closed |
+| `engine-risk` | the capital controls: equity-anchored envelope, account-wide caps, stop-attach discipline. Unknown inputs refuse the order |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
 | `engine-strategies` | the plugs: a registry from name + TOML to a boxed `Strategy` |
 
@@ -304,8 +304,8 @@ parallel and integrate by type-check.
   `BYBIT_ATTEST_API_SECRET`, verifies UTA, exact single-host IP, the required
   ContractTrade and Wallet query scopes, global read-only status, and no
   withdrawal permission. The
-  transient mainnet `attest-flat` and `loss-reset` services remove the execution
-  key and `REAL_MONEY` from their environments. Persistent engines never load
+  transient mainnet `attest-flat` service removes the execution key and
+  `REAL_MONEY` from its environment. Persistent engines never load
   the attestor file, and deployment does not require it.
 - **The engine sends orders, and the risk kernel gates every one.** It carries
   no mode of its own: whether the funded fleet runs at all is `REAL_MONEY` in
@@ -341,21 +341,11 @@ parallel and integrate by type-check.
     The next boot still runs the same comparison and latches again on
     anything that stands — the clear resets the memory, never the check.
 - **The capital controls are the kernel's, and unknown state refuses the
-  order.** The daily-loss halt, equity-anchored envelope, and stop-attach
-  discipline live in `engine-risk`, each with table-driven tests over its
+  order.** The equity-anchored envelope and stop-attach discipline live in
+  `engine-risk`, each with table-driven tests over its
   decision semantics. Every cap is account-wide: no sleeve holds a private
   share, so any one of them can spend the lot. The tests are the executable
   decision contract.
-- **The funded daily-loss trip is durable and operator-cleared.** Its first
-  fresh account view of the UTC day anchors total account equity. At equity no
-  more than 10 USDT below that opening, new risk stops and genuine reduce-only
-  exits continue. The anchor and trip cross a WAL barrier and survive restart;
-  a trip does not clear on recovery or day change. `scripts/ops.sh loss-reset
-  --environment demo|mainnet --note TEXT [--execute]` requires that realm's
-  engine and producers stopped and a fresh, credential-wide flat account.
-  Mainnet venue reads use only the read-only attestor key. Dry-run writes
-  nothing; execute writes the local WAL note and cleared anchor durably without
-  gaining venue-mutation authority.
 - **Instrument rules come from the selected Rust adapter at boot.** The engine
   aborts when the fetch fails or when a configured symbol has no rule. Quantity
   steps, price ticks, and venue minimums are live startup inputs, not deploy

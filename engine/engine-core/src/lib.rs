@@ -22,7 +22,6 @@ pub mod flatness;
 pub mod heartbeat;
 pub mod inflight;
 pub mod ledger;
-pub mod loss_reset;
 pub mod reconcile;
 pub mod replay;
 pub mod routing;

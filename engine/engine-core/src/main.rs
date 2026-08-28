@@ -60,10 +60,6 @@ engine — the execution loop
       and resets the latch, keeping the findings in the log as the receipt.
       The next boot still runs its own comparison.
 
-  engine loss-reset --config engine.toml --note TEXT [--execute]
-      Inspect the durable daily-loss halt while the engine is stopped. Requires
-      a credential-wide flat account; --execute appends an auditable cleared
-      anchor. Without --execute, writes nothing.
 ";
 
 fn main() -> ExitCode {
@@ -224,16 +220,6 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             let note = value(args, "--note").unwrap_or("operator reconcile-clear".into());
             let execute = args.iter().any(|a| a == "--execute");
             runtime()?.block_on(engine_core::clear::run(&config, &note, execute))
-        }
-        "loss-reset" => {
-            let config = PathBuf::from(
-                value(args, "--config")
-                    .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
-                    .unwrap_or("engine.toml".into()),
-            );
-            let note = value(args, "--note").ok_or("loss-reset needs --note TEXT")?;
-            let execute = args.iter().any(|a| a == "--execute");
-            runtime()?.block_on(engine_core::loss_reset::run(&config, &note, execute))
         }
         "-h" | "--help" | "help" => {
             print!("{USAGE}");

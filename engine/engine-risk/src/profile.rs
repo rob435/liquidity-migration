@@ -27,12 +27,12 @@
 
 use serde_json::Value;
 
-use crate::config::{ConfigError, EnvelopeConfig, KernelConfig, LossGuardConfig};
+use crate::config::{ConfigError, EnvelopeConfig, KernelConfig};
 
 /// The only schema this reads. A profile from the future is refused rather
 /// than read optimistically — the fields it added would be the interesting
 /// ones.
-pub const PROFILE_SCHEMA_VERSION: i64 = 1;
+pub const PROFILE_SCHEMA_VERSION: i64 = 2;
 
 /// `operational_profile.py`'s `OPERATIONAL_PROFILE_KIND`.
 pub const PROFILE_KIND: &str = "liquidity_migration_operational_profile";
@@ -58,7 +58,6 @@ const ACCOUNT_RISK_KEYS: &[&str] = &[
     "max_account_gross_notional_usdt",
     "max_initial_margin_usdt",
     "max_leverage",
-    "max_daily_loss_usdt",
     "quantity_tolerance",
 ];
 
@@ -305,9 +304,6 @@ pub fn kernel_config_from_profile(
 
     let config = KernelConfig {
         max_account_view_age_ns: inputs.max_account_view_age_ns,
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: optional_number(account, "max_daily_loss_usdt", "account_risk")?,
-        },
         envelope,
         leverage: number(account, "max_leverage", "account_risk")?,
         qty_tolerance: number(account, "quantity_tolerance", "account_risk")?,

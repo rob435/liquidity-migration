@@ -99,11 +99,11 @@ cannot prove sleeve ownership.
 
 ## Rust risk and durability
 
-Risk admission lives only in `engine-risk`. The engine enforces the durable
-daily-loss halt, equity-anchored envelope, gross and margin caps, leverage and
+Risk admission lives only in `engine-risk`. The engine enforces the
+equity-anchored envelope, gross and margin caps, leverage and
 instrument rules, book age, account identity, working-order ownership, and
 venue-native stop discipline. Reduction-only work is never blocked by a growth
-cap or the daily-loss trip.
+cap.
 
 Every order command and execution transition is written to the Rust WAL. For a
 contiguous group of sibling placements, the engine validates and reserves risk

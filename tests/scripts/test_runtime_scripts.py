@@ -1337,6 +1337,41 @@ def test_install_reopens_persistent_account_leases_for_isolated_engines() -> Non
     )
 
 
+def test_install_rehomes_persistent_engine_state_without_replacing_it() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    normalize = _function(
+        text, "normalize_engine_state_access", "ensure_runtime_identities"
+    )
+    identities = _function(
+        text, "ensure_runtime_identities", "write_producer_environment"
+    )
+
+    for directory, owner in (
+        ("/var/lib/liquidity-migration-engine", "$DEMO_ENGINE_USER"),
+        ("/var/lib/liquidity-migration-engine-mainnet", "$MAINNET_ENGINE_USER"),
+    ):
+        assert directory in normalize
+        assert owner in normalize
+    assert "os.lstat(path)" in normalize
+    assert "stat.S_ISLNK" in normalize
+    assert "os.O_NOFOLLOW" in normalize
+    assert "row.st_nlink != 1" in normalize
+    assert "row.st_dev != device" in normalize
+    assert "validate_directory(descriptor, path, device)" in normalize
+    assert "migrate_directory(descriptor, path, device, owner, group)" in normalize
+    assert "os.path.samestat" in normalize
+    assert "os.fchown" in normalize
+    assert "os.fchmod" in normalize
+    assert normalize.index("migrate_directory(child") < normalize.index(
+        "os.fchown(child"
+    )
+    for replacing in ("rm -rf", "shutil.move", "os.replace", "shutil.copy"):
+        assert replacing not in normalize
+    assert identities.index("normalize_account_lease_access") < identities.index(
+        "normalize_engine_state_access"
+    )
+
+
 def _process_start_ticks(pid: int) -> int:
     record = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
     fields_after_comm = record.rsplit(") ", maxsplit=1)[1].split()

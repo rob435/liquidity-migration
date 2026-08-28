@@ -41,7 +41,6 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 500.0);
     assert_eq!(cfg.envelope.max_initial_margin_usdt, 100.0);
     assert_eq!(cfg.leverage, 5.0);
-    assert_eq!(cfg.loss_guard.max_daily_loss_usdt, Some(10.0));
     assert_eq!(cfg.qty_tolerance, 1e-12);
 
     // 500 of gross against a 100 reference: exactly what leverage 5 funds.
@@ -65,7 +64,6 @@ fn the_committed_demo_profile_loads_pinned() {
     // No capital_reference block: the reference is pinned and never follows
     // the wallet.
     assert!(!cfg.envelope.tracks_equity);
-    assert_eq!(cfg.loss_guard.max_daily_loss_usdt, None);
 }
 
 #[test]
@@ -113,15 +111,13 @@ fn a_cap_the_engine_does_not_read_is_refused_rather_than_ignored() {
 }
 
 #[test]
-fn the_daily_loss_ceiling_is_parsed_and_validated() {
-    for value in [0.0, -1.0] {
-        let mut doc: serde_json::Value =
-            serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
-        doc["account_risk"]["max_daily_loss_usdt"] = serde_json::json!(value);
-        let err = kernel_config_from_profile(&doc.to_string(), &inputs())
-            .expect_err("an invalid daily loss ceiling was accepted");
-        assert!(err.to_string().contains("max_daily_loss_usdt"), "{err}");
-    }
+fn a_profile_still_declaring_the_retired_daily_loss_guard_is_refused() {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    doc["account_risk"]["max_daily_loss_usdt"] = serde_json::json!(10.0);
+    let err = kernel_config_from_profile(&doc.to_string(), &inputs())
+        .expect_err("a retired daily-loss field was accepted");
+    assert!(err.to_string().contains("max_daily_loss_usdt"), "{err}");
 }
 
 #[test]
@@ -145,7 +141,7 @@ fn a_profile_still_declaring_sleeve_shares_is_refused_rather_than_ignored() {
 fn a_profile_from_the_future_is_refused() {
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
-    doc["schema_version"] = serde_json::json!(2);
+    doc["schema_version"] = serde_json::json!(3);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(err.to_string().contains("schema_version"), "{err}");
 }
@@ -153,7 +149,7 @@ fn a_profile_from_the_future_is_refused() {
 #[test]
 fn some_other_json_document_is_not_an_operational_profile() {
     let err = kernel_config_from_profile(
-        r#"{"schema_version": 1, "kind": "something_else"}"#,
+        r#"{"schema_version": 2, "kind": "something_else"}"#,
         &inputs(),
     )
     .unwrap_err();

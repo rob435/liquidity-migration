@@ -41,10 +41,6 @@ Operator commands:
   attest-flat --environment demo|mainnet
                                run the installed Rust adapter's credential-wide
                                two-scan flatness proof (read-only)
-  loss-reset --environment demo|mainnet --note TEXT [--execute]
-                               prove the realm stopped and flat, then inspect
-                               or durably clear its daily-loss halt; dry-run by
-                               default
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   real-money preflight         report every remaining arming step (read-only)
   real-money render-profile [--execute --output PATH]
@@ -118,12 +114,10 @@ exec .venv/bin/python -m "${REMOTE_ARGS[@]}"' "$module" "$@"
 }
 
 remote_engine_control() {
-  local action="$1" realm="$2" note="$3" execute_mode="$4"
+  local realm="$1"
   remote_exec '
-action="${REMOTE_ARGS[0]}"
-realm="${REMOTE_ARGS[1]}"
-note="${REMOTE_ARGS[2]}"
-execute_mode="${REMOTE_ARGS[3]}"
+action=attest-flat
+realm="${REMOTE_ARGS[0]}"
 engine_binary=/opt/liquidity-migration-engine/bin/engine
 runtime_launcher=/opt/liquidity-migration-engine/bin/run-authorized-runtime
 control_helper=/opt/liquidity-migration-engine/bin/telegram-control-helper
@@ -147,11 +141,6 @@ case "$realm" in
     runtime_user=liquidity-engine-demo
     state_dir=/var/lib/liquidity-migration-engine
     unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-    realm_units=(
-      liquidity-migration-bybit-long-demo.service
-      liquidity-migration-bybit-carry-demo.service
-      liquidity-migration-engine.service
-    )
     ;;
   mainnet)
     env_file=/etc/liquidity-migration/engine-mainnet.env
@@ -159,11 +148,6 @@ case "$realm" in
     runtime_user=liquidity-engine-mainnet
     state_dir=/var/lib/liquidity-migration-engine-mainnet
     unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-    realm_units=(
-      liquidity-migration-bybit-long-mainnet.service
-      liquidity-migration-bybit-carry-mainnet.service
-      liquidity-migration-engine-mainnet.service
-    )
     ;;
   *) echo "invalid engine-control realm: $realm" >&2; exit 2 ;;
 esac
@@ -264,7 +248,7 @@ END {
     || { echo "mainnet attestor environment has invalid assignments" >&2; exit 3; }
 fi
 
-engine_args=("$action")
+engine_args=(attest-flat)
 sandbox_properties=(
   --property=NoNewPrivileges=true
   --property=PrivateTmp=true
@@ -274,27 +258,6 @@ sandbox_properties=(
   --property=ProtectHome=true
   --property=UMask=0027
 )
-case "$action" in
-  attest-flat)
-    [ -z "$note" ] && [ "$execute_mode" = dry-run ] \
-      || { echo "invalid attest-flat control arguments" >&2; exit 2; }
-    ;;
-  loss-reset)
-    for unit in "${realm_units[@]}"; do
-      if systemctl is-active --quiet "$unit"; then
-        echo "loss-reset refused: stop the complete $realm realm first ($unit is active)" >&2
-        exit 4
-      fi
-    done
-    engine_args+=(--note "$note")
-    [ "$execute_mode" = execute ] && engine_args+=(--execute)
-    sandbox_properties+=(
-      --property="ReadWritePaths=/run/lock/liquidity-migration $state_dir"
-    )
-    ;;
-  *) echo "invalid engine-control action: $action" >&2; exit 2 ;;
-esac
-
 # systemd parses the private EnvironmentFiles, then drops privileges. Funded
 # controls receive only the dedicated read-only attestor key, never the live
 # order-writing key. Secrets never enter this router or its argv.
@@ -321,7 +284,7 @@ fi
   && [ "$(sha256sum "$telegram_controls_bot" | awk "{print \$1}")" = "$marker_bot_digest" ] \
   || { echo "installed release control boundary changed during engine control" >&2; exit 3; }
 exit "$control_status"
-' "$action" "$realm" "$note" "$execute_mode"
+' "$realm"
 }
 
 command="${1:-help}"
@@ -431,44 +394,7 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
       demo|mainnet) ;;
       *) die_usage "attest-flat environment must be demo or mainnet" ;;
     esac
-    remote_engine_control attest-flat "$2" "" dry-run
-    ;;
-  loss-reset)
-    loss_realm=""
-    loss_note=""
-    loss_execute=dry-run
-    while [[ "$#" -gt 0 ]]; do
-      case "$1" in
-        --environment)
-          [[ "$#" -ge 2 && -z "$loss_realm" ]] \
-            || die_usage "loss-reset needs one --environment demo|mainnet"
-          loss_realm="$2"
-          shift 2
-          ;;
-        --note)
-          [[ "$#" -ge 2 && -z "$loss_note" ]] \
-            || die_usage "loss-reset needs one non-empty --note TEXT"
-          loss_note="$2"
-          shift 2
-          ;;
-        --execute)
-          [[ "$loss_execute" == dry-run ]] \
-            || die_usage "loss-reset accepts --execute only once"
-          loss_execute=execute
-          shift
-          ;;
-        *) die_usage "unknown loss-reset argument '$1'" ;;
-      esac
-    done
-    case "$loss_realm" in
-      demo|mainnet) ;;
-      *) die_usage "loss-reset requires --environment demo|mainnet" ;;
-    esac
-    [[ -n "${loss_note//[[:space:]]/}" ]] \
-      || die_usage "loss-reset requires a non-empty --note TEXT"
-    [[ "${#loss_note}" -le 512 ]] \
-      || die_usage "loss-reset note must be at most 512 characters"
-    remote_engine_control loss-reset "$loss_realm" "$loss_note" "$loss_execute"
+    remote_engine_control "$2"
     ;;
   deploy)
     # A leading --execute is accepted and discarded, for callers that still pass it.

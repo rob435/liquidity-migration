@@ -421,11 +421,7 @@ struct MockRisk {
     verdict: RiskVerdict,
     amend_verdict: Option<RiskVerdict>,
     seen: Rc<RefCell<Vec<OrderUpdate>>>,
-    restored: Rc<RefCell<Vec<String>>>,
-    restore_error: Option<String>,
-    anchor_script: VecDeque<String>,
     registered: Rc<RefCell<Vec<(String, f64)>>>,
-    clocks: Rc<RefCell<Vec<u64>>>,
 }
 
 impl MockRisk {
@@ -437,11 +433,7 @@ impl MockRisk {
                 verdict,
                 amend_verdict: None,
                 seen: seen.clone(),
-                restored: Rc::new(RefCell::new(Vec::new())),
-                restore_error: None,
-                anchor_script: VecDeque::new(),
                 registered: Rc::new(RefCell::new(Vec::new())),
-                clocks: Rc::new(RefCell::new(Vec::new())),
             },
             seen,
         )
@@ -471,26 +463,10 @@ impl RiskKernel for MockRisk {
             .unwrap_or_else(|| self.assess(intent, account))
     }
 
-    fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
-        self.clocks.borrow_mut().push(wall_ns);
-    }
-
-    fn take_control_anchor(&mut self) -> Option<String> {
-        self.anchor_script.pop_front()
-    }
-
     fn register_order(&mut self, client_order_id: &str, _intent: &Intent, approved_qty: f64) {
         self.registered
             .borrow_mut()
             .push((client_order_id.to_string(), approved_qty));
-    }
-
-    fn restore_control_anchor(&mut self, state: &str) -> Result<(), String> {
-        self.restored.borrow_mut().push(state.to_string());
-        match &self.restore_error {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }
     }
 }
 
@@ -805,7 +781,6 @@ struct Harness {
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
     stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     risk_saw: Rc<RefCell<Vec<OrderUpdate>>>,
-    risk_clocks: Rc<RefCell<Vec<u64>>>,
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Positions the venue's next account readings will report; see
     /// `MockVenue::account_readings`.
@@ -924,7 +899,6 @@ async fn build_with_venue_state(
     let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
-    let risk_clocks = risk.clocks.clone();
     let engine = Engine::boot(
         &settings(),
         "0000000000000000",
@@ -946,7 +920,6 @@ async fn build_with_venue_state(
             amends,
             stops,
             risk_saw,
-            risk_clocks,
             leverages,
             account_readings,
             account_view_fails,
@@ -984,7 +957,6 @@ async fn build_inner(
     let executions = venue.executions.clone();
     let (mut risk, risk_saw) = MockRisk::with(verdict);
     risk.amend_verdict = options.amend_verdict;
-    let risk_clocks = risk.clocks.clone();
     let engine = Engine::boot(
         settings,
         "0000000000000000",
@@ -1006,7 +978,6 @@ async fn build_inner(
             amends,
             stops,
             risk_saw,
-            risk_clocks,
             leverages,
             account_readings,
             account_view_fails,

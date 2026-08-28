@@ -21,7 +21,6 @@ low-level recovery section explicitly requires it.
 | `real-money render-profile` | Render the non-secret operational risk profile; writes only with `--execute` |
 | `flatten --environment demo\|mainnet` | Preview known-position reduction; `--execute` stops producers and publishes zero targets |
 | `attest-flat --environment demo\|mainnet` | Run the installed adapter's credential-wide, read-only two-scan flatness check |
-| `loss-reset --environment demo\|mainnet --note TEXT` | Prove that realm stopped and flat; inspect by default, clear durably only with `--execute` |
 | `deploy MODE [ARGS...]` | Demo-only hosts may install, activate, or stage; a host with any funded configuration may change or activate a generation only through rollout |
 
 Mutating commands require explicit targets. Preview is the default where the
@@ -226,8 +225,7 @@ Before arming, verify all of the following:
   position mode, margin mode, open orders, and positions.
 
 The separate read-only inventory credential is needed only when the operator
-uses manual `attest-flat` or `loss-reset`; arming and deployment do not require
-that file.
+uses manual `attest-flat`; arming and deployment do not require that file.
 
 Arming is a host-side operator act. A repository commit cannot arm funded
 trading.
@@ -268,8 +266,7 @@ needs the ContractTrade Order and Position query scopes plus Wallet
 AccountTransfer query scope so every inventory endpoint can be read; Wallet
 Withdraw must be absent. The global read-only flag makes those permission names
 query authority, not order or transfer authority. The persistent engine service
-never loads this file. Only transient mainnet `attest-flat` and stopped-engine
-`loss-reset` receive it.
+never loads this file. Only transient mainnet `attest-flat` receives it.
 
 ## Venue qualification
 
@@ -298,46 +295,6 @@ Hyperliquid and Lighter have practice realms. MEXC does not; its first canary is
 real money and needs a separate owner decision. Variational has no account or
 order API. Current evidence by venue is in [`engine.md`](engine.md) §The venues.
 
-## Daily loss halt
-
-`account_risk.max_daily_loss_usdt` is `10.0` in the funded profile and `null`
-in demo. At a UTC boundary the engine compares its latest pre-midnight equity
-evidence with the first fresh valid post-midnight account view and uses the
-higher value as the opening anchor. Equity at or below opening minus the cap
-refuses entries as `LossGuardTripped`; genuine reduce-only exits still flow.
-The measure is account-wide equity, not sleeve P&L or a high-water mark, so
-fees, funding, unrealized P&L, and outside activity reflected by the venue all
-affect it.
-
-The opening anchor and any trip are made durable in the WAL. Boundary equity
-evidence is also checkpointed once per minute and immediately on every rise,
-so a restart around midnight cannot discard an observed cross-boundary loss.
-Order and opening-amend assessments advance the UTC risk clock themselves, so
-they cannot race ahead under yesterday's anchor while waiting for the next
-account poll. If the process was offline, the
-older/higher evidence can conservatively halt too early; it cannot grant extra
-budget. A non-tripped anchor rolls on the next UTC day. A trip stays latched across equity recovery,
-day changes, and restart until an operator performs this workflow:
-
-1. Stop the engine that owns the account and leave producers stopped.
-2. Run `scripts/ops.sh loss-reset --environment demo|mainnet --note "REASON"`
-   with one concrete environment. The wrapper refuses while that realm's engine
-   or either producer is active, loads the private files through systemd, and
-   runs as the realm's unprivileged engine user. This dry run claims the WAL,
-   requires a fresh credential-wide flat attestation bound to the configured
-   realm and expected account ID, and writes nothing. On mainnet the venue read
-   uses only the dedicated read-only attestor key; the execution key and
-   `REAL_MONEY` are absent.
-3. Investigate the trip and independently confirm the account should resume.
-4. Repeat the same wrapper command with `--execute`. The command appends the
-   operator note and canonical cleared risk anchor, then crosses one durability
-   barrier.
-5. Start the engine and producers through the normal activation path. The next
-   new-risk assessment establishes a new UTC opening-equity anchor.
-
-The note must be non-empty and at most 512 bytes. Never clear the WAL anchor by
-editing files or by restarting the process.
-
 ## Funded key rotation
 
 Key rotation changes venue and host state and is performed by the account
@@ -360,8 +317,8 @@ it cannot create the replacement or revoke the prior key.
 4. Revoke the prior execution key at the venue.
 5. Run `scripts/ops.sh real-money preflight` and independently verify the realm,
    account ID, venue-reported key shape, position mode, margin mode, open orders,
-   and positions. If manual account-wide inventory or loss reset is required,
-   install the separate read-only inventory key and run
+   and positions. If manual account-wide inventory is required, install the
+   separate read-only inventory key and run
    `scripts/ops.sh attest-flat --environment mainnet`.
 6. Arm and activate the funded fleet through a reviewed rollout.
 

@@ -141,10 +141,9 @@ pub enum WalRecord {
         source: String,
         text: String,
     },
-    /// Control state that must outlive the process. Written (and made
-    /// durable) the moment it changes; the newest one is restored at boot.
-    /// The risk kernel uses this for the UTC opening-equity anchor and daily
-    /// loss trip latch; other controls may own independent source names.
+    /// Historical durable control state. The daily-loss feature that wrote
+    /// these records is retired, but the shape remains so existing logs stay
+    /// readable. New engine runs do not emit or restore it.
     ControlAnchor {
         source: String,
         state: String,
@@ -247,8 +246,8 @@ pub enum WalRecord {
         /// The reconciliation latch, same meaning as
         /// [`WalRecord::Reconciled`]'s `may_open`.
         may_open: bool,
-        /// The newest control anchor per source, same meaning as
-        /// [`WalRecord::ControlAnchor`].
+        /// Historical control anchors carried by older rotations. Retained in
+        /// the schema for replay compatibility; new rotations leave it empty.
         control_anchors: Vec<AnchorState>,
         /// Signed filled quantity per (strategy, symbol): whose fills built
         /// each position. Flat rows are absent.
@@ -388,6 +387,35 @@ mod tests {
         assert!(rendered.contains("SymbolNotionalBreached"), "{rendered}");
         assert!(rendered.contains("156255.2326"), "{rendered}");
         assert!(rendered.contains("125000.0"), "{rendered}");
+    }
+
+    #[test]
+    fn a_retired_loss_guard_verdict_and_anchor_still_read_back() {
+        let verdict = r#"{"kind":"verdict","client_order_id":null,"verdict":{"Deny":{"reason":{"LossGuardTripped":{"equity_usdt":89.5,"floor_usdt":90.0}}}}}"#;
+        let anchor = r#"{"kind":"control_anchor","source":"risk","state":"{\"day\":20693,\"tripped\":true}"}"#;
+
+        let verdict: WalRecord =
+            serde_json::from_str(verdict).expect("a retired loss verdict must still parse");
+        let anchor: WalRecord =
+            serde_json::from_str(anchor).expect("a retired control anchor must still parse");
+
+        assert!(matches!(
+            verdict,
+            WalRecord::Verdict {
+                verdict: RiskVerdict::Deny {
+                    reason: crate::risk::DenyReason::LossGuardTripped {
+                        equity_usdt: 89.5,
+                        floor_usdt: 90.0,
+                    },
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            anchor,
+            WalRecord::ControlAnchor { source, state }
+                if source == "risk" && state.contains("tripped")
+        ));
     }
 
     #[test]

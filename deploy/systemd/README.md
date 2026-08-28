@@ -145,11 +145,8 @@ explicitly removes the execution key and `REAL_MONEY`; persistent services and
 deployment never load the attestor file. Every inventory command requires two
 complete scans with stable scope.
 
-`scripts/ops.sh attest-flat --environment demo|mainnet` and `loss-reset
---environment demo|mainnet --note TEXT [--execute]` use the same transient
-service boundary for operator checks. Mainnet controls
-receive only the read-only attestor key; the reset wrapper also refuses while
-that realm's engine or producers are active.
+`scripts/ops.sh attest-flat --environment demo|mainnet` uses this transient
+service boundary. Mainnet receives only the read-only attestor key.
 
 ## Watchdog timers
 

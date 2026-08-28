@@ -39,7 +39,8 @@ pub struct AccountView {
 /// log and in tests.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DenyReason {
-    /// The account loss guard tripped at or below the UTC day's equity floor.
+    /// Read from historical logs, never written. The retired daily-loss guard
+    /// produced this shape, so it remains decodable for WAL compatibility.
     LossGuardTripped { equity_usdt: f64, floor_usdt: f64 },
     /// The order would breach the equity-anchored envelope.
     EnvelopeBreached {
@@ -116,19 +117,8 @@ pub trait RiskKernel {
     fn on_update(&mut self, update: &OrderUpdate);
     /// Latest price for a symbol, for valuing exposure. Default: ignore.
     fn observe_price(&mut self, _symbol: SymbolId, _px: f64) {}
-    /// Wall time of the account reading being folded in. The daily loss
-    /// anchor rolls on the reading's UTC day, not on the decision clock.
-    fn observe_wall_clock_ns(&mut self, _wall_ns: u64) {}
-    /// Fold every fresh account reading into account-level circuit breakers.
-    /// This is independent of a new intent: a loss halt must trip while an
-    /// old entry is still resting, before a supervisor can amend or cross it.
+    /// Fold every fresh account reading into account-level capital state.
     fn observe_account_view(&mut self, _account: &AccountView) {}
-    /// Whether opening exposure is halted by durable account-level state.
-    /// Engines use this to pull already-live entries; new intents are still
-    /// denied through [`Self::assess`].
-    fn entries_halted(&self) -> bool {
-        false
-    }
     /// Bind an engine-minted client order id to the intent it approved, so an
     /// order in flight is exposure the caps can see. Default: ignore.
     fn register_order(&mut self, _client_order_id: &str, _intent: &Intent, _approved_qty: f64) {}
@@ -145,18 +135,5 @@ pub trait RiskKernel {
         _high_px: f64,
     ) {
         self.register_order(client_order_id, intent, approved_qty);
-    }
-    /// Control state that must outlive the process. `Some` exactly when it
-    /// changed since last taken; the engine writes it to the log and makes it
-    /// durable. Default: none.
-    fn take_control_anchor(&mut self) -> Option<String> {
-        None
-    }
-    /// Restore from the newest anchor found in the log, before the first
-    /// evaluation. A malformed anchor must refuse startup rather than silently
-    /// resetting a durable circuit breaker. Default: accept and ignore for
-    /// kernels that own no control state.
-    fn restore_control_anchor(&mut self, _state: &str) -> Result<(), String> {
-        Ok(())
     }
 }

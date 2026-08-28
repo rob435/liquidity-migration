@@ -7,15 +7,11 @@ use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};
 use crate::config::{ConfigError, KernelConfig};
 use crate::envelope::Envelope;
 use crate::exposure::{Book, Pending};
-use crate::loss_guard::{LossGuard, LossGuardAnchor};
 
 pub struct Kernel {
     cfg: KernelConfig,
-    guard: LossGuard,
     envelope: Envelope,
     book: Book,
-    wall_ns: Option<u64>,
-    taken_anchor: Option<LossGuardAnchor>,
 }
 
 fn unknown(detail: impl Into<String>) -> DenyReason {
@@ -34,22 +30,12 @@ fn signed(side: Side, qty: f64) -> f64 {
 impl Kernel {
     pub fn new(cfg: KernelConfig) -> Result<Self, ConfigError> {
         cfg.validate()?;
-        let guard = LossGuard::new(cfg.loss_guard.clone());
         let envelope = Envelope::new(cfg.envelope.clone());
         Ok(Self {
             cfg,
-            guard,
             envelope,
             book: Book::default(),
-            wall_ns: None,
-            taken_anchor: None,
         })
-    }
-
-    /// Wall-clock nanoseconds for the loss guard's UTC day roll. Until this is
-    /// supplied, its first anchor never rolls.
-    pub fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
-        self.wall_ns = Some(wall_ns);
     }
 
     /// A price the kernel may value exposure at. The engine feeds this from
@@ -117,19 +103,6 @@ impl Kernel {
         self.envelope.reference_usdt()
     }
 
-    pub fn loss_guard_anchor(&self) -> LossGuardAnchor {
-        self.guard.anchor()
-    }
-
-    pub fn restore_loss_guard(&mut self, anchor: LossGuardAnchor) -> Result<(), String> {
-        self.guard.restore(anchor)
-    }
-
-    /// Clear the loss halt. Only an explicit operator action may call this.
-    pub fn reset_loss_guard(&mut self) {
-        self.guard.reset();
-    }
-
     fn price_for(&self, symbol: SymbolId, view: &ViewFacts) -> Option<f64> {
         match (self.book.px(symbol), view.entry_px(symbol)) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -187,9 +160,9 @@ impl Kernel {
         let view = ViewFacts::read(account, self.cfg.qty_tolerance)?;
         let ask_qty = read_intent_qty(intent)?;
 
-        // 3. A genuine exit passes the staleness and loss refusals below:
-        //    risk-reducing orders flow while blind or tripped, and the venue's
-        //    reduce-only enforcement bounds an exit sized from an old reading.
+        // 3. A genuine exit passes the staleness refusal below: risk-reducing
+        //    orders flow while blind, and the venue's reduce-only enforcement
+        //    bounds an exit sized from an old reading.
         let recent = self.book.fills_after(account.observed_ns);
         let settled_qty = view.net_qty(intent.symbol)
             + recent
@@ -230,14 +203,6 @@ impl Kernel {
             });
         }
 
-        // The loss guard comes before every entry control. A genuine exit has
-        // already returned above because flattening is the remedy for a trip.
-        if let Some(trip) = self.guard.observe(view.equity_usdt, self.wall_ns) {
-            return Err(DenyReason::LossGuardTripped {
-                equity_usdt: trip.equity_usdt,
-                floor_usdt: trip.floor_usdt,
-            });
-        }
         self.envelope.observe_equity(view.equity_usdt);
 
         // An unflagged reduction is judged as an entry from here on, but must
@@ -425,10 +390,9 @@ impl RiskKernel for Kernel {
     /// 3. exit or entry: a genuine exit is clamped to the position and stops
     ///    here — risk-reducing orders flow even under a stale reading;
     /// 4. entry freshness — too old is [`DenyReason::StaleAccountView`];
-    /// 5. account daily loss halt — [`DenyReason::LossGuardTripped`];
-    /// 6. stop discipline — [`DenyReason::MissingStop`];
-    /// 7. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
-    /// 8. the account-wide capital caps, smallest scope first: the whole
+    /// 5. stop discipline — [`DenyReason::MissingStop`];
+    /// 6. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
+    /// 7. the account-wide capital caps, smallest scope first: the whole
     ///    book's gross ([`DenyReason::ComponentGrossBreached`]), the whole
     ///    book's margin ([`DenyReason::InitialMarginBreached`]), and whether
     ///    the account's spare margin funds the increase
@@ -498,23 +462,14 @@ impl RiskKernel for Kernel {
         Kernel::observe_price(self, symbol, px);
     }
 
-    fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
-        Kernel::observe_wall_clock_ns(self, wall_ns);
-    }
-
     fn observe_account_view(&mut self, account: &AccountView) {
         // Refreshes happen independently of new intents. Prune fills the
         // venue snapshot has caught up with here so a fill-heavy, entry-idle
         // process does not retain its entire session until the next assess.
         self.book.prune_through(account.observed_ns);
-        self.guard.observe(account.equity_usdt, self.wall_ns);
         if account.equity_usdt.is_finite() && account.equity_usdt > 0.0 {
             self.envelope.observe_equity(account.equity_usdt);
         }
-    }
-
-    fn entries_halted(&self) -> bool {
-        self.guard.is_tripped()
     }
 
     fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
@@ -537,27 +492,6 @@ impl RiskKernel for Kernel {
             low_px,
             high_px,
         );
-    }
-
-    fn take_control_anchor(&mut self) -> Option<String> {
-        let current = self.guard.anchor();
-        if current == LossGuardAnchor::default() && self.taken_anchor.is_none() {
-            return None;
-        }
-        if self.taken_anchor.as_ref() == Some(&current) {
-            return None;
-        }
-        let state = serde_json::to_string(&current).ok()?;
-        self.taken_anchor = Some(current);
-        Some(state)
-    }
-
-    fn restore_control_anchor(&mut self, state: &str) -> Result<(), String> {
-        let anchor = serde_json::from_str::<LossGuardAnchor>(state)
-            .map_err(|error| format!("invalid loss-guard control anchor: {error}"))?;
-        self.guard.restore(anchor)?;
-        self.taken_anchor = Some(self.guard.anchor());
-        Ok(())
     }
 }
 

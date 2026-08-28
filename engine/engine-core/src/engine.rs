@@ -81,12 +81,6 @@ const HALT_CANCEL_CONFIRM_NS: u64 = 5_000_000_000;
 #[cfg(test)]
 const HALT_CANCEL_CONFIRM_NS: u64 = 25_000_000;
 
-fn wall_clock_ns() -> u64 {
-    u64::try_from(clock::wall_ms())
-        .unwrap_or(0)
-        .saturating_mul(1_000_000)
-}
-
 fn stop_key(symbol: SymbolId, side: Side) -> (u16, bool) {
     (symbol.0, side == Side::Sell)
 }
@@ -305,9 +299,6 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// recovery succeed. Unlike `may_open`, a healthy reconnect may restore
     /// it without operator action.
     private_stream_ready: bool,
-    /// The newest control anchor per source, mirroring what was written to
-    /// the log, so a rotation can restate it without re-reading the file.
-    control_anchors: std::collections::BTreeMap<String, String>,
     /// Signed quantity per symbol over every fill this log ever held —
     /// strangers' included, because it mirrors the log's records, not the
     /// strategies. It is what reconcile compares the venue's positions
@@ -494,48 +485,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             )));
         }
 
-        // The newest control anchor per source, restored before anything is
-        // judged. The risk anchor carries the UTC opening equity and any
-        // daily-loss trip across restarts. A segment restatement carries the
-        // same anchors and counts the same way — set, then overridden by
-        // anything written after it.
-        let mut control_anchors: std::collections::BTreeMap<String, String> = Default::default();
-        for record in replayed {
-            match record {
-                WalRecord::ControlAnchor { source, state } => {
-                    control_anchors.insert(source.clone(), state.clone());
-                }
-                WalRecord::SegmentBase {
-                    control_anchors: anchors,
-                    ..
-                } => {
-                    control_anchors = anchors
-                        .iter()
-                        .map(|anchor| (anchor.source.clone(), anchor.state.clone()))
-                        .collect();
-                }
-                _ => {}
-            }
-        }
-        if let Some(state) = control_anchors.get("risk") {
-            risk.restore_control_anchor(state).map_err(|error| {
-                EngineError::Boot(format!(
-                    "cannot restore durable risk control anchor: {error}"
-                ))
-            })?;
-        }
-
         let account = venue.account_view().await?;
-        risk.observe_wall_clock_ns(wall_clock_ns());
         risk.observe_account_view(&account);
-        if let Some(state) = risk.take_control_anchor() {
-            wal.append(&WalRecord::ControlAnchor {
-                source: "risk".to_string(),
-                state: state.clone(),
-            })?;
-            wal.barrier()?;
-            control_anchors.insert("risk".to_string(), state);
-        }
 
         // Fills the venue saw and this log never heard: a stop that fired
         // during a deploy window, an execution inside a private-stream gap.
@@ -783,7 +734,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             leverage_at: std::collections::HashMap::new(),
             may_open,
             private_stream_ready: true,
-            control_anchors,
             logged_exposure,
             intended_stops,
             // Boot recovery just read the venue's history up to now; the
@@ -1565,7 +1515,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// The one place a reading is adopted, so what has to happen with it
     /// cannot be done in one path and forgotten in the other.
     fn adopt_view(&mut self, view: AccountView) {
-        self.risk.observe_wall_clock_ns(wall_clock_ns());
         self.risk.observe_account_view(&view);
         match self.leverage_authority {
             crate::config::LeverageAuthority::Shared => {
@@ -1669,13 +1618,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    /// Pull every still-live opening order once either the account-level risk
-    /// breaker or reconciliation's durable opening latch is set. The durable
-    /// state is written by the caller before this queue reaches the venue.
+    /// Pull every still-live opening order when reconciliation has latched new
+    /// exposure off or private-stream continuity is unavailable. The durable
+    /// reconciliation state is written before this queue reaches the venue.
     /// Foreign and reduce-only orders are left alone: cancelling another
     /// writer's order or a protective exit is not a safe guess.
     fn queue_halted_entry_cancels(&mut self) -> Result<(), EngineError> {
-        if self.may_open && self.private_stream_ready && !self.risk.entries_halted() {
+        if self.may_open && self.private_stream_ready {
             return Ok(());
         }
         let entries: Vec<(SymbolId, String)> = self
@@ -1977,7 +1926,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // account refresh above is a venue round trip, and the stamp from
         // before it is old by the time we get here.
         let now = clock::now_ns();
-        if self.may_open && self.private_stream_ready && !self.risk.entries_halted() {
+        if self.may_open && self.private_stream_ready {
             let Engine {
                 working,
                 market,
@@ -2003,7 +1952,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         match self.venue.account_view().await {
             Ok(view) => {
                 self.adopt_view(view);
-                self.persist_control_anchor()?;
                 self.enforce_position_stop_intent().await?;
             }
             // Keeping the old reading is not the same as trusting it: it
@@ -2191,16 +2139,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
                 // Ordinary cancels share the same cooperative boundary. A
                 // run of cancels accumulates into one native-sized request;
-                // flush it before a different verb (or before routing a halt
-                // cancel into its dedicated queue), then resume that verb on
+                // flush it before a different verb, then resume that verb on
                 // the next turn.
-                let accumulates_cancel = matches!(
-                    &action,
-                    Action::Cancel {
-                        client_order_id,
-                        ..
-                    } if !(self.risk.entries_halted() && self.is_live_opening(client_order_id))
-                );
+                let accumulates_cancel = matches!(&action, Action::Cancel { .. });
                 if !accumulates_cancel && !cancellations.is_empty() {
                     let sent = self
                         .process_cancels(std::mem::take(&mut cancellations))
@@ -2227,17 +2168,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         symbol,
                         client_order_id,
                     } => {
-                        if self.risk.entries_halted() && self.is_live_opening(&client_order_id) {
-                            self.enqueue_halt_cancel(symbol, client_order_id);
-                        } else {
-                            cancellations.push((symbol, client_order_id));
-                            if cancellations.len() == MAX_CANCELS_PER_BATCH {
-                                let sent = self
-                                    .process_cancels(std::mem::take(&mut cancellations))
-                                    .await?;
-                                if sent && !self.pending.is_empty() {
-                                    return self.pause_drain(progress);
-                                }
+                        cancellations.push((symbol, client_order_id));
+                        if cancellations.len() == MAX_CANCELS_PER_BATCH {
+                            let sent = self
+                                .process_cancels(std::mem::take(&mut cancellations))
+                                .await?;
+                            if sent && !self.pending.is_empty() {
+                                return self.pause_drain(progress);
                             }
                         }
                     }
@@ -2292,7 +2229,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ),
             })?;
         }
-        self.persist_control_anchor()
+        Ok(())
     }
 
     /// End one venue-mutation turn without ending its strategy wake. The
@@ -2300,37 +2237,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// its durability barrier); this only keeps the flood counters and
     /// latency origin while the run loop polls account-safety inputs.
     fn pause_drain(&mut self, progress: DrainProgress) -> Result<(), EngineError> {
-        self.persist_control_anchor()?;
         self.drain_progress = Some(progress);
         Ok(())
-    }
-
-    /// Write a changed control anchor down and force it to disk. State that
-    /// outlives a process has to be durable the moment it changes, or a
-    /// crash-loop refreshes the daily loss budget.
-    fn persist_control_anchor(&mut self) -> Result<(), EngineError> {
-        if self.append_control_anchor()? {
-            self.wal.barrier()?;
-        }
-        Ok(())
-    }
-
-    /// Append a changed anchor without its own barrier. The order batch path
-    /// folds this record into the same durability barrier as its sibling
-    /// `OrderSent` records, so the first order of a UTC day cannot reach the
-    /// venue before that day's opening-equity anchor reaches stable storage.
-    fn append_control_anchor(&mut self) -> Result<bool, EngineError> {
-        let Some(state) = self.risk.take_control_anchor() else {
-            return Ok(false);
-        };
-        // Mirrored so a rotation can restate the newest anchor without
-        // re-reading the log.
-        self.control_anchors.insert("risk".into(), state.clone());
-        self.wal.append(&WalRecord::ControlAnchor {
-            source: "risk".into(),
-            state,
-        })?;
-        Ok(true)
     }
 
     /// Judge and reserve one sibling. The caller makes every accepted sibling
@@ -2464,10 +2372,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut intent = intent;
         let work = self.plan_resting_entry(&mut intent);
 
-        // UTC can roll between account polls. Advance the risk clock at the
-        // decision boundary so the first new-day order cannot use yesterday's
-        // budget; the batch barrier below makes any changed anchor durable.
-        self.risk.observe_wall_clock_ns(wall_clock_ns());
         let verdict = {
             let Engine { risk, account, .. } = self;
             risk.assess(&intent, account)
@@ -2764,13 +2668,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         if prepared.is_empty() {
-            // An assessment can roll or trip the durable loss guard even when
-            // another control refuses the order.
-            self.persist_control_anchor()?;
             return Ok(false);
         }
 
-        self.append_control_anchor()?;
         self.wal.barrier()?;
         let durable_ns = clock::now_ns();
         for order in &prepared {
@@ -3136,11 +3036,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         mut spec: AmendSpec,
         _origin_ns: u64,
     ) -> Result<bool, EngineError> {
-        if !self.may_open || self.risk.entries_halted() || !self.private_stream_ready {
+        if !self.may_open || !self.private_stream_ready {
             let halt = if !self.may_open {
                 "reconciliation opening latch is set"
-            } else if self.risk.entries_halted() {
-                "account-level entry halt is latched"
             } else {
                 "private account stream is not ready"
             };
@@ -3279,7 +3177,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             leverage: None,
         };
         if !existing.request.reduce_only {
-            self.risk.observe_wall_clock_ns(wall_clock_ns());
             let verdict =
                 self.risk
                     .assess_price_amend(client_order_id, &amended_intent, &self.account);
@@ -3298,7 +3195,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             "{client_order_id} not amended: risk approved {qty}, but an in-place price amend cannot resize remaining quantity {remaining_qty}"
                         ),
                     })?;
-                    self.persist_control_anchor()?;
                     return Ok(false);
                 }
                 RiskVerdict::Deny { reason } => {
@@ -3308,7 +3204,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             "{client_order_id} not amended at {requested_px}: {reason:?}"
                         ),
                     })?;
-                    self.persist_control_anchor()?;
                     return Ok(false);
                 }
             }
@@ -3335,7 +3230,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 old_px.min(requested_px),
                 old_px.max(requested_px),
             );
-            self.append_control_anchor()?;
             self.wal.barrier()?;
         }
 
@@ -3776,7 +3670,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             match self.venue.account_view().await {
                 Ok(view) => {
                     self.adopt_view(view);
-                    self.persist_control_anchor()?;
                     self.enforce_position_stop_intent().await?;
                     account_refreshed = true;
                 }
@@ -4074,8 +3967,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Each field is maintained by the same arithmetic the boot-time scan
     /// for it uses — the order ledger and attribution apply every record as
     /// it is written, the exposure and stop maps go through `reconcile`'s
-    /// own helpers, the anchor map mirrors every anchor written, and recent
-    /// execution ids come from the same bounded dedup set used live — so
+    /// own helpers, and recent execution ids come from the same bounded dedup
+    /// set used live — so
     /// replaying the old segments and replaying this record recover the same
     /// engine. The equivalence test in `tests/rotation.rs` holds the two sides
     /// together.
@@ -4093,14 +3986,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .map(|i| self.market.table.name(SymbolId(i as u16)).to_string())
                 .collect(),
             may_open: self.may_open,
-            control_anchors: self
-                .control_anchors
-                .iter()
-                .map(|(source, state)| engine_types::AnchorState {
-                    source: source.clone(),
-                    state: state.clone(),
-                })
-                .collect(),
+            // Older WALs may contain anchors from the retired daily-loss
+            // feature. Reading remains compatible; rotation scrubs them.
+            control_anchors: Vec::new(),
             attribution: self
                 .attribution
                 .rows()

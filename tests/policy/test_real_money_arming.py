@@ -61,12 +61,7 @@ def _producer_source(tmp_path: Path, profile: Path, *, realm: str = "mainnet") -
 def test_committed_profile_is_the_default_render() -> None:
     data, profile = render_real_money_profile()
     assert data == (REPO / "configs" / "operational.mainnet.json").read_bytes()
-    assert profile.account_risk.max_daily_loss_usdt == 10.0
-
-
-def test_funded_daily_loss_scales_with_the_profile_reference() -> None:
-    _data, profile = render_real_money_profile(capital_reference_usdt=200.0)
-    assert profile.account_risk.max_daily_loss_usdt == 20.0
+    assert profile.schema_version == 2
 
 
 def test_templates_are_strict_and_ship_disarmed_without_secrets() -> None:

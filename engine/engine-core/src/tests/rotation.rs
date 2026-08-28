@@ -75,8 +75,8 @@ fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
 }
 
 /// A previous run's log with everything a restatement has to carry: an id
-/// table, a control anchor, a closed order whose fills ARE the position, an
-/// order still in flight and part-filled, and a stranger's durable fill that
+/// table, a retired control anchor, a closed order whose fills ARE the
+/// position, an order still in flight and part-filled, and a stranger's durable fill that
 /// belongs to neither trusted exposure nor a strategy.
 fn previous_log() -> Vec<WalRecord> {
     vec![
@@ -134,10 +134,10 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     .await;
     let base = engine_a.rotation_base(recent_replay_ms());
 
-    // The restatement says what the log said, in full: names, latch, anchor,
+    // The restatement says what the active engine state said: names, latch,
     // whose fills built what, the trusted per-symbol fill total, the intended
-    // stops, and the one open order with
-    // its partial fill.
+    // stops, and the one open order with its partial fill. The retired anchor
+    // remains readable in the old log but is scrubbed from the new segment.
     let WalRecord::SegmentBase {
         strategies,
         symbols,
@@ -155,8 +155,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     assert_eq!(strategies, &["buyer".to_string()]);
     assert_eq!(symbols, &["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     assert!(!*may_open, "the foreign fill latches opening off");
-    assert_eq!(control_anchors.len(), 1);
-    assert_eq!(control_anchors[0].state, "anchor-1");
+    assert!(control_anchors.is_empty());
     let attributed: Vec<(u16, u16, f64)> = attribution
         .iter()
         .map(|row| (row.strategy.0, row.symbol.0, row.signed_qty))

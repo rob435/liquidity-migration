@@ -79,11 +79,6 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     assert!(id.starts_with("eng-"), "id shape: {id}");
     assert!(id.len() <= 36, "id is short enough for the venue: {id}");
     assert_eq!(h.risk_saw.borrow().len(), 1, "risk hears the reply");
-    let clocks = h.risk_clocks.borrow();
-    assert!(
-        clocks.len() >= 2 && clocks.last() >= clocks.first(),
-        "risk time is advanced again at the order decision, after boot: {clocks:?}"
-    );
 }
 
 #[tokio::test]
@@ -177,9 +172,7 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
 }
 
 #[tokio::test]
-async fn the_newest_control_anchor_in_the_log_is_restored_at_boot() {
-    // A restart must never hand the day a fresh loss budget or clear a
-    // latched trip — the newest anchor in the log is the guard's memory.
+async fn retired_control_anchors_are_ignored_and_cannot_halt_entries() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let replayed = vec![
         WalRecord::ControlAnchor {
@@ -192,15 +185,14 @@ async fn the_newest_control_anchor_in_the_log_is_restored_at_boot() {
         },
         WalRecord::ControlAnchor {
             source: "risk".into(),
-            state: "{\"newest\":true}".into(),
+            state: "{malformed-retired-state".into(),
         },
     ];
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
-    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
     let (risk, _seen) = MockRisk::with(allow_all());
-    let restored = risk.restored.clone();
-    let engine = Engine::boot(
+    let mut engine = Engine::boot(
         &settings(),
         "0000000000000000",
         wal,
@@ -211,40 +203,16 @@ async fn the_newest_control_anchor_in_the_log_is_restored_at_boot() {
     )
     .await
     .expect("boot");
-    drop(engine);
-    assert_eq!(*restored.borrow(), vec!["{\"newest\":true}".to_string()]);
-}
-
-#[tokio::test]
-async fn a_rejected_inner_control_anchor_refuses_boot() {
-    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let replayed = vec![WalRecord::ControlAnchor {
-        source: "risk".into(),
-        state: "{malformed-inner-state".into(),
-    }];
-    let tape = tape();
-    let (wal, _records) = MockWal::new(tape.clone());
-    let (venue, _sends) = MockVenue::new(tape, &["BTCUSDT"]);
-    let (mut risk, _seen) = MockRisk::with(allow_all());
-    risk.restore_error = Some("invalid loss-guard control anchor".into());
-
-    let result = Engine::boot(
-        &settings(),
-        "0000000000000000",
-        wal,
-        risk,
-        venue,
-        vec![Box::new(buyer)],
-        &replayed,
-    )
-    .await;
-
-    assert!(matches!(
-        result,
-        Err(EngineError::Boot(message))
-            if message.contains("cannot restore durable risk control anchor")
-                && message.contains("invalid loss-guard")
-    ));
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sends.borrow().len(), 1);
 }
 
 #[tokio::test]
@@ -458,43 +426,6 @@ fn minting_skips_an_id_the_log_already_knows() {
     });
     assert_eq!(id, "eng-99-3");
     assert_eq!(n, 3);
-}
-
-#[tokio::test]
-async fn a_changed_control_anchor_is_written_and_made_durable() {
-    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
-    engine
-        .risk
-        .anchor_script
-        .push_back("{\"day\":1}".to_string());
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 1, true),
-            &mut ScriptOrderFeed::empty(),
-            std::future::pending::<()>(),
-        )
-        .await
-        .unwrap();
-
-    let records = h.records.borrow();
-    let anchor_at = records.iter().position(
-        |r| matches!(r, WalRecord::ControlAnchor { state, .. } if state == "{\"day\":1}"),
-    );
-    assert!(
-        anchor_at.is_some(),
-        "the changed anchor never reached the log"
-    );
-    let tape = h.tape.borrow();
-    let write = tape
-        .iter()
-        .position(|s| matches!(s, Step::Append(k) if k == "control_anchor"))
-        .expect("append step");
-    assert!(
-        tape[write..].contains(&Step::Barrier),
-        "the anchor was written but never made durable"
-    );
 }
 
 #[tokio::test]

@@ -73,11 +73,11 @@ def test_help_lists_only_current_operator_routes() -> None:
         "research-refresh",
         "flatten",
         "attest-flat",
-        "loss-reset",
         "real-money",
         "deploy",
     ):
         assert command in result.stdout
+    assert "loss-reset" not in result.stdout
 
 
 def test_unknown_command_fails_with_usage() -> None:
@@ -135,13 +135,13 @@ def test_flatten_payload_hands_its_arguments_to_the_remote_script(tmp_path: Path
     assert "--dry-run" not in executed
 
 
-def test_flatness_and_loss_controls_use_the_installed_rust_engine(tmp_path: Path) -> None:
+def test_flatness_control_uses_the_installed_rust_engine(tmp_path: Path) -> None:
     capture, environment = _ssh_capture(tmp_path)
 
     attestation = _run("attest-flat", "--environment", "demo", env=environment)
     assert attestation.returncode == 0, attestation.stderr
     payload = capture.read_text(encoding="utf-8")
-    assert "REMOTE_ARGS=( attest-flat demo '' dry-run )" in payload
+    assert "REMOTE_ARGS=( demo )" in payload
     assert "engine_binary=/opt/liquidity-migration-engine/bin/engine" in payload
     assert (
         "runtime_launcher=/opt/liquidity-migration-engine/bin/run-authorized-runtime"
@@ -159,7 +159,7 @@ def test_flatness_and_loss_controls_use_the_installed_rust_engine(tmp_path: Path
     assert "installed controls sudoers boundary mismatch" in payload
     assert "installed Telegram controls bot digest mismatch" in payload
     assert "/usr/sbin/visudo -cf" in payload
-    assert 'engine_args=("$action")' in payload
+    assert "engine_args=(attest-flat)" in payload
     assert 'EnvironmentFile=$credential_file' in payload
     assert 'EnvironmentFile=$env_file' in payload
     assert payload.index('EnvironmentFile=$env_file') < payload.index(
@@ -181,25 +181,6 @@ def test_flatness_and_loss_controls_use_the_installed_rust_engine(tmp_path: Path
     assert payload.count('sha256sum "$engine_binary"') >= 2
     assert "installed Rust engine changed during engine control" in payload
 
-    reset = _run(
-        "loss-reset",
-        "--environment",
-        "mainnet",
-        "--note",
-        "incident 47 reviewed; owner approved",
-        "--execute",
-        env=environment,
-    )
-    assert reset.returncode == 0, reset.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert (
-        "REMOTE_ARGS=( loss-reset mainnet "
-        "incident\\ 47\\ reviewed\\;\\ owner\\ approved execute )"
-    ) in payload
-    assert 'systemctl is-active --quiet "$unit"' in payload
-    assert 'engine_args+=(--note "$note")' in payload
-    assert '[ "$execute_mode" = execute ] && engine_args+=(--execute)' in payload
-    assert '--property="ReadWritePaths=/run/lock/liquidity-migration $state_dir"' in payload
     assert '"$engine_binary" "${engine_args[@]}"' in payload
     assert "/etc/liquidity-migration/bybit-mainnet-attestor.env" in payload
     assert "/etc/liquidity-migration/bybit-mainnet.env" not in payload
@@ -210,13 +191,9 @@ def test_flatness_and_loss_controls_use_the_installed_rust_engine(tmp_path: Path
     [
         ("attest-flat",),
         ("attest-flat", "--environment", "paper"),
-        ("loss-reset", "--environment", "demo"),
-        ("loss-reset", "--note", "reason"),
-        ("loss-reset", "--environment", "demo", "--note", "   "),
-        ("loss-reset", "--environment", "demo", "--note", "reason", "--bogus"),
     ],
 )
-def test_flatness_and_loss_controls_reject_incomplete_arguments(argv: tuple[str, ...]) -> None:
+def test_flatness_control_rejects_incomplete_arguments(argv: tuple[str, ...]) -> None:
     result = _run(*argv)
     assert result.returncode == 2
     assert "Usage:" in result.stderr

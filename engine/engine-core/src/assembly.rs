@@ -8,7 +8,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use engine_marketdata::MarketFeeds;
-use engine_risk::{EnvelopeConfig, Kernel, KernelConfig, LossGuardConfig};
+use engine_risk::{EnvelopeConfig, Kernel, KernelConfig};
 use engine_strategies::build_strategy;
 use engine_types::{
     AccountIdentity, Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
@@ -277,10 +277,6 @@ pub fn trades(settings: &EngineSection) -> Option<Trades> {
 #[serde(deny_unknown_fields)]
 struct RiskSection {
     max_account_view_age_s: u64,
-    /// Optional absolute UTC-day loss ceiling. Profiles carry the same field
-    /// in `account_risk`; direct risk blocks must be able to express it too.
-    #[serde(default)]
-    max_daily_loss_usdt: Option<f64>,
     leverage: f64,
     #[serde(default = "default_qty_tolerance")]
     qty_tolerance: f64,
@@ -337,9 +333,6 @@ pub fn risk(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
         .map_err(|e| format!("the [risk] block is wrong: {e}"))?;
     let cfg = KernelConfig {
         max_account_view_age_ns: parsed.max_account_view_age_s.saturating_mul(1_000_000_000),
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: parsed.max_daily_loss_usdt,
-        },
         envelope: EnvelopeConfig {
             tracks_equity: parsed.envelope.tracks_equity,
             reference_usdt: parsed.envelope.reference_usdt,

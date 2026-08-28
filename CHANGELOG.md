@@ -6,6 +6,15 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — The daily-loss circuit breaker is retired.** Operational
+  profiles are schema v2 and no longer expose a daily-loss setting. The Rust
+  engine neither restores nor writes its former control anchors, so legacy
+  anchor state cannot block startup; historical anchor and verdict records
+  remain readable, and WAL rotation drops them. Stopped installation also
+  reassigns existing demo and funded engine-state trees in place to their
+  isolated service identities, rejecting links, hard-linked files, and
+  unsupported nodes instead of replacing durable state.
+
 - **2026-08-28 — Isolated engines retain the existing account lease inode.**
   Stopped installation now gives persistent account-lease files root ownership
   and group write access for the isolated engine identities. The deployment

@@ -381,6 +381,157 @@ normalize_account_lease_access() {
     done
 }
 
+normalize_engine_state_access() {
+    "$PYTHON" - "$RUNTIME_GROUP" \
+        "$DEMO_ENGINE_USER" /var/lib/liquidity-migration-engine \
+        "$MAINNET_ENGINE_USER" /var/lib/liquidity-migration-engine-mainnet <<'PY'
+import grp
+import os
+import pwd
+import stat
+import sys
+
+
+def refuse(detail: str) -> None:
+    raise RuntimeError(detail)
+
+
+def node_kind(row: os.stat_result, display: str, device: int) -> str:
+    if row.st_dev != device:
+        refuse(f"engine state crosses a filesystem at {display!r}")
+    if row.st_mode & (stat.S_ISUID | stat.S_ISGID):
+        refuse(f"engine state carries privilege bits at {display!r}")
+    if stat.S_ISLNK(row.st_mode):
+        refuse(f"engine state path is linked: {display!r}")
+    if stat.S_ISDIR(row.st_mode):
+        return "directory"
+    if stat.S_ISREG(row.st_mode):
+        if row.st_nlink != 1:
+            refuse(f"engine state file has more than one name: {display!r}")
+        return "file"
+    refuse(f"engine state path has an unsupported type: {display!r}")
+    raise AssertionError("unreachable")
+
+
+def directory_names(descriptor: int, display: str) -> list[str]:
+    try:
+        return sorted(os.listdir(descriptor))
+    except OSError as error:
+        refuse(f"cannot enumerate engine state {display!r}: {error}")
+    raise AssertionError("unreachable")
+
+
+def open_directory(name: str, parent: int | None = None) -> int:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    return os.open(name, flags, dir_fd=parent)
+
+
+def validate_directory(descriptor: int, display: str, device: int) -> None:
+    names = directory_names(descriptor, display)
+    for name in names:
+        child_display = os.path.join(display, name)
+        before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        kind = node_kind(before, child_display, device)
+        if kind == "directory":
+            child = open_directory(name, descriptor)
+            try:
+                opened = os.fstat(child)
+                if not os.path.samestat(before, opened):
+                    refuse(f"engine state changed during validation: {child_display!r}")
+                validate_directory(child, child_display, device)
+            finally:
+                os.close(child)
+    if directory_names(descriptor, display) != names:
+        refuse(f"engine state names changed during validation: {display!r}")
+
+
+def same_open_node(parent: int, name: str, opened: os.stat_result, display: str) -> None:
+    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not os.path.samestat(opened, current):
+        refuse(f"engine state path changed while open: {display!r}")
+
+
+def migrate_directory(
+    descriptor: int,
+    display: str,
+    device: int,
+    owner: int,
+    group: int,
+) -> None:
+    names = directory_names(descriptor, display)
+    for name in names:
+        child_display = os.path.join(display, name)
+        before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        kind = node_kind(before, child_display, device)
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        if kind == "directory":
+            flags |= os.O_DIRECTORY
+        child = os.open(name, flags, dir_fd=descriptor)
+        try:
+            opened = os.fstat(child)
+            if not os.path.samestat(before, opened):
+                refuse(f"engine state changed before migration: {child_display!r}")
+            if node_kind(opened, child_display, device) != kind:
+                refuse(f"engine state changed type: {child_display!r}")
+            if kind == "directory":
+                migrate_directory(child, child_display, device, owner, group)
+                mode = stat.S_IMODE(os.fstat(child).st_mode) | stat.S_IRWXU
+            else:
+                mode = stat.S_IMODE(opened.st_mode) | stat.S_IRUSR | stat.S_IWUSR
+            os.fchown(child, owner, group)
+            os.fchmod(child, mode)
+            same_open_node(descriptor, name, os.fstat(child), child_display)
+        finally:
+            os.close(child)
+    if directory_names(descriptor, display) != names:
+        refuse(f"engine state names changed during migration: {display!r}")
+
+    current = os.fstat(descriptor)
+    if node_kind(current, display, device) != "directory":
+        refuse(f"engine state directory changed type: {display!r}")
+    os.fchown(descriptor, owner, group)
+    os.fchmod(descriptor, stat.S_IMODE(current.st_mode) | stat.S_IRWXU)
+
+
+def migrate_root(owner_name: str, path: str, group: int) -> None:
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(before.st_mode):
+        refuse(f"engine state root is linked: {path!r}")
+    if not stat.S_ISDIR(before.st_mode):
+        refuse(f"engine state root is not a directory: {path!r}")
+
+    descriptor = open_directory(path)
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(before, opened):
+            refuse(f"engine state root changed before validation: {path!r}")
+        device = opened.st_dev
+        node_kind(opened, path, device)
+        validate_directory(descriptor, path, device)
+        owner = pwd.getpwnam(owner_name).pw_uid
+        migrate_directory(descriptor, path, device, owner, group)
+        current = os.lstat(path)
+        if not os.path.samestat(os.fstat(descriptor), current):
+            refuse(f"engine state root changed while open: {path!r}")
+    finally:
+        os.close(descriptor)
+
+
+try:
+    group_name, *pairs = sys.argv[1:]
+    if not pairs or len(pairs) % 2:
+        refuse("engine-state migration received invalid arguments")
+    group_id = grp.getgrnam(group_name).gr_gid
+    for offset in range(0, len(pairs), 2):
+        migrate_root(pairs[offset], pairs[offset + 1], group_id)
+except (KeyError, OSError, RuntimeError) as error:
+    raise SystemExit(f"engine-state migration refused: {error}") from None
+PY
+}
+
 ensure_runtime_identities() {
     [ -x /usr/bin/sudo ] && [ -x /usr/sbin/visudo ] \
         || fail "sudo and visudo are required for the isolated Telegram control boundary"
@@ -410,6 +561,7 @@ ensure_runtime_identities() {
     systemd-tmpfiles --create /etc/tmpfiles.d/liquidity-migration.conf \
         || fail "cannot create the runtime lock and engine lease boundaries"
     normalize_account_lease_access
+    normalize_engine_state_access
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration/targets
 }

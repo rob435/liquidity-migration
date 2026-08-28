@@ -337,10 +337,6 @@ async fn an_async_amend_ack_keeps_its_range_and_queues_cancellation() {
             .any(|step| matches!(step, Step::Barrier)),
         "an opening reprice did not pay for its risk barrier"
     );
-    assert!(
-        h.risk_clocks.borrow().len() >= 2,
-        "opening-amend risk time was not advanced after boot"
-    );
 }
 
 #[tokio::test]

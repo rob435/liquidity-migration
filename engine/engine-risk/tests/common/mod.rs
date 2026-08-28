@@ -5,7 +5,7 @@
 //! unused-here helper is normal and the lint is off for the file.
 #![allow(dead_code)]
 
-use engine_risk::{EnvelopeConfig, KernelConfig, LossGuardConfig};
+use engine_risk::{EnvelopeConfig, KernelConfig};
 use engine_types::ids::{StrategyId, SymbolId};
 use engine_types::orders::{Intent, OrderKind, Side, StopSpec, TimeInForce};
 use engine_types::risk::{AccountView, PositionView};
@@ -30,9 +30,6 @@ pub const CUSDT: SymbolId = SymbolId(1);
 pub fn demo_config() -> KernelConfig {
     KernelConfig {
         max_account_view_age_ns: MAX_VIEW_AGE_NS,
-        loss_guard: LossGuardConfig {
-            max_daily_loss_usdt: None,
-        },
         envelope: EnvelopeConfig {
             tracks_equity: false,
             reference_usdt: 250_000.0,

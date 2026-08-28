@@ -164,22 +164,10 @@ file.
   The funding arrived by hand, outside the bot — not independently confirmed
   beyond the health read. Money in the account changes what the producers
   publish and, through the tracked reference, every cap with it.
-- **Funded new risk stops after a 10 USDT UTC-day account loss.** The funded
-  profile sets `account_risk.max_daily_loss_usdt = 10.0`; demo explicitly sets
-  it to `null`. The UTC-day opening is conservatively bridged from the latest
-  pre-midnight equity evidence and the first fresh valid post-midnight account
-  view (the higher value wins). At equity less than or equal to
-  opening minus 10 USDT, entries are refused as `LossGuardTripped`; genuine
-  reduce-only exits still flow. This is account equity, not sleeve P&L or a
-  high-water mark, so fees, funding, unrealized P&L, and manual account activity
-  reflected by the venue all count. The anchor and trip are durable WAL state.
-  Boundary evidence is checkpointed durably once per minute and immediately
-  on every equity increase; after downtime this may halt too early but cannot
-  refresh away an observed loss. Every placement and opening reprice advances
-  the risk clock before assessment, so the first post-midnight order cannot
-  race the next account poll. A non-tripped anchor rolls on the next UTC day; a trip stays latched across
-  recovery, day changes, and restart until the stopped-realm, flat-account
-  `scripts/ops.sh loss-reset --environment mainnet` workflow clears it.
+- **There is no account daily-loss circuit breaker.** Operational-profile
+  schema v2 removed the field and the engine no longer restores, evaluates, or
+  writes daily-loss anchors. Historical WAL anchor and verdict shapes remain
+  decodable only; boot ignores them and the next rotation drops them.
 - **Real money is armed on the installed fleet, and the owner has used the same
   venue account outside the engine.** The audited generation requires
   `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` to equal the authenticated funded
@@ -416,8 +404,8 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
   receives a temporary binding for its unchanged release while only the observed
   units restart. After checkout mutation, failure leaves
   the managed fleet stopped for explicit recovery. Optional manual
-  `attest-flat` and loss-reset controls keep their separate read-only credential
-  and do not gate deployment ([docs/operations.md](docs/operations.md)).
+  `attest-flat` keeps its separate read-only credential and does not gate
+  deployment ([docs/operations.md](docs/operations.md)).
 - **The mandatory demo engine has a deployment-reconciled identity.** A missing
   `engine.env` is installed from the committed non-secret template. A legacy
   file gains only absent account, venue, and realm bindings atomically; host
