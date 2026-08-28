@@ -315,6 +315,10 @@ async fn the_feed_authenticates_subscribes_and_maps_what_arrives() {
     let mut feed = feed(&url);
 
     match feed.next_update().await.unwrap() {
+        OrderUpdate::StreamReset { .. } => (),
+        other => panic!("expected initial StreamReset, got {other:?}"),
+    }
+    match feed.next_update().await.unwrap() {
         OrderUpdate::Ack(ack) => {
             assert_eq!(ack.client_order_id, "eng-1");
             assert_eq!(ack.venue_order_id, "ord-1");
@@ -404,7 +408,11 @@ async fn the_handshake_survives_the_engine_dropping_the_future_every_tick() {
     .await;
     let mut feed = feed(&server.url);
 
-    match drive(&mut feed, Duration::from_secs(8), "first update").await {
+    match drive(&mut feed, Duration::from_secs(8), "initial reset").await {
+        OrderUpdate::StreamReset { .. } => (),
+        other => panic!("expected initial StreamReset, got {other:?}"),
+    }
+    match drive(&mut feed, Duration::from_secs(8), "first account update").await {
         OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
         other => panic!("expected Ack, got {other:?}"),
     }
@@ -432,6 +440,16 @@ async fn a_socket_closed_mid_auth_is_retried_not_terminal() {
     .await;
     let mut feed = feed(&server.url);
 
+    match read(
+        &mut feed,
+        Duration::from_secs(8),
+        "initial reset after the hiccup",
+    )
+    .await
+    {
+        OrderUpdate::StreamReset { .. } => (),
+        other => panic!("expected initial StreamReset, got {other:?}"),
+    }
     match read(&mut feed, Duration::from_secs(8), "update after the hiccup").await {
         OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
         other => panic!("expected Ack, got {other:?}"),
@@ -457,7 +475,23 @@ async fn a_refused_auth_is_retried_until_it_takes() {
     .await;
     let mut feed = feed(&server.url);
 
-    match drive(&mut feed, Duration::from_secs(8), "update after two refusals").await {
+    match drive(
+        &mut feed,
+        Duration::from_secs(8),
+        "initial reset after two refusals",
+    )
+    .await
+    {
+        OrderUpdate::StreamReset { .. } => (),
+        other => panic!("expected initial StreamReset, got {other:?}"),
+    }
+    match drive(
+        &mut feed,
+        Duration::from_secs(8),
+        "update after two refusals",
+    )
+    .await
+    {
         OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
         other => panic!("expected Ack, got {other:?}"),
     }
@@ -488,10 +522,11 @@ async fn dropping_the_feed_takes_the_socket_with_it() {
     assert_eq!(server.connections(), 1, "it redialled after being dropped");
 }
 
-/// A reconnect owes the engine a `StreamReset` before any row off the new
-/// socket, because whatever happened while the feed was away is lost.
+/// Every successful subscription owes the engine a `StreamReset` before any
+/// account row. The first establishes readiness; a reconnect also marks the
+/// interval whose updates may have been lost.
 #[tokio::test]
-async fn a_reconnect_announces_itself_before_the_new_socket_says_anything() {
+async fn every_subscription_announces_itself_before_the_socket_says_anything() {
     let server = serve(|n| Conn {
         auth_delay: Duration::ZERO,
         outcome: Outcome::Serve {
@@ -502,9 +537,13 @@ async fn a_reconnect_announces_itself_before_the_new_socket_says_anything() {
     .await;
     let mut feed = feed(&server.url);
 
+    match drive(&mut feed, Duration::from_secs(8), "initial reset").await {
+        OrderUpdate::StreamReset { .. } => (),
+        other => panic!("expected initial StreamReset, got {other:?}"),
+    }
     match drive(&mut feed, Duration::from_secs(8), "first update").await {
         OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
-        other => panic!("the first connection owes no reset, got {other:?}"),
+        other => panic!("expected Ack, got {other:?}"),
     }
     match drive(&mut feed, Duration::from_secs(8), "the reset").await {
         OrderUpdate::StreamReset { .. } => (),

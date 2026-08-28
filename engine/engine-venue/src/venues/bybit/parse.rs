@@ -1339,7 +1339,7 @@ mod tests {
         assert!(latent.iter().any(|row| row.symbol == "Futures Grid Bot"));
         assert!(latent.iter().any(|row| row.symbol == "Futures Combo Bot"));
         assert!(latent.iter().any(|row| row.symbol == "Copy Trading Pro"));
-        assert_eq!(positions.len(), 3);
+        assert_eq!(positions.len(), 2);
         assert!(positions
             .iter()
             .any(|row| { row.symbol == "USDT" && row.side == Side::Buy && row.qty == 4.0 }));
@@ -1465,7 +1465,7 @@ mod tests {
 
         let (positions, latent) = parse_asset_overview(&result, now_ms).unwrap();
         assert!(latent.is_empty());
-        assert_eq!(positions.len(), 2);
+        assert_eq!(positions.len(), 3);
         assert!(positions.iter().any(|row| {
             row.product == "asset_account_equity:Earn" && row.side == Side::Buy && row.qty == 100.0
         }));

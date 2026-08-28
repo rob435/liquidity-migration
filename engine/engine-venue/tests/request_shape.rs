@@ -821,7 +821,7 @@ async fn a_runtime_symbol_is_checked_once_before_its_first_order() {
     })
     .await;
     let mut gw = gateway(&server);
-    let symbol = gw.add_symbol("SOLUSDT");
+    let symbol = gw.add_symbol("XRPUSDT");
     let mut order = market_order();
     order.symbol = symbol;
     order.stop = None;
@@ -832,7 +832,7 @@ async fn a_runtime_symbol_is_checked_once_before_its_first_order() {
 
     let checks = server.to_path("/v5/position/list");
     assert_eq!(checks.len(), 1, "the successful proof is cached");
-    assert_eq!(checks[0].query, "category=linear&symbol=SOLUSDT");
+    assert_eq!(checks[0].query, "category=linear&symbol=XRPUSDT");
     assert_eq!(server.to_path("/v5/order/create").len(), 2);
 }
 

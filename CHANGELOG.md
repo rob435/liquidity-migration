@@ -6,6 +6,21 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Opening-stop lookup stays flat as order history grows.**
+  The live-order ledger maintains a per-symbol, per-side multiset of opening
+  stop prices and exposes only each side's tightest level to placement. This
+  replaces a full allocation and scan of every outstanding order before every
+  batch without moving the durability boundary or weakening whole-position
+  stop protection. On the production host's memory-backed filesystem, the
+  10,000-order durability median fell from 265 µs to 14.6 µs; the real-WAL
+  5,000-order run fell from about 29 s to 7.83 s. Three standard 1,000-order
+  native runs put the local submit-result median at 1.26 ms and the
+  median-of-runs p99 at 3.16 ms. The Bybit aggregate-inventory tests also state
+  their fixtures' actual row counts, restoring the Ubuntu release gate without
+  changing production parsing. Private-stream integration tests consume the
+  first successful subscription's readiness reset and prove the same reset
+  precedes updates after reconnect, matching the runtime contract.
+
 - **2026-08-28 — Venue-mutation bursts yield at bounded safety boundaries.**
   One strategy wake retains FIFO order, its original latency clock, and its
   flood limits across cooperative turns. After each completed placement,

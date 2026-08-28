@@ -13,11 +13,12 @@ its heartbeat. A second engine unit runs on the funded account, and only while
 `REAL_MONEY` is armed in the host credential file.
 
 Measured by `cd engine && cargo run --release -- bench`, with real signing and
-a real disk flush in the chain. On the production box: the decision itself
-takes 721 ns; market input → durable order → parsed localhost submit response
-takes 2.28 ms median, 5.18 ms p99. This benchmark does not expose a socket-write
-timestamp. (On a laptop the decision is faster and the flush slower — 84 ns
-and 3.9 ms; both tables are in [docs/engine.md](docs/engine.md).) Live
+a real disk flush in the chain. Three native runs on the production box put
+the decision at 80 ns median and market input through the parsed localhost
+submit response at 1.26 ms median, 3.16 ms p99. This benchmark does not expose
+a socket-write timestamp. (On a laptop the decision is faster and the flush
+slower — 84 ns and 3.9 ms; both tables are in
+[docs/engine.md](docs/engine.md).) Live
 decision-to-acknowledgement is about 179 ms median, dominated by geography.
 
 Each of the five venues may write its hostnames in exactly one file, its own

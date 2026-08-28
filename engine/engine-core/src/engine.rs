@@ -2634,18 +2634,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for (symbol, stop) in &self.intended_stops {
             batch_protection.insert(stop_key(SymbolId(*symbol), stop.side), stop.trigger_px);
         }
-        for order in self.orders.in_flight() {
-            let request = &order.request;
-            let Some(stop) = request.stop.filter(|_| !request.reduce_only) else {
-                continue;
-            };
-            let key = stop_key(request.symbol, request.side);
+        for (key, trigger_px) in self.orders.tightest_opening_stops() {
+            let side = if key.1 { Side::Sell } else { Side::Buy };
             batch_protection
                 .entry(key)
-                .and_modify(|protected| {
-                    *protected = tighter_stop(request.side, *protected, stop.trigger_px)
-                })
-                .or_insert(stop.trigger_px);
+                .and_modify(|protected| *protected = tighter_stop(side, *protected, trigger_px))
+                .or_insert(trigger_px);
         }
         for position in &self.account.positions {
             if !position.stop_attached || !position.stop_px.is_finite() || position.stop_px <= 0.0 {

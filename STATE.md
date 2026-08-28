@@ -316,10 +316,12 @@ file.
 ### Measured latency
 
 The live order path is the Rust engine's; the honest latency contract and the
-measured table are [docs/engine.md](docs/engine.md). The short version, measured
-on the fleet: **721 ns** to decide and **2.28 ms median / 5.18 ms p99** from
-market input through durability to a parsed localhost submit response. That
-benchmark has no socket-write timestamp. Live against the venue (n=67), the
+measured table are [docs/engine.md](docs/engine.md). Three native runs of the
+current release candidate on the fleet host put the decision at **80 ns** and
+market input through durability to a parsed localhost submit response at
+**1.26 ms median / 3.16 ms p99**. The installed fleet remains on the older
+release until rollout attestation succeeds. The benchmark has no socket-write
+timestamp. Live against the venue (n=67), the
 honest reconstructible total is **179 ms median decision→acknowledgment,
 512 ms p90, 1013 ms worst** (at n=67 the tail figure is the worst of the
 sample, not an estimated p99). Historical records cannot split that total
@@ -334,14 +336,20 @@ cleanly into disk, socket, leverage call, and venue legs.
   one WAL barrier, then asks the venue adapter to send the group. Bybit overlaps
   distinct-symbol chains over ten warm sockets and preserves same-symbol wire
   order; nonce-sensitive adapters keep the serial default.
-  No live venue sample establishes current sibling-group latency yet.
+  With three deterministic 100 ms local responses, five Linux integration
+  runs finish in 0.10–0.11 s and observe peak in-flight three. No live venue
+  sample establishes current sibling-group latency yet.
 - **Long-run account latency has a repeatable within-run probe.** The execution
   ID set is bounded, while venue execution history can still grow. Run the
   release `account_state_soak` example described in
   [docs/engine.md](docs/engine.md) on a production-like Linux host and compare
-  its early, middle, and late windows. The Ubuntu workflow runs that exact
-  bounded release workload and retains its output with the release checks.
-  Real venue fetch and decode time remains a separate measurement.
+  its early, middle, and late windows. A two-million-operation target-host run
+  measured 686/678/522 ns p50 mean cost in those windows, so within-run ID
+  handling stays flat. Already-decoded cold recovery measured 1.26 ms at
+  1,000 rows, 23.8 ms at 10,000, and 401.5 ms at 100,000; growing venue
+  history remains the startup concern. The Ubuntu workflow retains the same
+  bounded probe. Real venue fetch and decode time remains a separate
+  measurement.
 
 ## Topology
 

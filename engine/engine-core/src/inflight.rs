@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use engine_types::{OrderRequest, OrderUpdate, StrategyId, WalRecord};
+use engine_types::{OrderRequest, OrderUpdate, Side, StrategyId, WalRecord};
 
 const QTY_EPS: f64 = 1e-9;
 
@@ -55,11 +55,42 @@ impl OrderRec {
     }
 }
 
+/// A total-order wrapper for a venue stop price. WAL payloads cannot contain
+/// NaNs, but `total_cmp` also makes replay deterministic for every finite bit
+/// pattern, including the two representations of zero.
+#[derive(Clone, Copy, Debug)]
+struct StopPrice(f64);
+
+impl PartialEq for StopPrice {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for StopPrice {}
+
+impl PartialOrd for StopPrice {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StopPrice {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
 /// The order book of the log itself, rebuilt by reading records in order.
 #[derive(Default, Debug)]
 pub struct LedgerOfOrders {
     pub orders: BTreeMap<String, OrderRec>,
     pub boots: u32,
+    /// Live opening-stop prices grouped by (symbol, is-short). The engine asks
+    /// for the tightest level before every placement batch. Keeping the
+    /// multiset here makes that query proportional to active symbols instead
+    /// of rescanning the process's entire order history on every decision.
+    opening_stop_levels: BTreeMap<(u16, bool), BTreeMap<StopPrice, usize>>,
 }
 
 impl LedgerOfOrders {
@@ -80,7 +111,7 @@ impl LedgerOfOrders {
                 arrival_mid,
             } => {
                 let exact_px = limit_px(request);
-                self.orders.insert(
+                self.insert_live_order(
                     request.client_order_id.clone(),
                     OrderRec {
                         request: request.clone(),
@@ -105,12 +136,20 @@ impl LedgerOfOrders {
                 qty,
                 ..
             } => {
-                if let Some(rec) = self.orders.get_mut(client_order_id.as_str()) {
+                let ended_stop = if let Some(rec) = self.orders.get_mut(client_order_id.as_str()) {
+                    let was_live = rec.in_flight();
+                    let stop = was_live.then(|| opening_stop(&rec.request)).flatten();
                     rec.acked = true;
                     rec.filled_qty += qty;
                     if rec.filled_qty + QTY_EPS >= rec.request.qty {
                         rec.ending = Some(Ending::Filled);
                     }
+                    (was_live && !rec.in_flight()).then_some(stop).flatten()
+                } else {
+                    None
+                };
+                if let Some(stop) = ended_stop {
+                    self.remove_opening_stop(stop);
                 }
             }
             WalRecord::AmendSent {
@@ -159,8 +198,16 @@ impl LedgerOfOrders {
             WalRecord::Note { source, text } if source == "shadow" => {
                 if let Some(rest) = text.strip_prefix(NEVER_SENT_PREFIX) {
                     let id = rest.split_whitespace().next().unwrap_or_default();
-                    if let Some(order) = self.orders.get_mut(id) {
+                    let ended_stop = if let Some(order) = self.orders.get_mut(id) {
+                        let was_live = order.in_flight();
+                        let stop = was_live.then(|| opening_stop(&order.request)).flatten();
                         order.ending = Some(Ending::NeverSent);
+                        was_live.then_some(stop).flatten()
+                    } else {
+                        None
+                    };
+                    if let Some(stop) = ended_stop {
+                        self.remove_opening_stop(stop);
                     }
                 }
             }
@@ -173,7 +220,7 @@ impl LedgerOfOrders {
             WalRecord::SegmentBase { open_orders, .. } => {
                 for open in open_orders {
                     let exact_px = limit_px(&open.request);
-                    self.orders.insert(
+                    self.insert_live_order(
                         open.request.client_order_id.clone(),
                         OrderRec {
                             request: open.request.clone(),
@@ -195,25 +242,74 @@ impl LedgerOfOrders {
     pub fn apply_update(&mut self, update: &OrderUpdate) {
         let id = client_order_id(update);
         let Some(id) = id else { return };
-        let Some(rec) = self.orders.get_mut(id) else {
-            return;
-        };
-        match update {
-            OrderUpdate::Ack(_) => rec.acked = true,
-            OrderUpdate::Reject { code, reason, .. } => {
-                rec.ending = Some(Ending::Rejected {
-                    code: *code,
-                    reason: reason.clone(),
-                })
+        let ended_stop = {
+            let Some(rec) = self.orders.get_mut(id) else {
+                return;
+            };
+            let was_live = rec.in_flight();
+            let stop = was_live.then(|| opening_stop(&rec.request)).flatten();
+            match update {
+                OrderUpdate::Ack(_) => rec.acked = true,
+                OrderUpdate::Reject { code, reason, .. } => {
+                    rec.ending = Some(Ending::Rejected {
+                        code: *code,
+                        reason: reason.clone(),
+                    })
+                }
+                OrderUpdate::Cancelled { .. } => rec.ending = Some(Ending::Cancelled),
+                OrderUpdate::Fill { qty, .. } => {
+                    rec.filled_qty += qty;
+                    if rec.filled_qty + QTY_EPS >= rec.request.qty {
+                        rec.ending = Some(Ending::Filled);
+                    }
+                }
+                OrderUpdate::StopAttached { .. } | OrderUpdate::StreamReset { .. } => {}
             }
-            OrderUpdate::Cancelled { .. } => rec.ending = Some(Ending::Cancelled),
-            OrderUpdate::Fill { qty, .. } => {
-                rec.filled_qty += qty;
-                if rec.filled_qty + QTY_EPS >= rec.request.qty {
-                    rec.ending = Some(Ending::Filled);
+            (was_live && !rec.in_flight()).then_some(stop).flatten()
+        };
+        if let Some(stop) = ended_stop {
+            self.remove_opening_stop(stop);
+        }
+    }
+
+    fn insert_live_order(&mut self, id: String, record: OrderRec) {
+        let stop = opening_stop(&record.request);
+        if let Some(previous) = self.orders.insert(id, record) {
+            if previous.in_flight() {
+                if let Some(stop) = opening_stop(&previous.request) {
+                    self.remove_opening_stop(stop);
                 }
             }
-            OrderUpdate::StopAttached { .. } | OrderUpdate::StreamReset { .. } => {}
+        }
+        if let Some(stop) = stop {
+            self.add_opening_stop(stop);
+        }
+    }
+
+    fn add_opening_stop(&mut self, (key, price): ((u16, bool), StopPrice)) {
+        *self
+            .opening_stop_levels
+            .entry(key)
+            .or_default()
+            .entry(price)
+            .or_default() += 1;
+    }
+
+    fn remove_opening_stop(&mut self, (key, price): ((u16, bool), StopPrice)) {
+        let remove_key = if let Some(levels) = self.opening_stop_levels.get_mut(&key) {
+            if let Some(count) = levels.get_mut(&price) {
+                if *count > 1 {
+                    *count -= 1;
+                } else {
+                    levels.remove(&price);
+                }
+            }
+            levels.is_empty()
+        } else {
+            false
+        };
+        if remove_key {
+            self.opening_stop_levels.remove(&key);
         }
     }
 
@@ -243,6 +339,28 @@ impl LedgerOfOrders {
             .map(|(id, _)| id.as_str())
             .collect()
     }
+
+    /// Tightest live opening-order stop per (symbol, is-short). Long
+    /// protection tightens upward; short protection tightens downward.
+    pub fn tightest_opening_stops(&self) -> impl Iterator<Item = ((u16, bool), f64)> + '_ {
+        self.opening_stop_levels.iter().filter_map(|(key, levels)| {
+            let (price, _) = if key.1 {
+                levels.first_key_value()
+            } else {
+                levels.last_key_value()
+            }?;
+            Some((*key, price.0))
+        })
+    }
+}
+
+fn opening_stop(request: &OrderRequest) -> Option<((u16, bool), StopPrice)> {
+    request.stop.filter(|_| !request.reduce_only).map(|stop| {
+        (
+            (request.symbol.0, request.side == Side::Sell),
+            StopPrice(stop.trigger_px),
+        )
+    })
 }
 
 fn limit_px(request: &OrderRequest) -> f64 {
@@ -328,7 +446,7 @@ impl OrderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_types::{AmendSpec, OrderAck, OrderKind, Side, SymbolId, TimeInForce};
+    use engine_types::{AmendSpec, OrderAck, OrderKind, Side, StopSpec, SymbolId, TimeInForce};
 
     #[test]
     fn a_minted_id_carries_no_millisecond_of_its_own() {
@@ -375,6 +493,18 @@ mod tests {
             request: request(id, qty),
             wire_ns: 1,
             arrival_mid: 0.0,
+        }
+    }
+
+    fn opening_sent(id: &str, symbol: u16, side: Side, stop: f64) -> WalRecord {
+        let mut request = request(id, 1.0);
+        request.symbol = SymbolId(symbol);
+        request.side = side;
+        request.stop = Some(StopSpec { trigger_px: stop });
+        WalRecord::OrderSent {
+            request,
+            wire_ns: 1,
+            arrival_mid: 100.0,
         }
     }
 
@@ -471,6 +601,49 @@ mod tests {
             },
         ]);
         assert!(ledger.in_flight_ids().is_empty());
+    }
+
+    #[test]
+    fn live_stop_index_tracks_the_tightest_level_and_order_endings() {
+        let mut ledger = LedgerOfOrders::from_records(&[
+            opening_sent("long-loose", 3, Side::Buy, 90.0),
+            opening_sent("long-tight-a", 3, Side::Buy, 95.0),
+            opening_sent("long-tight-b", 3, Side::Buy, 95.0),
+            opening_sent("short-loose", 3, Side::Sell, 110.0),
+            opening_sent("short-tight", 3, Side::Sell, 105.0),
+        ]);
+        assert_eq!(
+            ledger.tightest_opening_stops().collect::<Vec<_>>(),
+            vec![((3, false), 95.0), ((3, true), 105.0)]
+        );
+
+        ledger.apply(&fill("long-tight-a", 1.0));
+        assert_eq!(
+            ledger.tightest_opening_stops().collect::<Vec<_>>(),
+            vec![((3, false), 95.0), ((3, true), 105.0)],
+            "a duplicate tight level remains live"
+        );
+        ledger.apply(&fill("long-tight-b", 1.0));
+        ledger.apply(&WalRecord::OrderUpdate {
+            update: OrderUpdate::Cancelled {
+                client_order_id: "short-tight".into(),
+                recv_ns: 3,
+            },
+        });
+        assert_eq!(
+            ledger.tightest_opening_stops().collect::<Vec<_>>(),
+            vec![((3, false), 90.0), ((3, true), 110.0)]
+        );
+
+        ledger.apply(&WalRecord::OrderUpdate {
+            update: OrderUpdate::Reject {
+                client_order_id: "long-loose".into(),
+                code: 7,
+                reason: "no".into(),
+            },
+        });
+        ledger.apply(&recovered("short-loose", 1.0));
+        assert!(ledger.tightest_opening_stops().next().is_none());
     }
 
     #[test]

@@ -112,18 +112,25 @@ the same geography every non-colocated participant pays.
 
 ### On the production box
 
-Measured 2026-08-14 by the same command on the VPS the fleet runs on (2
-cores, Linux, `fdatasync`; 20,000 quotes in, 1,000 orders out, alongside the
-running fleet):
+Measured 2026-08-28 by three consecutive native release runs on the VPS the
+fleet runs on (2 cores, Linux, `fdatasync`; 20,000 quotes in and 1,000 orders
+out per run, alongside the running fleet). The table reports the median of the
+three run medians, the median of the three run p99s, and the largest observed
+value across all three runs:
 
 | Segment | median | p99 | worst |
 | --- | --- | --- | --- |
-| market message in → decision made | 721 ns | 1.6 µs | 12.5 µs |
-| decision → order durable in the log | 1.91 ms | 4.71 ms | 8.82 ms |
-| **message → durable → local submit result** | **2.28 ms** | **5.18 ms** | **9.47 ms** |
+| market message in → decision made | 80 ns | 199 ns | 25.0 µs |
+| decision → order durable in the log | 1.06 ms | 2.75 ms | 6.77 ms |
+| local API round trip | 164.1 µs | 921.1 µs | 1.62 ms |
+| **message → durable → local submit result** | **1.26 ms** | **3.16 ms** | **7.52 ms** |
 
-The box's CPU is slower than the laptop's, so thinking costs more; its disk
-is faster to make durable, so the chain is shorter overall.
+The disk flush still dominates the chain. Stop protection is indexed by
+symbol and side: a decision reads one tightest live level per active key
+instead of rescanning order history. With the WAL on memory-backed storage,
+the durability median remains 14.6 µs at 10,000 outstanding orders; the
+pre-index path reached 265 µs. This isolates the in-process scaling cost from
+`fdatasync` noise.
 
 ### Sibling placement groups
 
@@ -147,9 +154,12 @@ only asynchronous acceptance, so every accepted or transport-ambiguous
 opening reprice is canceled rather than falsely resolved; its range remains
 reserved until cancellation is confirmed.
 
-The latency tables here measure the single-order path. No live venue sample
-establishes current sibling-group completion time, so they are not a claim
-about multi-order latency.
+The latency tables here measure the single-order path. A deterministic Linux
+integration test holds each of three distinct-symbol venue responses for
+100 ms; five runs complete in 0.10–0.11 s and observe all three requests in
+flight together. The same-symbol control observes one request in flight and
+keeps request order. This proves local overlap, not live venue latency; no live
+venue sample establishes current sibling-group completion time.
 
 ### Long-run account-state probe
 
@@ -174,6 +184,28 @@ bounded workload in release mode and retains its JSON in the job log. That is
 runner evidence, not a target-host or venue-history claim: run the same release
 command on the target class and compare windows within one run, then measure
 real fetch and decode separately when venue history is the suspect.
+
+A 2026-08-28 native target-host run retained 65,536 live IDs across two
+million operations. Its sampled mean cost does not grow within the run:
+
+| Window | p50 mean/op | p99 mean/op | largest sampled mean/op |
+| --- | ---: | ---: | ---: |
+| early | 686 ns | 939 ns | 4.89 µs |
+| middle | 678 ns | 1.57 µs | 4.97 µs |
+| late | 522 ns | 862 ns | 874 ns |
+
+Already-decoded synthetic recovery history remains the growing leg:
+
+| History rows | median boot path | median per row |
+| ---: | ---: | ---: |
+| 0 | 52.4 µs | — |
+| 1,000 | 1.26 ms | 1.26 µs |
+| 10,000 | 23.8 ms | 2.38 µs |
+| 100,000 | 401.5 ms | 4.02 µs |
+
+That per-row rise is worse than linear and remains an operational startup
+cost. The probe deliberately excludes venue fetch, JSON decoding, network,
+and durable WAL time; those require a separate real-account measurement.
 
 ### Against the real venue
 
