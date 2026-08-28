@@ -128,11 +128,14 @@ The engines are installed by the exact systemd manifest and run under distinct
 unprivileged identities. Their root-only credential files are loaded by PID 1;
 producer and observer processes receive only non-secret projections.
 
-The four Polars-backed target producers retain `ProtectProc=invisible` but do
-not set `ProcSubset=pid`. Polars reads `/proc/meminfo` when sizing its
+Every unit that runs repository Python able to reach Polars — the four target
+producers and both liveness observers — retains `ProtectProc=invisible` but
+does not set `ProcSubset=pid`. Polars reads `/proc/meminfo` when sizing its
 cgroup-aware memory manager; hiding non-process `/proc` files makes native
-Parquet writes fail before a target book can be published. Other users'
-process metadata remains hidden by `ProtectProc`.
+Parquet work fail, which kills a producer before it publishes a target book and
+kills the watchdog that would report it. Other users' process metadata remains
+hidden by `ProtectProc`. The two compiled engines read no Parquet and keep
+`ProcSubset=pid`.
 
 Before deploy trusts the checkout, and again before checkout code runs, the
 deploy preflight and trusted launcher reject group/world-writable or

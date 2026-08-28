@@ -6,6 +6,15 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Both liveness observers get the same cgroup memory
+  visibility as the producers.** `scripts/runtime/check_fleet_liveness.py`
+  imports Polars and runs as the demo and funded liveness units, which still
+  set `ProcSubset=pid`. Hiding the non-process `/proc` files kills that pass,
+  and activation gates a rollout on the immediate demo pass succeeding, so the
+  producer repair alone left the next rollout failing one phase later. The unit
+  test now derives the Polars-reaching set from the committed dispatcher and
+  the wrappers it names, rather than listing four producer unit names.
+
 - **2026-08-28 — Preserved strategy-event tapes survive the engine wake
   cutover.** The deterministic tape reader retains the former
   `journal_change` spelling at the same data-arrival phase as `engine_change`.

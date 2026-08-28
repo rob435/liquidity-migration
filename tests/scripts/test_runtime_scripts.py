@@ -62,18 +62,50 @@ def test_manifest_contains_only_the_current_rust_owned_fleet() -> None:
     assert not any("account-execution" in name for name in units)
 
 
-def test_polars_producers_keep_cgroup_memory_visibility() -> None:
-    units = _units()
-    for name in (
+def _authorized_commands() -> dict[str, str]:
+    """Each unit's committed command line, with any shell wrapper it names inlined."""
+    dispatcher = _read("scripts/run_authorized_runtime.sh")
+    body = dispatcher[dispatcher.index('case "$UNIT:$ENTRYPOINT" in') : dispatcher.index("\nesac")]
+    commands: dict[str, str] = {}
+    for block in body.split(";;"):
+        names = re.findall(r"(liquidity-migration-[\w-]+\.service):main", block)
+        text = block + "".join(
+            _read(f"scripts/runtime/{wrapper}")
+            for wrapper in re.findall(r"scripts/runtime/([\w.-]+\.sh)", block)
+        )
+        commands.update(dict.fromkeys(names, text))
+    return commands
+
+
+def test_polars_units_keep_cgroup_memory_visibility() -> None:
+    """Polars sizes its memory manager from /proc/meminfo, so a unit that can
+    reach it must not hide the non-process /proc files. Deriving the set from
+    the dispatcher is the point: a hand-listed set stayed green while the two
+    liveness units ran the same library behind ProcSubset=pid.
+    """
+    reaches_polars = {
+        name
+        for name, command in _authorized_commands().items()
+        if re.search(r"-m liquidity_migration(?![\w.])", command)
+        or "check_fleet_liveness.py" in command
+    }
+    assert reaches_polars == {
         "liquidity-migration-bybit-long-demo.service",
         "liquidity-migration-bybit-long-mainnet.service",
         "liquidity-migration-bybit-carry-demo.service",
         "liquidity-migration-bybit-carry-mainnet.service",
-    ):
+        "liquidity-migration-demo-liveness.service",
+        "liquidity-migration-mainnet-liveness.service",
+    }
+    units = _units()
+    for name in reaches_polars:
         body = units[name]
-        assert "ProtectProc=invisible" in body
-        assert "ProcSubset=pid" not in body
-        assert "/proc/meminfo" in body
+        assert "ProtectProc=invisible" in body, name
+        assert "ProcSubset=pid" not in body, name
+        assert "/proc/meminfo" in body, name
+    # The compiled engines read no Parquet and keep the tighter setting.
+    for name in ("liquidity-migration-engine.service", "liquidity-migration-engine-mainnet.service"):
+        assert "ProcSubset=pid" in units[name], name
 
 
 def test_guarded_units_cross_the_installed_release_gate_before_checkout_code() -> None:
