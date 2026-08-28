@@ -1786,7 +1786,7 @@ verify_controls_sudo_policy() {
     actual="$(
         LC_ALL=C COLUMNS=4096 /usr/bin/sudo -l -U "$CONTROLS_USER" 2>/dev/null \
             | awk '/^[[:space:]]*\(/ { print }' \
-            | tr -d '[:space:]' \
+            | LC_ALL=C sed 's/[[:space:]]//g' \
             | LC_ALL=C sort
     )" || fail "cannot enumerate the effective Telegram controls sudo policy"
     expected="$(
@@ -1795,7 +1795,7 @@ verify_controls_sudo_policy() {
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper pause-mainnet' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper resume-demo' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper status-demo' \
-            | tr -d '[:space:]' \
+            | LC_ALL=C sed 's/[[:space:]]//g' \
             | LC_ALL=C sort
     )"
     [ "$actual" = "$expected" ] \

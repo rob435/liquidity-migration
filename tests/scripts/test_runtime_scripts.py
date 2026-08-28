@@ -150,6 +150,15 @@ def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> N
         "build_engine",
     )
     assert '/usr/bin/sudo -l -U "$CONTROLS_USER"' in policy
+    assert policy.count("LC_ALL=C sed 's/[[:space:]]//g'") == 2
+    assert policy.count("| LC_ALL=C sort") == 2
+    assert "tr -d '[:space:]'" not in policy
+    actual_block = policy[policy.index("actual=") : policy.index("expected=")]
+    expected_block = policy[policy.index("expected=") :]
+    assert all(
+        block.index("LC_ALL=C sed") < block.index("LC_ALL=C sort")
+        for block in (actual_block, expected_block)
+    )
     assert "exact four-command boundary" in policy
 
     bot = _read("liquidity_migration/ops/telegram_controls.py")

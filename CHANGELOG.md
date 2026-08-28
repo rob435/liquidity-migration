@@ -37,7 +37,9 @@ edit STATE.md to match.
   single-link handoff, and only that handoff can reach stopped installation.
   Fresh Python dependency verification now enumerates only that generation's
   own site-packages, so stale source-tree metadata cannot enter or reject the
-  exact installed-distribution comparison.
+  exact installed-distribution comparison. Telegram control-policy comparison
+  also canonicalizes each command before sorting, making its exact four-command
+  proof independent of sudo's presentation order.
 
 - **2026-08-28 — Exodus handoff uses the position actually abandoned.**
   A v7 pre-settlement fire now snapshots the fresh carry-attributed venue
