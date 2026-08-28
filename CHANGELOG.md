@@ -6,6 +6,16 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Audit series pushed; Ubuntu qualification is billing-blocked.**
+  The 42-commit Rust-only migration series, ending in audit commit `206e40c21`,
+  was fast-forwarded to `main`. Push workflow run `33130163698` created both
+  Ubuntu jobs, but GitHub rejected each before assigning a runner or executing
+  a step because recent account payments failed or the Actions spending limit
+  must be increased. This is not a passing or failing test result: release
+  qualification remains pending until the account owner fixes billing and the
+  exact pushed commit's Python, Rust, bounded soak, build, and smoke steps run
+  green. No VPS deploy or live venue order was performed.
+
 - **2026-08-27 — The seven execution-audit gaps become explicit Rust and
   rollout contracts.** Sibling placements now validate and reserve in request
   order, append together, cross one WAL barrier, and reach Bybit as overlapping

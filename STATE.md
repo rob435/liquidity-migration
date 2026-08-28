@@ -338,9 +338,12 @@ leverage-needing entry, where paying that round trip cost ~169 ms median.
   ID set is bounded, while venue execution history can still grow. Run the
   release `account_state_soak` example described in
   [docs/engine.md](docs/engine.md) on a production-like Linux host and compare
-  its early, middle, and late windows. No Linux measurement is registered yet;
-  the Windows host can cross-compile the example but cannot execute the linked
-  binary. Real venue fetch and decode time remains a separate measurement.
+  its early, middle, and late windows. The Ubuntu workflow includes that exact
+  bounded release workload, but its first pushed job was rejected before a
+  runner started because of the repository owner's Actions billing/spending
+  limit. No Linux measurement is registered yet; the Windows host can
+  cross-compile the example but cannot execute the linked binary. Real venue
+  fetch and decode time remains a separate measurement.
 
 ## Topology
 
@@ -439,10 +442,14 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
   ([docs/operations.md](docs/operations.md)). Push only from the primary
   checkout until the pre-push hook's git-fixture tests are hermetic (a linked
   worktree run corrupted the repo once).
-- **Audit release evidence is pending.** This working tree is not yet the
-  pushed commit, so the configured Ubuntu workflow has not tested this exact
-  state. Do not deploy or call it release-qualified until that commit is pushed
-  and its Ubuntu CI and locked Rust jobs are green.
+- **Audit release evidence is pending.** The migration series and audit commit
+  `206e40c21` are pushed to `main`, but [workflow run
+  33130163698](https://github.com/rob435/liquidity-migration/actions/runs/33130163698)
+  rejected both Ubuntu jobs before a runner or test step started: GitHub reports
+  failed account payments or an Actions spending limit that must be increased.
+  Do not deploy or call this generation release-qualified until billing is
+  fixed and the exact pushed commit's Python, Rust, soak, build, and smoke jobs
+  are rerun green.
 - **The rollback floor is the one-line forward-compat commit `31ee68d`**:
   rolling back past it requires archiving each producer's event tape.
 - Three delisting candidates (`HIGHUSDT`, `PUMPBTCUSDT`, `WHITEWHALEUSDT`) have
