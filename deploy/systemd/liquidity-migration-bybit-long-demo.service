@@ -47,7 +47,7 @@ Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/lon
 # enter through THIS sleeve: same book, same sizing, same exits. Both lines
 # are the kill switch -- set ENABLED=0 (or stop the llm-ledger timer) and the
 # gate stops contributing entries while everything else runs on.
-Environment=LONG_ENGINE_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/targets/llm-gate-candidates.json
+Environment=LONG_ENGINE_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json
 Environment=LONG_ENGINE_LLM_GATE_ENABLED=1
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-long-demo.service main
 Restart=always

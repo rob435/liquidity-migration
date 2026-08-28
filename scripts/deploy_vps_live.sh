@@ -341,6 +341,9 @@ DEMO_ENGINE_USER=liquidity-engine-demo
 MAINNET_ENGINE_USER=liquidity-engine-mainnet
 OBSERVER_USER=liquidity-observer
 LLM_USER=liquidity-llm
+LLM_STATE_ROOT=/var/lib/liquidity-migration/llm-driver-ledger
+LLM_GATE_CANDIDATES_PATH="$LLM_STATE_ROOT/llm-gate-candidates.json"
+LEGACY_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/targets/llm-gate-candidates.json
 PRODUCER_DEMO_ENV=/etc/liquidity-migration/producer-demo.env
 PRODUCER_MAINNET_ENV=/etc/liquidity-migration/producer-mainnet.env
 PRODUCER_DEMO_SOURCE_ENV=/etc/liquidity-migration/producer-demo-source.env
@@ -381,10 +384,15 @@ normalize_account_lease_access() {
     done
 }
 
-normalize_engine_state_access() {
+normalize_runtime_state_access() {
     "$PYTHON" - "$RUNTIME_GROUP" \
         "$DEMO_ENGINE_USER" /var/lib/liquidity-migration-engine \
-        "$MAINNET_ENGINE_USER" /var/lib/liquidity-migration-engine-mainnet <<'PY'
+        "$MAINNET_ENGINE_USER" /var/lib/liquidity-migration-engine-mainnet \
+        "$PRODUCER_USER" "$LONG_DEMO_ROOT" \
+        "$PRODUCER_USER" "$CARRY_DEMO_ROOT" \
+        "$PRODUCER_USER" "$LONG_MAINNET_ROOT" \
+        "$PRODUCER_USER" "$CARRY_MAINNET_ROOT" \
+        "$LLM_USER" "$LLM_STATE_ROOT" <<'PY'
 import grp
 import os
 import pwd
@@ -398,18 +406,20 @@ def refuse(detail: str) -> None:
 
 def node_kind(row: os.stat_result, display: str, device: int) -> str:
     if row.st_dev != device:
-        refuse(f"engine state crosses a filesystem at {display!r}")
-    if row.st_mode & (stat.S_ISUID | stat.S_ISGID):
-        refuse(f"engine state carries privilege bits at {display!r}")
+        refuse(f"runtime state crosses a filesystem at {display!r}")
+    if row.st_mode & stat.S_ISUID or (
+        row.st_mode & stat.S_ISGID and not stat.S_ISDIR(row.st_mode)
+    ):
+        refuse(f"runtime state carries file privilege bits at {display!r}")
     if stat.S_ISLNK(row.st_mode):
-        refuse(f"engine state path is linked: {display!r}")
+        refuse(f"runtime state path is linked: {display!r}")
     if stat.S_ISDIR(row.st_mode):
         return "directory"
     if stat.S_ISREG(row.st_mode):
         if row.st_nlink != 1:
-            refuse(f"engine state file has more than one name: {display!r}")
+            refuse(f"runtime state file has more than one name: {display!r}")
         return "file"
-    refuse(f"engine state path has an unsupported type: {display!r}")
+    refuse(f"runtime state path has an unsupported type: {display!r}")
     raise AssertionError("unreachable")
 
 
@@ -417,7 +427,7 @@ def directory_names(descriptor: int, display: str) -> list[str]:
     try:
         return sorted(os.listdir(descriptor))
     except OSError as error:
-        refuse(f"cannot enumerate engine state {display!r}: {error}")
+        refuse(f"cannot enumerate runtime state {display!r}: {error}")
     raise AssertionError("unreachable")
 
 
@@ -437,18 +447,18 @@ def validate_directory(descriptor: int, display: str, device: int) -> None:
             try:
                 opened = os.fstat(child)
                 if not os.path.samestat(before, opened):
-                    refuse(f"engine state changed during validation: {child_display!r}")
+                    refuse(f"runtime state changed during validation: {child_display!r}")
                 validate_directory(child, child_display, device)
             finally:
                 os.close(child)
     if directory_names(descriptor, display) != names:
-        refuse(f"engine state names changed during validation: {display!r}")
+        refuse(f"runtime state names changed during validation: {display!r}")
 
 
 def same_open_node(parent: int, name: str, opened: os.stat_result, display: str) -> None:
     current = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if not os.path.samestat(opened, current):
-        refuse(f"engine state path changed while open: {display!r}")
+        refuse(f"runtime state path changed while open: {display!r}")
 
 
 def migrate_directory(
@@ -470,9 +480,9 @@ def migrate_directory(
         try:
             opened = os.fstat(child)
             if not os.path.samestat(before, opened):
-                refuse(f"engine state changed before migration: {child_display!r}")
+                refuse(f"runtime state changed before migration: {child_display!r}")
             if node_kind(opened, child_display, device) != kind:
-                refuse(f"engine state changed type: {child_display!r}")
+                refuse(f"runtime state changed type: {child_display!r}")
             if kind == "directory":
                 migrate_directory(child, child_display, device, owner, group)
                 mode = stat.S_IMODE(os.fstat(child).st_mode) | stat.S_IRWXU
@@ -484,11 +494,11 @@ def migrate_directory(
         finally:
             os.close(child)
     if directory_names(descriptor, display) != names:
-        refuse(f"engine state names changed during migration: {display!r}")
+        refuse(f"runtime state names changed during migration: {display!r}")
 
     current = os.fstat(descriptor)
     if node_kind(current, display, device) != "directory":
-        refuse(f"engine state directory changed type: {display!r}")
+        refuse(f"runtime state directory changed type: {display!r}")
     os.fchown(descriptor, owner, group)
     os.fchmod(descriptor, stat.S_IMODE(current.st_mode) | stat.S_IRWXU)
 
@@ -499,15 +509,15 @@ def migrate_root(owner_name: str, path: str, group: int) -> None:
     except FileNotFoundError:
         return
     if stat.S_ISLNK(before.st_mode):
-        refuse(f"engine state root is linked: {path!r}")
+        refuse(f"runtime state root is linked: {path!r}")
     if not stat.S_ISDIR(before.st_mode):
-        refuse(f"engine state root is not a directory: {path!r}")
+        refuse(f"runtime state root is not a directory: {path!r}")
 
     descriptor = open_directory(path)
     try:
         opened = os.fstat(descriptor)
         if not os.path.samestat(before, opened):
-            refuse(f"engine state root changed before validation: {path!r}")
+            refuse(f"runtime state root changed before validation: {path!r}")
         device = opened.st_dev
         node_kind(opened, path, device)
         validate_directory(descriptor, path, device)
@@ -515,7 +525,7 @@ def migrate_root(owner_name: str, path: str, group: int) -> None:
         migrate_directory(descriptor, path, device, owner, group)
         current = os.lstat(path)
         if not os.path.samestat(os.fstat(descriptor), current):
-            refuse(f"engine state root changed while open: {path!r}")
+            refuse(f"runtime state root changed while open: {path!r}")
     finally:
         os.close(descriptor)
 
@@ -523,13 +533,30 @@ def migrate_root(owner_name: str, path: str, group: int) -> None:
 try:
     group_name, *pairs = sys.argv[1:]
     if not pairs or len(pairs) % 2:
-        refuse("engine-state migration received invalid arguments")
+        refuse("runtime-state migration received invalid arguments")
     group_id = grp.getgrnam(group_name).gr_gid
     for offset in range(0, len(pairs), 2):
         migrate_root(pairs[offset], pairs[offset + 1], group_id)
 except (KeyError, OSError, RuntimeError) as error:
-    raise SystemExit(f"engine-state migration refused: {error}") from None
+    raise SystemExit(f"runtime-state migration refused: {error}") from None
 PY
+    [ "$?" -eq 0 ] || fail "cannot migrate runtime-state ownership"
+}
+
+migrate_legacy_llm_gate_candidates() {
+    local source="$LEGACY_LLM_GATE_CANDIDATES_PATH"
+    local target="$LLM_GATE_CANDIDATES_PATH"
+    [ ! -L "${source%/*}" ] && [ ! -L "${target%/*}" ] \
+        || fail "LLM candidate directory is linked"
+    if [ -e "$source" ] || [ -L "$source" ]; then
+        [ -f "$source" ] && [ ! -L "$source" ] \
+            && [ "$(stat -c %h "$source")" -eq 1 ] \
+            || fail "legacy LLM candidates are not a single regular file"
+        [ ! -e "$target" ] && [ ! -L "$target" ] \
+            || fail "both legacy and current LLM candidate files exist"
+        mv -T -- "$source" "$target" \
+            || fail "cannot move LLM candidates into their writer-owned state root"
+    fi
 }
 
 ensure_runtime_identities() {
@@ -560,10 +587,75 @@ ensure_runtime_identities() {
         > /etc/tmpfiles.d/liquidity-migration.conf
     systemd-tmpfiles --create /etc/tmpfiles.d/liquidity-migration.conf \
         || fail "cannot create the runtime lock and engine lease boundaries"
-    normalize_account_lease_access
-    normalize_engine_state_access
+    [ ! -L /var/lib/liquidity-migration/targets ] \
+        || fail "producer target root is linked"
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration/targets
+    [ ! -L "$LLM_STATE_ROOT" ] || fail "LLM state root is linked"
+    install -d -o "$LLM_USER" -g "$RUNTIME_GROUP" -m 0750 "$LLM_STATE_ROOT"
+    migrate_legacy_llm_gate_candidates
+    normalize_account_lease_access
+    normalize_runtime_state_access
+    normalize_producer_book_state_access
+}
+
+normalize_producer_book_state_access() {
+    /usr/bin/python3 - "$PRODUCER_USER" "$RUNTIME_GROUP" \
+        /var/lib/liquidity-migration/targets \
+        long-demo-state.json long-mainnet-state.json <<'PY'
+import grp
+import os
+import pwd
+import stat
+import sys
+
+owner = pwd.getpwnam(sys.argv[1]).pw_uid
+group = grp.getgrnam(sys.argv[2]).gr_gid
+root_path = sys.argv[3]
+root_before = os.lstat(root_path)
+if stat.S_ISLNK(root_before.st_mode) or not stat.S_ISDIR(root_before.st_mode):
+    raise SystemExit(f"producer target root is not a real directory: {root_path!r}")
+root = os.open(
+    root_path,
+    os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+)
+try:
+    if not os.path.samestat(root_before, os.fstat(root)):
+        raise SystemExit(f"producer target root changed before migration: {root_path!r}")
+    for name in sys.argv[4:]:
+        path = os.path.join(root_path, name)
+        try:
+            before = os.stat(name, dir_fd=root, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(before.st_mode):
+            raise SystemExit(f"producer book state is not a regular file: {path!r}")
+        if before.st_nlink != 1:
+            raise SystemExit(f"producer book state has multiple links: {path!r}")
+        if before.st_size > 16 * 1024 * 1024:
+            raise SystemExit(f"producer book state exceeds its reader limit: {path!r}")
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=root,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if not os.path.samestat(before, opened):
+                raise SystemExit(f"producer book state changed before migration: {path!r}")
+            os.fchown(descriptor, owner, group)
+            os.fchmod(descriptor, 0o640)
+            current = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if not os.path.samestat(os.fstat(descriptor), current):
+                raise SystemExit(f"producer book state changed during migration: {path!r}")
+        finally:
+            os.close(descriptor)
+    if not os.path.samestat(os.fstat(root), os.lstat(root_path)):
+        raise SystemExit(f"producer target root changed during migration: {root_path!r}")
+finally:
+    os.close(root)
+PY
+    [ "$?" -eq 0 ] || fail "cannot migrate producer book-state ownership"
 }
 
 write_producer_environment() {
@@ -859,8 +951,6 @@ PY
         [ ! -L "$root" ] || fail "demo runtime root must not be a symlink: $root"
         install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 "$root" \
             || fail "cannot create demo runtime root: $root"
-        chown -R --no-dereference "$PRODUCER_USER:$RUNTIME_GROUP" "$root" \
-            || fail "cannot assign demo runtime root: $root"
         chmod 0750 "$root" || fail "cannot secure demo runtime root: $root"
     done
     chown root:root "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
@@ -1061,6 +1151,7 @@ install_mode() {
     # main. Re-running them with the fleet stopped only lengthens the outage.
 
     run_phase install-runtime-identities ensure_runtime_identities
+    run_phase verify-python-runtime verify_python_runtime_environment
 
     # Bound journald so logs cannot crowd the data roots, and keep at most the
     # newest timestamped backup of the demo credential file.
@@ -1932,6 +2023,51 @@ secure_venv_directory() {
     [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 ))
 }
 
+verify_python_runtime_environment() {
+    local deployed="$REPO_DIR/.venv" runtime_user state_file
+    [ "$(stat -c %a "$deployed")" = 755 ] \
+        || fail "deployed Python environment is not traversable by runtime identities"
+    for runtime_user in \
+        "$PRODUCER_USER" "$CONTROLS_USER" "$OBSERVER_USER" "$LLM_USER"; do
+        /usr/bin/sudo -u "$runtime_user" -- \
+            /usr/bin/env PYTHONDONTWRITEBYTECODE=1 \
+            "$deployed/bin/python" - "$deployed" <<'PY'
+from pathlib import Path
+import sys
+
+expected = Path(sys.argv[1]).resolve()
+if Path(sys.prefix).resolve() != expected:
+    raise SystemExit(
+        f"runtime interpreter escaped deployed environment: {sys.prefix!r} != {str(expected)!r}"
+    )
+
+import polars  # noqa: F401, E402
+from liquidity_migration.cli.commands import main  # noqa: F401, E402
+PY
+        [ "$?" -eq 0 ] \
+            || fail "deployed Python environment is unusable by $runtime_user"
+    done
+    for state_file in \
+        /var/lib/liquidity-migration/targets/long-demo-state.json \
+        /var/lib/liquidity-migration/targets/long-mainnet-state.json; do
+        [ -e "$state_file" ] || continue
+        /usr/bin/sudo -u "$PRODUCER_USER" -- \
+            /usr/bin/env PYTHONDONTWRITEBYTECODE=1 \
+            "$deployed/bin/python" - "$state_file" <<'PY'
+import sys
+from liquidity_migration.strategy.long_book_state import (
+    migrate_empty_v1_book_state,
+    read_book_state,
+)
+
+migrate_empty_v1_book_state(sys.argv[1])
+read_book_state(sys.argv[1])
+PY
+        [ "$?" -eq 0 ] \
+            || fail "producer cannot restore durable book state: $state_file"
+    done
+}
+
 remove_deploy_venv_staging() {
     local path="$DEPLOY_VENV_STAGING"
     [ -n "$path" ] || return 0
@@ -1963,6 +2099,8 @@ install_python_environment() {
     staging="$(mktemp -d "$DEPLOY_VENV_STAGING_ROOT/deploy.XXXXXX")" \
         || fail "cannot create Python environment staging generation"
     DEPLOY_VENV_STAGING="$staging"
+    chmod 0755 "$staging" \
+        || fail "cannot make the Python environment traversable by runtime identities"
     secure_venv_directory "$staging" \
         || fail "new Python environment staging generation is unsafe"
     /usr/bin/python3 -m venv "$staging" \
@@ -2954,15 +3092,11 @@ require_mainnet_preflight() {
 # decision; the preflight proves the profile is the render of the dials
 # before anything starts.
 start_mainnet_fleet() {
-    local producer_started_ns root
+    local producer_started_ns
     provision_mainnet_prerequisites
     require_mainnet_preflight
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets
-    for root in "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT"; do
-        chown -R --no-dereference "$PRODUCER_USER:$RUNTIME_GROUP" "$root" \
-            || fail "cannot assign mainnet producer state to $PRODUCER_USER: $root"
-    done
     start_required_engine "$MAINNET_OWNER_UNIT" /etc/liquidity-migration/engine-mainnet.env mainnet
     producer_started_ns="$(date +%s%N)"
     systemctl enable --now liquidity-migration-bybit-carry-mainnet.service \

@@ -45,6 +45,7 @@ __all__ = [
     "LongBookEntry",
     "LongBookState",
     "long_book_state_path",
+    "migrate_empty_v1_book_state",
     "read_book_state",
     "write_book_state",
 ]
@@ -439,3 +440,69 @@ def write_book_state(path: str | Path, state: LongBookState) -> None:
         (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         label="LONG book state",
     )
+
+
+def migrate_empty_v1_book_state(path: str | Path) -> bool:
+    """Upgrade the one v1 shape whose v2 meaning is exact.
+
+    Version 2 added pending-request clocks and attempted-signal memory. Those
+    values cannot be reconstructed for a v1 holding, so a non-empty record is
+    refused. An empty v1 record has no such ambiguity: its cooldown stamps are
+    preserved and the new attempted-signal map starts empty.
+    """
+
+    resolved = Path(path)
+    try:
+        snapshot = read_stable_file(
+            resolved,
+            label="LONG book state",
+            reject_empty=True,
+            require_single_link=True,
+            max_bytes=16 * 1024 * 1024,
+        )
+    except FileNotFoundError:
+        return False
+    except ValueError as exc:
+        raise BookStateError(str(exc)) from exc
+    except OSError as exc:
+        raise BookStateError(f"{resolved}: unreadable v1 state ({exc})") from exc
+    try:
+        payload = json.loads(snapshot.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BookStateError(f"{resolved}: unreadable v1 state ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise BookStateError(f"{resolved}: v1 payload is not an object")
+    version = payload.get("version")
+    if version == BOOK_STATE_VERSION:
+        read_book_state(resolved)
+        return False
+    if type(version) is not int or version != 1:
+        raise BookStateError(f"{resolved}: cannot migrate book-state version {version!r}")
+    if set(payload) != {"version", "held", "left_at_ms"}:
+        raise BookStateError(f"{resolved}: v1 state has unexpected or missing fields")
+    held = payload["held"]
+    if not isinstance(held, list):
+        raise BookStateError(f"{resolved}: v1 held is not an array")
+    if held:
+        raise BookStateError(
+            f"{resolved}: cannot infer v2 request clocks for {len(held)} v1 holding(s)"
+        )
+    raw_left = payload["left_at_ms"]
+    if not isinstance(raw_left, dict):
+        raise BookStateError(f"{resolved}: v1 left_at_ms is not an object")
+    left_at_ms: dict[str, int] = {}
+    for symbol, when in raw_left.items():
+        if (
+            not isinstance(symbol, str)
+            or not symbol
+            or symbol != symbol.upper()
+            or not symbol.isalnum()
+            or isinstance(when, bool)
+            or not isinstance(when, int)
+            or when <= 0
+        ):
+            raise BookStateError(f"{resolved}: invalid v1 cooldown stamp for {symbol!r}")
+        left_at_ms[symbol] = when
+    write_book_state(resolved, LongBookState(left_at_ms=left_at_ms))
+    read_book_state(resolved)
+    return True

@@ -20,7 +20,8 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 if [[ ! -x "$PYTHON_BIN" ]]; then
-    PYTHON_BIN="$(command -v python3 || command -v python)"
+    echo "Pinned Python runtime is unavailable: $PYTHON_BIN" >&2
+    exit 2
 fi
 
 case "${EXECUTION_ENVIRONMENT:-}" in

@@ -81,6 +81,16 @@ digest-bound candidate. The target branch and exact-version Python wheels are
 also cached before quiescence. A deterministic manifest binds the downloaded
 wheel bytes to this rollout, and stopped installation uses `--no-index`. CI
 pins third-party action revisions.
+The atomically installed virtual environment is root-owned mode `0755` and is
+smoke-tested through the CLI import as each unprivileged Python service user;
+the two producer launchers never fall back to an unpinned system interpreter.
+While the fleet is stopped, installation also reassigns the engine and all four
+producer state trees in place through descriptor-relative traversal. Existing
+empty LONG v1 state is upgraded to v2 without dropping cooldown history; a v1
+record with a holding is not guessed because its v2 request clocks do not
+exist. LLM gate candidates live below the LLM service's state directory and
+are group-readable by LONG, so that service has no write path into the engine
+target-book directory.
 Release qualification also requires the configured Ubuntu workflow's Python
 checks, locked Rust tests, bounded optimized account-state soak, build, and
 binary smoke test to pass on the exact pushed commit; local Windows

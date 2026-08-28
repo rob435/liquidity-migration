@@ -42,7 +42,8 @@ file.
   live on demo).** The hourly ledger service judges fresh 4/12/24h trigger
   events on top-10-turnover names and publishes score ≥ 6 names to the LONG
   candidates file
-  (`llm-gate-candidates.json`); the LONG producer takes them as ordinary LONG
+  (`/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json`);
+  the LONG producer takes them as ordinary LONG
   entries — same book (`long-demo.json`), same engine sleeve (`long`), same
   vol-scaled sizing at the profile multiplier, same v12 exits and venue-native
   stops. The ledger holds no venue credentials. Kill switches:

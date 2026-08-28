@@ -819,6 +819,7 @@ def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None
     rollout_cleanup = _function(text, "rollout_cleanup", "prefetch_rollout_target")
 
     assert 'mktemp -d "$DEPLOY_VENV_STAGING_ROOT/deploy.XXXXXX"' in install
+    assert 'chmod 0755 "$staging"' in install
     assert '/usr/bin/python3 -m venv "$staging"' in install
     assert '"$staging/bin/python" -m pip install' in install
     assert "environment_root = Path(sys.prefix).resolve()" in install
@@ -843,6 +844,81 @@ def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None
     assert '"${path%/*}" = "$DEPLOY_VENV_STAGING_ROOT"' in cleanup
     assert "remove_deploy_venv_staging" in deploy_cleanup
     assert "remove_deploy_venv_staging" in rollout_cleanup
+
+
+def test_deployed_python_is_verified_from_unprivileged_runtime_identities() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    install_mode = _function(text, "install_mode", "load_authorization")
+    verify = _function(
+        text, "verify_python_runtime_environment", "remove_deploy_venv_staging"
+    )
+
+    assert "run_phase verify-python-runtime verify_python_runtime_environment" in install_mode
+    assert '[ "$(stat -c %a "$deployed")" = 755 ]' in verify
+    assert '"$PRODUCER_USER" "$CONTROLS_USER" "$OBSERVER_USER" "$LLM_USER"' in verify
+    assert '/usr/bin/sudo -u "$runtime_user"' in verify
+    assert "/usr/bin/env PYTHONDONTWRITEBYTECODE=1" in verify
+    assert "Path(sys.prefix).resolve() != expected" in verify
+    assert "import polars" in verify
+    assert "from liquidity_migration.cli.commands import main" in verify
+    assert "long-demo-state.json" in verify
+    assert "long-mainnet-state.json" in verify
+    assert "migrate_empty_v1_book_state(sys.argv[1])" in verify
+    assert "read_book_state(sys.argv[1])" in verify
+
+
+def test_preserved_long_book_state_is_migrated_for_its_producer() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    identities = _function(text, "ensure_runtime_identities", "write_producer_environment")
+    migrate = _function(
+        text,
+        "normalize_producer_book_state_access",
+        "write_producer_environment",
+    )
+
+    assert "normalize_producer_book_state_access" in identities
+    assert "long-demo-state.json" in migrate
+    assert "long-mainnet-state.json" in migrate
+    assert "stat.S_ISREG" in migrate
+    assert "before.st_nlink != 1" in migrate
+    assert "root_before = os.lstat(root_path)" in migrate
+    assert "os.O_DIRECTORY" in migrate
+    assert "os.O_NOFOLLOW" in migrate
+    assert "os.O_NONBLOCK" in migrate
+    assert "dir_fd=root" in migrate
+    assert "os.path.samestat" in migrate
+    assert "os.fchown" in migrate
+    assert "os.fchmod(descriptor, 0o640)" in migrate
+
+
+def test_llm_gate_uses_its_writer_owned_state_directory() -> None:
+    units = _units()
+    llm = units["liquidity-migration-llm-ledger.service"]
+    long_demo = units["liquidity-migration-bybit-long-demo.service"]
+    path = "/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json"
+    text = DEPLOY.read_text(encoding="utf-8")
+    migration = _function(
+        text, "migrate_legacy_llm_gate_candidates", "ensure_runtime_identities"
+    )
+
+    assert f"Environment=LONG_ENGINE_LLM_GATE_CANDIDATES_PATH={path}" in long_demo
+    assert "StateDirectory=liquidity-migration/llm-driver-ledger" in llm
+    assert "StateDirectoryMode=0750" in llm
+    assert "ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger" in llm
+    assert "ReadWritePaths=/var/lib/liquidity-migration/targets" not in llm
+    assert "LEGACY_LLM_GATE_CANDIDATES_PATH" in migration
+    assert "LLM_GATE_CANDIDATES_PATH" in migration
+    assert 'mv -T -- "$source" "$target"' in migration
+
+
+def test_live_producer_wrappers_never_fall_back_to_system_python() -> None:
+    for relative in (
+        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
+        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
+    ):
+        body = _read(relative)
+        assert "Pinned Python runtime is unavailable" in body
+        assert "command -v python" not in body
 
 
 def test_fresh_python_verifier_ignores_source_tree_distribution_metadata(
@@ -1337,10 +1413,10 @@ def test_install_reopens_persistent_account_leases_for_isolated_engines() -> Non
     )
 
 
-def test_install_rehomes_persistent_engine_state_without_replacing_it() -> None:
+def test_install_rehomes_persistent_runtime_state_without_replacing_it() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     normalize = _function(
-        text, "normalize_engine_state_access", "ensure_runtime_identities"
+        text, "normalize_runtime_state_access", "migrate_legacy_llm_gate_candidates"
     )
     identities = _function(
         text, "ensure_runtime_identities", "write_producer_environment"
@@ -1349,6 +1425,11 @@ def test_install_rehomes_persistent_engine_state_without_replacing_it() -> None:
     for directory, owner in (
         ("/var/lib/liquidity-migration-engine", "$DEMO_ENGINE_USER"),
         ("/var/lib/liquidity-migration-engine-mainnet", "$MAINNET_ENGINE_USER"),
+        ("$LONG_DEMO_ROOT", "$PRODUCER_USER"),
+        ("$CARRY_DEMO_ROOT", "$PRODUCER_USER"),
+        ("$LONG_MAINNET_ROOT", "$PRODUCER_USER"),
+        ("$CARRY_MAINNET_ROOT", "$PRODUCER_USER"),
+        ("$LLM_STATE_ROOT", "$LLM_USER"),
     ):
         assert directory in normalize
         assert owner in normalize
@@ -1362,14 +1443,74 @@ def test_install_rehomes_persistent_engine_state_without_replacing_it() -> None:
     assert "os.path.samestat" in normalize
     assert "os.fchown" in normalize
     assert "os.fchmod" in normalize
+    assert '[ "$?" -eq 0 ] || fail "cannot migrate runtime-state ownership"' in normalize
     assert normalize.index("migrate_directory(child") < normalize.index(
         "os.fchown(child"
     )
     for replacing in ("rm -rf", "shutil.move", "os.replace", "shutil.copy"):
         assert replacing not in normalize
     assert identities.index("normalize_account_lease_access") < identities.index(
-        "normalize_engine_state_access"
+        "normalize_runtime_state_access"
     )
+    assert "chown -R --no-dereference" not in text
+
+
+def test_runtime_state_refusal_cannot_be_masked_by_run_phase(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("descriptor migration is a Linux deployment boundary")
+    import grp
+    import pwd
+
+    text = DEPLOY.read_text(encoding="utf-8")
+    normalize = _function(
+        text, "normalize_runtime_state_access", "migrate_legacy_llm_gate_candidates"
+    )
+    demo_engine = tmp_path / "absent-demo-engine"
+    mainnet_engine = tmp_path / "absent-mainnet-engine"
+    normalize = normalize.replace(
+        "/var/lib/liquidity-migration-engine-mainnet", shlex.quote(str(mainnet_engine))
+    ).replace(
+        "/var/lib/liquidity-migration-engine", shlex.quote(str(demo_engine))
+    )
+    target = tmp_path / "real"
+    target.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(target, target_is_directory=True)
+    absent = shlex.quote(str(tmp_path / "absent"))
+    user = shlex.quote(pwd.getpwuid(os.getuid()).pw_name)
+    group = shlex.quote(grp.getgrgid(os.getgid()).gr_name)
+    script = f"""
+set -euo pipefail
+PYTHON={shlex.quote(sys.executable)}
+RUNTIME_GROUP={group}
+DEMO_ENGINE_USER={user}
+MAINNET_ENGINE_USER={user}
+PRODUCER_USER={user}
+LLM_USER={user}
+LONG_DEMO_ROOT={shlex.quote(str(linked))}
+CARRY_DEMO_ROOT={absent}
+LONG_MAINNET_ROOT={absent}
+CARRY_MAINNET_ROOT={absent}
+LLM_STATE_ROOT={absent}
+fail() {{ exit 77; }}
+{normalize}
+ensure_runtime_identities() {{ normalize_runtime_state_access; :; }}
+run_phase() {{ shift; if "$@"; then return 0; else return $?; fi; }}
+run_phase identity ensure_runtime_identities
+"""
+
+    result = subprocess.run(
+        ["bash"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 77, result.stderr
+    assert "runtime state root is linked" in result.stderr
 
 
 def _process_start_ticks(pid: int) -> int:

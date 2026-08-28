@@ -55,6 +55,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from liquidity_migration.core.durable_file import durable_atomic_replace
+
 BYBIT_PUBLIC = "https://api.bybit.com"
 #: Binance publishes who was aggressive; Bybit does not. Public, no key.
 BINANCE_PUBLIC = "https://fapi.binance.com"
@@ -669,14 +671,19 @@ def cmd_triggers(ledger_dir: Path) -> None:
 # The LONG side treats a missing or stale file as "no signal".
 # ---------------------------------------------------------------------------
 
-GATE_CANDIDATES_PATH = "/var/lib/liquidity-migration/targets/llm-gate-candidates.json"
+GATE_CANDIDATES_PATH = (
+    "/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json"
+)
 GATE_CANDIDATES_VALID_MIN = 60
 
 
 def _write_json_atomic(path: Path, payload: Any) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=1, sort_keys=True))
-    tmp.replace(path)
+    durable_atomic_replace(
+        path,
+        (json.dumps(payload, indent=1, sort_keys=True) + "\n").encode("utf-8"),
+        mode=0o640,
+        label="LLM gate candidates",
+    )
 
 
 def publish_gate_candidates(

@@ -19,6 +19,7 @@ from liquidity_migration.strategy.long_book_state import (
     BookStateError,
     LongBookEntry,
     LongBookState,
+    migrate_empty_v1_book_state,
     read_book_state,
     write_book_state,
 )
@@ -106,6 +107,43 @@ def test_a_version_this_reader_does_not_know_fails_the_read(tmp_path: Path) -> N
 
     with pytest.raises(BookStateError, match="version"):
         read_book_state(path)
+
+
+def test_an_empty_v1_record_migrates_without_losing_cooldowns(tmp_path: Path) -> None:
+    path = tmp_path / "v1.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "held": [],
+                "left_at_ms": {"COTIUSDT": NOW_MS - 1_000},
+            }
+        )
+    )
+
+    assert migrate_empty_v1_book_state(path) is True
+    assert read_book_state(path) == LongBookState(
+        left_at_ms={"COTIUSDT": NOW_MS - 1_000}
+    )
+    assert json.loads(path.read_text())["attempted_signals_ms"] == {}
+    assert migrate_empty_v1_book_state(path) is False
+
+
+def test_a_nonempty_v1_record_is_not_guessed_into_v2(tmp_path: Path) -> None:
+    path = tmp_path / "v1-held.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "held": [{"symbol": "COTIUSDT"}],
+                "left_at_ms": {},
+            }
+        )
+    )
+
+    with pytest.raises(BookStateError, match="cannot infer v2 request clocks"):
+        migrate_empty_v1_book_state(path)
+    assert json.loads(path.read_text())["version"] == 1
 
 
 def test_one_unreadable_row_fails_the_whole_read(tmp_path: Path) -> None:

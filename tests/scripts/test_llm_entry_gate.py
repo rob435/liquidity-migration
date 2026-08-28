@@ -29,6 +29,12 @@ TRIGGER_BAR_END = "2026-08-21T11:00:00+00:00"
 TRIGGER_TS_MS = int(dt.datetime.fromisoformat(TRIGGER_BAR_END).timestamp() * 1000)
 
 
+def test_default_gate_path_is_inside_the_llm_owned_state_root() -> None:
+    assert ledger.GATE_CANDIDATES_PATH == (
+        "/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json"
+    )
+
+
 def _event(symbol: str, *, score: int = 7, would: bool = True) -> dict:
     return {
         "would_enter": would,

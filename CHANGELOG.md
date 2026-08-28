@@ -6,6 +6,18 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Rollout installs a runtime-usable Python generation and
+  preserves producer state across the identity boundary.** Fresh virtual
+  environments are root-owned mode `0755`, are import-smoked as every
+  unprivileged Python runtime identity, and producer launchers no longer fall
+  back to the host interpreter. Stopped installation migrates the demo and
+  funded LONG/CARRY/Exodus state trees descriptor-relative, rehomes the two
+  external LONG state files to their producer, and upgrades only the exact
+  empty v1 LONG shape to v2 while preserving cooldowns. The LLM candidates
+  handoff now lives inside the LLM service's own state directory; LONG receives
+  group-read access without granting that service write access to engine target
+  books.
+
 - **2026-08-28 — The daily-loss circuit breaker is retired.** Operational
   profiles are schema v2 and no longer expose a daily-loss setting. The Rust
   engine neither restores nor writes its former control anchors, so legacy

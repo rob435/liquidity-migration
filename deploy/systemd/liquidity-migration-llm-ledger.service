@@ -25,10 +25,8 @@ ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger
-# Sibling books here are only read. The judged candidates file for the LONG
-# sleeve is this unit's whole output to the trading path.
-ReadWritePaths=/var/lib/liquidity-migration/targets
 StateDirectory=liquidity-migration/llm-driver-ledger
+StateDirectoryMode=0750
 MemoryMax=512M
 # Research must not preempt the producers (Nice=5) or the owners (Nice=-5).
 Nice=10
