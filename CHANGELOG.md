@@ -32,7 +32,9 @@ edit STATE.md to match.
   from the service outage without changing the installed artifact bindings.
   Each prefetch also scrubs its disposable compiler checkout before verifying
   the exact commit, so stale benchmark output and cross-platform metadata cannot
-  block or contaminate a later rollout.
+  block or contaminate a later rollout. Cargo's ordinary hard-linked promoted
+  binary is confined to the disposable target, byte-verified into an atomic
+  single-link handoff, and only that handoff can reach stopped installation.
 
 - **2026-08-28 — Exodus handoff uses the position actually abandoned.**
   A v7 pre-settlement fire now snapshots the fresh carry-attributed venue

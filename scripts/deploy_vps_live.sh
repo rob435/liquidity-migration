@@ -1326,6 +1326,54 @@ prepare_disposable_engine_build_root() {
         || fail "engine build Git directory is group/other writable"
 }
 
+materialize_single_link_engine_candidate() {
+    local candidate="$ENGINE_CANDIDATE_BINARY" candidate_dir hardlink_count
+    local internal_links source_digest temporary temporary_digest
+    candidate_dir="${candidate%/*}"
+    [ "$candidate_dir" = "$ENGINE_BUILDER_TARGET_DIR/release" ] \
+        && [ -d "$ENGINE_BUILDER_TARGET_DIR" ] \
+        && [ ! -L "$ENGINE_BUILDER_TARGET_DIR" ] \
+        && [ "$(readlink -f "$ENGINE_BUILDER_TARGET_DIR")" = "$ENGINE_BUILDER_TARGET_DIR" ] \
+        && [ "$(stat -c %U "$ENGINE_BUILDER_TARGET_DIR")" = "$ENGINE_BUILDER_USER" ] \
+        && [ "$(stat -c %G "$ENGINE_BUILDER_TARGET_DIR")" = "$ENGINE_BUILDER_GROUP" ] \
+        || fail "engine target root or candidate path is unsafe"
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -x "$candidate" ] \
+        && [ "$(readlink -f "$candidate")" = "$candidate" ] \
+        && [ "$(stat -c %U "$candidate")" = "$ENGINE_BUILDER_USER" ] \
+        && [ "$(stat -c %G "$candidate")" = "$ENGINE_BUILDER_GROUP" ] \
+        || fail "Cargo produced no safe regular engine binary"
+    hardlink_count="$(stat -c %h "$candidate")" \
+        || fail "cannot inspect Cargo engine hard links"
+    internal_links="$(
+        find "$ENGINE_BUILDER_TARGET_DIR" -xdev -type f -samefile "$candidate" \
+            -printf . | wc -c | tr -d '[:space:]'
+    )" || fail "cannot enumerate Cargo engine hard links"
+    [[ "$hardlink_count" =~ ^[1-9][0-9]*$ ]] \
+        && [[ "$internal_links" =~ ^[1-9][0-9]*$ ]] \
+        && [ "$internal_links" -eq "$hardlink_count" ] \
+        || fail "Cargo engine binary has a hard-link alias outside its target root"
+    source_digest="$(sha256sum "$candidate" | awk '{print $1}')" \
+        || fail "cannot digest Cargo engine binary"
+    temporary="$(mktemp "$candidate_dir/.engine-candidate.XXXXXX")" \
+        || fail "cannot create single-link engine candidate staging file"
+    [ "${temporary%/*}" = "$candidate_dir" ] && [ ! -L "$temporary" ] \
+        && [ "$(stat -c %h "$temporary")" -eq 1 ] \
+        || fail "engine candidate staging path escaped or is linked"
+    install -o "$ENGINE_BUILDER_USER" -g "$ENGINE_BUILDER_GROUP" -m 0700 \
+        "$candidate" "$temporary" \
+        || fail "cannot materialize the single-link engine candidate"
+    temporary_digest="$(sha256sum "$temporary" | awk '{print $1}')" \
+        || fail "cannot digest staged single-link engine candidate"
+    [ "$temporary_digest" = "$source_digest" ] \
+        && [ -f "$temporary" ] && [ ! -L "$temporary" ] \
+        && [ "$(stat -c %h "$temporary")" -eq 1 ] \
+        && [ "$(stat -c %U "$temporary")" = "$ENGINE_BUILDER_USER" ] \
+        && [ "$(stat -c %G "$temporary")" = "$ENGINE_BUILDER_GROUP" ] \
+        || fail "single-link engine candidate differs from Cargo output"
+    mv -fT -- "$temporary" "$candidate" \
+        || fail "cannot atomically select the single-link engine candidate"
+}
+
 compile_engine_commit() {
     local commit="$1"
     local built dirty candidate_digest candidate_real expected_candidate_real status=0
@@ -1394,6 +1442,10 @@ compile_engine_commit() {
     [ -z "$(find "$ENGINE_BUILD_DIR" ! -user root -print -quit)" ] \
         && [ -z "$(find "$ENGINE_BUILD_DIR" ! -type l -perm /222 -print -quit)" ] \
         || fail "engine source permissions changed during compilation"
+    # Cargo normally hard-links the promoted binary to its hashed deps entry.
+    # Prove every alias is inside the disposable target, then atomically copy
+    # the exact bytes onto a one-link handoff path for stopped installation.
+    materialize_single_link_engine_candidate
     [ -f "$ENGINE_CANDIDATE_BINARY" ] && [ ! -L "$ENGINE_CANDIDATE_BINARY" ] \
         && [ -x "$ENGINE_CANDIDATE_BINARY" ] \
         || fail "locked release build produced no regular engine binary"

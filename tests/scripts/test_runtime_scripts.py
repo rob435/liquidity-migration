@@ -518,6 +518,26 @@ def test_engine_build_fetches_locked_crates_then_compiles_offline() -> None:
     assert "cargo build --release --locked --offline" in build_case
 
 
+def test_cargo_hardlinks_are_confined_then_materialized_as_one_link() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    materialize = _function(
+        text, "materialize_single_link_engine_candidate", "compile_engine_commit"
+    )
+    compile_exact = _function(
+        text, "compile_engine_commit", "verify_prefetched_engine_candidate"
+    )
+
+    assert '-xdev -type f -samefile "$candidate"' in materialize
+    assert 'internal_links" -eq "$hardlink_count"' in materialize
+    assert 'mktemp "$candidate_dir/.engine-candidate.XXXXXX"' in materialize
+    assert 'temporary_digest" = "$source_digest"' in materialize
+    assert 'stat -c %h "$temporary")" -eq 1' in materialize
+    assert 'mv -fT -- "$temporary" "$candidate"' in materialize
+    assert compile_exact.index("run_engine_builder_step build") < compile_exact.index(
+        "materialize_single_link_engine_candidate"
+    ) < compile_exact.index('[ -f "$ENGINE_CANDIDATE_BINARY" ]')
+
+
 def test_engine_candidate_is_built_before_rollout_stops_and_reused_exactly() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     prefetch = _function(text, "prefetch_rollout_target", "record_installed_profile")
