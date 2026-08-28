@@ -1685,6 +1685,7 @@ from importlib.metadata import distributions
 from pathlib import Path
 import re
 import sys
+import sysconfig
 
 normalize = lambda value: re.sub(r"[-_.]+", "-", value).lower()
 expected = {}
@@ -1700,8 +1701,24 @@ for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
         raise SystemExit(f"duplicate requirement in deployment lock: {name}")
     expected[name] = parts[1]
 
+# `distributions()` without an explicit path also searches the current working
+# directory.  The deployed checkout can contain historical source-tree
+# metadata, but only distributions physically installed in this new venv are
+# part of its dependency generation.
+environment_root = Path(sys.prefix).resolve()
+site_packages = sorted(
+    {
+        str(Path(sysconfig.get_path(kind)).resolve())
+        for kind in ("purelib", "platlib")
+    }
+)
+if any(not Path(path).is_relative_to(environment_root) for path in site_packages):
+    raise SystemExit(
+        f"fresh environment site-packages escaped its root: {site_packages}"
+    )
+
 actual = {}
-for distribution in distributions():
+for distribution in distributions(path=site_packages):
     name = normalize(distribution.metadata["Name"])
     if name in {"pip", "setuptools"}:
         continue

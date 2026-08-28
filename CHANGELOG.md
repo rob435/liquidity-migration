@@ -35,6 +35,9 @@ edit STATE.md to match.
   block or contaminate a later rollout. Cargo's ordinary hard-linked promoted
   binary is confined to the disposable target, byte-verified into an atomic
   single-link handoff, and only that handoff can reach stopped installation.
+  Fresh Python dependency verification now enumerates only that generation's
+  own site-packages, so stale source-tree metadata cannot enter or reject the
+  exact installed-distribution comparison.
 
 - **2026-08-28 — Exodus handoff uses the position actually abandoned.**
   A v7 pre-settlement fire now snapshots the fresh carry-attributed venue

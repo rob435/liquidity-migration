@@ -7,6 +7,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import time
 import tomllib
 from pathlib import Path
@@ -670,6 +671,11 @@ def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None
     assert 'mktemp -d "$DEPLOY_VENV_STAGING_ROOT/deploy.XXXXXX"' in install
     assert '/usr/bin/python3 -m venv "$staging"' in install
     assert '"$staging/bin/python" -m pip install' in install
+    assert "environment_root = Path(sys.prefix).resolve()" in install
+    assert 'for kind in ("purelib", "platlib")' in install
+    assert "Path(path).is_relative_to(environment_root)" in install
+    assert "distributions(path=site_packages)" in install
+    assert "for distribution in distributions():" not in install
     assert "actual != expected" in install
     assert "extra = sorted" in install
     assert (
@@ -687,6 +693,39 @@ def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None
     assert '"${path%/*}" = "$DEPLOY_VENV_STAGING_ROOT"' in cleanup
     assert "remove_deploy_venv_staging" in deploy_cleanup
     assert "remove_deploy_venv_staging" in rollout_cleanup
+
+
+def test_fresh_python_verifier_ignores_source_tree_distribution_metadata(
+    tmp_path: Path,
+) -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    install = _function(text, "install_python_environment", "verify_controls_sudo_policy")
+    verifier = install.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    environment = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(environment)], check=True)
+    interpreter = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    source_metadata = checkout / "liquidity_migration-0.1.0.dist-info"
+    source_metadata.mkdir()
+    (source_metadata / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: liquidity-migration\nVersion: 0.1.0\n",
+        encoding="utf-8",
+    )
+    lock = tmp_path / "requirements.lock"
+    lock.write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(interpreter), "-", str(lock)],
+        cwd=checkout,
+        input=verifier,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_funded_attestor_template_has_only_the_read_only_identity_contract() -> None:
