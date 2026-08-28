@@ -1281,6 +1281,51 @@ run_engine_builder_step() {
 
 # Compile an exact commit in the isolated build clone while the current fleet
 # remains live. Stopped installation only consumes the bound candidate.
+prepare_disposable_engine_build_root() {
+    local mode mount_boundary
+    [ "$ENGINE_BUILD_DIR" = /opt/engine-build ] \
+        || fail "engine build root escaped its fixed path"
+    [ -d /opt ] && [ ! -L /opt ] && [ "$(readlink -f /opt)" = /opt ] \
+        && [ "$(stat -c %u /opt)" -eq 0 ] && [ "$(stat -c %g /opt)" -eq 0 ] \
+        || fail "engine build parent is not a canonical root-owned directory"
+    mode="$(stat -c %a /opt)" || fail "cannot inspect engine build parent mode"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \
+        || fail "engine build parent is group/other writable"
+    if [ ! -e "$ENGINE_BUILD_DIR" ] && [ ! -L "$ENGINE_BUILD_DIR" ]; then
+        install -d -o root -g root -m 0700 "$ENGINE_BUILD_DIR" \
+            || fail "cannot create the disposable engine build root"
+    fi
+    [ -d "$ENGINE_BUILD_DIR" ] && [ ! -L "$ENGINE_BUILD_DIR" ] \
+        && [ "$(readlink -f "$ENGINE_BUILD_DIR")" = "$ENGINE_BUILD_DIR" ] \
+        && [ "$(stat -c %u "$ENGINE_BUILD_DIR")" -eq 0 ] \
+        && [ "$(stat -c %g "$ENGINE_BUILD_DIR")" -eq 0 ] \
+        || fail "engine build root is linked, redirected, or not root-owned"
+    mode="$(stat -c %a "$ENGINE_BUILD_DIR")" \
+        || fail "cannot inspect engine build root mode"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \
+        || fail "engine build root is group/other writable"
+    mount_boundary="$(
+        awk -v root="$ENGINE_BUILD_DIR" '
+            $5 == root || index($5, root "/") == 1 { print $5; exit }
+        ' /proc/self/mountinfo
+    )" || fail "cannot inspect engine build mount boundaries"
+    [ -z "$mount_boundary" ] \
+        || fail "engine build root contains a mount boundary: $mount_boundary"
+    if [ ! -e "$ENGINE_BUILD_DIR/.git" ] && [ ! -L "$ENGINE_BUILD_DIR/.git" ]; then
+        "${GIT_ENV[@]}" /usr/bin/git init --quiet "$ENGINE_BUILD_DIR" \
+            || fail "cannot prepare engine build clone"
+    fi
+    [ -d "$ENGINE_BUILD_DIR/.git" ] && [ ! -L "$ENGINE_BUILD_DIR/.git" ] \
+        && [ "$(readlink -f "$ENGINE_BUILD_DIR/.git")" = "$ENGINE_BUILD_DIR/.git" ] \
+        && [ "$(stat -c %u "$ENGINE_BUILD_DIR/.git")" -eq 0 ] \
+        && [ "$(stat -c %g "$ENGINE_BUILD_DIR/.git")" -eq 0 ] \
+        || fail "engine build Git directory is linked, redirected, or not root-owned"
+    mode="$(stat -c %a "$ENGINE_BUILD_DIR/.git")" \
+        || fail "cannot inspect engine build Git directory mode"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \
+        || fail "engine build Git directory is group/other writable"
+}
+
 compile_engine_commit() {
     local commit="$1"
     local built dirty candidate_digest candidate_real expected_candidate_real status=0
@@ -1288,17 +1333,18 @@ compile_engine_commit() {
     ENGINE_PREFETCHED_DIGEST=""
     ensure_engine_builder_identity
     require_pinned_engine_toolchain
-    if [ ! -d "$ENGINE_BUILD_DIR/.git" ]; then
-        "${GIT_ENV[@]}" /usr/bin/git init --quiet "$ENGINE_BUILD_DIR" \
-            || fail "cannot prepare engine build clone"
-    else
-        chmod -R u+rwX "$ENGINE_BUILD_DIR" \
-            || fail "cannot reopen the root-owned engine source for exact reset"
-    fi
+    prepare_disposable_engine_build_root
+    chmod -R u+rwX "$ENGINE_BUILD_DIR" \
+        || fail "cannot reopen the root-owned engine source for exact reset"
     engine_git fetch --no-tags --quiet "$REPO_DIR" "$commit" \
         || fail "cannot copy engine commit $commit into the build clone"
     engine_git reset --hard --quiet FETCH_HEAD \
         || fail "cannot reset the engine build clone to $commit"
+    # This checkout is a disposable compiler input, never a runtime state
+    # root. Remove ignored and untracked residue from prior benchmarks or
+    # cross-platform copies before proving the exact commit is clean.
+    engine_git clean -ffdx --quiet \
+        || fail "cannot scrub the disposable engine build clone"
     built="$(engine_git rev-parse HEAD)" || fail "cannot read engine build clone HEAD"
     [ "$built" = "$commit" ] || fail "engine build clone is $built, not $commit"
     dirty="$(engine_git status --porcelain=v1 --untracked-files=all)" \

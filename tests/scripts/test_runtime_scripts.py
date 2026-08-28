@@ -613,6 +613,33 @@ def test_all_network_inputs_are_prefetched_and_stopped_install_is_offline() -> N
     assert "run_strict_phase install-target-prefetch" in dispatch
 
 
+def test_engine_prefetch_scrubs_only_its_disposable_build_clone() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    prepare = _function(
+        text, "prepare_disposable_engine_build_root", "compile_engine_commit"
+    )
+    compile_commit = _function(
+        text, "compile_engine_commit", "verify_prefetched_engine_candidate"
+    )
+
+    assert 'ENGINE_BUILD_DIR=/opt/engine-build' in text
+    assert '[ "$ENGINE_BUILD_DIR" = /opt/engine-build ]' in prepare
+    assert '[ ! -L "$ENGINE_BUILD_DIR" ]' in prepare
+    assert 'readlink -f "$ENGINE_BUILD_DIR"' in prepare
+    assert 'readlink -f "$ENGINE_BUILD_DIR/.git"' in prepare
+    assert '/proc/self/mountinfo' in prepare
+    assert 'index($5, root "/") == 1' in prepare
+    assert "0022" in prepare
+    assert "prepare_disposable_engine_build_root" in compile_commit
+    assert "engine_git clean -ffdx --quiet" in compile_commit
+    assert compile_commit.index("prepare_disposable_engine_build_root") < (
+        compile_commit.index('chmod -R u+rwX "$ENGINE_BUILD_DIR"')
+    ) < compile_commit.index("engine_git reset --hard --quiet FETCH_HEAD") < (
+        compile_commit.index("engine_git clean -ffdx --quiet")
+    ) < compile_commit.index('dirty="$(engine_git status --porcelain=v1')
+    assert "safe_git clean" not in compile_commit
+
+
 def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     install = _function(text, "install_python_environment", "verify_controls_sudo_policy")

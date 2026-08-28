@@ -30,6 +30,9 @@ edit STATE.md to match.
   or signal. A cancellation before the stop boundary leaves the incumbent
   topology untouched. This removes dependency downloads and the release build
   from the service outage without changing the installed artifact bindings.
+  Each prefetch also scrubs its disposable compiler checkout before verifying
+  the exact commit, so stale benchmark output and cross-platform metadata cannot
+  block or contaminate a later rollout.
 
 - **2026-08-28 — Exodus handoff uses the position actually abandoned.**
   A v7 pre-settlement fire now snapshots the fresh carry-attributed venue
