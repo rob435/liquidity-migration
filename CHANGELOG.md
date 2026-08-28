@@ -6,6 +6,13 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Isolated engines retain the existing account lease inode.**
+  Stopped installation now gives persistent account-lease files root ownership
+  and group write access for the isolated engine identities. The deployment
+  preserves each file instead of replacing its flock inode, rejects links and
+  non-regular paths, and lets both demo and funded services reopen leases made
+  before the engines stopped running as root.
+
 - **2026-08-28 — Bybit position-mode startup follows the row, not its cursor.**
   Explicit-symbol checks now request the venue's 200-row maximum and prove
   one-way mode from exactly one matching `linear` row with `positionIdx 0`.

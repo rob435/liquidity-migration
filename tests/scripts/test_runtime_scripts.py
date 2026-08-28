@@ -1316,6 +1316,27 @@ def test_tmpfiles_recreates_only_runtime_lock_boundaries_after_reboot() -> None:
     assert "systemd-tmpfiles --create" in identities
 
 
+def test_install_reopens_persistent_account_leases_for_isolated_engines() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    normalize = _function(
+        text, "normalize_account_lease_access", "ensure_runtime_identities"
+    )
+    identities = _function(
+        text, "ensure_runtime_identities", "write_producer_environment"
+    )
+
+    assert "-mindepth 1 -maxdepth 1" in normalize
+    assert "-name '*-user-*.lock' -print0" in normalize
+    assert '[ -f "$lease" ] && [ ! -L "$lease" ]' in normalize
+    assert 'stat -c %h -- "$lease"' in normalize
+    assert '[ "$links" -eq 1 ]' in normalize
+    assert 'chown root:"$RUNTIME_GROUP" -- "$lease"' in normalize
+    assert 'chmod 0660 -- "$lease"' in normalize
+    assert identities.index("systemd-tmpfiles --create") < identities.index(
+        "normalize_account_lease_access"
+    )
+
+
 def _process_start_ticks(pid: int) -> int:
     record = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
     fields_after_comm = record.rsplit(") ", maxsplit=1)[1].split()

@@ -360,6 +360,27 @@ ensure_engine_builder_identity() {
         || fail "$ENGINE_BUILDER_USER has unexpected supplementary groups"
 }
 
+normalize_account_lease_access() {
+    local lease links
+    local -a leases=()
+    while IFS= read -r -d '' lease; do
+        leases+=("$lease")
+    done < <(
+        find /run/lock/liquidity-migration -mindepth 1 -maxdepth 1 \
+            -name '*-user-*.lock' -print0
+    )
+    for lease in "${leases[@]}"; do
+        [ -f "$lease" ] && [ ! -L "$lease" ] \
+            || fail "account lease path is not a regular file: $lease"
+        links="$(stat -c %h -- "$lease")" \
+            || fail "cannot inspect account lease links: $lease"
+        [ "$links" -eq 1 ] \
+            || fail "account lease has more than one name: $lease"
+        chown root:"$RUNTIME_GROUP" -- "$lease" && chmod 0660 -- "$lease" \
+            || fail "cannot grant the isolated engine users access to $lease"
+    done
+}
+
 ensure_runtime_identities() {
     [ -x /usr/bin/sudo ] && [ -x /usr/sbin/visudo ] \
         || fail "sudo and visudo are required for the isolated Telegram control boundary"
@@ -388,6 +409,7 @@ ensure_runtime_identities() {
         > /etc/tmpfiles.d/liquidity-migration.conf
     systemd-tmpfiles --create /etc/tmpfiles.d/liquidity-migration.conf \
         || fail "cannot create the runtime lock and engine lease boundaries"
+    normalize_account_lease_access
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration/targets
 }
