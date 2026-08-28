@@ -6,6 +6,13 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Preserved strategy-event tapes survive the engine wake
+  cutover.** The deterministic tape reader retains the former
+  `journal_change` spelling at the same data-arrival phase as `engine_change`.
+  It verifies the original event IDs and rolling hashes without rewriting
+  history, then permits current engine-wake records to append to that chain;
+  unrelated event kinds remain rejected.
+
 - **2026-08-28 — Rollout installs a runtime-usable Python generation and
   preserves producer state across the identity boundary.** Fresh virtual
   environments are root-owned mode `0755`, are import-smoked as every

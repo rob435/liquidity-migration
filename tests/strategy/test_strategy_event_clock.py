@@ -86,6 +86,42 @@ def test_jsonl_tape_round_trips_and_detects_tampering(tmp_path) -> None:
         load_strategy_event_tape(path)
 
 
+def test_retained_journal_wake_chain_accepts_new_engine_wakes(tmp_path) -> None:
+    """The wake rename must not strand or rewrite an append-only live tape."""
+
+    path = tmp_path / "strategy-events.jsonl"
+    retained_bytes = (
+        b'{"event":{"event_id":"strategy-event-'
+        b'65c352ed84c8f848fd65f169b89a6bcf7488a68bc464bd7dc511a77bae65bffc",'
+        b'"event_ts_ns":1000,"ingest_ts_ns":1010,"kind":"journal_change",'
+        b'"payload":{"wake":1},"source":"host","source_sequence":1},'
+        b'"prior_tape_hash":"'
+        b'903aeb9284ba1c47632a147fff36c83d36e3dbfaf1ce7d1b07df6ff093c43f0d",'
+        b'"schema_version":1,"tape_hash":"'
+        b'5e89573e58c10ef8d93e9148fa0794ac73227eeb57a7e183ff4ef6d3b4239ea5"}\n'
+    )
+    path.write_bytes(retained_bytes)
+    retired = StrategyEvent(1_000, 1_010, "host", 1, "journal_change", {"wake": 1})
+
+    reopened = JsonlStrategyEventTape(path)
+    assert reopened.prior_events == (retired,)
+    assert reopened.tape_hash == "5e89573e58c10ef8d93e9148fa0794ac73227eeb57a7e183ff4ef6d3b4239ea5"
+    assert path.read_bytes() == retained_bytes
+
+    current = StrategyEvent(2_000, 2_010, "host", 2, "engine_change", {"wake": 2})
+    reopened.append(current)
+    loaded, tape_hash = load_strategy_event_tape(path)
+
+    assert loaded == (retired, current)
+    assert tape_hash == reopened.tape_hash
+    assert path.read_bytes().startswith(retained_bytes)
+
+
+def test_unknown_strategy_event_kind_still_fails_closed() -> None:
+    with pytest.raises(ValueError, match="unknown strategy event kind"):
+        StrategyEvent(1_000, 1_010, "host", 1, "invented_wake", {})
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -119,5 +155,7 @@ def test_every_cycle_kind_the_host_can_set_is_a_kind_the_clock_accepts() -> None
         re.findall(r'_pending_cycle_kind = "([a-z_]+)"', inspect.getsource(strategy_host))
     )
     assert "price_touch" in kinds, "the host seam moved; repoint this test at it"
+    assert "engine_change" in kinds
+    assert "journal_change" not in kinds
     for kind in sorted(kinds):
         StrategyEvent(1_000, 1_010, "host", 1, kind, {})

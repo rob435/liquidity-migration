@@ -26,6 +26,11 @@ _PHASES = {
     "startup": 0,
     "market_boundary": 10,
     "confirmed_bar": 10,
+    # Read compatibility for tapes written before the Rust engine heartbeat
+    # replaced the account-journal wake.  The spelling is part of the event id
+    # and rolling hash, so translating it would destroy the evidence chain.
+    # Current hosts emit ``engine_change``; retained tapes may contain either.
+    "journal_change": 10,
     # An engine heartbeat update ended the producer's wait. Same phase tier as
     # the other data arrivals.
     "engine_change": 10,
