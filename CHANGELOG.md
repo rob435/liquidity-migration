@@ -6,6 +6,31 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Rollout recovery repairs producer inputs and lock cleanup.**
+  Candidate-universe loading now accepts the deployment's exact immutable
+  projection: root-owned mode `0640`, readable by the runtime group but not
+  writable by producers. Private verifier-owned artifacts remain mode `0600`.
+  This reconciles the producer loader with the installed demo and mainnet
+  files without handing either producer authority to rewrite the reviewed
+  universe. Lock-file orphan sweeping also invalidates its cache after a known
+  staging mutation and bounds every clean cache entry, so equal or coarse
+  directory mtimes cannot hide an abandoned alias indefinitely.
+
+- **2026-08-28 — Rollout compilation leaves the incumbent fleet live.**
+  The exact target commit now compiles during rollout prefetch. Stopped
+  installation rechecks the immutable build source plus the candidate's path,
+  owner, hard-link count, and prefetched SHA-256 before copying it, and performs
+  no Cargo fetch or compilation. Prefetch fills a clean locked Cargo cache,
+  then runs proc macros and build scripts offline in a private network. This
+  phase also fetches and binds the target branch and downloads the exact-version
+  Python wheels into a byte-digested cache; stopped install builds a fresh
+  environment only from that cache with `--no-index`, proves its distribution
+  set exactly matches the lock, and atomically exchanges it with the prior
+  environment. Transient builders have a runtime bound and are stopped on exit
+  or signal. A cancellation before the stop boundary leaves the incumbent
+  topology untouched. This removes dependency downloads and the release build
+  from the service outage without changing the installed artifact bindings.
+
 - **2026-08-28 — Exodus handoff uses the position actually abandoned.**
   A v7 pre-settlement fire now snapshots the fresh carry-attributed venue
   quantity and the same ticker's mark price. Target-book v2 carries that exact

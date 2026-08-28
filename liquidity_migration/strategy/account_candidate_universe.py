@@ -701,6 +701,28 @@ def write_candidate_universe(path: str | Path, payload: Mapping[str, Any]) -> Pa
 _CANDIDATE_UNIVERSE_MEMO: dict[tuple[str, str, str], "FrozenCandidateUniverse"] = {}
 
 
+def _require_trusted_candidate_universe_access(
+    snapshot: StableFileSnapshot,
+) -> None:
+    """Accept a private owner copy or an immutable root-managed projection."""
+
+    if os.name == "nt":
+        return
+    effective_uid = os.geteuid()
+    if snapshot.uid == 0 and snapshot.mode == 0o640:
+        return
+    if snapshot.uid == effective_uid:
+        if snapshot.mode & 0o077:
+            raise ValueError(
+                "candidate-universe artifact must not be group/world accessible"
+            )
+        return
+    raise ValueError(
+        "candidate-universe artifact must be owned by the verifier or "
+        "installed root-owned with mode 0640"
+    )
+
+
 def _realm_endpoint_host(realm: VenueRealm) -> str:
     """Host portion of the REST endpoint the artifact must have been read from."""
 
@@ -718,7 +740,6 @@ def load_candidate_universe(
             snapshot = read_stable_file(
                 path,
                 label="candidate-universe artifact",
-                require_owner=True,
                 require_single_link=False,
             )
         except ValueError as exc:
@@ -729,10 +750,7 @@ def load_candidate_universe(
             raise
     elif snapshot.path != Path(path).expanduser().absolute():
         raise ValueError("candidate-universe artifact snapshot path differs")
-    if snapshot.mode & 0o077:
-        raise ValueError("candidate-universe artifact must not be group/world accessible")
-    if snapshot.uid != os.geteuid():
-        raise ValueError("candidate-universe artifact must be owned by the verifier")
+    _require_trusted_candidate_universe_access(snapshot)
     # The artifact is frozen, so its own content hash keys the result exactly.
     # The ownership and
     # permission checks above still run on every call against the live stat, so

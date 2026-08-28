@@ -142,7 +142,12 @@ file.
 
 - **The engine binary is built in an isolated clone at `/opt/engine-build`** —
   never the deployed checkout the fleet runs from — with its own toolchain
-  under `/opt/rust`. Its measured latency on the box, the single-writer lease
+  under `/opt/rust`. Rollout compiles the exact target commit during prefetch
+  while the incumbent fleet remains live, then stopped installation rechecks
+  and copies that same digest-bound candidate. Git and exact-version Python
+  wheels are also fetched and byte-bound before the stop; installation uses the
+  wheel cache with no package index. Its measured latency on the box, the
+  single-writer lease
   it takes (one kernel `flock` per venue account at
   `/run/lock/liquidity-migration/bybit-{realm}-user-{userID}.lock`, named by
   the account number the venue itself reports), and the mainnet fence are

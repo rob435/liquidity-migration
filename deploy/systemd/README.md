@@ -64,8 +64,12 @@ What the engine does with an account is [`../../docs/engine.md`](../../docs/engi
   `/etc/liquidity-migration/engine.env`, its config, a fresh heartbeat, and the
   expected account/venue/realm binding. Missing or mismatched inputs fail closed.
 - **Its build is part of the deploy gate.** `cargo build --release --locked`
-  runs while the fleet is quiescent. Any toolchain, fetch, compile, install,
-  restart, digest, or commit-marker failure aborts activation.
+  runs against the exact target commit during prefetch, before the fleet is
+  stopped. Cargo first fetches the locked graph into a clean isolated cache;
+  compilation then runs `--offline` with a private network. Stopped installation
+  rechecks the immutable source, candidate owner, path, and prefetched digest
+  before copying it. Any toolchain, fetch, compile, install, restart, digest, or
+  commit-marker failure aborts activation.
 
 `liquidity-migration-engine-mainnet.service` has the same shape on the funded
 account: gated by `/etc/liquidity-migration/engine-mainnet.env` plus the

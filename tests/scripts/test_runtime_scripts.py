@@ -309,18 +309,25 @@ def test_demo_engine_template_has_an_exact_account_id_and_mainnet_requires_one()
 
 def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    compile_exact = _function(text, "compile_engine_commit", "build_engine")
+    compile_exact = _function(
+        text, "compile_engine_commit", "verify_prefetched_engine_candidate"
+    )
     toolchain_check = _function(text, "require_pinned_engine_toolchain", "compile_engine_commit")
+    builder = _function(text, "run_engine_builder_step", "compile_engine_commit")
     prefetch = _function(text, "prefetch_rollout_target", "record_installed_profile")
     build = _function(text, "build_engine", "verify_engine_release")
     verify = _function(text, "verify_engine_release", "validate_engine_environment")
-    assert "cargo" in compile_exact and "build --release --locked" in compile_exact
-    assert "locked release engine build failed" in compile_exact
+    assert "cargo fetch --locked" in builder
+    assert "build --release --locked --offline" in builder
+    assert "locked offline release engine build failed" in compile_exact
     assert 'RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN"' in toolchain_check
-    assert 'RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN"' in compile_exact
+    assert 'RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN"' in builder
     assert "require_pinned_engine_toolchain" in prefetch
     assert 'engine_git reset --hard --quiet FETCH_HEAD' in compile_exact
     assert 'built" = "$commit' in compile_exact
+    assert 'compile_engine_commit "$EXPECTED_COMMIT"' in prefetch
+    assert 'verify_prefetched_engine_candidate "$commit"' in build
+    assert "compile_engine_commit" not in build
     assert (
         "commit=%s\\nsha256=%s\\nlauncher_sha256=%s\\n"
         "control_helper_sha256=%s\\ncontrols_sudoers_sha256=%s\\n"
@@ -463,27 +470,176 @@ def test_rollout_and_activation_do_not_depend_on_flatness_attestation() -> None:
 
 def test_engine_build_runs_unprivileged_against_immutable_exact_source() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    block = _function(text, "compile_engine_commit", "build_engine")
+    compile_exact = _function(
+        text, "compile_engine_commit", "verify_prefetched_engine_candidate"
+    )
+    builder = _function(text, "run_engine_builder_step", "compile_engine_commit")
     for required in (
         "ENGINE_BUILDER_USER",
         "ENGINE_BUILDER_CARGO_HOME",
         "ENGINE_BUILDER_TARGET_DIR",
-        "chown -R root:root",
-        "chmod -R a-w",
         "systemd-run --quiet --wait --pipe --collect",
         "KillMode=control-group",
         "/usr/sbin/runuser -u",
         "/usr/bin/env -i",
         "CARGO_HOME=",
         "CARGO_TARGET_DIR=",
-        "build --release --locked",
+    ):
+        assert required in builder
+    for required in (
+        "chown -R root:root",
+        "chmod -R a-w",
         'engine_git status --porcelain=v1 --untracked-files=all',
         'readlink -f "$ENGINE_CANDIDATE_BINARY"',
         'stat -c %h "$ENGINE_CANDIDATE_BINARY"',
     ):
-        assert required in block
-    assert block.index("chmod -R a-w") < block.index("systemd-run")
-    assert block.index("systemd-run") < block.rindex("engine_git status")
+        assert required in compile_exact
+    assert compile_exact.index("chmod -R a-w") < compile_exact.index(
+        "run_engine_builder_step fetch"
+    )
+    assert compile_exact.index("run_engine_builder_step fetch") < compile_exact.index(
+        "run_engine_builder_step build"
+    )
+    assert compile_exact.index("run_engine_builder_step build") < compile_exact.rindex(
+        "engine_git status"
+    )
+
+
+def test_engine_build_fetches_locked_crates_then_compiles_offline() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    builder = _function(text, "run_engine_builder_step", "compile_engine_commit")
+    fetch_case = builder[builder.index("fetch)") : builder.index("build)")]
+    build_case = builder[builder.index("build)") : builder.index("python-fetch)")]
+
+    assert "cargo fetch --locked" in fetch_case
+    assert "PrivateNetwork" not in fetch_case
+    assert "PrivateNetwork=true" in build_case
+    assert "RestrictAddressFamilies=AF_UNIX" in build_case
+    assert "cargo build --release --locked --offline" in build_case
+
+
+def test_engine_candidate_is_built_before_rollout_stops_and_reused_exactly() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    prefetch = _function(text, "prefetch_rollout_target", "record_installed_profile")
+    verifier = _function(
+        text, "verify_prefetched_engine_candidate", "verify_controls_sudo_policy"
+    )
+    build = _function(text, "build_engine", "verify_engine_release")
+    install = _function(text, "install_mode", "load_authorization")
+    rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
+
+    assert 'compile_engine_commit "$EXPECTED_COMMIT"' in prefetch
+    assert install.index("verify_prefetched_deploy_inputs") < install.index(
+        "require_quiescent"
+    )
+    assert rollout.index("rollout-target-prefetch") < rollout.index(
+        "snapshot-prior-topology"
+    )
+    assert rollout.index("rollout-target-prefetch") < rollout.index("ROLLOUT_STOPPED=1")
+    assert rollout.index("rollout-target-prefetch") < rollout.index(
+        "stop-downstream-units"
+    )
+    assert 'ENGINE_PREFETCHED_COMMIT" = "$commit' in verifier
+    assert 'actual_digest" = "$ENGINE_PREFETCHED_DIGEST' in verifier
+    assert 'stat -c %U "$ENGINE_CANDIDATE_BINARY"' in verifier
+    assert 'verify_prefetched_engine_candidate "$commit"' in build
+    assert "compile_engine_commit" not in build
+    assert "cargo build" not in build
+
+
+def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    stop = _function(
+        text, "stop_active_engine_builder_unit", "run_engine_builder_step"
+    )
+    stale = _function(text, "stop_stale_engine_builder_units", "run_engine_builder_step")
+    builder = _function(text, "run_engine_builder_step", "compile_engine_commit")
+    deploy_cleanup = _function(text, "deploy_cleanup", "rollout_cancel")
+    rollout_cleanup = _function(text, "rollout_cleanup", "prefetch_rollout_target")
+    dispatch = text[text.index("trap deploy_cleanup EXIT") : text.index("REMOTE_SCRIPT\n")]
+
+    assert 'ENGINE_ACTIVE_BUILDER_UNIT="$unit"' in builder
+    assert builder.index('ENGINE_ACTIVE_BUILDER_UNIT="$unit"') < builder.index(
+        "systemd-run"
+    )
+    assert "RuntimeMaxSec=45m" in builder
+    assert "TimeoutStopSec=30s" in builder
+    assert "stop_active_engine_builder_unit" in builder
+    assert 'systemctl stop "$unit"' in stop
+    assert 'systemctl reset-failed "$unit"' in stop
+    assert 'ENGINE_ACTIVE_BUILDER_UNIT=""' in stop
+    assert "liquidity-migration-engine-python-fetch-" in stale
+    assert 'systemctl stop "$unit"' in stale
+    assert "stop_stale_engine_builder_units" in _function(
+        text, "prefetch_rollout_target", "record_installed_profile"
+    )
+    assert "stop_active_engine_builder_unit" in deploy_cleanup
+    assert "stop_active_engine_builder_unit" in rollout_cleanup
+    for signal in ("INT", "TERM", "HUP", "PIPE"):
+        assert f"trap 'deploy_cancel {signal} " in dispatch
+
+
+def test_all_network_inputs_are_prefetched_and_stopped_install_is_offline() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    prefetch = _function(text, "prefetch_rollout_target", "record_installed_profile")
+    python_prefetch = _function(
+        text, "prefetch_python_dependencies", "verify_prefetched_python_dependencies"
+    )
+    wheel_digest = _function(
+        text, "python_wheel_cache_digest", "prefetch_python_dependencies"
+    )
+    install = _function(text, "install_mode", "load_authorization")
+    venv_install = _function(text, "install_python_environment", "verify_controls_sudo_policy")
+    staged = _function(text, "staged_mode", "rollout_mode")
+    dispatch = text[text.index("acquire_maintenance_locks\ncase") : text.index("REMOTE_SCRIPT\n")]
+
+    assert "git_fetch fetch" in prefetch
+    assert "prefetch_python_dependencies" in prefetch
+    assert prefetch.index("git_fetch fetch") < prefetch.index(
+        "compile_engine_commit"
+    ) < prefetch.index("prefetch_python_dependencies")
+    assert "python-fetch" in python_prefetch
+    assert "PYTHON_PREFETCHED_LOCK_DIGEST" in python_prefetch
+    assert "PYTHON_PREFETCHED_WHEEL_DIGEST" in python_prefetch
+    assert "st_nlink != 1" in wheel_digest
+    assert "content.digest()" in wheel_digest
+    assert "git_fetch" not in install
+    assert "pip download" not in install
+    assert "install_python_environment" in install
+    assert "--no-index" in venv_install
+    assert '--find-links "$PYTHON_WHEEL_CACHE"' in venv_install
+    assert install.count("verify_prefetched_deploy_inputs") >= 2
+    assert "run_strict_phase staged-target-prefetch" in staged
+    assert "run_strict_phase install-target-prefetch" in dispatch
+
+
+def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    install = _function(text, "install_python_environment", "verify_controls_sudo_policy")
+    cleanup = _function(text, "remove_deploy_venv_staging", "install_python_environment")
+    deploy_cleanup = _function(text, "deploy_cleanup", "rollout_cancel")
+    rollout_cleanup = _function(text, "rollout_cleanup", "prefetch_rollout_target")
+
+    assert 'mktemp -d "$DEPLOY_VENV_STAGING_ROOT/deploy.XXXXXX"' in install
+    assert '/usr/bin/python3 -m venv "$staging"' in install
+    assert '"$staging/bin/python" -m pip install' in install
+    assert "actual != expected" in install
+    assert "extra = sorted" in install
+    assert (
+        '|| fail "fresh Python environment does not exactly match the deployment lock"'
+        in install
+    )
+    assert "renameat2" in install
+    assert "RENAME_EXCHANGE = 2" in install
+    assert "renameat2(AT_FDCWD, source, AT_FDCWD, target, RENAME_EXCHANGE)" in install
+    assert '|| fail "cannot atomically install the fresh Python environment"' in install
+    assert "os.fsync(directory)" in install
+    assert install.index("actual != expected") < install.index("renameat2")
+    assert "secure_venv_directory" in install
+    assert "rm -rf" not in install[: install.index("renameat2")]
+    assert '"${path%/*}" = "$DEPLOY_VENV_STAGING_ROOT"' in cleanup
+    assert "remove_deploy_venv_staging" in deploy_cleanup
+    assert "remove_deploy_venv_staging" in rollout_cleanup
 
 
 def test_funded_attestor_template_has_only_the_read_only_identity_contract() -> None:
@@ -621,15 +777,18 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
     cleanup = _function(text, "rollout_cleanup", "prefetch_rollout_target")
     cancel = _function(text, "rollout_cancel", "rollout_cleanup")
     assert 'ROLLOUT_CANCELLATION_SIGNAL="$signal"' in cancel
-    assert cleanup.index('if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]') < cleanup.index(
+    cancellation_start = 'if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]'
+    assert cleanup.index(cancellation_start) < cleanup.index(
         'if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]'
     )
     cancellation = cleanup[
-        cleanup.index('if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]') : cleanup.index(
-            'elif [ "$status" -ne 0 ]'
+        cleanup.index(cancellation_start) : cleanup.index(
+            'elif [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ]'
         )
     ]
     assert "stop_all_rollout_units_best_effort" in cancellation
+    assert 'ROLLOUT_STOPPED" -eq 1' in cancellation
+    assert "incumbent topology untouched" in cancellation
     assert "activate_mode" not in cancellation
     for signal, status in (("INT", 130), ("TERM", 143), ("HUP", 129), ("PIPE", 141)):
         assert f"trap 'rollout_cancel {signal} {status}' {signal}" in rollout
@@ -655,21 +814,26 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
 @pytest.mark.parametrize(
-    ("cancellation_signal", "expected_status", "expected_actions"),
+    ("cancellation_signal", "expected_status", "rollout_stopped", "expected_actions"),
     [
-        ("INT", 130, ["stop"]),
-        ("TERM", 143, ["stop"]),
-        ("HUP", 129, ["stop"]),
-        ("PIPE", 141, ["stop"]),
-        ("", 71, ["restore"]),
+        ("INT", 130, 1, ["stop"]),
+        ("TERM", 143, 1, ["stop"]),
+        ("HUP", 129, 1, ["stop"]),
+        ("PIPE", 141, 1, ["stop"]),
+        ("INT", 130, 0, []),
+        ("TERM", 143, 0, []),
+        ("HUP", 129, 0, []),
+        ("PIPE", 141, 0, []),
+        ("", 71, 1, ["restore"]),
         # A command may itself return a signal-shaped status. Only the shell's
         # explicit signal handler marks cancellation and suppresses restore.
-        ("", 143, ["restore"]),
+        ("", 143, 1, ["restore"]),
     ],
 )
 def test_rollout_cleanup_quarantines_cancellation_but_restores_ordinary_failure(
     cancellation_signal: str,
     expected_status: int,
+    rollout_stopped: int,
     expected_actions: list[str],
 ) -> None:
     text = DEPLOY.read_text(encoding="utf-8")
@@ -685,11 +849,15 @@ def test_rollout_cleanup_quarantines_cancellation_but_restores_ordinary_failure(
     script = f"""
 set -u
 ROLLOUT_CANCELLATION_SIGNAL=""
-ROLLOUT_STOPPED=1
+ROLLOUT_STOPPED={rollout_stopped}
 ROLLOUT_COMPLETE=0
 ROLLOUT_IRREVERSIBLE=0
 ROLLOUT_CURRENT_COMMIT=prior-commit
+ENGINE_ACTIVE_BUILDER_UNIT=""
+DEPLOY_VENV_STAGING=""
 cleanup_notice() {{ :; }}
+stop_active_engine_builder_unit() {{ :; }}
+remove_deploy_venv_staging() {{ :; }}
 stop_all_rollout_units_best_effort() {{ printf 'stop\\n'; }}
 restore_prior_topology() {{ printf 'restore\\n'; }}
 {cancel}

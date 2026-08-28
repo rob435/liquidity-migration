@@ -5,10 +5,16 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
+from liquidity_migration.core.artifact_snapshot import StableFileSnapshot
+from liquidity_migration.core.deterministic_serialization import canonical_json
+from liquidity_migration.data.downloaders import _normalize_instruments, _normalize_tickers
 from liquidity_migration.strategy.account_candidate_universe import (
+    _require_trusted_candidate_universe_access,
     build_candidate_universe_artifact,
     build_profile_universe_tables,
     carry_profile_universe_inputs,
@@ -20,12 +26,33 @@ from liquidity_migration.strategy.account_candidate_universe import (
     strategy_instruments_universe_inputs,
     write_candidate_universe,
 )
-from liquidity_migration.core.deterministic_serialization import canonical_json
-from liquidity_migration.data.downloaders import _normalize_instruments, _normalize_tickers
 from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 
 
 SNAPSHOT_NS = 1_800_000_000_000_000_000
+
+
+def _snapshot_with_identity(*, uid: int, mode: int) -> StableFileSnapshot:
+    return cast(StableFileSnapshot, SimpleNamespace(uid=uid, mode=mode))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership contract")
+def test_candidate_universe_accepts_only_the_root_managed_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "geteuid", lambda: 1234)
+
+    _require_trusted_candidate_universe_access(
+        _snapshot_with_identity(uid=0, mode=0o640)
+    )
+    with pytest.raises(ValueError, match="root-owned with mode 0640"):
+        _require_trusted_candidate_universe_access(
+            _snapshot_with_identity(uid=0, mode=0o660)
+        )
+    with pytest.raises(ValueError, match="root-owned with mode 0640"):
+        _require_trusted_candidate_universe_access(
+            _snapshot_with_identity(uid=4321, mode=0o640)
+        )
 
 
 def _instrument(

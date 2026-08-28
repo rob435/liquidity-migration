@@ -347,10 +347,7 @@ PRODUCER_DEMO_SOURCE_ENV=/etc/liquidity-migration/producer-demo-source.env
 PRODUCER_MAINNET_SOURCE_ENV=/etc/liquidity-migration/producer-mainnet-source.env
 MAINNET_TELEGRAM_ENV=/etc/liquidity-migration/telegram-mainnet.env
 
-ensure_runtime_identities() {
-    [ -x /usr/bin/sudo ] && [ -x /usr/sbin/visudo ] \
-        || fail "sudo and visudo are required for the isolated Telegram control boundary"
-    getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || groupadd --system "$RUNTIME_GROUP"
+ensure_engine_builder_identity() {
     getent group "$ENGINE_BUILDER_GROUP" >/dev/null 2>&1 \
         || groupadd --system "$ENGINE_BUILDER_GROUP"
     if ! id -u "$ENGINE_BUILDER_USER" >/dev/null 2>&1; then
@@ -361,6 +358,13 @@ ensure_runtime_identities() {
         || fail "$ENGINE_BUILDER_USER does not have its isolated primary group"
     [ "$(id -nG "$ENGINE_BUILDER_USER")" = "$ENGINE_BUILDER_GROUP" ] \
         || fail "$ENGINE_BUILDER_USER has unexpected supplementary groups"
+}
+
+ensure_runtime_identities() {
+    [ -x /usr/bin/sudo ] && [ -x /usr/sbin/visudo ] \
+        || fail "sudo and visudo are required for the isolated Telegram control boundary"
+    getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || groupadd --system "$RUNTIME_GROUP"
+    ensure_engine_builder_identity
     getent group "$CONTROLS_GROUP" >/dev/null 2>&1 \
         || groupadd --system "$CONTROLS_GROUP"
     if ! id -u "$CONTROLS_USER" >/dev/null 2>&1; then
@@ -729,7 +733,8 @@ git_fetch() {
         GIT_CONFIG_GLOBAL="$config_file" \
         GIT_TERMINAL_PROMPT=0 \
         "${GIT_COMMAND[@]}" "$@" || status=$?
-        rm -f "$config_file"
+        rm -f "$config_file" \
+            || fail "cannot remove the authenticated Git configuration"
         return "$status"
     else
         "${GIT_ENV[@]}" GIT_TERMINAL_PROMPT=0 "${GIT_COMMAND[@]}" "$@"
@@ -746,31 +751,20 @@ install_mode() {
     . deploy/lib_sleeves.sh
     lm_load_sleeve_toggles
     resolve_stop_first
+    verify_prefetched_deploy_inputs "$EXPECTED_COMMIT" source
     require_quiescent
     run_phase persist-install-boot-fence disable_rollout_units_for_boot_fence
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
     require_clean_checkout_at "$installed_head" "install"
 
-    if safe_git remote get-url "$REMOTE" >/dev/null 2>&1; then
-        safe_git remote set-url "$REMOTE" "$REPO_URL"
-    else
-        safe_git remote add "$REMOTE" "$REPO_URL"
-    fi
-    run_phase fetch-exact-commit \
-        git_fetch fetch "$REMOTE" "refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH"
-    safe_git cat-file -e "$EXPECTED_COMMIT^{commit}" 2>/dev/null \
-        || fail "expected commit is unavailable"
-    safe_git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH" \
-        || fail "expected commit is not on $REMOTE/$BRANCH"
-    safe_git checkout -B "$BRANCH" "$EXPECTED_COMMIT"
+    safe_git checkout -B "$BRANCH" "$EXPECTED_COMMIT" \
+        || fail "cannot select the prefetched exact commit"
     require_clean_head
+    verify_prefetched_deploy_inputs "$EXPECTED_COMMIT" checkout
     unset GITHUB_TOKEN
 
-    [ -x .venv/bin/python ] || python3 -m venv .venv
+    run_phase install-locked-dependencies install_python_environment
     PYTHON=.venv/bin/python
-    run_phase install-locked-dependencies \
-        "$PYTHON" -m pip install --disable-pip-version-check --no-deps \
-        --only-binary=:all: -r requirements.lock
     # No lint/type/test phase here: CI runs scripts/dev.sh lint+types+test on
     # every push to main, and the ancestor check above proves this commit is on
     # main. Re-running them with the fleet stopped only lengthens the outage.
@@ -885,6 +879,10 @@ ENGINE_RUST_TOOLCHAIN=1.90.0
 ENGINE_BUILDER_STATE=/var/lib/liquidity-migration-builder
 ENGINE_BUILDER_CARGO_HOME="$ENGINE_BUILDER_STATE/cargo-home"
 ENGINE_BUILDER_TARGET_DIR="$ENGINE_BUILDER_STATE/target"
+PYTHON_PREFETCH_VENV="$ENGINE_BUILDER_STATE/python-prefetch-venv"
+PYTHON_WHEEL_CACHE="$ENGINE_BUILDER_STATE/python-wheels"
+DEPLOY_VENV_STAGING_ROOT="$REPO_DIR/venv"
+DEPLOY_VENV_STAGING=""
 ENGINE_BINARY=/opt/liquidity-migration-engine/bin/engine
 ENGINE_LAUNCHER=/opt/liquidity-migration-engine/bin/run-authorized-runtime
 ENGINE_CONTROL_HELPER=/opt/liquidity-migration-engine/bin/telegram-control-helper
@@ -898,6 +896,13 @@ ENGINE_ENVIRONMENT=/etc/liquidity-migration/engine.env
 ENGINE_MAINNET_ENVIRONMENT=/etc/liquidity-migration/engine-mainnet.env
 ENGINE_MAINNET_CONFIG=/etc/liquidity-migration/engine-mainnet.toml
 ENGINE_CANDIDATE_BINARY="$ENGINE_BUILDER_TARGET_DIR/release/engine"
+ENGINE_PREFETCHED_COMMIT=""
+ENGINE_PREFETCHED_DIGEST=""
+PYTHON_PREFETCHED_LOCK_DIGEST=""
+PYTHON_PREFETCHED_WHEEL_DIGEST=""
+DEPLOY_PREFETCHED_COMMIT=""
+DEPLOY_PREFETCHED_REMOTE_TIP=""
+ENGINE_ACTIVE_BUILDER_UNIT=""
 
 # The single arming switch: REAL_MONEY=true in the mainnet credential file,
 # written by the owner's own hand next to the live API key. No file, or any
@@ -1184,12 +1189,104 @@ require_pinned_engine_toolchain() {
         || fail "pinned Rust cargo cannot run for $ENGINE_RUST_TOOLCHAIN"
 }
 
-# Compile an exact commit in the isolated build clone. Rollout reaches this
-# only through stopped installation after the fleet is quiescent.
+stop_active_engine_builder_unit() {
+    local unit="$ENGINE_ACTIVE_BUILDER_UNIT"
+    [ -n "$unit" ] || return 0
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        return 1
+    fi
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    ENGINE_ACTIVE_BUILDER_UNIT=""
+}
+
+stop_stale_engine_builder_units() {
+    local rows unit
+    rows="$(
+        systemctl list-units 'liquidity-migration-engine-*.service' \
+            --all --no-legend --no-pager --plain 2>/dev/null
+    )" || fail "cannot enumerate transient builder units"
+    while IFS= read -r unit; do
+        unit="${unit%% *}"
+        case "$unit" in
+            liquidity-migration-engine-fetch-[0-9]*-[0-9]*.service|\
+            liquidity-migration-engine-build-[0-9]*-[0-9]*.service|\
+            liquidity-migration-engine-python-fetch-[0-9]*-[0-9]*.service) ;;
+            *) continue ;;
+        esac
+        if ! systemctl stop "$unit" 2>/dev/null \
+            && systemctl is-active --quiet "$unit" 2>/dev/null; then
+            fail "cannot stop stale transient builder unit $unit"
+        fi
+        ! systemctl is-active --quiet "$unit" 2>/dev/null \
+            || fail "stale transient builder unit remained active: $unit"
+        systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    done <<< "$rows"
+}
+
+run_engine_builder_step() {
+    local step="$1" command status=0 unit
+    local -a network_boundary=()
+    case "$step" in
+        fetch)
+            command='cd /opt/engine-build/engine && exec /opt/rust/cargo/bin/cargo fetch --locked'
+            ;;
+        build)
+            network_boundary+=(
+                --property="PrivateNetwork=true"
+                --property="RestrictAddressFamilies=AF_UNIX"
+            )
+            command='cd /opt/engine-build/engine && exec /usr/bin/nice -n 19 /opt/rust/cargo/bin/cargo build --release --locked --offline -j 1'
+            ;;
+        python-fetch)
+            command='/usr/bin/python3 -m venv /var/lib/liquidity-migration-builder/python-prefetch-venv && exec /var/lib/liquidity-migration-builder/python-prefetch-venv/bin/python -m pip download --disable-pip-version-check --no-deps --no-cache-dir --only-binary=:all: --dest /var/lib/liquidity-migration-builder/python-wheels -r /opt/engine-build/requirements.lock'
+            ;;
+        *) fail "invalid engine builder step: $step" ;;
+    esac
+    [ -z "$ENGINE_ACTIVE_BUILDER_UNIT" ] \
+        || fail "another transient builder unit is still tracked: $ENGINE_ACTIVE_BUILDER_UNIT"
+    unit="liquidity-migration-engine-$step-$$-$RANDOM"
+    ENGINE_ACTIVE_BUILDER_UNIT="$unit"
+    systemd-run --quiet --wait --pipe --collect --service-type=exec \
+        --unit="$unit" \
+        --property="Restart=no" \
+        --property="KillMode=control-group" \
+        --property="RuntimeMaxSec=45m" \
+        --property="TimeoutStopSec=30s" \
+        --property="NoNewPrivileges=true" \
+        --property="PrivateTmp=true" \
+        --property="ProtectProc=invisible" \
+        --property="ProcSubset=pid" \
+        --property="ProtectSystem=strict" \
+        --property="ProtectHome=true" \
+        --property="ReadOnlyPaths=$ENGINE_BUILD_DIR $ENGINE_TOOLCHAIN_DIR" \
+        --property="ReadWritePaths=$ENGINE_BUILDER_STATE" \
+        --property="UMask=0077" \
+        "${network_boundary[@]}" \
+        /usr/sbin/runuser -u "$ENGINE_BUILDER_USER" -- \
+            /usr/bin/env -i \
+                HOME=/nonexistent \
+                PATH="$ENGINE_TOOLCHAIN_DIR/cargo/bin:/usr/bin:/bin" \
+                CARGO_HOME="$ENGINE_BUILDER_CARGO_HOME" \
+                CARGO_TARGET_DIR="$ENGINE_BUILDER_TARGET_DIR" \
+                RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup" \
+                RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN" \
+                RUST_BACKTRACE=1 \
+                /bin/sh -c "$command" \
+        || status=$?
+    stop_active_engine_builder_unit \
+        || fail "cannot stop transient builder unit $unit"
+    return "$status"
+}
+
+# Compile an exact commit in the isolated build clone while the current fleet
+# remains live. Stopped installation only consumes the bound candidate.
 compile_engine_commit() {
     local commit="$1"
-    local cargo="$ENGINE_TOOLCHAIN_DIR/cargo/bin/cargo"
-    local built dirty candidate_real expected_candidate_real status=0
+    local built dirty candidate_digest candidate_real expected_candidate_real status=0
+    ENGINE_PREFETCHED_COMMIT=""
+    ENGINE_PREFETCHED_DIGEST=""
+    ensure_engine_builder_identity
     require_pinned_engine_toolchain
     if [ ! -d "$ENGINE_BUILD_DIR/.git" ]; then
         "${GIT_ENV[@]}" /usr/bin/git init --quiet "$ENGINE_BUILD_DIR" \
@@ -1223,41 +1320,26 @@ compile_engine_commit() {
     [ "$(readlink -f "$ENGINE_BUILDER_STATE")" = "$ENGINE_BUILDER_STATE" ] \
         && [ ! -L "$ENGINE_BUILDER_STATE" ] \
         || fail "engine builder state path is linked or escapes its fixed root"
-    rm -rf -- "$ENGINE_BUILDER_CARGO_HOME" "$ENGINE_BUILDER_TARGET_DIR"
+    rm -rf -- "$ENGINE_BUILDER_CARGO_HOME" "$ENGINE_BUILDER_TARGET_DIR" \
+        || fail "cannot clear disposable Rust builder roots"
     install -d -o "$ENGINE_BUILDER_USER" -g "$ENGINE_BUILDER_GROUP" -m 0700 \
         "$ENGINE_BUILDER_CARGO_HOME" "$ENGINE_BUILDER_TARGET_DIR" \
         || fail "cannot prepare disposable builder output roots"
-    # The transient cgroup ensures a build.rs child cannot daemonize past the
-    # build and race artifact staging. runuser is retained as an explicit,
-    # auditable UID boundary inside the root-started sandbox.
-    if systemd-run --quiet --wait --pipe --collect --service-type=exec \
-        --unit="liquidity-migration-engine-build-$$-$RANDOM" \
-        --property="KillMode=control-group" \
-        --property="NoNewPrivileges=true" \
-        --property="PrivateTmp=true" \
-        --property="ProtectProc=invisible" \
-        --property="ProcSubset=pid" \
-        --property="ProtectSystem=strict" \
-        --property="ProtectHome=true" \
-        --property="ReadOnlyPaths=$ENGINE_BUILD_DIR $ENGINE_TOOLCHAIN_DIR" \
-        --property="ReadWritePaths=$ENGINE_BUILDER_STATE" \
-        --property="UMask=0077" \
-        /usr/sbin/runuser -u "$ENGINE_BUILDER_USER" -- \
-            /usr/bin/env -i \
-                HOME=/nonexistent \
-                PATH="$ENGINE_TOOLCHAIN_DIR/cargo/bin:/usr/bin:/bin" \
-                CARGO_HOME="$ENGINE_BUILDER_CARGO_HOME" \
-                CARGO_TARGET_DIR="$ENGINE_BUILDER_TARGET_DIR" \
-                RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup" \
-                RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN" \
-                RUST_BACKTRACE=1 \
-                /bin/sh -c \
-                    'cd /opt/engine-build/engine && exec /usr/bin/nice -n 19 /opt/rust/cargo/bin/cargo build --release --locked -j 1'; then
+    # Dependency archives are fetched while network access is available, then
+    # proc macros and build.rs execute offline inside a private network. The
+    # transient cgroup prevents a child from surviving artifact staging.
+    if run_engine_builder_step fetch; then
         status=0
     else
         status=$?
     fi
-    [ "$status" -eq 0 ] || fail "locked release engine build failed (status $status)"
+    [ "$status" -eq 0 ] || fail "locked engine dependency fetch failed (status $status)"
+    if run_engine_builder_step build; then
+        status=0
+    else
+        status=$?
+    fi
+    [ "$status" -eq 0 ] || fail "locked offline release engine build failed (status $status)"
     built="$(engine_git rev-parse HEAD)" || fail "cannot re-read engine source HEAD"
     dirty="$(engine_git status --porcelain=v1 --untracked-files=all)" \
         || fail "cannot re-inspect engine source after compilation"
@@ -1277,6 +1359,308 @@ compile_engine_commit() {
         && [ "$(stat -c %G "$ENGINE_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_GROUP" ] \
         && [ "$(stat -c %h "$ENGINE_CANDIDATE_BINARY")" -eq 1 ] \
         || fail "engine candidate is linked, outside its target root, or not builder-owned"
+    candidate_digest="$(sha256sum "$ENGINE_CANDIDATE_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest the prefetched engine candidate"
+    [[ "$candidate_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "prefetched engine candidate digest is invalid"
+    ENGINE_PREFETCHED_COMMIT="$commit"
+    ENGINE_PREFETCHED_DIGEST="$candidate_digest"
+    printf 'engine-prefetch-ok commit=%s sha256=%s binary=%s\n' \
+        "$commit" "$candidate_digest" "$ENGINE_CANDIDATE_BINARY"
+}
+
+verify_prefetched_engine_candidate() {
+    local commit="$1"
+    local actual_digest built candidate_real dirty expected_candidate_real
+    [ "$ENGINE_PREFETCHED_COMMIT" = "$commit" ] \
+        || fail "engine candidate was not prefetched for commit $commit"
+    [[ "$ENGINE_PREFETCHED_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "prefetched engine candidate has no valid digest binding"
+    built="$(engine_git rev-parse HEAD)" \
+        || fail "cannot read prefetched engine source HEAD"
+    [ "$built" = "$commit" ] \
+        || fail "prefetched engine source is $built, not $commit"
+    dirty="$(engine_git status --porcelain=v1 --untracked-files=all)" \
+        || fail "cannot inspect prefetched engine source"
+    [ -z "$dirty" ] || fail "prefetched engine source is dirty"
+    [ -z "$(find "$ENGINE_BUILD_DIR" ! -user root -print -quit)" ] \
+        && [ -z "$(find "$ENGINE_BUILD_DIR" ! -type l -perm /222 -print -quit)" ] \
+        || fail "prefetched engine source ownership or write permissions changed"
+    [ -f "$ENGINE_CANDIDATE_BINARY" ] && [ ! -L "$ENGINE_CANDIDATE_BINARY" ] \
+        && [ -x "$ENGINE_CANDIDATE_BINARY" ] \
+        || fail "prefetched engine candidate is not a regular executable"
+    candidate_real="$(readlink -f "$ENGINE_CANDIDATE_BINARY")" \
+        || fail "cannot resolve prefetched engine candidate"
+    expected_candidate_real="$ENGINE_BUILDER_TARGET_DIR/release/engine"
+    [ "$candidate_real" = "$expected_candidate_real" ] \
+        && [ "$(stat -c %U "$ENGINE_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_USER" ] \
+        && [ "$(stat -c %G "$ENGINE_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_GROUP" ] \
+        && [ "$(stat -c %h "$ENGINE_CANDIDATE_BINARY")" -eq 1 ] \
+        || fail "prefetched engine candidate moved, linked, or changed owner"
+    actual_digest="$(sha256sum "$ENGINE_CANDIDATE_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest the prefetched engine candidate"
+    [ "$actual_digest" = "$ENGINE_PREFETCHED_DIGEST" ] \
+        || fail "prefetched engine candidate changed before stopped installation"
+}
+
+python_wheel_cache_digest() {
+    local lock_file="$1" builder_uid builder_gid
+    [ -d "$PYTHON_WHEEL_CACHE" ] && [ ! -L "$PYTHON_WHEEL_CACHE" ] \
+        && [ "$(readlink -f "$PYTHON_WHEEL_CACHE")" = "$PYTHON_WHEEL_CACHE" ] \
+        && [ "$(stat -c %U "$PYTHON_WHEEL_CACHE")" = "$ENGINE_BUILDER_USER" ] \
+        && [ "$(stat -c %G "$PYTHON_WHEEL_CACHE")" = "$ENGINE_BUILDER_GROUP" ] \
+        && [ "$(stat -c %a "$PYTHON_WHEEL_CACHE")" = 700 ] \
+        || fail "Python wheel cache path, owner, or mode changed"
+    builder_uid="$(id -u "$ENGINE_BUILDER_USER")" \
+        || fail "cannot resolve engine builder uid"
+    builder_gid="$(id -g "$ENGINE_BUILDER_USER")" \
+        || fail "cannot resolve engine builder gid"
+    /usr/bin/python3 - "$PYTHON_WHEEL_CACHE" "$lock_file" \
+        "$builder_uid" "$builder_gid" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+lock = Path(sys.argv[2])
+expected_uid = int(sys.argv[3])
+expected_gid = int(sys.argv[4])
+requirements = [
+    line.strip()
+    for line in lock.read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+wheels = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
+if not requirements or len(wheels) != len(requirements):
+    raise SystemExit(
+        f"wheel cache count {len(wheels)} does not match locked requirement count {len(requirements)}"
+    )
+
+manifest = hashlib.sha256()
+for wheel in wheels:
+    metadata = os.lstat(wheel)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != expected_uid
+        or metadata.st_gid != expected_gid
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or wheel.suffix.lower() != ".whl"
+    ):
+        raise SystemExit(f"unsafe wheel cache entry: {wheel.name}")
+    content = hashlib.sha256()
+    with wheel.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            content.update(chunk)
+    manifest.update(wheel.name.encode("utf-8"))
+    manifest.update(b"\0")
+    manifest.update(content.digest())
+print(manifest.hexdigest())
+PY
+}
+
+prefetch_python_dependencies() {
+    local lock_digest status=0 wheel_digest
+    PYTHON_PREFETCHED_LOCK_DIGEST=""
+    PYTHON_PREFETCHED_WHEEL_DIGEST=""
+    rm -rf -- "$PYTHON_PREFETCH_VENV" "$PYTHON_WHEEL_CACHE" \
+        || fail "cannot clear disposable Python prefetch roots"
+    install -d -o "$ENGINE_BUILDER_USER" -g "$ENGINE_BUILDER_GROUP" -m 0700 \
+        "$PYTHON_WHEEL_CACHE" \
+        || fail "cannot prepare isolated Python wheel cache"
+    if run_engine_builder_step python-fetch; then
+        status=0
+    else
+        status=$?
+    fi
+    [ "$status" -eq 0 ] \
+        || fail "locked Python dependency fetch failed (status $status)"
+    lock_digest="$(sha256sum "$ENGINE_BUILD_DIR/requirements.lock" | awk '{print $1}')" \
+        || fail "cannot digest prefetched Python requirement lock"
+    wheel_digest="$(python_wheel_cache_digest "$ENGINE_BUILD_DIR/requirements.lock")" \
+        || fail "cannot validate prefetched Python wheel cache"
+    [[ "$lock_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$wheel_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "prefetched Python dependency digest is invalid"
+    PYTHON_PREFETCHED_LOCK_DIGEST="$lock_digest"
+    PYTHON_PREFETCHED_WHEEL_DIGEST="$wheel_digest"
+    printf 'python-prefetch-ok lock_sha256=%s wheels_sha256=%s directory=%s\n' \
+        "$lock_digest" "$wheel_digest" "$PYTHON_WHEEL_CACHE"
+}
+
+verify_prefetched_python_dependencies() {
+    local lock_file="$1" lock_digest wheel_digest
+    [[ "$PYTHON_PREFETCHED_LOCK_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$PYTHON_PREFETCHED_WHEEL_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "Python dependencies were not bound during prefetch"
+    [ -f "$lock_file" ] && [ ! -L "$lock_file" ] \
+        || fail "prefetched Python requirement lock is missing or linked: $lock_file"
+    lock_digest="$(sha256sum "$lock_file" | awk '{print $1}')" \
+        || fail "cannot digest Python requirement lock: $lock_file"
+    [ "$lock_digest" = "$PYTHON_PREFETCHED_LOCK_DIGEST" ] \
+        || fail "Python requirement lock changed after prefetch"
+    wheel_digest="$(python_wheel_cache_digest "$lock_file")" \
+        || fail "cannot revalidate prefetched Python wheel cache"
+    [ "$wheel_digest" = "$PYTHON_PREFETCHED_WHEEL_DIGEST" ] \
+        || fail "prefetched Python wheel cache changed before offline installation"
+}
+
+verify_prefetched_deploy_inputs() {
+    local commit="$1" view="$2" current_remote_tip lock_file
+    [ "$DEPLOY_PREFETCHED_COMMIT" = "$commit" ] \
+        || fail "deployment inputs were not prefetched for commit $commit"
+    [[ "$DEPLOY_PREFETCHED_REMOTE_TIP" =~ ^[0-9a-f]{40}$ ]] \
+        || fail "prefetched remote branch has no valid commit binding"
+    current_remote_tip="$(safe_git rev-parse "$REMOTE/$BRANCH")" \
+        || fail "cannot read the cached remote branch"
+    [ "$current_remote_tip" = "$DEPLOY_PREFETCHED_REMOTE_TIP" ] \
+        || fail "cached remote branch changed after prefetch"
+    [ "$(safe_git cat-file -t "$commit" 2>/dev/null || true)" = commit ] \
+        || fail "prefetched deploy commit is unavailable"
+    verify_prefetched_engine_candidate "$commit"
+    case "$view" in
+        source) lock_file="$ENGINE_BUILD_DIR/requirements.lock" ;;
+        checkout)
+            [ "$(safe_git rev-parse HEAD)" = "$commit" ] \
+                || fail "checkout does not match prefetched deploy commit"
+            lock_file="$REPO_DIR/requirements.lock"
+            ;;
+        *) fail "invalid prefetched deploy input view: $view" ;;
+    esac
+    verify_prefetched_python_dependencies "$lock_file"
+}
+
+secure_venv_directory() {
+    local path="$1" mode
+    [ -d "$path" ] && [ ! -L "$path" ] \
+        && [ "$(readlink -f "$path")" = "$path" ] \
+        && [ "$(stat -c %u "$path")" -eq 0 ] \
+        && [ "$(stat -c %g "$path")" -eq 0 ] \
+        || return 1
+    mode="$(stat -c %a "$path")" || return 1
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 ))
+}
+
+remove_deploy_venv_staging() {
+    local path="$DEPLOY_VENV_STAGING"
+    [ -n "$path" ] || return 0
+    [ "${path%/*}" = "$DEPLOY_VENV_STAGING_ROOT" ] \
+        && [[ "${path##*/}" == deploy.* ]] \
+        && [ ! -L "$path" ] \
+        || return 1
+    if [ -e "$path" ]; then
+        secure_venv_directory "$path" || return 1
+        rm -rf -- "$path" || return 1
+    fi
+    DEPLOY_VENV_STAGING=""
+}
+
+install_python_environment() {
+    local deployed="$REPO_DIR/.venv" staging unsafe
+    [ -z "$DEPLOY_VENV_STAGING" ] \
+        || fail "a Python environment staging generation is already tracked"
+    if [ -e "$deployed" ] || [ -L "$deployed" ]; then
+        secure_venv_directory "$deployed" \
+            || fail "deployed Python environment is linked, unowned, or writable"
+    fi
+    [ ! -L "$DEPLOY_VENV_STAGING_ROOT" ] \
+        || fail "Python environment staging root is linked"
+    install -d -o root -g root -m 0700 "$DEPLOY_VENV_STAGING_ROOT" \
+        || fail "cannot prepare Python environment staging root"
+    secure_venv_directory "$DEPLOY_VENV_STAGING_ROOT" \
+        || fail "Python environment staging root is unsafe"
+    staging="$(mktemp -d "$DEPLOY_VENV_STAGING_ROOT/deploy.XXXXXX")" \
+        || fail "cannot create Python environment staging generation"
+    DEPLOY_VENV_STAGING="$staging"
+    secure_venv_directory "$staging" \
+        || fail "new Python environment staging generation is unsafe"
+    /usr/bin/python3 -m venv "$staging" \
+        || fail "cannot create a fresh Python environment"
+    "$staging/bin/python" -m pip install --disable-pip-version-check --no-deps \
+        --no-cache-dir --no-index --find-links "$PYTHON_WHEEL_CACHE" \
+        --only-binary=:all: -r "$REPO_DIR/requirements.lock" \
+        || fail "cannot install locked dependencies from the offline wheel cache"
+    "$staging/bin/python" - "$REPO_DIR/requirements.lock" <<'PY'
+from importlib.metadata import distributions
+from pathlib import Path
+import re
+import sys
+
+normalize = lambda value: re.sub(r"[-_.]+", "-", value).lower()
+expected = {}
+for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split("==")
+    if len(parts) != 2 or not all(parts):
+        raise SystemExit(f"non-exact requirement in deployment lock: {line}")
+    name = normalize(parts[0])
+    if name in expected:
+        raise SystemExit(f"duplicate requirement in deployment lock: {name}")
+    expected[name] = parts[1]
+
+actual = {}
+for distribution in distributions():
+    name = normalize(distribution.metadata["Name"])
+    if name in {"pip", "setuptools"}:
+        continue
+    if name in actual:
+        raise SystemExit(f"duplicate installed distribution: {name}")
+    actual[name] = distribution.version
+if actual != expected:
+    missing = sorted(expected.keys() - actual.keys())
+    extra = sorted(actual.keys() - expected.keys())
+    wrong = sorted(
+        name for name in expected.keys() & actual.keys() if expected[name] != actual[name]
+    )
+    raise SystemExit(
+        f"fresh environment differs from lock: missing={missing} extra={extra} wrong={wrong}"
+    )
+PY
+    [ "$?" -eq 0 ] \
+        || fail "fresh Python environment does not exactly match the deployment lock"
+    unsafe="$(
+        find "$staging" -xdev -mindepth 1 \
+            \( ! -type l -a \( ! -uid 0 -o -perm /022 \
+                -o \( ! -type f -a ! -type d \) \) \) \
+            -print -quit
+    )" || fail "cannot inspect the fresh Python environment"
+    [ -z "$unsafe" ] \
+        || fail "fresh Python environment contains an unsafe entry: $unsafe"
+    /usr/bin/python3 - "$staging" "$deployed" <<'PY'
+import ctypes
+import os
+import sys
+
+source = os.fsencode(sys.argv[1])
+target = os.fsencode(sys.argv[2])
+AT_FDCWD = -100
+RENAME_EXCHANGE = 2
+if os.path.lexists(target):
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(AT_FDCWD, source, AT_FDCWD, target, RENAME_EXCHANGE) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), sys.argv[2])
+else:
+    os.rename(source, target)
+directory = os.open(os.path.dirname(target), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+    [ "$?" -eq 0 ] \
+        || fail "cannot atomically install the fresh Python environment"
+    secure_venv_directory "$deployed" && [ -x "$deployed/bin/python" ] \
+        || fail "atomically installed Python environment is unsafe or incomplete"
+    remove_deploy_venv_staging \
+        || fail "cannot remove the replaced Python environment generation"
 }
 
 # Prove the dedicated bot identity has exactly the four reviewed commands and
@@ -1303,9 +1687,8 @@ verify_controls_sudo_policy() {
         || fail "effective Telegram controls sudo policy is not the exact four-command boundary"
 }
 
-# Build and atomically install the exact locked release while the managed
-# units are stopped. Any compiler, fetch, build, install, or digest failure
-# aborts the deployment.
+# Atomically install the exact candidate compiled during prefetch. The stopped
+# window performs no Rust compilation or dependency fetch.
 build_engine() {
     local commit candidate_digest candidate_after digest launcher_digest
     local helper_digest sudoers_digest bot_digest helper_source sudoers_source
@@ -1313,7 +1696,7 @@ build_engine() {
     local sudoers_source_after launcher_source marker_tmp
     commit="$(safe_git rev-parse HEAD)" || fail "cannot read installed commit for engine build"
     [ "$commit" = "$EXPECTED_COMMIT" ] || fail "engine build commit is not the requested commit"
-    compile_engine_commit "$commit"
+    verify_prefetched_engine_candidate "$commit"
     launcher_source="$REPO_DIR/deploy/run_authorized_runtime_trusted.sh"
     helper_source="$REPO_DIR/deploy/telegram_control_helper.sh"
     sudoers_source="$REPO_DIR/deploy/liquidity-controls.sudoers"
@@ -1348,8 +1731,7 @@ build_engine() {
     for source in "$ENGINE_CONTROL_HELPER" "$CONTROLS_SUDOERS"; do
         [ ! -L "$source" ] || fail "installed control boundary path is linked: $source"
     done
-    candidate_digest="$(sha256sum "$ENGINE_CANDIDATE_BINARY" | awk '{print $1}')" \
-        || fail "cannot digest the engine candidate before staging"
+    candidate_digest="$ENGINE_PREFETCHED_DIGEST"
     helper_source_before="$(sha256sum "$helper_source" | awk '{print $1}')" \
         || fail "cannot digest the Telegram control helper source"
     sudoers_source_before="$(sha256sum "$sudoers_source" | awk '{print $1}')" \
@@ -2675,6 +3057,28 @@ cleanup_notice() {
     printf '%s\n' "$*" >&2 2>/dev/null || true
 }
 
+deploy_cancel() {
+    local signal="$1" status="$2"
+    : "$signal"
+    exit "$status"
+}
+
+deploy_cleanup() {
+    local status="$?"
+    trap - EXIT INT TERM HUP PIPE
+    trap '' INT TERM HUP PIPE
+    set +e
+    if ! stop_active_engine_builder_unit; then
+        cleanup_notice "cannot stop tracked transient builder unit=$ENGINE_ACTIVE_BUILDER_UNIT"
+        [ "$status" -ne 0 ] || status=1
+    fi
+    if ! remove_deploy_venv_staging; then
+        cleanup_notice "cannot remove Python environment staging generation=$DEPLOY_VENV_STAGING"
+        [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+}
+
 rollout_cancel() {
     local signal="$1" status="$2"
     ROLLOUT_CANCELLATION_SIGNAL="$signal"
@@ -2689,10 +3093,22 @@ rollout_cleanup() {
     # fail-closed handoff.
     trap '' INT TERM HUP PIPE
     set +e
-    if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]; then
+    if ! stop_active_engine_builder_unit; then
+        cleanup_notice "cannot stop tracked transient builder unit=$ENGINE_ACTIVE_BUILDER_UNIT"
+        [ "$status" -ne 0 ] || status=1
+    fi
+    if ! remove_deploy_venv_staging; then
+        cleanup_notice "cannot remove Python environment staging generation=$DEPLOY_VENV_STAGING"
+        [ "$status" -ne 0 ] || status=1
+    fi
+    if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ] \
+        && [ "$ROLLOUT_STOPPED" -eq 1 ]; then
         cleanup_notice \
             "rollout canceled signal=$cancellation_signal; forcing the managed fleet stopped"
         stop_all_rollout_units_best_effort || true
+    elif [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]; then
+        cleanup_notice \
+            "rollout canceled signal=$cancellation_signal before fleet stop; incumbent topology untouched"
     elif [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ] \
         && [ "$ROLLOUT_COMPLETE" -eq 0 ]; then
         if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]; then
@@ -2716,21 +3132,38 @@ rollout_cleanup() {
 
 prefetch_rollout_target() {
     require_trusted_checkout
-    local installed_head
+    local installed_head remote_tip
+    DEPLOY_PREFETCHED_COMMIT=""
+    DEPLOY_PREFETCHED_REMOTE_TIP=""
+    stop_stale_engine_builder_units
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
     require_clean_checkout_at "$installed_head" "rollout prefetch"
     if safe_git remote get-url "$REMOTE" >/dev/null 2>&1; then
-        safe_git remote set-url "$REMOTE" "$REPO_URL"
+        safe_git remote set-url "$REMOTE" "$REPO_URL" \
+            || fail "cannot set the rollout prefetch remote"
     else
-        safe_git remote add "$REMOTE" "$REPO_URL"
+        safe_git remote add "$REMOTE" "$REPO_URL" \
+            || fail "cannot add the rollout prefetch remote"
     fi
-    git_fetch fetch "$REMOTE" "refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH"
+    git_fetch fetch "$REMOTE" "refs/heads/$BRANCH:refs/remotes/$REMOTE/$BRANCH" \
+        || fail "cannot fetch the rollout target branch"
     safe_git cat-file -e "$EXPECTED_COMMIT^{commit}" 2>/dev/null \
         || fail "expected commit is unavailable"
     safe_git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH" \
         || fail "expected commit is not on $REMOTE/$BRANCH"
+    remote_tip="$(safe_git rev-parse "$REMOTE/$BRANCH")" \
+        || fail "cannot bind the fetched target branch"
+    [[ "$remote_tip" =~ ^[0-9a-f]{40}$ ]] \
+        || fail "fetched target branch binding is invalid"
     require_pinned_engine_toolchain
+    compile_engine_commit "$EXPECTED_COMMIT"
+    prefetch_python_dependencies
+    [ "$(safe_git rev-parse "$REMOTE/$BRANCH")" = "$remote_tip" ] \
+        || fail "cached target branch changed during prefetch"
     require_clean_checkout_at "$installed_head" "rollout prefetch completion"
+    DEPLOY_PREFETCHED_COMMIT="$EXPECTED_COMMIT"
+    DEPLOY_PREFETCHED_REMOTE_TIP="$remote_tip"
+    verify_prefetched_deploy_inputs "$EXPECTED_COMMIT" source
 }
 
 record_installed_profile() {
@@ -2744,6 +3177,7 @@ record_installed_profile() {
 # "operational" whatever the operator asked for.
 staged_mode() {
     require_rollout_for_funded_generation_change staged
+    run_strict_phase staged-target-prefetch prefetch_rollout_target
     run_strict_phase staged-install install_mode
     run_strict_phase record-installed-profile record_installed_profile
     run_strict_phase staged-activate-and-verify activate_mode
@@ -2790,9 +3224,18 @@ rollout_mode() {
     printf 'rollout-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 
+trap deploy_cleanup EXIT
+trap 'deploy_cancel INT 130' INT
+trap 'deploy_cancel TERM 143' TERM
+trap 'deploy_cancel HUP 129' HUP
+trap 'deploy_cancel PIPE 141' PIPE
 acquire_maintenance_locks
 case "$MODE" in
-    install) install_mode ;;
+    install)
+        require_rollout_for_funded_generation_change install
+        run_strict_phase install-target-prefetch prefetch_rollout_target
+        install_mode
+        ;;
     activate) activate_mode ;;
     staged) staged_mode ;;
     stop-mainnet) stop_mainnet_mode ;;

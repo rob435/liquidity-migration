@@ -65,12 +65,23 @@ Producer units require:
 
 They explicitly reject venue keys and `REAL_MONEY`. Liveness observers receive
 only a root-generated Telegram projection, never funded venue credentials.
+Producer source environments remain root-only mode `0600`. Their installed
+profile and candidate-universe projections are root-owned, runtime-group
+readable mode `0640`; the producer can verify those stable files but cannot
+rewrite the reviewed inputs.
 
 ## Release verification
 
 Install and rollout bind the checkout commit, release marker, binary SHA-256,
 engine heartbeat version, realm, and exact venue account ID. Cargo builds use
-the pinned toolchain and `--locked`; CI pins third-party action revisions.
+the pinned toolchain and `--locked`. Rollout compiles the exact target during
+prefetch while the incumbent fleet stays live. A locked network fetch populates
+the new isolated Cargo cache, then compilation runs offline in a private
+network. Stopped installation only revalidates and copies that commit- and
+digest-bound candidate. The target branch and exact-version Python wheels are
+also cached before quiescence. A deterministic manifest binds the downloaded
+wheel bytes to this rollout, and stopped installation uses `--no-index`. CI
+pins third-party action revisions.
 Release qualification also requires the configured Ubuntu workflow's Python
 checks, locked Rust tests, bounded optimized account-state soak, build, and
 binary smoke test to pass on the exact pushed commit; local Windows

@@ -34,7 +34,7 @@ _LOCK_CREATE_SUFFIX_BYTES = 16
 _LOCK_CREATE_ORPHAN_SECONDS = 600.0
 _LOCK_CREATE_SWEEP_CACHE: dict[
     str,
-    tuple[tuple[int, int, int], float | None],
+    tuple[tuple[int, int, int], float],
 ] = {}
 _LOCK_CREATE_SWEEP_GUARD = threading.Lock()
 
@@ -500,6 +500,11 @@ def _lock_create_orphan_removable(current: os.stat_result, *, cutoff: float) -> 
     )
 
 
+def _invalidate_lock_create_sweep_cache(lock_path: Path) -> None:
+    with _LOCK_CREATE_SWEEP_GUARD:
+        _LOCK_CREATE_SWEEP_CACHE.pop(str(lock_path), None)
+
+
 def _sweep_lock_create_orphans_if_directory_changed(
     *,
     lock_path: Path,
@@ -512,17 +517,19 @@ def _sweep_lock_create_orphans_if_directory_changed(
         now = time.time()
         cached = _LOCK_CREATE_SWEEP_CACHE.get(key)
         if cached is not None and cached[0] == signature:
-            next_sweep_at = cached[1]
-            if next_sweep_at is None or now <= next_sweep_at:
+            if now <= cached[1]:
                 return
         next_sweep_at = _cleanup_old_lock_create_orphans(
             directory_fd=directory_fd,
             lock_name=lock_path.name,
         )
-        # Cache the signature observed before scanning. If another process
-        # changes the directory during/after the scan, the next acquisition
-        # sees a different signature and scans again rather than missing it.
-        _LOCK_CREATE_SWEEP_CACHE[key] = (signature, next_sweep_at)
+        # Directory mtimes can be coarse enough for two changes to compare
+        # equal. Bound every clean result so an unseen alias is reconsidered
+        # when it could first be old enough to remove.
+        rescan_at = now + _LOCK_CREATE_ORPHAN_SECONDS
+        if next_sweep_at is not None:
+            rescan_at = min(rescan_at, next_sweep_at)
+        _LOCK_CREATE_SWEEP_CACHE[key] = (signature, rescan_at)
 
 
 def _close_registered_fd_while_guarded(fd: int) -> None:
@@ -560,6 +567,9 @@ def _open_registered_lock_fd(lock_path: Path) -> tuple[int, tuple[int, int]]:
                         )
                     except OSError as exc:
                         raise RuntimeError(f"cannot safely stage lock path {lock_path}: {exc}") from exc
+                    # The cached directory signature was captured before this
+                    # known mutation and may compare equal on a coarse clock.
+                    _invalidate_lock_create_sweep_cache(lock_path)
                     _ACTIVE_FLOCK_FDS.add(fd)
                     published = False
                     try:

@@ -606,6 +606,81 @@ def test_old_unpublished_alias_is_cleaned_when_canonical_already_exists(
     assert not alias.exists()
 
 
+def test_equal_directory_mtime_does_not_hide_old_unpublished_alias(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage._LOCK_CREATE_SWEEP_CACHE.clear()
+    lock_path = tmp_path / "coarse-mtime.lock"
+    real_open_directory = storage._open_lock_directory
+    fixed_mtime_ns: int | None = None
+
+    class FixedDirectoryMtime:
+        def __init__(self, current: os.stat_result, mtime_ns: int) -> None:
+            self._current = current
+            self.st_mtime_ns = mtime_ns
+
+        def __getattr__(self, name: str):
+            return getattr(self._current, name)
+
+    def open_with_fixed_mtime(path: Path):
+        nonlocal fixed_mtime_ns
+        directory_fd, directory = real_open_directory(path)
+        if fixed_mtime_ns is None:
+            fixed_mtime_ns = directory.st_mtime_ns
+        return directory_fd, FixedDirectoryMtime(directory, fixed_mtime_ns)
+
+    monkeypatch.setattr(storage, "_open_lock_directory", open_with_fixed_mtime)
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        pass
+    alias = tmp_path / f".{lock_path.name}.create-{'e' * 32}"
+    alias.touch(mode=0o600)
+    old_ts = time.time() - storage._LOCK_CREATE_ORPHAN_SECONDS - 1.0
+    os.utime(alias, (old_ts, old_ts))
+
+    with exclusive_file_lock(lock_path, poll_seconds=0.0):
+        pass
+
+    assert not alias.exists()
+
+
+def test_equal_directory_mtime_cache_expires_before_unseen_alias_can_be_stale(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage._LOCK_CREATE_SWEEP_CACHE.clear()
+    lock_path = tmp_path / "coarse-cache.lock"
+    base = time.time()
+    monkeypatch.setattr(storage.time, "time", lambda: base)
+    directory_fd, directory = storage._open_lock_directory(lock_path)
+    try:
+        storage._sweep_lock_create_orphans_if_directory_changed(
+            lock_path=lock_path,
+            directory_fd=directory_fd,
+            directory=directory,
+        )
+        alias = tmp_path / f".{lock_path.name}.create-{'9' * 32}"
+        alias.touch(mode=0o600)
+        os.utime(alias, (base, base))
+
+        monkeypatch.setattr(
+            storage.time,
+            "time",
+            lambda: base + storage._LOCK_CREATE_ORPHAN_SECONDS + 1.0,
+        )
+        storage._sweep_lock_create_orphans_if_directory_changed(
+            lock_path=lock_path,
+            directory_fd=directory_fd,
+            directory=directory,
+        )
+    finally:
+        os.close(directory_fd)
+        storage._LOCK_CREATE_SWEEP_CACHE.clear()
+
+    assert not alias.exists()
+
+
 def test_fresh_unpublished_alias_is_swept_when_cached_expiry_arrives(
     tmp_path: Path,
     monkeypatch,
