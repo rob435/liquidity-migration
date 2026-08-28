@@ -41,6 +41,21 @@ def _units() -> dict[str, str]:
     }
 
 
+def test_no_guard_ends_a_deploy_function_as_an_and_list() -> None:
+    """`check && fail ...` as a function's last statement returns the check's
+    own status, so a healthy check makes the function return 1 with nothing
+    printed. The funded liveness guard shipped that way and failed a rollout
+    precisely because the watchdog was well. Use `if check; then fail; fi`.
+    """
+    lines = DEPLOY.read_text(encoding="utf-8").splitlines()
+    offenders = [
+        index + 1
+        for index, line in enumerate(lines[:-1])
+        if "&& fail" in line and lines[index + 1].rstrip() == "}"
+    ]
+    assert not offenders, f"&& fail ends a function at line(s) {offenders}"
+
+
 def test_deployed_shell_entrypoints_are_executable() -> None:
     if os.name == "nt":
         return

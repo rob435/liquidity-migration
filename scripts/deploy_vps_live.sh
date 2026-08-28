@@ -3013,8 +3013,9 @@ activate_mode() {
         || fail "cannot enable the demo watchdog timer"
     systemctl start liquidity-migration-demo-liveness.service \
         || fail "the immediate demo liveness pass failed to start"
-    systemctl is-failed --quiet liquidity-migration-demo-liveness.service \
-        && fail "the immediate demo liveness pass failed"
+    if systemctl is-failed --quiet liquidity-migration-demo-liveness.service; then
+        fail "the immediate demo liveness pass failed"
+    fi
     systemctl enable --now liquidity-migration-telegram-controls.service \
         || fail "cannot start Telegram controls"
     systemctl enable --now liquidity-migration-llm-ledger.timer \
@@ -3116,8 +3117,9 @@ start_mainnet_fleet() {
         || fail "cannot enable the funded liveness timer"
     systemctl start "$MAINNET_LIVENESS_SERVICE" \
         || fail "the immediate funded liveness pass failed to start"
-    systemctl is-failed --quiet "$MAINNET_LIVENESS_SERVICE" \
-        && fail "the immediate funded liveness pass failed"
+    if systemctl is-failed --quiet "$MAINNET_LIVENESS_SERVICE"; then
+        fail "the immediate funded liveness pass failed"
+    fi
 }
 resolve_fail_safe_python() {
     local interpreter mode directory

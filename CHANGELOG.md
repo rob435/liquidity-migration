@@ -6,6 +6,14 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — A healthy funded watchdog no longer fails the rollout.**
+  `start_mainnet_fleet` ended with `systemctl is-failed --quiet ... && fail`.
+  A well funded liveness pass makes `is-failed` return non-zero, so that
+  and-list — the function's last statement — returned 1, and activation aborted
+  with no message at all. The guard now uses `if ... then fail`, as does the
+  demo check that was correct only by its position in the caller. A unit test
+  rejects any `&& fail` that ends a deploy function.
+
 - **2026-08-28 — Both liveness observers get the same cgroup memory
   visibility as the producers.** `scripts/runtime/check_fleet_liveness.py`
   imports Polars and runs as the demo and funded liveness units, which still
