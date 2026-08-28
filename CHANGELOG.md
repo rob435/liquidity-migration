@@ -39,7 +39,11 @@ edit STATE.md to match.
   own site-packages, so stale source-tree metadata cannot enter or reject the
   exact installed-distribution comparison. Telegram control-policy comparison
   also canonicalizes each command before sorting, making its exact four-command
-  proof independent of sudo's presentation order.
+  proof independent of sudo's presentation order. Deployment now also
+  reconciles legacy demo-engine environments with the committed exact account,
+  venue, and realm binding before the build. Missing bindings are appended
+  atomically while host-only dials are preserved; empty or conflicting bindings
+  abort without modifying the file.
 
 - **2026-08-28 — Exodus handoff uses the position actually abandoned.**
   A v7 pre-settlement fire now snapshots the fresh carry-attributed venue

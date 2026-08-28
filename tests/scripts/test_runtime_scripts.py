@@ -27,6 +27,12 @@ def _function(text: str, name: str, next_name: str) -> str:
     return text[text.index(f"{name}()") : text.index(f"{next_name}()")]
 
 
+def _python_heredoc(block: str) -> str:
+    match = re.search(r"<<'PY'\n(.*?)\nPY(?:\n|$)", block, re.DOTALL)
+    assert match is not None
+    return match.group(1)
+
+
 def _units() -> dict[str, str]:
     return {
         path.name: path.read_text(encoding="utf-8")
@@ -315,6 +321,124 @@ def test_demo_engine_template_has_an_exact_account_id_and_mainnet_requires_one()
     assert "EXPECTED_ENGINE_ACCOUNT_USER_ID=555899665" in demo
     assert "EXPECTED_ENGINE_ACCOUNT_USER_ID=" in mainnet
     assert "must set EXPECTED_ENGINE_ACCOUNT_USER_ID to the exact venue id" in DEPLOY.read_text(encoding="utf-8")
+
+
+def test_demo_engine_environment_reconciliation_is_atomic_conservative_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    block = _function(
+        deploy,
+        "reconcile_demo_engine_environment",
+        "prepare_demo_runtime_config",
+    )
+    program = _python_heredoc(block)
+    source = ROOT / "deploy" / "engine.env.template"
+
+    def write_target(path: Path, body: bytes) -> None:
+        path.write_bytes(body)
+        path.chmod(0o600)
+
+    def run(target: Path) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [sys.executable, "-", str(source), str(target)],
+            cwd=ROOT,
+            input=program.encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+
+    absent = tmp_path / "absent.env"
+    result = run(absent)
+    assert result.returncode == 0, result.stderr.decode()
+    assert absent.read_bytes() == source.read_bytes()
+    if os.name != "nt":
+        assert stat.S_IMODE(absent.stat().st_mode) == 0o600
+    assert absent.stat().st_nlink == 1
+
+    legacy = tmp_path / "legacy.env"
+    original = (
+        b"ENGINE_CONFIG_FILE=/etc/liquidity-migration/engine.toml\n"
+        b"LIVENESS_ENGINE_HEARTBEAT_FILE="
+        b"/var/lib/liquidity-migration-engine/heartbeat.json\n"
+        b"EXPECTED_ENGINE_VERSION=engine-core-0.1.0\n"
+        b"RUST_LOG=debug\n"
+        b"HOST_ONLY_DIAL=preserved\n"
+    )
+    write_target(legacy, original)
+    result = run(legacy)
+    assert result.returncode == 0, result.stderr.decode()
+    reconciled = legacy.read_bytes()
+    assert reconciled.startswith(original)
+    for assignment in (
+        b"EXPECTED_ENGINE_ACCOUNT_USER_ID=555899665\n",
+        b"EXPECTED_ENGINE_VENUE=bybit\n",
+        b"EXPECTED_ENGINE_REALM=demo\n",
+    ):
+        assert reconciled.count(assignment) == 1
+    assert b"EXPECTED_ENGINE_VERSION=engine-core-0.1.0\n" in reconciled
+    assert b"RUST_LOG=debug\n" in reconciled
+    assert b"HOST_ONLY_DIAL=preserved\n" in reconciled
+    before = (legacy.stat().st_ino, legacy.read_bytes())
+    result = run(legacy)
+    assert result.returncode == 0, result.stderr.decode()
+    assert (legacy.stat().st_ino, legacy.read_bytes()) == before
+    assert not list(tmp_path.glob(".*.env.*"))
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("EXPECTED_ENGINE_ACCOUNT_USER_ID", ""),
+        ("EXPECTED_ENGINE_ACCOUNT_USER_ID", "579580669"),
+        ("EXPECTED_ENGINE_VENUE", ""),
+        ("EXPECTED_ENGINE_VENUE", "mexc"),
+        ("EXPECTED_ENGINE_REALM", ""),
+        ("EXPECTED_ENGINE_REALM", "mainnet"),
+    ],
+)
+def test_demo_engine_environment_reconciliation_refuses_conflicting_identity(
+    tmp_path: Path,
+    key: str,
+    value: str,
+) -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    program = _python_heredoc(
+        _function(
+            deploy,
+            "reconcile_demo_engine_environment",
+            "prepare_demo_runtime_config",
+        )
+    )
+    source = ROOT / "deploy" / "engine.env.template"
+    target = tmp_path / "engine.env"
+    body = f"RUST_LOG=debug\n{key}={value}\n".encode()
+    target.write_bytes(body)
+    target.chmod(0o600)
+    result = subprocess.run(
+        [sys.executable, "-", str(source), str(target)],
+        cwd=ROOT,
+        input=program.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert target.read_bytes() == body
+    assert not list(tmp_path.glob(".engine.env.*"))
+
+
+def test_demo_engine_environment_reconciliation_precedes_runtime_build() -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    prepare = _function(
+        deploy,
+        "prepare_demo_runtime_config",
+        "trusted_checkout_directory",
+    )
+    install = _function(deploy, "install_mode", "load_authorization")
+    assert prepare.index("reconcile_demo_engine_environment") < prepare.index(
+        "write_producer_environment"
+    )
+    assert install.index("prepare_demo_runtime_config") < install.index("build_engine")
 
 
 def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:

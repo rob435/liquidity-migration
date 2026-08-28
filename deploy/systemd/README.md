@@ -62,7 +62,9 @@ What the engine does with an account is [`../../docs/engine.md`](../../docs/engi
   two writers wedge each other.
 - **The engine is mandatory.** Activation requires the exact locked release,
   `/etc/liquidity-migration/engine.env`, its config, a fresh heartbeat, and the
-  expected account/venue/realm binding. Missing or mismatched inputs fail closed.
+  expected account/venue/realm binding. Deploy installs a missing non-secret
+  demo environment and atomically adds absent identity fields to a legacy one;
+  an explicit mismatch is never overwritten.
 - **Its build is part of the deploy gate.** `cargo build --release --locked`
   runs against the exact target commit during prefetch, before the fleet is
   stopped. Cargo first fetches the locked graph into a clean isolated cache;

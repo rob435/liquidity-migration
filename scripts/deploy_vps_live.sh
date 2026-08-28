@@ -516,10 +516,128 @@ retire_paper_host_config() {
     rm -rf "$RETIRED_PAPER_CONFIG_DIR"
 }
 
+reconcile_demo_engine_environment() {
+    local source="$REPO_DIR/deploy/engine.env.template"
+    local target="$ENGINE_ENVIRONMENT"
+    [ -f "$source" ] && [ ! -L "$source" ] \
+        || fail "missing tracked demo engine environment: $source"
+    "$PYTHON" - "$source" "$target" <<'PY'
+import os
+import shlex
+import sys
+import tempfile
+from pathlib import Path
+
+from liquidity_migration.core.artifact_snapshot import read_stable_file
+from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+required = (
+    "EXPECTED_ENGINE_ACCOUNT_USER_ID",
+    "EXPECTED_ENGINE_VENUE",
+    "EXPECTED_ENGINE_REALM",
+)
+
+source_snapshot = read_stable_file(
+    source,
+    label="tracked demo engine environment",
+    reject_empty=True,
+    max_bytes=1024 * 1024,
+)
+source_values = parse_systemd_environment_bytes(
+    source_snapshot.data,
+    label=str(source_snapshot.path),
+)
+expected = {key: source_values.get(key, "") for key in required}
+invalid_template = [key for key, value in expected.items() if not value]
+if invalid_template:
+    raise SystemExit(
+        "tracked demo engine environment lacks exact bindings: "
+        + ", ".join(invalid_template)
+    )
+
+if os.path.lexists(target):
+    target_snapshot = read_stable_file(
+        target,
+        label="installed demo engine environment",
+        reject_empty=True,
+        require_mode=0o600,
+        require_owner=True,
+        max_bytes=1024 * 1024,
+    )
+    installed = parse_systemd_environment_bytes(
+        target_snapshot.data,
+        label=str(target_snapshot.path),
+    )
+    conflicts = [
+        key
+        for key in required
+        if key in installed and installed[key] != expected[key]
+    ]
+    if conflicts:
+        raise SystemExit(
+            "installed demo engine environment conflicts with tracked identity: "
+            + ", ".join(conflicts)
+        )
+    missing = [key for key in required if key not in installed]
+    if not missing:
+        raise SystemExit(0)
+    payload = target_snapshot.data
+    if not payload.endswith(b"\n"):
+        payload += b"\n"
+    payload += b"\n# Deployment-reconciled exact demo engine identity.\n"
+    payload += b"".join(
+        f"{key}={shlex.quote(expected[key])}\n".encode("utf-8")
+        for key in missing
+    )
+else:
+    payload = source_snapshot.data
+
+fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+try:
+    with os.fdopen(fd, "wb") as handle:
+        if os.name != "nt":
+            os.fchmod(handle.fileno(), 0o600)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if os.name == "nt":
+        os.chmod(temporary, 0o600)
+    os.replace(temporary, target)
+    if os.name != "nt":
+        directory = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+except BaseException:
+    Path(temporary).unlink(missing_ok=True)
+    raise
+
+installed_snapshot = read_stable_file(
+    target,
+    label="reconciled demo engine environment",
+    reject_empty=True,
+    require_mode=0o600,
+    require_owner=True,
+    max_bytes=1024 * 1024,
+)
+installed = parse_systemd_environment_bytes(
+    installed_snapshot.data,
+    label=str(installed_snapshot.path),
+)
+if any(installed.get(key) != value for key, value in expected.items()):
+    raise SystemExit("reconciled demo engine environment failed identity verification")
+PY
+}
+
 prepare_demo_runtime_config() {
     local demo_candidate demo_profile root
     [ "$REPO_DIR" = /opt/liquidity-migration ] \
         || fail "systemd runtime paths require REPO_DIR=/opt/liquidity-migration"
+    install -d -o root -g root -m 0700 /etc/liquidity-migration
+    reconcile_demo_engine_environment
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 /var/lib/liquidity-migration/targets
     if [ ! -f "$PRODUCER_DEMO_SOURCE_ENV" ]; then
         install -o root -g root -m 0600 \
@@ -553,7 +671,6 @@ PY
     install -o root -g root -m 0600 "$operational_profile_source" "$demo_profile"
     [ -f "$demo_candidate" ] && [ ! -L "$demo_candidate" ] \
         || fail "install a reviewed demo candidate universe: $demo_candidate"
-    install -d -o root -g root -m 0700 /etc/liquidity-migration
     chown root:root /etc/liquidity-migration/sleeves.resolved.env
     chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
     write_producer_environment "$PRODUCER_DEMO_SOURCE_ENV" "$PRODUCER_DEMO_ENV"

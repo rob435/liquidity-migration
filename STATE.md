@@ -416,6 +416,10 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
   the managed fleet stopped for explicit recovery. Optional manual
   `attest-flat` and loss-reset controls keep their separate read-only credential
   and do not gate deployment ([docs/operations.md](docs/operations.md)).
+- **The mandatory demo engine has a deployment-reconciled identity.** A missing
+  `engine.env` is installed from the committed non-secret template. A legacy
+  file gains only absent account, venue, and realm bindings atomically; host
+  dials are preserved, while empty or conflicting bindings abort unchanged.
 - **Unknown safety-critical state fails closed.**
 - **Service activation has a durable commit point.** Candidate services run
   only under a root-watchdog-renewed six-second permit bound to the boot,
