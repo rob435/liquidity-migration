@@ -26,7 +26,9 @@ both:
   funding and hourly bars, and holds a state machine across all of it —
   cannot and should not compute that inside a trading process. Python
   decides on its own clock and writes a *target book*: absolute notional per
-  symbol, the stop each carries, and how long it may be acted on. The engine
+  symbol, optionally an exact signed base quantity, the stop each carries, and
+  how long it may be acted on. When exact quantity is present the engine
+  converges to it directly instead of re-sizing from a later price. The engine
   follows it — diff against position, exits first, size, quantize, quote,
   attach stops — and every risk gate applies exactly as it does to any other
   order. The stop is not fixed for the life of a trade: a book that declares a
@@ -285,8 +287,8 @@ parallel and integrate by type-check.
   first order, stop, or leverage request. The engine never changes venue mode,
   does not check margin mode, and cannot prevent an operator changing mode after
   a successful check.
-- **Funded Bybit identity enforces the replacement key.** The venue must report
-  a UTA, write-capable key created on or after 2026-08-27 22:30 UTC, with
+- **Funded Bybit identity enforces the execution-key shape.** The venue must report
+  a UTA, write-capable key with
   ContractTrade Order and Position, no Wallet Withdraw, and exactly the one host
   IP declared by `BYBIT_REAL_API_KEY_IP`. A mismatch stops identity before the
   account is accepted. `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` must also equal
@@ -295,16 +297,14 @@ parallel and integrate by type-check.
   keys; it is required because Bybit exposes no account-wide list for every bot
   family and is not itself a machine proof of exclusivity. The owner rotation
   workflow is in [`operations.md`](operations.md) §Funded key rotation.
-- **Funded inventory uses a different, globally read-only key.** The narrow
+- **Optional funded inventory uses a different, globally read-only key.** The narrow
   `InventoryProbe` reads `BYBIT_ATTEST_API_KEY` and
-  `BYBIT_ATTEST_API_SECRET`, verifies UTA,
-  creation time, exact single-host IP, the required ContractTrade and Wallet
-  query scopes, global read-only status, and no withdrawal permission. The
+  `BYBIT_ATTEST_API_SECRET`, verifies UTA, exact single-host IP, the required
+  ContractTrade and Wallet query scopes, global read-only status, and no
+  withdrawal permission. The
   transient mainnet `attest-flat` and `loss-reset` services remove the execution
   key and `REAL_MONEY` from their environments. Persistent engines never load
-  the attestor file. Rollout snapshots the outgoing installed verifier before
-  prefetch; the final boundary requires both that immutable verifier and the
-  digest-bound installed target, never a build candidate.
+  the attestor file, and deployment does not require it.
 - **The engine sends orders, and the risk kernel gates every one.** It carries
   no mode of its own: whether the funded fleet runs at all is `REAL_MONEY` in
   the host credential file, and nothing else. Logs written before that was the
@@ -831,7 +831,7 @@ Six steps, five in `engine-venue` and one next door:
 | --- | --- |
 | Decide, gate, make durable, sign, send | Done, and measured |
 | The capital controls | In the kernel, with every load-time proof, down to the proof that the account gross cap sits inside what the reference could fund. The `engine-risk` tests are the executable contract. |
-| The fleet's own risk limits | Done. `[risk] operational_profile_path` loads `configs/operational.mainnet.json` itself, so a reviewed cap change binds the Rust owner directly. |
+| The fleet's own risk limits | Done. `[risk] operational_profile_path` loads the preflight-validated host rendering also read by the funded producers, so reviewed defaults and the operator's carry-stop dial bind the Rust owner directly. |
 | Quantizing to tick and step, venue minimums | Done |
 | Following a research target book | Done, and run against the demo account. The engine remembers what each strategy sent until the account reading shows it, so the window between a fill and the next reading cannot become a second entry — see the in-flight row below |
 | One account, more than one sleeve | Done. Each sleeve names its own book path and that book reaches that sleeve only |
@@ -903,7 +903,7 @@ The pieces, all in `deploy/`:
 | File | What it is |
 | --- | --- |
 | `systemd/liquidity-migration-engine-mainnet.service` | The unit. Deliberately does **not** conflict with anything else on the box: the kernel lease stops a second local engine, while the dedicated-UID contract excludes hand trading, venue bots, and other trading keys |
-| `engine.mainnet.toml.template` | The engine's config: `venue = "bybit_mainnet"`, capital limits loaded from `configs/operational.mainnet.json` itself, one block per sleeve with its own book path |
+| `engine.mainnet.toml.template` | The engine's config: `venue = "bybit_mainnet"`, capital limits loaded from `/etc/liquidity-migration/producer-mainnet-source/operational-profile.json`, one block per sleeve with its own book path |
 | `engine.mainnet.env.template` | Unit settings: which config, where the heartbeat goes |
 
 Neither template carries a live switch. `REAL_MONEY=true` in

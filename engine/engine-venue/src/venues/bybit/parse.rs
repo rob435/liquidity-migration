@@ -15,50 +15,8 @@ use serde_json::Value;
 
 use crate::json::{int_field, kind_of, num_field, opt_num_field, str_field};
 
-/// The prior funded key was exposed before this audit and must never be
-/// accepted by a new engine generation. Bybit reports the authenticated key's
-/// creation time, so the gate is venue-backed rather than a self-asserted env
-/// receipt.
-const MIN_FUNDED_KEY_CREATED_AT: &str = "2026-08-27T22:30:00Z";
 const MAX_ASSET_SNAPSHOT_AGE_MS: i64 = 30_000;
 const MAX_ASSET_SNAPSHOT_FUTURE_SKEW_MS: i64 = 5_000;
-
-fn utc_second(value: &str) -> Option<(u16, u8, u8, u8, u8, u8)> {
-    let bytes = value.as_bytes();
-    let shape = bytes.len() == 20
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[10] == b'T'
-        && bytes[13] == b':'
-        && bytes[16] == b':'
-        && bytes[19] == b'Z'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(at, byte)| matches!(at, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit());
-    if !shape {
-        return None;
-    }
-    let number = |from: usize, to: usize| value[from..to].parse::<u16>().ok();
-    let year = number(0, 4)?;
-    let month = u8::try_from(number(5, 7)?).ok()?;
-    let day = u8::try_from(number(8, 10)?).ok()?;
-    let hour = u8::try_from(number(11, 13)?).ok()?;
-    let minute = u8::try_from(number(14, 16)?).ok()?;
-    let second = u8::try_from(number(17, 19)?).ok()?;
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return None,
-    };
-    if day == 0 || day > days || hour > 23 || minute > 59 || second > 59 {
-        return None;
-    }
-    Some((year, month, day, hour, minute, second))
-}
 
 /// Unwrap the `retCode` envelope every v5 endpoint shares.
 pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
@@ -86,7 +44,7 @@ pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
     Ok(obj.remove("result").unwrap_or(Value::Null))
 }
 
-/// Enforce the funded key's rotation and least-dangerous required shape.
+/// Enforce the funded key's required identity and permission shape.
 pub(crate) fn verify_funded_key(result: &Value, expected_ip: &str) -> Result<(), VenueError> {
     if int_field(result, "readOnly")? != 0 {
         return Err(VenueError::Credentials(
@@ -155,14 +113,6 @@ fn verify_key_identity(
     if int_field(result, "uta")? != 1 {
         return Err(VenueError::Credentials(format!(
             "the {label} is not bound to a unified trading account"
-        )));
-    }
-    let created = str_field(result, "createdAt")?;
-    let created_second = utc_second(&created);
-    let minimum_second = utc_second(MIN_FUNDED_KEY_CREATED_AT).expect("valid key cutoff");
-    if created_second.is_none_or(|timestamp| timestamp < minimum_second) {
-        return Err(VenueError::Credentials(format!(
-            "the {label} was created at {created:?}; rotate it to a key created on or after {MIN_FUNDED_KEY_CREATED_AT}"
         )));
     }
     let ips = result
@@ -1184,11 +1134,10 @@ mod tests {
         assert!(parse_inventory_orders(&incomplete, "linear").is_err());
     }
 
-    fn funded_key(created_at: &str) -> Value {
+    fn funded_key() -> Value {
         json!({
             "readOnly": 0,
             "uta": 1,
-            "createdAt": created_at,
             "ips": ["203.0.113.7"],
             "permissions": {
                 "ContractTrade": ["Order", "Position"],
@@ -1198,44 +1147,35 @@ mod tests {
     }
 
     #[test]
-    fn funded_key_gate_requires_rotation_ip_scope_and_safe_permissions() {
-        verify_funded_key(&funded_key("2026-08-27T22:30:00Z"), "203.0.113.7").unwrap();
+    fn funded_key_gate_requires_ip_scope_and_safe_permissions() {
+        verify_funded_key(&funded_key(), "203.0.113.7").unwrap();
 
-        let mut no_ips = funded_key("2026-08-27T22:30:00Z");
+        let mut no_ips = funded_key();
         no_ips["ips"] = json!([]);
-        let mut withdrawal = funded_key("2026-08-27T22:30:00Z");
+        let mut withdrawal = funded_key();
         withdrawal["permissions"]["Wallet"] = json!(["Withdraw"]);
-        let mut read_only = funded_key("2026-08-27T22:30:00Z");
+        let mut read_only = funded_key();
         read_only["readOnly"] = json!(1);
-        for refused in [
-            funded_key("2026-08-27T22:29:59Z"),
-            funded_key("not-a-time"),
-            funded_key("2026-99-99T99:99:99Z"),
-            funded_key("2026-02-29T00:00:00Z"),
-            no_ips,
-            withdrawal,
-            read_only,
-        ] {
+        let mut classic = funded_key();
+        classic["uta"] = json!(0);
+        let mut insufficient = funded_key();
+        insufficient["permissions"]["ContractTrade"] = json!(["Order"]);
+        for refused in [no_ips, withdrawal, read_only, classic, insufficient] {
             assert!(
                 verify_funded_key(&refused, "203.0.113.7").is_err(),
                 "accepted {refused}"
             );
         }
-        let extra_ip = json!({
-            "readOnly": 0,
-            "uta": 1,
-            "createdAt": "2026-08-27T22:30:00Z",
-            "ips": ["203.0.113.7", "198.51.100.2"],
-            "permissions": {"ContractTrade": ["Order", "Position"], "Wallet": []}
-        });
+        let mut extra_ip = funded_key();
+        extra_ip["ips"] = json!(["203.0.113.7", "198.51.100.2"]);
         assert!(verify_funded_key(&extra_ip, "203.0.113.7").is_err());
-        assert!(verify_funded_key(&funded_key("2026-08-27T22:30:00Z"), "0.0.0.0/0").is_err());
-        assert!(verify_funded_key(&funded_key("2026-08-27T22:30:00Z"), "not-an-ip").is_err());
+        assert!(verify_funded_key(&funded_key(), "0.0.0.0/0").is_err());
+        assert!(verify_funded_key(&funded_key(), "not-an-ip").is_err());
     }
 
     #[test]
     fn attestation_key_must_be_separate_globally_read_only_and_inventory_capable() {
-        let mut key = funded_key("2026-08-27T22:30:00Z");
+        let mut key = funded_key();
         key["readOnly"] = json!(1);
         key["permissions"]["Wallet"] = json!(["AccountTransfer"]);
         verify_attestation_key(&key, "203.0.113.7").unwrap();

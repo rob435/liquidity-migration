@@ -36,8 +36,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use engine_types::{
-    quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, InstrumentRule, Intent,
-    MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate,
+    quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, Feed, InstrumentRule,
+    Intent, MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate,
     RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyId, Subscription, SymbolId,
     SymbolTable, TargetBook, TimeInForce, VenueError, VenueGateway, Wal, WalError, WalRecord,
     WorkPolicy,
@@ -200,6 +200,14 @@ struct DrainProgress {
     adding_dropped: usize,
 }
 
+/// One not-yet-subscribed symbol and every strategy/feed pair waiting for it.
+/// Grouping by symbol keeps concurrent target books from admitting the same
+/// name twice while retaining every listener that must be routed afterward.
+struct WantedSymbol {
+    name: String,
+    listeners: Vec<(StrategyId, Feed)>,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum HaltCancelState {
     Submitting,
@@ -245,13 +253,14 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// group is submitted per main-loop turn, with private order updates
     /// biased ahead of the next group.
     halt_cancel_queue: VecDeque<(SymbolId, String)>,
-    /// Symbols a book has named that the engine does not follow yet.
+    /// Symbol/feed subscriptions a book has requested that are not live yet,
+    /// together with every strategy waiting to hear them.
     ///
     /// Filled while a book is being handled and drained by the run loop, which
     /// is the only place that holds the feeds. Admitting from inside
     /// `on_targets` would mean borrowing them out of the `select!` they are
     /// waiting in.
-    wanted_symbols: Vec<String>,
+    wanted_symbols: Vec<WantedSymbol>,
     /// What leverage each symbol was last set to by this engine.
     ///
     /// A symbol keeps its leverage at the venue until somebody changes it, so
@@ -429,9 +438,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         let prior_names = crate::replay::LogNames::of_log(replayed).strategies;
-        if !sleeves.is_empty() && !prior_names.is_empty() && prior_names != names {
+        if !sleeves.is_empty()
+            && !prior_names.is_empty()
+            && !names.as_slice().starts_with(prior_names.as_slice())
+        {
             return Err(EngineError::Boot(format!(
-                "configured strategy identity/order {:?} does not match the WAL {:?}",
+                "configured strategy identity/order {:?} does not preserve the WAL prefix {:?}",
                 names, prior_names
             )));
         }
@@ -1476,15 +1488,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     {
         let wanted = std::mem::take(&mut self.wanted_symbols);
         let mut admitted = 0usize;
-        for name in wanted {
+        for wanted in wanted {
+            let name = wanted.name;
             let core_id = self.market.add_symbol(&name);
-            let feed_id = market_feed.admit(&name, engine_types::Feed::Quote);
             let venue_id = self.venue.add_symbol(&name);
-            if feed_id != Some(core_id) || venue_id != Some(core_id) {
+            let mut feeds = Vec::new();
+            for (_, feed) in &wanted.listeners {
+                if !feeds.contains(feed) {
+                    feeds.push(*feed);
+                }
+            }
+            let feed_ids: Vec<_> = feeds
+                .iter()
+                .map(|feed| (*feed, market_feed.admit(&name, *feed)))
+                .collect();
+            if feed_ids.iter().any(|(_, id)| *id != Some(core_id)) || venue_id != Some(core_id) {
                 tracing::error!(
                     symbol = %name,
                     ?core_id,
-                    ?feed_id,
+                    ?feed_ids,
                     ?venue_id,
                     "the parts of the engine disagree about this symbol's id; it will not be \
                      traded. Nothing else is affected — the ids already handed out do not move."
@@ -1493,6 +1515,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             order_feed.learn(&name, core_id);
             self.routing.size_to(self.market.table.len());
+            for (strategy, feed) in wanted.listeners {
+                self.routing.add(core_id, feed, strategy);
+            }
+            for feed in feeds {
+                let subscription = Subscription {
+                    symbol: name.clone(),
+                    feed,
+                };
+                if !self.subscriptions.contains(&subscription) {
+                    self.subscriptions.push(subscription);
+                }
+            }
             admitted += 1;
             tracing::info!(symbol = %name, id = core_id.0, "following a symbol a book named");
         }
@@ -1803,10 +1837,31 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // for the run loop, which can reach the feeds; the strategy is still
         // woken now, and will act on the name once it has a price.
         for target in &book.targets {
-            if self.market.table.get(&target.symbol).is_none()
-                && !self.wanted_symbols.contains(&target.symbol)
+            let feed = Feed::Quote;
+            let subscribed = self
+                .subscriptions
+                .iter()
+                .any(|sub| sub.symbol == target.symbol && sub.feed == feed);
+            if let Some(symbol) = self.market.table.get(&target.symbol).filter(|_| subscribed) {
+                // The feed is already live (possibly for another sleeve); it
+                // is only this requesting strategy's route that is missing.
+                self.routing.add(symbol, feed, strategy);
+                continue;
+            }
+            let listener = (strategy, feed);
+            if let Some(wanted) = self
+                .wanted_symbols
+                .iter_mut()
+                .find(|wanted| wanted.name == target.symbol)
             {
-                self.wanted_symbols.push(target.symbol.clone());
+                if !wanted.listeners.contains(&listener) {
+                    wanted.listeners.push(listener);
+                }
+            } else {
+                self.wanted_symbols.push(WantedSymbol {
+                    name: target.symbol.clone(),
+                    listeners: vec![listener],
+                });
             }
         }
 
@@ -1993,6 +2048,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             market,
             strategies,
             attribution,
+            orders,
+            covers,
             ..
         } = self;
         let Some(heartbeat) = heartbeat.as_mut() else {
@@ -2009,6 +2066,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // same symbol and need their own answer. Within one sleeve the first
         // reason wins, so its kernel refusal still outranks a planner skip.
         let blockers = named_entry_blockers(strategies, names);
+        let working_entries: Vec<(String, String)> = orders
+            .opening_symbols()
+            .chain(covers.opening_symbols())
+            .filter_map(|(strategy, symbol)| {
+                Some((
+                    names.get(usize::from(strategy.0))?.clone(),
+                    market.table.name(symbol).to_string(),
+                ))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         // Named, because the producers that read this file know symbols by
         // name and nothing else. Flat rows are dropped the way every other
         // reader of this view drops them: flat is not a holding.
@@ -2058,6 +2127,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .then(|| now_ns.saturating_sub(account.observed_ns)),
                 holdings: &holdings,
                 entry_blockers: &blockers,
+                working_entries: &working_entries,
                 costs: &costs,
             },
         );
@@ -2566,13 +2636,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // The engine's own note of what just went out, at the size that
         // actually went — strategies read it back as `ctx.in_flight`, so the
         // window between a fill and the next account reading cannot look flat.
-        self.covers.register(
-            intent.strategy,
-            request.symbol,
-            request.side,
-            qty,
-            &self.account,
-        );
+        if request.reduce_only {
+            self.covers.register_reduce(
+                intent.strategy,
+                request.symbol,
+                request.side,
+                qty,
+                &self.account,
+            );
+        } else {
+            self.covers.register(
+                intent.strategy,
+                request.symbol,
+                request.side,
+                qty,
+                &self.account,
+            );
+        }
         self.risk.register_order(&client_order_id, &intent, qty);
         self.orders_sent += 1;
 

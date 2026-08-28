@@ -4,6 +4,7 @@
 //! [`super`].
 
 use super::*;
+use engine_types::TargetBook;
 
 /// Writes down every book the loop hands it, and places nothing.
 struct BookListener {
@@ -243,6 +244,104 @@ fn book_watcher(path: &crate::testpath::TempPath) -> crate::targets::TargetBookW
     )
 }
 
+/// A target follower with a one-symbol seed universe. A later book expands
+/// that universe; only a quote routed after admission can make it trade.
+struct DynamicTargetBuyer {
+    wanted: Option<String>,
+    sent: bool,
+}
+
+impl Strategy for DynamicTargetBuyer {
+    fn name(&self) -> &str {
+        "dynamic-target-buyer"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: "BTCUSDT".to_string(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn follows_a_target_book(&self) -> bool {
+        true
+    }
+
+    fn on_targets(&mut self, book: &TargetBook, _ctx: &mut dyn StrategyCtx) {
+        self.wanted = book.targets.first().map(|target| target.symbol.clone());
+    }
+
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
+        let MarketEvent::Quote { symbol, quote } = event else {
+            return;
+        };
+        if self.sent || self.wanted.as_deref().and_then(|name| ctx.symbol_id(name)) != Some(*symbol)
+        {
+            return;
+        }
+        self.sent = true;
+        ctx.place(Intent {
+            strategy: StrategyId(0),
+            symbol: *symbol,
+            side: Side::Buy,
+            qty: 0.01,
+            kind: OrderKind::Market,
+            stop: Some(StopSpec {
+                trigger_px: quote.bid_px * 0.99,
+            }),
+            reduce_only: false,
+            tag: "dynamic-target-entry".to_string(),
+            decided_ns: ctx.now_ns(),
+            work: None,
+            leverage: None,
+        });
+    }
+}
+
+/// Holds its quote until the engine has called `admit`, making the ordering
+/// deterministic without assuming when the target-book watcher first polls.
+struct QuoteAfterAdmission {
+    inner: ScriptFeed,
+    emitted: bool,
+}
+
+impl MarketFeed for QuoteAfterAdmission {
+    fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
+        self.inner.admit(symbol, feed)
+    }
+
+    async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
+        loop {
+            let admitted = self
+                .inner
+                .admitted
+                .borrow()
+                .iter()
+                .find(|(name, _)| name == "ETHUSDT")
+                .map(|(_, id)| *id);
+            if let Some(symbol) = admitted {
+                if self.emitted {
+                    return std::future::pending().await;
+                }
+                self.emitted = true;
+                return Ok(MarketEvent::Quote {
+                    symbol,
+                    quote: Quote {
+                        bid_px: 2_000.0,
+                        bid_qty: 1.0,
+                        ask_px: 2_000.5,
+                        ask_qty: 1.0,
+                        venue_ts_ms: 1,
+                        recv_ns: clock::now_ns(),
+                        seq: 1,
+                    },
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+}
+
 /// Wait until both sleeves have heard something, or give up.
 async fn until_both_heard(a: Rc<RefCell<Vec<String>>>, b: Rc<RefCell<Vec<String>>>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -343,6 +442,60 @@ async fn a_symbol_a_book_names_late_is_taken_on() {
         h.sends.borrow().is_empty(),
         "taking on a symbol is not a reason to trade it"
     );
+}
+
+#[tokio::test]
+async fn a_post_admission_quote_reaches_the_requesting_follower() {
+    let path = temp_path("book-late-symbol-routes");
+    std::fs::write(&path, LONG_BOOK_JSON).expect("writes a book naming ETHUSDT");
+    let follower = DynamicTargetBuyer {
+        wanted: None,
+        sent: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(follower)], &["BTCUSDT"], &[]).await;
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![(
+        StrategyId(0),
+        book_watcher(&path),
+    )]));
+
+    let inner = ScriptFeed::quotes(SymbolId(0), 0, false);
+    let admitted = inner.admitted.clone();
+    let mut feed = QuoteAfterAdmission {
+        inner,
+        emitted: false,
+    };
+    let sends = h.sends.clone();
+    let shutdown = async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while sends.borrow().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    engine
+        .run(&mut feed, &mut ScriptOrderFeed::empty(), shutdown)
+        .await
+        .unwrap();
+
+    let dynamic_id = engine
+        .market()
+        .table
+        .get("ETHUSDT")
+        .expect("the target symbol was admitted");
+    assert!(engine.subscriptions().contains(&Subscription {
+        symbol: "ETHUSDT".to_string(),
+        feed: Feed::Quote,
+    }));
+    assert_eq!(
+        admitted.borrow().as_slice(),
+        [("ETHUSDT".to_string(), dynamic_id)]
+    );
+    let sent = h.sends.borrow();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the admitted quote never reached its follower"
+    );
+    assert_eq!(sent[0].symbol, dynamic_id);
 }
 
 #[tokio::test]

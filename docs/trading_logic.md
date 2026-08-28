@@ -310,9 +310,10 @@ conservatively scored at 7.78 bp/side), partial fills, borrow, margin cost, venu
 
 ## EXODUS — `lane2_exodus_short_v1`
 
-A standalone sleeve at the engine — its own `[[strategy]]` block, book file
-(`exodus-demo.json`), capital attribution, and kill dial — produced from inside
-the carry process because its whole trigger is carry's v7 pre-settle exit fire.
+A standalone sleeve at each engine — its own `[[strategy]]` block, realm book
+file (`exodus-demo.json` or `exodus-mainnet.json`), capital attribution, and
+kill dial — produced from inside the matching carry process because its whole
+trigger is carry's v7 pre-settle exit fire.
 Registered config: [`lane2_exodus_short_v1.json`](../configs/lane2_exodus_short_v1.json);
 rules module: [`rules/exodus_short.py`](../liquidity_migration/rules/exodus_short.py).
 
@@ -328,10 +329,12 @@ happens later than S+5. The venue holds one net position per symbol, so the shor
 open until carry's exit fill lands — the engine leaves foreign-held names alone and
 retries; the seconds-scale delay is inside the measured entry tolerance.
 
-**Sizing.** The notional carry held at the fire (weight × sizing equity × carry's
-multiplier), frozen at fire so covers never need an equity read. No entry without a live
-owner-health read, same gate as carry entries; a fire arriving during an outage is
-skipped for good and receipted (`exodus_entry_blocked`).
+**Sizing.** The exact carry-attributed venue quantity in the fresh engine reading is
+copied at the fire. Its audit notional is frozen from that quantity and the same Bybit
+mark sample that triggered the exit; the signed quantity remains authoritative in the
+engine, so partial fills and later price movement cannot resize the handoff. No entry
+without that owner-health reading and mark; an incomplete fire is skipped for good and
+receipted (`exodus_entry_blocked`).
 
 **Exit.** A hard clock: cover 60 minutes after the settlement — the name simply leaves the
 book, and the engine reads absence as the exit. Time-boxed, never price-boxed. The
@@ -341,11 +344,13 @@ whipsaw than it saved on the tail — these names wick violently while dying. Co
 the producer's 60s idle-floor contract; the cover time also becomes the daemon's next
 wake deadline.
 
-**Kill switches.** Unset `EXODUS_SHORT_PROFILE` on the carry unit: no new entries, and the
-book drains flat immediately (open records are covered on the next cycle, not at S+60).
-`CARRY_EARLY_EXIT=0` silences the fires (so also all new exodus entries) while open
-records still cover on their clock. A lost or torn state file reads as flat and covers
-every open short — losing state never strands a position.
+**Kill switches.** Unset `EXODUS_SHORT_PROFILE` on either carry unit: no new
+entries, and that realm's book drains flat immediately (open records are
+covered on the next cycle, not at S+60). `CARRY_EARLY_EXIT=0` silences the fires
+(so also all new exodus entries) while open records still cover on their clock.
+A lost or torn state file is unknown state: the producer reports the error and
+leaves the last engine-visible target untouched instead of silently flattening
+or inventing a replacement decision.
 
 **Limits.** The edge is a regime trade on the 2025-26 farmer crowd: overlay +6.1 bp/day
 pooled, but 2023 +0.2, **2024 −0.8 (a losing year)**, 2025 +7.8, 2026 +18.2. The premature

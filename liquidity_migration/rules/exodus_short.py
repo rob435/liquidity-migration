@@ -13,7 +13,7 @@ but the print stayed deep; a short pays that print, and the worst squeezed
 modern farmer crowd, priced as such in the registered config.
 
 This module owns the sleeve's whole decision surface: a record per fired
-name (notional frozen at fire, settlement time), the cover clock, and the
+name (exact carry quantity and marked notional frozen at fire, settlement time), the cover clock, and the
 rendered book the engine follows. The carry producer opens records at its
 own fire site — the trigger IS carry's fire, so there is no second signal
 machine. Entries cross the spread; the venue stop is a disaster fence
@@ -42,6 +42,7 @@ MIN_MS = 60_000
 #: "hold nothing", and the engine treats an expired book as entry-closed,
 #: which for an empty book changes nothing.
 _EMPTY_BOOK_VALIDITY_MS = 6 * 60 * 60_000
+_ENGINE_ENTRY_CUTOFF_MS = 15 * MIN_MS
 
 
 class ExodusShortError(ValueError):
@@ -72,10 +73,10 @@ class ExodusShortConfig:
                 "only 'carry_presettle_exit_fire' is implemented"
             )
         sizing = rule["sizing"]
-        if sizing.get("basis") != "carry_notional_at_fire":
+        if sizing.get("basis") != "carry_position_at_fire":
             raise ExodusShortError(
                 f"unsupported sizing basis {sizing.get('basis')!r}; "
-                "only 'carry_notional_at_fire' is implemented"
+                "only 'carry_position_at_fire' is implemented"
             )
         cover = rule["cover"]
         stop = rule["stop"]
@@ -92,14 +93,17 @@ class ExodusShortConfig:
 
 @dataclasses.dataclass(frozen=True)
 class ExodusShortRecord:
-    """One open short. ``notional_usdt`` is the positive magnitude, frozen
-    at fire so covers never need an equity read; the book renders it
-    negative."""
+    """One open short. Magnitudes are positive and frozen at the fire.
+
+    ``target_qty`` is absent only on migrated schema-v1 state; those records
+    retain their legacy notional-sizing behavior until they cover.
+    """
 
     symbol: str
     notional_usdt: float
     settlement_ts_ms: int
     fired_ts_ms: int
+    target_qty: float | None = None
 
     def cover_ts_ms(self, cfg: ExodusShortConfig) -> int:
         return self.settlement_ts_ms + cfg.cover_minutes_after_settlement * MIN_MS
@@ -107,13 +111,14 @@ class ExodusShortRecord:
 
 def records_to_payload(records: list[ExodusShortRecord]) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "open": [
             {
                 "symbol": r.symbol,
                 "notional_usdt": r.notional_usdt,
                 "settlement_ts_ms": r.settlement_ts_ms,
                 "fired_ts_ms": r.fired_ts_ms,
+                "target_qty": r.target_qty,
             }
             for r in sorted(records, key=lambda r: r.symbol)
         ]
@@ -130,7 +135,7 @@ def records_from_payload(raw: Any) -> list[ExodusShortRecord]:
 
     if not isinstance(raw, Mapping) or set(raw) != {"schema_version", "open"}:
         raise ValueError("exodus state must contain exactly schema_version and open")
-    if raw["schema_version"] != 1 or isinstance(raw["schema_version"], bool):
+    if raw["schema_version"] not in {1, 2} or isinstance(raw["schema_version"], bool):
         raise ValueError("unsupported exodus state schema_version")
     rows = raw["open"]
     if not isinstance(rows, list):
@@ -138,6 +143,8 @@ def records_from_payload(raw: Any) -> list[ExodusShortRecord]:
     records: list[ExodusShortRecord] = []
     symbols: set[str] = set()
     expected = {"symbol", "notional_usdt", "settlement_ts_ms", "fired_ts_ms"}
+    if raw["schema_version"] == 2:
+        expected.add("target_qty")
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping) or set(row) != expected:
             raise ValueError(f"exodus state row {index} has an invalid shape")
@@ -158,6 +165,14 @@ def records_from_payload(raw: Any) -> list[ExodusShortRecord]:
             or float(notional) <= 0.0
         ):
             raise ValueError(f"exodus state row {index} has invalid notional_usdt")
+        target_qty = row.get("target_qty")
+        if target_qty is not None and (
+            isinstance(target_qty, bool)
+            or not isinstance(target_qty, (int, float))
+            or not math.isfinite(float(target_qty))
+            or float(target_qty) <= 0.0
+        ):
+            raise ValueError(f"exodus state row {index} has invalid target_qty")
         settlement = row["settlement_ts_ms"]
         fired = row["fired_ts_ms"]
         if (
@@ -176,6 +191,7 @@ def records_from_payload(raw: Any) -> list[ExodusShortRecord]:
                 notional_usdt=float(notional),
                 settlement_ts_ms=settlement,
                 fired_ts_ms=fired,
+                target_qty=(float(target_qty) if target_qty is not None else None),
             )
         )
     return sorted(records, key=lambda record: record.symbol)
@@ -209,11 +225,15 @@ def render_exodus_book(
     now_ms: int,
     source: str,
     entry_leverage: float | None = None,
+    cover_records: list[ExodusShortRecord] | None = None,
 ) -> str:
     """The absolute short book: every open record, negative, with the fence
-    stop. Validity runs to the latest settlement plus the entry window, so
-    the engine stops opening once the ride is spent but the book keeps
-    standing as the hold instruction until the cover book replaces it.
+    stop. Book validity runs to the latest settlement while each target has
+    its own S+5 entry deadline. The book therefore keeps standing as a hold
+    instruction without letting a later record extend an older one's entry.
+
+    ``cover_records`` are explicit zero targets. Naming a due dynamic symbol
+    lets a fresh follower find and close it after an engine restart.
 
     ``entry_leverage`` is a deployment dial (the operational profile's,
     same as carry's own book) and overrides the registered file's value;
@@ -225,9 +245,24 @@ def render_exodus_book(
             notional_usdt=-abs(r.notional_usdt),
             stop_loss_fraction=cfg.stop_loss_fraction,
             leverage=leverage,
+            entry_valid_until_ms=(
+                r.settlement_ts_ms
+                + cfg.entry_valid_minutes_after_settlement * MIN_MS
+                - _ENGINE_ENTRY_CUTOFF_MS
+            ),
+            target_qty=(-abs(r.target_qty) if r.target_qty is not None else None),
         )
         for r in records
     ]
+    targets.extend(
+        EngineTarget(
+            symbol=r.symbol,
+            notional_usdt=0.0,
+            stop_loss_fraction=cfg.stop_loss_fraction,
+            leverage=leverage,
+        )
+        for r in (cover_records or [])
+    )
     if records:
         valid_until_ms = (
             max(r.settlement_ts_ms for r in records)

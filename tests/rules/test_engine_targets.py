@@ -6,7 +6,9 @@ import pytest
 
 from liquidity_migration.rules.engine_targets import (
     TARGET_BOOK_VERSION,
+    TARGET_BOOK_EXTENDED_VERSION,
     EngineTarget,
+    parse_target_book_bytes,
     publish_target_book,
     render_target_book,
     write_target_book,
@@ -64,6 +66,45 @@ def test_a_short_target_keeps_its_sign() -> None:
     assert parsed["targets"][0]["notional_usdt"] == -54.0
 
 
+def test_a_target_can_carry_its_own_entry_deadline() -> None:
+    deadline = 1786665900000
+    text = _book(targets=[EngineTarget("KAITOUSDT", -54.0, 0.35, 2.0, deadline)])
+    parsed = json.loads(text)
+    assert parsed["version"] == TARGET_BOOK_EXTENDED_VERSION
+    assert parsed["targets"][0]["entry_valid_until_ms"] == deadline
+    assert parsed["targets"][0]["target_qty"] is None
+    assert parse_target_book_bytes(text.encode()).targets[0].entry_valid_until_ms == deadline
+
+
+def test_an_exact_quantity_promotes_v2_and_round_trips() -> None:
+    text = _book(
+        targets=[EngineTarget("KAITOUSDT", -54.0, 0.35, 2.0, target_qty=-3.2)]
+    )
+    payload = json.loads(text)
+    assert payload["version"] == TARGET_BOOK_EXTENDED_VERSION
+    assert payload["targets"][0]["entry_valid_until_ms"] is None
+    assert payload["targets"][0]["target_qty"] == -3.2
+    assert parse_target_book_bytes(text.encode()).targets[0].target_qty == -3.2
+
+
+def test_deadline_fields_and_versions_cannot_be_mixed() -> None:
+    legacy = json.loads(_book())
+    legacy["targets"][0]["entry_valid_until_ms"] = legacy["valid_until_ms"]
+    with pytest.raises(ValueError, match="invalid fields"):
+        parse_target_book_bytes(json.dumps(legacy).encode())
+
+    current = json.loads(
+        _book(
+            targets=[
+                EngineTarget("KAITOUSDT", -54.0, 0.35, 2.0, 1786665900000)
+            ]
+        )
+    )
+    del current["targets"][0]["entry_valid_until_ms"]
+    with pytest.raises(ValueError, match="version 2"):
+        parse_target_book_bytes(json.dumps(current).encode())
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
@@ -77,6 +118,18 @@ def test_a_short_target_keeps_its_sign() -> None:
         ({"targets": [EngineTarget("BTCUSDT", 1.0, 0.0)]}, "between 0 and 1"),
         ({"targets": [EngineTarget("BTCUSDT", 1.0, 1.0)]}, "between 0 and 1"),
         ({"targets": [EngineTarget("BTCUSDT", 1.0, 0.35, 0.0)]}, "positive finite"),
+        (
+            {"targets": [EngineTarget("BTCUSDT", 1.0, 0.35, 2.0, 0)]},
+            "entry_valid_until_ms",
+        ),
+        (
+            {"targets": [EngineTarget("BTCUSDT", 1.0, 0.35, target_qty=0.0)]},
+            "target_qty",
+        ),
+        (
+            {"targets": [EngineTarget("BTCUSDT", 1.0, 0.35, target_qty=-1.0)]},
+            "same sign",
+        ),
         (
             {"targets": [EngineTarget("BTCUSDT", 1.0, 0.35), EngineTarget("BTCUSDT", 2.0, 0.35)]},
             "twice",

@@ -1098,8 +1098,8 @@ class TestPresettleExit:
         state = self._state()
         now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
         tickers = {
-            DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR),  # -1 bp, pays in 10 min
-            DEEP_B: (-0.0025, D0 + 9 * MS_PER_HOUR),  # still -25 bp deep
+            DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5),  # -1 bp, pays in 10 min
+            DEEP_B: (-0.0025, D0 + 9 * MS_PER_HOUR, 8.0),  # still -25 bp deep
         }
         masked, fires, details = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=state,
@@ -1108,12 +1108,11 @@ class TestPresettleExit:
         assert fires == [DEEP_A]
         assert set(masked.weights) == {DEEP_B, RESIZED}
         assert masked.gross == pytest.approx(0.0247 + 0.0125)
-        # The exodus trigger rides the same fire: the weight carry held and
-        # the settlement the rate was read against, captured before the mask
-        # deletes them.
+        # The exodus trigger rides the same fire, with the contemporaneous
+        # mark and settlement captured before the mask deletes the name.
         assert [
-            (d.symbol, d.weight, d.settlement_ts_ms) for d in details
-        ] == [(DEEP_A, 0.0125, D0 + 9 * MS_PER_HOUR)]
+            (d.symbol, d.settlement_ts_ms, d.mark_px) for d in details
+        ] == [(DEEP_A, D0 + 9 * MS_PER_HOUR, 12.5)]
         # The mask persists in the SAME file the settled-print path owns.
         assert module._early_exit_state_path(tmp_path).exists()
         reloaded = module._load_early_exits(tmp_path)
@@ -1138,13 +1137,13 @@ class TestPresettleExit:
         _, fires, _ = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=self._state(),
             root=tmp_path / "a", now_ms=now,
-            tickers={DEEP_A: (-rule.exit_bp / 1e4, pay)},
+            tickers={DEEP_A: (-rule.exit_bp / 1e4, pay, 10.0)},
         )
         assert fires == [DEEP_A]
         _, fires, _ = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=self._state(),
             root=tmp_path / "b", now_ms=now,
-            tickers={DEEP_A: (-rule.exit_bp / 1e4 - 1e-6, pay)},
+            tickers={DEEP_A: (-rule.exit_bp / 1e4 - 1e-6, pay, 10.0)},
         )
         assert fires == []
 
@@ -1155,14 +1154,14 @@ class TestPresettleExit:
         _, fires, _ = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=self._state(),
             root=tmp_path / "a", now_ms=pay - 20 * 60_000,
-            tickers={DEEP_A: (0.0001, pay)},
+            tickers={DEEP_A: (0.0001, pay, 10.0)},
         )
         assert fires == []
         # Already paid (the ticker not yet rolled): never fire on lead <= 0.
         _, fires, _ = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=self._state(),
             root=tmp_path / "b", now_ms=pay,
-            tickers={DEEP_A: (0.0001, pay)},
+            tickers={DEEP_A: (0.0001, pay, 10.0)},
         )
         assert fires == []
 
@@ -1173,7 +1172,7 @@ class TestPresettleExit:
         masked, fires, details = module._apply_presettle_exits(
             decision=self._decision(), rule=rule, state=state,
             root=tmp_path, now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
-            tickers={DEEP_A: (0.0001, D0 + 9 * MS_PER_HOUR)},
+            tickers={DEEP_A: (0.0001, D0 + 9 * MS_PER_HOUR, 10.0)},
         )
         assert fires == []
         assert details == []
@@ -1189,7 +1188,7 @@ class TestPresettleExit:
         fake = _FakeTickerClient(
             [
                 {"symbol": DEEP_A, "fundingRate": "-0.0001",
-                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
+                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR), "markPrice": "12.5"},
                 {"symbol": DEEP_B, "fundingRate": "", "nextFundingTime": "x"},
                 {"symbol": "UNHELDUSDT", "fundingRate": "0.0001",
                  "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
@@ -1198,7 +1197,7 @@ class TestPresettleExit:
         tickers, error = module._fetch_presettle_tickers([DEEP_A, DEEP_B], lambda: fake)
         assert error == ""
         # Unparseable rows and unheld names drop; held good rows coerce.
-        assert tickers == {DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR)}
+        assert tickers == {DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5)}
 
 
 
@@ -1308,7 +1307,7 @@ class TestExodusShort:
 
     def _fire(self) -> "module.PresettleFire":
         return module.PresettleFire(
-            symbol=DEEP_A, weight=0.0125, settlement_ts_ms=self.SETTLE
+            symbol=DEEP_A, settlement_ts_ms=self.SETTLE, mark_px=10.0
         )
 
     def _arm(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -1324,13 +1323,13 @@ class TestExodusShort:
         monkeypatch.delenv("EXODUS_ENGINE_TARGET_BOOK_PATH", raising=False)
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=2.0,
             now_ms=self.SETTLE - 10 * 60_000,
         )
         assert receipt == {}
         assert not module._exodus_state_path(tmp_path).exists()
 
-    def test_a_fire_opens_the_abandoned_notional_as_a_short(
+    def test_a_fire_opens_the_exact_abandoned_quantity_as_a_short(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         book_path = self._arm(monkeypatch, tmp_path)
@@ -1338,7 +1337,7 @@ class TestExodusShort:
         now = self.SETTLE - 10 * 60_000
         receipt = module._run_exodus_short(
             state=state, root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=5.0, now_ms=now,
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=5.0, now_ms=now,
         )
         assert receipt["exodus_opened"] == [DEEP_A]
         assert receipt["exodus_open_names"] == 1
@@ -1347,10 +1346,12 @@ class TestExodusShort:
         assert receipt["exodus_next_cover_ts_ms"] == self.SETTLE + 60 * 60_000
         book = json.loads(book_path.read_text(encoding="utf-8"))
         (target,) = book["targets"]
-        # The short IS carry's abandoned position: weight x equity x
-        # multiplier, negative, with the fence stop, frozen at fire.
+        # The short IS carry's actual attributed quantity. Notional is marked
+        # from the same ticker sample; entry price and desired-weight math are
+        # deliberately irrelevant.
         assert target["symbol"] == DEEP_A
-        assert target["notional_usdt"] == -50.0
+        assert target["notional_usdt"] == -32.5
+        assert target["target_qty"] == -3.25
         assert target["stop_loss_fraction"] == 0.35
         # Leverage is the operational profile's dial, not the registered
         # file's constant (which stays 2.0): the deployment margin knob
@@ -1358,11 +1359,13 @@ class TestExodusShort:
         assert target["leverage"] == 5.0
         assert book["valid_until_ms"] == self.SETTLE + 20 * 60_000
         # Persisted: a restart re-renders the same book from disk.
-        assert module._load_exodus_shorts(tmp_path)[0].notional_usdt == 50.0
+        stored = module._load_exodus_shorts(tmp_path)[0]
+        assert stored.notional_usdt == 32.5
+        assert stored.target_qty == 3.25
         # The same fire again does not double the position.
         receipt = module._run_exodus_short(
             state=state, root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=2.0,
             now_ms=now + 60_000,
         )
         assert receipt["exodus_opened"] == []
@@ -1378,12 +1381,16 @@ class TestExodusShort:
         )
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[],
-            sizing_equity_usdt=None, notional_multiplier=1.0, entry_leverage=2.0,
+            carry_holdings=None, entry_leverage=2.0,
             now_ms=self.SETTLE + 60 * 60_000,
+            exodus_held_symbols=frozenset(),
+            exodus_working_entry_symbols=frozenset(),
         )
         assert receipt["exodus_covered"] == [DEEP_A]
         assert receipt["exodus_open_names"] == 0
-        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
+        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"][0][
+            "notional_usdt"
+        ] == 0.0
         assert module._load_exodus_shorts(tmp_path) == []
 
     def test_dial_off_drains_to_flat(
@@ -1397,26 +1404,70 @@ class TestExodusShort:
         )
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
+            carry_holdings=None, entry_leverage=2.0,
             # Well before the cover clock: off means flat NOW, not at S+60.
             now_ms=self.SETTLE - 5 * 60_000,
+            exodus_held_symbols=frozenset(),
+            exodus_working_entry_symbols=frozenset(),
         )
         assert receipt["exodus_enabled"] is False
         assert receipt["exodus_covered"] == [DEEP_A]
-        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
+        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"][0][
+            "notional_usdt"
+        ] == 0.0
         assert module._load_exodus_shorts(tmp_path) == []
 
-    def test_no_sizing_basis_blocks_the_entry_for_good(
+    def test_no_actual_carry_holding_blocks_the_entry_for_good(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         book_path = self._arm(monkeypatch, tmp_path)
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=None, notional_multiplier=1.0, entry_leverage=2.0,
+            carry_holdings=None, entry_leverage=2.0,
             now_ms=self.SETTLE - 10 * 60_000,
         )
         assert receipt["exodus_entry_blocked"] == [DEEP_A]
         assert receipt["exodus_opened"] == []
+        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
+
+    @pytest.mark.parametrize(
+        "fire,holdings",
+        [
+            (
+                module.PresettleFire(
+                    symbol=DEEP_A,
+                    settlement_ts_ms=SETTLE,
+                    mark_px=None,
+                ),
+                {DEEP_A: ("long", 3.25, 8.0)},
+            ),
+            (
+                module.PresettleFire(
+                    symbol=DEEP_A,
+                    settlement_ts_ms=SETTLE,
+                    mark_px=10.0,
+                ),
+                {DEEP_A: ("short", 3.25, 8.0)},
+            ),
+        ],
+    )
+    def test_an_incomplete_or_non_long_handoff_is_blocked(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fire: "module.PresettleFire",
+        holdings: dict[str, tuple[str, float, float]],
+    ) -> None:
+        book_path = self._arm(monkeypatch, tmp_path)
+        receipt = module._run_exodus_short(
+            state=CarryCycleState(),
+            root=tmp_path,
+            fires=[fire],
+            carry_holdings=holdings,
+            entry_leverage=2.0,
+            now_ms=self.SETTLE - 10 * 60_000,
+        )
+        assert receipt["exodus_entry_blocked"] == [DEEP_A]
         assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
 
     def test_bookkeeping_failure_never_raises(
@@ -1428,7 +1479,7 @@ class TestExodusShort:
         monkeypatch.setenv("EXODUS_ENGINE_TARGET_BOOK_PATH", str(tmp_path))
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=2.0,
             now_ms=self.SETTLE - 10 * 60_000,
         )
         assert receipt["exodus_error"] != ""
@@ -1440,7 +1491,7 @@ class TestExodusShort:
         monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v9")
         receipt = module._run_exodus_short(
             state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            sizing_equity_usdt=4000.0, notional_multiplier=1.0, entry_leverage=2.0,
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=2.0,
             now_ms=self.SETTLE - 10 * 60_000,
         )
         assert "unknown exodus profile" in receipt["exodus_error"]

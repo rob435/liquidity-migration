@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Guarded rollout, staged install/activation, or read-only verification.
+        description: Rollout, staged install/activation, or read-only verification.
         required: true
         default: verify
         type: choice
@@ -189,7 +189,7 @@ jobs:
             > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           ssh-keygen -lf ~/.ssh/known_hosts | grep -F "$VPS_ED25519_FINGERPRINT"
-      - name: Run guarded VPS mode
+      - name: Run VPS mode
         env:
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}
           DEPLOY_PROFILE_INPUT: ${{ inputs.profile }}

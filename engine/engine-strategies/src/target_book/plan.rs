@@ -1,7 +1,8 @@
 //! Turning a target book into orders.
 //!
-//! The book says what to hold, in absolute notional per symbol. This works
-//! out the difference from what is held now and says what to do about it.
+//! The book says what to hold, in absolute notional or an exact quantity per
+//! symbol. This works out the difference from what is held now and says what
+//! to do about it.
 //! Pure arithmetic: no clock of its own, no venue, no engine — everything it
 //! needs is an argument, which is what makes the rules below testable one at
 //! a time.
@@ -18,7 +19,7 @@
 //! caller's to handle, and it must handle it by not calling.
 
 use engine_types::orders::{InstrumentRule, Side};
-use engine_types::quantize::quantize_qty;
+use engine_types::quantize::{quantize_qty, round_clean};
 
 /// A symbol's absolute target, as research wrote it down.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +29,11 @@ pub struct Target {
     pub notional_usdt: f64,
     /// How far below (long) or above (short) the entry the stop sits.
     pub stop_loss_fraction: f64,
+    /// Direct opening deadline. Absent targets inherit the book-wide cutoff.
+    pub entry_valid_until_ms: Option<i64>,
+    /// Exact signed base-asset quantity. When present this is authoritative;
+    /// notional remains the fire-time audit/risk value.
+    pub target_qty: Option<f64>,
 }
 
 /// What is held now, for one symbol.
@@ -178,8 +184,6 @@ pub fn plan(
     let mut opens: Vec<Step> = Vec::new();
     let mut skipped: Vec<Skipped> = Vec::new();
 
-    let entries_allowed = now_ms < valid_until_ms.saturating_sub(rules.entry_cutoff_ms);
-
     // Anything held that the book does not name at all is an exit. A book is
     // absolute: silence about a symbol is an instruction to hold none of it.
     for symbol in held_symbols {
@@ -198,6 +202,11 @@ pub fn plan(
     for target in targets {
         let symbol = target.symbol.as_str();
         let position = facts.held(symbol);
+        let book_entry_deadline = valid_until_ms.saturating_sub(rules.entry_cutoff_ms);
+        let entry_deadline = target
+            .entry_valid_until_ms
+            .map_or(book_entry_deadline, |deadline| deadline.min(book_entry_deadline));
+        let entries_allowed = now_ms < entry_deadline;
 
         // Zero, or a target that rounds to nothing, is an explicit exit.
         if target.notional_usdt == 0.0 {
@@ -220,9 +229,31 @@ pub fn plan(
             continue;
         };
 
-        let want_side = if target.notional_usdt > 0.0 { Side::Buy } else { Side::Sell };
+        let exact_target_qty = if let Some(raw) = target.target_qty {
+            let Some(magnitude) = quantize_qty(raw.abs(), &rule) else {
+                skipped.push(Skipped::BelowVenueMinimum { symbol: symbol.to_string() });
+                continue;
+            };
+            Some(if raw > 0.0 { magnitude } else { -magnitude })
+        } else {
+            None
+        };
+        let want_side = if exact_target_qty.unwrap_or(target.notional_usdt) > 0.0 {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         let standing = position.map(|p| p.notional()).unwrap_or(0.0);
-        let delta_usdt = target.notional_usdt - standing;
+        let standing_qty = position.map_or(0.0, |p| match p.side {
+            Side::Buy => round_clean(p.qty.abs(), rule.qty_step),
+            Side::Sell => -round_clean(p.qty.abs(), rule.qty_step),
+        });
+        let delta_qty = exact_target_qty.map(|wanted| {
+            let raw = wanted - standing_qty;
+            let magnitude = round_clean(raw.abs(), rule.qty_step);
+            if raw >= 0.0 { magnitude } else { -magnitude }
+        });
+        let delta_usdt = delta_qty.map_or(target.notional_usdt - standing, |qty| qty * px);
 
         match position {
             None => {
@@ -230,7 +261,7 @@ pub fn plan(
                     skipped.push(Skipped::EntryWindowClosed { symbol: symbol.to_string() });
                     continue;
                 }
-                let size = target.notional_usdt.abs();
+                let size = exact_target_qty.map_or(target.notional_usdt.abs(), |qty| qty.abs() * px);
                 if size < rules.entry_floor_usdt {
                     skipped.push(Skipped::BelowEntryFloor {
                         symbol: symbol.to_string(),
@@ -238,7 +269,8 @@ pub fn plan(
                     });
                     continue;
                 }
-                let Some(qty) = quantize_qty(size / px, &rule) else {
+                let raw_qty = exact_target_qty.map_or(size / px, f64::abs);
+                let Some(qty) = quantize_qty(raw_qty, &rule) else {
                     skipped.push(Skipped::BelowVenueMinimum { symbol: symbol.to_string() });
                     continue;
                 };
@@ -271,7 +303,15 @@ pub fn plan(
                     .resize_floor_usdt
                     .max(rules.resize_floor_fraction * standing.abs())
                     .max(rule.min_notional);
-                if delta_usdt.abs() <= threshold {
+                let too_small = if target.target_qty.is_some() {
+                    // An exact handoff is not a discretionary rebalance. Top
+                    // up a partial fill whenever the venue can accept the
+                    // remainder; only its hard minimum may stop convergence.
+                    delta_usdt.abs() < rule.min_notional
+                } else {
+                    delta_usdt.abs() <= threshold
+                };
+                if too_small {
                     // Staying as it is in size does not mean staying as it is
                     // in protection: the book's stop distance can narrow over
                     // the life of a trade, and this is the only step that
@@ -290,7 +330,10 @@ pub fn plan(
                     skipped.push(Skipped::EntryWindowClosed { symbol: symbol.to_string() });
                     continue;
                 }
-                let Some(qty) = quantize_qty(delta_usdt.abs() / px, &rule) else {
+                let raw_qty = delta_qty.map_or(delta_usdt.abs() / px, |qty| {
+                    round_clean(qty.abs(), rule.qty_step)
+                });
+                let Some(qty) = quantize_qty(raw_qty, &rule) else {
                     skipped.push(Skipped::BelowVenueMinimum { symbol: symbol.to_string() });
                     continue;
                 };
@@ -427,7 +470,13 @@ mod tests {
     }
 
     fn target(symbol: &str, notional: f64) -> Target {
-        Target { symbol: symbol.into(), notional_usdt: notional, stop_loss_fraction: 0.35 }
+        Target {
+            symbol: symbol.into(),
+            notional_usdt: notional,
+            stop_loss_fraction: 0.35,
+            entry_valid_until_ms: None,
+            target_qty: None,
+        }
     }
 
     const NOW: i64 = 1_000_000;
@@ -628,6 +677,121 @@ mod tests {
     }
 
     #[test]
+    fn exact_quantity_is_not_recomputed_from_a_later_price() {
+        let facts = Facts::with("EXODUS", 20.0);
+        let mut wanted = target("EXODUS", -32.0);
+        wanted.target_qty = Some(-3.2);
+
+        let plan = plan_now(&[wanted], &[], &facts);
+
+        assert_eq!(
+            plan.steps,
+            vec![Step::Enter {
+                symbol: "EXODUS".into(),
+                side: Side::Sell,
+                qty: 3.2,
+                stop_px: 27.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn exact_quantity_resizes_from_the_actual_partial_position() {
+        let facts = Facts::default().holding("EXODUS", 1.0, Side::Sell, 40.0);
+        let mut wanted = target("EXODUS", -32.0);
+        wanted.target_qty = Some(-3.2);
+
+        let plan = plan_now(&[wanted], &["EXODUS".into()], &facts);
+
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [Step::Resize {
+                side: Side::Sell,
+                qty,
+                reduce_only: false,
+                ..
+            }] if *qty == 2.2
+        ));
+    }
+
+    #[test]
+    fn exact_quantity_bypasses_the_notional_rebalance_dead_band() {
+        let mut facts = Facts::default().holding("EXODUS", 10.0, Side::Sell, 10.0);
+        facts.rules.insert(
+            "EXODUS".into(),
+            InstrumentRule {
+                min_notional: 0.5,
+                ..RULE
+            },
+        );
+        let mut wanted = target("EXODUS", -100.0);
+        wanted.target_qty = Some(-10.1);
+
+        let plan = plan_now(&[wanted], &["EXODUS".into()], &facts);
+
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [Step::Resize {
+                side: Side::Sell,
+                qty,
+                reduce_only: false,
+                ..
+            }] if *qty == 0.1
+        ));
+    }
+
+    #[test]
+    fn target_deadlines_close_one_entry_without_blocking_a_later_one() {
+        let mut early = target("EARLY", 100.0);
+        early.entry_valid_until_ms = Some(NOW);
+        let mut later = target("LATER", 100.0);
+        later.entry_valid_until_ms = Some(NOW + 60_000);
+        let mut facts = Facts::with("EARLY", 10.0);
+        facts.px.insert("LATER".into(), 10.0);
+        facts.rules.insert("LATER".into(), RULE);
+
+        let plan = plan_now(&[early, later], &[], &facts);
+
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].symbol(), "LATER");
+        assert!(matches!(
+            plan.skipped.as_slice(),
+            [Skipped::EntryWindowClosed { symbol }] if symbol == "EARLY"
+        ));
+    }
+
+    #[test]
+    fn an_expired_target_deadline_does_not_block_a_reduction() {
+        let facts = Facts::default().holding("A", 20.0, Side::Buy, 10.0);
+        let mut wanted = target("A", 100.0);
+        wanted.entry_valid_until_ms = Some(NOW);
+
+        let plan = plan_now(&[wanted], &["A".into()], &facts);
+
+        assert!(matches!(plan.steps.as_slice(), [Step::Resize { reduce_only: true, .. }]));
+    }
+
+    #[test]
+    fn a_target_deadline_cannot_extend_the_book_cutoff() {
+        let mut wanted = target("A", 100.0);
+        wanted.entry_valid_until_ms = Some(VALID + 60_000);
+        let facts = Facts::with("A", 10.0);
+        let late = VALID - PlanRules::FLEET.entry_cutoff_ms;
+
+        let plan = plan(
+            &[wanted],
+            &[],
+            &facts,
+            late,
+            VALID,
+            PlanRules::FLEET,
+        );
+
+        assert!(plan.steps.is_empty());
+        assert!(matches!(plan.skipped.as_slice(), [Skipped::EntryWindowClosed { .. }]));
+    }
+
+    #[test]
     fn a_flip_closes_first_and_does_not_reverse_in_one_order() {
         // Reversing through flat in a single order would leave the position
         // carrying a stop that belongs to the side it just left.
@@ -681,7 +845,13 @@ mod restop_tests {
     }
 
     fn target(fraction: f64) -> Target {
-        Target { symbol: "A".into(), notional_usdt: 100.0, stop_loss_fraction: fraction }
+        Target {
+            symbol: "A".into(),
+            notional_usdt: 100.0,
+            stop_loss_fraction: fraction,
+            entry_valid_until_ms: None,
+            target_qty: None,
+        }
     }
 
     #[test]
@@ -740,7 +910,13 @@ mod restop_plan_tests {
     // all, so the venue went on holding the distance the position opened at.
     fn a_held_steady_position_whose_stop_narrowed_still_produces_a_step() {
         let facts = Facts::with("A", 100.0).holding_behind("A", 100.0, 70.0);
-        let target = Target { symbol: "A".into(), notional_usdt: 100.0, stop_loss_fraction: 0.15 };
+        let target = Target {
+            symbol: "A".into(),
+            notional_usdt: 100.0,
+            stop_loss_fraction: 0.15,
+            entry_valid_until_ms: None,
+            target_qty: None,
+        };
         let plan = plan(&[target], &["A".into()], &facts, 0, 60 * 60 * 1000, PlanRules::FLEET);
         let restop = plan
             .steps
@@ -761,7 +937,13 @@ mod restop_plan_tests {
     // opened is exactly the one whose stop still has to come in.
     fn an_expired_book_still_moves_the_stop() {
         let facts = Facts::with("A", 100.0).holding_behind("A", 100.0, 70.0);
-        let target = Target { symbol: "A".into(), notional_usdt: 100.0, stop_loss_fraction: 0.15 };
+        let target = Target {
+            symbol: "A".into(),
+            notional_usdt: 100.0,
+            stop_loss_fraction: 0.15,
+            entry_valid_until_ms: None,
+            target_qty: None,
+        };
         // now_ms is past valid_until_ms: entries are long closed.
         let plan = plan(&[target], &["A".into()], &facts, 9_000_000, 1_000_000, PlanRules::FLEET);
         assert!(

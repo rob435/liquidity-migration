@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration Bybit carry-hold MAINNET target producer (v7 pre-settle exit clock on the lane2_carry_hold_v7 rule)
+Description=liquidity-migration Bybit carry-hold MAINNET target producer (v7 pre-settle exit clock on the lane2_carry_hold_v7 rule + exodus short)
 Wants=network-online.target
 # This producer writes a target book; the Rust engine reads it and owns the
 # venue account. There is no process-ordering edge between them.
@@ -32,6 +32,11 @@ Environment=CARRY_EARLY_EXIT=1
 # the engine that reads it sends: REAL_MONEY in bybit-mainnet.env is the only
 # thing between this book and a real order.
 Environment=CARRY_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/carry-mainnet.json
+# The exodus short runs in this process because its only trigger is carry's
+# pre-settle exit fire. Its own engine sleeve crosses the funded entry, keeps
+# separate fill attribution, and covers on the registered one-hour clock.
+Environment=EXODUS_SHORT_PROFILE=v1
+Environment=EXODUS_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/exodus-mainnet.json
 # The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
 Environment=LOOKBACK_DAYS=90
 Environment=WORKERS=2

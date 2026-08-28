@@ -41,6 +41,8 @@ fn target(symbol: &str, notional_usdt: f64) -> BookTarget {
         notional_usdt,
         stop_loss_fraction: 0.35,
         leverage: 2.0,
+        entry_valid_until_ms: None,
+        target_qty: None,
     }
 }
 
@@ -126,6 +128,40 @@ fn an_empty_book_exits_everything_held() {
     assert_eq!(by_symbol(kaito).qty, 10.0);
     assert_eq!(by_symbol(coti).side, Side::Buy, "closing a short buys");
     assert_eq!(by_symbol(coti).qty, 4.0);
+}
+
+#[test]
+fn a_fresh_follower_exits_a_dynamic_symbol_named_by_a_zero_target() {
+    let mut h = Harness::new(follower(&["SEEDUSDT"]));
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx
+        .set_position("DYNAMICUSDT", Side::Sell, 4.0, 10.0);
+
+    h.targets(book(vec![target("DYNAMICUSDT", 0.0)]));
+
+    let intent = h.one_intent();
+    assert_eq!(intent.symbol, h.ctx.id_of("DYNAMICUSDT"));
+    assert_eq!(intent.side, Side::Buy);
+    assert!(intent.reduce_only);
+}
+
+#[test]
+fn per_target_deadlines_do_not_extend_an_older_entry() {
+    let mut h = bench(&["EARLYUSDT", "LATERUSDT"], 10.0);
+    let mut early = target("EARLYUSDT", -100.0);
+    early.entry_valid_until_ms = Some(NOW_MS);
+    let mut later = target("LATERUSDT", -100.0);
+    later.entry_valid_until_ms = Some(NOW_MS + 60_000);
+
+    h.targets(book(vec![early, later]));
+
+    let sent = h.drain();
+    assert_eq!(sent.len(), 1, "only the later record may enter: {sent:?}");
+    assert_eq!(sent[0].symbol, h.ctx.id_of("LATERUSDT"));
+    assert_eq!(
+        h.strategy.entry_blockers(),
+        vec![("EARLYUSDT".to_string(), "entry_window_closed".to_string())]
+    );
 }
 
 #[test]

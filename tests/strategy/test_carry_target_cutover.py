@@ -133,7 +133,9 @@ def test_engine_blocker_does_not_starve_later_carry_candidates(tmp_path, monkeyp
     assert [target.symbol for target in active.targets] == ["BUSDT", "CUSDT"]
 
 
-def test_exodus_state_write_failure_cannot_advance_memory_or_book(tmp_path, monkeypatch) -> None:
+def test_exodus_state_write_failure_keeps_memory_after_cover_book_publishes(
+    tmp_path, monkeypatch
+) -> None:
     book_path = tmp_path / "exodus.json"
     monkeypatch.delenv(EXODUS_PROFILE_ENV, raising=False)
     monkeypatch.setenv(EXODUS_TARGET_BOOK_PATH_ENV, str(book_path))
@@ -154,12 +156,111 @@ def test_exodus_state_write_failure_cannot_advance_memory_or_book(tmp_path, monk
         state=state,
         root=tmp_path,
         fires=[],
-        sizing_equity_usdt=None,
-        notional_multiplier=1.0,
+        carry_holdings=None,
         entry_leverage=2.0,
         now_ms=NOW_MS,
+        exodus_held_symbols=frozenset(),
+        exodus_working_entry_symbols=frozenset(),
     )
 
     assert state.exodus_shorts == [original]
-    assert not book_path.exists()
+    assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == [
+        {
+            "leverage": 2.0,
+            "notional_usdt": 0.0,
+            "stop_loss_fraction": 0.35,
+            "symbol": "AUSDT",
+        }
+    ]
     assert "injected durable-state failure" in receipt["exodus_error"]
+
+
+def test_exodus_cover_publish_failure_survives_restart_and_retries(tmp_path, monkeypatch) -> None:
+    book_path = tmp_path / "exodus.json"
+    monkeypatch.setenv(EXODUS_PROFILE_ENV, "v1")
+    monkeypatch.setenv(EXODUS_TARGET_BOOK_PATH_ENV, str(book_path))
+    original = ExodusShortRecord(
+        symbol="DYNAMICUSDT",
+        notional_usdt=25.0,
+        settlement_ts_ms=NOW_MS - 3_600_000,
+        fired_ts_ms=NOW_MS - 4_200_000,
+    )
+    carry_module._save_exodus_shorts(tmp_path, [original])
+    real_write = carry_module.write_target_book
+
+    def fail_publish(*_args, **_kwargs) -> None:
+        raise OSError("injected durable-book failure")
+
+    monkeypatch.setattr(carry_module, "write_target_book", fail_publish)
+    failed = _run_exodus_short(
+        state=CarryCycleState(),
+        root=tmp_path,
+        fires=[],
+        carry_holdings=None,
+        entry_leverage=2.0,
+        now_ms=NOW_MS,
+        exodus_held_symbols=frozenset(),
+        exodus_working_entry_symbols=frozenset({"DYNAMICUSDT"}),
+    )
+    assert "injected durable-book failure" in failed["exodus_error"]
+    assert carry_module._load_exodus_shorts(tmp_path) == [original]
+
+    monkeypatch.setattr(carry_module, "write_target_book", real_write)
+    restarted = CarryCycleState()
+    retried = _run_exodus_short(
+        state=restarted,
+        root=tmp_path,
+        fires=[],
+        carry_holdings=None,
+        entry_leverage=2.0,
+        now_ms=NOW_MS + 60_000,
+        exodus_held_symbols=frozenset(),
+        exodus_working_entry_symbols=frozenset({"DYNAMICUSDT"}),
+    )
+    assert retried["exodus_error"] == ""
+    assert json.loads(book_path.read_text(encoding="utf-8"))["targets"][0][
+        "notional_usdt"
+    ] == 0.0
+    assert carry_module._load_exodus_shorts(tmp_path) == [original]
+
+    cleared = _run_exodus_short(
+        state=CarryCycleState(),
+        root=tmp_path,
+        fires=[],
+        carry_holdings=None,
+        entry_leverage=2.0,
+        now_ms=NOW_MS + 120_000,
+        exodus_held_symbols=frozenset(),
+        exodus_working_entry_symbols=frozenset(),
+    )
+    assert cleared["exodus_error"] == ""
+    assert carry_module._load_exodus_shorts(tmp_path) == []
+
+
+def test_exodus_unknown_holdings_keep_due_state_while_publishing_cover(tmp_path, monkeypatch) -> None:
+    book_path = tmp_path / "exodus.json"
+    monkeypatch.setenv(EXODUS_PROFILE_ENV, "v1")
+    monkeypatch.setenv(EXODUS_TARGET_BOOK_PATH_ENV, str(book_path))
+    original = ExodusShortRecord(
+        symbol="DYNAMICUSDT",
+        notional_usdt=25.0,
+        settlement_ts_ms=NOW_MS - 3_600_000,
+        fired_ts_ms=NOW_MS - 4_200_000,
+    )
+    carry_module._save_exodus_shorts(tmp_path, [original])
+
+    receipt = _run_exodus_short(
+        state=CarryCycleState(),
+        root=tmp_path,
+        fires=[],
+        carry_holdings=None,
+        entry_leverage=2.0,
+        now_ms=NOW_MS,
+        exodus_held_symbols=None,
+    )
+
+    assert receipt["exodus_error"] == ""
+    assert carry_module._load_exodus_shorts(tmp_path) == [original]
+    assert json.loads(book_path.read_text(encoding="utf-8"))["targets"][0][
+        "notional_usdt"
+    ] == 0.0

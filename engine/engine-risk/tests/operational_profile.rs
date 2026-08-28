@@ -69,6 +69,37 @@ fn the_committed_demo_profile_loads_pinned() {
 }
 
 #[test]
+fn a_rendered_carry_stop_widens_the_kernel_ceiling() {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+    doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(0.4);
+    let cfg = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap();
+    assert_eq!(cfg.envelope.disaster_stop_fraction, 0.4);
+
+    doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(0.2);
+    let cfg = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap();
+    assert_eq!(
+        cfg.envelope.disaster_stop_fraction,
+        DISASTER_STOP_FRACTION,
+        "a carry-only tightening must not narrow the other sleeves' ceiling"
+    );
+}
+
+#[test]
+fn an_invalid_rendered_carry_stop_is_refused() {
+    for value in [0.0, 1.0] {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(value);
+        let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
+        assert!(
+            err.to_string().contains("declared_stop_loss_fraction"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn a_cap_the_engine_does_not_read_is_refused_rather_than_ignored() {
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();

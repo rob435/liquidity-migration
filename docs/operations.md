@@ -76,6 +76,18 @@ checks, locked Rust tests, bounded optimized account-state soak, build, and
 binary smoke test to pass on the exact pushed commit; local Windows
 cross-compilation is not a substitute for executing those Linux binaries.
 
+On a funded host, install atomically replaces
+`/etc/liquidity-migration/engine-mainnet.toml` with the exact committed mainnet
+template after the fleet is stopped and the target checkout is selected. The
+file therefore cannot retain an old sleeve list while running a new binary.
+
+The engine WAL's ordered strategy names are durable identity. Appending a
+sleeve preserves every existing numeric ID, but the first successful boot then
+writes the longer name list. Recovery from that point needs a binary and config
+that accept the same prefix; a two-sleeve generation cannot replay a WAL that
+names `carry`, `long`, and `exodus`. Keep a qualified three-sleeve release
+available for recovery.
+
 Deploy preflight and the fixed trusted launcher both prove the checkout's
 immediate parent, checkout root, runtime-dispatcher ancestry, Telegram-bot
 ancestry, and `.git` directory are canonical root-owned directories with no
@@ -85,97 +97,41 @@ also fixes its umask at `0022` before Git creates new metadata. A compromised
 workload identity therefore cannot rewrite either the runtime source boundary
 or the Git metadata used to bind it to the release marker.
 
-Before target prefetch or any stop, a rollout verifies the outgoing installed
-engine against its checkout-bound release marker and SHA-256, copies that
-root-owned executable into a private runtime directory, and verifies the source
-and copy against the same digest. This immutable outgoing snapshot is the first
-trusted verifier. The incoming checkout and build candidate never attest to
-their own safety.
+### Manual account inventory
 
-The activation watchdog records the permit device/inode before validating its
-contents, opens that exact object read-only (never with a pathname
-`O_CREAT`), proves the pinned identity is unchanged, and only then reopens the
-descriptor for locked renewal. It revalidates content under the inode lock
-before the first and every later write. A direct unlink or same-content
-replacement therefore revokes activation instead of being recreated or adopted
-by a startup race. Launchers validate the durable receipt, then the locked
-permit, then the receipt again so the atomic completion handoff has no
-receipt/permit observation gap.
+`scripts/ops.sh attest-flat --environment demo|mainnet` is an optional,
+read-only account inventory command. Rollout and activation do not call it and
+do not require an attestor credential. Demo uses its demo credential. Mainnet
+uses `/etc/liquidity-migration/bybit-mainnet-attestor.env`; the transient
+service removes the execution key and `REAL_MONEY`, drops to the mainnet engine
+user, and does not copy credentials into the deploy shell or command line.
 
-The rollout uses that outgoing snapshot before any unit stops and again after
-all downstream units and both account owners stop. After the target is built
-and installed while quiescent, the installed-generation boundary requires two
-independent verifiers: the unchanged outgoing snapshot and the newly installed
-target bound to its installed release marker and digest. Each verifier performs
-two complete inventory scans with stable scope. A refusal by either blocks
-activation.
+The Bybit adapter runs two complete scans. It discovers the venue's linear
+settlement coins; paginates linear, inverse, and option positions; reads
+unified-wallet non-cash assets and borrow liabilities; and reads linear,
+inverse, option, and spot open orders. Mainnet also checks spread orders, RFQ
+roles and inquiries, active venue-native algorithmic orders, and cross-account
+asset categories. Unknown and delisted rows remain visible blockers.
 
-An outgoing release that predates `attest-flat` fails before prefetch. The
-rollout never substitutes the incoming candidate. Crossing that compatibility
-boundary requires a separately signed and reviewed out-of-band attestor
-bootstrap; this repository provides no automatic bypass. Provision its operator
-trust root independently as the regular root-owned mode-`0600` file
-`/etc/liquidity-migration/rollout-attestor-operator-public.pem`. Never place or
-copy that public key into `/etc/liquidity-migration/attestor-bootstrap`; that
-root-owned mode-`0700` directory contains exactly `attestor`, `manifest`, and
-`manifest.sig`. The signed manifest contains exactly `commit`, `sha256`,
-`purpose`, and `not_after_utc` in that order. Rollout verifies the signature and
-expiry against the independently provisioned trust root before it snapshots or
-runs the bootstrap attestor.
+A successful command means those two collected samples were fresh, stable in
+scope, bound to the expected account ID, and empty. Bybit does not expose one
+transactional account snapshot or every possible bot family, so the result
+does not cover activity racing the scans. The separate account ID acknowledgement
+(`BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID`) records that the UID is dedicated to
+this engine. Other venue adapters refuse the account-wide inventory capability.
 
-The inventory probe type has no order, cancel, amend, stop, leverage, or other
-venue-mutation method. For mainnet, systemd loads the mainnet engine environment
-plus the dedicated read-only attestor file, explicitly removes the write-key
-variables and `REAL_MONEY`, and runs under the unprivileged mainnet engine user.
-Neither the deploy shell nor a mainnet attestation receives the execution key.
-Before the first proof, rollout validates and privately snapshots the exact
-attestor file and binds its digest, so every rollout phase uses the same
-credential material.
-
-Demo is always attested. Any persisted funded surface makes mainnet attestation
-mandatory and requires both the mainnet engine environment and the attestor
-file. Funded and `--require-flat` rollouts abort with status 3 on any non-flat
-or incomplete read. An unarmed demo-only rollout reports the same failure and
-continues unless `--require-flat` is set.
-
-Bybit discovers every linear settlement coin advertised by the venue while
-retaining USDT and USDC, then strictly paginates linear, inverse, and option
-positions; unified-wallet non-cash assets and every borrow liability; and
-linear, inverse, option, and spot open orders. Mainnet also scans spread open
-orders, both RFQ quote roles and inquiries, and active venue-native TWAP,
-chase, iceberg, and POV strategies. Its cross-account asset overview retains
-non-cash holdings and liabilities from every reported product account and
-blocks every reported TradingBot or CopyTrading category even at zero equity.
-Demo exposes none of those extended surfaces. Unknown and delisted rows remain
-blockers by name. The verifier also
-binds the authenticated venue, realm, and expected account ID, requires a
-non-empty stable scope, rejects either local sample when it is older than 30
-seconds or more than 5 seconds in the future, and rejects a double scan that
-takes more than 60 seconds. Other venue adapters currently refuse this
-capability.
-
-Bybit exposes these surfaces through several reads, not one transactional
-snapshot. The two complete scans make some races visible but do not make the
-result atomic. Bybit also has no account-wide list for every bot family. The
-funded UID must therefore be dedicated to this engine, with no hand trading,
-venue bots, copy trading, or other trading API keys;
-`BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` must equal the authenticated UID as the
-reviewed operator acknowledgement of that constraint. Do not place orders or
-move assets while a rollout or manual attestation is running. Success describes
-the collected samples, not activity racing them and not a mathematical proof
-that unenumerable bot state is absent.
-
-`scripts/ops.sh attest-flat --environment demo|mainnet` runs the installed
-adapter's same read-only check outside a rollout. Demo uses its demo credential.
-Mainnet uses `/etc/liquidity-migration/bybit-mainnet-attestor.env` and explicitly
-removes the execution key and arming switch from the transient service. The
-wrapper drops to the realm's unprivileged engine user and never copies secrets
-into the deploy shell or argv. The underlying `engine attest-flat` reads
-`ENGINE_CONFIG_FILE`, then falls back to `engine.toml` when no `--config` is
-given. Success means the adapter returned two fresh, empty credential-wide
-samples; it does not predict activity after them.
 
 ### Activation commit protocol
+
+Rollout snapshots which managed units are active, persistently enabled, and
+runtime-enabled before stopping them. Unsupported linked/transient enablement
+states are refused before any unit stops. If a phase fails before checkout
+mutation, cleanup restores the snapshot: a markerless incumbent starts directly;
+a marked incumbent receives a temporary authority bound to its unchanged
+release, starts only the observed units, then commits that restored generation.
+Once checkout mutation starts, rollout does not guess across code or WAL
+formats; a failed candidate leaves the managed fleet stopped for an explicit
+compatible recovery.
 
 Artifact installation and service activation are separate commits. Before the
 first candidate unit starts, rollout removes the prior completion authority and
@@ -246,11 +202,6 @@ Before arming, verify all of the following:
 
 - the funded API key is contract-trading only, withdrawal-disabled, and IP
   allowlisted;
-- `/etc/liquidity-migration/bybit-mainnet-attestor.env` is an operator-installed
-  regular `root:root` mode-`0600` file containing exactly the four non-empty
-  attestor assignments from its template;
-- the attestor key is physically separate from the execution key, globally
-  read-only, UTA-bound, and allowlisted only to the production host;
 - the funded UID is dedicated to this engine, with no hand trading, venue bots,
   copy trading, or other trading API keys, and
   `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` names it;
@@ -263,6 +214,10 @@ Before arming, verify all of the following:
 - the venue account is independently verified against the intended realm,
   position mode, margin mode, open orders, and positions.
 
+The separate read-only inventory credential is needed only when the operator
+uses manual `attest-flat` or `loss-reset`; arming and deployment do not require
+that file.
+
 Arming is a host-side operator act. A repository commit cannot arm funded
 trading.
 
@@ -271,14 +226,13 @@ symbol and aborts on ambiguity. It does not change mode, verify margin mode, or
 prevent a later manual mode switch, so the operator check remains required.
 
 Funded Bybit account identity also enforces the key shape reported by the venue.
-It requires a creation time on or after 2026-08-27 22:30 UTC, UTA membership, a
-write-capable key, ContractTrade Order and Position permissions, and no Wallet
+It requires UTA membership, a write-capable key, ContractTrade Order and
+Position permissions, and no Wallet
 Withdraw permission. `BYBIT_REAL_API_KEY_IP` must name the one production host
 IP, and the venue must report exactly that IP alone; the exact host `/32` or
 `/128` form is also accepted. Missing, wildcard, all-network, additional, or
-mismatched entries abort before account identity is accepted. This forces
-replacement of the exposed older key but cannot create, install, or revoke a
-key for the owner.
+mismatched entries abort before account identity is accepted. Key creation time
+does not affect admission.
 
 Funded identity separately requires
 `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` to equal the authenticated account ID.
@@ -286,8 +240,8 @@ This is load-bearing because Bybit cannot machine-enumerate every account bot
 family. Setting it is an acknowledgement of a dedicated UID, not permission to
 share one and not proof that outside activity has stopped.
 
-Mainnet inventory controls authenticate with a second key, never the execution
-key. Copy [`deploy/bybit-mainnet-attestor.env.template`](../deploy/bybit-mainnet-attestor.env.template)
+Optional mainnet inventory controls authenticate with a second key, never the
+execution key. Copy [`deploy/bybit-mainnet-attestor.env.template`](../deploy/bybit-mainnet-attestor.env.template)
 to `/etc/liquidity-migration/bybit-mainnet-attestor.env` as a regular
 `root:root` mode-`0600` file. Apart from comments and blank lines, it must have
 exactly one non-empty assignment for each of:
@@ -297,14 +251,14 @@ exactly one non-empty assignment for each of:
 - `BYBIT_ATTEST_API_KEY_IP`;
 - `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID`.
 
-The venue must report this key as globally read-only, UTA-bound, created on or
-after 2026-08-27 22:30 UTC, and allowlisted to exactly the declared host IP. It
+The venue must report this key as globally read-only, UTA-bound, and allowlisted
+to exactly the declared host IP. It
 needs the ContractTrade Order and Position query scopes plus Wallet
 AccountTransfer query scope so every inventory endpoint can be read; Wallet
 Withdraw must be absent. The global read-only flag makes those permission names
 query authority, not order or transfer authority. The persistent engine service
-never loads this file. Only transient mainnet `attest-flat`, stopped-engine
-`loss-reset`, and rollout proofs receive it.
+never loads this file. Only transient mainnet `attest-flat` and stopped-engine
+`loss-reset` receive it.
 
 ## Venue qualification
 
@@ -381,8 +335,8 @@ it cannot create the replacement or revoke the prior key.
 
 1. Run `scripts/ops.sh deploy disarm-mainnet`. This atomically removes the
    arming switch and stops and disables funded units; it does not flatten.
-2. In the venue account, create a UTA key on or after 2026-08-27 22:30 UTC. It
-   must be write-capable, grant ContractTrade Order and Position, omit Wallet
+2. In the venue account, create a UTA key. It must be write-capable, grant
+   ContractTrade Order and Position, omit Wallet
    Withdraw, and allowlist only the production host IP. Remove or revoke every
    other trading key and venue bot for this UID, and stop hand and copy trading
    on it.
@@ -392,17 +346,13 @@ it cannot create the replacement or revoke the prior key.
    history, logs, or chat. Set
    `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` to the dedicated funded UID only
    after the exclusivity condition is true.
-4. Create a separate globally read-only attestor key with the query scopes
-   above, install its exact four-value root-owned file, and do not put either
-   key in the other's environment.
-5. Revoke the prior execution key at the venue.
-6. Run `scripts/ops.sh real-money preflight`, then
-   `scripts/ops.sh attest-flat --environment mainnet`, and independently verify the
-   realm, account ID, venue-reported key shape, position mode, margin mode, open
-   orders, and positions. The startup must accept the new execution key and the
-   attestation must accept the separate query key.
-7. Arm and activate the funded fleet only through a reviewed rollout after every
-   check passes.
+4. Revoke the prior execution key at the venue.
+5. Run `scripts/ops.sh real-money preflight` and independently verify the realm,
+   account ID, venue-reported key shape, position mode, margin mode, open orders,
+   and positions. If manual account-wide inventory or loss reset is required,
+   install the separate read-only inventory key and run
+   `scripts/ops.sh attest-flat --environment mainnet`.
+6. Arm and activate the funded fleet through a reviewed rollout.
 
 `STATE.md` records whether rotation is still owed. Do not infer completion from
 a green build or deploy.

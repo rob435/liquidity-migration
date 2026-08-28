@@ -52,6 +52,7 @@ struct Cover {
     view_at_send: f64,
     /// Signed quantity still covered. Positive is long.
     sent: f64,
+    reduce_only: bool,
 }
 
 /// The engine's in-flight position accounting, per (strategy, symbol).
@@ -88,6 +89,29 @@ impl CoverBook {
         qty: f64,
         account: &AccountView,
     ) {
+        self.register_kind(strategy, symbol, side, qty, account, false);
+    }
+
+    pub fn register_reduce(
+        &mut self,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        account: &AccountView,
+    ) {
+        self.register_kind(strategy, symbol, side, qty, account, true);
+    }
+
+    fn register_kind(
+        &mut self,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        account: &AccountView,
+        reduce_only: bool,
+    ) {
         let sent = match side {
             Side::Buy => qty,
             Side::Sell => -qty,
@@ -97,7 +121,17 @@ impl CoverBook {
             symbol,
             view_at_send: view_signed(account, symbol),
             sent,
+            reduce_only,
         });
+    }
+
+    /// Opening sends not yet absorbed by the venue position reading.
+    pub fn opening_symbols(&self) -> Vec<(StrategyId, SymbolId)> {
+        self.records
+            .iter()
+            .filter(|record| !record.reduce_only)
+            .map(|record| (record.strategy, record.symbol))
+            .collect()
     }
 
     /// Signed quantity this strategy has sent that the reading has not
@@ -352,5 +386,14 @@ mod tests {
         book.absorb(&reading(&[(KAITO, 10.0)]));
         assert_eq!(book.in_flight(CARRY, KAITO), 0.0);
         assert_eq!(book.in_flight(LONG, COTI), 8.0, "the other sleeve's cover is untouched");
+    }
+
+    #[test]
+    fn only_unabsorbed_opening_sends_are_reported() {
+        let mut book = CoverBook::default();
+        book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
+        book.register_reduce(CARRY, COTI, Side::Buy, 4.0, &flat());
+
+        assert_eq!(book.opening_symbols(), vec![(CARRY, KAITO)]);
     }
 }

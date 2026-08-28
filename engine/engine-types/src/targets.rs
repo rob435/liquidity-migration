@@ -21,6 +21,12 @@ pub struct BookTarget {
     /// The leverage research sized against. Carried so the log says what the
     /// book assumed; the account's own leverage is what the venue applies.
     pub leverage: f64,
+    /// Direct deadline for opening or adding exposure in this symbol. When
+    /// absent, the follower uses the book-wide validity and cutoff.
+    pub entry_valid_until_ms: Option<i64>,
+    /// Exact signed base-asset quantity. When present, execution follows this
+    /// quantity instead of re-deriving it from notional and a later price.
+    pub target_qty: Option<f64>,
 }
 
 /// A whole book, already known to be a version this engine reads.

@@ -68,7 +68,7 @@ if [ "${1:-}" != --worker ]; then
         --property=ProtectSystem=true \
         --property=RestrictAddressFamilies=AF_UNIX \
         --property=UMask=0077 \
-        --property="InaccessiblePaths=-/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine.toml -/etc/liquidity-migration/engine-mainnet.toml -/etc/liquidity-migration/producer-demo.env -/etc/liquidity-migration/producer-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env -/etc/liquidity-migration/attestor-bootstrap -/etc/liquidity-migration/rollout-attestor-operator-public.pem" \
+        --property="InaccessiblePaths=-/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine.toml -/etc/liquidity-migration/engine-mainnet.toml -/etc/liquidity-migration/producer-demo.env -/etc/liquidity-migration/producer-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env" \
         /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             "$HELPER" --worker "$ACTION"
 fi

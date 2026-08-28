@@ -130,27 +130,18 @@ regular files and directories; deploy uses umask `0022` for new metadata. The
 runtime identities cannot rewrite the source or metadata that the release
 marker authenticates.
 
-Rollout flatness checks also use transient systemd services under the matching
-engine identity. Before prefetch, rollout verifies and freezes the outgoing
-installed engine against its checkout-bound release marker and SHA-256. That
-immutable snapshot performs the pre-stop and owners-stopped checks. The final
-installed-generation boundary runs both the outgoing snapshot and the
-digest-bound installed target; no build-candidate binary attests.
+Optional manual inventory controls use transient systemd services under the
+matching engine identity. PID 1 loads the engine environment plus the realm
+credential. For mainnet that credential is the operator-owned root:root
+mode-0600 `/etc/liquidity-migration/bybit-mainnet-attestor.env`, containing
+exactly the four read-only inventory/UID assignments. The transient unit
+explicitly removes the execution key and `REAL_MONEY`; persistent services and
+deployment never load the attestor file. Every inventory command requires two
+complete scans with stable scope.
 
-PID 1 loads the engine environment plus the realm credential. For funded
-checks that credential is the operator-owned, root:root mode-0600
-`/etc/liquidity-migration/bybit-mainnet-attestor.env`, containing exactly the
-four read-only attestor/UID assignments. The transient unit explicitly removes
-the execution key and `REAL_MONEY`; persistent services never load the attestor
-file. Demo is always checked, while any persisted funded surface makes mainnet
-mandatory. Every verifier requires two complete scans with stable scope.
-Funded identity also requires the dedicated-UID acknowledgement because Bybit
-cannot list every bot instance. That operating contract prohibits manual
-trading, venue bots, copy trading, and other trading keys at all times; asset
-moves are also prohibited while a rollout or manual attestation runs.
 `scripts/ops.sh attest-flat --environment demo|mainnet` and `loss-reset
 --environment demo|mainnet --note TEXT [--execute]` use the same transient
-service boundary for installed-generation operator checks. Mainnet controls
+service boundary for operator checks. Mainnet controls
 receive only the read-only attestor key; the reset wrapper also refuses while
 that realm's engine or producers are active.
 

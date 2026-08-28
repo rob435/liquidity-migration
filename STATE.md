@@ -24,16 +24,17 @@ file.
   engine trades it — the demo account carries the larger practice book. Exact
   live truth is `scripts/ops.sh status`, never this prose.
 
-- **A third sleeve, the EXODUS SHORT, is registered and deployed to demo.**
+- **A third sleeve, the EXODUS SHORT, runs on demo and the funded topology.**
   When carry's v7 pre-settle exit fires, the carry producer publishes the
   abandoned position as a SHORT to the engine's `exodus` sleeve (its own
-  `[[strategy]]` block — appended, per the id discipline — book
-  `exodus-demo.json`, fill attribution), covered 60 minutes after the
-  settlement. Registered config `configs/lane2_exodus_short_v1.json`; dial
-  `EXODUS_SHORT_PROFILE=v1` on the demo carry unit only, mainnet unset;
-  unsetting it drains the book flat. The declared 0.35 stop is a disaster
-  fence (every measured stop level loses; the cover clock is the exit). No
-  live fire yet — the sleeve waits for the first v7 fire like everything else.
+  appended `[[strategy]]` block, realm-specific book, and fill attribution),
+  then covers 60 minutes after settlement. Registered config
+  `configs/lane2_exodus_short_v1.json`; both carry units set
+  `EXODUS_SHORT_PROFILE=v1` and write `exodus-demo.json` or
+  `exodus-mainnet.json`. Unsetting it drains that realm's book flat. The
+  declared 0.35 stop is a disaster fence (every measured stop level loses; the
+  cover clock is the exit). No funded Exodus fill has been observed yet; the
+  sleeve waits for a v7 fire and no test order is forced.
   Evidence and the honest 2024-negative era shape:
   `docs/research/research_findings.md` (the exodus short row); promotion
   note in `docs/research/governance.md`.
@@ -48,23 +49,23 @@ file.
   `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit, or stop
   `llm-ledger.timer`. Detail: `docs/trading_logic.md` §LLM GATE.
 
-- **LONG runs at 6.0× and carry/exodus at 3.0×, set from one dial bank
-  (owner directive, both fleets).** Sizing is three env dials read directly by
-  the producers — `CARRY_NOTIONAL_MULTIPLIER`, `LONG_NOTIONAL_MULTIPLIER`,
-  `EXODUS_NOTIONAL_MULTIPLIER` — each entry = the strategy's base slot (at
-  most 10% of equity) × its multiplier. LONG sits at **6.0** (~60% of equity
+- **LONG runs at 6.0× and carry at 3.0×; Exodus copies carry's filled quantity
+  (owner directive, both fleets).** Sizing dials are read directly by
+  the producers — `CARRY_NOTIONAL_MULTIPLIER` and `LONG_NOTIONAL_MULTIPLIER`. LONG/carry
+  entries equal their base slot (at most 10% of equity) × multiplier. LONG sits at **6.0** (~60% of equity
   per entry before LONG's own vol/weekend scaling — the measured
-  double-LONG-at-no-Sharpe-cost lever, research_findings §3), carry and exodus
-  at **3.0** (~30% per name). On demo the dials are in
-  `producer-demo-source.env`; on the funded fleet the LONG line is in
-  `producer-mainnet-source.env` and
-  carry sizes from the committed profile (see Risk envelope §Real money).
+  double-LONG-at-no-Sharpe-cost lever, research_findings §3); carry is **3.0**
+  (~30% per name), and Exodus takes the exact quantity carry actually abandons,
+  with no independent sizing dial. On demo the dials are in
+  `producer-demo-source.env`; both funded dials are in
+  `producer-mainnet-source.env` (see Risk envelope §Real money).
   There is no book-level margin ceiling in the way: what bounds a loss is the
   venue-native stop on each position. Held components keep their
   fill-anchored size — the dials reach new entries only. The mainnet account
-  document (`operational.mainnet.json`) is static: entry leverage 5, gross
-  cap wallet × 5 split between the sleeves, every cap a ratio of tracked
-  equity. The sizing is
+  document is rendered once on the host from the reviewed base and operator
+  dial: entry leverage 5, gross cap wallet × 5 across the sleeves, every cap
+  a ratio of tracked equity. Both funded producers and the Rust engine read
+  that identical artifact. The sizing is
   a forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** It runs
   `9d2c646e`, with carry_hold **v7** on both CARRY producers: the v7 execution
@@ -228,20 +229,18 @@ file.
   the only trading authority (`REAL_MONEY=true` and the carry stop 0.35). The
   key was
   readable in plaintext on the Desktop from 2026-08-05 to 2026-08-08, so
-  **rotation is still owed and is the owner's act.** Funded Bybit identity now
-  refuses any key created before 2026-08-27 22:30 UTC, or one that is not UTA,
-  is read-only, is not allowlisted only to the exact host IP declared by
+  **rotation is still owed and is the owner's act, but key age does not block
+  startup.** Funded Bybit identity refuses a key that is not UTA, is read-only,
+  is not allowlisted only to the exact host IP declared by
   `BYBIT_REAL_API_KEY_IP`, lacks ContractTrade Order and Position permissions,
   or carries Wallet Withdraw permission. Missing, wildcard, all-network, and
-  additional IP entries fail. The old key therefore cannot pass a new funded
-  startup or rollout activation; the owner must still create the replacement
-  at Bybit, dedicate the funded UID to this engine, install the key and both
-  account-binding values on the host, and revoke the old key. Funded rollout
-  and operator inventory controls use a physically separate, globally read-only
-  query key from the operator-owned root:root mode-0600
+  additional IP entries fail. The current key can pass startup once the exact
+  host IP and dedicated account ID are present in its environment. The owner
+  must still rotate it at Bybit and revoke the old key. Optional operator
+  inventory controls use a physically separate, globally read-only query key
+  from the operator-owned root:root mode-0600
   `/etc/liquidity-migration/bybit-mainnet-attestor.env`; they never receive the
-  execution key. That four-assignment file and its Bybit key are also owner
-  provisioning actions still required before rollout.
+  execution key and are not a rollout prerequisite.
 
 ### Instrument rules
 
@@ -319,9 +318,8 @@ The live order path is the Rust engine's; the honest latency contract and the
 measured table are [docs/engine.md](docs/engine.md). Three native runs of the
 current release candidate on the fleet host put the decision at **80 ns** and
 market input through durability to a parsed localhost submit response at
-**1.26 ms median / 3.16 ms p99**. The installed fleet remains on the older
-release until rollout attestation succeeds. The benchmark has no socket-write
-timestamp. Live against the venue (n=67), the
+**1.26 ms median / 3.16 ms p99**. The benchmark has no socket-write timestamp.
+Live against the venue (n=67), the
 honest reconstructible total is **179 ms median decision→acknowledgment,
 512 ms p90, 1013 ms worst** (at n=67 the tail figure is the worst of the
 sample, not an estimated p99). Historical records cannot split that total
@@ -402,30 +400,17 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
 - **The funded account stays in one-way position mode.** Startup verifies every
   configured symbol read-only; it never changes account mode. An operator must
   still avoid switching it after the check.
-- **A generation-changing rollout samples Bybit credential-wide inventory at
-  three boundaries.** Before prefetch or any stop, rollout verifies the
-  checkout-bound outgoing installed engine and release digest, then freezes an
-  immutable snapshot of that binary. The snapshot alone performs the pre-stop
-  and owners-stopped proofs. After quiescent installation, the final boundary
-  requires both that outgoing snapshot and the digest-bound installed target;
-  the incoming checkout and build candidate never attest. Each verifier
-  performs two complete scans with stable scope. An outgoing release without
-  `attest-flat` fails closed and needs a signed, reviewed out-of-band bootstrap.
-  Funded proofs use only the separately snapshotted read-only attestor key.
-  The production host currently has neither that attestor file nor an outgoing
-  binary with `attest-flat`; a generation-changing rollout therefore stops
-  before service mutation until the owner provisions the separate read-only
-  credential and the reviewed bootstrap path.
-  They cover ordinary, spread, RFQ, venue-native strategy, and reported
-  cross-account asset/bot inventory, but Bybit cannot enumerate every bot
-  instance; the funded UID is therefore also required to be dedicated to this
-  engine. The attestation is not an atomic venue snapshot, so manual trading,
-  bots, other trading keys, and asset movement are prohibited while it runs.
-  Demo is always scanned; any persisted funded surface also makes mainnet and
-  its attestor file mandatory. Funded and
-  `--require-flat` rollouts treat any blocker or incomplete read as status 3.
-  An unarmed demo-only rollout reports the same failure but continues unless
-  `--require-flat` is set ([docs/operations.md](docs/operations.md)).
+- **A generation-changing rollout does not depend on account-wide inventory or
+  outgoing release receipts.** It pins the target commit, stops producers before
+  both account owners, persists the boot fence, requires quiescence, installs
+  the target, then activates and verifies the new topology. Before checkout
+  mutation, failure restores the exact active/persistent/runtime-enabled unit
+  snapshot; a markerless incumbent is restarted directly and a marked incumbent
+  receives a temporary binding for its unchanged release while only the observed
+  units restart. After checkout mutation, failure leaves
+  the managed fleet stopped for explicit recovery. Optional manual
+  `attest-flat` and loss-reset controls keep their separate read-only credential
+  and do not gate deployment ([docs/operations.md](docs/operations.md)).
 - **Unknown safety-critical state fails closed.**
 - **Service activation has a durable commit point.** Candidate services run
   only under a root-watchdog-renewed six-second permit bound to the boot,
@@ -455,10 +440,12 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
 - **Release evidence is revision-specific.** A candidate is qualified only when
   that exact commit's Python checks, optimized Rust suite, bounded account soak,
   order-path benchmark, build, and smoke test run green on Ubuntu. Production
-  remains on `e4e6750465ac8f8ebcc4b359781a0d9eb35d753b` until both that gate and
-  the trusted-attestor rollout boundary pass.
-- **The rollback floor is the one-line forward-compat commit `31ee68d`**:
-  rolling back past it requires archiving each producer's event tape.
+  advances only after that gate passes and rollout activates the candidate.
+- **There are two forward-only rollback floors.** Rolling a producer behind
+  `31ee68d` requires archiving its event tape. Once the funded engine has
+  durably named `carry`, `long`, and `exodus` in its WAL, its binary and config
+  must continue to understand that three-name prefix; the former two-sleeve
+  generation cannot replay that WAL.
 - Three delisting candidates (`HIGHUSDT`, `PUMPBTCUSDT`, `WHITEWHALEUSDT`) have
   venue `deliveryTime=1784538000000`, recorded prospectively with their
   first-observed anchors in LONG's private mode-0600 retirement registry; they
@@ -494,10 +481,11 @@ entries unchanged; no dial, the rollback is a revert and redeploy), LONG v12
 wide-stop, and the entry execution recipes (quote-first entries, touch-sized
 windows, and the replay-selected resting recipe). Sizing is the fixed
 multipliers on both sleeves (carry 3.0, LONG 6.0), and the LLM gate's judged
-entries sit inside the LONG sleeve — same book and identity, so their fills
-grade under LONG v12's config id beside the native entries. Sizing collapses
-into three env dials on both fleets; mainnet's account document is static at
-entry leverage 5. The v6 whale halving makes the carry producers read one
+  entries sit inside the LONG sleeve — same book and identity, so their fills
+  grade under LONG v12's config id beside the native entries. Sizing uses two
+  env dials on both fleets; Exodus copies carry's actual handed-off quantity.
+  Mainnet's rendered account document keeps entry leverage 5. The v6 whale
+  halving makes the carry producers read one
 non-Bybit input (Binance top-trader EODs, public endpoint, fail-open under the
 registered 48h freshness clause). Full statements in
 [docs/research/research_findings.md](docs/research/research_findings.md).

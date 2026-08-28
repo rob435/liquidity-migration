@@ -43,8 +43,8 @@ def test_reject_ambiguous_flag_raises_for_unrecognised_value() -> None:
 
 
 # --------------------------------------------------------------------------
-# env_positive_float reads the three live sizing dials
-# (CARRY_/LONG_/EXODUS_NOTIONAL_MULTIPLIER), so every way it can be wrong is a
+# env_positive_float reads the two live sizing dials
+# (CARRY_/LONG_NOTIONAL_MULTIPLIER), so every way it can be wrong is a
 # way the fleet can trade a size nobody chose.
 # --------------------------------------------------------------------------
 

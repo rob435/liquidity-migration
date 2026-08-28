@@ -32,8 +32,8 @@ armed in the host credential file. Design, crates and safety posture:
 | --- | --- | --- |
 | LONG | `LongV12WideStop` | `LONG_SLEEVE` |
 | CARRY | `carry_hold_v7_live_v1` — the v7 execution clock, which trades the registered `lane2_carry_hold_v7` rule | `CARRY_SLEEVE` |
-| EXODUS SHORT | `lane2_exodus_short_v1` — shorts what v7's pre-settle exit abandons, demo only | `EXODUS_SHORT_PROFILE` on the demo carry unit; unset drains the book flat |
-| LONG / CARRY, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
+| EXODUS SHORT | `lane2_exodus_short_v1` — shorts what v7's pre-settle exit abandons | `EXODUS_SHORT_PROFILE` on each carry unit; unset drains that realm's book flat |
+| LONG / CARRY / EXODUS, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
 
 Which demo toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not
 here. That file is a ceiling: a host override can turn an enabled sleeve off,

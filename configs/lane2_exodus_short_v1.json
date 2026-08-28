@@ -2,8 +2,8 @@
   "config_id": "lane2_exodus_short_v1",
   "registered": "2026-08-20",
   "lane": 2,
-  "surface": "research-only",
-  "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
+  "surface": "runtime strategy rule for demo and funded producers",
+  "authorizes": "rule parameters only; venue permission comes from the separately armed Rust engine and its host credential",
   "descends_from": "nothing - a new sleeve. It consumes the carry v7 pre-settle exit fire (lane2_carry_hold_v7.json under the v7 clock) as its trigger, but its economics are its own.",
   "claim": "After a dying deep-negative funding print settles, the name keeps falling for about an hour. When carry's v7 pre-settle exit fires, take over the exact position carry abandons as a SHORT, and cover 60 minutes after the settlement. The trigger, the name, and the size are all carry's own fire - this sleeve adds no signal, no threshold, and no universe of its own.",
   "read_this_before_citing_a_number": {
@@ -32,8 +32,8 @@
       "note": "time-boxed, never price-boxed. The name simply leaves the book; the engine reads absence as the exit and crosses. Covers ride the producer's 60s idle-floor contract with the deadline slot as an accelerator."
     },
     "sizing": {
-      "basis": "carry_notional_at_fire",
-      "note": "the short's notional is exactly the notional carry held at the fire (weight x sizing equity x carry's notional multiplier), frozen at fire so covers never need an equity read. No entry without a live owner-health read, same as carry entries. The backtest was priced at these same weights."
+      "basis": "carry_position_at_fire",
+      "note": "the short copies the exact carry-attributed venue quantity from the fresh engine reading at the fire. Audit notional is frozen from that quantity and the fire's Bybit mark price; signed target quantity remains authoritative, so partial fills and later price movement do not resize it. No entry without both live owner-health and mark reads. The backtest was priced at these same positions."
     },
     "stop": {
       "stop_loss_fraction": 0.35,

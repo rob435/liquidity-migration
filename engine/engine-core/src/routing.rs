@@ -1,7 +1,8 @@
 //! Who hears what: symbol and feed in, strategies out.
 //!
-//! Built once at boot from the subscriptions, then read-only, so a market
-//! message costs one index and a short walk.
+//! Built at boot from configured subscriptions and extended when a target
+//! book admits a new symbol. A market message still costs one index and a
+//! short walk.
 
 use engine_types::{Feed, StrategyId, SymbolId};
 

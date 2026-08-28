@@ -26,11 +26,13 @@ defined in [`engine.md`](engine.md).
 
 ## Absolute target books
 
-LONG and CARRY write versioned JSON books through
+LONG, CARRY, and Exodus write versioned JSON books through
 [`engine_targets.py`](../liquidity_migration/rules/engine_targets.py). A target
-is signed USDT notional plus leverage and a mandatory stop fraction. Omission
-means target zero. Empty means an explicit flat sleeve. No file means no new
-decision and never means flat.
+is signed USDT notional plus leverage and a mandatory stop fraction. Version 2
+may also carry a direct entry deadline and/or an exact signed base quantity;
+when quantity is present it is authoritative and not re-derived from a later
+price. Omission means target zero. Empty means an explicit flat sleeve. No file
+means no new decision and never means flat.
 
 Publication has three boundaries:
 
@@ -137,13 +139,11 @@ cd engine && cargo test --workspace --all-targets
 cd engine && cargo run --release -- bench
 ```
 
-Generation-changing rollouts freeze the checkout- and digest-bound outgoing
-installed engine before target prefetch. That immutable snapshot performs the
-pre-stop and owners-stopped inventory checks. After quiescent installation, the
-final boundary requires both the outgoing snapshot and the digest-bound
-installed target; the incoming checkout and build candidate never attest.
-Mainnet verifiers receive only a separately snapshotted globally read-only
-attestor key, never the execution key.
+Generation-changing rollouts fetch and pin the target commit, stop downstream
+producers before both account owners, persist the boot fence, require the fleet
+quiescent, then install and activate the target. The outgoing generation does
+not need a release marker or account-inventory capability, which keeps the
+upgrade path compatible with installed releases that predate those artifacts.
 
 Activation is a two-authority commit protocol. Before the candidate topology
 starts, a root watchdog maintains a six-second tmpfs permit bound to the boot,
@@ -161,12 +161,13 @@ receipt yields a stopped generation; receipt-permit-receipt reads make the
 handoff linearizable. After it, reboot authorization depends only on the
 digest-bound receipt and not on ephemeral `/run` state.
 
-Bybit discovers every advertised linear settlement coin, retains USDT and USDC,
+The optional manual Bybit inventory command discovers every advertised linear
+settlement coin, retains USDT and USDC,
 and strictly paginates linear, inverse, and option positions; unified-wallet
 assets and liabilities; and linear, inverse, option, and spot orders. Mainnet
 also reads spread orders, both RFQ quote roles and inquiries, active
 venue-native TWAP, chase, iceberg, and POV strategies, and cross-account asset
-and bot categories. Each verifier requires two full scans with stable scope.
+and bot categories. It requires two full scans with stable scope.
 These are several venue reads, not an atomic snapshot, and Bybit cannot
 enumerate every bot instance; the funded UID therefore also requires a
 dedicated-account operator acknowledgement. Unknown and delisted rows stay

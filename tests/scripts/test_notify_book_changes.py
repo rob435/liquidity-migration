@@ -20,6 +20,11 @@ sys.modules[_SPEC.name] = notify
 _SPEC.loader.exec_module(notify)
 
 
+def test_default_funded_account_includes_exodus_book() -> None:
+    funded = next(account for account in notify.ACCOUNTS if account.name == "funded")
+    assert funded.books["EXODUS"].endswith("/exodus-mainnet.json")
+
+
 def _book(tmp: Path, rows: list[tuple[str, float]]) -> str:
     p = tmp / "book.json"
     p.write_text(json.dumps({"targets": [{"symbol": s, "notional_usdt": n} for s, n in rows]}))

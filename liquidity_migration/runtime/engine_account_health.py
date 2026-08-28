@@ -88,6 +88,8 @@ class EngineAccountReading:
     #: position is manual, inherited, or shared and cannot be claimed by a
     #: producer.
     holding_strategies: Mapping[str, str | None]
+    #: Symbols with an unfinished opening order, grouped by owning sleeve.
+    working_entries_by_strategy: Mapping[str, frozenset[str]]
     #: Why each configured sleeve cannot open each requested name.
     entry_blockers_by_strategy: Mapping[str, Mapping[str, str]]
     #: Configured stable Rust sleeve names carried by this heartbeat.
@@ -112,6 +114,14 @@ class EngineAccountReading:
         if sleeve not in self.strategies:
             raise ValueError(f"engine heartbeat does not configure strategy {sleeve!r}")
         return dict(self.entry_blockers_by_strategy.get(sleeve, {}))
+
+    def working_entries_for_strategy(self, strategy: str) -> frozenset[str]:
+        """Unfinished opening-order symbols attributable to one sleeve."""
+
+        sleeve = str(strategy)
+        if sleeve not in self.strategies:
+            raise ValueError(f"engine heartbeat does not configure strategy {sleeve!r}")
+        return self.working_entries_by_strategy.get(sleeve, frozenset())
 
 
 def engine_heartbeat_path(environment: str) -> Path:
@@ -158,6 +168,7 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
     realm = payload.get("realm")
     positions = payload.get("positions")
     raw_strategies = payload.get("strategies")
+    raw_working_entries = payload.get("working_entries")
     if equity is None or available is None or observed is None:
         raise ValueError(
             "engine heartbeat carries no account reading yet "
@@ -197,6 +208,33 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         strategies.add(strategy)
     if not strategies:
         raise ValueError("engine heartbeat configures no strategies")
+    if not isinstance(raw_working_entries, list):
+        raise ValueError("engine heartbeat working_entries must be an array")
+    working_entries_by_strategy: dict[str, set[str]] = {
+        strategy: set() for strategy in strategies
+    }
+    working_keys: set[tuple[str, str]] = set()
+    for index, row in enumerate(raw_working_entries):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"engine heartbeat working entry {index} is not an object")
+        if set(row) != {"strategy", "symbol"}:
+            raise ValueError(f"engine heartbeat working entry {index} has invalid fields")
+        strategy = row["strategy"]
+        symbol = row["symbol"]
+        if (
+            not isinstance(strategy, str)
+            or strategy not in strategies
+            or not isinstance(symbol, str)
+            or not symbol
+            or symbol != symbol.upper()
+            or not symbol.isalnum()
+        ):
+            raise ValueError(f"engine heartbeat working entry {index} is invalid")
+        key = (strategy, symbol)
+        if key in working_keys:
+            raise ValueError(f"engine heartbeat repeats working entry for {strategy}:{symbol}")
+        working_keys.add(key)
+        working_entries_by_strategy[strategy].add(symbol)
     held_symbols: frozenset[str] | None = None
     holdings: dict[str, tuple[str, float, float]] = {}
     holding_strategies: dict[str, str | None] = {}
@@ -292,6 +330,10 @@ def read_engine_account(path: str | Path) -> EngineAccountReading:
         held_symbols=held_symbols,
         holdings=holdings,
         holding_strategies=holding_strategies,
+        working_entries_by_strategy={
+            strategy: frozenset(symbols)
+            for strategy, symbols in working_entries_by_strategy.items()
+        },
         entry_blockers_by_strategy=entry_blockers_by_strategy,
         strategies=frozenset(strategies),
     )

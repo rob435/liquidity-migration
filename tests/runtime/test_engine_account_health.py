@@ -22,6 +22,7 @@ def _write_heartbeat(path: Path, *, positions: list | None = None, account_user_
         "realm": "demo",
         "positions": positions,
         "entry_blockers": [],
+        "working_entries": [],
         "strategies": ["carry", "long"],
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -105,6 +106,9 @@ def test_holdings_and_blockers_are_sleeve_scoped(tmp_path: Path) -> None:
         {"strategy": "long", "symbol": "XUSDT", "reason": "risk"},
         {"strategy": "carry", "symbol": "XUSDT", "reason": "floor"},
     ]
+    payload["working_entries"] = [
+        {"strategy": "long", "symbol": "PENDINGUSDT"},
+    ]
     heartbeat.write_text(json.dumps(payload), encoding="utf-8")
 
     reading = engine_account_health.read_engine_account(heartbeat)
@@ -113,6 +117,8 @@ def test_holdings_and_blockers_are_sleeve_scoped(tmp_path: Path) -> None:
     assert set(reading.holdings_for_strategy("carry")) == {"KAITOUSDT"}
     assert reading.entry_blockers_for_strategy("long") == {"XUSDT": "risk"}
     assert reading.entry_blockers_for_strategy("carry") == {"XUSDT": "floor"}
+    assert reading.working_entries_for_strategy("long") == frozenset({"PENDINGUSDT"})
+    assert reading.working_entries_for_strategy("carry") == frozenset()
 
 
 @pytest.mark.parametrize(
@@ -152,4 +158,35 @@ def test_malformed_position_rows_fail_closed(tmp_path: Path, positions: list) ->
     heartbeat = tmp_path / "heartbeat.json"
     _write_heartbeat(heartbeat, positions=positions)
     with pytest.raises(ValueError, match="position"):
+        engine_account_health.read_engine_account(heartbeat)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {},
+        {"strategy": "unknown", "symbol": "BTCUSDT"},
+        {"strategy": "carry", "symbol": "btcusdt"},
+        {"strategy": "carry", "symbol": "BTCUSDT", "reduce_only": False},
+    ],
+)
+def test_malformed_working_entries_fail_closed(tmp_path: Path, row: dict) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    _write_heartbeat(heartbeat, positions=[])
+    payload = json.loads(heartbeat.read_text(encoding="utf-8"))
+    payload["working_entries"] = [row]
+    heartbeat.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="working entry"):
+        engine_account_health.read_engine_account(heartbeat)
+
+
+def test_an_older_heartbeat_without_working_entries_is_unknown(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    _write_heartbeat(heartbeat, positions=[])
+    payload = json.loads(heartbeat.read_text(encoding="utf-8"))
+    del payload["working_entries"]
+    heartbeat.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="working_entries"):
         engine_account_health.read_engine_account(heartbeat)

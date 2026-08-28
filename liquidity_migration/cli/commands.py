@@ -392,7 +392,6 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
     from liquidity_migration.core.env_flags import env_positive_float
 
     carry_multiplier_dial = env_positive_float("CARRY_NOTIONAL_MULTIPLIER")
-    exodus_multiplier_dial = env_positive_float("EXODUS_NOTIONAL_MULTIPLIER")
     carry_demo_config = CarryDemoCycleConfig(
         execution_environment=args.execution_environment,
         candidate_universe_file=getattr(args, "candidate_universe_file", ""),
@@ -403,7 +402,6 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
             if carry_multiplier_dial is not None
             else carry_settings.notional_multiplier
         ),
-        exodus_notional_multiplier=exodus_multiplier_dial,
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,
         max_new_entries_per_cycle=carry_settings.max_new_entries_per_cycle,
@@ -499,5 +497,4 @@ def _validate_datasets(requested: set[str], known: frozenset[str], *, venue: str
             f"Unknown {venue} dataset(s): {', '.join(unknown)}. Known datasets: {', '.join(sorted(known))}."
         )
     return requested
-
 

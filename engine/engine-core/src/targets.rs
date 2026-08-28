@@ -30,10 +30,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// The only book shape this engine reads. The producer bumps its version
-/// exactly when an old reader would misread the file, so a number we do not
-/// know is a file we must not try.
-pub const KNOWN_VERSION: u64 = 1;
+/// Current book shape. Version 1 remains readable for books without direct
+/// target entry deadlines; unknown versions are refused.
+pub const KNOWN_VERSION: u64 = 2;
+const LEGACY_VERSION: u64 = 1;
 
 /// How often the path is looked at, unless a caller says otherwise. A carry
 /// book changes daily; two seconds is already far quicker than it needs.
@@ -61,18 +61,18 @@ impl std::fmt::Display for BookError {
         match self {
             BookError::UnknownVersion { version } => write!(
                 f,
-                "target book is version {version} and this engine reads version {KNOWN_VERSION}"
+                "target book is version {version} and this engine reads versions \
+                 {LEGACY_VERSION} and {KNOWN_VERSION}"
             ),
             BookError::Malformed(detail) => write!(f, "target book is unreadable: {detail}"),
         }
     }
 }
 
-/// The file's shape, version 1.
+/// Fields shared by the version 1 and version 2 shapes.
 ///
-/// Unknown keys are allowed on purpose: the producer bumps the version only
-/// when an old reader would *misread* the file, so a version-1 book may
-/// legitimately grow a field this engine has no use for.
+/// Top-level metadata may grow, but target rows are strict per version: an old
+/// reader must never silently discard an execution-bearing field.
 #[derive(Debug, Deserialize)]
 struct RawBook {
     source: String,
@@ -87,6 +87,10 @@ struct RawTarget {
     notional_usdt: f64,
     stop_loss_fraction: f64,
     leverage: f64,
+    #[serde(default)]
+    entry_valid_until_ms: Option<i64>,
+    #[serde(default)]
+    target_qty: Option<f64>,
 }
 
 /// Read one file's bytes as a book.
@@ -102,12 +106,50 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
             "no version field, or it is not a whole number".to_string(),
         ));
     };
-    if version != KNOWN_VERSION {
+    if !matches!(version, LEGACY_VERSION | KNOWN_VERSION) {
         return Err(BookError::UnknownVersion { version });
+    }
+
+    let Some(targets) = value.get("targets").and_then(|targets| targets.as_array()) else {
+        return Err(BookError::Malformed("targets must be an array".to_string()));
+    };
+    let base_fields = ["symbol", "notional_usdt", "stop_loss_fraction", "leverage"];
+    for (index, target) in targets.iter().enumerate() {
+        let Some(fields) = target.as_object() else {
+            return Err(BookError::Malformed(format!("target {index} must be an object")));
+        };
+        let extension_fields_match = match version {
+            LEGACY_VERSION => {
+                !fields.contains_key("entry_valid_until_ms")
+                    && !fields.contains_key("target_qty")
+                    && fields.len() == 4
+            }
+            KNOWN_VERSION => {
+                fields.contains_key("entry_valid_until_ms")
+                    && fields.contains_key("target_qty")
+                    && fields.len() == 6
+            }
+            _ => unreachable!(),
+        };
+        if !extension_fields_match || !base_fields.iter().all(|field| fields.contains_key(*field)) {
+            return Err(BookError::Malformed(format!(
+                "target {index} fields do not match target book version {version}"
+            )));
+        }
     }
 
     let raw: RawBook =
         serde_json::from_value(value).map_err(|e| BookError::Malformed(e.to_string()))?;
+    if version == KNOWN_VERSION
+        && !raw
+            .targets
+            .iter()
+            .any(|target| target.entry_valid_until_ms.is_some() || target.target_qty.is_some())
+    {
+        return Err(BookError::Malformed(
+            "target book version 2 must carry an entry deadline or exact quantity".to_string(),
+        ));
+    }
 
     if raw.source.is_empty()
         || !raw
@@ -168,6 +210,28 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
                 target.symbol
             )));
         }
+        if target.entry_valid_until_ms.is_some_and(|deadline| deadline <= 0) {
+            return Err(BookError::Malformed(format!(
+                "{} entry_valid_until_ms must be positive",
+                target.symbol
+            )));
+        }
+        if let Some(qty) = target.target_qty {
+            if !qty.is_finite() || qty == 0.0 {
+                return Err(BookError::Malformed(format!(
+                    "{} target_qty must be finite and non-zero",
+                    target.symbol
+                )));
+            }
+            if target.notional_usdt == 0.0
+                || ((qty > 0.0) != (target.notional_usdt > 0.0))
+            {
+                return Err(BookError::Malformed(format!(
+                    "{} target_qty and notional_usdt must have the same sign",
+                    target.symbol
+                )));
+            }
+        }
     }
 
     Ok(TargetBook {
@@ -182,6 +246,8 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
                 notional_usdt: t.notional_usdt,
                 stop_loss_fraction: t.stop_loss_fraction,
                 leverage: t.leverage,
+                entry_valid_until_ms: t.entry_valid_until_ms,
+                target_qty: t.target_qty,
             })
             .collect(),
     })
@@ -462,6 +528,53 @@ mod tests {
     }
 
     #[test]
+    fn a_target_entry_deadline_is_optional_and_parsed() {
+        let text = GOOD
+            .replace("\"version\": 1", "\"version\": 2")
+            .replace(
+                "\"symbol\": \"KAITOUSDT\"",
+                "\"symbol\": \"KAITOUSDT\", \"entry_valid_until_ms\": 1700000300000, \"target_qty\": null",
+            )
+            .replace(
+                "\"symbol\": \"COTIUSDT\"",
+                "\"symbol\": \"COTIUSDT\", \"entry_valid_until_ms\": null, \"target_qty\": null",
+            );
+        let book = parse_book(text.as_bytes()).expect("the optional deadline parses");
+        assert_eq!(book.targets[0].entry_valid_until_ms, Some(1_700_000_300_000));
+        assert_eq!(book.targets[1].entry_valid_until_ms, None);
+    }
+
+    #[test]
+    fn an_exact_signed_quantity_is_parsed_and_must_match_notional_direction() {
+        let text = GOOD
+            .replace("\"version\": 1", "\"version\": 2")
+            .replace(
+                "\"symbol\": \"KAITOUSDT\"",
+                "\"symbol\": \"KAITOUSDT\", \"entry_valid_until_ms\": null, \"target_qty\": 3.2",
+            )
+            .replace(
+                "\"symbol\": \"COTIUSDT\"",
+                "\"symbol\": \"COTIUSDT\", \"entry_valid_until_ms\": null, \"target_qty\": null",
+            );
+        let book = parse_book(text.as_bytes()).expect("the exact quantity parses");
+        assert_eq!(book.targets[0].target_qty, Some(3.2));
+
+        let wrong_sign = text.replace("\"target_qty\": 3.2", "\"target_qty\": -3.2");
+        assert!(matches!(parse_book(wrong_sign.as_bytes()), Err(BookError::Malformed(_))));
+    }
+
+    #[test]
+    fn deadline_fields_and_versions_cannot_be_mixed() {
+        let v1_with_deadline = GOOD.replace(
+            "\"symbol\": \"KAITOUSDT\"",
+            "\"symbol\": \"KAITOUSDT\", \"entry_valid_until_ms\": 1700000300000",
+        );
+        let v2_without_deadline = GOOD.replace("\"version\": 1", "\"version\": 2");
+        assert!(matches!(parse_book(v1_with_deadline.as_bytes()), Err(BookError::Malformed(_))));
+        assert!(matches!(parse_book(v2_without_deadline.as_bytes()), Err(BookError::Malformed(_))));
+    }
+
+    #[test]
     fn an_empty_book_parses_it_is_a_decision_not_an_absence() {
         let book = parse_book(EMPTY.as_bytes()).expect("an empty book is still a book");
         assert!(book.targets.is_empty());
@@ -469,11 +582,11 @@ mod tests {
 
     #[test]
     fn a_version_we_do_not_know_is_refused_by_name() {
-        let text = GOOD.replace("\"version\": 1", "\"version\": 2");
-        let err = parse_book(text.as_bytes()).expect_err("version 2 is not ours to read");
-        assert_eq!(err, BookError::UnknownVersion { version: 2 });
+        let text = GOOD.replace("\"version\": 1", "\"version\": 3");
+        let err = parse_book(text.as_bytes()).expect_err("version 3 is not ours to read");
+        assert_eq!(err, BookError::UnknownVersion { version: 3 });
         let words = err.to_string();
-        assert!(words.contains('2') && words.contains('1'), "{words}");
+        assert!(words.contains('3') && words.contains('2'), "{words}");
     }
 
     #[test]

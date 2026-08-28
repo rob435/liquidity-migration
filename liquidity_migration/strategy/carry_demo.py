@@ -313,6 +313,7 @@ _logger = logging.getLogger(__name__)
 #: Stable source id. The version lives in the registered strategy profile.
 CARRY_STRATEGY_ID = "carry_hold"
 ENGINE_CARRY_SLEEVE = "carry"
+ENGINE_EXODUS_SLEEVE = "exodus"
 CARRY_CYCLES_DATASET = "carry_hold_demo_cycles"
 CARRY_MAINNET_CYCLES_DATASET = "carry_hold_mainnet_cycles"
 CARRY_FUNDING_DATASET = "carry_funding_events"
@@ -618,10 +619,6 @@ class CarryDemoCycleConfig:
     early_exit_enabled: bool = False
     # --- sizing (operational profile carry block) ---
     notional_multiplier: float = 1.0
-    #: The EXODUS SHORT's own multiplier; None inherits ``notional_multiplier``
-    #: (the historical behavior). The ``EXODUS_NOTIONAL_MULTIPLIER`` env dial
-    #: sets it from the fleet env file.
-    exodus_notional_multiplier: float | None = None
     entry_leverage: float = 2.0
     declared_stop_loss_fraction: float = 0.35
     max_new_entries_per_cycle: int = 10
@@ -659,11 +656,6 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
         raise ValueError("strategy producers do not own Telegram controls")
     if not math.isfinite(config.notional_multiplier) or config.notional_multiplier <= 0.0:
         raise ValueError("notional_multiplier must be positive")
-    if config.exodus_notional_multiplier is not None and (
-        not math.isfinite(config.exodus_notional_multiplier)
-        or config.exodus_notional_multiplier <= 0.0
-    ):
-        raise ValueError("exodus_notional_multiplier must be positive")
     if not math.isfinite(config.entry_leverage) or config.entry_leverage <= 0.0:
         raise ValueError("entry_leverage must be positive")
     if not 0.0 < config.declared_stop_loss_fraction < 1.0:
@@ -1059,8 +1051,8 @@ def _presettle_ticker_factory() -> BybitMarketData:
 def _fetch_presettle_tickers(
     symbols: list[str],
     client_factory: Any = None,
-) -> tuple[dict[str, tuple[float, int]], str]:
-    """One batch ticker read: symbol -> (running rate, next pay time ms).
+) -> tuple[dict[str, tuple[float, int, float | None]], str]:
+    """One batch ticker read: symbol -> (rate, next pay time ms, mark price).
 
     Never raises; a failed read returns an empty map plus the error text and
     the cycle falls back to the settled-print clock.
@@ -1071,27 +1063,37 @@ def _fetch_presettle_tickers(
     except Exception as exc:  # noqa: BLE001 - fail open to the settled-print clock
         return {}, str(exc)[:200]
     want = set(symbols)
-    out: dict[str, tuple[float, int]] = {}
+    out: dict[str, tuple[float, int, float | None]] = {}
     for row in rows:
         sym = str(row.get("symbol", ""))
         if sym not in want:
             continue
         try:
-            out[sym] = (float(row["fundingRate"]), int(row["nextFundingTime"]))
+            rate = float(row["fundingRate"])
+            next_pay_ms = int(row["nextFundingTime"])
         except (KeyError, TypeError, ValueError):
             continue
+        mark_px: float | None
+        try:
+            parsed_mark_px = float(row["markPrice"])
+            mark_px = (
+                parsed_mark_px
+                if math.isfinite(parsed_mark_px) and parsed_mark_px > 0.0
+                else None
+            )
+        except (KeyError, TypeError, ValueError):
+            mark_px = None
+        out[sym] = (rate, next_pay_ms, mark_px)
     return out, ""
 
 
 @dataclasses.dataclass(frozen=True)
 class PresettleFire:
-    """One fire, captured before the mask deletes it: the weight carry held
-    and the settlement the running rate was read against. This is the exodus
-    sleeve's entire trigger."""
+    """One fire and its contemporaneous mark, captured before masking."""
 
     symbol: str
-    weight: float
     settlement_ts_ms: int
+    mark_px: float | None
 
 
 def _apply_presettle_exits(
@@ -1101,7 +1103,7 @@ def _apply_presettle_exits(
     state: CarryCycleState,
     root: Path,
     now_ms: int,
-    tickers: Mapping[str, tuple[float, int]],
+    tickers: Mapping[str, tuple[float, int, float | None]],
 ) -> tuple[CarryDecision, list[str], list[PresettleFire]]:
     """Fire the registered exit test on the pre-settlement running rate.
 
@@ -1121,7 +1123,7 @@ def _apply_presettle_exits(
         info = tickers.get(sym)
         if info is None:
             continue
-        rate, next_pay_ms = info
+        rate, next_pay_ms, mark_px = info
         lead_ms = int(next_pay_ms) - int(now_ms)
         if not (0 < lead_ms <= _PRESETTLE_WINDOW_MS):
             continue
@@ -1131,8 +1133,8 @@ def _apply_presettle_exits(
             fire_details.append(
                 PresettleFire(
                     symbol=sym,
-                    weight=float(decision.weights[sym]),
                     settlement_ts_ms=int(next_pay_ms),
+                    mark_px=mark_px,
                 )
             )
     if new_fires:
@@ -1250,18 +1252,22 @@ def _run_exodus_short(
     state: CarryCycleState,
     root: Path,
     fires: list[PresettleFire],
-    sizing_equity_usdt: float | None,
-    notional_multiplier: float,
+    carry_holdings: Mapping[str, tuple[str, float, float]] | None,
     entry_leverage: float,
     now_ms: int,
+    exodus_held_symbols: frozenset[str] | None = None,
+    exodus_working_entry_symbols: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """One exodus pass per carry cycle: open on this cycle's fires, cover on
     the clock, publish the book. Runs on EVERY cycle — covers must drain even
     when the carry decision is unavailable, so nothing here depends on it.
 
-    ``sizing_equity_usdt`` is ``None`` when the engine-health read failed; a
-    fire arriving in that state is skipped for good (one-shot, like the fire
-    itself) and receipted, mirroring carry's own entry gate.
+    ``carry_holdings`` is the fresh engine account reading taken after the
+    fire. A fire without a positive carry-attributed quantity and a valid
+    contemporaneous mark is blocked rather than inventing a target.
+
+    The two Exodus symbol readings come from the engine. Unknown holdings or
+    unfinished entries retain due state and keep publishing the named cover.
     """
 
     profile_name = os.environ.get(EXODUS_PROFILE_ENV, "").strip()
@@ -1285,42 +1291,56 @@ def _run_exodus_short(
             state.exodus_shorts = _load_exodus_shorts(root)
         records = list(state.exodus_shorts)
         if not profile_name:
-            # Dial off: no config to run a cover clock against, so the book
-            # goes flat now and the state drains with it.
-            kept: list[ExodusShortRecord] = []
+            active: list[ExodusShortRecord] = []
             covered = records
             cfg = None
         else:
             cfg = _registered_exodus_rule(profile_name)
-            kept, covered = split_due_covers(records, now_ms=now_ms, cfg=cfg)
-            open_symbols = {r.symbol for r in kept}
+            active, covered = split_due_covers(records, now_ms=now_ms, cfg=cfg)
+            open_symbols = {r.symbol for r in records}
             for fire in fires:
                 if fire.symbol in open_symbols:
                     continue
-                if sizing_equity_usdt is None or sizing_equity_usdt <= 0.0:
+                holding = carry_holdings.get(fire.symbol) if carry_holdings is not None else None
+                if holding is None:
                     receipt["exodus_entry_blocked"].append(fire.symbol)
                     continue
-                notional = fire.weight * sizing_equity_usdt * notional_multiplier
-                if notional <= 0.0:
+                side, qty, _entry_px = holding
+                if (
+                    str(side).lower() != "long"
+                    or not math.isfinite(float(qty))
+                    or float(qty) <= 0.0
+                    or fire.mark_px is None
+                    or not math.isfinite(float(fire.mark_px))
+                    or float(fire.mark_px) <= 0.0
+                ):
+                    receipt["exodus_entry_blocked"].append(fire.symbol)
                     continue
-                kept.append(
+                target_qty = abs(float(qty))
+                notional = target_qty * float(fire.mark_px)
+                active.append(
                     ExodusShortRecord(
                         symbol=fire.symbol,
                         notional_usdt=notional,
                         settlement_ts_ms=fire.settlement_ts_ms,
                         fired_ts_ms=now_ms,
+                        target_qty=target_qty,
                     )
                 )
                 open_symbols.add(fire.symbol)
                 receipt["exodus_opened"].append(fire.symbol)
         receipt["exodus_covered"] = sorted(r.symbol for r in covered)
-        receipt["exodus_open_names"] = len(kept)
-        if kept != records:
-            # State reaches disk before either memory or the engine-visible
-            # book advances. A failed cover write therefore leaves both on the
-            # old state and is retried, never resurrected after restart.
-            _save_exodus_shorts(root, kept)
-        state.exodus_shorts = kept
+        receipt["exodus_open_names"] = len(active)
+
+        # New exposure reaches durable state before the engine can see it.
+        # Cover state moves in the opposite order: its explicit zero target is
+        # published first, then a flat engine reading permits deletion.
+        opened = [r for r in active if r not in records]
+        durable_records = records
+        if opened:
+            durable_records = sorted(records + opened, key=lambda record: record.symbol)
+            _save_exodus_shorts(root, durable_records)
+            state.exodus_shorts = durable_records
         if receipt["exodus_opened"]:
             _logger.info(
                 "exodus short OPENED: %s (cover %d min after settlement)",
@@ -1330,24 +1350,33 @@ def _run_exodus_short(
         if receipt["exodus_covered"]:
             _logger.info("exodus short covering: %s", ",".join(receipt["exodus_covered"]))
         if book_path_text:
-            if cfg is not None:
-                text = render_exodus_book(
-                    kept,
-                    cfg=cfg,
-                    now_ms=now_ms,
-                    source=_EXODUS_BOOK_SOURCE,
-                    entry_leverage=entry_leverage,
-                )
-            else:
-                text = render_target_book(
-                    source=_EXODUS_BOOK_SOURCE,
-                    decision_ts_ms=now_ms,
-                    valid_until_ms=now_ms + SIGNAL_VALIDITY_MS,
-                    targets=[],
-                )
+            render_cfg = cfg or _registered_exodus_rule("v1")
+            text = render_exodus_book(
+                active,
+                cfg=render_cfg,
+                now_ms=now_ms,
+                source=_EXODUS_BOOK_SOURCE,
+                entry_leverage=entry_leverage,
+                cover_records=covered,
+            )
             write_target_book(Path(book_path_text), text)
-        if cfg is not None and kept:
-            deadline = next_cover_deadline_ts_ms(kept, cfg)
+
+            pending_covers = [
+                record
+                for record in covered
+                if exodus_held_symbols is None
+                or exodus_working_entry_symbols is None
+                or record.symbol in exodus_held_symbols
+                or record.symbol in exodus_working_entry_symbols
+            ]
+            final_records = sorted(
+                active + pending_covers, key=lambda record: record.symbol
+            )
+            if final_records != durable_records:
+                _save_exodus_shorts(root, final_records)
+            state.exodus_shorts = final_records
+        if cfg is not None and active:
+            deadline = next_cover_deadline_ts_ms(active, cfg)
             if deadline is not None:
                 receipt["exodus_next_cover_ts_ms"] = deadline
     except Exception as exc:  # noqa: BLE001 - bookkeeping must never stop the carry sleeve
@@ -2545,7 +2574,7 @@ def run_carry_demo_cycle(
 
         # The exodus pass runs on EVERY cycle: covers must drain even when
         # the carry decision is unavailable. Entries additionally need the
-        # same sizing basis carry entries need, computed the same way.
+        # exact carry-attributed holding and contemporaneous mark.
         try:
             engine_reading = require_recent_engine_account(
                 environment,
@@ -2566,31 +2595,27 @@ def run_carry_demo_cycle(
                 "CARRY commit-time engine account reading unavailable; additions and resizes blocked: %s",
                 exc,
             )
-        exodus_sizing_equity: float | None = None
-        if (
-            decision is not None
-            and not engine_account_health_error
-            and equity_usdt > 0.0
-        ):
-            exodus_sizing_equity = state.sizing_equity(
-                decision_ts_ms=decision.decision_ts_ms, equity_usdt=equity_usdt
-            )
-            if demo.capital_reference_usdt > 0.0:
-                exodus_sizing_equity = min(
-                    exodus_sizing_equity, float(demo.capital_reference_usdt)
-                )
         exodus_receipt = _run_exodus_short(
             state=state,
             root=root,
             fires=presettle_fire_details,
-            sizing_equity_usdt=exodus_sizing_equity,
-            notional_multiplier=float(
-                demo.exodus_notional_multiplier
-                if demo.exodus_notional_multiplier is not None
-                else demo.notional_multiplier
-            ),
+            carry_holdings=(standing_rows if engine_reading is not None else None),
             entry_leverage=float(demo.entry_leverage),
             now_ms=cycle_now_ms,
+            exodus_held_symbols=(
+                frozenset(
+                    engine_reading.holdings_for_strategy(ENGINE_EXODUS_SLEEVE)
+                )
+                if engine_reading is not None
+                and ENGINE_EXODUS_SLEEVE in engine_reading.strategies
+                else None
+            ),
+            exodus_working_entry_symbols=(
+                engine_reading.working_entries_for_strategy(ENGINE_EXODUS_SLEEVE)
+                if engine_reading is not None
+                and ENGINE_EXODUS_SLEEVE in engine_reading.strategies
+                else None
+            ),
         )
 
         plan = _carry_target_plan(
@@ -2619,11 +2644,6 @@ def run_carry_demo_cycle(
             "operational_profile_sha256": demo.operational_profile_sha256,
             "replay_days": demo.replay_days,
             "notional_multiplier": demo.notional_multiplier,
-            "exodus_notional_multiplier": (
-                demo.exodus_notional_multiplier
-                if demo.exodus_notional_multiplier is not None
-                else demo.notional_multiplier
-            ),
             "entry_leverage": demo.entry_leverage,
             "declared_stop_loss_fraction": demo.declared_stop_loss_fraction,
             "max_new_entries_per_cycle": demo.max_new_entries_per_cycle,

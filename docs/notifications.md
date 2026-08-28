@@ -57,6 +57,7 @@ is news the moment it is decided, before anything fills.
     DEMO CARRY enters ONGUSDT · $478
     DEMO EXODUS shorts COTIUSDT · $536
     RM LONG enters ETHUSDT · $25.74
+    RM EXODUS shorts MOVEUSDT · $31.20
 
 **Exits come from the engine**, out of the closed-trade file it appends a line to whenever a position
 goes flat (`trades_path` in `engine.toml`). An exit is worth reading only with its numbers beside it:

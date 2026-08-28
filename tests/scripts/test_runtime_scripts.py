@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -108,7 +109,8 @@ def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> N
     assert "ReadWritePaths=" not in unit
     assert "InaccessiblePaths=" in unit
     assert "bybit-mainnet-attestor.env" in unit
-    assert "rollout-attestor-operator-public.pem" in unit
+    assert "rollout-attestor-operator-public.pem" not in unit
+    assert "attestor-bootstrap" not in unit
     assert "User=root" not in unit
 
     helper = _read("deploy/telegram_control_helper.sh")
@@ -253,6 +255,50 @@ def test_engine_environment_is_bound_to_account_venue_realm_config_and_heartbeat
     assert "book_path is" in block
 
 
+def test_funded_exodus_is_wired_from_producer_to_engine_and_activation() -> None:
+    config = tomllib.loads(_read("deploy/engine.mainnet.toml.template"))
+    strategies = config["strategy"]
+    assert [row["sleeve"] for row in strategies] == ["carry", "long", "exodus"]
+    exodus = strategies[2]
+    assert exodus == {
+        "name": "target_book",
+        "sleeve": "exodus",
+        "book_path": "/var/lib/liquidity-migration/targets/exodus-mainnet.json",
+        "rest_entries": False,
+        "symbols": ["DOGEUSDT"],
+    }
+
+    carry_unit = _read(
+        "deploy/systemd/liquidity-migration-bybit-carry-mainnet.service"
+    )
+    assert "Environment=EXODUS_SHORT_PROFILE=v1" in carry_unit
+    assert (
+        "Environment=EXODUS_ENGINE_TARGET_BOOK_PATH="
+        "/var/lib/liquidity-migration/targets/exodus-mainnet.json"
+    ) in carry_unit
+
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    validation = _function(deploy, "validate_engine_environment", "quarantine_engine_inputs")
+    quarantine = _function(deploy, "quarantine_engine_inputs", "wait_engine_heartbeat")
+    activation = _function(deploy, "start_mainnet_fleet", "resolve_fail_safe_python")
+    expected = "/var/lib/liquidity-migration/targets/exodus-mainnet.json"
+    assert expected in validation
+    assert "exodus-mainnet.json" in quarantine
+    assert expected in activation
+    install_config = _function(
+        deploy, "install_mainnet_engine_config", "require_rollout_for_funded_generation_change"
+    )
+    install_mode = _function(deploy, "install_mode", "load_authorization")
+    assert "deploy/engine.mainnet.toml.template" in install_config
+    assert 'mv -f "${ENGINE_MAINNET_CONFIG}.new"' in install_config
+    assert install_mode.index("checkout -B") < install_mode.index(
+        "install-mainnet-engine-config"
+    )
+
+    flatten = _read("scripts/vps/flatten_account.sh")
+    assert expected in flatten
+
+
 def test_demo_engine_template_has_an_exact_account_id_and_mainnet_requires_one() -> None:
     demo = _read("deploy/engine.env.template")
     mainnet = _read("deploy/engine.mainnet.env.template")
@@ -336,9 +382,16 @@ def test_activation_starts_engine_then_producers_then_immediate_liveness() -> No
 
 def test_mainnet_preflight_uses_only_credentials_and_neutral_producer_inputs() -> None:
     arming = _read("liquidity_migration/policy/real_money_arming.py")
+    provision = _function(
+        DEPLOY.read_text(encoding="utf-8"),
+        "provision_mainnet_prerequisites",
+        "require_mainnet_preflight",
+    )
     assert "MAINNET_CREDENTIAL_ENV" in arming
     assert "MAINNET_PRODUCER_SOURCE_ENV" in arming
     assert "OPERATIONAL_PROFILE_FILE" in arming
+    assert 'install -d -o root -g "$RUNTIME_GROUP" -m 0750' in provision
+    assert 'chmod 700 "$(dirname "$risk_policy_file")"' not in provision
     for retired in ("ACCOUNT_EXECUTION_ROOT", "ACCOUNT_INTENT_INBOX_ROOT", "create-state-roots"):
         assert retired not in arming
 
@@ -390,97 +443,22 @@ def test_embedded_fail_safe_disarm_parser_is_strict_and_standalone() -> None:
             parse_environment(malformed)  # type: ignore[operator]
 
 
-def test_generation_changing_rollout_uses_read_only_trusted_attestation() -> None:
+def test_rollout_and_activation_do_not_depend_on_flatness_attestation() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    block = _function(text, "rollout_flat_check", "verify_topology")
-    assert "rollout_flat_check_realm demo" in block
-    assert "rollout_flat_check_realm mainnet" in block
-    assert "funded_configuration_present" in block
-    assert "return 3" in block
-    assert "check_deploy_rollout_readiness" not in text
-    realm = _function(text, "rollout_flat_check_realm", "rollout_flat_check")
-    assert "verifier_binary" in realm
-    assert "MAINNET_ATTESTOR_ENV" in realm
-    assert "ROLLOUT_ATTESTOR_ENVIRONMENT" in realm
-    assert "ROLLOUT_ATTESTOR_SOURCE_DIGEST" in realm
-    assert "MAINNET_CREDENTIAL_ENV" not in realm
-    assert "ENGINE_CANDIDATE_BINARY" not in realm
-    assert "attest-flat" in realm
-    assert "systemd-run" in realm
-    assert "EnvironmentFile" in realm
-    assert realm.index("EnvironmentFile=$env_file") < realm.index(
-        "EnvironmentFile=$credential_file"
+    rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
+    prerequisites = _function(
+        text, "provision_mainnet_prerequisites", "require_mainnet_preflight"
     )
-    assert "UnsetEnvironment=$unset_environment" in realm
-    for key in ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET", "REAL_MONEY"):
-        assert key in realm
-    assert "ProtectSystem=strict" in realm
-    assert "ReadWritePaths=" not in realm
-    assert "configured-symbol" not in realm
-    assert "head_binding" not in text
-    assert "trusted-outgoing" in block
-    assert "installed-target" in block
-    assert "verify_engine_release" in block
-    assert "ENGINE_BINARY" in block
-    assert "ENGINE_CANDIDATE_BINARY" not in block
-
-
-def test_rollout_snapshots_one_installed_release_before_any_mutation_or_proof() -> None:
-    text = DEPLOY.read_text(encoding="utf-8")
-    block = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
-    snapshotted = block.index("trusted-rollout-attestor")
-    fetched = block.index("rollout-target-prefetch")
-    proved = block.index("pre-stop-flat-account-proof")
-    stopped = block.index("ROLLOUT_STOPPED=1")
-    assert snapshotted < fetched < proved < stopped
-    assert "rollout-engine-candidate" not in block
-    snapshot = _function(text, "snapshot_trusted_rollout_attestor", "remove_trusted_rollout_attestor")
-    assert "verify_engine_release" in snapshot
-    assert 'source_before" = "$marker_digest' in snapshot
-    assert 'copied" = "$marker_digest' in snapshot
-    assert "attestor_supports_flat" in snapshot
-    assert "readonly ROLLOUT_ATTESTOR" in snapshot
-    assert "validate_mainnet_attestor_environment" in snapshot
-    assert '"$MAINNET_ATTESTOR_ENV" "$ROLLOUT_ATTESTOR_ENVIRONMENT"' in snapshot
-
-
-def test_attestor_capability_and_proofs_are_unprivileged_and_digest_bracketed() -> None:
-    text = DEPLOY.read_text(encoding="utf-8")
-    capability = _function(text, "attestor_supports_flat", "install_signed_bootstrap_attestor")
-    assert "engine attest-flat --config engine.toml" in capability
-    assert "User=$DEMO_ENGINE_USER" in capability
-    assert '"$binary" --help' in capability
-    assert capability.index('digest_before="$(') < capability.index("systemd-run")
-    assert capability.index("systemd-run") < capability.index('digest_after="$(')
-    realm = _function(text, "rollout_flat_check_realm", "rollout_flat_check")
-    assert realm.index('digest_before="$(') < realm.index("systemd-run")
-    assert realm.index("systemd-run") < realm.index('digest_after="$(')
-
-
-def test_bootstrap_attestor_uses_an_external_operator_trust_root() -> None:
-    text = DEPLOY.read_text(encoding="utf-8")
-    bootstrap = _function(
-        text, "install_signed_bootstrap_attestor", "snapshot_trusted_rollout_attestor"
-    )
-    assert (
-        "BOOTSTRAP_ATTESTOR_TRUST_ROOT=/etc/liquidity-migration/"
-        "rollout-attestor-operator-public.pem"
-    ) in text
-    assert "BOOTSTRAP_ATTESTOR_PUBLIC_KEY" not in text
-    assert "copied_public_key" not in bootstrap
-    assert "operator-public.pem" not in bootstrap
-    assert "must contain exactly attestor, manifest, and manifest.sig" in bootstrap
-    assert bootstrap.count(
-        '/usr/bin/openssl dgst -sha256 -verify "$BOOTSTRAP_ATTESTOR_TRUST_ROOT"'
-    ) == 2
-    assert 'stat -c %u "$BOOTSTRAP_ATTESTOR_TRUST_ROOT"' in bootstrap
-    assert 'stat -c %g "$BOOTSTRAP_ATTESTOR_TRUST_ROOT"' in bootstrap
-    assert 'stat -c %a "$BOOTSTRAP_ATTESTOR_TRUST_ROOT"' in bootstrap
-    assert "trust_root_before" in bootstrap and "trust_root_after" in bootstrap
-    for field in ("commit=", "sha256=", "purpose=", "not_after_utc="):
-        assert field in bootstrap
-    assert "ENGINE_CANDIDATE_BINARY" not in bootstrap
-    assert "attestor_supports_flat" in bootstrap
+    for removed in (
+        "trusted-rollout-attestor",
+        "rollout_flat_check",
+        "flat-account-proof",
+        "snapshot_trusted_rollout_attestor",
+        "--require-flat",
+    ):
+        assert removed not in rollout
+    assert "validate_mainnet_attestor_environment" not in prerequisites
+    assert "MAINNET_ATTESTOR_ENV" not in prerequisites
 
 
 def test_engine_build_runs_unprivileged_against_immutable_exact_source() -> None:
@@ -566,7 +544,7 @@ def test_direct_generation_modes_refuse_every_persisted_funded_surface() -> None
     for function, boundary in (
         ("install_mode", "load_authorization"),
         ("activate_mode", "provision_mainnet_prerequisites"),
-        ("staged_mode", "rollout_flat_required"),
+        ("staged_mode", "rollout_mode"),
     ):
         assert "require_rollout_for_funded_generation_change" in _function(
             text, function, boundary
@@ -575,34 +553,43 @@ def test_direct_generation_modes_refuse_every_persisted_funded_surface() -> None
     assert "ROLLOUT_FUNDED_AUTHORITY=1" in rollout
 
 
-def test_rollout_calls_the_flat_gate_before_any_stop_or_checkout_mutation() -> None:
+def test_rollout_accepts_a_markerless_incumbent_until_the_stopped_install() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     block = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
-    gate = block.index("pre-stop-flat-account-proof")
-    assert gate < block.index("ROLLOUT_STOPPED=1")
-    assert gate < block.index("stop-downstream-units")
-    assert gate < block.index("stopped-install")
+    before_install = block[: block.index("stopped-install")]
+    assert before_install.index("rollout-target-prefetch") < before_install.index(
+        "stop-downstream-units"
+    )
+    assert before_install.index("snapshot-prior-topology") < before_install.index(
+        "stop-downstream-units"
+    )
+    for incompatible in (
+        "load_authorization",
+        "verify_topology",
+        "verify_engine_release",
+        "activation_authority_matches",
+        "ENGINE_BINARY.release",
+    ):
+        assert incompatible not in before_install
 
 
-def test_rollout_rechecks_after_owner_stop_and_after_install_before_activation() -> None:
+def test_rollout_stops_owners_before_install_and_activates_after_install() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     block = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
     owners = block.index("stop-account-owners")
-    stopped_proof = block.index("final-stopped-flat-account-proof")
     install = block.index("stopped-install")
-    installed_proof = block.index("installed-generation-flat-account-proof")
     activate = block.index("activate-and-verify")
-    assert owners < stopped_proof < install < installed_proof < activate
+    assert owners < install < activate
 
 
 def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
-    stopped_proof = rollout.index("final-stopped-flat-account-proof")
+    owners_stopped = rollout.index("stop-account-owners")
     boot_fence = rollout.index("persist-rollout-boot-fence")
     irreversible = rollout.index("ROLLOUT_IRREVERSIBLE=1")
     install = rollout.index("stopped-install")
-    assert stopped_proof < boot_fence < irreversible < install
+    assert owners_stopped < boot_fence < irreversible < install
 
     fence = _function(
         text, "disable_rollout_units_for_boot_fence", "stop_all_rollout_units_best_effort"
@@ -646,9 +633,24 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
     assert "activate_mode" not in cancellation
     for signal, status in (("INT", 130), ("TERM", 143), ("HUP", 129), ("PIPE", 141)):
         assert f"trap 'rollout_cancel {signal} {status}' {signal}" in rollout
-    # A failed prior-topology restore (including failure after the first
-    # mainnet enable) crosses the quarantine a second time before returning.
-    assert cleanup.count("stop_all_rollout_units_best_effort") >= 3
+    snapshot_restore = _function(
+        text, "restore_prior_topology_snapshot", "restore_prior_topology"
+    )
+    restore = _function(text, "restore_prior_topology", "stop_rollout_units")
+    assert "activate_mode" not in snapshot_restore
+    assert "verify_engine_release" not in snapshot_restore
+    assert snapshot_restore.index('"${ROLLOUT_OWNER_UNITS[@]}"') < snapshot_restore.index(
+        "ROLLOUT_DOWNSTREAM_UNITS[$index]"
+    )
+    assert 'systemctl enable --runtime "$unit"' in snapshot_restore
+    assert 'if [ -f "${ENGINE_BINARY}.release" ]' in restore
+    assert "activate_mode" not in restore
+    assert "begin_activation_generation" in restore
+    assert "complete_activation_generation" in restore
+    assert "restore_prior_topology_snapshot" in restore
+    # A failed prior-topology restore crosses the quarantine a second time
+    # before returning.
+    assert cleanup.count("stop_all_rollout_units_best_effort") >= 2
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
@@ -659,10 +661,10 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
         ("TERM", 143, ["stop"]),
         ("HUP", 129, ["stop"]),
         ("PIPE", 141, ["stop"]),
-        ("", 71, ["stop", "activate"]),
+        ("", 71, ["restore"]),
         # A command may itself return a signal-shaped status. Only the shell's
         # explicit signal handler marks cancellation and suppresses restore.
-        ("", 143, ["stop", "activate"]),
+        ("", 143, ["restore"]),
     ],
 )
 def test_rollout_cleanup_quarantines_cancellation_but_restores_ordinary_failure(
@@ -689,8 +691,7 @@ ROLLOUT_IRREVERSIBLE=0
 ROLLOUT_CURRENT_COMMIT=prior-commit
 cleanup_notice() {{ :; }}
 stop_all_rollout_units_best_effort() {{ printf 'stop\\n'; }}
-activate_mode() {{ printf 'activate\\n'; }}
-remove_trusted_rollout_attestor() {{ return 0; }}
+restore_prior_topology() {{ printf 'restore\\n'; }}
 {cancel}
 {cleanup}
 trap rollout_cleanup EXIT
@@ -737,7 +738,7 @@ def test_activation_receipt_commits_only_after_full_in_boot_verification() -> No
         assert required in permit
 
     complete = _function(
-        text, "complete_activation_generation", "attestor_supports_flat"
+        text, "complete_activation_generation", "validate_engine_environment"
     )
     receipt_move = complete.index('mv -f "$temporary" "$ACTIVATION_RECEIPT"')
     watchdog_stop = complete.index("stop_activation_watchdog")
@@ -1518,13 +1519,6 @@ def test_release_marker_binds_helper_sudoers_and_bot_before_activation() -> None
     assert activate.index("begin_activation_generation") < activate.index(
         "liquidity-migration-telegram-controls.service"
     )
-
-
-def test_disarmed_but_configured_funded_account_keeps_rollout_flatness_strict() -> None:
-    text = DEPLOY.read_text(encoding="utf-8")
-    required = _function(text, "rollout_flat_required", "rollout_flat_phase")
-    assert "funded_configuration_present" in required
-    assert "mainnet_armed" not in required
 
 
 def test_exact_commit_checkout_gate_uses_an_independent_index_and_rechecks_head() -> None:

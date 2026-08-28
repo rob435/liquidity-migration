@@ -85,6 +85,7 @@ ACCOUNTS = (
         books={
             "CARRY": f"{TARGETS}/carry-mainnet.json",
             "LONG": f"{TARGETS}/long-mainnet.json",
+            "EXODUS": f"{TARGETS}/exodus-mainnet.json",
         },
         trades="/var/lib/liquidity-migration-engine-mainnet/trades.jsonl",
     ),

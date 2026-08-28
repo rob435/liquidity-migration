@@ -1,9 +1,9 @@
 """The exodus short's decision surface: config, cover clock, book shape.
 
 The registered file is configs/lane2_exodus_short_v1.json; these tests pin
-the contract the carry producer and the engine both rely on: notionals
-render NEGATIVE with the fence stop, covers are decided by the clock alone,
-and a torn state file reads as flat (covers, never strands).
+the contract the carry producer and the engine both rely on: quantities and
+notionals render NEGATIVE with the fence stop, covers are decided by the clock
+alone, and a torn state file is unknown rather than an invented flat decision.
 """
 
 import json
@@ -40,6 +40,7 @@ def _record(symbol: str = "DEEPUSDT", settlement_ts_ms: int = S) -> ExodusShortR
         notional_usdt=54.0,
         settlement_ts_ms=settlement_ts_ms,
         fired_ts_ms=settlement_ts_ms - 10 * MIN_MS,
+        target_qty=3.2,
     )
 
 
@@ -52,6 +53,16 @@ class TestRegisteredConfig:
         assert cfg.entry_valid_minutes_after_settlement == 20
         assert cfg.stop_loss_fraction == 0.35
         assert cfg.entry_leverage == 2.0
+        payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        assert payload["rule"]["sizing"]["basis"] == "carry_position_at_fire"
+
+    def test_metadata_names_the_runtime_without_claiming_venue_permission(self) -> None:
+        payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        assert payload["surface"] == "runtime strategy rule for demo and funded producers"
+        assert payload["authorizes"] == (
+            "rule parameters only; venue permission comes from the separately armed "
+            "Rust engine and its host credential"
+        )
 
     def test_an_unknown_trigger_basis_is_refused(self, tmp_path: Path) -> None:
         payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -98,6 +109,7 @@ class TestBookShape:
         book = json.loads(text)
         (target,) = book["targets"]
         assert target["notional_usdt"] == -54.0
+        assert target["target_qty"] == -3.2
         assert target["stop_loss_fraction"] == 0.35
         assert target["leverage"] == cfg.entry_leverage
 
@@ -113,6 +125,43 @@ class TestBookShape:
             S + cfg.entry_valid_minutes_after_settlement * MIN_MS
         )
 
+    def test_staggered_records_keep_independent_entry_deadlines(
+        self, cfg: ExodusShortConfig
+    ) -> None:
+        text = render_exodus_book(
+            [_record("EARLYUSDT", S), _record("LATEUSDT", S + 60 * MIN_MS)],
+            cfg=cfg,
+            now_ms=S - 10 * MIN_MS,
+            source="exodus_short",
+        )
+        book = json.loads(text)
+        targets = {row["symbol"]: row for row in book["targets"]}
+        assert book["valid_until_ms"] == S + 80 * MIN_MS
+        assert targets["EARLYUSDT"]["entry_valid_until_ms"] == S + 5 * MIN_MS
+        assert targets["LATEUSDT"]["entry_valid_until_ms"] == S + 65 * MIN_MS
+
+    def test_cover_records_render_as_named_zero_targets(
+        self, cfg: ExodusShortConfig
+    ) -> None:
+        record = _record("DYNAMICUSDT")
+        book = json.loads(
+            render_exodus_book(
+                [],
+                cfg=cfg,
+                now_ms=S + 60 * MIN_MS,
+                source="exodus_short",
+                cover_records=[record],
+            )
+        )
+        assert book["targets"] == [
+            {
+                "leverage": 2.0,
+                "notional_usdt": 0.0,
+                "stop_loss_fraction": 0.35,
+                "symbol": "DYNAMICUSDT",
+            }
+        ]
+
     def test_an_empty_book_is_cash_not_silence(self, cfg: ExodusShortConfig) -> None:
         text = render_exodus_book([], cfg=cfg, now_ms=S, source="exodus_short")
         book = json.loads(text)
@@ -126,6 +175,20 @@ class TestStateFile:
         assert records_from_payload(records_to_payload(records)) == sorted(
             records, key=lambda r: r.symbol
         )
+
+    def test_schema_v1_state_loads_without_an_exact_quantity(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "open": [
+                {
+                    "symbol": "AUSDT",
+                    "notional_usdt": 54.0,
+                    "settlement_ts_ms": S,
+                    "fired_ts_ms": S - 10 * MIN_MS,
+                }
+            ],
+        }
+        assert records_from_payload(payload)[0].target_qty is None
 
     @pytest.mark.parametrize(
         "payload",

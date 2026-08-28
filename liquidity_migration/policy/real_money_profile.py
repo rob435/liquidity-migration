@@ -1,8 +1,8 @@
 """Render the real-money operational profile.
 
-Sizing lives in three env dials the producers read directly
-(``CARRY_NOTIONAL_MULTIPLIER``, ``LONG_NOTIONAL_MULTIPLIER``,
-``EXODUS_NOTIONAL_MULTIPLIER``). They sit in the file each producer unit loads:
+Entry sizing lives in the carry and LONG env dials the producers read directly.
+Exodus copies carry's actual filled quantity and has no independent size dial.
+The two dials sit in:
 ``producer-demo.env`` on demo, ``producer-mainnet.env``
 on the funded fleet — never ``bybit-mainnet.env``, which no producer loads.
 This module only builds the account document: caps, partition, entry leverage,
@@ -87,8 +87,8 @@ def parse_real_money_dials(environment: Mapping[str, str]) -> RealMoneyDials:
         raise ValueError(
             "retired real-money dial(s) in the env file: "
             + ", ".join(retired)
-            + "; sizing is now CARRY_NOTIONAL_MULTIPLIER, LONG_NOTIONAL_MULTIPLIER, "
-            "and EXODUS_NOTIONAL_MULTIPLIER in the fleet env files - delete the old lines"
+            + "; sizing is now CARRY_NOTIONAL_MULTIPLIER and LONG_NOTIONAL_MULTIPLIER "
+            "in the fleet env files - delete the old lines"
         )
     values: dict[str, Any] = {}
     for key, name in known.items():

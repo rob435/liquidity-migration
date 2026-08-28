@@ -28,6 +28,7 @@ from liquidity_migration.core.durable_file import durable_atomic_replace, durabl
 #: Bumped when the shape changes in a way an old reader would misread. The
 #: engine refuses a version it does not know rather than guessing.
 TARGET_BOOK_VERSION = 1
+TARGET_BOOK_EXTENDED_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,13 @@ class EngineTarget:
     notional_usdt: float
     stop_loss_fraction: float
     leverage: float = 1.0
+    #: Optional direct deadline for increasing exposure in this symbol.
+    #: ``None`` keeps the book-wide validity/cutoff behavior.
+    entry_valid_until_ms: int | None = None
+    #: Optional exact signed base-asset quantity. When present, the engine
+    #: follows this quantity instead of deriving one from notional/current
+    #: price. ``notional_usdt`` remains the frozen audit/risk value.
+    target_qty: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,17 +108,46 @@ def render_target_book(
             raise ValueError(f"{symbol}: stop_loss_fraction must be between 0 and 1")
         if not math.isfinite(target.leverage) or target.leverage <= 0:
             raise ValueError(f"{symbol}: leverage must be a positive finite number")
-        rows.append(
-            {
-                "symbol": symbol,
-                "notional_usdt": float(target.notional_usdt),
-                "stop_loss_fraction": float(target.stop_loss_fraction),
-                "leverage": float(target.leverage),
-            }
-        )
+        if target.entry_valid_until_ms is not None and (
+            isinstance(target.entry_valid_until_ms, bool)
+            or not isinstance(target.entry_valid_until_ms, int)
+            or target.entry_valid_until_ms <= 0
+        ):
+            raise ValueError(f"{symbol}: entry_valid_until_ms must be a positive integer")
+        if target.target_qty is not None:
+            if (
+                isinstance(target.target_qty, bool)
+                or not isinstance(target.target_qty, (int, float))
+                or not math.isfinite(float(target.target_qty))
+                or float(target.target_qty) == 0.0
+            ):
+                raise ValueError(f"{symbol}: target_qty must be a finite non-zero number")
+            if target.notional_usdt == 0.0 or (
+                (float(target.target_qty) > 0.0) != (target.notional_usdt > 0.0)
+            ):
+                raise ValueError(f"{symbol}: target_qty and notional_usdt must have the same sign")
+        row: dict[str, object] = {
+            "symbol": symbol,
+            "notional_usdt": float(target.notional_usdt),
+            "stop_loss_fraction": float(target.stop_loss_fraction),
+            "leverage": float(target.leverage),
+        }
+        rows.append(row)
 
+    version = (
+        TARGET_BOOK_EXTENDED_VERSION
+        if any(
+            target.entry_valid_until_ms is not None or target.target_qty is not None
+            for target in targets
+        )
+        else TARGET_BOOK_VERSION
+    )
+    if version == TARGET_BOOK_EXTENDED_VERSION:
+        for row, target in zip(rows, sorted(targets, key=lambda target: target.symbol), strict=True):
+            row["entry_valid_until_ms"] = target.entry_valid_until_ms
+            row["target_qty"] = target.target_qty
     book = {
-        "version": TARGET_BOOK_VERSION,
+        "version": version,
         "source": source,
         "decision_ts_ms": int(decision_ts_ms),
         "valid_until_ms": int(valid_until_ms),
@@ -131,7 +168,8 @@ def parse_target_book_bytes(data: bytes) -> ParsedTargetBook:
         raise ValueError("engine target book has unexpected or missing fields")
     if (
         type(payload["version"]) is not int
-        or payload["version"] != TARGET_BOOK_VERSION
+        or payload["version"]
+        not in {TARGET_BOOK_VERSION, TARGET_BOOK_EXTENDED_VERSION}
         or type(payload["source"]) is not str
         or type(payload["decision_ts_ms"]) is not int
         or type(payload["valid_until_ms"]) is not int
@@ -140,8 +178,22 @@ def parse_target_book_bytes(data: bytes) -> ParsedTargetBook:
         raise ValueError("engine target book has an unsupported schema")
     targets: list[EngineTarget] = []
     target_fields = {"symbol", "notional_usdt", "stop_loss_fraction", "leverage"}
+    if payload["version"] == TARGET_BOOK_EXTENDED_VERSION and not any(
+        isinstance(row, dict)
+        and (
+            type(row.get("entry_valid_until_ms")) is int
+            or type(row.get("target_qty")) in {int, float}
+        )
+        for row in payload["targets"]
+    ):
+        raise ValueError("target book version 2 must carry an entry deadline or exact quantity")
     for index, row in enumerate(payload["targets"]):
-        if not isinstance(row, dict) or set(row) != target_fields:
+        expected_target_fields = (
+            target_fields | {"entry_valid_until_ms", "target_qty"}
+            if payload["version"] == TARGET_BOOK_EXTENDED_VERSION
+            else target_fields
+        )
+        if not isinstance(row, dict) or set(row) != expected_target_fields:
             raise ValueError(f"engine target book target {index} has invalid fields")
         if (
             type(row["symbol"]) is not str
@@ -157,6 +209,8 @@ def parse_target_book_bytes(data: bytes) -> ParsedTargetBook:
                     notional_usdt=float(row["notional_usdt"]),
                     stop_loss_fraction=float(row["stop_loss_fraction"]),
                     leverage=float(row["leverage"]),
+                    entry_valid_until_ms=row.get("entry_valid_until_ms"),
+                    target_qty=row.get("target_qty"),
                 )
             )
         except (TypeError, ValueError) as exc:
@@ -250,6 +304,7 @@ __all__ = [
     "ParsedTargetBook",
     "PublishedTargetBook",
     "TARGET_BOOK_VERSION",
+    "TARGET_BOOK_EXTENDED_VERSION",
     "publish_target_book",
     "parse_target_book_bytes",
     "read_target_book",

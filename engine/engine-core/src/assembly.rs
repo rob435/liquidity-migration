@@ -893,16 +893,23 @@ mod deployed_templates {
             .parent()
             .and_then(|p| p.parent())
             .expect("the repo root is two above this crate");
+        let profile_path = root
+            .join("configs")
+            .join(profile)
+            .to_str()
+            .expect("a utf-8 path")
+            .to_string();
         let text = std::fs::read_to_string(root.join("deploy").join(template))
             .unwrap_or_else(|e| {
                 panic!("{template} is a shipped artifact and must be readable: {e}")
             })
             .replace(
                 &format!("/opt/liquidity-migration/configs/{profile}"),
-                root.join("configs")
-                    .join(profile)
-                    .to_str()
-                    .expect("a utf-8 path"),
+                &profile_path,
+            )
+            .replace(
+                "/etc/liquidity-migration/producer-mainnet-source/operational-profile.json",
+                &profile_path,
             );
         toml::from_str::<Config>(&text).unwrap_or_else(|e| panic!("{template} must parse: {e}"))
     }
@@ -948,10 +955,33 @@ mod deployed_templates {
     }
 
     #[test]
+    fn the_mainnet_template_runs_carry_then_long_then_exodus() {
+        let config = config_from("engine.mainnet.toml.template", "operational.mainnet.json");
+        let sleeves: Vec<&str> = config.strategies.iter().map(|s| s.sleeve_name()).collect();
+        assert_eq!(sleeves, ["carry", "long", "exodus"]);
+    }
+
+    #[test]
     fn each_sleeve_in_the_demo_template_reads_its_own_book() {
         // Books are routed, not broadcast. Two sleeves sharing one path would
         // each act on the other's decisions.
         let config = config_from("engine.demo.toml.template", "operational.demo.json");
+        let paths: Vec<&std::path::Path> = config
+            .strategies
+            .iter()
+            .map(|s| s.book_path.as_deref().expect("every sleeve names a book"))
+            .collect();
+        assert_eq!(paths.len(), 3);
+        for (i, a) in paths.iter().enumerate() {
+            for b in paths.iter().skip(i + 1) {
+                assert_ne!(a, b, "one file cannot be two sleeves' decisions");
+            }
+        }
+    }
+
+    #[test]
+    fn each_sleeve_in_the_mainnet_template_reads_its_own_book() {
+        let config = config_from("engine.mainnet.toml.template", "operational.mainnet.json");
         let paths: Vec<&std::path::Path> = config
             .strategies
             .iter()

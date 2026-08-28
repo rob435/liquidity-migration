@@ -1,8 +1,8 @@
 //! Reading the fleet's operational profile into a [`KernelConfig`].
 //!
-//! `configs/operational.mainnet.json` is the document that says how much of
-//! the funded account may be at risk. The Python fleet loads it and proves it
-//! at start-up, and the engine reads the same file rather than a copy of its
+//! The rendered operational profile is the document that says how much of the
+//! funded account may be at risk. The Python fleet loads it and proves it at
+//! start-up, and the engine reads the same file rather than a copy of its
 //! numbers — a copy of a risk limit is a limit that can drift without anyone
 //! noticing.
 //!
@@ -14,14 +14,16 @@
 //! `capital_reference` are refused rather than ignored. Those are the blocks
 //! the kernel reads, and a cap added on the Python side that the engine
 //! silently did not enforce is exactly the failure this module exists to stop.
-//! The producer blocks (`long`, `carry`, `hedge`) are sizing for the Python
-//! producers, are not the kernel's business, and are skipped by name.
+//! Most producer-block values (`long`, `carry`, `hedge`) are sizing for the
+//! Python producers and are skipped by name. The carry stop distance is the
+//! exception: the kernel must admit every stop a producer can publish, so it
+//! reads that one field as well.
 //!
-//! **What is not in the file.** Two numbers the kernel needs live elsewhere,
-//! so the caller supplies them through [`ProfileInputs`] rather than this
-//! module inventing defaults: the disaster-stop distance (an environment
-//! variable on the host, `DISASTER_STOP_FRACTION`) and how stale an account
-//! reading may be.
+//! **What is not in the file.** The caller supplies a baseline disaster-stop
+//! distance and the maximum account-view age through [`ProfileInputs`]. The
+//! effective stop ceiling is the larger of that baseline and carry's declared
+//! stop, so a host-rendered carry dial cannot pass producer preflight and then
+//! be refused by a stale engine constant.
 
 use serde_json::Value;
 
@@ -70,8 +72,8 @@ const CAPITAL_REFERENCE_KEYS: &[&str] = &[
 /// The numbers the kernel needs that the profile does not carry.
 #[derive(Clone, Copy, Debug)]
 pub struct ProfileInputs {
-    /// How far a position may move against us before its stop ends it. The
-    /// host's `DISASTER_STOP_FRACTION`.
+    /// Baseline upper bound for stop distance. Producer declarations may
+    /// widen it, but never narrow the bound used by the other sleeves.
     pub disaster_stop_fraction: f64,
     /// An account view older than this is not evidence about the account now.
     pub max_account_view_age_ns: u64,
@@ -142,6 +144,24 @@ fn optional_number(
         None | Some(Value::Null) => Ok(None),
         Some(_) => number(row, key, where_).map(Some),
     }
+}
+
+fn carry_stop_fraction(root: &serde_json::Map<String, Value>) -> Result<Option<f64>, ConfigError> {
+    let Some(value) = root.get("carry") else {
+        return Ok(None);
+    };
+    let carry = value
+        .as_object()
+        .ok_or_else(|| bad("the operational profile carry block must be an object"))?;
+    let Some(stop) = optional_number(carry, "declared_stop_loss_fraction", "carry")? else {
+        return Ok(None);
+    };
+    if !(stop > 0.0 && stop < 1.0) {
+        return Err(bad(
+            "carry.declared_stop_loss_fraction must be a fraction in (0, 1)",
+        ));
+    }
+    Ok(Some(stop))
 }
 
 /// Read one operational profile document into a kernel config, and prove it.
@@ -255,6 +275,18 @@ pub fn kernel_config_from_profile(
         }
     };
 
+    if !(inputs.disaster_stop_fraction.is_finite()
+        && inputs.disaster_stop_fraction > 0.0
+        && inputs.disaster_stop_fraction < 1.0)
+    {
+        return Err(bad(
+            "the baseline disaster_stop_fraction must be a fraction in (0, 1)",
+        ));
+    }
+    let disaster_stop_fraction = carry_stop_fraction(root)?
+        .map_or(inputs.disaster_stop_fraction, |carry| {
+            inputs.disaster_stop_fraction.max(carry)
+        });
     let envelope = EnvelopeConfig {
         tracks_equity,
         reference_usdt,
@@ -262,7 +294,7 @@ pub fn kernel_config_from_profile(
         floor_usdt,
         expand_dead_band_fraction,
         gross_notional_multiple,
-        disaster_stop_fraction: inputs.disaster_stop_fraction,
+        disaster_stop_fraction,
         max_component_gross_notional_usdt: number(
             account,
             "max_component_gross_notional_usdt",

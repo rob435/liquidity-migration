@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Staged VPS lifecycle plus a guarded, flat-account one-command rollout.
+# Staged VPS lifecycle plus a one-command rollout.
 set -euo pipefail
 
 MODE="${1:-${DEPLOY_MODE:-verify}}"
@@ -20,15 +20,12 @@ usage: deploy_vps_live.sh {install|activate|verify|staged|rollout|stop-mainnet|d
   --stop-first / --no-stop-first          install|activate|staged: stop a running
                                           fleet instead of refusing. Default: stop
                                           unless real money is armed.
-  --require-flat                          rollout: gate on a flat demo account
-                                          rather than reporting residuals
 USAGE
     exit 2
 }
 
 DEPLOY_PROFILE=""
 STOP_FIRST=auto
-REQUIRE_FLAT=0
 
 require_mode() {
     local flag="$1"
@@ -56,11 +53,6 @@ while [ "$#" -gt 0 ]; do
         --no-stop-first)
             require_mode --no-stop-first install activate staged
             STOP_FIRST=0
-            shift
-            ;;
-        --require-flat)
-            require_mode --require-flat rollout
-            REQUIRE_FLAT=1
             shift
             ;;
         *) echo "unknown $MODE argument: $1" >&2; deploy_usage ;;
@@ -157,7 +149,6 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
     printf 'STOP_FIRST=%q\n' "$STOP_FIRST"
-    printf 'REQUIRE_FLAT=%q\n' "$REQUIRE_FLAT"
 	cat <<'REMOTE_SCRIPT'
 # `-E` propagates the ERR trap into shell functions so a strict phase can still
 # report which phase died; see run_strict_phase below.
@@ -410,7 +401,7 @@ source = Path(sys.argv[1])
 target = Path(sys.argv[2])
 allowed = {
     "CANDIDATE_UNIVERSE_FILE", "CARRY_NOTIONAL_MULTIPLIER",
-    "EXODUS_NOTIONAL_MULTIPLIER", "LONG_NOTIONAL_MULTIPLIER",
+    "LONG_NOTIONAL_MULTIPLIER",
     "OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM",
 }
 values = load_private_systemd_environment(source)
@@ -813,6 +804,7 @@ install_mode() {
     # process wrote, which is the read that can actually disagree.
     lm_write_resolved_sleeve_toggles
     prepare_demo_runtime_config
+    run_phase install-mainnet-engine-config install_mainnet_engine_config
     require_clean_head
     run_phase engine-build build_engine
     echo "install-ok commit=$EXPECTED_COMMIT units_started=0"
@@ -904,16 +896,8 @@ ACTIVATION_WATCHDOG_UNIT=liquidity-migration-activation-watchdog.service
 ACTIVATION_LEASE_SECONDS=6
 ENGINE_ENVIRONMENT=/etc/liquidity-migration/engine.env
 ENGINE_MAINNET_ENVIRONMENT=/etc/liquidity-migration/engine-mainnet.env
+ENGINE_MAINNET_CONFIG=/etc/liquidity-migration/engine-mainnet.toml
 ENGINE_CANDIDATE_BINARY="$ENGINE_BUILDER_TARGET_DIR/release/engine"
-BOOTSTRAP_ATTESTOR_DIRECTORY=/etc/liquidity-migration/attestor-bootstrap
-BOOTSTRAP_ATTESTOR_BINARY="$BOOTSTRAP_ATTESTOR_DIRECTORY/attestor"
-BOOTSTRAP_ATTESTOR_MANIFEST="$BOOTSTRAP_ATTESTOR_DIRECTORY/manifest"
-BOOTSTRAP_ATTESTOR_SIGNATURE="$BOOTSTRAP_ATTESTOR_DIRECTORY/manifest.sig"
-# Independently provisioned trust root. It is deliberately outside the
-# replaceable bootstrap bundle: a manifest and a key supplied by the same
-# bundle would only prove that they were replaced together.
-BOOTSTRAP_ATTESTOR_TRUST_ROOT=/etc/liquidity-migration/rollout-attestor-operator-public.pem
-BOOTSTRAP_ATTESTOR_PURPOSE=liquidity-migration-rollout-flat-attestor-v1
 
 # The single arming switch: REAL_MONEY=true in the mainnet credential file,
 # written by the owner's own hand next to the live API key. No file, or any
@@ -941,44 +925,21 @@ funded_configuration_present() {
     return 1
 }
 
+install_mainnet_engine_config() {
+    funded_configuration_present || return 0
+    install -o root -g "$RUNTIME_GROUP" -m 0640 \
+        deploy/engine.mainnet.toml.template "${ENGINE_MAINNET_CONFIG}.new" \
+        || fail "cannot stage the committed mainnet engine config"
+    mv -f "${ENGINE_MAINNET_CONFIG}.new" "$ENGINE_MAINNET_CONFIG" \
+        || fail "cannot install the committed mainnet engine config"
+}
+
 require_rollout_for_funded_generation_change() {
     local operation="$1"
     if [ "${ROLLOUT_FUNDED_AUTHORITY:-0}" -ne 1 ] \
         && funded_configuration_present; then
         fail "$operation refused: this host has persisted funded configuration; only rollout may change or activate its generation"
     fi
-}
-
-validate_mainnet_attestor_environment() {
-    local path="${1:-$MAINNET_ATTESTOR_ENV}"
-    [ -f "$path" ] && [ ! -L "$path" ] \
-        || fail "funded attestor environment is missing or linked: $path"
-    [ "$(stat -c %u "$path")" -eq 0 ] && [ "$(stat -c %g "$path")" -eq 0 ] \
-        && [ "$(stat -c %a "$path")" = 600 ] \
-        || fail "funded attestor environment must be root:root mode 0600: $path"
-    awk '
-BEGIN {
-    allowed["BYBIT_ATTEST_API_KEY"] = 1
-    allowed["BYBIT_ATTEST_API_SECRET"] = 1
-    allowed["BYBIT_ATTEST_API_KEY_IP"] = 1
-    allowed["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] = 1
-}
-/^[[:space:]]*$/ || /^#/ { next }
-{
-    separator = index($0, "=")
-    if (separator < 2) exit 1
-    key = substr($0, 1, separator - 1)
-    value = substr($0, separator + 1)
-    if (!(key in allowed) || seen[key]++ || value == "") exit 1
-}
-END {
-    if (seen["BYBIT_ATTEST_API_KEY"] != 1 ||
-        seen["BYBIT_ATTEST_API_SECRET"] != 1 ||
-        seen["BYBIT_ATTEST_API_KEY_IP"] != 1 ||
-        seen["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] != 1) exit 1
-}
-' "$path" \
-        || fail "funded attestor environment must contain exactly the four non-empty BYBIT_ATTEST/UID assignments"
 }
 
 mainnet_armed() {
@@ -1049,141 +1010,6 @@ verify_unit() {
     verify_note "$message"
 }
 
-rollout_flat_check_realm() {
-    local realm="$1" phase="$2" verifier_kind="$3" verifier_binary="$4"
-    local verifier_commit="$5" verifier_digest="$6"
-    local env_file credential_file runtime_user state_dir unset_environment
-    local digest_before digest_after status=0
-    case "$realm" in
-        demo)
-            env_file="$ENGINE_ENVIRONMENT"
-            credential_file=/etc/liquidity-migration/bybit-demo.env
-            runtime_user="$DEMO_ENGINE_USER"
-            state_dir=/var/lib/liquidity-migration-engine
-            unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-            ;;
-        mainnet)
-            env_file="$ENGINE_MAINNET_ENVIRONMENT"
-            credential_file="$ROLLOUT_ATTESTOR_ENVIRONMENT"
-            runtime_user="$MAINNET_ENGINE_USER"
-            state_dir=/var/lib/liquidity-migration-engine-mainnet
-            unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-            [ "$(sha256sum "$MAINNET_ATTESTOR_ENV" | awk '{print $1}')" \
-                = "$ROLLOUT_ATTESTOR_SOURCE_DIGEST" ] \
-                || fail "operator attestor environment changed during rollout"
-            validate_mainnet_attestor_environment "$credential_file"
-            ;;
-        *) fail "invalid flatness realm: $realm" ;;
-    esac
-    [ -x "$verifier_binary" ] \
-        || fail "$verifier_kind flatness verifier is missing: $verifier_binary"
-    for path in "$env_file" "$credential_file"; do
-        [ -f "$path" ] && [ ! -L "$path" ] \
-            || fail "flatness verifier input is missing or linked: $path"
-    done
-
-    # PID 1 parses the private EnvironmentFiles before dropping privileges.
-    # The funded branch receives only the dedicated read-only attestor key.
-    # Every phase executes the digest-pinned outgoing snapshot. The final phase
-    # additionally executes the installed target; the uninstalled build
-    # candidate never supplies a verifier.
-    if [ "$verifier_binary" = "$ROLLOUT_ATTESTOR_BINARY" ] \
-        && [ -n "$ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH" ] \
-        && [ "$(date -u +%s)" -ge "$ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH" ]; then
-        fail "signed bootstrap attestor expired during rollout"
-    fi
-    digest_before="$(sha256sum "$verifier_binary" | awk '{print $1}')" \
-        || fail "cannot digest $verifier_kind verifier immediately before execution"
-    [ "$digest_before" = "$verifier_digest" ] \
-        || fail "$verifier_kind verifier changed before execution"
-    if systemd-run --quiet --wait --pipe --collect --service-type=exec \
-        --unit="liquidity-migration-flat-attestation-$realm-$phase-$verifier_kind-$$" \
-        --property="User=$runtime_user" \
-        --property="Group=$RUNTIME_GROUP" \
-        --property="WorkingDirectory=$state_dir" \
-        --property="EnvironmentFile=$env_file" \
-        --property="EnvironmentFile=$credential_file" \
-        --property="UnsetEnvironment=$unset_environment" \
-        --property="NoNewPrivileges=true" \
-        --property="PrivateTmp=true" \
-        --property="ProtectProc=invisible" \
-        --property="ProcSubset=pid" \
-        --property="ProtectSystem=strict" \
-        --property="ProtectHome=true" \
-        --property="UMask=0077" \
-        "$verifier_binary" attest-flat; then
-        status=0
-    else
-        status=$?
-    fi
-    digest_after="$(sha256sum "$verifier_binary" | awk '{print $1}')" \
-        || fail "cannot digest $verifier_kind verifier immediately after execution"
-    [ "$digest_after" = "$verifier_digest" ] \
-        || fail "$verifier_kind verifier changed during execution"
-    if [ "$status" -eq 0 ]; then
-        printf 'rollout-flat-ok realm=%s phase=%s verifier=%s commit=%s sha256=%s\n' \
-            "$realm" "$phase" "$verifier_kind" "$verifier_commit" "$verifier_digest"
-        return 0
-    fi
-    printf 'rollout-flat-refused realm=%s phase=%s verifier=%s commit=%s sha256=%s status=%s\n' \
-        "$realm" "$phase" "$verifier_kind" "$verifier_commit" "$verifier_digest" "$status" >&2
-    return 3
-}
-
-rollout_flat_check() {
-    local phase="$1" demo_status=0 mainnet_status=0
-    local verifier_kind verifier_binary verifier_commit verifier_digest
-    local -a verifier_kinds=(trusted-outgoing)
-    case "$phase" in
-        pre-stop|owners-stopped|installed-generation) ;;
-        *) fail "invalid flatness phase" ;;
-    esac
-
-    # The final boundary needs two independent claims: the immutable outgoing
-    # snapshot prevents a target from lying about venue state, while the
-    # digest-bound installed target covers inventory surfaces introduced by
-    # the new adapter. The target is never run from the build/candidate path.
-    if [ "$phase" = installed-generation ]; then
-        verifier_kinds+=(installed-target)
-    fi
-    for verifier_kind in "${verifier_kinds[@]}"; do
-        case "$verifier_kind" in
-            trusted-outgoing)
-                verifier_binary="$ROLLOUT_ATTESTOR_BINARY"
-                verifier_commit="$ROLLOUT_ATTESTOR_COMMIT"
-                verifier_digest="$ROLLOUT_ATTESTOR_DIGEST"
-                ;;
-            installed-target)
-                verify_engine_release launcher-required
-                verifier_binary="$ENGINE_BINARY"
-                verifier_commit="$(safe_git rev-parse HEAD)" \
-                    || fail "cannot bind installed target attestor to checkout"
-                verifier_digest="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}')" \
-                    || fail "cannot digest installed target attestor"
-                ;;
-            *) fail "invalid rollout verifier kind" ;;
-        esac
-
-        # The checkout and engine artifact are shared by both account owners,
-        # so every configured account crosses this generation boundary. Demo
-        # is required. Any funded residue makes its read-only scan mandatory.
-        rollout_flat_check_realm demo "$phase" "$verifier_kind" \
-            "$verifier_binary" "$verifier_commit" "$verifier_digest" \
-            || demo_status=$?
-        if funded_configuration_present; then
-            [ -f "$MAINNET_ATTESTOR_ENV" ] && [ ! -L "$MAINNET_ATTESTOR_ENV" ] \
-                && [ -f "$ENGINE_MAINNET_ENVIRONMENT" ] \
-                && [ ! -L "$ENGINE_MAINNET_ENVIRONMENT" ] \
-                || fail "funded flatness proof requires both attestor and mainnet engine environment files"
-            rollout_flat_check_realm mainnet "$phase" "$verifier_kind" \
-                "$verifier_binary" "$verifier_commit" "$verifier_digest" \
-                || mainnet_status=$?
-        fi
-    done
-    if [ "$demo_status" -ne 0 ] || [ "$mainnet_status" -ne 0 ]; then
-        return 3
-    fi
-}
 verify_topology() {
     local activation_policy="${1:-complete}"
     case "$activation_policy" in
@@ -1359,8 +1185,7 @@ require_pinned_engine_toolchain() {
 }
 
 # Compile an exact commit in the isolated build clone. Rollout reaches this
-# only through stopped installation, after the immutable outgoing attestor has
-# already proved the account. The build artifact is never an attestor.
+# only through stopped installation after the fleet is quiescent.
 compile_engine_commit() {
     local commit="$1"
     local cargo="$ENGINE_TOOLCHAIN_DIR/cargo/bin/cargo"
@@ -2025,260 +1850,6 @@ complete_activation_generation() {
         "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest"
 }
 
-ROLLOUT_ATTESTOR_DIRECTORY=""
-ROLLOUT_ATTESTOR_BINARY=""
-ROLLOUT_ATTESTOR_COMMIT=""
-ROLLOUT_ATTESTOR_DIGEST=""
-ROLLOUT_ATTESTOR_ENVIRONMENT=""
-ROLLOUT_ATTESTOR_SOURCE_DIGEST=""
-ROLLOUT_ATTESTOR_SOURCE=""
-ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH=""
-
-attestor_supports_flat() {
-    local binary="$1" expected_digest="$2" label="$3"
-    local digest_before digest_after help_output status=0
-    digest_before="$(sha256sum "$binary" | awk '{print $1}')" \
-        || fail "cannot digest $label before capability probe"
-    [ "$digest_before" = "$expected_digest" ] \
-        || fail "$label changed before capability probe"
-    if help_output="$(
-        systemd-run --quiet --wait --pipe --collect --service-type=exec \
-            --unit="liquidity-migration-attestor-capability-$label-$$-$RANDOM" \
-            --property="User=$DEMO_ENGINE_USER" \
-            --property="Group=$RUNTIME_GROUP" \
-            --property="WorkingDirectory=/" \
-            --property="UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID" \
-            --property="NoNewPrivileges=true" \
-            --property="PrivateTmp=true" \
-            --property="ProtectProc=invisible" \
-            --property="ProcSubset=pid" \
-            --property="ProtectSystem=strict" \
-            --property="ProtectHome=true" \
-            --property="UMask=0077" \
-            "$binary" --help 2>&1
-    )"; then
-        status=0
-    else
-        status=$?
-    fi
-    digest_after="$(sha256sum "$binary" | awk '{print $1}')" \
-        || fail "cannot digest $label after capability probe"
-    [ "$digest_after" = "$expected_digest" ] \
-        || fail "$label changed during capability probe"
-    [ "$status" -eq 0 ] \
-        || fail "$label capability probe could not execute safely (status $status)"
-    grep -F 'engine attest-flat --config engine.toml' <<< "$help_output" >/dev/null \
-        && return 0
-    return 2
-}
-
-install_signed_bootstrap_attestor() {
-    local path manifest_commit manifest_digest manifest_purpose manifest_not_after
-    local not_after_epoch canonical_not_after source_before source_after copied
-    local copied_manifest copied_signature trust_root_before trust_root_after
-    local manifest_source_before manifest_source_after manifest_copied bundle_members
-    [ -d "$BOOTSTRAP_ATTESTOR_DIRECTORY" ] \
-        && [ ! -L "$BOOTSTRAP_ATTESTOR_DIRECTORY" ] \
-        && [ "$(stat -c %u "$BOOTSTRAP_ATTESTOR_DIRECTORY")" -eq 0 ] \
-        && [ "$(stat -c %g "$BOOTSTRAP_ATTESTOR_DIRECTORY")" -eq 0 ] \
-        && [ "$(stat -c %a "$BOOTSTRAP_ATTESTOR_DIRECTORY")" = 700 ] \
-        || fail "installed release lacks attest-flat; provision the signed bootstrap bundle as root:root mode 0700 at $BOOTSTRAP_ATTESTOR_DIRECTORY"
-    bundle_members="$(
-        find "$BOOTSTRAP_ATTESTOR_DIRECTORY" -mindepth 1 -maxdepth 1 -printf '%f\n' \
-            | LC_ALL=C sort
-    )" || fail "cannot enumerate the bootstrap attestor bundle"
-    [ "$bundle_members" = $'attestor\nmanifest\nmanifest.sig' ] \
-        || fail "bootstrap attestor bundle must contain exactly attestor, manifest, and manifest.sig"
-    for path in "$BOOTSTRAP_ATTESTOR_BINARY" "$BOOTSTRAP_ATTESTOR_MANIFEST" \
-        "$BOOTSTRAP_ATTESTOR_SIGNATURE"; do
-        [ -f "$path" ] && [ ! -L "$path" ] \
-            && [ "$(stat -c %u "$path")" -eq 0 ] \
-            && [ "$(stat -c %g "$path")" -eq 0 ] \
-            || fail "bootstrap attestor bundle member is missing, linked, or not root-owned: $path"
-    done
-    [ "$(stat -c %a "$BOOTSTRAP_ATTESTOR_BINARY")" = 700 ] \
-        || fail "bootstrap attestor binary must be mode 0700"
-    for path in "$BOOTSTRAP_ATTESTOR_MANIFEST" "$BOOTSTRAP_ATTESTOR_SIGNATURE"; do
-        [ "$(stat -c %a "$path")" = 600 ] \
-            || fail "bootstrap attestor receipt material must be mode 0600: $path"
-    done
-    [ -f "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" ] \
-        && [ ! -L "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" ] \
-        && [ "$(stat -c %u "$BOOTSTRAP_ATTESTOR_TRUST_ROOT")" -eq 0 ] \
-        && [ "$(stat -c %g "$BOOTSTRAP_ATTESTOR_TRUST_ROOT")" -eq 0 ] \
-        && [ "$(stat -c %a "$BOOTSTRAP_ATTESTOR_TRUST_ROOT")" = 600 ] \
-        || fail "install the independent operator attestor trust root as root:root mode 0600 at $BOOTSTRAP_ATTESTOR_TRUST_ROOT"
-    [ -x /usr/bin/openssl ] || fail "OpenSSL is required to verify the bootstrap attestor"
-    trust_root_before="$(sha256sum "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" | awk '{print $1}')" \
-        || fail "cannot digest the operator attestor trust root"
-    manifest_source_before="$(sha256sum "$BOOTSTRAP_ATTESTOR_MANIFEST" | awk '{print $1}')" \
-        || fail "cannot digest the bootstrap attestor manifest"
-    /usr/bin/openssl dgst -sha256 -verify "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" \
-        -signature "$BOOTSTRAP_ATTESTOR_SIGNATURE" "$BOOTSTRAP_ATTESTOR_MANIFEST" \
-        >/dev/null \
-        || fail "bootstrap attestor manifest signature is invalid"
-    awk '
-NR == 1 && /^commit=/ { next }
-NR == 2 && /^sha256=/ { next }
-NR == 3 && /^purpose=/ { next }
-NR == 4 && /^not_after_utc=/ { next }
-{ exit 1 }
-END { if (NR != 4) exit 1 }
-' "$BOOTSTRAP_ATTESTOR_MANIFEST" \
-        || fail "bootstrap attestor manifest must contain exactly commit, sha256, purpose, not_after_utc in that order"
-    manifest_commit="$(sed -n 's/^commit=//p' "$BOOTSTRAP_ATTESTOR_MANIFEST")"
-    manifest_digest="$(sed -n 's/^sha256=//p' "$BOOTSTRAP_ATTESTOR_MANIFEST")"
-    manifest_purpose="$(sed -n 's/^purpose=//p' "$BOOTSTRAP_ATTESTOR_MANIFEST")"
-    manifest_not_after="$(sed -n 's/^not_after_utc=//p' "$BOOTSTRAP_ATTESTOR_MANIFEST")"
-    [[ "$manifest_commit" =~ ^[0-9a-f]{40}$ ]] \
-        || fail "bootstrap attestor manifest commit is invalid"
-    [[ "$manifest_digest" =~ ^[0-9a-f]{64}$ ]] \
-        || fail "bootstrap attestor manifest digest is invalid"
-    [ "$manifest_purpose" = "$BOOTSTRAP_ATTESTOR_PURPOSE" ] \
-        || fail "bootstrap attestor manifest purpose is not rollout flat attestation"
-    [[ "$manifest_not_after" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
-        || fail "bootstrap attestor manifest not_after_utc is not canonical UTC"
-    not_after_epoch="$(date -u --date="$manifest_not_after" +%s)" \
-        || fail "bootstrap attestor manifest not_after_utc is not a real timestamp"
-    canonical_not_after="$(date -u --date="@$not_after_epoch" +%Y-%m-%dT%H:%M:%SZ)" \
-        || fail "cannot canonicalize bootstrap attestor expiry"
-    [ "$canonical_not_after" = "$manifest_not_after" ] \
-        && [ "$(date -u +%s)" -lt "$not_after_epoch" ] \
-        || fail "bootstrap attestor manifest is expired or non-canonical"
-
-    source_before="$(sha256sum "$BOOTSTRAP_ATTESTOR_BINARY" | awk '{print $1}')" \
-        || fail "cannot digest bootstrap attestor binary"
-    [ "$source_before" = "$manifest_digest" ] \
-        || fail "bootstrap attestor binary does not match its signed manifest"
-    copied_manifest="$ROLLOUT_ATTESTOR_DIRECTORY/bootstrap.manifest"
-    copied_signature="$ROLLOUT_ATTESTOR_DIRECTORY/bootstrap.manifest.sig"
-    install -o root -g "$RUNTIME_GROUP" -m 0755 \
-        "$BOOTSTRAP_ATTESTOR_BINARY" "$ROLLOUT_ATTESTOR_BINARY" \
-        && install -o root -g root -m 0600 \
-            "$BOOTSTRAP_ATTESTOR_MANIFEST" "$copied_manifest" \
-        && install -o root -g root -m 0600 \
-            "$BOOTSTRAP_ATTESTOR_SIGNATURE" "$copied_signature" \
-        || fail "cannot snapshot signed bootstrap attestor bundle"
-    /usr/bin/openssl dgst -sha256 -verify "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" \
-        -signature "$copied_signature" "$copied_manifest" >/dev/null \
-        || fail "snapshotted bootstrap attestor signature is invalid"
-    trust_root_after="$(sha256sum "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" | awk '{print $1}')" \
-        || fail "cannot redigest the operator attestor trust root"
-    manifest_source_after="$(sha256sum "$BOOTSTRAP_ATTESTOR_MANIFEST" | awk '{print $1}')" \
-        || fail "cannot redigest the bootstrap attestor manifest"
-    manifest_copied="$(sha256sum "$copied_manifest" | awk '{print $1}')" \
-        || fail "cannot digest the snapshotted bootstrap attestor manifest"
-    [ "$trust_root_after" = "$trust_root_before" ] \
-        && [ "$manifest_source_after" = "$manifest_source_before" ] \
-        && [ "$manifest_copied" = "$manifest_source_before" ] \
-        || fail "bootstrap attestor trust material changed while it was snapshotted"
-    copied="$(sha256sum "$ROLLOUT_ATTESTOR_BINARY" | awk '{print $1}')" \
-        || fail "cannot digest snapshotted bootstrap attestor"
-    source_after="$(sha256sum "$BOOTSTRAP_ATTESTOR_BINARY" | awk '{print $1}')" \
-        || fail "cannot redigest bootstrap attestor source"
-    [ "$copied" = "$manifest_digest" ] && [ "$source_after" = "$manifest_digest" ] \
-        || fail "bootstrap attestor changed while it was snapshotted"
-    attestor_supports_flat "$ROLLOUT_ATTESTOR_BINARY" "$manifest_digest" signed-bootstrap \
-        || fail "signed bootstrap binary does not support attest-flat"
-
-    ROLLOUT_ATTESTOR_COMMIT="$manifest_commit"
-    ROLLOUT_ATTESTOR_DIGEST="$manifest_digest"
-    ROLLOUT_ATTESTOR_SOURCE=signed-bootstrap
-    ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH="$not_after_epoch"
-}
-
-snapshot_trusted_rollout_attestor() {
-    local source_before source_after copied marker_commit marker_digest
-    verify_engine_release
-    [ -f "$ENGINE_BINARY" ] && [ ! -L "$ENGINE_BINARY" ] \
-        && [ "$(stat -c %u "$ENGINE_BINARY")" -eq 0 ] \
-        && [ "$(stat -c %a "$ENGINE_BINARY")" = 755 ] \
-        || fail "installed engine must be a root-owned regular executable mode 0755"
-    [ -f "${ENGINE_BINARY}.release" ] && [ ! -L "${ENGINE_BINARY}.release" ] \
-        && [ "$(stat -c %u "${ENGINE_BINARY}.release")" -eq 0 ] \
-        && [ "$(stat -c %g "${ENGINE_BINARY}.release")" -eq 0 ] \
-        && [ "$(stat -c %a "${ENGINE_BINARY}.release")" = 644 ] \
-        || fail "engine release marker must be root:root regular file mode 0644"
-    marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
-    marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
-    [[ "$marker_commit" =~ ^[0-9a-f]{40}$ ]] \
-        || fail "installed engine release marker has an invalid commit"
-    [[ "$marker_digest" =~ ^[0-9a-f]{64}$ ]] \
-        || fail "installed engine release marker has an invalid digest"
-    [ "$marker_commit" = "$ROLLOUT_CURRENT_COMMIT" ] \
-        || fail "installed engine release is not bound to the outgoing rollout commit"
-
-    source_before="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}')" \
-        || fail "cannot digest installed engine before attestor snapshot"
-    [ "$source_before" = "$marker_digest" ] \
-        || fail "installed engine changed before attestor snapshot"
-    ROLLOUT_ATTESTOR_DIRECTORY="$(
-        mktemp -d /run/liquidity-migration/trusted-attestor.XXXXXX
-    )" || fail "cannot create trusted attestor directory"
-    chown root:"$RUNTIME_GROUP" "$ROLLOUT_ATTESTOR_DIRECTORY" \
-        && chmod 0750 "$ROLLOUT_ATTESTOR_DIRECTORY" \
-        || fail "cannot secure trusted attestor directory"
-    ROLLOUT_ATTESTOR_BINARY="$ROLLOUT_ATTESTOR_DIRECTORY/engine"
-    install -o root -g "$RUNTIME_GROUP" -m 0755 \
-        "$ENGINE_BINARY" "$ROLLOUT_ATTESTOR_BINARY" \
-        || fail "cannot snapshot installed engine as rollout attestor"
-    copied="$(sha256sum "$ROLLOUT_ATTESTOR_BINARY" | awk '{print $1}')" \
-        || fail "cannot digest trusted attestor snapshot"
-    source_after="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}')" \
-        || fail "cannot redigest installed engine after attestor snapshot"
-    [ "$copied" = "$marker_digest" ] && [ "$source_after" = "$marker_digest" ] \
-        || fail "trusted attestor snapshot does not match the installed release marker"
-    if attestor_supports_flat "$ROLLOUT_ATTESTOR_BINARY" "$marker_digest" installed-outgoing; then
-        ROLLOUT_ATTESTOR_COMMIT="$marker_commit"
-        ROLLOUT_ATTESTOR_DIGEST="$marker_digest"
-        ROLLOUT_ATTESTOR_SOURCE=installed-outgoing
-    else
-        [ "$?" -eq 2 ] \
-            || fail "cannot distinguish an unsupported outgoing attestor from a failed probe"
-        install_signed_bootstrap_attestor
-    fi
-    if funded_configuration_present; then
-        validate_mainnet_attestor_environment
-        ROLLOUT_ATTESTOR_SOURCE_DIGEST="$(
-            sha256sum "$MAINNET_ATTESTOR_ENV" | awk '{print $1}'
-        )" || fail "cannot digest operator attestor environment"
-        ROLLOUT_ATTESTOR_ENVIRONMENT="$ROLLOUT_ATTESTOR_DIRECTORY/bybit-mainnet-attestor.env"
-        install -o root -g root -m 0600 \
-            "$MAINNET_ATTESTOR_ENV" "$ROLLOUT_ATTESTOR_ENVIRONMENT" \
-            || fail "cannot snapshot operator attestor environment"
-        [ "$(sha256sum "$ROLLOUT_ATTESTOR_ENVIRONMENT" | awk '{print $1}')" \
-            = "$ROLLOUT_ATTESTOR_SOURCE_DIGEST" ] \
-            || fail "attestor environment snapshot changed during copy"
-    fi
-    readonly ROLLOUT_ATTESTOR_DIRECTORY ROLLOUT_ATTESTOR_BINARY \
-        ROLLOUT_ATTESTOR_COMMIT ROLLOUT_ATTESTOR_DIGEST \
-        ROLLOUT_ATTESTOR_ENVIRONMENT ROLLOUT_ATTESTOR_SOURCE_DIGEST \
-        ROLLOUT_ATTESTOR_SOURCE ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH
-    printf 'rollout-attestor-ok source=%s commit=%s sha256=%s\n' \
-        "$ROLLOUT_ATTESTOR_SOURCE" "$ROLLOUT_ATTESTOR_COMMIT" "$ROLLOUT_ATTESTOR_DIGEST"
-}
-
-remove_trusted_rollout_attestor() {
-    [ -n "$ROLLOUT_ATTESTOR_DIRECTORY" ] || return 0
-    case "$ROLLOUT_ATTESTOR_DIRECTORY" in
-        /run/liquidity-migration/trusted-attestor.*) ;;
-        *) cleanup_notice "refusing unexpected trusted-attestor cleanup path"; return 1 ;;
-    esac
-    [ -d "$ROLLOUT_ATTESTOR_DIRECTORY" ] && [ ! -L "$ROLLOUT_ATTESTOR_DIRECTORY" ] \
-        || { cleanup_notice "trusted-attestor cleanup directory is missing or linked"; return 1; }
-    if [ -n "$ROLLOUT_ATTESTOR_BINARY" ]; then
-        rm -f -- "$ROLLOUT_ATTESTOR_BINARY" || return 1
-    fi
-    if [ -n "$ROLLOUT_ATTESTOR_ENVIRONMENT" ]; then
-        rm -f -- "$ROLLOUT_ATTESTOR_ENVIRONMENT" || return 1
-    fi
-    rm -f -- \
-        "$ROLLOUT_ATTESTOR_DIRECTORY/bootstrap.manifest" \
-        "$ROLLOUT_ATTESTOR_DIRECTORY/bootstrap.manifest.sig" \
-        || return 1
-    rmdir -- "$ROLLOUT_ATTESTOR_DIRECTORY"
-}
-
 validate_engine_environment() {
     local env_file="$1" expected_realm="$2" expected_config_venue
     [ -f "$env_file" ] && [ ! -L "$env_file" ] \
@@ -2334,6 +1905,7 @@ expected_books = {
     "mainnet": {
         "carry": Path("/var/lib/liquidity-migration/targets/carry-mainnet.json"),
         "long": Path("/var/lib/liquidity-migration/targets/long-mainnet.json"),
+        "exodus": Path("/var/lib/liquidity-migration/targets/exodus-mainnet.json"),
     },
 }[realm]
 observed = {
@@ -2357,7 +1929,7 @@ quarantine_engine_inputs() {
     install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$archive"
     case "$realm" in
         demo) set -- long-demo.json carry-demo.json exodus-demo.json ;;
-        mainnet) set -- long-mainnet.json carry-mainnet.json ;;
+        mainnet) set -- long-mainnet.json carry-mainnet.json exodus-mainnet.json ;;
     esac
     for path in "$@"; do
         if [ -e "/var/lib/liquidity-migration/targets/$path" ]; then
@@ -2538,7 +2110,6 @@ MAINNET_DEMO_TELEGRAM_ENV=/etc/liquidity-migration/bybit-demo.env
 # optional dials). Everything else is derived here at activation, and
 # preflight still gates below.
 provision_mainnet_prerequisites() {
-    validate_mainnet_attestor_environment
     if [ ! -f "$PRODUCER_MAINNET_SOURCE_ENV" ]; then
         install -o root -g root -m 600 \
             "$REPO_DIR/deploy/producer-mainnet-source.env.template" "$PRODUCER_MAINNET_SOURCE_ENV" \
@@ -2562,8 +2133,9 @@ provision_mainnet_prerequisites() {
     risk_policy_file="$OPERATIONAL_PROFILE_FILE"
     universe_file="$CANDIDATE_UNIVERSE_FILE"
 
-    mkdir -p "$(dirname "$risk_policy_file")"
-    chmod 700 "$(dirname "$risk_policy_file")" 2>/dev/null || true
+    install -d -o root -g "$RUNTIME_GROUP" -m 0750 \
+        "$(dirname "$risk_policy_file")" \
+        || fail "cannot create the mainnet producer input directory"
     # The installed profile is always the render of the current dials, so a
     # dial edit can never drift from what the kernel enforces.
     "$PYTHON" -m liquidity_migration.policy.real_money_arming render-profile \
@@ -2605,6 +2177,9 @@ start_mainnet_fleet() {
         || fail "cannot start the funded LONG target producer"
     wait_fresh_producer_book liquidity-migration-bybit-carry-mainnet.service \
         "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets/carry-mainnet.json \
+        mainnet "$producer_started_ns"
+    wait_fresh_producer_book liquidity-migration-bybit-carry-mainnet.service \
+        "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets/exodus-mainnet.json \
         mainnet "$producer_started_ns"
     wait_fresh_producer_book liquidity-migration-bybit-long-mainnet.service \
         "$LONG_MAINNET_ROOT" /var/lib/liquidity-migration/targets/long-mainnet.json \
@@ -2886,8 +2461,95 @@ ROLLOUT_STOPPED=0
 ROLLOUT_IRREVERSIBLE=0
 ROLLOUT_COMPLETE=0
 ROLLOUT_CURRENT_COMMIT=""
-ROLLOUT_TARGET_COMMIT=""
 ROLLOUT_CANCELLATION_SIGNAL=""
+ROLLOUT_PRIOR_ACTIVE_UNITS=()
+ROLLOUT_PRIOR_ENABLED_UNITS=()
+ROLLOUT_PRIOR_RUNTIME_ENABLED_UNITS=()
+
+snapshot_prior_topology() {
+    local unit enabled
+    ROLLOUT_PRIOR_ACTIVE_UNITS=()
+    ROLLOUT_PRIOR_ENABLED_UNITS=()
+    ROLLOUT_PRIOR_RUNTIME_ENABLED_UNITS=()
+    for unit in "${ROLLOUT_OWNER_UNITS[@]}" "${ROLLOUT_DOWNSTREAM_UNITS[@]}"; do
+        systemctl cat "$unit" >/dev/null 2>&1 || continue
+        if systemctl is-active --quiet "$unit"; then
+            ROLLOUT_PRIOR_ACTIVE_UNITS+=("$unit")
+        fi
+        enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+        case "$enabled" in
+            enabled)
+                ROLLOUT_PRIOR_ENABLED_UNITS+=("$unit")
+                ;;
+            enabled-runtime)
+                ROLLOUT_PRIOR_RUNTIME_ENABLED_UNITS+=("$unit")
+                ;;
+            disabled|static|indirect|masked|masked-runtime) ;;
+            linked|linked-runtime|alias|generated|transient)
+                fail "rollout cannot preserve unsupported enablement state for $unit: $enabled"
+                ;;
+            *) fail "rollout cannot classify enablement state for $unit: ${enabled:-unknown}" ;;
+        esac
+    done
+    printf 'prior-topology-ok active=%s enabled=%s enabled_runtime=%s\n' \
+        "${#ROLLOUT_PRIOR_ACTIVE_UNITS[@]}" "${#ROLLOUT_PRIOR_ENABLED_UNITS[@]}" \
+        "${#ROLLOUT_PRIOR_RUNTIME_ENABLED_UNITS[@]}"
+}
+
+prior_topology_contains() {
+    local needle="$1" candidate
+    shift
+    for candidate in "$@"; do
+        [ "$candidate" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+restore_prior_topology_snapshot() {
+    local unit index
+    systemctl daemon-reload || return 1
+    for unit in "${ROLLOUT_PRIOR_ENABLED_UNITS[@]}"; do
+        systemctl enable "$unit" || return 1
+    done
+    for unit in "${ROLLOUT_PRIOR_RUNTIME_ENABLED_UNITS[@]}"; do
+        systemctl enable --runtime "$unit" || return 1
+    done
+    for unit in "${ROLLOUT_OWNER_UNITS[@]}"; do
+        prior_topology_contains "$unit" "${ROLLOUT_PRIOR_ACTIVE_UNITS[@]}" || continue
+        systemctl start "$unit" || return 1
+    done
+    for ((index=${#ROLLOUT_DOWNSTREAM_UNITS[@]} - 1; index >= 0; index--)); do
+        unit="${ROLLOUT_DOWNSTREAM_UNITS[$index]}"
+        prior_topology_contains "$unit" "${ROLLOUT_PRIOR_ACTIVE_UNITS[@]}" || continue
+        systemctl start "$unit" || return 1
+    done
+    for unit in "${ROLLOUT_PRIOR_ACTIVE_UNITS[@]}"; do
+        systemctl is-active --quiet "$unit" || return 1
+    done
+    for unit in "${ROLLOUT_PRIOR_ENABLED_UNITS[@]}"; do
+        [ "$(systemctl is-enabled "$unit" 2>/dev/null || true)" = enabled ] || return 1
+    done
+    for unit in "${ROLLOUT_PRIOR_RUNTIME_ENABLED_UNITS[@]}"; do
+        [ "$(systemctl is-enabled "$unit" 2>/dev/null || true)" = enabled-runtime ] || return 1
+    done
+}
+
+restore_prior_topology() {
+    stop_all_rollout_units_best_effort || return 1
+    if [ -f "${ENGINE_BINARY}.release" ]; then
+        (
+            EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
+            # The boot fence deliberately revoked the old receipt. Rebind the
+            # unchanged incumbent release, start only the units observed before
+            # the rollout, then commit that exact restored generation.
+            begin_activation_generation
+            restore_prior_topology_snapshot
+            complete_activation_generation
+        )
+    else
+        restore_prior_topology_snapshot
+    fi
+}
 
 stop_rollout_units() {
     local unit
@@ -3035,12 +2697,8 @@ rollout_cleanup() {
         && [ "$ROLLOUT_COMPLETE" -eq 0 ]; then
         if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]; then
             cleanup_notice \
-                'rollout failed before install; restoring the verified prior topology'
-            if stop_all_rollout_units_best_effort \
-                && (
-                    EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
-                    activate_mode
-                ); then
+                'rollout failed before install; restoring the prior topology'
+            if restore_prior_topology; then
                 cleanup_notice "rollout-restore-ok commit=$ROLLOUT_CURRENT_COMMIT"
             else
                 cleanup_notice \
@@ -3052,10 +2710,6 @@ rollout_cleanup() {
                 'rollout cannot safely restore prior authority; forcing the managed fleet stopped for explicit recovery'
             stop_all_rollout_units_best_effort || true
         fi
-    fi
-    if ! remove_trusted_rollout_attestor; then
-        cleanup_notice 'trusted-attestor cleanup failed'
-        [ "$status" -ne 0 ] || status=1
     fi
     exit "$status"
 }
@@ -3084,8 +2738,8 @@ record_installed_profile() {
     chmod 0644 "$PROFILE_MARKER"
 }
 
-# install + activate in one remote session, without the rollout's flat-account
-# proofs and rollback machinery. The profile marker is written here too: a
+# install + activate in one remote session, without the rollout's rollback
+# machinery. The profile marker is written here too: a
 # staged install that skipped it left load_authorization falling back to
 # "operational" whatever the operator asked for.
 staged_mode() {
@@ -3097,74 +2751,31 @@ staged_mode() {
     printf 'staged-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 
-# Any persisted funded-account configuration keeps the hard gate, armed or
-# disarmed. A demo-only fleet gets the same check reported and continues, so a
-# dirty demo account cannot make rollback machinery unusable unless the
-# operator explicitly selected --require-flat.
-rollout_flat_required() {
-    if [ "${REQUIRE_FLAT:-0}" -eq 1 ]; then
-        return 0
-    fi
-    funded_configuration_present
-}
-
-rollout_flat_phase() {
-    local label="$1" status=0
-    shift
-    if rollout_flat_required; then
-        run_strict_phase "$label" "$@"
-        return 0
-    fi
-    printf 'phase-start name=%s utc=%s\n' "$label" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    "$@" || status=$?
-    if [ "$status" -eq 0 ]; then
-        printf 'phase-ok name=%s\n' "$label"
-        return 0
-    fi
-    printf 'rollout-flat-warn phase=%s status=%s: residual demo exposure or open orders; continuing (--require-flat gates instead)\n' \
-        "$label" "$status" >&2
-}
-
 rollout_mode() {
     require_trusted_checkout
     ROLLOUT_FUNDED_AUTHORITY=1
-    ROLLOUT_TARGET_COMMIT="$EXPECTED_COMMIT"
     ROLLOUT_CURRENT_COMMIT="$(safe_git rev-parse HEAD)" \
         || fail "cannot read installed checkout HEAD"
 
-    # Install the cleanup trap before creating the snapshot. The same verified
-    # outgoing binary then owns all three proofs, including the final proof
-    # after the checkout and installed engine have changed.
+    # Install cleanup before any work that can stop or mutate the fleet.
     trap rollout_cleanup EXIT
     trap 'rollout_cancel INT 130' INT
     trap 'rollout_cancel TERM 143' TERM
     trap 'rollout_cancel HUP 129' HUP
     trap 'rollout_cancel PIPE 141' PIPE
-    run_strict_phase trusted-rollout-attestor snapshot_trusted_rollout_attestor
-
     run_strict_phase rollout-target-prefetch prefetch_rollout_target
-
-    # Prove the current receipt/topology before changing any unit, using the
-    # commit it actually authorizes rather than the incoming target commit.
-    EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
-    load_authorization
-    run_strict_phase current-topology-verification verify_topology
-    rollout_flat_phase pre-stop-flat-account-proof rollout_flat_check pre-stop
-    EXPECTED_COMMIT="$ROLLOUT_TARGET_COMMIT"
+    run_strict_phase snapshot-prior-topology snapshot_prior_topology
 
     ROLLOUT_STOPPED=1
     # bash skips the EXIT trap on an untrapped fatal signal, so an SSH client
     # death (HUP, then SIGPIPE) would leave the fleet half-stopped uncleaned.
 
-    # Stop every producer/timer before either owner. Then stop both owners and
-    # sample venue truth. An unconsumed final target book is inert once its
-    # owner is stopped and activation quarantines every old book; pretending a
-    # venue scan was a target/WAL "head binding" would add no safety.
+    # Stop every producer/timer before either owner. Activation quarantines
+    # every old book before admitting work from the new service generation.
     run_strict_phase stop-downstream-units \
         stop_rollout_units "${ROLLOUT_DOWNSTREAM_UNITS[@]}"
     run_strict_phase stop-account-owners \
         stop_rollout_units "${ROLLOUT_OWNER_UNITS[@]}"
-    rollout_flat_phase final-stopped-flat-account-proof rollout_flat_check owners-stopped
     run_strict_phase persist-rollout-boot-fence disable_rollout_units_for_boot_fence
     require_quiescent
 
@@ -3173,11 +2784,6 @@ rollout_mode() {
     ROLLOUT_IRREVERSIBLE=1
     run_strict_phase stopped-install install_mode
     run_strict_phase record-installed-profile record_installed_profile
-    # Re-attest immediately before authority changes with both the immutable
-    # outgoing snapshot and the digest-bound installed target. The uninstalled
-    # build candidate is never an attestor.
-    rollout_flat_phase installed-generation-flat-account-proof \
-        rollout_flat_check installed-generation
     run_strict_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
     ROLLOUT_STOPPED=0

@@ -84,6 +84,7 @@ else
     BOOKS=(
         /var/lib/liquidity-migration/targets/carry-mainnet.json
         /var/lib/liquidity-migration/targets/long-mainnet.json
+        /var/lib/liquidity-migration/targets/exodus-mainnet.json
     )
 fi
 

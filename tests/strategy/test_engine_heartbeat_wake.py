@@ -10,6 +10,7 @@ def _heartbeat(*, wall_ts_ms: int, positions: list[dict] | None = None) -> dict:
         "account_user_id": "555899665",
         "engine_version": "test",
         "entry_blockers": [],
+        "working_entries": [],
         "may_open": True,
         "positions": positions or [],
         "realm": "demo",

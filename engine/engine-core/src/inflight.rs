@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use engine_types::{OrderRequest, OrderUpdate, Side, StrategyId, WalRecord};
+use engine_types::{OrderRequest, OrderUpdate, Side, StrategyId, SymbolId, WalRecord};
 
 const QTY_EPS: f64 = 1e-9;
 
@@ -86,6 +86,9 @@ impl Ord for StopPrice {
 pub struct LedgerOfOrders {
     pub orders: BTreeMap<String, OrderRec>,
     pub boots: u32,
+    /// Count of live opening orders per sleeve/symbol. Counts, rather than a
+    /// set, ensure one terminal sibling cannot hide another still-live order.
+    opening_symbols: BTreeMap<(u16, u16), usize>,
     /// Live opening-stop prices grouped by (symbol, is-short). The engine asks
     /// for the tightest level before every placement batch. Keeping the
     /// multiset here makes that query proportional to active symbols instead
@@ -136,20 +139,26 @@ impl LedgerOfOrders {
                 qty,
                 ..
             } => {
-                let ended_stop = if let Some(rec) = self.orders.get_mut(client_order_id.as_str()) {
+                let ended_indexes = if let Some(rec) = self.orders.get_mut(client_order_id.as_str()) {
                     let was_live = rec.in_flight();
                     let stop = was_live.then(|| opening_stop(&rec.request)).flatten();
+                    let opening = was_live.then(|| opening_key(&rec.request)).flatten();
                     rec.acked = true;
                     rec.filled_qty += qty;
                     if rec.filled_qty + QTY_EPS >= rec.request.qty {
                         rec.ending = Some(Ending::Filled);
                     }
-                    (was_live && !rec.in_flight()).then_some(stop).flatten()
+                    (was_live && !rec.in_flight()).then_some((stop, opening))
                 } else {
                     None
                 };
-                if let Some(stop) = ended_stop {
-                    self.remove_opening_stop(stop);
+                if let Some((stop, opening)) = ended_indexes {
+                    if let Some(stop) = stop {
+                        self.remove_opening_stop(stop);
+                    }
+                    if let Some(opening) = opening {
+                        self.remove_opening_symbol(opening);
+                    }
                 }
             }
             WalRecord::AmendSent {
@@ -198,16 +207,22 @@ impl LedgerOfOrders {
             WalRecord::Note { source, text } if source == "shadow" => {
                 if let Some(rest) = text.strip_prefix(NEVER_SENT_PREFIX) {
                     let id = rest.split_whitespace().next().unwrap_or_default();
-                    let ended_stop = if let Some(order) = self.orders.get_mut(id) {
+                    let ended_indexes = if let Some(order) = self.orders.get_mut(id) {
                         let was_live = order.in_flight();
                         let stop = was_live.then(|| opening_stop(&order.request)).flatten();
+                        let opening = was_live.then(|| opening_key(&order.request)).flatten();
                         order.ending = Some(Ending::NeverSent);
-                        was_live.then_some(stop).flatten()
+                        was_live.then_some((stop, opening))
                     } else {
                         None
                     };
-                    if let Some(stop) = ended_stop {
-                        self.remove_opening_stop(stop);
+                    if let Some((stop, opening)) = ended_indexes {
+                        if let Some(stop) = stop {
+                            self.remove_opening_stop(stop);
+                        }
+                        if let Some(opening) = opening {
+                            self.remove_opening_symbol(opening);
+                        }
                     }
                 }
             }
@@ -242,12 +257,13 @@ impl LedgerOfOrders {
     pub fn apply_update(&mut self, update: &OrderUpdate) {
         let id = client_order_id(update);
         let Some(id) = id else { return };
-        let ended_stop = {
+        let ended_indexes = {
             let Some(rec) = self.orders.get_mut(id) else {
                 return;
             };
             let was_live = rec.in_flight();
             let stop = was_live.then(|| opening_stop(&rec.request)).flatten();
+            let opening = was_live.then(|| opening_key(&rec.request)).flatten();
             match update {
                 OrderUpdate::Ack(_) => rec.acked = true,
                 OrderUpdate::Reject { code, reason, .. } => {
@@ -265,24 +281,56 @@ impl LedgerOfOrders {
                 }
                 OrderUpdate::StopAttached { .. } | OrderUpdate::StreamReset { .. } => {}
             }
-            (was_live && !rec.in_flight()).then_some(stop).flatten()
+            (was_live && !rec.in_flight()).then_some((stop, opening))
         };
-        if let Some(stop) = ended_stop {
-            self.remove_opening_stop(stop);
+        if let Some((stop, opening)) = ended_indexes {
+            if let Some(stop) = stop {
+                self.remove_opening_stop(stop);
+            }
+            if let Some(opening) = opening {
+                self.remove_opening_symbol(opening);
+            }
         }
     }
 
     fn insert_live_order(&mut self, id: String, record: OrderRec) {
         let stop = opening_stop(&record.request);
+        let opening = opening_key(&record.request);
         if let Some(previous) = self.orders.insert(id, record) {
             if previous.in_flight() {
                 if let Some(stop) = opening_stop(&previous.request) {
                     self.remove_opening_stop(stop);
                 }
+                if let Some(opening) = opening_key(&previous.request) {
+                    self.remove_opening_symbol(opening);
+                }
             }
         }
         if let Some(stop) = stop {
             self.add_opening_stop(stop);
+        }
+        if let Some(opening) = opening {
+            self.add_opening_symbol(opening);
+        }
+    }
+
+    fn add_opening_symbol(&mut self, key: (u16, u16)) {
+        *self.opening_symbols.entry(key).or_default() += 1;
+    }
+
+    fn remove_opening_symbol(&mut self, key: (u16, u16)) {
+        let remove_key = if let Some(count) = self.opening_symbols.get_mut(&key) {
+            if *count > 1 {
+                *count -= 1;
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        if remove_key {
+            self.opening_symbols.remove(&key);
         }
     }
 
@@ -340,6 +388,14 @@ impl LedgerOfOrders {
             .collect()
     }
 
+    /// Distinct sleeve/symbol pairs with at least one live opening order.
+    /// Cost is bounded by current live exposure, never WAL/account history.
+    pub fn opening_symbols(&self) -> impl Iterator<Item = (StrategyId, SymbolId)> + '_ {
+        self.opening_symbols
+            .keys()
+            .map(|(strategy, symbol)| (StrategyId(*strategy), SymbolId(*symbol)))
+    }
+
     /// Tightest live opening-order stop per (symbol, is-short). Long
     /// protection tightens upward; short protection tightens downward.
     pub fn tightest_opening_stops(&self) -> impl Iterator<Item = ((u16, bool), f64)> + '_ {
@@ -361,6 +417,10 @@ fn opening_stop(request: &OrderRequest) -> Option<((u16, bool), StopPrice)> {
             StopPrice(stop.trigger_px),
         )
     })
+}
+
+fn opening_key(request: &OrderRequest) -> Option<(u16, u16)> {
+    (!request.reduce_only).then_some((request.strategy.0, request.symbol.0))
 }
 
 fn limit_px(request: &OrderRequest) -> f64 {
@@ -644,6 +704,58 @@ mod tests {
         });
         ledger.apply(&recovered("short-loose", 1.0));
         assert!(ledger.tightest_opening_stops().next().is_none());
+    }
+
+    #[test]
+    fn live_opening_symbol_index_counts_siblings_and_drops_every_ending() {
+        let mut reduce = request("reduce", 1.0);
+        reduce.strategy = StrategyId(4);
+        reduce.symbol = SymbolId(9);
+        reduce.reduce_only = true;
+        let reduce = WalRecord::OrderSent {
+            request: reduce,
+            wire_ns: 1,
+            arrival_mid: 100.0,
+        };
+        let mut ledger = LedgerOfOrders::from_records(&[
+            opening_sent("first", 3, Side::Buy, 90.0),
+            opening_sent("second", 3, Side::Buy, 91.0),
+            reduce,
+        ]);
+        assert_eq!(
+            ledger.opening_symbols().collect::<Vec<_>>(),
+            vec![(StrategyId(0), SymbolId(3))],
+            "duplicate siblings produce one bounded heartbeat row and reductions produce none"
+        );
+
+        ledger.apply(&fill("first", 1.0));
+        assert_eq!(
+            ledger.opening_symbols().collect::<Vec<_>>(),
+            vec![(StrategyId(0), SymbolId(3))],
+            "ending one sibling must not hide the other"
+        );
+        ledger.apply(&WalRecord::OrderUpdate {
+            update: OrderUpdate::Cancelled {
+                client_order_id: "second".into(),
+                recv_ns: 3,
+            },
+        });
+        assert!(ledger.opening_symbols().next().is_none());
+
+        ledger.apply(&opening_sent("rejected", 7, Side::Sell, 105.0));
+        ledger.apply(&WalRecord::OrderUpdate {
+            update: OrderUpdate::Reject {
+                client_order_id: "rejected".into(),
+                code: 7,
+                reason: "no".into(),
+            },
+        });
+        ledger.apply(&opening_sent("recovered", 8, Side::Sell, 106.0));
+        ledger.apply(&recovered("recovered", 1.0));
+        assert!(
+            ledger.opening_symbols().next().is_none(),
+            "reject and recovered fill both retire their index rows"
+        );
     }
 
     #[test]

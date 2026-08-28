@@ -111,6 +111,9 @@ pub struct Facts<'a> {
     /// its whole deadline. Empty is a real answer — everything asked for is
     /// either held, being worked, or not blocked at all.
     pub entry_blockers: &'a [(String, String, String)],
+    /// Unfinished opening orders as (strategy, symbol) rows. These include
+    /// uncertain sends rebuilt from the WAL, not only venue-visible rests.
+    pub working_entries: &'a [(String, String)],
     /// What the fills have cost so far this run.
     ///
     /// Five numbers, and they answer the question the latency pair beside them
@@ -269,6 +272,7 @@ impl Heartbeat {
             ("wall_ts_ms", wall_ts_ms.to_string()),
             ("wire_p50_ns", figure(facts.wire.count, facts.wire.p50_ns)),
             ("wire_p99_ns", figure(facts.wire.count, facts.wire.p99_ns)),
+            ("working_entries", working_entries(facts.working_entries)),
         ];
         fields.sort_by_key(|(key, _)| *key);
         let body: Vec<String> = fields
@@ -414,13 +418,29 @@ fn blockers(rows: &[(String, String, String)]) -> String {
     format!("[{}]", items.join(", "))
 }
 
+fn working_entries(rows: &[(String, String)]) -> String {
+    let items: Vec<String> = rows
+        .iter()
+        .map(|(strategy, symbol)| {
+            format!(
+                "{{{}: {}, {}: {}}}",
+                quoted("strategy"),
+                quoted(strategy),
+                quoted("symbol"),
+                quoted(symbol),
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 26] = [
+    const KEYS: [&str; 27] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -447,6 +467,7 @@ mod tests {
         "wall_ts_ms",
         "wire_p50_ns",
         "wire_p99_ns",
+        "working_entries",
     ];
 
     fn measured(count: u64, p50_ns: u64, p99_ns: u64) -> Quantiles {
@@ -483,6 +504,8 @@ mod tests {
         static NOTHING_YET: std::sync::OnceLock<Costs> = std::sync::OnceLock::new();
         static NO_BLOCKERS: std::sync::OnceLock<Vec<(String, String, String)>> =
             std::sync::OnceLock::new();
+        static NO_WORKING: std::sync::OnceLock<Vec<(String, String)>> =
+            std::sync::OnceLock::new();
         Facts {
             costs: NOTHING_YET.get_or_init(Costs::default),
             may_open: true,
@@ -497,6 +520,7 @@ mod tests {
             account_age_ns: Some(2_000_000_000),
             holdings: held,
             entry_blockers: NO_BLOCKERS.get_or_init(Vec::new),
+            working_entries: NO_WORKING.get_or_init(Vec::new),
         }
     }
 
@@ -667,6 +691,20 @@ mod tests {
             Some(0),
             "present and empty, never absent"
         );
+    }
+
+    #[test]
+    fn unfinished_entries_keep_their_strategy_and_symbol() {
+        let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
+        let names = vec!["exodus".to_string()];
+        let pending = vec![("exodus".to_string(), "DYNAMICUSDT".to_string())];
+        let mut facts = facts(&names, &[]);
+        facts.working_entries = &pending;
+
+        let fields = parsed(&beat.render(&facts, 1_755_000_000_000));
+
+        assert_eq!(fields["working_entries"][0]["strategy"], "exodus");
+        assert_eq!(fields["working_entries"][0]["symbol"], "DYNAMICUSDT");
     }
 
     fn on_the_demo_account(path: PathBuf) -> Heartbeat {
@@ -909,6 +947,7 @@ mod fill_cost_tests {
             account_age_ns: Some(1),
             holdings: &[],
             entry_blockers: &[],
+            working_entries: &[],
             costs,
         };
         let beat = Heartbeat::new("unused".into(), None, None);

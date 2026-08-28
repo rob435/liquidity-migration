@@ -197,9 +197,6 @@ impl TargetBookFollower {
         };
 
         let now_ms = ctx.wall_ms();
-        let entries_allowed =
-            now_ms < book.valid_until_ms.saturating_sub(self.rules.entry_cutoff_ms);
-
         // One order at a time per symbol. Without this the same entry goes
         // out again on every quote until the fill news gets back, which is
         // several orders for one decision. A working entry is authorization
@@ -221,10 +218,22 @@ impl TargetBookFollower {
                         .revoked_entries
                         .iter()
                         .any(|id| id == order.client_order_id)
-                        || !entries_allowed
                         || !book.targets.iter().any(|target| {
                             target.notional_usdt != 0.0
                                 && ctx.symbol_id(&target.symbol) == Some(order.symbol)
+                                && now_ms
+                                    < target.entry_valid_until_ms.map_or_else(
+                                        || {
+                                            book.valid_until_ms
+                                                .saturating_sub(self.rules.entry_cutoff_ms)
+                                        },
+                                        |deadline| {
+                                            deadline.min(
+                                                book.valid_until_ms
+                                                    .saturating_sub(self.rules.entry_cutoff_ms),
+                                            )
+                                        },
+                                    )
                         }))
             })
             .map(|order| (order.symbol, order.client_order_id.to_string()))
@@ -243,6 +252,8 @@ impl TargetBookFollower {
                 symbol: t.symbol.clone(),
                 notional_usdt: t.notional_usdt,
                 stop_loss_fraction: t.stop_loss_fraction,
+                entry_valid_until_ms: t.entry_valid_until_ms,
+                target_qty: t.target_qty,
             })
             .collect();
 

@@ -1,7 +1,7 @@
-//! Credential-wide, read-only flatness attestation for guarded rollouts.
+//! Credential-wide, read-only account inventory for explicit operator controls.
 //!
 //! This intentionally does not read the engine's configured symbol table. A
-//! generation change is safe only when the venue adapter can enumerate the
+//! A global claim is available only when the venue adapter can enumerate the
 //! whole account surface it owns; adapters that cannot do that refuse through
 //! [`VenueGateway::account_inventory`].
 

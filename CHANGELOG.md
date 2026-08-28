@@ -6,6 +6,57 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Exodus handoff uses the position actually abandoned.**
+  A v7 pre-settlement fire now snapshots the fresh carry-attributed venue
+  quantity and the same ticker's mark price. Target-book v2 carries that exact
+  signed quantity alongside its frozen audit notional and direct entry
+  deadline; the Rust follower converges entry and partial fills by quantity,
+  so later price movement cannot resize the handoff. Legacy v1 target books
+  and Exodus state remain readable, while new state is schema v2. The obsolete
+  `EXODUS_NOTIONAL_MULTIPLIER` dial is removed. Heartbeat working-entry rows now
+  come from a counted live-order index rather than scanning all orders retained
+  in the current WAL segment, keeping account-state publication cost bounded by
+  live work as history grows.
+
+- **2026-08-28 — Funded risk configuration has one runtime source.**
+  The engine now reads the same preflight-validated operational-profile artifact
+  as the funded producers. Carry's rendered stop declaration can widen the
+  engine baseline but cannot narrow the ceiling used by LONG and Exodus. This
+  removes the case where a valid operator dial passed producer preflight and
+  was then refused by an engine still holding the committed default.
+
+- **2026-08-28 — Exodus short joins the funded engine as sleeve three.**
+  The funded carry producer selects `lane2_exodus_short_v1` and writes
+  `exodus-mainnet.json`; the funded engine consumes it as the appended
+  `exodus` strategy, crosses entries and covers, and reports its book and fills
+  separately. Carry and long keep WAL ids zero and one; boot accepts this
+  suffix addition but still refuses any reorder. Once that longer Names record
+  reaches the WAL, recovery requires a three-sleeve-compatible binary and
+  config. Deployment installs the committed funded engine config atomically,
+  validates, quarantines, waits for, flattens, and notifies the funded Exodus
+  book. No
+  synthetic venue order is used: the first live order waits for a real v7
+  pre-settlement exit fire.
+
+- **2026-08-28 — Rollout no longer depends on account-flatness attestation.**
+  The deployment path no longer snapshots an outgoing attestor, runs account
+  inventory at three rollout phases, accepts `--require-flat`, or requires a
+  mainnet attestor credential during activation. It also stops asking the
+  outgoing generation for a release marker and activation receipt before the
+  fleet is stopped, so the markerless `e4e6750` production generation can cross
+  the upgrade boundary. The target build, release binding, ordered fleet stop,
+  persistent boot fence, quiescence check, activation lease, target-topology
+  verification, and rollback/quarantine handling remain. `attest-flat` stays
+  available as an explicit read-only operator command and for loss reset. The
+  arbitrary 2026-08-27 key-creation cutoff is also gone; funded identity still
+  requires UTA, write access, exact single-host IP, ContractTrade Order and
+  Position permissions, no withdrawal permission, and the dedicated account ID.
+  A pre-install failure now restores the exact active and persistent/runtime
+  enablement topology it observed. Markerless incumbents restart directly;
+  marked releases receive a temporary binding to the unchanged artifacts while
+  only observed units restart, followed by a replacement completion receipt. A
+  failure after checkout mutation leaves the fleet stopped.
+
 - **2026-08-28 — Opening-stop lookup stays flat as order history grows.**
   The live-order ledger maintains a per-symbol, per-side multiset of opening
   stop prices and exposes only each side's tightest level to placement. This

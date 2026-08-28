@@ -357,6 +357,9 @@ impl VenueGateway for MockVenue {
     }
 
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
+        if let Some(index) = self.rules.iter().position(|(known, _)| known == symbol) {
+            return Some(SymbolId(index as u16));
+        }
         let id = SymbolId(self.rules.len() as u16);
         self.rules.push((
             symbol.to_string(),
@@ -560,6 +563,14 @@ impl ScriptFeed {
 
 impl MarketFeed for ScriptFeed {
     fn admit(&mut self, symbol: &str, _feed: engine_types::Feed) -> Option<SymbolId> {
+        if let Some((_, id)) = self
+            .admitted
+            .borrow()
+            .iter()
+            .find(|(known, _)| known == symbol)
+        {
+            return Some(*id);
+        }
         let id = if self.admits_wrongly {
             SymbolId(self.known + 7)
         } else {
