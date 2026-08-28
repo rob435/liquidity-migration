@@ -162,10 +162,10 @@ async fn the_group_flush_tick_walks_a_resting_entry_after_the_market() {
 }
 
 #[tokio::test]
-async fn repricing_a_resting_entry_never_costs_an_fsync() {
-    // Only an amend that raises the size adds exposure. If a reprice ever
-    // barriered, every worked order would pay a disk sync several times a
-    // minute — which is the whole latency budget.
+async fn repricing_a_resting_entry_reserves_its_price_range_before_the_wire() {
+    // A price-only amend can still increase notional or stop distance. The
+    // engine therefore reserves the conservative old/new price range and
+    // makes that state durable before asking the venue to mutate the order.
     let quick = WorkPolicy {
         reprice_ms: 1,
         ..WorkPolicy::default()
@@ -195,8 +195,8 @@ async fn repricing_a_resting_entry_never_costs_an_fsync() {
         "there was a reprice to measure"
     );
 
-    // Between writing the reprice down and putting it on the wire is exactly
-    // where a barrier would sit if one were added.
+    // The changed reservation and AmendSent record must reach the durability
+    // barrier before the venue sees the amend.
     let steps = tape.borrow();
     let mut checked = 0;
     for (i, step) in steps.iter().enumerate() {
@@ -207,9 +207,13 @@ async fn repricing_a_resting_entry_never_costs_an_fsync() {
             .iter()
             .position(|s| matches!(s, Step::Amend(_)))
             .expect("the reprice reaches the venue");
+        let barrier = i + steps[i..wire]
+            .iter()
+            .position(|s| matches!(s, Step::Barrier))
+            .expect("the amend's conservative reservation is durable");
         assert!(
-            !steps[i..wire].contains(&Step::Barrier),
-            "a reprice forced the log to disk"
+            i < barrier && barrier < wire,
+            "the barrier precedes the wire"
         );
         checked += 1;
     }
@@ -319,14 +323,15 @@ async fn a_fresh_account_trip_is_durable_before_resting_entries_are_cancelled() 
     };
     let burst = RestingBurst {
         fired: false,
-        // Seven native cancel groups. This catches queue starvation,
-        // duplicate submission, and a deadline accidentally started before
-        // its own group's REST acknowledgement.
+        // Spans several native groups. Exactly how many placement groups win
+        // the race with the fresh account reading is deliberately unspecified;
+        // once that reading trips the guard, the durable barrier must divide
+        // the sent prefix from cancellation and suppress the unsent suffix.
         count: 61,
         work: quick,
     };
     let tape = tape();
-    let (wal, _records) = MockWal::new(tape.clone());
+    let (wal, records) = MockWal::new(tape.clone());
     let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
@@ -343,14 +348,17 @@ async fn a_fresh_account_trip_is_durable_before_resting_entries_are_cancelled() 
         .await
         .unwrap();
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    let error = engine
-        .run(
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        engine.run(
             &mut ScriptFeed::wide_quotes(symbol, 1, false),
             &mut ScriptOrderFeed::empty(),
-            tokio::time::sleep(Duration::from_millis(60)),
-        )
-        .await
-        .expect_err("an accepted cancel without private confirmation must restart");
+            std::future::pending::<()>(),
+        ),
+    )
+    .await
+    .expect("the private-confirmation deadline remained bounded")
+    .expect_err("an accepted cancel without private confirmation must restart");
     assert!(
         error
             .to_string()
@@ -363,20 +371,42 @@ async fn a_fresh_account_trip_is_durable_before_resting_entries_are_cancelled() 
         .iter()
         .map(|request| request.client_order_id.clone())
         .collect();
-    assert_eq!(
-        ids.len(),
-        11,
-        "the resting sibling burst did not reach the venue"
+    assert!(
+        !ids.is_empty() && ids.len() <= 61,
+        "the venue must see a nonempty bounded prefix, saw {}",
+        ids.len()
     );
-    let cancelled: Vec<_> = cancels
+    let mut sent_ids = ids.clone();
+    sent_ids.sort();
+    let sent_count = sent_ids.len();
+    sent_ids.dedup();
+    assert_eq!(sent_ids.len(), sent_count, "placement ids must be unique");
+
+    let mut cancelled: Vec<_> = cancels
         .borrow()
         .iter()
         .map(|(_, client_order_id)| client_order_id.clone())
         .collect();
-    assert_eq!(cancelled.len(), ids.len());
-    assert!(
-        ids.iter().all(|id| cancelled.contains(id)),
-        "the latched account trip did not pull the complete resting burst"
+    cancelled.sort();
+    assert_eq!(
+        cancelled, sent_ids,
+        "every sent resting id must be cancelled exactly once, and no unsent id may be cancelled"
+    );
+
+    let mut observable: Vec<_> = records
+        .borrow()
+        .iter()
+        .filter_map(|record| match record {
+            WalRecord::CancelSent {
+                client_order_id, ..
+            } => Some(client_order_id.clone()),
+            _ => None,
+        })
+        .collect();
+    observable.sort();
+    assert_eq!(
+        observable, sent_ids,
+        "every wire cancellation must have exactly one WAL-observable record"
     );
     assert!(amends.borrow().is_empty(), "a halted entry was amended");
 
@@ -398,17 +428,18 @@ async fn a_fresh_account_trip_is_durable_before_resting_entries_are_cancelled() 
         .skip(anchor + 1)
         .find_map(|(index, step)| (step == &Step::Barrier).then_some(index))
         .expect("trip durability barrier");
-    let cancel = steps
+    let first_cancel = steps
         .iter()
-        .position(|step| step == &Step::Cancel(id.clone()))
+        .position(|step| matches!(step, Step::Cancel(_)))
         .expect("entry cancellation on tape");
-    assert!(anchor < barrier && barrier < cancel);
-    assert_eq!(
-        steps
+    assert!(
+        anchor < barrier && barrier < first_cancel,
+        "the trip anchor and its barrier must precede the first cancel"
+    );
+    assert!(
+        !steps[barrier + 1..]
             .iter()
-            .filter(|step| step == &&Step::Append("cancel_sent".into()))
-            .count(),
-        11,
-        "every cancellation was made observable before the batch wire call"
+            .any(|step| matches!(step, Step::Send(_))),
+        "an opening placement reached the venue after the trip became durable"
     );
 }

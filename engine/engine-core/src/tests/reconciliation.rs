@@ -93,12 +93,12 @@ async fn an_operators_clear_resets_the_latch() {
     // clean account the engine trades again.
     let earlier = vec![
         WalRecord::Reconciled {
-            wall_ts_ms: 1,
+            wall_ts_ms: recent_replay_ms(),
             findings: vec!["old debt".to_string()],
             may_open: false,
         },
         WalRecord::LatchCleared {
-            wall_ts_ms: 2,
+            wall_ts_ms: recent_replay_ms() + 1,
             note: "looked at the log".to_string(),
             restated_exposure: Vec::new(),
             findings: vec!["old debt".to_string()],
@@ -125,12 +125,12 @@ async fn a_clear_resets_the_memory_not_the_check() {
     // symbol a strategy here trades: boot's own comparison latches again.
     let earlier = vec![
         WalRecord::Reconciled {
-            wall_ts_ms: 1,
+            wall_ts_ms: recent_replay_ms(),
             findings: vec!["old debt".to_string()],
             may_open: false,
         },
         WalRecord::LatchCleared {
-            wall_ts_ms: 2,
+            wall_ts_ms: recent_replay_ms() + 1,
             note: "looked at the log".to_string(),
             restated_exposure: Vec::new(),
             findings: vec!["old debt".to_string()],
@@ -222,7 +222,7 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
                 px: 100.0,
                 fee: 0.01,
                 is_maker: false,
-                venue_ts_ms: 1,
+                venue_ts_ms: recent_replay_ms(),
                 recv_ns: 2,
             },
         },
@@ -295,7 +295,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
                 px: 100.0,
                 fee: 0.01,
                 is_maker: false,
-                venue_ts_ms: 1,
+                venue_ts_ms: recent_replay_ms(),
                 recv_ns: 2,
             },
         },
@@ -340,7 +340,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
             px: 100.0,
             fee: 0.01,
             is_maker: false,
-            venue_ts_ms: 4,
+            venue_ts_ms: recent_replay_ms() + 1,
             recv_ns: 5,
         },
     });
@@ -390,7 +390,7 @@ async fn a_latch_from_an_earlier_boot_survives_the_restart() {
     // would turn "stop and tell somebody" into "stop until the next crash",
     // and something restarts this process automatically.
     let earlier = vec![WalRecord::Reconciled {
-        wall_ts_ms: 1,
+        wall_ts_ms: recent_replay_ms(),
         findings: vec!["someone else was working an order".to_string()],
         may_open: false,
     }];

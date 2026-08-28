@@ -14,7 +14,11 @@ impl OrderFeed for ClosedOrderFeed {
 
 #[tokio::test]
 async fn a_dead_private_feed_stops_for_supervised_recovery() {
-    let (mut engine, _) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
+    // The engine's symbol table is built from strategy subscriptions, not
+    // from the mock venue's rule inventory. No market event is delivered in
+    // this test, so this buyer acts only as a passive BTC subscription.
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, _) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let outcome = engine
         .run(
@@ -316,7 +320,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
                 px: 100.0,
                 fee: 0.0,
                 is_maker: true,
-                venue_ts_ms: 1,
+                venue_ts_ms: recent_replay_ms(),
                 recv_ns: 1,
             },
         },
@@ -528,6 +532,90 @@ struct BurstEmitter {
     entries: usize,
     exits: usize,
     fired: bool,
+}
+
+/// Becomes ready only after the first native-sized placement group reached
+/// the mock venue. This models private lifecycle news arriving while a
+/// larger sibling wake is still being drained.
+struct PrivateUpdateAfterFirstPlacementBatch {
+    sends: Rc<RefCell<Vec<OrderRequest>>>,
+    tape: Tape,
+    delivered: bool,
+}
+
+impl OrderFeed for PrivateUpdateAfterFirstPlacementBatch {
+    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
+        while self.sends.borrow().len() < crate::engine::MAX_ORDERS_PER_BATCH {
+            tokio::task::yield_now().await;
+        }
+        if self.delivered {
+            return std::future::pending().await;
+        }
+        self.delivered = true;
+        let client_order_id = self.sends.borrow()[0].client_order_id.clone();
+        self.tape.borrow_mut().push(Step::PrivateUpdate);
+        Ok(OrderUpdate::Ack(OrderAck {
+            client_order_id,
+            venue_order_id: "private-stream-ack".to_string(),
+            ack_ns: clock::now_ns(),
+        }))
+    }
+}
+
+struct PrivateUpdateAfterFirstCancelBatch {
+    cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
+    tape: Tape,
+    delivered: bool,
+}
+
+impl OrderFeed for PrivateUpdateAfterFirstCancelBatch {
+    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
+        while self.cancels.borrow().len() < crate::engine::MAX_CANCELS_PER_BATCH {
+            tokio::task::yield_now().await;
+        }
+        if self.delivered {
+            return std::future::pending().await;
+        }
+        self.delivered = true;
+        let client_order_id = self.cancels.borrow()[0].1.clone();
+        self.tape.borrow_mut().push(Step::PrivateUpdate);
+        Ok(OrderUpdate::Cancelled {
+            client_order_id,
+            recv_ns: clock::now_ns(),
+        })
+    }
+}
+
+struct CancelBurst {
+    symbol: String,
+    cancels: usize,
+    fired: bool,
+}
+
+impl Strategy for CancelBurst {
+    fn name(&self) -> &str {
+        "cancel-burst"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event else {
+            return;
+        };
+        if self.fired {
+            return;
+        }
+        self.fired = true;
+        for i in 0..self.cancels {
+            ctx.cancel(*symbol, &format!("eng-cancel-burst-{i}"));
+        }
+    }
 }
 
 impl Strategy for BurstEmitter {
@@ -904,12 +992,190 @@ async fn oversized_sibling_bursts_are_revalidated_after_each_bounded_send() {
         sends[9] < sent[10],
         "the eleventh order was not revalidated after the preceding bounded send"
     );
+    let batch_barriers: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .skip(sent[0])
+        .take(sends[10] - sent[0] + 1)
+        .filter_map(|(at, step)| matches!(step, Step::Barrier).then_some(at))
+        .collect();
+    assert_eq!(batch_barriers.len(), 2);
+    assert!(
+        sent[9] < batch_barriers[0] && batch_barriers[0] < sends[0],
+        "the first bounded group is durable before its first send"
+    );
+    assert!(
+        sent[10] < batch_barriers[1] && batch_barriers[1] < sends[10],
+        "the second bounded group is durable before its send"
+    );
+}
+
+#[tokio::test]
+async fn private_updates_are_polled_between_bounded_sibling_sends() {
+    let burst = BurstEmitter {
+        symbol: "BTCUSDT".into(),
+        entries: 11,
+        exits: 0,
+        fired: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let mut order_feed = PrivateUpdateAfterFirstPlacementBatch {
+        sends: h.sends.clone(),
+        tape: h.tape.clone(),
+        delivered: false,
+    };
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut order_feed,
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let tape = h.tape.borrow();
+    let sends: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| matches!(step, Step::Send(_)).then_some(at))
+        .collect();
+    let private = tape
+        .iter()
+        .position(|step| matches!(step, Step::PrivateUpdate))
+        .expect("the ready private update was never polled");
+    assert_eq!(sends.len(), 11);
+    assert!(
+        sends[9] < private && private < sends[10],
+        "private lifecycle news must be applied between native-sized sibling groups"
+    );
+}
+
+#[tokio::test]
+async fn private_updates_are_polled_between_bounded_cancel_groups() {
+    let burst = CancelBurst {
+        symbol: "BTCUSDT".into(),
+        cancels: 11,
+        fired: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let mut order_feed = PrivateUpdateAfterFirstCancelBatch {
+        cancels: h.cancels.clone(),
+        tape: h.tape.clone(),
+        delivered: false,
+    };
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut order_feed,
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let tape = h.tape.borrow();
+    let cancels: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| matches!(step, Step::Cancel(_)).then_some(at))
+        .collect();
+    let private = tape
+        .iter()
+        .position(|step| matches!(step, Step::PrivateUpdate))
+        .expect("the ready private update was never polled");
+    assert_eq!(cancels.len(), 11);
+    assert!(
+        cancels[9] < private && private < cancels[10],
+        "private lifecycle news must be applied between native-sized cancel groups"
+    );
+}
+
+#[tokio::test]
+async fn due_account_refresh_is_polled_between_bounded_sibling_sends() {
+    let burst = BurstEmitter {
+        symbol: "BTCUSDT".into(),
+        entries: 11,
+        exits: 0,
+        fired: false,
+    };
+    let mut refresh_every_tick = settings();
+    refresh_every_tick.account_view_max_age_ms = 0;
+    let (mut engine, h) = build_with(
+        &refresh_every_tick,
+        allow_all(),
+        vec![Box::new(burst)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let tape = h.tape.borrow();
+    let sends: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| matches!(step, Step::Send(_)).then_some(at))
+        .collect();
+    let account_reads: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| matches!(step, Step::ReadAccount).then_some(at))
+        .collect();
+    assert_eq!(sends.len(), 11);
+    assert!(
+        account_reads.len() >= 2,
+        "the due refresh never ran; tape={tape:?}"
+    );
+    assert!(
+        sends[9] < account_reads[1] && account_reads[1] < sends[10],
+        "the due account view must be adopted between native-sized sibling groups"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_after_a_batch_does_not_abandon_a_trailing_exit() {
+    let burst = BurstEmitter {
+        symbol: "BTCUSDT".into(),
+        entries: 10,
+        exits: 1,
+        fired: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let sends = h.sends.clone();
+    let shutdown = async move {
+        while sends.borrow().len() < crate::engine::MAX_ORDERS_PER_BATCH {
+            tokio::task::yield_now().await;
+        }
+    };
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.borrow();
     assert_eq!(
-        tape.iter()
-            .filter(|step| matches!(step, Step::Barrier))
-            .count(),
-        2,
-        "each bounded group gets one durability barrier"
+        sends.len(),
+        11,
+        "shutdown truncated the bounded wake after its first native group"
+    );
+    assert!(
+        sends[10].reduce_only,
+        "the trailing risk-reducing sibling was not completed before shutdown"
     );
 }
 
@@ -1379,7 +1645,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
         WalRecord::Boot {
             version: "old".into(),
             config_sha256: "abc".into(),
-            wall_ts_ms: 1,
+            wall_ts_ms: recent_replay_ms(),
         },
         WalRecord::OrderSent {
             request: finished.clone(),
@@ -1396,7 +1662,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
                 px: 30_000.0,
                 fee: 0.1,
                 is_maker: false,
-                venue_ts_ms: 2,
+                venue_ts_ms: recent_replay_ms() + 1,
                 recv_ns: 2,
             },
         },

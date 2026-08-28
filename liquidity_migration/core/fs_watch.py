@@ -18,6 +18,7 @@ import errno
 import os
 import select
 import struct
+import sys
 from pathlib import Path
 
 # Only the ways a finished artifact appears. A consumer may rename the file
@@ -38,6 +39,8 @@ class DirectoryRenameWatch:
     __slots__ = ("_libc", "_fd", "_wd")
 
     def __init__(self, directory: Path) -> None:
+        if sys.platform != "linux":
+            raise OSError(errno.ENOSYS, "inotify is available only on Linux")
         name = ctypes.util.find_library("c")
         self._libc = ctypes.CDLL(name, use_errno=True) if name else ctypes.CDLL(None, use_errno=True)
         self._libc.inotify_init1.argtypes = [ctypes.c_int]

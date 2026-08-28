@@ -331,7 +331,11 @@ async fn recovery_tier(history_rows: usize, repeats: usize) -> Result<RecoveryTi
         p50_ns,
         p99_ns: percentile(&sorted, 99),
         max_ns: *sorted.last().unwrap_or(&0),
-        p50_ns_per_row: (history_rows > 0).then_some(p50_ns / history_rows as u64),
+        p50_ns_per_row: if history_rows == 0 {
+            None
+        } else {
+            Some(p50_ns / history_rows as u64)
+        },
     })
 }
 
@@ -635,6 +639,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 0, 2), (16, 16, 2)]
         );
+        assert_eq!(result.cold_recovery[0].p50_ns_per_row, None);
+        assert!(result.cold_recovery[1].p50_ns_per_row.is_some());
     }
 
     #[tokio::test]

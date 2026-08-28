@@ -1,4 +1,6 @@
 name: CI and staged VPS operation
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' && format('{0} {1}@{2}', inputs.mode, github.ref_name, github.sha) || format('checks {0}@{1}', github.ref_name, github.sha) }}
 
 on:
   pull_request:
@@ -23,15 +25,29 @@ permissions:
   contents: read
 
 concurrency:
-  group: liquidity-migration-${{ github.ref }}
-  cancel-in-progress: false
+  # Push/PR checks must not occupy or replace the deploy queue's single
+  # pending slot while a safety disarm is preempting a rollout.
+  group: >-
+    ${{ github.event_name == 'workflow_dispatch'
+        && format('liquidity-migration-vps-{0}', github.ref)
+        || format('liquidity-migration-ci-{0}', github.ref) }}
+  # A funded disarm is the safety interrupt: it requests cancellation of the
+  # running deploy. An ordinary dispatch cannot cancel a running disarm. GitHub
+  # has no pending-run priority, so do not dispatch ordinary work while a
+  # disarm is still pending behind cancellation of the previous run.
+  cancel-in-progress: >-
+    ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'disarm-mainnet' }}
 
 jobs:
   ci:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - name: Install locked dependencies
@@ -51,9 +67,13 @@ jobs:
   # The Rust execution engine. Independent of `ci`: a Python failure should not
   # hide an engine failure, or the other way round.
   rust:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # rust-toolchain.toml pins the compiler; Cargo.lock pins and checksums crates.
       # Test the optimized binary we actually deploy, not a debug-only build.
       - name: Release tests (locked)
@@ -70,6 +90,15 @@ jobs:
           --repeats 3
           --json
         working-directory: engine
+      - name: Engine order-path benchmark (local pretend venue)
+        run: >-
+          cargo run --release --locked -p engine-core --bin engine -- bench
+          --events 20000
+          --rate 0
+          --every 20
+          --symbols BTCUSDT
+          --wal "$RUNNER_TEMP/engine-bench-${GITHUB_SHA}.wal"
+        working-directory: engine
       - name: Build and smoke-test deploy artifact (locked)
         run: |
           cargo build --release --locked
@@ -77,23 +106,73 @@ jobs:
           target/release/engine --help >/dev/null
         working-directory: engine
 
-  vps:
-    if: github.event_name == 'workflow_dispatch'
-    needs: [ci, rust]
+  # Safety action: stopping and persistently disarming funded units must remain
+  # available even when a build or test is red. It still uses the exact pinned
+  # identity/host checks and the remote script's fail-safe implementation.
+  disarm:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'disarm-mainnet' &&
+      github.repository == 'rob435/liquidity-migration' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # A rollout takes single-digit minutes; the 6-hour job default would hold a
-    # half-stopped fleet for hours before the runner cancelled it.
-    timeout-minutes: 45
-    concurrency:
-      group: liquidity-migration-vps
-      cancel-in-progress: false
+    timeout-minutes: 15
+    environment: production
     env:
       VPS_HOST: ${{ vars.VPS_HOST || '116.202.15.128' }}
       VPS_USER: ${{ vars.VPS_USER || 'root' }}
       VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4' }}
       GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Configure pinned SSH identity
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: |
+          test -n "$VPS_SSH_PRIVATE_KEY"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
+          chmod 600 ~/.ssh/vps_deploy_key
+          ssh-keygen -y -f ~/.ssh/vps_deploy_key > ~/.ssh/vps_deploy_key.pub
+          ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 |
+            grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT"
+          printf '%s\n' \
+            '116.202.15.128 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICf7380psA4UujIrKaLuxWINmEl7vmBAKLMa7CpL7Dvq' \
+            > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          ssh-keygen -lf ~/.ssh/known_hosts | grep -F "$VPS_ED25519_FINGERPRINT"
+      - name: Stop and persistently disarm mainnet
+        run: |
+          set -euo pipefail
+          EXPECTED_COMMIT="$GITHUB_SHA" \
+          BRANCH=main \
+          SSH_TARGET="$VPS_USER@$VPS_HOST" \
+          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3" \
+          scripts/deploy_vps_live.sh disarm-mainnet
+
+  vps:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode != 'disarm-mainnet' &&
+      github.repository == 'rob435/liquidity-migration' &&
+      github.ref == 'refs/heads/main'
+    needs: [ci, rust]
+    runs-on: ubuntu-latest
+    environment: production
+    # Bound the stopped window, but leave room for every guarded producer drain
+    # and both post-activation verification passes on a loaded host.
+    timeout-minutes: 120
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST || '116.202.15.128' }}
+      VPS_USER: ${{ vars.VPS_USER || 'root' }}
+      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4' }}
+      GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Configure pinned SSH identity
         env:
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
@@ -112,7 +191,6 @@ jobs:
           ssh-keygen -lf ~/.ssh/known_hosts | grep -F "$VPS_ED25519_FINGERPRINT"
       - name: Run guarded VPS mode
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}
           DEPLOY_PROFILE_INPUT: ${{ inputs.profile }}
         run: |
@@ -122,11 +200,11 @@ jobs:
           # any other flag outright.
           case "$DEPLOY_MODE_INPUT" in
             rollout) deploy_args+=(--profile "$DEPLOY_PROFILE_INPUT") ;;
-            install|activate|verify|disarm-mainnet) ;;
+            install|activate|verify) ;;
             *) exit 2 ;;
           esac
           EXPECTED_COMMIT="$GITHUB_SHA" \
-          BRANCH="$GITHUB_REF_NAME" \
+          BRANCH=main \
           SSH_TARGET="$VPS_USER@$VPS_HOST" \
-          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3" \
+          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3" \
           scripts/deploy_vps_live.sh "${deploy_args[@]}"

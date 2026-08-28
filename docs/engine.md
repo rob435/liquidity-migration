@@ -97,7 +97,7 @@ release build, Apple silicon; 20,000 quotes in, 1,000 orders out):
 | --- | --- | --- | --- |
 | market message in → decision made | 84 ns | 125 ns | 209 ns |
 | decision → order durable in the log | 3.8 ms | 4.8 ms | 10.5 ms |
-| **in → durable → out the socket** | **3.9 ms** | **5.0 ms** | **10.8 ms** |
+| **message → durable → local submit result** | **3.9 ms** | **5.0 ms** | **10.8 ms** |
 
 The durable step is nearly the whole chain, and it is the platform's price:
 on macOS, Rust's `sync_data` is a full drive-cache flush (~3.2 ms/barrier
@@ -106,9 +106,9 @@ plain HTTP on localhost, so the venue-side cost is short by about one TLS
 record's work. Numbers are re-measured by running `engine bench` — they live
 in the log the bench writes, not only here.
 
-The <100 ms decision-to-execution goal is met on our side of the wire with
-a ~25× margin at p99; the venue round trip on top is the same geography
-every non-colocated participant pays.
+The local submit-call path is below 100 ms with a ~20× margin at p99. This is
+not a decision-to-execution claim: the venue round trip remains on top and is
+the same geography every non-colocated participant pays.
 
 ### On the production box
 
@@ -120,7 +120,7 @@ running fleet):
 | --- | --- | --- | --- |
 | market message in → decision made | 721 ns | 1.6 µs | 12.5 µs |
 | decision → order durable in the log | 1.91 ms | 4.71 ms | 8.82 ms |
-| **in → durable → out the socket** | **2.28 ms** | **5.18 ms** | **9.47 ms** |
+| **message → durable → local submit result** | **2.28 ms** | **5.18 ms** | **9.47 ms** |
 
 The box's CPU is slower than the laptop's, so thinking costs more; its disk
 is faster to make durable, so the chain is shorter overall.
@@ -178,17 +178,18 @@ real fetch and decode separately when venue history is the suspect.
 ### Against the real venue
 
 Measured 2026-08-18 from the live demo engine's own log — all 67 real orders
-placed since 2026-08-14, each order's decide, wire, and venue-ack stamps:
+placed since 2026-08-14. The durable `OrderSent.wire_ns` field is stamped
+before append and fsync, while the acknowledgement is stamped after response
+parsing. Those records establish the total decision-to-acknowledgement time,
+but they cannot honestly split disk, socket-write, and venue time.
 
 | Leg | median | p90 | worst |
 | --- | --- | --- | --- |
-| decision → durable → out the socket | 2.7 ms | — | 185 ms |
-| socket → the venue acknowledges | 172.4 ms | 177.5 ms | 486 ms |
-| decision → order live at the venue | 179 ms | 512 ms | 1.01 s |
+| decision → parsed venue acknowledgement | 179 ms | 512 ms | 1.01 s |
 
-The slow tail above is 27 of those 67 entries paying an extra ~169 ms (844 ms
-worst) *before* the wire, because every entry from flat re-confirmed leverage
-with the venue inline. Under `leverage_authority = "sole"` (the demo config)
+The sample also shows 27 of those 67 entries making an inline leverage
+confirmation before submission. The historical fields do not support a clean
+latency split for that extra call. Under `leverage_authority = "sole"` (the demo config)
 the confirmation is off the order path: what the engine set stays trusted
 across flat spells, the book's leverage is armed at book arrival, and every
 held position's leverage is verified against the venue's own position rows — a

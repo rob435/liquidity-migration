@@ -14,10 +14,11 @@ its heartbeat. A second engine unit runs on the funded account, and only while
 
 Measured by `cd engine && cargo run --release -- bench`, with real signing and
 a real disk flush in the chain. On the production box: the decision itself
-takes 721 ns; decision → order durable on disk → out the socket takes 2.28 ms
-median, 5.18 ms p99. (On a laptop the decision is faster and the flush slower —
-84 ns and 3.9 ms; both tables are in [docs/engine.md](docs/engine.md).) The
-venue round trip on top is ~172 ms — geography, not software.
+takes 721 ns; market input → durable order → parsed localhost submit response
+takes 2.28 ms median, 5.18 ms p99. This benchmark does not expose a socket-write
+timestamp. (On a laptop the decision is faster and the flush slower — 84 ns
+and 3.9 ms; both tables are in [docs/engine.md](docs/engine.md).) Live
+decision-to-acknowledgement is about 179 ms median, dominated by geography.
 
 Each of the five venues may write its hostnames in exactly one file, its own
 `realm.rs`, and the funded gateway refuses to build unless `REAL_MONEY` is

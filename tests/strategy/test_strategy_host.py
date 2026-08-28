@@ -113,12 +113,16 @@ def test_engine_heartbeat_rename_ends_the_event_wait(tmp_path: Path) -> None:
     daemon = _host(tmp_path, engine_change_wake_dir=engine_dir, interval_seconds=6.0)
     daemon._start_engine_watch_thread()
     try:
-        # Let the watch adopt the directory (inotify) or take its mtime
-        # baseline (poll fallback) before the commit lands.
-        time.sleep(0.6)
-        tmp = engine_dir / ".engine-heartbeat.json.tmp"
+        # The starter does not return until inotify is armed or the polling
+        # fallback has taken its baseline.  Publishing immediately exercises
+        # that readiness contract instead of relying on scheduler timing.
+        assert daemon._engine_watch_ready.is_set()
+        heartbeat = daemon._engine_heartbeat_file
+        assert heartbeat is not None
+        assert heartbeat.parent == engine_dir
+        tmp = heartbeat.with_name(f".{heartbeat.name}.tmp")
         tmp.write_bytes(b"{}\n")
-        os.replace(tmp, engine_dir / "engine-heartbeat-demo.json")
+        os.replace(tmp, heartbeat)
 
         started = time.monotonic()
         daemon._wait_for_next_cycle_event()

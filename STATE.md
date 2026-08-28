@@ -317,12 +317,13 @@ file.
 
 The live order path is the Rust engine's; the honest latency contract and the
 measured table are [docs/engine.md](docs/engine.md). The short version, measured
-on the fleet: **721 ns** to decide, **~2.7 ms** decision to bytes-on-wire (the
-fsync-dominated software chain), and live against the venue (n=67): **179 ms
-median decision→acknowledgment, 512 ms p90, 1013 ms worst** (at n=67 the tail
-figure is the worst of the sample, not an estimated p99). Leverage pre-arm takes
-the last software round trip out of an entry — 8.7 ms decided→wire on a
-leverage-needing entry, where paying that round trip cost ~169 ms median.
+on the fleet: **721 ns** to decide and **2.28 ms median / 5.18 ms p99** from
+market input through durability to a parsed localhost submit response. That
+benchmark has no socket-write timestamp. Live against the venue (n=67), the
+honest reconstructible total is **179 ms median decision→acknowledgment,
+512 ms p90, 1013 ms worst** (at n=67 the tail figure is the worst of the
+sample, not an estimated p99). Historical records cannot split that total
+cleanly into disk, socket, leverage call, and venue legs.
 
 - **The ~172 ms venue round trip is geography** — `api.bybit.com`,
   `api.bytick.com` and `api.byhkbit.com` are the same Frankfurt CloudFront edge
@@ -338,12 +339,9 @@ leverage-needing entry, where paying that round trip cost ~169 ms median.
   ID set is bounded, while venue execution history can still grow. Run the
   release `account_state_soak` example described in
   [docs/engine.md](docs/engine.md) on a production-like Linux host and compare
-  its early, middle, and late windows. The Ubuntu workflow includes that exact
-  bounded release workload, but its first pushed job was rejected before a
-  runner started because of the repository owner's Actions billing/spending
-  limit. No Linux measurement is registered yet; the Windows host can
-  cross-compile the example but cannot execute the linked binary. Real venue
-  fetch and decode time remains a separate measurement.
+  its early, middle, and late windows. The Ubuntu workflow runs that exact
+  bounded release workload and retains its output with the release checks.
+  Real venue fetch and decode time remains a separate measurement.
 
 ## Topology
 
@@ -406,6 +404,10 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
   performs two complete scans with stable scope. An outgoing release without
   `attest-flat` fails closed and needs a signed, reviewed out-of-band bootstrap.
   Funded proofs use only the separately snapshotted read-only attestor key.
+  The production host currently has neither that attestor file nor an outgoing
+  binary with `attest-flat`; a generation-changing rollout therefore stops
+  before service mutation until the owner provisions the separate read-only
+  credential and the reviewed bootstrap path.
   They cover ordinary, spread, RFQ, venue-native strategy, and reported
   cross-account asset/bot inventory, but Bybit cannot enumerate every bot
   instance; the funded UID is therefore also required to be dedicated to this
@@ -442,14 +444,11 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
   ([docs/operations.md](docs/operations.md)). Push only from the primary
   checkout until the pre-push hook's git-fixture tests are hermetic (a linked
   worktree run corrupted the repo once).
-- **Audit release evidence is pending.** The migration series and audit commit
-  `206e40c21` are pushed to `main`, but [workflow run
-  33130163698](https://github.com/rob435/liquidity-migration/actions/runs/33130163698)
-  rejected both Ubuntu jobs before a runner or test step started: GitHub reports
-  failed account payments or an Actions spending limit that must be increased.
-  Do not deploy or call this generation release-qualified until billing is
-  fixed and the exact pushed commit's Python, Rust, soak, build, and smoke jobs
-  are rerun green.
+- **Release evidence is revision-specific.** A candidate is qualified only when
+  that exact commit's Python checks, optimized Rust suite, bounded account soak,
+  order-path benchmark, build, and smoke test run green on Ubuntu. Production
+  remains on `e4e6750465ac8f8ebcc4b359781a0d9eb35d753b` until both that gate and
+  the trusted-attestor rollout boundary pass.
 - **The rollback floor is the one-line forward-compat commit `31ee68d`**:
   rolling back past it requires archiving each producer's event tape.
 - Three delisting candidates (`HIGHUSDT`, `PUMPBTCUSDT`, `WHITEWHALEUSDT`) have

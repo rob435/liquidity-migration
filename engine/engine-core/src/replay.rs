@@ -228,7 +228,7 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             wire_p50_ns,
             wire_p99_ns,
         } => format!(
-            "latency    {window_s}s, {events} messages; think {} / {}, out the door {} / {}",
+            "latency    {window_s}s, {events} messages; think {} / {}, submit result {} / {}",
             pretty(*decide_p50_ns),
             pretty(*decide_p99_ns),
             pretty(*wire_p50_ns),

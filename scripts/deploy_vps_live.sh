@@ -165,6 +165,7 @@ set -Eeuo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 022
+readonly DISARM_MAINTENANCE_LOCK_WAIT_SECONDS=120
 
 fail() { report_strict_phase_failure 1; echo "deploy failed: $*" >&2; exit 1; }
 
@@ -274,7 +275,25 @@ safe_git_with_index() {
     "${GIT_ENV[@]}" GIT_INDEX_FILE="$index_path" "${GIT_COMMAND[@]}" "$@"
 }
 
+acquire_maintenance_fd() {
+    local descriptor="$1" label="$2" disarm_deadline="$3" remaining_seconds
+    case "$disarm_deadline" in
+        ''|*[!0-9]*) fail "invalid maintenance lock deadline" ;;
+    esac
+    if [ "$MODE" = disarm-mainnet ]; then
+        remaining_seconds=$((disarm_deadline - SECONDS))
+        [ "$remaining_seconds" -gt 0 ] \
+            || fail "disarm maintenance lock wait expired before $label"
+        flock --exclusive --timeout "$remaining_seconds" "$descriptor" \
+            || fail "disarm timed out after ${DISARM_MAINTENANCE_LOCK_WAIT_SECONDS}s waiting for canceled maintenance cleanup at $label"
+        return 0
+    fi
+    flock --exclusive --nonblock "$descriptor" \
+        || fail "another maintenance operation holds $label"
+}
+
 acquire_maintenance_locks() {
+    local disarm_deadline=0
     local lock_dir=/run/liquidity-migration lock_path
     # maintenance.lock is the canonical mutex; the two retired leaves stay
     # nested so an old deploy or reset process is still excluded.
@@ -302,12 +321,12 @@ acquire_maintenance_locks() {
         || fail "cannot open legacy deploy lock without truncation"
     exec 7<>/run/lock/liquidity-migration-ledger-reset.lock \
         || fail "cannot open legacy reset lock without truncation"
-    flock --exclusive --nonblock 9 \
-        || fail "another maintenance operation holds maintenance.lock"
-    flock --exclusive --nonblock 8 \
-        || fail "another maintenance operation holds the legacy deploy lock"
-    flock --exclusive --nonblock 7 \
-        || fail "another maintenance operation holds the legacy reset lock"
+    if [ "$MODE" = disarm-mainnet ]; then
+        disarm_deadline=$((SECONDS + DISARM_MAINTENANCE_LOCK_WAIT_SECONDS))
+    fi
+    acquire_maintenance_fd 9 maintenance.lock "$disarm_deadline"
+    acquire_maintenance_fd 8 legacy-deploy.lock "$disarm_deadline"
+    acquire_maintenance_fd 7 legacy-reset.lock "$disarm_deadline"
 }
 
 PROFILE_MARKER=/etc/liquidity-migration/profile
@@ -870,6 +889,7 @@ ENGINE_UNIT=liquidity-migration-engine.service
 # against the exact commit at several points in this script.
 ENGINE_BUILD_DIR=/opt/engine-build
 ENGINE_TOOLCHAIN_DIR=/opt/rust
+ENGINE_RUST_TOOLCHAIN=1.90.0
 ENGINE_BUILDER_STATE=/var/lib/liquidity-migration-builder
 ENGINE_BUILDER_CARGO_HOME="$ENGINE_BUILDER_STATE/cargo-home"
 ENGINE_BUILDER_TARGET_DIR="$ENGINE_BUILDER_STATE/target"
@@ -1323,18 +1343,29 @@ engine_git() {
         -C "$ENGINE_BUILD_DIR" "$@"
 }
 
+require_pinned_engine_toolchain() {
+    local cargo="$ENGINE_TOOLCHAIN_DIR/cargo/bin/cargo"
+    local rustc="$ENGINE_TOOLCHAIN_DIR/cargo/bin/rustc"
+    [ -x "$cargo" ] || fail "pinned Rust cargo proxy is missing: $cargo"
+    [ -x "$rustc" ] || fail "pinned Rust compiler proxy is missing: $rustc"
+    RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup" \
+        RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN" \
+        "$rustc" --version | grep -F "rustc $ENGINE_RUST_TOOLCHAIN " >/dev/null \
+        || fail "host Rust compiler does not match rust-toolchain.toml (required $ENGINE_RUST_TOOLCHAIN)"
+    RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup" \
+        RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN" \
+        "$cargo" --version >/dev/null \
+        || fail "pinned Rust cargo cannot run for $ENGINE_RUST_TOOLCHAIN"
+}
+
 # Compile an exact commit in the isolated build clone. Rollout reaches this
 # only through stopped installation, after the immutable outgoing attestor has
 # already proved the account. The build artifact is never an attestor.
 compile_engine_commit() {
     local commit="$1"
     local cargo="$ENGINE_TOOLCHAIN_DIR/cargo/bin/cargo"
-    local rustc="$ENGINE_TOOLCHAIN_DIR/cargo/bin/rustc"
     local built dirty candidate_real expected_candidate_real status=0
-    [ -x "$cargo" ] || fail "pinned Rust toolchain is missing: $cargo"
-    [ -x "$rustc" ] || fail "pinned rustc is missing: $rustc"
-    "$rustc" --version | grep -F 'rustc 1.90.0 ' >/dev/null \
-        || fail "host Rust compiler does not match rust-toolchain.toml (required 1.90.0)"
+    require_pinned_engine_toolchain
     if [ ! -d "$ENGINE_BUILD_DIR/.git" ]; then
         "${GIT_ENV[@]}" /usr/bin/git init --quiet "$ENGINE_BUILD_DIR" \
             || fail "cannot prepare engine build clone"
@@ -1393,6 +1424,7 @@ compile_engine_commit() {
                 CARGO_HOME="$ENGINE_BUILDER_CARGO_HOME" \
                 CARGO_TARGET_DIR="$ENGINE_BUILDER_TARGET_DIR" \
                 RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup" \
+                RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN" \
                 RUST_BACKTRACE=1 \
                 /bin/sh -c \
                     'cd /opt/engine-build/engine && exec /usr/bin/nice -n 19 /opt/rust/cargo/bin/cargo build --release --locked -j 1'; then
@@ -2855,6 +2887,7 @@ ROLLOUT_IRREVERSIBLE=0
 ROLLOUT_COMPLETE=0
 ROLLOUT_CURRENT_COMMIT=""
 ROLLOUT_TARGET_COMMIT=""
+ROLLOUT_CANCELLATION_SIGNAL=""
 
 stop_rollout_units() {
     local unit
@@ -2980,14 +3013,25 @@ cleanup_notice() {
     printf '%s\n' "$*" >&2 2>/dev/null || true
 }
 
+rollout_cancel() {
+    local signal="$1" status="$2"
+    ROLLOUT_CANCELLATION_SIGNAL="$signal"
+    exit "$status"
+}
+
 rollout_cleanup() {
     local status="$?"
-    trap - EXIT INT TERM HUP
+    local cancellation_signal="$ROLLOUT_CANCELLATION_SIGNAL"
+    trap - EXIT INT TERM HUP PIPE
     # A second signal, or a write to a dead stdout, must not interrupt the
     # fail-closed handoff.
     trap '' INT TERM HUP PIPE
     set +e
-    if [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ] \
+    if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]; then
+        cleanup_notice \
+            "rollout canceled signal=$cancellation_signal; forcing the managed fleet stopped"
+        stop_all_rollout_units_best_effort || true
+    elif [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ] \
         && [ "$ROLLOUT_COMPLETE" -eq 0 ]; then
         if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]; then
             cleanup_notice \
@@ -3031,6 +3075,7 @@ prefetch_rollout_target() {
         || fail "expected commit is unavailable"
     safe_git merge-base --is-ancestor "$EXPECTED_COMMIT" "$REMOTE/$BRANCH" \
         || fail "expected commit is not on $REMOTE/$BRANCH"
+    require_pinned_engine_toolchain
     require_clean_checkout_at "$installed_head" "rollout prefetch completion"
 }
 
@@ -3091,10 +3136,10 @@ rollout_mode() {
     # outgoing binary then owns all three proofs, including the final proof
     # after the checkout and installed engine have changed.
     trap rollout_cleanup EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    trap 'exit 129' HUP
-    trap 'exit 141' PIPE
+    trap 'rollout_cancel INT 130' INT
+    trap 'rollout_cancel TERM 143' TERM
+    trap 'rollout_cancel HUP 129' HUP
+    trap 'rollout_cancel PIPE 141' PIPE
     run_strict_phase trusted-rollout-attestor snapshot_trusted_rollout_attestor
 
     run_strict_phase rollout-target-prefetch prefetch_rollout_target

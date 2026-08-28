@@ -534,7 +534,10 @@ async fn a_venue_row_contradicting_the_cache_evicts_the_trust() {
         side: Side::Buy,
         qty: 0.01,
         entry_px: 30_000.0,
-        stop_attached: true, stop_px: 0.0,
+        // Keep this fixture valid for the position-stop supervisor: this test
+        // is about leverage-authority eviction, not an unprotected holding.
+        stop_attached: true,
+        stop_px: 29_000.0,
         leverage: Some(5.0),
     }]);
     engine
@@ -605,4 +608,3 @@ async fn a_book_arrival_pre_arms_leverage_before_any_entry() {
     );
     assert!(h.sends.borrow().is_empty(), "no order went; only the arm");
 }
-

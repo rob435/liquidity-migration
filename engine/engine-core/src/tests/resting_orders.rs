@@ -628,7 +628,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
                 px: 29_000.0,
                 fee: 0.0,
                 is_maker: false,
-                venue_ts_ms: 4,
+                venue_ts_ms: recent_replay_ms(),
                 recv_ns: 4,
             },
         },

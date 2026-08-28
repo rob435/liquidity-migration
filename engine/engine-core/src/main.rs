@@ -21,7 +21,7 @@ engine — the execution loop
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
                [--wal PATH] [--fills]
-      Measure the whole chain on this box against a pretend venue.
+      Measure the real loop through a local submit response on this box.
       --fills has that venue fill what it accepts, so the log it writes can be
       read by `engine fills`. Off by default: the published latency table was
       measured without it.

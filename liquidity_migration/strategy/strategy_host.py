@@ -33,6 +33,7 @@ construct a sleeve-private execution stream.
 
 from __future__ import annotations
 
+import errno
 import logging
 import json
 import os
@@ -193,6 +194,11 @@ class StrategyHostDaemon:
         self._engine_wake_pending = False
         self._engine_watch_thread: threading.Thread | None = None
         self._engine_watch_stop = threading.Event()
+        # Starting the thread is not the same as arming its inotify watch (or
+        # taking the polling baseline).  The caller waits for this handshake so
+        # an atomic heartbeat rename immediately after startup cannot land in
+        # the unobserved gap between ``Thread.start`` and watch installation.
+        self._engine_watch_ready = threading.Event()
         self._cycles_engine_triggered = 0
         # Deadline-driven passes: each cycle reports the earliest future
         # instant a time rule can change its book (a max-hold stop coming
@@ -856,17 +862,23 @@ class StrategyHostDaemon:
         the engine atomically replaces its heartbeat.
 
         Only meaningful in event mode: the timer grid ignores the wake
-        event. Uses inotify where available; elsewhere a coarse mtime poll
+        event. Uses inotify where available; elsewhere a projection poll
         carries the same signal a little later."""
         if not self._event_driven_cycle or self._engine_change_wake_dir is None:
             return
         self._engine_watch_stop.clear()
+        self._engine_watch_ready.clear()
         self._engine_watch_thread = threading.Thread(
             target=self._engine_watch_loop,
             name=f"{self._sleeve_label}-engine-watch",
             daemon=True,
         )
         self._engine_watch_thread.start()
+        if not self._engine_watch_ready.wait(timeout=5.0):
+            _logger.warning(
+                "%s engine heartbeat watch did not become ready within 5s; idle-floor polling remains active",
+                self._sleeve_label,
+            )
 
     def _stop_engine_watch_thread(self) -> None:
         thread = self._engine_watch_thread
@@ -881,27 +893,53 @@ class StrategyHostDaemon:
         if directory is None:  # pragma: no cover - guarded by the starter
             return
         watch: DirectoryRenameWatch | None = None
-        last_mtime_ns: int | None = None
         last_projection = self._engine_wake_projection()
         inotify_unavailable = False
+        handshake_ready = False
         try:
             while not self._engine_watch_stop.is_set():
+                watch_installed = False
                 if watch is None and not inotify_unavailable and directory.is_dir():
                     try:
                         watch = DirectoryRenameWatch(directory)
+                        watch_installed = True
                     except AttributeError:
-                        # No inotify symbols on this platform (macOS
-                        # development): the mtime poll carries the wake.
+                        # No inotify symbols on this platform.
                         inotify_unavailable = True
-                    except (OSError, ValueError):
+                    except OSError as exc:
+                        if exc.errno == errno.ENOSYS:
+                            inotify_unavailable = True
+                        watch = None
+                    except ValueError:
                         # Descriptor budget spent or the directory raced away;
                         # poll now, retry the watch on later passes.
                         watch = None
+                if not handshake_ready:
+                    # Establish the projection baseline before announcing
+                    # readiness.  If it changed while the inotify descriptor
+                    # was being installed, compare across that window
+                    # explicitly; a later change is queued by inotify.
+                    projection = self._engine_wake_projection()
+                    if projection is not None and projection != last_projection:
+                        last_projection = projection
+                        self._engine_wake_pending = True
+                        self._bar_event.set()
+                    handshake_ready = True
+                    self._engine_watch_ready.set()
+                elif watch_installed:
+                    # A transient inotify failure may have left us polling.
+                    # Close the handoff gap before switching back to the
+                    # descriptor: changes after installation remain queued.
+                    projection = self._engine_wake_projection()
+                    if projection is not None and projection != last_projection:
+                        last_projection = projection
+                        self._engine_wake_pending = True
+                        self._bar_event.set()
                 arrived = False
                 if watch is not None:
                     try:
-                        ready, _, _ = select.select([watch.fd], [], [], 0.5)
-                        arrived = bool(ready) and watch.drain()
+                        readable, _, _ = select.select([watch.fd], [], [], 0.5)
+                        arrived = bool(readable) and watch.drain()
                     except (OSError, ValueError):
                         watch.close()
                         watch = None
@@ -914,11 +952,15 @@ class StrategyHostDaemon:
                 else:
                     if self._engine_watch_stop.wait(timeout=0.25):
                         return
-                    current = self._engine_dir_mtime_ns(directory)
-                    # First observation is the baseline, not an arrival.
-                    arrived = current is not None and last_mtime_ns is not None and current != last_mtime_ns
-                    if current is not None:
-                        last_mtime_ns = current
+                    # Poll the actual decision projection, not directory
+                    # mtime.  Filesystems may coalesce metadata timestamps, so
+                    # an immediate rename after startup must still be visible.
+                    projection = self._engine_wake_projection()
+                    if projection is not None and projection != last_projection:
+                        last_projection = projection
+                        self._engine_wake_pending = True
+                        self._bar_event.set()
+                    continue
                 if arrived:
                     projection = self._engine_wake_projection()
                     if projection is None or projection == last_projection:
@@ -929,15 +971,10 @@ class StrategyHostDaemon:
                     self._engine_wake_pending = True
                     self._bar_event.set()
         finally:
+            # Do not leave startup blocked if the watcher dies unexpectedly.
+            self._engine_watch_ready.set()
             if watch is not None:
                 watch.close()
-
-    @staticmethod
-    def _engine_dir_mtime_ns(directory: Path) -> int | None:
-        try:
-            return os.stat(directory).st_mtime_ns
-        except OSError:
-            return None
 
     def _engine_wake_projection(self) -> bytes | None:
         """Account facts that can change a strategy book, excluding telemetry.

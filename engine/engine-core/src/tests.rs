@@ -37,12 +37,23 @@ enum Step {
     Amend(String),
     ReadAccount,
     ReadRules,
+    PrivateUpdate,
 }
 
 type Tape = Rc<RefCell<Vec<Step>>>;
 
 fn tape() -> Tape {
     Rc::new(RefCell::new(Vec::new()))
+}
+
+/// A stable, recent wall timestamp for records that tests replay through boot.
+///
+/// These fixtures model a prior run, not a log older than the venue's bounded
+/// execution-history reach. Tests for an actually stale log choose their own
+/// timestamp explicitly.
+fn recent_replay_ms() -> i64 {
+    static FIXTURE_MS: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *FIXTURE_MS.get_or_init(|| clock::wall_ms() - 1_000)
 }
 
 fn kind_of(record: &WalRecord) -> String {

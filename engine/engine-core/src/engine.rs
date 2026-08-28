@@ -189,6 +189,17 @@ struct PreparedOrder {
     origin_ns: u64,
 }
 
+/// One strategy wake suspended at a clean venue-mutation boundary.
+///
+/// The counters stay live across the cooperative turn so returning to the
+/// feeds cannot reset the per-wake flood limit. `origin_ns` likewise keeps
+/// every remaining sibling on the latency clock of the event that emitted it.
+struct DrainProgress {
+    origin_ns: u64,
+    handled: usize,
+    adding_dropped: usize,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum HaltCancelState {
     Submitting,
@@ -206,6 +217,10 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     rules: Vec<Option<InstrumentRule>>,
     timers: Timers,
     pending: VecDeque<Action>,
+    /// Present only after a venue mutation has completed while the same
+    /// strategy wake still has actions. The run loop polls the private stream
+    /// and a due account-refresh tick before resuming it.
+    drain_progress: Option<DrainProgress>,
     account: AccountView,
     registry: OrderRegistry,
     orders: LedgerOfOrders,
@@ -735,6 +750,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             rules,
             timers: Timers::default(),
             pending: VecDeque::new(),
+            drain_progress: None,
             account,
             registry,
             orders,
@@ -1133,7 +1149,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // observing the update first avoids a false timeout.
                 tokio::select! {
                     biased;
-                    _ = &mut shutdown => break,
+                    _ = &mut shutdown, if self.drain_progress.is_none() => break,
                     update = order_feed.next_update() => match update {
                         Ok(update) => {
                             let now = clock::now_ns();
@@ -1158,6 +1174,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     _ = std::future::ready(()), if !self.halt_cancel_queue.is_empty() => {
                         self.dispatch_halt_cancel_group().await?;
                     }
+                    _ = std::future::ready(()), if self.drain_progress.is_some() => {
+                        self.drain(clock::now_ns()).await?;
+                    }
                     event = market_feed.next_event() => match event {
                         Ok(event) => self.on_market(event).await?,
                         Err(engine_types::FeedError::Closed) => {
@@ -1176,6 +1195,59 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             targets_open = false;
                         }
                     }
+                }
+
+                if !self.wanted_symbols.is_empty() {
+                    self.admit_wanted(market_feed, order_feed).await?;
+                }
+                continue;
+            }
+
+            if self.drain_progress.is_some() {
+                // A completed venue mutation is the cooperative boundary.
+                // Poll one private update without waiting, then independently
+                // refresh a stale account view, and only then resume the wake.
+                // Keeping those phases separate means a ready private update
+                // cannot hide a simultaneously due account refresh.
+                let private_update = tokio::select! {
+                    biased;
+                    update = order_feed.next_update() => Some(update),
+                    _ = std::future::ready(()) => None,
+                };
+                match private_update {
+                    Some(Ok(update)) => self.take_update(update).await?,
+                    Some(Err(engine_types::FeedError::Closed)) => {
+                        tracing::error!("order feed closed; stopping for supervised recovery");
+                        stopped_by = StopReason::FeedClosed;
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        self.invalidate_private_stream()?;
+                        tracing::warn!(error = %e, "order feed hiccup");
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        if !self.wanted_symbols.is_empty() {
+                            self.admit_wanted(market_feed, order_feed).await?;
+                        }
+                        continue;
+                    }
+                    None => {}
+                }
+
+                // Do not infer account freshness from timer readiness. An
+                // overdue interval polled for the first time can register
+                // with Tokio's timer driver and return Pending for this turn;
+                // an immediate drain would then skip a refresh the monotonic
+                // account stamp already says is due.
+                let now = clock::now_ns();
+                self.refresh_account_if_due(now).await?;
+                self.queue_halted_entry_cancels()?;
+
+                // Preserve the ordinary group-tick work when its timer is
+                // already ready. Both branches call `drain` exactly once.
+                tokio::select! {
+                    biased;
+                    _ = flush_tick.tick() => self.on_tick().await?,
+                    _ = std::future::ready(()) => self.drain(now).await?,
                 }
 
                 if !self.wanted_symbols.is_empty() {
@@ -1644,7 +1716,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.halt_cancels.remove(&client_order_id);
             }
         }
-        self.process_cancels(requests).await
+        self.process_cancels(requests).await.map(|_| ())
     }
 
     /// Under sole leverage authority: hold what we set against what the venue
@@ -1843,18 +1915,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for mark in self.fills.due(now, &self.market) {
             self.wal.append(&mark.to_record())?;
         }
-        if now.saturating_sub(self.account.observed_ns) >= self.refresh_after_ns {
-            match self.venue.account_view().await {
-                Ok(view) => {
-                    self.adopt_view(view);
-                    self.persist_control_anchor()?;
-                    self.enforce_position_stop_intent().await?;
-                }
-                // Keeping the old reading is not the same as trusting it: it
-                // ages, and the risk kernel refuses on an old reading.
-                Err(e) => tracing::warn!(error = %e, "could not refresh the account reading"),
-            }
-        }
+        self.refresh_account_if_due(now).await?;
         self.queue_halted_entry_cancels()?;
 
         // Every resting entry gets one look. Read the clock again: the
@@ -1874,6 +1935,27 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         // Through the ordinary queue, so the flood cap counts these too.
         self.drain(now).await
+    }
+
+    fn account_refresh_due(&self, now_ns: u64) -> bool {
+        now_ns.saturating_sub(self.account.observed_ns) >= self.refresh_after_ns
+    }
+
+    async fn refresh_account_if_due(&mut self, now_ns: u64) -> Result<(), EngineError> {
+        if !self.account_refresh_due(now_ns) {
+            return Ok(());
+        }
+        match self.venue.account_view().await {
+            Ok(view) => {
+                self.adopt_view(view);
+                self.persist_control_anchor()?;
+                self.enforce_position_stop_intent().await?;
+            }
+            // Keeping the old reading is not the same as trusting it: it
+            // ages, and the risk kernel refuses on an old reading.
+            Err(e) => tracing::warn!(error = %e, "could not refresh the account reading"),
+        }
+        Ok(())
     }
 
     /// Write down what any position that just closed made.
@@ -1982,25 +2064,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
-        let mut handled = 0usize;
-        let mut adding_dropped = 0usize;
+        let mut progress = self.drain_progress.take().unwrap_or(DrainProgress {
+            origin_ns,
+            handled: 0,
+            adding_dropped: 0,
+        });
+        let origin_ns = progress.origin_ns;
         let mut placements = Vec::new();
         let mut cancellations = Vec::new();
         let mut hard_cap_hit = false;
         loop {
             while let Some(action) = self.pending.pop_front() {
-                handled += 1;
+                progress.handled += 1;
                 // Past the cap, whatever adds risk is dropped but whatever sheds
                 // it still flows: an exit or a cancel queued behind a flood must
                 // get out, or its strategy is stranded holding a position — or an
                 // order — it believes it is rid of. An amend counts as adding: it
                 // can raise the size of a resting order. The hard cap bounds even
                 // the de-risking ones against a runaway loop.
-                if handled > MAX_INTENTS_PER_WAKE && !action.is_risk_reducing() {
-                    adding_dropped += 1;
+                if progress.handled > MAX_INTENTS_PER_WAKE && !action.is_risk_reducing() {
+                    progress.adding_dropped += 1;
                     continue;
                 }
-                if handled > MAX_INTENTS_PER_WAKE * 4 {
+                if progress.handled > MAX_INTENTS_PER_WAKE * 4 {
                     let dropped = self.pending.len() + 1;
                     self.pending.clear();
                     hard_cap_hit = true;
@@ -2017,31 +2103,71 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     })?;
                     break;
                 }
+
+                // Do not cross a placement boundary with the next verb
+                // already consumed. If a real send happened, put this action
+                // back at the front and let the run loop poll account-safety
+                // inputs before resuming the same FIFO wake.
+                if !matches!(&action, Action::Place(_)) && !placements.is_empty() {
+                    let sent = self
+                        .process_intents(std::mem::take(&mut placements), origin_ns)
+                        .await?;
+                    if sent {
+                        progress.handled -= 1;
+                        self.pending.push_front(action);
+                        return self.pause_drain(progress);
+                    }
+                }
+
+                // Ordinary cancels share the same cooperative boundary. A
+                // run of cancels accumulates into one native-sized request;
+                // flush it before a different verb (or before routing a halt
+                // cancel into its dedicated queue), then resume that verb on
+                // the next turn.
+                let accumulates_cancel = matches!(
+                    &action,
+                    Action::Cancel {
+                        client_order_id,
+                        ..
+                    } if !(self.risk.entries_halted() && self.is_live_opening(client_order_id))
+                );
+                if !accumulates_cancel && !cancellations.is_empty() {
+                    let sent = self
+                        .process_cancels(std::mem::take(&mut cancellations))
+                        .await?;
+                    if sent {
+                        progress.handled -= 1;
+                        self.pending.push_front(action);
+                        return self.pause_drain(progress);
+                    }
+                }
                 match action {
                     Action::Place(intent) => {
-                        self.process_cancels(std::mem::take(&mut cancellations))
-                            .await?;
                         placements.push(intent);
                         if placements.len() == MAX_ORDERS_PER_BATCH {
-                            self.process_intents(std::mem::take(&mut placements), origin_ns)
+                            let sent = self
+                                .process_intents(std::mem::take(&mut placements), origin_ns)
                                 .await?;
+                            if sent && !self.pending.is_empty() {
+                                return self.pause_drain(progress);
+                            }
                         }
                     }
                     Action::Cancel {
                         symbol,
                         client_order_id,
                     } => {
-                        self.process_intents(std::mem::take(&mut placements), origin_ns)
-                            .await?;
                         if self.risk.entries_halted() && self.is_live_opening(&client_order_id) {
-                            self.process_cancels(std::mem::take(&mut cancellations))
-                                .await?;
                             self.enqueue_halt_cancel(symbol, client_order_id);
                         } else {
                             cancellations.push((symbol, client_order_id));
                             if cancellations.len() == MAX_CANCELS_PER_BATCH {
-                                self.process_cancels(std::mem::take(&mut cancellations))
+                                let sent = self
+                                    .process_cancels(std::mem::take(&mut cancellations))
                                     .await?;
+                                if sent && !self.pending.is_empty() {
+                                    return self.pause_drain(progress);
+                                }
                             }
                         }
                     }
@@ -2050,46 +2176,63 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         client_order_id,
                         spec,
                     } => {
-                        self.process_intents(std::mem::take(&mut placements), origin_ns)
-                            .await?;
-                        self.process_cancels(std::mem::take(&mut cancellations))
-                            .await?;
                         let taken = self
                             .process_amend(symbol, &client_order_id, spec, origin_ns)
                             .await?;
                         self.working
                             .amended(&client_order_id, spec.px, taken, clock::now_ns());
+                        if !self.pending.is_empty() {
+                            return self.pause_drain(progress);
+                        }
                     }
                     Action::SetStop { symbol, trigger_px } => {
-                        self.process_intents(std::mem::take(&mut placements), origin_ns)
-                            .await?;
-                        self.process_cancels(std::mem::take(&mut cancellations))
-                            .await?;
                         self.process_set_stop(symbol, trigger_px).await?;
+                        if !self.pending.is_empty() {
+                            return self.pause_drain(progress);
+                        }
                     }
                 }
             }
-            self.process_intents(std::mem::take(&mut placements), origin_ns)
+            let sent = self
+                .process_intents(std::mem::take(&mut placements), origin_ns)
                 .await?;
-            self.process_cancels(std::mem::take(&mut cancellations))
+            if sent && !hard_cap_hit && !self.pending.is_empty() {
+                return self.pause_drain(progress);
+            }
+            let cancelled = self
+                .process_cancels(std::mem::take(&mut cancellations))
                 .await?;
+            if cancelled && !hard_cap_hit && !self.pending.is_empty() {
+                return self.pause_drain(progress);
+            }
             if hard_cap_hit || self.pending.is_empty() {
                 break;
             }
         }
-        if adding_dropped > 0 {
+        if progress.adding_dropped > 0 {
             tracing::error!(
-                adding_dropped,
+                adding_dropped = progress.adding_dropped,
                 "too many actions in one wake; entries and amends were dropped"
             );
             self.wal.append(&WalRecord::Note {
                 source: "engine".into(),
                 text: format!(
-                    "dropped {adding_dropped} entries and amends: more than {MAX_INTENTS_PER_WAKE} actions in one wake (exits and cancels still flowed)"
+                    "dropped {} entries and amends: more than {MAX_INTENTS_PER_WAKE} actions in one wake (exits and cancels still flowed)",
+                    progress.adding_dropped
                 ),
             })?;
         }
         self.persist_control_anchor()
+    }
+
+    /// End one venue-mutation turn without ending its strategy wake. The
+    /// batch has completed its record/send/reply sequence (and, for entries,
+    /// its durability barrier); this only keeps the flood counters and
+    /// latency origin while the run loop polls account-safety inputs.
+    fn pause_drain(&mut self, progress: DrainProgress) -> Result<(), EngineError> {
+        self.persist_control_anchor()?;
+        self.drain_progress = Some(progress);
+        Ok(())
     }
 
     /// Write a changed control anchor down and force it to disk. State that
@@ -2453,7 +2596,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         intents: Vec<Intent>,
         origin_ns: u64,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         if intents.len() > MAX_ORDERS_PER_BATCH {
             return Err(EngineError::State(format!(
                 "placement batch has {} orders; hard maximum is {MAX_ORDERS_PER_BATCH}",
@@ -2550,7 +2693,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // An assessment can roll or trip the durable loss guard even when
             // another control refuses the order.
             self.persist_control_anchor()?;
-            return Ok(());
+            return Ok(false);
         }
 
         self.append_control_anchor()?;
@@ -2633,7 +2776,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.take_update(update).await?;
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Pull a resting order.
@@ -2643,7 +2786,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// recovered at the next boot whether or not the cancel survived a crash
     /// — so the fsync would buy nothing. `origin_ns` is taken but not
     /// recorded: the latency ledger measures the order path, and mixing a
-    /// barrier-free cancel into "out the door" would flatter that number.
+    /// barrier-free cancel into the submit-result segment would flatter it.
     ///
     /// True means the venue took the change. False means the resting order
     /// is untouched, and whoever asked has to ask again.
@@ -2750,9 +2893,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     async fn process_cancels(
         &mut self,
         requests: Vec<(SymbolId, String)>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         if requests.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         if let [(symbol, client_order_id)] = requests.as_slice() {
             let symbol = *symbol;
@@ -2772,7 +2915,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     )));
                 }
             }
-            return Ok(());
+            return Ok(true);
         }
         if requests.len() > MAX_CANCELS_PER_BATCH {
             return Err(EngineError::State(format!(
@@ -2863,7 +3006,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 "account-level halt left at least one opening cancel unconfirmed ({detail}); restarting for venue reconciliation"
             )));
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn process_cancel(

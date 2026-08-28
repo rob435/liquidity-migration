@@ -189,7 +189,10 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
 
 #[tokio::test]
 async fn a_repeated_live_exec_id_mutates_the_engine_once() {
-    let (mut engine, h) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
+    // Symbols enter the engine table through subscriptions. This strategy is
+    // passive because the scripted market feed below delivers no quotes.
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let fill = OrderUpdate::Fill {
         exec_id: "exec-once".to_string(),
@@ -248,7 +251,8 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
 
 #[tokio::test]
 async fn execution_history_failure_after_a_gap_stops_the_run_and_latches_entries() {
-    let (mut engine, h) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     *h.executions.borrow_mut() = None;
 
@@ -300,7 +304,8 @@ async fn failed_gap_account_refresh_denies_the_next_entry_immediately() {
 
 #[tokio::test]
 async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
-    let (mut engine, h) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     *h.executions.borrow_mut() = Some(vec![VenueExecution {
         exec_id: "foreign-unknown-1".into(),

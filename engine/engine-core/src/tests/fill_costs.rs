@@ -49,7 +49,7 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
         WalRecord::Boot {
             version: "old".into(),
             config_sha256: "abc".into(),
-            wall_ts_ms: 1,
+            wall_ts_ms: recent_replay_ms(),
         },
         WalRecord::OrderSent {
             request: before.clone(),

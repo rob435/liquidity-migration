@@ -6,12 +6,15 @@
 //!   intent was decided.
 //! - **durable** — intent decided until the order record is on disk, past the
 //!   barrier. This is the fsync.
-//! - **wire** — intent decided until `send_order` returned (in shadow mode,
-//!   until the point where the send was skipped).
-//! - **ack** — the send call started until the venue's reply was parsed. This
-//!   one is mostly geography and is not ours to fix.
+//! - **submit result** — intent decided until `send_orders` returned (in
+//!   shadow mode, until the point where the send was skipped). This includes
+//!   the adapter's request, response, and reply parsing; it is not a socket
+//!   write timestamp.
+//! - **API round trip** — the send call started until the adapter stamped a
+//!   parsed venue acknowledgement. This one is mostly geography.
 //!
-//! **end to end** is market message in to wire out, the whole chain.
+//! **market to submit result** is market message in until the batch submit
+//! call returned and result handling began.
 
 use hdrhistogram::Histogram;
 
@@ -48,9 +51,9 @@ impl Segment {
         match self {
             Segment::Decide => "think",
             Segment::Durable => "write it down",
-            Segment::Wire => "out the door",
-            Segment::Ack => "venue answers",
-            Segment::EndToEnd => "whole chain",
+            Segment::Wire => "submit result",
+            Segment::Ack => "API round trip",
+            Segment::EndToEnd => "market to submit result",
         }
     }
 }
@@ -238,9 +241,12 @@ mod tests {
         ledger.saw_event();
         ledger.record(Segment::Decide, 12_000);
         ledger.record(Segment::Durable, 2_200_000);
+        ledger.record(Segment::Wire, 2_400_000);
         let line = ledger.plain_line(1_000_000_000);
         assert!(line.contains("think"), "{line}");
         assert!(line.contains("write it down"), "{line}");
+        assert!(line.contains("submit result"), "{line}");
+        assert!(!line.contains("out the door"), "{line}");
         assert!(line.contains("2.20ms"), "{line}");
         assert!(!line.contains("p99"), "no jargon: {line}");
     }

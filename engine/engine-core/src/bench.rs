@@ -1,4 +1,4 @@
-//! `engine bench`: the whole chain, on this box, with the real loop.
+//! `engine bench`: the real loop through a local submit response, on this box.
 //!
 //! Nothing here is a simulation of the engine — it is the engine, running its
 //! own `run()` against parts that stand in for the outside world:

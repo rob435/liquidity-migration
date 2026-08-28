@@ -6,6 +6,23 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Venue-mutation bursts yield at bounded safety boundaries.**
+  One strategy wake retains FIFO order, its original latency clock, and its
+  flood limits across cooperative turns. After each completed placement,
+  cancel, amend, or stop mutation, the engine gives ready private lifecycle
+  updates and a due account refresh priority before sending the next group;
+  an already-selected trailing exit still completes when shutdown becomes
+  ready. The strategy-host heartbeat watcher now completes an installation
+  handshake and compares the decision projection across both inotify and
+  polling handoffs, closing the immediate-start rename gap. Release CI runs
+  the optimized engine suite, bounded account-history soak, order-path
+  benchmark, and artifact smoke test. Funded disarm remains available when CI
+  is red, preempts a running rollout, shares one bounded lock deadline, and a
+  canceled rollout leaves the fleet stopped. Rollout builds require the pinned
+  Rust toolchain during prefetch as well as compilation. Latency output and
+  standing docs call the measured local boundary a parsed submit result; the
+  available records do not establish a socket-write timestamp.
+
 - **2026-08-28 — Audit series pushed; Ubuntu qualification is billing-blocked.**
   The 42-commit Rust-only migration series, ending in audit commit `206e40c21`,
   was fast-forwarded to `main`. Push workflow run `33130163698` created both

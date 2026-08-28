@@ -68,7 +68,7 @@ fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
             px: 100.0,
             fee: 0.01,
             is_maker: true,
-            venue_ts_ms: 1,
+            venue_ts_ms: recent_replay_ms(),
             recv_ns: 6,
         },
     }
@@ -132,7 +132,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
         venue_holdings(),
     )
     .await;
-    let base = engine_a.rotation_base(7);
+    let base = engine_a.rotation_base(recent_replay_ms());
 
     // The restatement says what the log said, in full: names, latch, anchor,
     // whose fills built what, the trusted per-symbol fill total, the intended
@@ -190,7 +190,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     .await;
     assert_eq!(engine_b.in_flight_ids(), engine_a.in_flight_ids());
     assert_eq!(
-        engine_b.rotation_base(7),
+        engine_b.rotation_base(recent_replay_ms()),
         base,
         "orders, latches, names, attribution, exposure and stops all round-trip"
     );
@@ -249,7 +249,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         .await
         .expect("boot");
         assert!(reconciled_may_open(&records), "the full log accounts for the position");
-        engine.rotation_base(7)
+        engine.rotation_base(recent_replay_ms())
     };
 
     // Booted on the restatement alone, holding the same position: still

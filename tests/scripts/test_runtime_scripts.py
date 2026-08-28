@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import time
@@ -263,10 +264,15 @@ def test_demo_engine_template_has_an_exact_account_id_and_mainnet_requires_one()
 def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     compile_exact = _function(text, "compile_engine_commit", "build_engine")
+    toolchain_check = _function(text, "require_pinned_engine_toolchain", "compile_engine_commit")
+    prefetch = _function(text, "prefetch_rollout_target", "record_installed_profile")
     build = _function(text, "build_engine", "verify_engine_release")
     verify = _function(text, "verify_engine_release", "validate_engine_environment")
     assert "cargo" in compile_exact and "build --release --locked" in compile_exact
     assert "locked release engine build failed" in compile_exact
+    assert 'RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN"' in toolchain_check
+    assert 'RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN"' in compile_exact
+    assert "require_pinned_engine_toolchain" in prefetch
     assert 'engine_git reset --hard --quiet FETCH_HEAD' in compile_exact
     assert 'built" = "$commit' in compile_exact
     assert (
@@ -626,9 +632,79 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
     ):
         assert required in quarantine
     cleanup = _function(text, "rollout_cleanup", "prefetch_rollout_target")
+    cancel = _function(text, "rollout_cancel", "rollout_cleanup")
+    assert 'ROLLOUT_CANCELLATION_SIGNAL="$signal"' in cancel
+    assert cleanup.index('if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]') < cleanup.index(
+        'if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]'
+    )
+    cancellation = cleanup[
+        cleanup.index('if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]') : cleanup.index(
+            'elif [ "$status" -ne 0 ]'
+        )
+    ]
+    assert "stop_all_rollout_units_best_effort" in cancellation
+    assert "activate_mode" not in cancellation
+    for signal, status in (("INT", 130), ("TERM", 143), ("HUP", 129), ("PIPE", 141)):
+        assert f"trap 'rollout_cancel {signal} {status}' {signal}" in rollout
     # A failed prior-topology restore (including failure after the first
     # mainnet enable) crosses the quarantine a second time before returning.
     assert cleanup.count("stop_all_rollout_units_best_effort") >= 3
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
+@pytest.mark.parametrize(
+    ("cancellation_signal", "expected_status", "expected_actions"),
+    [
+        ("INT", 130, ["stop"]),
+        ("TERM", 143, ["stop"]),
+        ("HUP", 129, ["stop"]),
+        ("PIPE", 141, ["stop"]),
+        ("", 71, ["stop", "activate"]),
+        # A command may itself return a signal-shaped status. Only the shell's
+        # explicit signal handler marks cancellation and suppresses restore.
+        ("", 143, ["stop", "activate"]),
+    ],
+)
+def test_rollout_cleanup_quarantines_cancellation_but_restores_ordinary_failure(
+    cancellation_signal: str,
+    expected_status: int,
+    expected_actions: list[str],
+) -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    cancel = _function(text, "rollout_cancel", "rollout_cleanup")
+    cleanup = _function(text, "rollout_cleanup", "prefetch_rollout_target")
+    bash = shutil.which("bash")
+    assert bash is not None
+    trigger = (
+        f"rollout_cancel {cancellation_signal} {expected_status}"
+        if cancellation_signal
+        else f"exit {expected_status}"
+    )
+    script = f"""
+set -u
+ROLLOUT_CANCELLATION_SIGNAL=""
+ROLLOUT_STOPPED=1
+ROLLOUT_COMPLETE=0
+ROLLOUT_IRREVERSIBLE=0
+ROLLOUT_CURRENT_COMMIT=prior-commit
+cleanup_notice() {{ :; }}
+stop_all_rollout_units_best_effort() {{ printf 'stop\\n'; }}
+activate_mode() {{ printf 'activate\\n'; }}
+remove_trusted_rollout_attestor() {{ return 0; }}
+{cancel}
+{cleanup}
+trap rollout_cleanup EXIT
+{trigger}
+"""
+    result = subprocess.run(
+        [bash, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == expected_status, result.stderr
+    assert result.stdout.splitlines() == expected_actions
 
 
 def test_activation_receipt_commits_only_after_full_in_boot_verification() -> None:
@@ -1486,10 +1562,155 @@ def test_every_remote_mode_shares_the_maintenance_locks() -> None:
     dispatch = text.rindex('case "$MODE" in')
     assert call < dispatch
     assert "maintenance.lock" in text and "deploy.lock" in text
+    helper = _function(text, "acquire_maintenance_fd", "acquire_maintenance_locks")
+    assert '[ "$MODE" = disarm-mainnet ]' in helper
+    assert 'flock --exclusive --timeout "$remaining_seconds" "$descriptor"' in helper
+    assert 'flock --exclusive --nonblock "$descriptor"' in helper
     lock = _function(text, "acquire_maintenance_locks", "ensure_runtime_identities")
-    for descriptor in ("9", "8", "7"):
-        assert f"flock --exclusive --nonblock {descriptor}" in lock
+    assert "DISARM_MAINTENANCE_LOCK_WAIT_SECONDS=120" in text
+    assert "disarm_deadline=$((SECONDS + DISARM_MAINTENANCE_LOCK_WAIT_SECONDS))" in lock
+    for descriptor, label in (
+        ("9", "maintenance.lock"),
+        ("8", "legacy-deploy.lock"),
+        ("7", "legacy-reset.lock"),
+    ):
+        assert f'acquire_maintenance_fd {descriptor} {label} "$disarm_deadline"' in lock
     assert "maintenance_lock.py" not in text
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or shutil.which("bash") is None or shutil.which("flock") is None,
+    reason="requires Linux bash and util-linux flock",
+)
+def test_disarm_lock_waits_for_cleanup_but_remains_strictly_bounded(
+    tmp_path: Path,
+) -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    helper = _function(text, "acquire_maintenance_fd", "acquire_maintenance_locks")
+    bash = shutil.which("bash")
+    assert bash is not None
+    lock_path = tmp_path / "maintenance.lock"
+    lock_path.touch()
+
+    holder_script = """
+set -euo pipefail
+exec 9<>"$1"
+flock --exclusive 9
+: > "$2"
+while [ ! -e "$3" ]; do sleep 0.02; done
+"""
+
+    def wait_for_file(path: Path, process: subprocess.Popen[str]) -> None:
+        deadline = time.monotonic() + 5
+        while not path.exists():
+            if process.poll() is not None:
+                _, stderr = process.communicate()
+                pytest.fail(f"lock subprocess exited before readiness: {stderr}")
+            if time.monotonic() >= deadline:
+                process.terminate()
+                process.wait(timeout=2)
+                pytest.fail(f"lock subprocess did not become ready: {path}")
+            time.sleep(0.01)
+
+    def start_holder(label: str) -> tuple[subprocess.Popen[str], Path]:
+        ready = tmp_path / f"{label}.holder-ready"
+        release = tmp_path / f"{label}.holder-release"
+        process = subprocess.Popen(
+            [
+                bash,
+                "-c",
+                holder_script,
+                "lock-holder",
+                str(lock_path),
+                str(ready),
+                str(release),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        wait_for_file(ready, process)
+        return process, release
+
+    def waiter_script(mode: str, wait_seconds: int) -> str:
+        return f"""
+set -euo pipefail
+MODE={shlex.quote(mode)}
+DISARM_MAINTENANCE_LOCK_WAIT_SECONDS={wait_seconds}
+fail() {{ printf 'failed: %s\\n' "$*" >&2; exit 71; }}
+{helper}
+exec 9<>"$1"
+: > "$2"
+deadline=0
+if [ "$MODE" = disarm-mainnet ]; then
+    deadline=$((SECONDS + DISARM_MAINTENANCE_LOCK_WAIT_SECONDS))
+fi
+acquire_maintenance_fd 9 maintenance.lock "$deadline"
+printf 'acquired\\n'
+"""
+
+    def acquire(mode: str, wait_seconds: int, label: str) -> subprocess.CompletedProcess[str]:
+        ready = tmp_path / f"{label}.waiter-ready"
+        return subprocess.run(
+            [
+                bash,
+                "-c",
+                waiter_script(mode, wait_seconds),
+                "lock-waiter",
+                str(lock_path),
+                str(ready),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+    releasing, release_releasing = start_holder("releasing")
+    try:
+        waiter_ready = tmp_path / "releasing.waiter-ready"
+        waiter = subprocess.Popen(
+            [
+                bash,
+                "-c",
+                waiter_script("disarm-mainnet", 2),
+                "lock-waiter",
+                str(lock_path),
+                str(waiter_ready),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        wait_for_file(waiter_ready, waiter)
+        assert waiter.poll() is None, "disarm did not wait for the held lock"
+        release_releasing.touch()
+        stdout, stderr = waiter.communicate(timeout=3)
+        assert waiter.returncode == 0, stderr
+        assert stdout.strip() == "acquired"
+        assert releasing.wait(timeout=2) == 0
+    finally:
+        if releasing.poll() is None:
+            release_releasing.touch()
+            releasing.wait(timeout=2)
+
+    blocking, release_blocking = start_holder("blocking")
+    try:
+        ordinary = acquire("rollout", 0, "ordinary")
+        assert ordinary.returncode == 71
+        assert "another maintenance operation holds maintenance.lock" in ordinary.stderr
+
+        started = time.monotonic()
+        bounded = acquire("disarm-mainnet", 1, "bounded")
+        elapsed = time.monotonic() - started
+        assert bounded.returncode == 71
+        assert "disarm timed out after 1s" in bounded.stderr
+        assert elapsed < 4, "disarm exceeded its bounded lock-wait budget"
+        assert blocking.poll() is None, "disarm exceeded its bound and waited for release"
+    finally:
+        if blocking.poll() is None:
+            release_blocking.touch()
+            blocking.wait(timeout=2)
 
 
 def test_deploy_python_modules_resolve_in_the_checkout() -> None:
@@ -1595,10 +1816,14 @@ def test_ci_tests_and_builds_the_exact_locked_release_shape() -> None:
 
 def test_vps_workflow_is_serialized_and_time_bounded() -> None:
     workflow = _read(".github/workflows/vps-deploy.yml")
+    concurrency = workflow[workflow.index("concurrency:") : workflow.index("jobs:")]
     vps = workflow[workflow.index("  vps:") :]
-    assert "timeout-minutes: 45" in vps
-    assert "group: liquidity-migration-vps" in vps
-    assert "cancel-in-progress: false" in vps
+    assert "timeout-minutes: 120" in vps
+    assert "format('liquidity-migration-vps-{0}', github.ref)" in concurrency
+    assert "format('liquidity-migration-ci-{0}', github.ref)" in concurrency
+    assert "inputs.mode == 'disarm-mainnet'" in concurrency
+    assert workflow.count("\nconcurrency:\n") == 1
+    assert "\n    concurrency:\n" not in workflow
     assert "ServerAliveInterval=15" in vps and "ServerAliveCountMax=3" in vps
 
 
