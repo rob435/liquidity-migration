@@ -127,8 +127,8 @@ fn an_ambiguous_short_reprice_reserves_both_notional_and_stop_loss_extremes() {
     let mut cfg = demo_config();
     cfg.envelope.reference_usdt = 100.0;
     cfg.envelope.gross_notional_multiple = 1.15;
-    cfg.envelope.max_component_gross_notional_usdt = 1_000.0;
-    cfg.envelope.max_initial_margin_usdt = 1_000.0;
+    cfg.envelope.max_component_gross_notional_usdt = 115.0;
+    cfg.envelope.max_initial_margin_usdt = 100.0;
 
     let original = entry(CARRY, BUSDT, Side::Sell, 1.0, 100.0, 110.0, NOW);
     let sibling = entry(CARRY, BUSDT, Side::Sell, 0.001, 100.0, 110.0, NOW);
@@ -497,8 +497,8 @@ fn narrow_wide_stop_kernel() -> Kernel {
     let mut cfg = demo_config();
     cfg.envelope.reference_usdt = 100.0;
     cfg.envelope.gross_notional_multiple = 1.0;
-    cfg.envelope.max_component_gross_notional_usdt = 1_000.0;
-    cfg.envelope.max_initial_margin_usdt = 1_000.0;
+    cfg.envelope.max_component_gross_notional_usdt = 100.0;
+    cfg.envelope.max_initial_margin_usdt = 100.0;
     Kernel::new(cfg).unwrap()
 }
 
