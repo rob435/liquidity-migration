@@ -281,12 +281,14 @@ parallel and integrate by type-check.
   production validation.
 - **Bybit proves one-way mode before startup completes.** During account
   identity, the adapter makes one signed read-only position query per configured
-  symbol and requires exactly one matching `linear` row with `positionIdx 0`
-  and no next page. Any missing, duplicate, malformed, hedge-mode, rejected, or
-  failed response stops startup. A symbol added after boot is checked before its
-  first order, stop, or leverage request. The engine never changes venue mode,
-  does not check margin mode, and cannot prevent an operator changing mode after
-  a successful check.
+  symbol at the venue's 200-row maximum and requires exactly one matching
+  `linear` row with `positionIdx 0`. Bybit can attach an opaque pagination
+  cursor that repeats that same row, so cursor presence is not treated as a
+  second position. Any missing, duplicate, malformed, hedge-mode, rejected, or
+  failed response stops startup. A symbol added after boot is checked before
+  its first order, stop, or leverage request. The engine never changes venue
+  mode, does not check margin mode, and cannot prevent an operator changing
+  mode after a successful check.
 - **Funded Bybit identity enforces the execution-key shape.** The venue must report
   a UTA, write-capable key with
   ContractTrade Order and Position, no Wallet Withdraw, and exactly the one host

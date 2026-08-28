@@ -6,6 +6,14 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-28 — Bybit position-mode startup follows the row, not its cursor.**
+  Explicit-symbol checks now request the venue's 200-row maximum and prove
+  one-way mode from exactly one matching `linear` row with `positionIdx 0`.
+  Demo and mainnet attach an opaque cursor to that complete response; following
+  the observed demo cursor repeats the same row. Cursor presence no longer
+  rejects a valid startup. Missing, duplicate, wrong-symbol, malformed, and
+  hedge-mode rows still abort before a heartbeat or order.
+
 - **2026-08-28 — Rollout recovery repairs producer inputs and lock cleanup.**
   Candidate-universe loading now accepts the deployment's exact immutable
   projection: root-owned mode `0640`, readable by the runtime group but not

@@ -65,6 +65,7 @@ const TRADING_STOPS_MAINNET_PER_SECOND: usize = 10;
 const TRADING_STOPS_DEMO_PER_SECOND: usize = 5;
 const LEVERAGE_CHANGES_PER_SECOND: usize = 10;
 const POSITION_READS_PER_SECOND: usize = 50;
+const POSITION_MODE_PAGE_LIMIT: usize = 200;
 const WARM_CONNECTIONS: usize = 10;
 // The endpoint accepts twenty request objects, but Bybit consumes rate-limit
 // quota by object and the default linear quota is ten per second. Refusing a
@@ -339,7 +340,10 @@ impl BybitGateway {
         }
 
         let symbol = self.name_of(id)?.to_string();
-        let query = format!("category={CATEGORY}&symbol={}", percent_encode(&symbol));
+        let query = format!(
+            "category={CATEGORY}&symbol={}&limit={POSITION_MODE_PAGE_LIMIT}",
+            percent_encode(&symbol)
+        );
         reserve_rate_capacity(
             &mut self.position_read_limiter,
             1,
@@ -371,7 +375,10 @@ impl BybitGateway {
             .await;
             let rest = &self.rest;
             let checks = wave.iter().map(|(_, symbol)| async move {
-                let query = format!("category={CATEGORY}&symbol={}", percent_encode(symbol));
+                let query = format!(
+                    "category={CATEGORY}&symbol={}&limit={POSITION_MODE_PAGE_LIMIT}",
+                    percent_encode(symbol)
+                );
                 let envelope = rest.get_signed(PATH_POSITIONS, &query).await?;
                 verify_one_way_position(&venue_result(envelope)?, symbol)
             });

@@ -324,12 +324,11 @@ pub(crate) fn verify_one_way_position(
         )));
     }
 
-    let cursor = str_field(result, "nextPageCursor")?;
-    if !cursor.is_empty() {
-        return Err(VenueError::BadReply(format!(
-            "position-mode reply for {expected_symbol} unexpectedly has another page"
-        )));
-    }
+    // Bybit returns an opaque cursor for a complete symbol-scoped position
+    // reply and following it repeats the same row. The limit-200 request fits
+    // both possible hedge legs, so the rows below prove the mode; the cursor
+    // remains type-checked but is not distinct-position evidence.
+    str_field(result, "nextPageCursor")?;
 
     let rows = list_field(result)?;
     if rows.len() != 1 {
@@ -1706,15 +1705,17 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_flat_symbol_proves_one_way_mode() {
-        let result = json!({
-            "category": "linear",
-            "list": [{
-                "symbol": "BTCUSDT", "positionIdx": 0, "side": "", "size": "0"
-            }],
-            "nextPageCursor": ""
-        });
-        verify_one_way_position(&result, "BTCUSDT").unwrap();
+    fn an_explicit_flat_symbol_proves_one_way_mode_with_any_string_cursor() {
+        for cursor in ["", "opaque-demo-cursor"] {
+            let result = json!({
+                "category": "linear",
+                "list": [{
+                    "symbol": "BTCUSDT", "positionIdx": 0, "side": "", "size": "0"
+                }],
+                "nextPageCursor": cursor
+            });
+            verify_one_way_position(&result, "BTCUSDT").unwrap();
+        }
     }
 
     #[test]
@@ -1723,17 +1724,25 @@ mod tests {
 
         for result in [
             page(json!([])),
-            page(json!([
-                {"symbol": "BTCUSDT", "positionIdx": 1},
-                {"symbol": "BTCUSDT", "positionIdx": 2}
-            ])),
+            json!({
+                "category": "linear",
+                "list": [
+                    {"symbol": "BTCUSDT", "positionIdx": 1},
+                    {"symbol": "BTCUSDT", "positionIdx": 2}
+                ],
+                "nextPageCursor": "opaque-hedge-cursor"
+            }),
             page(json!([{"symbol": "BTCUSDT", "positionIdx": 3}])),
             page(json!([{"symbol": "ETHUSDT", "positionIdx": 0}])),
             page(json!([{"symbol": "BTCUSDT"}])),
             json!({
                 "category": "linear",
+                "list": [{"symbol": "BTCUSDT", "positionIdx": 0}]
+            }),
+            json!({
+                "category": "linear",
                 "list": [{"symbol": "BTCUSDT", "positionIdx": 0}],
-                "nextPageCursor": "more"
+                "nextPageCursor": 7
             }),
         ] {
             assert!(

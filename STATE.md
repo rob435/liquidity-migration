@@ -222,12 +222,14 @@ file.
   durably latches new risk off if the repair fails.
 - **Bybit one-way position mode is verified before startup completes.** Rust
   makes a signed read-only position query for every configured symbol and
-  requires exactly one matching `linear` row, no next page, and `positionIdx 0`.
+  requests the 200-row maximum, and requires exactly one matching `linear` row
+  with `positionIdx 0`. Bybit can return a cursor that repeats the same
+  symbol-scoped row, so cursor presence is not treated as another position.
   Any missing, duplicate, malformed, hedge-mode, or failed response aborts
   startup. Configured checks run concurrently in rate-bounded 50-request waves;
-  a symbol admitted later is checked before its first order, stop, or
-  leverage request. The check does not mutate venue mode and does not pin cross
-  margin. An external mode switch after verification remains possible; the next
+  a symbol admitted later is checked before its first order, stop, or leverage
+  request. The check does not mutate venue mode and does not pin cross margin.
+  An external mode switch after verification remains possible; the next
   incompatible venue request rejects.
 - **No copy of the funded execution key remains on the laptop.**
   `/etc/liquidity-migration/bybit-mainnet.env` on the host is the only copy and

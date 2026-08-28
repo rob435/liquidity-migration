@@ -82,9 +82,10 @@ fn one_way_position(request: &Recorded) -> (u16, String) {
     let symbol = request
         .query
         .strip_prefix("category=linear&symbol=")
+        .and_then(|query| query.strip_suffix("&limit=200"))
         .expect("an explicit linear symbol query");
     ok(&format!(
-        r#"{{"category":"linear","list":[{{"symbol":"{symbol}","positionIdx":0,"side":"","size":"0"}}],"nextPageCursor":""}}"#
+        r#"{{"category":"linear","list":[{{"symbol":"{symbol}","positionIdx":0,"side":"","size":"0"}}],"nextPageCursor":"opaque-live-cursor"}}"#
     ))
 }
 
@@ -832,7 +833,7 @@ async fn a_runtime_symbol_is_checked_once_before_its_first_order() {
 
     let checks = server.to_path("/v5/position/list");
     assert_eq!(checks.len(), 1, "the successful proof is cached");
-    assert_eq!(checks[0].query, "category=linear&symbol=XRPUSDT");
+    assert_eq!(checks[0].query, "category=linear&symbol=XRPUSDT&limit=200");
     assert_eq!(server.to_path("/v5/order/create").len(), 2);
 }
 
@@ -878,8 +879,8 @@ async fn account_identity_asks_the_venue_whose_account_this_is() {
     let checks = server.to_path("/v5/position/list");
     assert_eq!(checks.len(), 2, "every configured symbol is checked");
     assert_eq!(checks[0].method, "GET");
-    assert_eq!(checks[0].query, "category=linear&symbol=BTCUSDT");
-    assert_eq!(checks[1].query, "category=linear&symbol=ETHUSDT");
+    assert_eq!(checks[0].query, "category=linear&symbol=BTCUSDT&limit=200");
+    assert_eq!(checks[1].query, "category=linear&symbol=ETHUSDT&limit=200");
     for check in checks {
         assert_signed(&check, &check.query);
         assert!(check.body.is_empty());
@@ -911,7 +912,9 @@ async fn an_account_number_sent_as_text_reads_the_same() {
 #[tokio::test]
 async fn hedge_mode_refuses_startup_before_any_order_can_be_sent() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
-        "/v5/position/list" if request.query.ends_with("BTCUSDT") => one_way_position(request),
+        "/v5/position/list" if request.query.contains("symbol=BTCUSDT&") => {
+            one_way_position(request)
+        }
         "/v5/position/list" => ok(
             r#"{"category":"linear","list":[{"symbol":"ETHUSDT","positionIdx":1,"side":"","size":"0"},{"symbol":"ETHUSDT","positionIdx":2,"side":"","size":"0"}],"nextPageCursor":""}"#,
         ),
