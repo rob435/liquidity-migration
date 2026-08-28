@@ -6,6 +6,7 @@
 //! that supply market data, the venue, the log and the risk kernel are still
 //! being written. `assembly.rs` is where those get plugged in.
 
+pub mod account_state_bench;
 pub mod assembly;
 pub mod attribution;
 pub mod bench;
@@ -17,9 +18,11 @@ pub mod ctx;
 pub mod engine;
 pub mod execution;
 mod execution_ids;
+pub mod flatness;
 pub mod heartbeat;
 pub mod inflight;
 pub mod ledger;
+pub mod loss_reset;
 pub mod reconcile;
 pub mod replay;
 pub mod routing;

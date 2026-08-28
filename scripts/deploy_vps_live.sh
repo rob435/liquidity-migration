@@ -164,6 +164,7 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
 set -Eeuo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+umask 022
 
 fail() { report_strict_phase_failure 1; echo "deploy failed: $*" >&2; exit 1; }
 
@@ -321,6 +322,10 @@ LONG_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-long-mainnet-event
 CARRY_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-carry-mainnet-event
 
 RUNTIME_GROUP=liquidity-migration
+ENGINE_BUILDER_GROUP=liquidity-builder
+ENGINE_BUILDER_USER=liquidity-builder
+CONTROLS_GROUP=liquidity-controls
+CONTROLS_USER=liquidity-controls
 PRODUCER_USER=liquidity-producer
 DEMO_ENGINE_USER=liquidity-engine-demo
 MAINNET_ENGINE_USER=liquidity-engine-mainnet
@@ -333,7 +338,28 @@ PRODUCER_MAINNET_SOURCE_ENV=/etc/liquidity-migration/producer-mainnet-source.env
 MAINNET_TELEGRAM_ENV=/etc/liquidity-migration/telegram-mainnet.env
 
 ensure_runtime_identities() {
+    [ -x /usr/bin/sudo ] && [ -x /usr/sbin/visudo ] \
+        || fail "sudo and visudo are required for the isolated Telegram control boundary"
     getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || groupadd --system "$RUNTIME_GROUP"
+    getent group "$ENGINE_BUILDER_GROUP" >/dev/null 2>&1 \
+        || groupadd --system "$ENGINE_BUILDER_GROUP"
+    if ! id -u "$ENGINE_BUILDER_USER" >/dev/null 2>&1; then
+        useradd --system --no-create-home --home-dir /nonexistent \
+            --shell /usr/sbin/nologin --gid "$ENGINE_BUILDER_GROUP" "$ENGINE_BUILDER_USER"
+    fi
+    [ "$(id -gn "$ENGINE_BUILDER_USER")" = "$ENGINE_BUILDER_GROUP" ] \
+        || fail "$ENGINE_BUILDER_USER does not have its isolated primary group"
+    [ "$(id -nG "$ENGINE_BUILDER_USER")" = "$ENGINE_BUILDER_GROUP" ] \
+        || fail "$ENGINE_BUILDER_USER has unexpected supplementary groups"
+    getent group "$CONTROLS_GROUP" >/dev/null 2>&1 \
+        || groupadd --system "$CONTROLS_GROUP"
+    if ! id -u "$CONTROLS_USER" >/dev/null 2>&1; then
+        useradd --system --no-create-home --home-dir /nonexistent \
+            --shell /usr/sbin/nologin --gid "$CONTROLS_GROUP" "$CONTROLS_USER"
+    fi
+    [ "$(id -gn "$CONTROLS_USER")" = "$CONTROLS_GROUP" ] \
+        && [ "$(id -nG "$CONTROLS_USER")" = "$CONTROLS_GROUP" ] \
+        || fail "$CONTROLS_USER is not isolated in its dedicated primary group"
     local user
     for user in "$PRODUCER_USER" "$DEMO_ENGINE_USER" "$MAINNET_ENGINE_USER" "$OBSERVER_USER" "$LLM_USER"; do
         if ! id -u "$user" >/dev/null 2>&1; then
@@ -344,10 +370,10 @@ ensure_runtime_identities() {
             || fail "$user is not isolated in the $RUNTIME_GROUP runtime group"
     done
     install -d -o root -g root -m 0755 /etc/tmpfiles.d
-    printf 'd /run/lock/liquidity-migration 0770 root %s -\n' "$RUNTIME_GROUP" \
+    printf 'd /run/liquidity-migration 0755 root root -\nf /run/liquidity-migration/maintenance.lock 0600 root root -\nf /run/liquidity-migration/deploy.lock 0600 root root -\nd /run/lock/liquidity-migration 0770 root %s -\nf /run/lock/liquidity-migration-ledger-reset.lock 0600 root root -\n' "$RUNTIME_GROUP" \
         > /etc/tmpfiles.d/liquidity-migration.conf
     systemd-tmpfiles --create /etc/tmpfiles.d/liquidity-migration.conf \
-        || fail "cannot create the engine lease directory"
+        || fail "cannot create the runtime lock and engine lease boundaries"
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration/targets
 }
@@ -371,7 +397,9 @@ allowed = {
 values = load_private_systemd_environment(source)
 forbidden = {
     "BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET", "BYBIT_REAL_API_KEY",
-    "BYBIT_REAL_API_SECRET", "REAL_MONEY", "TELEGRAM_BOT_TOKEN",
+    "BYBIT_REAL_API_SECRET", "BYBIT_REAL_API_KEY_IP",
+    "BYBIT_ATTEST_API_KEY", "BYBIT_ATTEST_API_SECRET", "BYBIT_ATTEST_API_KEY_IP",
+    "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID", "REAL_MONEY", "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID", "TELEGRAM_ALERT_CHAT_ID",
 }
 leaked = sorted(key for key in forbidden if str(values.get(key) or "").strip())
@@ -534,10 +562,40 @@ PY
     chmod 0600 "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
 }
 
+trusted_checkout_directory() {
+    local directory="$1" mode
+    [ -d "$directory" ] && [ ! -L "$directory" ] \
+        && [ "$(readlink -f "$directory")" = "$directory" ] \
+        && [ "$(stat -c %u "$directory")" -eq 0 ] \
+        || return 1
+    mode="$(stat -c %a "$directory")" || return 1
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] \
+        && (( (8#$mode & 0022) == 0 ))
+}
+
 require_checkout() {
     [ -d "$REPO_DIR/.git" ] && [ ! -L "$REPO_DIR/.git" ] \
         || fail "missing trusted Git checkout: $REPO_DIR"
     cd "$REPO_DIR"
+}
+
+require_trusted_checkout() {
+    local directory unsafe_git_metadata
+    require_checkout
+    for directory in "${REPO_DIR%/*}" "$REPO_DIR" "$REPO_DIR/scripts" \
+        "$REPO_DIR/liquidity_migration" "$REPO_DIR/liquidity_migration/ops" \
+        "$REPO_DIR/.git"; do
+        trusted_checkout_directory "$directory" \
+            || fail "trusted checkout ancestry is missing, linked, non-root-owned, or group/world-writable: $directory"
+    done
+    unsafe_git_metadata="$(
+        /usr/bin/find "$REPO_DIR/.git" -xdev -mindepth 1 \
+            \( ! -uid 0 -o -perm /022 -o -type l \
+                -o \( ! -type f -a ! -type d \) \) \
+            -print -quit
+    )" || fail "cannot inspect trusted checkout metadata permissions"
+    [ -z "$unsafe_git_metadata" ] \
+        || fail "trusted checkout metadata contains a non-root-owned, writable, linked, or special entry: $unsafe_git_metadata"
 }
 
 clean_checkout_status() {
@@ -670,7 +728,8 @@ git_fetch() {
 
 install_mode() {
     local installed_head
-    require_checkout
+    require_rollout_for_funded_generation_change install
+    require_trusted_checkout
     # The installed checkout's toggles answer one question here: is a funded
     # sleeve in play? If it is, --stop-first stays off and a running fleet is
     # refused rather than stopped.
@@ -678,6 +737,7 @@ install_mode() {
     lm_load_sleeve_toggles
     resolve_stop_first
     require_quiescent
+    run_phase persist-install-boot-fence disable_rollout_units_for_boot_fence
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
     require_clean_checkout_at "$installed_head" "install"
 
@@ -741,7 +801,7 @@ install_mode() {
 }
 
 load_authorization() {
-    require_checkout
+    require_trusted_checkout
     PYTHON=.venv/bin/python
     [ -x "$PYTHON" ] || fail "missing deployed Python environment"
     # Which profile is installed, read from the marker install wrote. An
@@ -810,15 +870,97 @@ ENGINE_UNIT=liquidity-migration-engine.service
 # against the exact commit at several points in this script.
 ENGINE_BUILD_DIR=/opt/engine-build
 ENGINE_TOOLCHAIN_DIR=/opt/rust
+ENGINE_BUILDER_STATE=/var/lib/liquidity-migration-builder
+ENGINE_BUILDER_CARGO_HOME="$ENGINE_BUILDER_STATE/cargo-home"
+ENGINE_BUILDER_TARGET_DIR="$ENGINE_BUILDER_STATE/target"
 ENGINE_BINARY=/opt/liquidity-migration-engine/bin/engine
+ENGINE_LAUNCHER=/opt/liquidity-migration-engine/bin/run-authorized-runtime
+ENGINE_CONTROL_HELPER=/opt/liquidity-migration-engine/bin/telegram-control-helper
+CONTROLS_SUDOERS=/etc/sudoers.d/liquidity-migration-controls
+TELEGRAM_CONTROLS_BOT=/opt/liquidity-migration/liquidity_migration/ops/telegram_controls.py
+ACTIVATION_RECEIPT=/opt/liquidity-migration-engine/bin/activation.complete
+ACTIVATION_PERMIT=/run/liquidity-migration/activation.permit
+ACTIVATION_WATCHDOG_UNIT=liquidity-migration-activation-watchdog.service
+ACTIVATION_LEASE_SECONDS=6
 ENGINE_ENVIRONMENT=/etc/liquidity-migration/engine.env
+ENGINE_MAINNET_ENVIRONMENT=/etc/liquidity-migration/engine-mainnet.env
+ENGINE_CANDIDATE_BINARY="$ENGINE_BUILDER_TARGET_DIR/release/engine"
+BOOTSTRAP_ATTESTOR_DIRECTORY=/etc/liquidity-migration/attestor-bootstrap
+BOOTSTRAP_ATTESTOR_BINARY="$BOOTSTRAP_ATTESTOR_DIRECTORY/attestor"
+BOOTSTRAP_ATTESTOR_MANIFEST="$BOOTSTRAP_ATTESTOR_DIRECTORY/manifest"
+BOOTSTRAP_ATTESTOR_SIGNATURE="$BOOTSTRAP_ATTESTOR_DIRECTORY/manifest.sig"
+# Independently provisioned trust root. It is deliberately outside the
+# replaceable bootstrap bundle: a manifest and a key supplied by the same
+# bundle would only prove that they were replaced together.
+BOOTSTRAP_ATTESTOR_TRUST_ROOT=/etc/liquidity-migration/rollout-attestor-operator-public.pem
+BOOTSTRAP_ATTESTOR_PURPOSE=liquidity-migration-rollout-flat-attestor-v1
 
 # The single arming switch: REAL_MONEY=true in the mainnet credential file,
 # written by the owner's own hand next to the live API key. No file, or any
 # other value, means disarmed. The value is read through the strict private
 # loader and never printed. Cached: one answer per run.
 MAINNET_CREDENTIAL_ENV=/etc/liquidity-migration/bybit-mainnet.env
+MAINNET_ATTESTOR_ENV=/etc/liquidity-migration/bybit-mainnet-attestor.env
 MAINNET_ARMED_STATE=""
+ROLLOUT_FUNDED_AUTHORITY=0
+
+funded_configuration_present() {
+    local path
+    for path in \
+        "$MAINNET_CREDENTIAL_ENV" \
+        "$MAINNET_ATTESTOR_ENV" \
+        "$ENGINE_MAINNET_ENVIRONMENT" \
+        /etc/liquidity-migration/engine-mainnet.toml \
+        "$PRODUCER_MAINNET_ENV" \
+        "$PRODUCER_MAINNET_SOURCE_ENV" \
+        "$MAINNET_TELEGRAM_ENV"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+require_rollout_for_funded_generation_change() {
+    local operation="$1"
+    if [ "${ROLLOUT_FUNDED_AUTHORITY:-0}" -ne 1 ] \
+        && funded_configuration_present; then
+        fail "$operation refused: this host has persisted funded configuration; only rollout may change or activate its generation"
+    fi
+}
+
+validate_mainnet_attestor_environment() {
+    local path="${1:-$MAINNET_ATTESTOR_ENV}"
+    [ -f "$path" ] && [ ! -L "$path" ] \
+        || fail "funded attestor environment is missing or linked: $path"
+    [ "$(stat -c %u "$path")" -eq 0 ] && [ "$(stat -c %g "$path")" -eq 0 ] \
+        && [ "$(stat -c %a "$path")" = 600 ] \
+        || fail "funded attestor environment must be root:root mode 0600: $path"
+    awk '
+BEGIN {
+    allowed["BYBIT_ATTEST_API_KEY"] = 1
+    allowed["BYBIT_ATTEST_API_SECRET"] = 1
+    allowed["BYBIT_ATTEST_API_KEY_IP"] = 1
+    allowed["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] = 1
+}
+/^[[:space:]]*$/ || /^#/ { next }
+{
+    separator = index($0, "=")
+    if (separator < 2) exit 1
+    key = substr($0, 1, separator - 1)
+    value = substr($0, separator + 1)
+    if (!(key in allowed) || seen[key]++ || value == "") exit 1
+}
+END {
+    if (seen["BYBIT_ATTEST_API_KEY"] != 1 ||
+        seen["BYBIT_ATTEST_API_SECRET"] != 1 ||
+        seen["BYBIT_ATTEST_API_KEY_IP"] != 1 ||
+        seen["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] != 1) exit 1
+}
+' "$path" \
+        || fail "funded attestor environment must contain exactly the four non-empty BYBIT_ATTEST/UID assignments"
+}
+
 mainnet_armed() {
     if [ -z "$MAINNET_ARMED_STATE" ]; then
         if [ ! -f "$MAINNET_CREDENTIAL_ENV" ]; then
@@ -887,24 +1029,147 @@ verify_unit() {
     verify_note "$message"
 }
 
-rollout_flat_check() {
-    local head_binding="$1" realm
-    case "$head_binding" in
-        exact|allow_behind|none|stopped-maintenance) ;;
-        *) fail "invalid rollout head binding" ;;
+rollout_flat_check_realm() {
+    local realm="$1" phase="$2" verifier_kind="$3" verifier_binary="$4"
+    local verifier_commit="$5" verifier_digest="$6"
+    local env_file credential_file runtime_user state_dir unset_environment
+    local digest_before digest_after status=0
+    case "$realm" in
+        demo)
+            env_file="$ENGINE_ENVIRONMENT"
+            credential_file=/etc/liquidity-migration/bybit-demo.env
+            runtime_user="$DEMO_ENGINE_USER"
+            state_dir=/var/lib/liquidity-migration-engine
+            unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+            ;;
+        mainnet)
+            env_file="$ENGINE_MAINNET_ENVIRONMENT"
+            credential_file="$ROLLOUT_ATTESTOR_ENVIRONMENT"
+            runtime_user="$MAINNET_ENGINE_USER"
+            state_dir=/var/lib/liquidity-migration-engine-mainnet
+            unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+            [ "$(sha256sum "$MAINNET_ATTESTOR_ENV" | awk '{print $1}')" \
+                = "$ROLLOUT_ATTESTOR_SOURCE_DIGEST" ] \
+                || fail "operator attestor environment changed during rollout"
+            validate_mainnet_attestor_environment "$credential_file"
+            ;;
+        *) fail "invalid flatness realm: $realm" ;;
     esac
-    if mainnet_armed; then realm=mainnet; else realm=demo; fi
-    # There is intentionally no configured-symbol fallback here. The current
-    # engine AccountView can omit unknown or delisted residual positions, so it
-    # cannot establish venue-global flatness. Until an independently reviewed,
-    # credential-isolated venue-global attestation verifier is shipped, every
-    # funded (and every --require-flat) rollout stops before producers, owners,
-    # target books, checkout, or LONG schema-v2 state are changed.
-    printf '%s\n' \
-        "venue-global-flat-attestation-unavailable realm=$realm binding=$head_binding; refusing generation-changing rollout" >&2
+    [ -x "$verifier_binary" ] \
+        || fail "$verifier_kind flatness verifier is missing: $verifier_binary"
+    for path in "$env_file" "$credential_file"; do
+        [ -f "$path" ] && [ ! -L "$path" ] \
+            || fail "flatness verifier input is missing or linked: $path"
+    done
+
+    # PID 1 parses the private EnvironmentFiles before dropping privileges.
+    # The funded branch receives only the dedicated read-only attestor key.
+    # Every phase executes the digest-pinned outgoing snapshot. The final phase
+    # additionally executes the installed target; the uninstalled build
+    # candidate never supplies a verifier.
+    if [ "$verifier_binary" = "$ROLLOUT_ATTESTOR_BINARY" ] \
+        && [ -n "$ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH" ] \
+        && [ "$(date -u +%s)" -ge "$ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH" ]; then
+        fail "signed bootstrap attestor expired during rollout"
+    fi
+    digest_before="$(sha256sum "$verifier_binary" | awk '{print $1}')" \
+        || fail "cannot digest $verifier_kind verifier immediately before execution"
+    [ "$digest_before" = "$verifier_digest" ] \
+        || fail "$verifier_kind verifier changed before execution"
+    if systemd-run --quiet --wait --pipe --collect --service-type=exec \
+        --unit="liquidity-migration-flat-attestation-$realm-$phase-$verifier_kind-$$" \
+        --property="User=$runtime_user" \
+        --property="Group=$RUNTIME_GROUP" \
+        --property="WorkingDirectory=$state_dir" \
+        --property="EnvironmentFile=$env_file" \
+        --property="EnvironmentFile=$credential_file" \
+        --property="UnsetEnvironment=$unset_environment" \
+        --property="NoNewPrivileges=true" \
+        --property="PrivateTmp=true" \
+        --property="ProtectProc=invisible" \
+        --property="ProcSubset=pid" \
+        --property="ProtectSystem=strict" \
+        --property="ProtectHome=true" \
+        --property="UMask=0077" \
+        "$verifier_binary" attest-flat; then
+        status=0
+    else
+        status=$?
+    fi
+    digest_after="$(sha256sum "$verifier_binary" | awk '{print $1}')" \
+        || fail "cannot digest $verifier_kind verifier immediately after execution"
+    [ "$digest_after" = "$verifier_digest" ] \
+        || fail "$verifier_kind verifier changed during execution"
+    if [ "$status" -eq 0 ]; then
+        printf 'rollout-flat-ok realm=%s phase=%s verifier=%s commit=%s sha256=%s\n' \
+            "$realm" "$phase" "$verifier_kind" "$verifier_commit" "$verifier_digest"
+        return 0
+    fi
+    printf 'rollout-flat-refused realm=%s phase=%s verifier=%s commit=%s sha256=%s status=%s\n' \
+        "$realm" "$phase" "$verifier_kind" "$verifier_commit" "$verifier_digest" "$status" >&2
     return 3
 }
+
+rollout_flat_check() {
+    local phase="$1" demo_status=0 mainnet_status=0
+    local verifier_kind verifier_binary verifier_commit verifier_digest
+    local -a verifier_kinds=(trusted-outgoing)
+    case "$phase" in
+        pre-stop|owners-stopped|installed-generation) ;;
+        *) fail "invalid flatness phase" ;;
+    esac
+
+    # The final boundary needs two independent claims: the immutable outgoing
+    # snapshot prevents a target from lying about venue state, while the
+    # digest-bound installed target covers inventory surfaces introduced by
+    # the new adapter. The target is never run from the build/candidate path.
+    if [ "$phase" = installed-generation ]; then
+        verifier_kinds+=(installed-target)
+    fi
+    for verifier_kind in "${verifier_kinds[@]}"; do
+        case "$verifier_kind" in
+            trusted-outgoing)
+                verifier_binary="$ROLLOUT_ATTESTOR_BINARY"
+                verifier_commit="$ROLLOUT_ATTESTOR_COMMIT"
+                verifier_digest="$ROLLOUT_ATTESTOR_DIGEST"
+                ;;
+            installed-target)
+                verify_engine_release launcher-required
+                verifier_binary="$ENGINE_BINARY"
+                verifier_commit="$(safe_git rev-parse HEAD)" \
+                    || fail "cannot bind installed target attestor to checkout"
+                verifier_digest="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}')" \
+                    || fail "cannot digest installed target attestor"
+                ;;
+            *) fail "invalid rollout verifier kind" ;;
+        esac
+
+        # The checkout and engine artifact are shared by both account owners,
+        # so every configured account crosses this generation boundary. Demo
+        # is required. Any funded residue makes its read-only scan mandatory.
+        rollout_flat_check_realm demo "$phase" "$verifier_kind" \
+            "$verifier_binary" "$verifier_commit" "$verifier_digest" \
+            || demo_status=$?
+        if funded_configuration_present; then
+            [ -f "$MAINNET_ATTESTOR_ENV" ] && [ ! -L "$MAINNET_ATTESTOR_ENV" ] \
+                && [ -f "$ENGINE_MAINNET_ENVIRONMENT" ] \
+                && [ ! -L "$ENGINE_MAINNET_ENVIRONMENT" ] \
+                || fail "funded flatness proof requires both attestor and mainnet engine environment files"
+            rollout_flat_check_realm mainnet "$phase" "$verifier_kind" \
+                "$verifier_binary" "$verifier_commit" "$verifier_digest" \
+                || mainnet_status=$?
+        fi
+    done
+    if [ "$demo_status" -ne 0 ] || [ "$mainnet_status" -ne 0 ]; then
+        return 3
+    fi
+}
 verify_topology() {
+    local activation_policy="${1:-complete}"
+    case "$activation_policy" in
+        complete|activation-in-progress) ;;
+        *) fail "invalid topology activation policy: $activation_policy" ;;
+    esac
     VERIFY_UNIT_ROWS=()
     VERIFY_MISMATCHES=()
 
@@ -960,14 +1225,48 @@ verify_topology() {
     if [ ! -x "$ENGINE_BINARY" ] || [ ! -r "${ENGINE_BINARY}.release" ]; then
         verify_note "required commit-bound Rust engine artifact is missing"
     else
-        local marker_commit marker_digest actual_digest
+        local marker_commit marker_digest marker_launcher_digest
+        local marker_helper_digest marker_sudoers_digest marker_bot_digest
+        local actual_digest actual_launcher_digest actual_helper_digest
+        local actual_sudoers_digest actual_bot_digest
         marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
         marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+        marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
+        marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
+        marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
+        marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "${ENGINE_BINARY}.release")"
         actual_digest="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}' || true)"
         [ "$marker_commit" = "$EXPECTED_COMMIT" ] \
             || verify_note "engine artifact is not bound to requested commit $EXPECTED_COMMIT"
         [ -n "$marker_digest" ] && [ "$marker_digest" = "$actual_digest" ] \
             || verify_note "engine artifact digest does not match its release marker"
+        if [ -n "$marker_launcher_digest" ]; then
+            actual_launcher_digest="$(sha256sum "$ENGINE_LAUNCHER" 2>/dev/null | awk '{print $1}' || true)"
+            [ "$marker_launcher_digest" = "$actual_launcher_digest" ] \
+                || verify_note "trusted launcher digest does not match its release marker"
+            if [ -n "$marker_helper_digest$marker_sudoers_digest$marker_bot_digest" ]; then
+                actual_helper_digest="$(sha256sum "$ENGINE_CONTROL_HELPER" 2>/dev/null | awk '{print $1}' || true)"
+                actual_sudoers_digest="$(sha256sum "$CONTROLS_SUDOERS" 2>/dev/null | awk '{print $1}' || true)"
+                actual_bot_digest="$(sha256sum "$TELEGRAM_CONTROLS_BOT" 2>/dev/null | awk '{print $1}' || true)"
+                [[ "$marker_helper_digest" =~ ^[0-9a-f]{64}$ ]] \
+                    && [ "$marker_helper_digest" = "$actual_helper_digest" ] \
+                    || verify_note "Telegram control helper digest does not match its release marker"
+                [[ "$marker_sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
+                    && [ "$marker_sudoers_digest" = "$actual_sudoers_digest" ] \
+                    || verify_note "controls sudoers digest does not match its release marker"
+                [[ "$marker_bot_digest" =~ ^[0-9a-f]{64}$ ]] \
+                    && [ "$marker_bot_digest" = "$actual_bot_digest" ] \
+                    || verify_note "Telegram controls bot digest does not match its release marker"
+                verify_controls_sudo_policy
+            fi
+            if [ "$activation_policy" = activation-in-progress ]; then
+                activation_authority_matches "$ACTIVATION_PERMIT" permit \
+                    || verify_note "generation has no valid in-progress activation permit"
+            else
+                activation_authority_matches "$ACTIVATION_RECEIPT" complete \
+                    || verify_note "generation has no valid activation completion receipt"
+            fi
+        fi
     fi
     for oneshot in \
         liquidity-migration-demo-liveness.service; do
@@ -1024,72 +1323,930 @@ engine_git() {
         -C "$ENGINE_BUILD_DIR" "$@"
 }
 
-# Build the exact locked release while the managed units are stopped. Any
-# compiler, fetch, build, install, or digest failure aborts the deployment.
-build_engine() {
+# Compile an exact commit in the isolated build clone. Rollout reaches this
+# only through stopped installation, after the immutable outgoing attestor has
+# already proved the account. The build artifact is never an attestor.
+compile_engine_commit() {
+    local commit="$1"
     local cargo="$ENGINE_TOOLCHAIN_DIR/cargo/bin/cargo"
     local rustc="$ENGINE_TOOLCHAIN_DIR/cargo/bin/rustc"
-    local commit built digest marker_tmp status=0
+    local built dirty candidate_real expected_candidate_real status=0
     [ -x "$cargo" ] || fail "pinned Rust toolchain is missing: $cargo"
     [ -x "$rustc" ] || fail "pinned rustc is missing: $rustc"
     "$rustc" --version | grep -F 'rustc 1.90.0 ' >/dev/null \
         || fail "host Rust compiler does not match rust-toolchain.toml (required 1.90.0)"
-    commit="$(safe_git rev-parse HEAD)" || fail "cannot read installed commit for engine build"
-    [ "$commit" = "$EXPECTED_COMMIT" ] || fail "engine build commit is not the requested commit"
     if [ ! -d "$ENGINE_BUILD_DIR/.git" ]; then
         "${GIT_ENV[@]}" /usr/bin/git init --quiet "$ENGINE_BUILD_DIR" \
             || fail "cannot prepare engine build clone"
+    else
+        chmod -R u+rwX "$ENGINE_BUILD_DIR" \
+            || fail "cannot reopen the root-owned engine source for exact reset"
     fi
-    engine_git fetch --no-tags --quiet "$REPO_DIR" HEAD \
-        || fail "cannot copy the deployed commit into the engine build clone"
+    engine_git fetch --no-tags --quiet "$REPO_DIR" "$commit" \
+        || fail "cannot copy engine commit $commit into the build clone"
     engine_git reset --hard --quiet FETCH_HEAD \
-        || fail "cannot reset the engine build clone to the deployed commit"
+        || fail "cannot reset the engine build clone to $commit"
     built="$(engine_git rev-parse HEAD)" || fail "cannot read engine build clone HEAD"
     [ "$built" = "$commit" ] || fail "engine build clone is $built, not $commit"
-    (
-        CARGO_HOME="$ENGINE_TOOLCHAIN_DIR/cargo"
-        RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup"
-        PATH="$ENGINE_TOOLCHAIN_DIR/cargo/bin:$PATH"
-        export CARGO_HOME RUSTUP_HOME PATH
-        cd "$ENGINE_BUILD_DIR/engine"
-        nice -n 19 "$cargo" build --release --locked -j 1
-    ) || status=$?
+    dirty="$(engine_git status --porcelain=v1 --untracked-files=all)" \
+        || fail "cannot inspect exact engine source checkout"
+    [ -z "$dirty" ] || fail "engine build source is dirty before compilation"
+
+    # Root prepares an immutable source view. Cargo, proc macros, and build.rs
+    # run as a credential-isolated builder and can write only their disposable
+    # CARGO_HOME/target roots outside the checkout.
+    chown -R root:root "$ENGINE_BUILD_DIR" \
+        && chmod -R a-w "$ENGINE_BUILD_DIR" \
+        || fail "cannot make exact engine source root-owned and non-writable"
+    [ -z "$(find "$ENGINE_BUILD_DIR" ! -user root -print -quit)" ] \
+        && [ -z "$(find "$ENGINE_BUILD_DIR" ! -type l -perm /222 -print -quit)" ] \
+        || fail "engine source ownership or write permissions are unsafe"
+    install -d -o "$ENGINE_BUILDER_USER" -g "$ENGINE_BUILDER_GROUP" -m 0700 \
+        "$ENGINE_BUILDER_STATE" \
+        || fail "cannot prepare isolated engine builder state"
+    [ "$(readlink -f "$ENGINE_BUILDER_STATE")" = "$ENGINE_BUILDER_STATE" ] \
+        && [ ! -L "$ENGINE_BUILDER_STATE" ] \
+        || fail "engine builder state path is linked or escapes its fixed root"
+    rm -rf -- "$ENGINE_BUILDER_CARGO_HOME" "$ENGINE_BUILDER_TARGET_DIR"
+    install -d -o "$ENGINE_BUILDER_USER" -g "$ENGINE_BUILDER_GROUP" -m 0700 \
+        "$ENGINE_BUILDER_CARGO_HOME" "$ENGINE_BUILDER_TARGET_DIR" \
+        || fail "cannot prepare disposable builder output roots"
+    # The transient cgroup ensures a build.rs child cannot daemonize past the
+    # build and race artifact staging. runuser is retained as an explicit,
+    # auditable UID boundary inside the root-started sandbox.
+    if systemd-run --quiet --wait --pipe --collect --service-type=exec \
+        --unit="liquidity-migration-engine-build-$$-$RANDOM" \
+        --property="KillMode=control-group" \
+        --property="NoNewPrivileges=true" \
+        --property="PrivateTmp=true" \
+        --property="ProtectProc=invisible" \
+        --property="ProcSubset=pid" \
+        --property="ProtectSystem=strict" \
+        --property="ProtectHome=true" \
+        --property="ReadOnlyPaths=$ENGINE_BUILD_DIR $ENGINE_TOOLCHAIN_DIR" \
+        --property="ReadWritePaths=$ENGINE_BUILDER_STATE" \
+        --property="UMask=0077" \
+        /usr/sbin/runuser -u "$ENGINE_BUILDER_USER" -- \
+            /usr/bin/env -i \
+                HOME=/nonexistent \
+                PATH="$ENGINE_TOOLCHAIN_DIR/cargo/bin:/usr/bin:/bin" \
+                CARGO_HOME="$ENGINE_BUILDER_CARGO_HOME" \
+                CARGO_TARGET_DIR="$ENGINE_BUILDER_TARGET_DIR" \
+                RUSTUP_HOME="$ENGINE_TOOLCHAIN_DIR/rustup" \
+                RUST_BACKTRACE=1 \
+                /bin/sh -c \
+                    'cd /opt/engine-build/engine && exec /usr/bin/nice -n 19 /opt/rust/cargo/bin/cargo build --release --locked -j 1'; then
+        status=0
+    else
+        status=$?
+    fi
     [ "$status" -eq 0 ] || fail "locked release engine build failed (status $status)"
+    built="$(engine_git rev-parse HEAD)" || fail "cannot re-read engine source HEAD"
+    dirty="$(engine_git status --porcelain=v1 --untracked-files=all)" \
+        || fail "cannot re-inspect engine source after compilation"
+    [ "$built" = "$commit" ] && [ -z "$dirty" ] \
+        || fail "engine source changed during unprivileged compilation"
+    [ -z "$(find "$ENGINE_BUILD_DIR" ! -user root -print -quit)" ] \
+        && [ -z "$(find "$ENGINE_BUILD_DIR" ! -type l -perm /222 -print -quit)" ] \
+        || fail "engine source permissions changed during compilation"
+    [ -f "$ENGINE_CANDIDATE_BINARY" ] && [ ! -L "$ENGINE_CANDIDATE_BINARY" ] \
+        && [ -x "$ENGINE_CANDIDATE_BINARY" ] \
+        || fail "locked release build produced no regular engine binary"
+    candidate_real="$(readlink -f "$ENGINE_CANDIDATE_BINARY")" \
+        || fail "cannot resolve engine candidate"
+    expected_candidate_real="$ENGINE_BUILDER_TARGET_DIR/release/engine"
+    [ "$candidate_real" = "$expected_candidate_real" ] \
+        && [ "$(stat -c %U "$ENGINE_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_USER" ] \
+        && [ "$(stat -c %G "$ENGINE_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_GROUP" ] \
+        && [ "$(stat -c %h "$ENGINE_CANDIDATE_BINARY")" -eq 1 ] \
+        || fail "engine candidate is linked, outside its target root, or not builder-owned"
+}
+
+# Prove the dedicated bot identity has exactly the four reviewed commands and
+# no stale/broader sudo grant. Whitespace is presentation-only in `sudo -l`;
+# command paths and argv remain exact after normalization.
+verify_controls_sudo_policy() {
+    local actual expected
+    actual="$(
+        LC_ALL=C COLUMNS=4096 /usr/bin/sudo -l -U "$CONTROLS_USER" 2>/dev/null \
+            | awk '/^[[:space:]]*\(/ { print }' \
+            | tr -d '[:space:]' \
+            | LC_ALL=C sort
+    )" || fail "cannot enumerate the effective Telegram controls sudo policy"
+    expected="$(
+        printf '%s\n' \
+            '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper pause-demo' \
+            '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper pause-mainnet' \
+            '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper resume-demo' \
+            '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper status-demo' \
+            | tr -d '[:space:]' \
+            | LC_ALL=C sort
+    )"
+    [ "$actual" = "$expected" ] \
+        || fail "effective Telegram controls sudo policy is not the exact four-command boundary"
+}
+
+# Build and atomically install the exact locked release while the managed
+# units are stopped. Any compiler, fetch, build, install, or digest failure
+# aborts the deployment.
+build_engine() {
+    local commit candidate_digest candidate_after digest launcher_digest
+    local helper_digest sudoers_digest bot_digest helper_source sudoers_source
+    local helper_source_before helper_source_after sudoers_source_before
+    local sudoers_source_after launcher_source marker_tmp
+    commit="$(safe_git rev-parse HEAD)" || fail "cannot read installed commit for engine build"
+    [ "$commit" = "$EXPECTED_COMMIT" ] || fail "engine build commit is not the requested commit"
+    compile_engine_commit "$commit"
+    launcher_source="$REPO_DIR/deploy/run_authorized_runtime_trusted.sh"
+    helper_source="$REPO_DIR/deploy/telegram_control_helper.sh"
+    sudoers_source="$REPO_DIR/deploy/liquidity-controls.sudoers"
+    [ "$TELEGRAM_CONTROLS_BOT" = "$REPO_DIR/liquidity_migration/ops/telegram_controls.py" ] \
+        || fail "Telegram controls bot path escaped the fixed checkout location"
+    local source
+    for source in "$launcher_source" "$helper_source" "$sudoers_source" \
+        "$TELEGRAM_CONTROLS_BOT"; do
+        [ -f "$source" ] && [ ! -L "$source" ] \
+            && [ "$(stat -c %u "$source")" -eq 0 ] \
+            && [ "$(stat -c %g "$source")" -eq 0 ] \
+            || fail "release control source must be a root-owned regular file: $source"
+        case "$(stat -c %a "$source")" in
+            440|600|640|644|700|740|744|755) ;;
+            *) fail "release control source must not be group/other writable: $source" ;;
+        esac
+    done
+    /bin/bash -n "$launcher_source" \
+        || fail "trusted runtime launcher source has invalid shell syntax"
+    /bin/bash -n "$helper_source" \
+        || fail "Telegram control helper source has invalid shell syntax"
+    require_clean_head
     install -d -o root -g liquidity-migration -m 0755 "${ENGINE_BINARY%/*}" \
         || fail "cannot create the engine binary directory"
+    install -d -o root -g root -m 0755 "${CONTROLS_SUDOERS%/*}" \
+        || fail "cannot create the sudoers fragment directory"
+    for source in "$ENGINE_BINARY.new" "$ENGINE_LAUNCHER.new" \
+        "$ENGINE_CONTROL_HELPER.new" "$CONTROLS_SUDOERS.new"; do
+        [ ! -L "$source" ] || fail "release staging path is linked: $source"
+        rm -f -- "$source" || fail "cannot clear release staging path: $source"
+    done
+    for source in "$ENGINE_CONTROL_HELPER" "$CONTROLS_SUDOERS"; do
+        [ ! -L "$source" ] || fail "installed control boundary path is linked: $source"
+    done
+    candidate_digest="$(sha256sum "$ENGINE_CANDIDATE_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest the engine candidate before staging"
+    helper_source_before="$(sha256sum "$helper_source" | awk '{print $1}')" \
+        || fail "cannot digest the Telegram control helper source"
+    sudoers_source_before="$(sha256sum "$sudoers_source" | awk '{print $1}')" \
+        || fail "cannot digest the controls sudoers source"
     install -o root -g liquidity-migration -m 0755 \
-        "$ENGINE_BUILD_DIR/engine/target/release/engine" "$ENGINE_BINARY.new" \
+        "$ENGINE_CANDIDATE_BINARY" "$ENGINE_BINARY.new" \
         || fail "cannot stage the release engine binary"
+    install -o root -g root -m 0755 \
+        "$launcher_source" "$ENGINE_LAUNCHER.new" \
+        || fail "cannot stage the trusted runtime launcher"
+    install -o root -g root -m 0755 \
+        "$helper_source" "$ENGINE_CONTROL_HELPER.new" \
+        || fail "cannot stage the Telegram control helper"
+    install -o root -g root -m 0440 \
+        "$sudoers_source" "$CONTROLS_SUDOERS.new" \
+        || fail "cannot stage the controls sudoers fragment"
+    /usr/sbin/visudo -cf "$CONTROLS_SUDOERS.new" >/dev/null \
+        || fail "staged controls sudoers fragment is invalid"
     digest="$(sha256sum "$ENGINE_BINARY.new" | awk '{print $1}')" \
         || fail "cannot digest the staged engine binary"
-    [ "${#digest}" -eq 64 ] || fail "invalid staged engine digest"
-    mv -f "$ENGINE_BINARY.new" "$ENGINE_BINARY" \
-        || fail "cannot atomically install the engine binary"
+    candidate_after="$(sha256sum "$ENGINE_CANDIDATE_BINARY" | awk '{print $1}')" \
+        || fail "cannot redigest the engine candidate after staging"
+    [ "$digest" = "$candidate_digest" ] && [ "$candidate_after" = "$candidate_digest" ] \
+        || fail "engine candidate changed while it was staged"
+    launcher_digest="$(sha256sum "$ENGINE_LAUNCHER.new" | awk '{print $1}')" \
+        || fail "cannot digest the staged trusted runtime launcher"
+    helper_digest="$(sha256sum "$ENGINE_CONTROL_HELPER.new" | awk '{print $1}')" \
+        || fail "cannot digest the staged Telegram control helper"
+    sudoers_digest="$(sha256sum "$CONTROLS_SUDOERS.new" | awk '{print $1}')" \
+        || fail "cannot digest the staged controls sudoers fragment"
+    bot_digest="$(sha256sum "$TELEGRAM_CONTROLS_BOT" | awk '{print $1}')" \
+        || fail "cannot digest the Telegram controls bot"
+    helper_source_after="$(sha256sum "$helper_source" | awk '{print $1}')" \
+        || fail "cannot redigest the Telegram control helper source"
+    sudoers_source_after="$(sha256sum "$sudoers_source" | awk '{print $1}')" \
+        || fail "cannot redigest the controls sudoers source"
+    [ "$helper_digest" = "$helper_source_before" ] \
+        && [ "$helper_source_after" = "$helper_source_before" ] \
+        && [ "$sudoers_digest" = "$sudoers_source_before" ] \
+        && [ "$sudoers_source_after" = "$sudoers_source_before" ] \
+        || fail "control boundary source changed while it was staged"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$helper_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$bot_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "invalid staged release digest"
     marker_tmp="${ENGINE_BINARY}.release.tmp.$$"
-    printf 'commit=%s\nsha256=%s\nrustc=1.90.0\n' "$commit" "$digest" > "$marker_tmp" \
+    printf 'commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nrustc=1.90.0\n' \
+        "$commit" "$digest" "$launcher_digest" "$helper_digest" \
+        "$sudoers_digest" "$bot_digest" > "$marker_tmp" \
         || fail "cannot write engine release marker"
     chown root:root "$marker_tmp" && chmod 0644 "$marker_tmp" \
         || fail "cannot secure engine release marker"
+    # The receipt is the commit point. A crash after either artifact rename but
+    # before the receipt rename leaves the old receipt in place, so startup
+    # rejects the mixed generation.
+    mv -f "$ENGINE_BINARY.new" "$ENGINE_BINARY" \
+        || fail "cannot atomically install the engine binary"
+    mv -f "$ENGINE_LAUNCHER.new" "$ENGINE_LAUNCHER" \
+        || fail "cannot atomically install the trusted runtime launcher"
+    mv -f "$ENGINE_CONTROL_HELPER.new" "$ENGINE_CONTROL_HELPER" \
+        || fail "cannot atomically install the Telegram control helper"
+    mv -f "$CONTROLS_SUDOERS.new" "$CONTROLS_SUDOERS" \
+        || fail "cannot atomically install the controls sudoers fragment"
+    /usr/sbin/visudo -c >/dev/null \
+        || fail "installed global sudo policy is invalid"
+    verify_controls_sudo_policy
     mv -f "$marker_tmp" "${ENGINE_BINARY}.release" \
         || fail "cannot atomically install engine release marker"
-    verify_engine_release
-    printf 'engine-build-ok commit=%s sha256=%s binary=%s\n' "$commit" "$digest" "$ENGINE_BINARY"
+    sync
+    verify_engine_release launcher-required
+    printf 'engine-build-ok commit=%s sha256=%s launcher_sha256=%s control_helper_sha256=%s controls_sudoers_sha256=%s telegram_bot_sha256=%s binary=%s\n' \
+        "$commit" "$digest" "$launcher_digest" "$helper_digest" \
+        "$sudoers_digest" "$bot_digest" "$ENGINE_BINARY"
 }
 
 verify_engine_release() {
-    local installed_head marker_commit marker_digest actual_digest
-    [ -x "$ENGINE_BINARY" ] || fail "required engine binary is missing: $ENGINE_BINARY"
-    [ -r "${ENGINE_BINARY}.release" ] || fail "engine release marker is missing"
+    local launcher_policy="${1:-launcher-optional}"
+    local installed_head marker_commit marker_digest marker_launcher_digest
+    local marker_helper_digest marker_sudoers_digest marker_bot_digest
+    local actual_digest actual_launcher_digest actual_helper_digest
+    local actual_sudoers_digest actual_bot_digest marker_has_controls=0
+    case "$launcher_policy" in
+        launcher-optional|launcher-required) ;;
+        *) fail "invalid engine release launcher policy: $launcher_policy" ;;
+    esac
+    [ -f "$ENGINE_BINARY" ] && [ ! -L "$ENGINE_BINARY" ] \
+        && [ -x "$ENGINE_BINARY" ] \
+        && [ "$(stat -c %u "$ENGINE_BINARY")" -eq 0 ] \
+        && [ "$(stat -c %a "$ENGINE_BINARY")" = 755 ] \
+        || fail "required engine binary is not a trusted root-owned regular executable: $ENGINE_BINARY"
+    [ -f "${ENGINE_BINARY}.release" ] && [ ! -L "${ENGINE_BINARY}.release" ] \
+        && [ "$(stat -c %u "${ENGINE_BINARY}.release")" -eq 0 ] \
+        && [ "$(stat -c %g "${ENGINE_BINARY}.release")" -eq 0 ] \
+        && [ "$(stat -c %a "${ENGINE_BINARY}.release")" = 644 ] \
+        || fail "engine release marker is missing or untrusted"
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
     marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
     marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
-    [ -n "$marker_commit" ] && [ "$marker_commit" = "$installed_head" ] \
+    marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "${ENGINE_BINARY}.release")"
+    [[ "$marker_commit" =~ ^[0-9a-f]{40}$ ]] \
+        && [ "$marker_commit" = "$installed_head" ] \
         || fail "engine release marker is not bound to installed commit $installed_head"
+    [[ "$marker_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "engine release marker has an invalid engine digest"
     actual_digest="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}')" \
         || fail "cannot digest installed engine binary"
-    [ -n "$marker_digest" ] && [ "$marker_digest" = "$actual_digest" ] \
+    [ "$marker_digest" = "$actual_digest" ] \
         || fail "installed engine digest does not match its release marker"
+    if [ -n "$marker_launcher_digest" ]; then
+        [[ "$marker_launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
+            || fail "engine release marker has an invalid launcher digest"
+        [ -f "$ENGINE_LAUNCHER" ] && [ ! -L "$ENGINE_LAUNCHER" ] \
+            && [ "$(stat -c %u "$ENGINE_LAUNCHER")" -eq 0 ] \
+            && [ "$(stat -c %g "$ENGINE_LAUNCHER")" -eq 0 ] \
+            && [ "$(stat -c %a "$ENGINE_LAUNCHER")" = 755 ] \
+            || fail "trusted runtime launcher is missing, linked, or not root:root mode 0755"
+        actual_launcher_digest="$(sha256sum "$ENGINE_LAUNCHER" | awk '{print $1}')" \
+            || fail "cannot digest the installed trusted runtime launcher"
+        [ "$actual_launcher_digest" = "$marker_launcher_digest" ] \
+            || fail "installed launcher digest does not match its release marker"
+        if [ -n "$marker_helper_digest$marker_sudoers_digest$marker_bot_digest" ]; then
+            [[ "$marker_helper_digest" =~ ^[0-9a-f]{64}$ ]] \
+                && [[ "$marker_sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
+                && [[ "$marker_bot_digest" =~ ^[0-9a-f]{64}$ ]] \
+                || fail "engine release marker has a partial or invalid control boundary"
+            awk '
+NR == 1 && /^commit=/ { next }
+NR == 2 && /^sha256=/ { next }
+NR == 3 && /^launcher_sha256=/ { next }
+NR == 4 && /^control_helper_sha256=/ { next }
+NR == 5 && /^controls_sudoers_sha256=/ { next }
+NR == 6 && /^telegram_bot_sha256=/ { next }
+NR == 7 && $0 == "rustc=1.90.0" { next }
+{ exit 1 }
+END { if (NR != 7) exit 1 }
+' "${ENGINE_BINARY}.release" \
+                || fail "engine release marker has an invalid control-bound schema"
+            [ -f "$ENGINE_CONTROL_HELPER" ] && [ ! -L "$ENGINE_CONTROL_HELPER" ] \
+                && [ "$(stat -c %u "$ENGINE_CONTROL_HELPER")" -eq 0 ] \
+                && [ "$(stat -c %g "$ENGINE_CONTROL_HELPER")" -eq 0 ] \
+                && [ "$(stat -c %a "$ENGINE_CONTROL_HELPER")" = 755 ] \
+                || fail "Telegram control helper is missing, linked, or not root:root mode 0755"
+            [ -f "$CONTROLS_SUDOERS" ] && [ ! -L "$CONTROLS_SUDOERS" ] \
+                && [ "$(stat -c %u "$CONTROLS_SUDOERS")" -eq 0 ] \
+                && [ "$(stat -c %g "$CONTROLS_SUDOERS")" -eq 0 ] \
+                && [ "$(stat -c %a "$CONTROLS_SUDOERS")" = 440 ] \
+                || fail "controls sudoers fragment is missing, linked, or not root:root mode 0440"
+            [ -f "$TELEGRAM_CONTROLS_BOT" ] && [ ! -L "$TELEGRAM_CONTROLS_BOT" ] \
+                && [ "$(stat -c %u "$TELEGRAM_CONTROLS_BOT")" -eq 0 ] \
+                && [ "$(stat -c %g "$TELEGRAM_CONTROLS_BOT")" -eq 0 ] \
+                && [ "$(stat -c %a "$TELEGRAM_CONTROLS_BOT")" = 644 ] \
+                || fail "Telegram controls bot is missing, linked, or not root:root mode 0644"
+            /usr/sbin/visudo -cf "$CONTROLS_SUDOERS" >/dev/null \
+                || fail "installed controls sudoers fragment is invalid"
+            verify_controls_sudo_policy
+            actual_helper_digest="$(sha256sum "$ENGINE_CONTROL_HELPER" | awk '{print $1}')" \
+                || fail "cannot digest the installed Telegram control helper"
+            actual_sudoers_digest="$(sha256sum "$CONTROLS_SUDOERS" | awk '{print $1}')" \
+                || fail "cannot digest the installed controls sudoers fragment"
+            actual_bot_digest="$(sha256sum "$TELEGRAM_CONTROLS_BOT" | awk '{print $1}')" \
+                || fail "cannot digest the installed Telegram controls bot"
+            [ "$actual_helper_digest" = "$marker_helper_digest" ] \
+                && [ "$actual_sudoers_digest" = "$marker_sudoers_digest" ] \
+                && [ "$actual_bot_digest" = "$marker_bot_digest" ] \
+                || fail "installed control boundary differs from its release marker"
+            marker_has_controls=1
+        else
+            awk '
+NR == 1 && /^commit=/ { next }
+NR == 2 && /^sha256=/ { next }
+NR == 3 && /^launcher_sha256=/ { next }
+NR == 4 && $0 == "rustc=1.90.0" { next }
+{ exit 1 }
+END { if (NR != 4) exit 1 }
+' "${ENGINE_BINARY}.release" \
+                || fail "legacy launcher release marker schema is invalid"
+        fi
+    else
+        [ -z "$marker_helper_digest$marker_sudoers_digest$marker_bot_digest" ] \
+            || fail "engine release marker has controls without a trusted launcher"
+        awk '
+NR == 1 && /^commit=/ { next }
+NR == 2 && /^sha256=/ { next }
+NR == 3 && $0 == "rustc=1.90.0" { next }
+{ exit 1 }
+END { if (NR != 3) exit 1 }
+' "${ENGINE_BINARY}.release" \
+            || fail "legacy engine release marker schema is invalid"
+    fi
+    if [ "$launcher_policy" = launcher-required ] \
+        && [ "$marker_has_controls" -ne 1 ]; then
+        fail "engine release marker predates the complete trusted runtime/control boundary"
+    fi
 }
+
+# Persistent activation is a commit protocol separate from artifact install.
+# A generation may start under a root-watchdog freshness lease while it is
+# being verified, but it may survive a reboot only after the root-owned
+# completion receipt is atomically installed and synced.
+activation_watchdog_running() {
+    [ "$(systemctl show -p ActiveState --value "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true)" = active ] \
+        && [ "$(systemctl show -p SubState --value "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true)" = running ]
+}
+
+stop_activation_watchdog() {
+    systemctl stop "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true
+    if activation_watchdog_running; then
+        return 1
+    fi
+    systemctl reset-failed "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true
+}
+
+start_activation_watchdog() {
+    local owner_pid="$1" owner_start_ticks="$2"
+    stop_activation_watchdog \
+        || fail "cannot stop the prior activation lease watchdog"
+    /usr/bin/systemd-run --quiet --collect --service-type=exec \
+        --unit="$ACTIVATION_WATCHDOG_UNIT" \
+        --property=User=root \
+        --property=Group=root \
+        --property=WorkingDirectory=/ \
+        --property=Restart=no \
+        --property=KillMode=control-group \
+        --property=TimeoutStopSec=10s \
+        --property=RuntimeMaxSec=2h \
+        --property=Nice=19 \
+        --property=NoNewPrivileges=true \
+        --property=PrivateDevices=true \
+        --property=PrivateNetwork=true \
+        --property=PrivateTmp=true \
+        --property=ProtectClock=true \
+        --property=ProtectControlGroups=true \
+        --property=ProtectHome=true \
+        --property=ProtectKernelLogs=true \
+        --property=ProtectKernelModules=true \
+        --property=ProtectKernelTunables=true \
+        --property=ProtectSystem=strict \
+        --property=RestrictAddressFamilies=AF_UNIX \
+        --property=RestrictRealtime=true \
+        --property=RestrictSUIDSGID=true \
+        --property=LockPersonality=true \
+        --property=MemoryDenyWriteExecute=true \
+        --property=UMask=0022 \
+        --property="ReadWritePaths=${ACTIVATION_PERMIT%/*}" \
+        --property="InaccessiblePaths=-/etc/liquidity-migration" \
+        /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            "$ENGINE_LAUNCHER" --activation-watchdog \
+            "$owner_pid" "$owner_start_ticks" \
+        || fail "cannot start the root activation lease watchdog"
+    activation_watchdog_running \
+        || fail "activation lease watchdog did not remain active"
+}
+
+activation_authority_matches_unlocked() {
+    local path="$1" kind="$2" marker_commit marker_digest marker_launcher_digest
+    local marker_helper_digest marker_sudoers_digest marker_bot_digest
+    local file_commit file_digest file_launcher_digest file_helper_digest
+    local file_sudoers_digest file_bot_digest file_boot_id file_owner_pid
+    local file_owner_start_ticks file_owner_stat file_owner_tail file_not_after
+    local current_epoch
+    local -a file_owner_fields=()
+    local control_bound=0
+    [ -f "$path" ] && [ ! -L "$path" ] \
+        && [ "$(stat -c %u "$path")" -eq 0 ] \
+        && [ "$(stat -c %g "$path")" -eq 0 ] \
+        && [ "$(stat -c %a "$path")" = 644 ] \
+        || return 1
+    marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
+    marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "${ENGINE_BINARY}.release")"
+    [[ "$marker_commit" =~ ^[0-9a-f]{40}$ ]] \
+        && [[ "$marker_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$marker_launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || return 1
+    if [ -n "$marker_helper_digest$marker_sudoers_digest$marker_bot_digest" ]; then
+        [[ "$marker_helper_digest" =~ ^[0-9a-f]{64}$ ]] \
+            && [[ "$marker_sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
+            && [[ "$marker_bot_digest" =~ ^[0-9a-f]{64}$ ]] \
+            || return 1
+        control_bound=1
+    fi
+    file_commit="$(sed -n 's/^commit=//p' "$path")"
+    file_digest="$(sed -n 's/^sha256=//p' "$path")"
+    file_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "$path")"
+    [ "$file_commit" = "$marker_commit" ] \
+        && [ "$file_digest" = "$marker_digest" ] \
+        && [ "$file_launcher_digest" = "$marker_launcher_digest" ] \
+        || return 1
+    if [ "$control_bound" -eq 1 ]; then
+        file_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "$path")"
+        file_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "$path")"
+        file_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "$path")"
+        [ "$file_helper_digest" = "$marker_helper_digest" ] \
+            && [ "$file_sudoers_digest" = "$marker_sudoers_digest" ] \
+            && [ "$file_bot_digest" = "$marker_bot_digest" ] \
+            || return 1
+    fi
+    case "$kind" in
+        complete)
+            if [ "$control_bound" -eq 1 ]; then
+                awk '
+NR == 1 && /^commit=/ { next }
+NR == 2 && /^sha256=/ { next }
+NR == 3 && /^launcher_sha256=/ { next }
+NR == 4 && /^control_helper_sha256=/ { next }
+NR == 5 && /^controls_sudoers_sha256=/ { next }
+NR == 6 && /^telegram_bot_sha256=/ { next }
+{ exit 1 }
+END { if (NR != 6) exit 1 }
+' "$path" >/dev/null
+            else
+                awk '
+NR == 1 && /^commit=/ { next }
+NR == 2 && /^sha256=/ { next }
+NR == 3 && /^launcher_sha256=/ { next }
+{ exit 1 }
+END { if (NR != 3) exit 1 }
+' "$path" >/dev/null
+            fi
+            ;;
+        permit)
+            [ -d "${ACTIVATION_PERMIT%/*}" ] \
+                && [ ! -L "${ACTIVATION_PERMIT%/*}" ] \
+                && [ "$(stat -c %u "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
+                && [ "$(stat -c %g "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
+                && [ "$(stat -c %a "${ACTIVATION_PERMIT%/*}")" = 755 ] \
+                || return 1
+            [ "$control_bound" -eq 1 ] || return 1
+            awk '
+NR == 1 && /^commit=/ { next }
+NR == 2 && /^sha256=/ { next }
+NR == 3 && /^launcher_sha256=/ { next }
+NR == 4 && /^control_helper_sha256=/ { next }
+NR == 5 && /^controls_sudoers_sha256=/ { next }
+NR == 6 && /^telegram_bot_sha256=/ { next }
+NR == 7 && /^boot_id=/ { next }
+NR == 8 && /^owner_pid=/ { next }
+NR == 9 && /^owner_start_ticks=/ { next }
+NR == 10 && /^not_after_epoch=/ { next }
+{ exit 1 }
+END { if (NR != 10) exit 1 }
+' "$path" >/dev/null || return 1
+            file_boot_id="$(sed -n 's/^boot_id=//p' "$path")"
+            file_owner_pid="$(sed -n 's/^owner_pid=//p' "$path")"
+            file_owner_start_ticks="$(sed -n 's/^owner_start_ticks=//p' "$path")"
+            file_not_after="$(sed -n 's/^not_after_epoch=//p' "$path")"
+            [[ "$file_boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+                && [ "$file_boot_id" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
+                && [[ "$file_owner_pid" =~ ^[1-9][0-9]*$ ]] \
+                && [[ "$file_owner_start_ticks" =~ ^[1-9][0-9]*$ ]] \
+                && [[ "$file_not_after" =~ ^[0-9]{10,}$ ]] \
+                || return 1
+            current_epoch="$(date -u +%s)" || return 1
+            [ "$current_epoch" -lt "$file_not_after" ] \
+                && [ "$file_not_after" -le "$((current_epoch + ACTIVATION_LEASE_SECONDS + 2))" ] \
+                && activation_watchdog_running \
+                || return 1
+            [ -r "/proc/$file_owner_pid/stat" ] \
+                || return 1
+            file_owner_stat="$(<"/proc/$file_owner_pid/stat")" \
+                || return 1
+            file_owner_tail="${file_owner_stat##*) }"
+            read -r -a file_owner_fields <<< "$file_owner_tail" \
+                || return 1
+            [ "${#file_owner_fields[@]}" -ge 20 ] \
+                && [ "${file_owner_fields[0]}" != Z ] \
+                && [ "${file_owner_fields[0]}" != X ] \
+                && [ "${file_owner_fields[19]}" = "$file_owner_start_ticks" ]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+activation_authority_matches() {
+    local path="$1" kind="$2" authority_fd descriptor_path status=1
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    exec {authority_fd}<"$path" || return 1
+    descriptor_path="/proc/self/fd/$authority_fd"
+    if /usr/bin/flock -s "$authority_fd" \
+        && [ "$path" -ef "$descriptor_path" ] \
+        && [ "$(stat -Lc %h "$descriptor_path")" -eq 1 ] \
+        && activation_authority_matches_unlocked "$path" "$kind" \
+        && [ "$path" -ef "$descriptor_path" ]; then
+        status=0
+    fi
+    /usr/bin/flock -u "$authority_fd" || status=1
+    exec {authority_fd}<&- || status=1
+    return "$status"
+}
+
+invalidate_activation_authority() {
+    local path
+    stop_activation_watchdog \
+        || fail "cannot stop the activation lease watchdog"
+    for path in "$ACTIVATION_PERMIT" "$ACTIVATION_RECEIPT"; do
+        [ ! -L "$path" ] || fail "activation authority path is linked: $path"
+        rm -f -- "$path" || fail "cannot invalidate activation authority: $path"
+    done
+    sync
+}
+
+begin_activation_generation() {
+    local marker_commit marker_digest marker_launcher_digest marker_helper_digest
+    local marker_sudoers_digest marker_bot_digest boot_id owner_pid owner_stat
+    local owner_tail owner_start_ticks not_after temporary
+    local -a owner_fields=()
+    verify_engine_release launcher-required
+    invalidate_activation_authority
+    marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
+    marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "${ENGINE_BINARY}.release")"
+    boot_id="$(cat /proc/sys/kernel/random/boot_id)" \
+        || fail "cannot bind the activation permit to this boot"
+    [[ "$boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+        || fail "kernel boot id is not canonical"
+    owner_pid="$$"
+    owner_stat="$(<"/proc/$owner_pid/stat")" \
+        || fail "cannot bind the activation permit to its deployment owner"
+    owner_tail="${owner_stat##*) }"
+    read -r -a owner_fields <<< "$owner_tail" \
+        || fail "cannot parse the activation owner process identity"
+    [ "${#owner_fields[@]}" -ge 20 ] \
+        || fail "activation owner process identity is incomplete"
+    owner_start_ticks="${owner_fields[19]}"
+    [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] \
+        && [[ "$owner_start_ticks" =~ ^[1-9][0-9]*$ ]] \
+        || fail "activation owner process identity is invalid"
+    # This is only an initial freshness lease. The root watchdog validates the
+    # owner PID/start-ticks pair and refreshes it once per second; if either the
+    # rollout or watchdog dies, launchers revoke within a few seconds.
+    not_after="$(( $(date -u +%s) + ACTIVATION_LEASE_SECONDS ))"
+    temporary="$(mktemp "${ACTIVATION_PERMIT}.tmp.XXXXXX")" \
+        || fail "cannot stage the transient activation permit"
+    printf 'commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nboot_id=%s\nowner_pid=%s\nowner_start_ticks=%s\nnot_after_epoch=%s\n' \
+        "$marker_commit" "$marker_digest" "$marker_launcher_digest" \
+        "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest" \
+        "$boot_id" "$owner_pid" "$owner_start_ticks" "$not_after" > "$temporary" \
+        || fail "cannot write the transient activation permit"
+    chown root:root "$temporary" && chmod 0644 "$temporary" \
+        || fail "cannot secure the transient activation permit"
+    mv -f "$temporary" "$ACTIVATION_PERMIT" \
+        || fail "cannot atomically install the transient activation permit"
+    start_activation_watchdog "$owner_pid" "$owner_start_ticks"
+    sync
+    activation_authority_matches "$ACTIVATION_PERMIT" permit \
+        || fail "transient activation permit failed its installed validation"
+}
+
+complete_activation_generation() {
+    local marker_commit marker_digest marker_launcher_digest marker_helper_digest
+    local marker_sudoers_digest marker_bot_digest temporary
+    verify_engine_release launcher-required
+    activation_authority_matches "$ACTIVATION_PERMIT" permit \
+        || fail "activation permit expired or changed before completion"
+    marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
+    marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "${ENGINE_BINARY}.release")"
+    # Flush every enable symlink and service-side state verified immediately
+    # before this call. The receipt rename is the persistent activation commit.
+    sync
+    temporary="$(mktemp "${ACTIVATION_RECEIPT}.tmp.XXXXXX")" \
+        || fail "cannot stage the activation completion receipt"
+    printf 'commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\n' \
+        "$marker_commit" "$marker_digest" "$marker_launcher_digest" \
+        "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest" \
+        > "$temporary" \
+        || fail "cannot write the activation completion receipt"
+    chown root:root "$temporary" && chmod 0644 "$temporary" \
+        || fail "cannot secure the activation completion receipt"
+    mv -f "$temporary" "$ACTIVATION_RECEIPT" \
+        || fail "cannot atomically install the activation completion receipt"
+    sync
+    activation_authority_matches "$ACTIVATION_RECEIPT" complete \
+        || fail "activation completion receipt failed its installed validation"
+    # The durable receipt is visible before terminating the temporary lease.
+    # Launchers accept either authority, so this handoff has no rejection gap.
+    stop_activation_watchdog \
+        || fail "cannot stop the completed activation lease watchdog"
+    rm -f -- "$ACTIVATION_PERMIT" \
+        || fail "cannot retire the transient activation permit"
+    sync
+    printf 'activation-complete commit=%s sha256=%s launcher_sha256=%s control_helper_sha256=%s controls_sudoers_sha256=%s telegram_bot_sha256=%s\n' \
+        "$marker_commit" "$marker_digest" "$marker_launcher_digest" \
+        "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest"
+}
+
+ROLLOUT_ATTESTOR_DIRECTORY=""
+ROLLOUT_ATTESTOR_BINARY=""
+ROLLOUT_ATTESTOR_COMMIT=""
+ROLLOUT_ATTESTOR_DIGEST=""
+ROLLOUT_ATTESTOR_ENVIRONMENT=""
+ROLLOUT_ATTESTOR_SOURCE_DIGEST=""
+ROLLOUT_ATTESTOR_SOURCE=""
+ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH=""
+
+attestor_supports_flat() {
+    local binary="$1" expected_digest="$2" label="$3"
+    local digest_before digest_after help_output status=0
+    digest_before="$(sha256sum "$binary" | awk '{print $1}')" \
+        || fail "cannot digest $label before capability probe"
+    [ "$digest_before" = "$expected_digest" ] \
+        || fail "$label changed before capability probe"
+    if help_output="$(
+        systemd-run --quiet --wait --pipe --collect --service-type=exec \
+            --unit="liquidity-migration-attestor-capability-$label-$$-$RANDOM" \
+            --property="User=$DEMO_ENGINE_USER" \
+            --property="Group=$RUNTIME_GROUP" \
+            --property="WorkingDirectory=/" \
+            --property="UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID" \
+            --property="NoNewPrivileges=true" \
+            --property="PrivateTmp=true" \
+            --property="ProtectProc=invisible" \
+            --property="ProcSubset=pid" \
+            --property="ProtectSystem=strict" \
+            --property="ProtectHome=true" \
+            --property="UMask=0077" \
+            "$binary" --help 2>&1
+    )"; then
+        status=0
+    else
+        status=$?
+    fi
+    digest_after="$(sha256sum "$binary" | awk '{print $1}')" \
+        || fail "cannot digest $label after capability probe"
+    [ "$digest_after" = "$expected_digest" ] \
+        || fail "$label changed during capability probe"
+    [ "$status" -eq 0 ] \
+        || fail "$label capability probe could not execute safely (status $status)"
+    grep -F 'engine attest-flat --config engine.toml' <<< "$help_output" >/dev/null \
+        && return 0
+    return 2
+}
+
+install_signed_bootstrap_attestor() {
+    local path manifest_commit manifest_digest manifest_purpose manifest_not_after
+    local not_after_epoch canonical_not_after source_before source_after copied
+    local copied_manifest copied_signature trust_root_before trust_root_after
+    local manifest_source_before manifest_source_after manifest_copied bundle_members
+    [ -d "$BOOTSTRAP_ATTESTOR_DIRECTORY" ] \
+        && [ ! -L "$BOOTSTRAP_ATTESTOR_DIRECTORY" ] \
+        && [ "$(stat -c %u "$BOOTSTRAP_ATTESTOR_DIRECTORY")" -eq 0 ] \
+        && [ "$(stat -c %g "$BOOTSTRAP_ATTESTOR_DIRECTORY")" -eq 0 ] \
+        && [ "$(stat -c %a "$BOOTSTRAP_ATTESTOR_DIRECTORY")" = 700 ] \
+        || fail "installed release lacks attest-flat; provision the signed bootstrap bundle as root:root mode 0700 at $BOOTSTRAP_ATTESTOR_DIRECTORY"
+    bundle_members="$(
+        find "$BOOTSTRAP_ATTESTOR_DIRECTORY" -mindepth 1 -maxdepth 1 -printf '%f\n' \
+            | LC_ALL=C sort
+    )" || fail "cannot enumerate the bootstrap attestor bundle"
+    [ "$bundle_members" = $'attestor\nmanifest\nmanifest.sig' ] \
+        || fail "bootstrap attestor bundle must contain exactly attestor, manifest, and manifest.sig"
+    for path in "$BOOTSTRAP_ATTESTOR_BINARY" "$BOOTSTRAP_ATTESTOR_MANIFEST" \
+        "$BOOTSTRAP_ATTESTOR_SIGNATURE"; do
+        [ -f "$path" ] && [ ! -L "$path" ] \
+            && [ "$(stat -c %u "$path")" -eq 0 ] \
+            && [ "$(stat -c %g "$path")" -eq 0 ] \
+            || fail "bootstrap attestor bundle member is missing, linked, or not root-owned: $path"
+    done
+    [ "$(stat -c %a "$BOOTSTRAP_ATTESTOR_BINARY")" = 700 ] \
+        || fail "bootstrap attestor binary must be mode 0700"
+    for path in "$BOOTSTRAP_ATTESTOR_MANIFEST" "$BOOTSTRAP_ATTESTOR_SIGNATURE"; do
+        [ "$(stat -c %a "$path")" = 600 ] \
+            || fail "bootstrap attestor receipt material must be mode 0600: $path"
+    done
+    [ -f "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" ] \
+        && [ ! -L "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" ] \
+        && [ "$(stat -c %u "$BOOTSTRAP_ATTESTOR_TRUST_ROOT")" -eq 0 ] \
+        && [ "$(stat -c %g "$BOOTSTRAP_ATTESTOR_TRUST_ROOT")" -eq 0 ] \
+        && [ "$(stat -c %a "$BOOTSTRAP_ATTESTOR_TRUST_ROOT")" = 600 ] \
+        || fail "install the independent operator attestor trust root as root:root mode 0600 at $BOOTSTRAP_ATTESTOR_TRUST_ROOT"
+    [ -x /usr/bin/openssl ] || fail "OpenSSL is required to verify the bootstrap attestor"
+    trust_root_before="$(sha256sum "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" | awk '{print $1}')" \
+        || fail "cannot digest the operator attestor trust root"
+    manifest_source_before="$(sha256sum "$BOOTSTRAP_ATTESTOR_MANIFEST" | awk '{print $1}')" \
+        || fail "cannot digest the bootstrap attestor manifest"
+    /usr/bin/openssl dgst -sha256 -verify "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" \
+        -signature "$BOOTSTRAP_ATTESTOR_SIGNATURE" "$BOOTSTRAP_ATTESTOR_MANIFEST" \
+        >/dev/null \
+        || fail "bootstrap attestor manifest signature is invalid"
+    awk '
+NR == 1 && /^commit=/ { next }
+NR == 2 && /^sha256=/ { next }
+NR == 3 && /^purpose=/ { next }
+NR == 4 && /^not_after_utc=/ { next }
+{ exit 1 }
+END { if (NR != 4) exit 1 }
+' "$BOOTSTRAP_ATTESTOR_MANIFEST" \
+        || fail "bootstrap attestor manifest must contain exactly commit, sha256, purpose, not_after_utc in that order"
+    manifest_commit="$(sed -n 's/^commit=//p' "$BOOTSTRAP_ATTESTOR_MANIFEST")"
+    manifest_digest="$(sed -n 's/^sha256=//p' "$BOOTSTRAP_ATTESTOR_MANIFEST")"
+    manifest_purpose="$(sed -n 's/^purpose=//p' "$BOOTSTRAP_ATTESTOR_MANIFEST")"
+    manifest_not_after="$(sed -n 's/^not_after_utc=//p' "$BOOTSTRAP_ATTESTOR_MANIFEST")"
+    [[ "$manifest_commit" =~ ^[0-9a-f]{40}$ ]] \
+        || fail "bootstrap attestor manifest commit is invalid"
+    [[ "$manifest_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "bootstrap attestor manifest digest is invalid"
+    [ "$manifest_purpose" = "$BOOTSTRAP_ATTESTOR_PURPOSE" ] \
+        || fail "bootstrap attestor manifest purpose is not rollout flat attestation"
+    [[ "$manifest_not_after" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+        || fail "bootstrap attestor manifest not_after_utc is not canonical UTC"
+    not_after_epoch="$(date -u --date="$manifest_not_after" +%s)" \
+        || fail "bootstrap attestor manifest not_after_utc is not a real timestamp"
+    canonical_not_after="$(date -u --date="@$not_after_epoch" +%Y-%m-%dT%H:%M:%SZ)" \
+        || fail "cannot canonicalize bootstrap attestor expiry"
+    [ "$canonical_not_after" = "$manifest_not_after" ] \
+        && [ "$(date -u +%s)" -lt "$not_after_epoch" ] \
+        || fail "bootstrap attestor manifest is expired or non-canonical"
+
+    source_before="$(sha256sum "$BOOTSTRAP_ATTESTOR_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest bootstrap attestor binary"
+    [ "$source_before" = "$manifest_digest" ] \
+        || fail "bootstrap attestor binary does not match its signed manifest"
+    copied_manifest="$ROLLOUT_ATTESTOR_DIRECTORY/bootstrap.manifest"
+    copied_signature="$ROLLOUT_ATTESTOR_DIRECTORY/bootstrap.manifest.sig"
+    install -o root -g "$RUNTIME_GROUP" -m 0755 \
+        "$BOOTSTRAP_ATTESTOR_BINARY" "$ROLLOUT_ATTESTOR_BINARY" \
+        && install -o root -g root -m 0600 \
+            "$BOOTSTRAP_ATTESTOR_MANIFEST" "$copied_manifest" \
+        && install -o root -g root -m 0600 \
+            "$BOOTSTRAP_ATTESTOR_SIGNATURE" "$copied_signature" \
+        || fail "cannot snapshot signed bootstrap attestor bundle"
+    /usr/bin/openssl dgst -sha256 -verify "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" \
+        -signature "$copied_signature" "$copied_manifest" >/dev/null \
+        || fail "snapshotted bootstrap attestor signature is invalid"
+    trust_root_after="$(sha256sum "$BOOTSTRAP_ATTESTOR_TRUST_ROOT" | awk '{print $1}')" \
+        || fail "cannot redigest the operator attestor trust root"
+    manifest_source_after="$(sha256sum "$BOOTSTRAP_ATTESTOR_MANIFEST" | awk '{print $1}')" \
+        || fail "cannot redigest the bootstrap attestor manifest"
+    manifest_copied="$(sha256sum "$copied_manifest" | awk '{print $1}')" \
+        || fail "cannot digest the snapshotted bootstrap attestor manifest"
+    [ "$trust_root_after" = "$trust_root_before" ] \
+        && [ "$manifest_source_after" = "$manifest_source_before" ] \
+        && [ "$manifest_copied" = "$manifest_source_before" ] \
+        || fail "bootstrap attestor trust material changed while it was snapshotted"
+    copied="$(sha256sum "$ROLLOUT_ATTESTOR_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest snapshotted bootstrap attestor"
+    source_after="$(sha256sum "$BOOTSTRAP_ATTESTOR_BINARY" | awk '{print $1}')" \
+        || fail "cannot redigest bootstrap attestor source"
+    [ "$copied" = "$manifest_digest" ] && [ "$source_after" = "$manifest_digest" ] \
+        || fail "bootstrap attestor changed while it was snapshotted"
+    attestor_supports_flat "$ROLLOUT_ATTESTOR_BINARY" "$manifest_digest" signed-bootstrap \
+        || fail "signed bootstrap binary does not support attest-flat"
+
+    ROLLOUT_ATTESTOR_COMMIT="$manifest_commit"
+    ROLLOUT_ATTESTOR_DIGEST="$manifest_digest"
+    ROLLOUT_ATTESTOR_SOURCE=signed-bootstrap
+    ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH="$not_after_epoch"
+}
+
+snapshot_trusted_rollout_attestor() {
+    local source_before source_after copied marker_commit marker_digest
+    verify_engine_release
+    [ -f "$ENGINE_BINARY" ] && [ ! -L "$ENGINE_BINARY" ] \
+        && [ "$(stat -c %u "$ENGINE_BINARY")" -eq 0 ] \
+        && [ "$(stat -c %a "$ENGINE_BINARY")" = 755 ] \
+        || fail "installed engine must be a root-owned regular executable mode 0755"
+    [ -f "${ENGINE_BINARY}.release" ] && [ ! -L "${ENGINE_BINARY}.release" ] \
+        && [ "$(stat -c %u "${ENGINE_BINARY}.release")" -eq 0 ] \
+        && [ "$(stat -c %g "${ENGINE_BINARY}.release")" -eq 0 ] \
+        && [ "$(stat -c %a "${ENGINE_BINARY}.release")" = 644 ] \
+        || fail "engine release marker must be root:root regular file mode 0644"
+    marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
+    marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    [[ "$marker_commit" =~ ^[0-9a-f]{40}$ ]] \
+        || fail "installed engine release marker has an invalid commit"
+    [[ "$marker_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "installed engine release marker has an invalid digest"
+    [ "$marker_commit" = "$ROLLOUT_CURRENT_COMMIT" ] \
+        || fail "installed engine release is not bound to the outgoing rollout commit"
+
+    source_before="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest installed engine before attestor snapshot"
+    [ "$source_before" = "$marker_digest" ] \
+        || fail "installed engine changed before attestor snapshot"
+    ROLLOUT_ATTESTOR_DIRECTORY="$(
+        mktemp -d /run/liquidity-migration/trusted-attestor.XXXXXX
+    )" || fail "cannot create trusted attestor directory"
+    chown root:"$RUNTIME_GROUP" "$ROLLOUT_ATTESTOR_DIRECTORY" \
+        && chmod 0750 "$ROLLOUT_ATTESTOR_DIRECTORY" \
+        || fail "cannot secure trusted attestor directory"
+    ROLLOUT_ATTESTOR_BINARY="$ROLLOUT_ATTESTOR_DIRECTORY/engine"
+    install -o root -g "$RUNTIME_GROUP" -m 0755 \
+        "$ENGINE_BINARY" "$ROLLOUT_ATTESTOR_BINARY" \
+        || fail "cannot snapshot installed engine as rollout attestor"
+    copied="$(sha256sum "$ROLLOUT_ATTESTOR_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest trusted attestor snapshot"
+    source_after="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}')" \
+        || fail "cannot redigest installed engine after attestor snapshot"
+    [ "$copied" = "$marker_digest" ] && [ "$source_after" = "$marker_digest" ] \
+        || fail "trusted attestor snapshot does not match the installed release marker"
+    if attestor_supports_flat "$ROLLOUT_ATTESTOR_BINARY" "$marker_digest" installed-outgoing; then
+        ROLLOUT_ATTESTOR_COMMIT="$marker_commit"
+        ROLLOUT_ATTESTOR_DIGEST="$marker_digest"
+        ROLLOUT_ATTESTOR_SOURCE=installed-outgoing
+    else
+        [ "$?" -eq 2 ] \
+            || fail "cannot distinguish an unsupported outgoing attestor from a failed probe"
+        install_signed_bootstrap_attestor
+    fi
+    if funded_configuration_present; then
+        validate_mainnet_attestor_environment
+        ROLLOUT_ATTESTOR_SOURCE_DIGEST="$(
+            sha256sum "$MAINNET_ATTESTOR_ENV" | awk '{print $1}'
+        )" || fail "cannot digest operator attestor environment"
+        ROLLOUT_ATTESTOR_ENVIRONMENT="$ROLLOUT_ATTESTOR_DIRECTORY/bybit-mainnet-attestor.env"
+        install -o root -g root -m 0600 \
+            "$MAINNET_ATTESTOR_ENV" "$ROLLOUT_ATTESTOR_ENVIRONMENT" \
+            || fail "cannot snapshot operator attestor environment"
+        [ "$(sha256sum "$ROLLOUT_ATTESTOR_ENVIRONMENT" | awk '{print $1}')" \
+            = "$ROLLOUT_ATTESTOR_SOURCE_DIGEST" ] \
+            || fail "attestor environment snapshot changed during copy"
+    fi
+    readonly ROLLOUT_ATTESTOR_DIRECTORY ROLLOUT_ATTESTOR_BINARY \
+        ROLLOUT_ATTESTOR_COMMIT ROLLOUT_ATTESTOR_DIGEST \
+        ROLLOUT_ATTESTOR_ENVIRONMENT ROLLOUT_ATTESTOR_SOURCE_DIGEST \
+        ROLLOUT_ATTESTOR_SOURCE ROLLOUT_ATTESTOR_NOT_AFTER_EPOCH
+    printf 'rollout-attestor-ok source=%s commit=%s sha256=%s\n' \
+        "$ROLLOUT_ATTESTOR_SOURCE" "$ROLLOUT_ATTESTOR_COMMIT" "$ROLLOUT_ATTESTOR_DIGEST"
+}
+
+remove_trusted_rollout_attestor() {
+    [ -n "$ROLLOUT_ATTESTOR_DIRECTORY" ] || return 0
+    case "$ROLLOUT_ATTESTOR_DIRECTORY" in
+        /run/liquidity-migration/trusted-attestor.*) ;;
+        *) cleanup_notice "refusing unexpected trusted-attestor cleanup path"; return 1 ;;
+    esac
+    [ -d "$ROLLOUT_ATTESTOR_DIRECTORY" ] && [ ! -L "$ROLLOUT_ATTESTOR_DIRECTORY" ] \
+        || { cleanup_notice "trusted-attestor cleanup directory is missing or linked"; return 1; }
+    if [ -n "$ROLLOUT_ATTESTOR_BINARY" ]; then
+        rm -f -- "$ROLLOUT_ATTESTOR_BINARY" || return 1
+    fi
+    if [ -n "$ROLLOUT_ATTESTOR_ENVIRONMENT" ]; then
+        rm -f -- "$ROLLOUT_ATTESTOR_ENVIRONMENT" || return 1
+    fi
+    rm -f -- \
+        "$ROLLOUT_ATTESTOR_DIRECTORY/bootstrap.manifest" \
+        "$ROLLOUT_ATTESTOR_DIRECTORY/bootstrap.manifest.sig" \
+        || return 1
+    rmdir -- "$ROLLOUT_ATTESTOR_DIRECTORY"
+}
+
 validate_engine_environment() {
     local env_file="$1" expected_realm="$2" expected_config_venue
     [ -f "$env_file" ] && [ ! -L "$env_file" ] \
@@ -1281,7 +2438,7 @@ PY
 
 start_required_engine() {
     local unit="$1" env_file="$2" realm="$3"
-    verify_engine_release
+    verify_engine_release launcher-required
     quarantine_engine_inputs "$env_file" "$realm"
     systemctl enable "$unit" || fail "cannot enable required Rust engine $unit"
     systemctl start "$unit" || fail "cannot start required Rust engine $unit"
@@ -1289,9 +2446,11 @@ start_required_engine() {
 }
 activate_mode() {
     local producer_started_ns
+    require_rollout_for_funded_generation_change activate
     load_authorization
     resolve_stop_first
     require_quiescent
+    begin_activation_generation
 
     for unit in $(lm_expected_systemd_units); do
         systemctl disable --now "$unit" 2>/dev/null || true
@@ -1329,7 +2488,8 @@ activate_mode() {
     if mainnet_armed; then
         start_mainnet_fleet
     fi
-    verify_topology
+    verify_topology activation-in-progress
+    complete_activation_generation
 }
 # The engine owns the funded account.
 #
@@ -1346,6 +2506,7 @@ MAINNET_DEMO_TELEGRAM_ENV=/etc/liquidity-migration/bybit-demo.env
 # optional dials). Everything else is derived here at activation, and
 # preflight still gates below.
 provision_mainnet_prerequisites() {
+    validate_mainnet_attestor_environment
     if [ ! -f "$PRODUCER_MAINNET_SOURCE_ENV" ]; then
         install -o root -g root -m 600 \
             "$REPO_DIR/deploy/producer-mainnet-source.env.template" "$PRODUCER_MAINNET_SOURCE_ENV" \
@@ -1423,70 +2584,36 @@ start_mainnet_fleet() {
     systemctl is-failed --quiet "$MAINNET_LIVENESS_SERVICE" \
         && fail "the immediate funded liveness pass failed"
 }
-disarm_mainnet_mode() {
-    require_checkout
-    PYTHON=.venv/bin/python
-    [ -x "$PYTHON" ] || fail "missing deployed Python environment"
-    [ -f "$MAINNET_CREDENTIAL_ENV" ] && [ ! -L "$MAINNET_CREDENTIAL_ENV" ] \
-        || fail "cannot disarm without the real private credential file: $MAINNET_CREDENTIAL_ENV"
-    # Replace the owner file before stopping processes. A concurrent restart
-    # therefore reads false and refuses mainnet even if this command is
-    # interrupted between the atomic replace and systemctl stop.
-    "$PYTHON" - "$MAINNET_CREDENTIAL_ENV" <<'PY'
-import os
-import shlex
-import sys
-import tempfile
-from pathlib import Path
-from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
-path = Path(sys.argv[1])
-values = load_private_systemd_environment(path)
-values["REAL_MONEY"] = "false"
-fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        for key, value in sorted(values.items()):
-            handle.write(f"{key}={shlex.quote(str(value))}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
-except BaseException:
-    Path(temporary).unlink(missing_ok=True)
-    raise
-PY
-    chown root:root "$MAINNET_CREDENTIAL_ENV" && chmod 0600 "$MAINNET_CREDENTIAL_ENV" \
-        || fail "cannot secure the atomically disarmed credential file"
-    MAINNET_ARMED_STATE=off
-    local unit
-    for unit in \
-        "$MAINNET_LIVENESS_TIMER" "$MAINNET_LIVENESS_SERVICE" \
-        liquidity-migration-bybit-carry-mainnet.service \
-        liquidity-migration-bybit-long-mainnet.service \
-        "$MAINNET_OWNER_UNIT"; do
-        if systemctl cat "$unit" >/dev/null 2>&1; then
-            systemctl disable --now "$unit" \
-                || fail "failed to stop or disable disarmed unit: $unit"
-            ! systemctl is-active --quiet "$unit" \
-                || fail "disarmed unit remained active: $unit"
-            ! systemctl is-enabled --quiet "$unit" 2>/dev/null \
-                || fail "disarmed unit remained enabled: $unit"
-        fi
+resolve_fail_safe_python() {
+    local interpreter mode directory
+    interpreter="$(/usr/bin/readlink -f /usr/bin/python3)" || return 1
+    [[ "$interpreter" =~ ^/usr/bin/python3(\.[0-9]+)?$ ]] || return 1
+    [ -f "$interpreter" ] && [ ! -L "$interpreter" ] \
+        && [ -x "$interpreter" ] \
+        && [ "$(/usr/bin/stat -c %u "$interpreter")" -eq 0 ] \
+        && [ "$(/usr/bin/stat -c %g "$interpreter")" -eq 0 ] \
+        || return 1
+    mode="$(/usr/bin/stat -c %a "$interpreter")" || return 1
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \
+        || return 1
+    for directory in /usr /usr/bin; do
+        [ -d "$directory" ] && [ ! -L "$directory" ] \
+            && [ "$(/usr/bin/stat -c %u "$directory")" -eq 0 ] \
+            && [ "$(/usr/bin/stat -c %g "$directory")" -eq 0 ] \
+            || return 1
+        mode="$(/usr/bin/stat -c %a "$directory")" || return 1
+        [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \
+            || return 1
     done
-    echo "disarm-mainnet-ok real_money=false units=inactive-and-disabled"
-    echo "note: disarm does not flatten existing exposure; reconcile/flatten separately"
+    printf '%s\n' "$interpreter"
 }
-stop_mainnet_mode() {
-    require_checkout
-    # Without this, every systemctl below fails silently and the mode still
-    # reports stop-mainnet-ok having stopped nothing.
-    command -v systemctl >/dev/null 2>&1 || fail "systemctl is unavailable"
-    local unit
+
+# Emergency containment must not trust the checkout: it operates only on this
+# fixed unit allowlist through PID 1, then proves every installed unit inactive
+# and persistently disabled. The caller may subsequently change credentials,
+# but a failed credential rewrite still leaves the funded fleet quarantined.
+quarantine_mainnet_units() {
+    local unit load_state failures=0
     local -a units=(
         "$MAINNET_LIVENESS_TIMER"
         "$MAINNET_LIVENESS_SERVICE"
@@ -1494,24 +2621,196 @@ stop_mainnet_mode() {
         liquidity-migration-bybit-long-mainnet.service
         "$MAINNET_OWNER_UNIT"
     )
+    [ -x /usr/bin/systemctl ] || return 1
     for unit in "${units[@]}"; do
-        if systemctl cat "$unit" >/dev/null 2>&1; then
-            systemctl disable --now "$unit" 2>/dev/null || true
-            printf 'stopped unit=%s\n' "$unit"
-        else
+        load_state="$(/usr/bin/systemctl show --property=LoadState --value "$unit" 2>/dev/null)" \
+            || { printf 'stop-failed unit=%s reason=load-state-unavailable\n' "$unit" >&2; failures=1; continue; }
+        if [ "$load_state" = not-found ]; then
             printf 'stop-skipped unit=%s reason=not-installed\n' "$unit"
+            continue
         fi
+        /usr/bin/systemctl disable --now "$unit" 2>/dev/null || true
     done
+    /bin/sync || failures=1
     for unit in "${units[@]}"; do
-        ! systemctl is-active --quiet "$unit" \
-            || fail "unit remained active after mainnet stop: $unit"
-        systemctl reset-failed "$unit" 2>/dev/null || true
+        load_state="$(/usr/bin/systemctl show --property=LoadState --value "$unit" 2>/dev/null)" \
+            || { printf 'stop-failed unit=%s reason=verification-unavailable\n' "$unit" >&2; failures=1; continue; }
+        [ "$load_state" = not-found ] && continue
+        if /usr/bin/systemctl is-active --quiet "$unit"; then
+            printf 'stop-failed unit=%s reason=still-active\n' "$unit" >&2
+            failures=1
+        fi
+        if /usr/bin/systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+            printf 'stop-failed unit=%s reason=still-enabled\n' "$unit" >&2
+            failures=1
+        fi
+        /usr/bin/systemctl reset-failed "$unit" 2>/dev/null || true
+        printf 'stopped unit=%s\n' "$unit"
     done
+    [ "$failures" -eq 0 ]
+}
+
+disarm_mainnet_mode() {
+    local fail_safe_python
+    quarantine_mainnet_units \
+        || fail "cannot prove the funded units inactive and disabled"
+    fail_safe_python="$(resolve_fail_safe_python)" \
+        || fail "the fixed root-owned system Python boundary is unavailable"
+    # This parser is intentionally embedded and standard-library-only. A
+    # compromised checkout or virtualenv must not gain execution as root while
+    # the disarm path reads the funded credential file.
+    /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+        "$fail_safe_python" -I -S - "$MAINNET_CREDENTIAL_ENV" <<'PY'
+import os
+import re
+import shlex
+import stat
+import sys
+import tempfile
+
+MAX_FILE_BYTES = 1024 * 1024
+KEY_PATTERN = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
+class DisarmError(Exception):
+    pass
+
+
+def checked_snapshot(path: str) -> tuple[bytes, os.stat_result]:
+    parent = os.path.dirname(path)
+    parent_stat = os.lstat(parent)
+    if (
+        not stat.S_ISDIR(parent_stat.st_mode)
+        or parent_stat.st_uid != 0
+        or parent_stat.st_gid != 0
+        or stat.S_IMODE(parent_stat.st_mode) & 0o022
+    ):
+        raise DisarmError("unsafe credential directory")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != 0
+            or before.st_gid != 0
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > MAX_FILE_BYTES
+        ):
+            raise DisarmError("unsafe credential file")
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk:
+                raise DisarmError("short credential read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise DisarmError("credential grew while reading")
+        after = os.fstat(descriptor)
+        identity = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+        if identity(before) != identity(after):
+            raise DisarmError("credential changed while reading")
+        return b"".join(chunks), before
+    finally:
+        os.close(descriptor)
+
+
+def parse_environment(data: bytes) -> dict[str, str]:
+    if len(data) > MAX_FILE_BYTES or b"\0" in data or b"\r" in data:
+        raise DisarmError("credential contains invalid bytes")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise DisarmError("credential is not UTF-8") from error
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        key, separator, raw_value = line.partition("=")
+        if separator != "=" or not KEY_PATTERN.fullmatch(key) or key in values:
+            raise DisarmError("credential assignment is invalid or repeated")
+        if "\\" in raw_value:
+            raise DisarmError("credential uses unsupported escape syntax")
+        try:
+            parsed = shlex.split(raw_value, comments=False, posix=True)
+        except ValueError as error:
+            raise DisarmError("credential quoting is invalid") from error
+        if len(parsed) > 1:
+            raise DisarmError("credential value is ambiguous")
+        values[key] = "" if not parsed else parsed[0]
+    return values
+
+
+def replace_disarmed(path: str, values: dict[str, str], original: os.stat_result) -> None:
+    parent = os.path.dirname(path)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            os.fchown(handle.fileno(), 0, 0)
+            for key, value in sorted(values.items()):
+                handle.write(f"{key}={shlex.quote(value)}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        current = os.lstat(path)
+        if (
+            current.st_dev != original.st_dev
+            or current.st_ino != original.st_ino
+            or current.st_size != original.st_size
+            or current.st_mtime_ns != original.st_mtime_ns
+            or current.st_ctime_ns != original.st_ctime_ns
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_uid != 0
+            or current.st_gid != 0
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_nlink != 1
+        ):
+            raise DisarmError("credential changed before replacement")
+        os.replace(temporary, path)
+        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+try:
+    credential_path = sys.argv[1]
+    payload, source_stat = checked_snapshot(credential_path)
+    environment = parse_environment(payload)
+    environment["REAL_MONEY"] = "false"
+    replace_disarmed(credential_path, environment, source_stat)
+except (DisarmError, OSError) as error:
+    print(f"disarm refused: {type(error).__name__}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+    MAINNET_ARMED_STATE=off
+    echo "disarm-mainnet-ok real_money=false units=inactive-and-disabled"
+    echo "note: disarm does not flatten existing exposure; reconcile/flatten separately"
+}
+
+stop_mainnet_mode() {
+    quarantine_mainnet_units \
+        || fail "cannot prove the funded units inactive and disabled"
     echo "stop-mainnet-ok"
     echo "note: this stopped publication only; exposure is unchanged. Flatten through the account owner."
-    if mainnet_armed; then
-        echo "note: REAL_MONEY is still armed, so verify now fails and the next activate or rollout restarts this fleet. Set REAL_MONEY=false in /etc/liquidity-migration/bybit-mainnet.env to make the stop stick."
-    fi
+    echo "note: REAL_MONEY was not read; run disarm-mainnet to remove arming at the credential boundary."
 }
 
 ROLLOUT_DOWNSTREAM_UNITS=(
@@ -1579,18 +2878,81 @@ stop_rollout_units() {
     done
 }
 
+disable_rollout_units_for_boot_fence() {
+    local unit enabled
+    for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
+        if systemctl cat "$unit" >/dev/null 2>&1; then
+            enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+            case "$enabled" in
+                static|indirect|masked|masked-runtime) ;;
+                *)
+                    systemctl disable "$unit" 2>/dev/null \
+                        || fail "cannot persistently disable rollout unit before mutation: $unit"
+                    ;;
+            esac
+        fi
+    done
+    systemctl daemon-reload \
+        || fail "cannot reload the persistent rollout boot fence"
+    for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
+        ! systemctl is-active --quiet "$unit" \
+            || fail "boot-fenced rollout unit is still active: $unit"
+        enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+        case "$enabled" in
+            disabled|static|indirect|masked|masked-runtime|not-found) ;;
+            *) fail "rollout unit remains boot-enabled after persistent fence: $unit ($enabled)" ;;
+        esac
+    done
+    invalidate_activation_authority
+    sync
+    echo "rollout-boot-fence-ok units=inactive-and-disabled"
+}
+
 stop_all_rollout_units_best_effort() {
-    local unit failed=0
+    local unit enabled path failed=0
+    # Remove both the transient and persistent startup authorities before
+    # stopping anything. If cleanup itself is interrupted, an enabled unit can
+    # no longer cross the trusted launcher on the next boot.
+    if ! stop_activation_watchdog; then
+        cleanup_notice "failed-to-stop-activation-watchdog unit=$ACTIVATION_WATCHDOG_UNIT"
+        failed=1
+    fi
+    for path in "$ACTIVATION_PERMIT" "$ACTIVATION_RECEIPT"; do
+        if [ -L "$path" ]; then
+            cleanup_notice "linked-activation-authority path=$path"
+            failed=1
+        elif ! rm -f -- "$path"; then
+            cleanup_notice "failed-to-remove-activation-authority path=$path"
+            failed=1
+        fi
+    done
+    sync
     for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
         # A unit introduced by the commit being deployed is not installed yet;
         # counting its stop as a failure would demote a recoverable pre-install
         # abort into a forced full-fleet stop.
         systemctl cat "$unit" >/dev/null 2>&1 || continue
-        if ! systemctl stop "$unit"; then
-            cleanup_notice "failed-to-stop unit=$unit"
-            failed=1
-        fi
+        enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+        case "$enabled" in
+            static|indirect)
+                if ! systemctl stop "$unit"; then
+                    cleanup_notice "failed-to-stop static-unit=$unit"
+                    failed=1
+                fi
+                ;;
+            *)
+                if ! systemctl disable --now "$unit"; then
+                    cleanup_notice "failed-to-disable-and-stop unit=$unit"
+                    systemctl stop "$unit" 2>/dev/null || true
+                    failed=1
+                fi
+                ;;
+        esac
     done
+    if ! systemctl daemon-reload; then
+        cleanup_notice "failed-to-reload-systemd-after-rollout-quarantine"
+        failed=1
+    fi
     for unit in "${ROLLOUT_DOWNSTREAM_UNITS[@]}" "${ROLLOUT_OWNER_UNITS[@]}"; do
         if systemctl is-active --quiet "$unit"; then
             cleanup_notice "still-active unit=$unit"
@@ -1600,7 +2962,13 @@ stop_all_rollout_units_best_effort() {
             # into staged recovery.
             systemctl reset-failed "$unit" 2>/dev/null || true
         fi
+        enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+        case "$enabled" in
+            disabled|static|indirect|masked|masked-runtime|not-found) ;;
+            *) cleanup_notice "still-boot-enabled unit=$unit state=$enabled"; failed=1 ;;
+        esac
     done
+    sync
     return "$failed"
 }
 
@@ -1641,11 +3009,15 @@ rollout_cleanup() {
             stop_all_rollout_units_best_effort || true
         fi
     fi
+    if ! remove_trusted_rollout_attestor; then
+        cleanup_notice 'trusted-attestor cleanup failed'
+        [ "$status" -ne 0 ] || status=1
+    fi
     exit "$status"
 }
 
 prefetch_rollout_target() {
-    require_checkout
+    require_trusted_checkout
     local installed_head
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
     require_clean_checkout_at "$installed_head" "rollout prefetch"
@@ -1662,17 +3034,6 @@ prefetch_rollout_target() {
     require_clean_checkout_at "$installed_head" "rollout prefetch completion"
 }
 
-retry_exact_rollout_flat_check() {
-    local attempt
-    for attempt in 1 2 3; do
-        if rollout_flat_check exact; then
-            return 0
-        fi
-        [ "$attempt" -eq 3 ] || sleep 2
-    done
-    return 1
-}
-
 record_installed_profile() {
     printf '%s\n' "$DEPLOY_PROFILE" > "$PROFILE_MARKER"
     chmod 0644 "$PROFILE_MARKER"
@@ -1683,6 +3044,7 @@ record_installed_profile() {
 # staged install that skipped it left load_authorization falling back to
 # "operational" whatever the operator asked for.
 staged_mode() {
+    require_rollout_for_funded_generation_change staged
     run_strict_phase staged-install install_mode
     run_strict_phase record-installed-profile record_installed_profile
     run_strict_phase staged-activate-and-verify activate_mode
@@ -1690,13 +3052,15 @@ staged_mode() {
     printf 'staged-ok commit=%s profile=%s\n' "$EXPECTED_COMMIT" "$DEPLOY_PROFILE"
 }
 
-# A funded fleet keeps the hard gate; a demo fleet gets the same check
-# reported and continues, so rollout (and its rollback) is usable there.
+# Any persisted funded-account configuration keeps the hard gate, armed or
+# disarmed. A demo-only fleet gets the same check reported and continues, so a
+# dirty demo account cannot make rollback machinery unusable unless the
+# operator explicitly selected --require-flat.
 rollout_flat_required() {
     if [ "${REQUIRE_FLAT:-0}" -eq 1 ]; then
         return 0
     fi
-    mainnet_armed
+    funded_configuration_present
 }
 
 rollout_flat_phase() {
@@ -1717,10 +3081,21 @@ rollout_flat_phase() {
 }
 
 rollout_mode() {
-    require_checkout
+    require_trusted_checkout
+    ROLLOUT_FUNDED_AUTHORITY=1
     ROLLOUT_TARGET_COMMIT="$EXPECTED_COMMIT"
     ROLLOUT_CURRENT_COMMIT="$(safe_git rev-parse HEAD)" \
         || fail "cannot read installed checkout HEAD"
+
+    # Install the cleanup trap before creating the snapshot. The same verified
+    # outgoing binary then owns all three proofs, including the final proof
+    # after the checkout and installed engine have changed.
+    trap rollout_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    trap 'exit 141' PIPE
+    run_strict_phase trusted-rollout-attestor snapshot_trusted_rollout_attestor
 
     run_strict_phase rollout-target-prefetch prefetch_rollout_target
 
@@ -1729,27 +3104,23 @@ rollout_mode() {
     EXPECTED_COMMIT="$ROLLOUT_CURRENT_COMMIT"
     load_authorization
     run_strict_phase current-topology-verification verify_topology
-    rollout_flat_phase pre-stop-flat-account-proof rollout_flat_check allow_behind
+    rollout_flat_phase pre-stop-flat-account-proof rollout_flat_check pre-stop
     EXPECTED_COMMIT="$ROLLOUT_TARGET_COMMIT"
 
     ROLLOUT_STOPPED=1
-    trap rollout_cleanup EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
     # bash skips the EXIT trap on an untrapped fatal signal, so an SSH client
     # death (HUP, then SIGPIPE) would leave the fleet half-stopped uncleaned.
-    trap 'exit 129' HUP
-    trap 'exit 141' PIPE
 
-    # Stop every producer/timer before either owner. A bounded exact-head
-    # recheck closes the target/journal race while the owner is still alive;
-    # only then are owners stopped and venue truth sampled once more.
+    # Stop every producer/timer before either owner. Then stop both owners and
+    # sample venue truth. An unconsumed final target book is inert once its
+    # owner is stopped and activation quarantines every old book; pretending a
+    # venue scan was a target/WAL "head binding" would add no safety.
     run_strict_phase stop-downstream-units \
         stop_rollout_units "${ROLLOUT_DOWNSTREAM_UNITS[@]}"
-    rollout_flat_phase post-producer-flat-account-proof retry_exact_rollout_flat_check
     run_strict_phase stop-account-owners \
         stop_rollout_units "${ROLLOUT_OWNER_UNITS[@]}"
-    rollout_flat_phase final-stopped-flat-account-proof rollout_flat_check none
+    rollout_flat_phase final-stopped-flat-account-proof rollout_flat_check owners-stopped
+    run_strict_phase persist-rollout-boot-fence disable_rollout_units_for_boot_fence
     require_quiescent
 
     # From checkout mutation onward there is no rollback authority, so any
@@ -1757,6 +3128,11 @@ rollout_mode() {
     ROLLOUT_IRREVERSIBLE=1
     run_strict_phase stopped-install install_mode
     run_strict_phase record-installed-profile record_installed_profile
+    # Re-attest immediately before authority changes with both the immutable
+    # outgoing snapshot and the digest-bound installed target. The uninstalled
+    # build candidate is never an attestor.
+    rollout_flat_phase installed-generation-flat-account-proof \
+        rollout_flat_check installed-generation
     run_strict_phase activate-and-verify activate_mode
     ROLLOUT_COMPLETE=1
     ROLLOUT_STOPPED=0

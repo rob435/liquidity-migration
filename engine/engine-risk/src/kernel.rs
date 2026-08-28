@@ -7,11 +7,15 @@ use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};
 use crate::config::{ConfigError, KernelConfig};
 use crate::envelope::Envelope;
 use crate::exposure::{Book, Pending};
+use crate::loss_guard::{LossGuard, LossGuardAnchor};
 
 pub struct Kernel {
     cfg: KernelConfig,
+    guard: LossGuard,
     envelope: Envelope,
     book: Book,
+    wall_ns: Option<u64>,
+    taken_anchor: Option<LossGuardAnchor>,
 }
 
 fn unknown(detail: impl Into<String>) -> DenyReason {
@@ -30,12 +34,22 @@ fn signed(side: Side, qty: f64) -> f64 {
 impl Kernel {
     pub fn new(cfg: KernelConfig) -> Result<Self, ConfigError> {
         cfg.validate()?;
+        let guard = LossGuard::new(cfg.loss_guard.clone());
         let envelope = Envelope::new(cfg.envelope.clone());
         Ok(Self {
             cfg,
+            guard,
             envelope,
             book: Book::default(),
+            wall_ns: None,
+            taken_anchor: None,
         })
+    }
+
+    /// Wall-clock nanoseconds for the loss guard's UTC day roll. Until this is
+    /// supplied, its first anchor never rolls.
+    pub fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
+        self.wall_ns = Some(wall_ns);
     }
 
     /// A price the kernel may value exposure at. The engine feeds this from
@@ -52,7 +66,41 @@ impl Kernel {
             OrderKind::Limit { px, .. } if px.is_finite() && px > 0.0 => px,
             _ => 0.0,
         };
-        let px = quoted.max(self.book.px(intent.symbol).unwrap_or(0.0));
+        self.register_order_price_range(client_order_id, intent, approved_qty, quoted, quoted);
+    }
+
+    /// Bind a reservation whose amend acknowledgement was lost. A single
+    /// worst price is insufficient: high prices dominate gross notional while
+    /// low prices can dominate a short's loss to its stop.
+    pub fn register_order_price_range(
+        &mut self,
+        client_order_id: &str,
+        intent: &Intent,
+        approved_qty: f64,
+        quoted_low_px: f64,
+        quoted_high_px: f64,
+    ) {
+        let observed = self.book.px(intent.symbol).unwrap_or(0.0);
+        let first = positive(quoted_low_px);
+        let second = positive(quoted_high_px);
+        let (quoted_low_px, quoted_high_px) = match (first > 0.0, second > 0.0) {
+            (true, true) => (first.min(second), first.max(second)),
+            (true, false) => (first, first),
+            (false, true) => (second, second),
+            (false, false) => (0.0, 0.0),
+        };
+        let px = quoted_high_px.max(observed);
+        let low_px = match (quoted_low_px > 0.0, observed > 0.0) {
+            (true, true) => quoted_low_px.min(observed),
+            (true, false) => quoted_low_px,
+            (false, true) => observed,
+            (false, false) => 0.0,
+        };
+        let stop_fraction = if low_px > 0.0 && px > 0.0 {
+            read_stop(intent, low_px, px).unwrap_or(f64::MAX)
+        } else {
+            f64::MAX
+        };
         self.book.register(
             client_order_id,
             Pending {
@@ -60,6 +108,7 @@ impl Kernel {
                 signed_qty: signed(intent.side, approved_qty),
                 reduce_only: intent.reduce_only,
                 px,
+                stop_fraction,
             },
         );
     }
@@ -68,12 +117,61 @@ impl Kernel {
         self.envelope.reference_usdt()
     }
 
+    pub fn loss_guard_anchor(&self) -> LossGuardAnchor {
+        self.guard.anchor()
+    }
+
+    pub fn restore_loss_guard(&mut self, anchor: LossGuardAnchor) -> Result<(), String> {
+        self.guard.restore(anchor)
+    }
+
+    /// Clear the loss halt. Only an explicit operator action may call this.
+    pub fn reset_loss_guard(&mut self) {
+        self.guard.reset();
+    }
+
     fn price_for(&self, symbol: SymbolId, view: &ViewFacts) -> Option<f64> {
         match (self.book.px(symbol), view.entry_px(symbol)) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
             (None, None) => None,
+        }
+    }
+
+    fn held_stop_fraction(&self, symbol: SymbolId, view: &ViewFacts) -> Result<f64, DenyReason> {
+        let mut found = false;
+        let mut worst = 0.0_f64;
+        for (_, side, entry_px, stop_px) in view
+            .stops
+            .iter()
+            .filter(|(held, _, _, _)| *held == symbol.0)
+        {
+            found = true;
+            let current = self.book.px(symbol).unwrap_or(*entry_px);
+            if !current.is_finite() || current <= 0.0 {
+                return Err(unknown("no price to measure a held position's stop"));
+            }
+            let low = current.min(*entry_px);
+            let high = current.max(*entry_px);
+            let fraction = match side {
+                Side::Buy if *stop_px < high => (high - *stop_px) / high,
+                Side::Sell if *stop_px > low => (*stop_px - low) / high,
+                _ => {
+                    return Err(unknown(
+                        "held position stop is not on the protective side of plausible prices",
+                    ));
+                }
+            };
+            if !fraction.is_finite() || fraction < 0.0 {
+                return Err(unknown("held position stop distance is unreadable"));
+            }
+            worst = worst.max(fraction);
+        }
+        if found {
+            Ok(worst)
+        } else {
+            Err(unknown("held position has no readable stop level"))
         }
     }
 
@@ -89,18 +187,20 @@ impl Kernel {
         let view = ViewFacts::read(account, self.cfg.qty_tolerance)?;
         let ask_qty = read_intent_qty(intent)?;
 
-        // 3. A genuine exit passes the staleness refusal below: risk-reducing
-        //    orders flow while blind, and the venue's own reduce-only
-        //    enforcement bounds an exit sized from an old reading. Stale
-        //    equity is NOT folded into the envelope here — only entries
-        //    observe.
+        // 3. A genuine exit passes the staleness and loss refusals below:
+        //    risk-reducing orders flow while blind or tripped, and the venue's
+        //    reduce-only enforcement bounds an exit sized from an old reading.
         let recent = self.book.fills_after(account.observed_ns);
-        let net_qty = view.net_qty(intent.symbol)
-            + recent.get(&intent.symbol.0).copied().unwrap_or(0.0);
+        let settled_qty = view.net_qty(intent.symbol)
+            + recent
+                .get(&intent.symbol.0)
+                .map(|row| row.signed_qty)
+                .unwrap_or(0.0);
         let delta = signed(intent.side, ask_qty);
-        let reduces = net_qty.abs() > self.cfg.qty_tolerance && delta * net_qty < 0.0;
+        let reduces_settled =
+            settled_qty.abs() > self.cfg.qty_tolerance && delta * settled_qty < 0.0;
         if intent.reduce_only {
-            if !reduces {
+            if !reduces_settled {
                 return Err(unknown(
                     "reduce_only intent does not reduce the position it names",
                 ));
@@ -113,7 +213,7 @@ impl Kernel {
             // The venue bounds ONE reduce-only order to the position, not a
             // stack of them: what resting exits already cover is spoken for.
             let covered = self.book.pending_reduce_qty(intent.symbol);
-            let open = net_qty.abs() - covered;
+            let open = settled_qty.abs() - covered;
             if open <= self.cfg.qty_tolerance {
                 return Err(unknown(
                     "the position is already fully covered by resting exits",
@@ -130,12 +230,23 @@ impl Kernel {
             });
         }
 
+        // The loss guard comes before every entry control. A genuine exit has
+        // already returned above because flattening is the remedy for a trip.
+        if let Some(trip) = self.guard.observe(view.equity_usdt, self.wall_ns) {
+            return Err(DenyReason::LossGuardTripped {
+                equity_usdt: trip.equity_usdt,
+                floor_usdt: trip.floor_usdt,
+            });
+        }
         self.envelope.observe_equity(view.equity_usdt);
 
         // An unflagged reduction is judged as an entry from here on, but must
         // not cross through flat to the other side.
-        if reduces && ask_qty > net_qty.abs() + self.cfg.qty_tolerance {
-            return Err(unknown("intent crosses through flat to the other side"));
+        if reduces_settled {
+            let already_opposite = self.book.pending_open_qty(intent.symbol, intent.side);
+            if already_opposite + ask_qty > settled_qty.abs() + self.cfg.qty_tolerance {
+                return Err(unknown("intent crosses through flat to the other side"));
+            }
         }
 
         // 5. Stop discipline. Every position carries one: an entry without a
@@ -193,32 +304,38 @@ impl Kernel {
             let held_px = self
                 .price_for(symbol, view)
                 .ok_or_else(|| unknown("no price for a held symbol"))?;
-            let effective_qty = qty + recent.remove(&symbol.0).unwrap_or(0.0);
+            let just_filled = recent.remove(&symbol.0).unwrap_or_default();
+            let effective_qty = qty + just_filled.signed_qty;
             let held_usdt = effective_qty.abs() * held_px;
             projected.add(held_usdt);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(held_usdt, 0.0);
+            let held_stop = self.held_stop_fraction(symbol, view)?;
+            let combined_stop = held_stop.max(just_filled.stop_fraction);
+            projected.worst_case_loss_usdt += self
+                .envelope
+                .position_worst_case_usdt(held_usdt, combined_stop);
         }
-        for (symbol, qty) in recent {
-            if qty.abs() <= self.cfg.qty_tolerance {
+        for (symbol, exposure) in recent {
+            if exposure.signed_qty.abs() <= self.cfg.qty_tolerance {
                 continue;
             }
             let held_px = self
                 .price_for(SymbolId(symbol), view)
                 .ok_or_else(|| unknown("no price for a just-filled symbol"))?;
-            let held_usdt = qty.abs() * held_px;
+            let held_usdt = exposure.signed_qty.abs() * held_px;
             projected.add(held_usdt);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(held_usdt, 0.0);
+            projected.worst_case_loss_usdt += self
+                .envelope
+                .position_worst_case_usdt(held_usdt, exposure.stop_fraction);
         }
         let in_flight = self
             .book
-            .pending_notional_by_symbol(|symbol| self.price_for(symbol, view))
+            .pending_risk_rows(|symbol| self.price_for(symbol, view))
             .ok_or_else(|| unknown("no price for an in-flight symbol"))?;
-        for (_symbol, pending_usdt) in in_flight {
+        for (_symbol, pending_usdt, pending_stop_fraction) in in_flight {
             projected.add(pending_usdt);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(pending_usdt, 0.0);
+            projected.worst_case_loss_usdt += self
+                .envelope
+                .position_worst_case_usdt(pending_usdt, pending_stop_fraction);
         }
         Ok(projected)
     }
@@ -296,7 +413,6 @@ impl Kernel {
             (None, None) => Err(unknown("no price to value this symbol")),
         }
     }
-
 }
 
 impl RiskKernel for Kernel {
@@ -309,9 +425,10 @@ impl RiskKernel for Kernel {
     /// 3. exit or entry: a genuine exit is clamped to the position and stops
     ///    here — risk-reducing orders flow even under a stale reading;
     /// 4. entry freshness — too old is [`DenyReason::StaleAccountView`];
-    /// 5. stop discipline — [`DenyReason::MissingStop`];
-    /// 6. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
-    /// 7. the account-wide capital caps, smallest scope first: the whole
+    /// 5. account daily loss halt — [`DenyReason::LossGuardTripped`];
+    /// 6. stop discipline — [`DenyReason::MissingStop`];
+    /// 7. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
+    /// 8. the account-wide capital caps, smallest scope first: the whole
     ///    book's gross ([`DenyReason::ComponentGrossBreached`]), the whole
     ///    book's margin ([`DenyReason::InitialMarginBreached`]), and whether
     ///    the account's spare margin funds the increase
@@ -321,6 +438,28 @@ impl RiskKernel for Kernel {
             Ok(qty) => RiskVerdict::Allow { qty },
             Err(reason) => RiskVerdict::Deny { reason },
         }
+    }
+
+    fn assess_price_amend(
+        &mut self,
+        client_order_id: &str,
+        intent: &Intent,
+        account: &AccountView,
+    ) -> RiskVerdict {
+        let Some(previous) = self.book.take(client_order_id) else {
+            return RiskVerdict::Deny {
+                reason: unknown("opening amend has no matching risk reservation"),
+            };
+        };
+        // Judge the replacement, not old+replacement. Restore the old state
+        // before returning; the engine commits the conservative replacement
+        // only after its AmendSent record is durable.
+        let verdict = match self.evaluate(intent, account) {
+            Ok(qty) => RiskVerdict::Allow { qty },
+            Err(reason) => RiskVerdict::Deny { reason },
+        };
+        self.book.register(client_order_id, previous);
+        verdict
     }
 
     fn on_update(&mut self, update: &OrderUpdate) {
@@ -359,10 +498,67 @@ impl RiskKernel for Kernel {
         Kernel::observe_price(self, symbol, px);
     }
 
+    fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
+        Kernel::observe_wall_clock_ns(self, wall_ns);
+    }
+
+    fn observe_account_view(&mut self, account: &AccountView) {
+        // Refreshes happen independently of new intents. Prune fills the
+        // venue snapshot has caught up with here so a fill-heavy, entry-idle
+        // process does not retain its entire session until the next assess.
+        self.book.prune_through(account.observed_ns);
+        self.guard.observe(account.equity_usdt, self.wall_ns);
+        if account.equity_usdt.is_finite() && account.equity_usdt > 0.0 {
+            self.envelope.observe_equity(account.equity_usdt);
+        }
+    }
+
+    fn entries_halted(&self) -> bool {
+        self.guard.is_tripped()
+    }
+
     fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
         Kernel::register_order(self, client_order_id, intent, approved_qty);
     }
 
+    fn register_order_price_range(
+        &mut self,
+        client_order_id: &str,
+        intent: &Intent,
+        approved_qty: f64,
+        low_px: f64,
+        high_px: f64,
+    ) {
+        Kernel::register_order_price_range(
+            self,
+            client_order_id,
+            intent,
+            approved_qty,
+            low_px,
+            high_px,
+        );
+    }
+
+    fn take_control_anchor(&mut self) -> Option<String> {
+        let current = self.guard.anchor();
+        if current == LossGuardAnchor::default() && self.taken_anchor.is_none() {
+            return None;
+        }
+        if self.taken_anchor.as_ref() == Some(&current) {
+            return None;
+        }
+        let state = serde_json::to_string(&current).ok()?;
+        self.taken_anchor = Some(current);
+        Some(state)
+    }
+
+    fn restore_control_anchor(&mut self, state: &str) -> Result<(), String> {
+        let anchor = serde_json::from_str::<LossGuardAnchor>(state)
+            .map_err(|error| format!("invalid loss-guard control anchor: {error}"))?;
+        self.guard.restore(anchor)?;
+        self.taken_anchor = Some(self.guard.anchor());
+        Ok(())
+    }
 }
 
 fn read_intent_qty(intent: &Intent) -> Result<f64, DenyReason> {
@@ -370,6 +566,14 @@ fn read_intent_qty(intent: &Intent) -> Result<f64, DenyReason> {
         return Err(unknown("intent quantity is not a positive number"));
     }
     Ok(intent.qty)
+}
+
+fn positive(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        0.0
+    }
 }
 
 /// The worst stop distance, as a fraction of the notional. A stop that cannot
@@ -413,6 +617,10 @@ struct ViewFacts {
     /// Net signed quantity per symbol: positive long, negative short.
     net: Vec<(u16, f64)>,
     entry_px: Vec<(u16, f64)>,
+    /// Per-position stop facts. Bybit one-way mode yields one row per symbol;
+    /// retaining the row shape keeps the calculation fail-closed if another
+    /// adapter reports more than one.
+    stops: Vec<(u16, Side, f64, f64)>,
     /// The book holds exposure with no stop attached. New risk waits until it
     /// is protected again.
     unprotected: bool,
@@ -435,6 +643,7 @@ impl ViewFacts {
             available_usdt: account.available_usdt,
             net: Vec::new(),
             entry_px: Vec::new(),
+            stops: Vec::new(),
             unprotected: false,
         };
         for position in &account.positions {
@@ -470,6 +679,15 @@ impl ViewFacts {
             }
             if !position.stop_attached {
                 facts.unprotected = true;
+            } else if !position.stop_px.is_finite() || position.stop_px <= 0.0 {
+                return Err(unknown("attached position stop has no positive price"));
+            } else {
+                facts.stops.push((
+                    position.symbol.0,
+                    position.side,
+                    position.entry_px,
+                    position.stop_px,
+                ));
             }
         }
         Ok(facts)

@@ -193,7 +193,10 @@ pub enum Action {
     ///
     /// The engine refuses one that would move a stop further from the
     /// position than where it stands. A stop that loosens is not a stop.
-    SetStop { symbol: SymbolId, trigger_px: f64 },
+    SetStop {
+        symbol: SymbolId,
+        trigger_px: f64,
+    },
 }
 
 impl Action {
@@ -238,6 +241,40 @@ pub struct VenueOrder {
     pub qty: f64,
     pub filled_qty: f64,
     pub reduce_only: bool,
+}
+
+/// One nonzero position from an account-wide inventory, before symbol
+/// interning. `product` names the venue category that was scanned.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountPosition {
+    pub product: String,
+    pub symbol: String,
+    pub side: Side,
+    pub qty: f64,
+}
+
+/// One working order from an account-wide inventory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountOrder {
+    pub product: String,
+    pub symbol: String,
+    pub client_order_id: String,
+}
+
+/// A complete scan of every product surface the venue account can carry.
+/// An adapter returns an error when it cannot prove the scan is complete.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountInventory {
+    pub scope: String,
+    pub positions: Vec<AccountPosition>,
+    pub open_orders: Vec<AccountOrder>,
+    pub observed_ms: i64,
+}
+
+impl AccountInventory {
+    pub fn is_flat(&self) -> bool {
+        self.positions.is_empty() && self.open_orders.is_empty()
+    }
 }
 
 /// One execution from the venue's own history, as the venue says it.

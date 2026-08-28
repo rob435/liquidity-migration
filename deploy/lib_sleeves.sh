@@ -245,7 +245,7 @@ lm_verify_guarded_unit_surfaces() {
         fi
         _lvgus_exec="$(systemctl show "$_lvgus_unit" --property=ExecStart --value --no-pager)" || return 1
         case "$_lvgus_exec" in
-            *"argv[]=/opt/liquidity-migration/scripts/run_authorized_runtime.sh $_lvgus_unit main ;"*) ;;
+            *"argv[]=/opt/liquidity-migration-engine/bin/run-authorized-runtime $_lvgus_unit main ;"*) ;;
             *)
                 echo "verify failed: guarded unit has unexpected effective ExecStart: $_lvgus_unit -> $_lvgus_exec" >&2
                 return 1

@@ -76,11 +76,14 @@ file.
   instead of on the 00:20 clock; entries keep that clock.
 
   The engine recovers fills its stream never delivered from the venue's own
-  execution history — at boot and after every private-stream reconnect — so the
-  ledger does not drift behind the venue. A reconciliation finding latches the
-  may-open gate, and `engine reconcile-clear` is the deliberate operator act
-  that gate waits for ([docs/engine.md](docs/engine.md) §Safety posture); a
-  fresh finding latches again. The engine keeps an in-flight cover book and
+  execution history at boot and after every private-stream reconnect. A failed
+  boot history read, or a WAL whose missing interval predates the venue's
+  history reach, aborts boot. A failed read after a live stream gap writes a
+  durable `may_open=false` latch and stops the run. Other reconciliation
+  findings can also latch the may-open gate, and `engine reconcile-clear` is
+  the deliberate operator act that gate waits for
+  ([docs/engine.md](docs/engine.md) §Safety posture); a fresh finding latches
+  again. The engine keeps an in-flight cover book and
   rotates its WAL in segments. The who-opened-what ledger (fill attribution)
   follows the venue: boot drops a sleeve's claim on any symbol the venue
   reports flat (durable `ClaimsDropped` receipt in the WAL), and a
@@ -89,8 +92,9 @@ file.
   name.
   The demo engine runs `leverage_authority = "sole"` (set in the host's
   `/etc/liquidity-migration/engine.toml`, which staged deploys deliberately
-  never rewrite; backup beside it). Mainnet stays `"shared"` — the owner
-  hand-trades there.
+  never rewrite; backup beside it). Mainnet stays `"shared"` so an unexpected
+  venue-side leverage change is never trusted; the funded dedicated-UID
+  contract still forbids a second trading authority.
 
   The chain runs end to end:
 
@@ -154,76 +158,115 @@ file.
   The funding arrived by hand, outside the bot — not independently confirmed
   beyond the health read. Money in the account changes what the producers
   publish and, through the tracked reference, every cap with it.
-- **There is no daily loss halt, by the owner's decision.** What bounds a loss
-  is the venue-native stop on each position; **nothing bounds the accumulation
-  of many stopped positions in one day**, and the owner accepted that knowingly.
-  On LONG that stop is not fixed for the life of a trade: past a name's own
-  decay age the book declares the narrower distance and the engine moves the
-  venue's stop in to match. It only ever tightens, and it survives the
-  producer dying.
-  A profile carrying a `max_daily_loss_usdt` key, or an env file carrying an
-  `RM_DAILY_LOSS_FRACTION` dial, is refused by name rather than ignored. Do not
-  re-add the control ([AGENTS.md](AGENTS.md)).
-- **Real money is armed**, and the owner hand-trades the same venue account.
-- **The bot and the owner keep separate books on one account.** Venue exposure
-  above what the bot owns, and venue orders the bot did not place, are recorded
-  in the venue snapshot (`foreign_positions`, ownership `status`) and left
-  strictly alone — never traded, never blocking. The bot claiming exposure the
-  venue does *not* hold still blocks, and heals itself by booking the reduction
-  down to flat. A symbol carrying foreign exposure is still swept for its stop;
-  skipping it would age its freshness out and re-block the account on `native
-  protection health is stale`.
+- **Funded new risk stops after a 10 USDT UTC-day account loss.** The funded
+  profile sets `account_risk.max_daily_loss_usdt = 10.0`; demo explicitly sets
+  it to `null`. The UTC-day opening is conservatively bridged from the latest
+  pre-midnight equity evidence and the first fresh valid post-midnight account
+  view (the higher value wins). At equity less than or equal to
+  opening minus 10 USDT, entries are refused as `LossGuardTripped`; genuine
+  reduce-only exits still flow. This is account equity, not sleeve P&L or a
+  high-water mark, so fees, funding, unrealized P&L, and manual account activity
+  reflected by the venue all count. The anchor and trip are durable WAL state.
+  Boundary evidence is checkpointed durably once per minute and immediately
+  on every equity increase; after downtime this may halt too early but cannot
+  refresh away an observed loss. Every placement and opening reprice advances
+  the risk clock before assessment, so the first post-midnight order cannot
+  race the next account poll. A non-tripped anchor rolls on the next UTC day; a trip stays latched across
+  recovery, day changes, and restart until the stopped-realm, flat-account
+  `scripts/ops.sh loss-reset --environment mainnet` workflow clears it.
+- **Real money is armed on the installed fleet, and the owner has used the same
+  venue account outside the engine.** The audited generation requires
+  `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` to equal the authenticated funded
+  UID. That value is an operator acknowledgement that the UID is dedicated to
+  this engine: no hand trading, venue bots, copy trading, or other trading API
+  keys. Bybit does not expose an account-wide list for every bot family, so
+  this is a reviewed operating contract, not a machine proof. Funded startup
+  and flat attestation refuse a missing or mismatched acknowledgement. The
+  owner must make the account exclusive before the audited generation can take
+  funded authority.
+- **Outside activity is not a second trusted book.** The engine does not claim or
+  cancel foreign orders and does not count unowned fills as its exposure. A
+  foreign fill, unexplained position quantity, or foreign working order in a
+  symbol a configured strategy trades durably latches `may_open=false`.
+  Reductions and stop protection continue. A foreign order in a symbol no
+  configured strategy can address is reported but does not halt openings.
+  Any breach of the dedicated-account contract requires investigation and an
+  explicit `reconcile-clear` before entries resume; clearing the latch does not
+  authorize sharing the account again.
 - **The funded engine runs `leverage_authority = "shared"`**, so a symbol that
   goes flat forgets its cached leverage and its next entry pays one
   `set_leverage` round trip — the cost of not sizing against a leverage the
-  owner changed by hand. A venue value that contradicts the cache drops it under
-  either setting.
-- **A `-21 USDT` available margin is the owner trading by hand, read correctly**,
-  not a fault.
-- **The safety stop covers the owner's hand-placed size.** The manager only
+  venue changed outside the process. A venue value that contradicts the cache
+  drops it under either setting. This conservative setting does not authorize a
+  second writer.
+- **The last recorded `-21 USDT` available margin came from owner trading by
+  hand and is read correctly.** It is also evidence that the existing account
+  arrangement is not yet the dedicated-UID contract the audited generation
+  requires.
+- **The safety stop covers unexpected outside size.** The manager only
   creates Bybit **Full-position** stops (`tpsl_mode="Full"`), which close the
-  entire venue position at trigger, so the bot's stop sits over the combined
-  position whenever the owner scales a coin by hand. Known and accepted; the venue
-  offers one stop per coin and cannot split it.
-- **Cross margin and one-way position mode, and one-way is load-bearing**: the
-  fleet places every order and stop with `positionIdx 0` and the protection layer
-  refuses nonzero-index rows, so a venue-side switch to hedge mode would reject
-  every fleet order. No startup check pins either mode — proposed, owner to
-  decide.
-- **No copy of the funded API key remains on the laptop.**
+  entire venue position at trigger. This keeps reductions safe if the dedicated
+  account contract is breached; it does not make hand trading or another bot
+  permitted. The venue offers one stop per coin and cannot split it.
+- **A later entry cannot loosen that Full-position stop.** Admission holds
+  same-side siblings against the tighter of the fresh venue stop and the
+  fill-owned durable stop. Replay advances stop intent only when that order
+  actually grows or crosses the position; rejected and unfilled siblings do
+  not count. Every fresh account view restores a missing or looser level and
+  durably latches new risk off if the repair fails.
+- **Bybit one-way position mode is verified before startup completes.** Rust
+  makes a signed read-only position query for every configured symbol and
+  requires exactly one matching `linear` row, no next page, and `positionIdx 0`.
+  Any missing, duplicate, malformed, hedge-mode, or failed response aborts
+  startup. Configured checks run concurrently in rate-bounded 50-request waves;
+  a symbol admitted later is checked before its first order, stop, or
+  leverage request. The check does not mutate venue mode and does not pin cross
+  margin. An external mode switch after verification remains possible; the next
+  incompatible venue request rejects.
+- **No copy of the funded execution key remains on the laptop.**
   `/etc/liquidity-migration/bybit-mainnet.env` on the host is the only copy and
-  the only authority (`REAL_MONEY=true` and the carry stop 0.35). The key was
+  the only trading authority (`REAL_MONEY=true` and the carry stop 0.35). The
+  key was
   readable in plaintext on the Desktop from 2026-08-05 to 2026-08-08, so
-  **rotation is still owed and is the owner's act.**
+  **rotation is still owed and is the owner's act.** Funded Bybit identity now
+  refuses any key created before 2026-08-27 22:30 UTC, or one that is not UTA,
+  is read-only, is not allowlisted only to the exact host IP declared by
+  `BYBIT_REAL_API_KEY_IP`, lacks ContractTrade Order and Position permissions,
+  or carries Wallet Withdraw permission. Missing, wildcard, all-network, and
+  additional IP entries fail. The old key therefore cannot pass a new funded
+  startup or rollout activation; the owner must still create the replacement
+  at Bybit, dedicate the funded UID to this engine, install the key and both
+  account-binding values on the host, and revoke the old key. Funded rollout
+  and operator inventory controls use a physically separate, globally read-only
+  query key from the operator-owned root:root mode-0600
+  `/etc/liquidity-migration/bybit-mainnet-attestor.env`; they never receive the
+  execution key. That four-assignment file and its Bybit key are also owner
+  provisioning actions still required before rollout.
 
-### Trading-rule receipts
+### Instrument rules
 
-- **The funded pair is fresh.** `candidate-universe-20260817T205337Z` /
-  `venue-rules-20260817T205337Z`, frozen as one pair from the live venue on
-  2026-08-17 20:53 UTC; expires **2026-08-24 ~20:53 UTC**, and every deploy
-  renews it (a failed renewal keeps the installed pair and the deploy
-  finishes). The rules also cover any symbol the account still has exposure on,
-  so a retiring symbol that is still held does not wedge the LONG cycle —
-  entries stop, exits keep publishing until flat.
-- **The demo receipt is fresh.** `demo-rules-20260818T220119Z`, probed
-  2026-08-18 22:01 UTC inside a flat maintenance window. Expires **2026-08-25
-  ~22:01 UTC**; any rollout in the back half re-probes on its own. Its
-  freshness does not alert — only the funded receipt's does (see below).
+- **Each Rust venue adapter fetches current instrument rules at engine boot.**
+  A failed fetch aborts boot. The engine also refuses to start when the venue
+  omits a configured symbol, so quantity steps, price ticks, and venue minimums
+  never come from a deploy receipt or a Python file.
 
 ### Execution and market data
 
-- **The engine trades five venues, and one name in `engine.toml` picks which.**
-  The demo engine runs `venue = "bybit_demo"` and the funded one
-  `venue = "bybit_mainnet"`; the other names are
-  `hyperliquid_testnet`, `hyperliquid_mainnet`,
-  `lighter_testnet`, `lighter_mainnet`, `mexc_mainnet`,
-  `variational_mainnet`. MEXC has no testnet at all, so `mexc_mainnet` is its
-  only spelling and its first order would be real money. That one name
+- **The engine registry contains five venue families, and one realm name in
+  `engine.toml` picks the path.** `engine venues` lists every compiled realm and
+  its evidence gate. Bybit demo and mainnet are `live-proven`;
+  `hyperliquid_testnet` and `lighter_testnet` are runnable `testnet-canary`
+  paths. Hyperliquid, Lighter, and MEXC mainnet are `production-blocked`, and
+  Variational is `read-only`. `engine run` enforces this before opening a WAL,
+  reading credentials, or opening a socket. MEXC has no testnet, so changing
+  its status needs reviewed real-money lifecycle evidence. The selected name
   decides the gateway, the private order stream and the public market feed
   together, so a config cannot send orders to one venue and price them off
-  another's book. **Nothing has ever been sent to any venue but Bybit** — the
-  four new adapters are built, fenced and tested, and no order has left the
-  box for any of them. Lighter also cannot open a position yet: it has no
+  another's book. **Only Bybit has live-order evidence.** MEXC
+  enforces consecutive depth versions and redials on
+  gaps; Lighter enforces its nonce chain; Hyperliquid rejects a same-symbol BBO
+  timestamp regression but its protocol cannot expose forward gaps. Lighter
+  also cannot open a position yet: it has no
   leverage transaction here, and the engine refuses an entry naming a leverage
   it cannot set. `REAL_MONEY` is still the single arming switch, and it
   reaches every venue that reads a credential — which is every one but
@@ -285,13 +328,19 @@ leverage-needing entry, where paying that round trip cost ~169 ms median.
   `api.bytick.com` and `api.byhkbit.com` are the same Frankfurt CloudFront edge
   proxying to an Asian origin. No code change reaches it; a host near the origin
   is the only lever and the largest single win left. Owner decision.
-- **What remains of the software tail is grouped sibling entries sending
-  serially** — each awaits the previous order's ~190 ms venue acknowledgment
-  (measured: 8.7 / 199 / 369 ms for three same-decision entries). Concurrent
-  sends are the one software lever left; observed, not built.
-- **Cross-session latency comparisons are confounded by account-state growth** —
-  protections, orders, decisions and executions accumulate for the life of the
-  account and nothing prunes them. Compare within a run, or reset the epoch first.
+- **Sibling placements share one durable batch.** The engine validates and
+  reserves them in deterministic order, appends every accepted order, crosses
+  one WAL barrier, then asks the venue adapter to send the group. Bybit overlaps
+  distinct-symbol chains over ten warm sockets and preserves same-symbol wire
+  order; nonce-sensitive adapters keep the serial default.
+  No live venue sample establishes current sibling-group latency yet.
+- **Long-run account latency has a repeatable within-run probe.** The execution
+  ID set is bounded, while venue execution history can still grow. Run the
+  release `account_state_soak` example described in
+  [docs/engine.md](docs/engine.md) on a production-like Linux host and compare
+  its early, middle, and late windows. No Linux measurement is registered yet;
+  the Windows host can cross-compile the example but cannot execute the linked
+  binary. Real venue fetch and decode time remains a separate measurement.
 
 ## Topology
 
@@ -341,36 +390,59 @@ runtime admission; a retired `RM_*` line in an env file is refused by name.
   can never arm; activation still walks the full preflight, and every
   capital-preservation control (envelope, native stops, single-writer lease,
   reconciliation) gates the start.
-- **The funded account must stay in one-way position mode** (see Now — a
-  venue-side switch to hedge mode would reject every fleet order).
-- **A guarded rollout proves the account venue-flat**; the proof binds on
-  mainnet and is advisory off it. A failed verification is not permission to
-  hand-start a partial fleet.
-- **Both trading-rule receipts are a side effect of deploying, not a deadline.**
-  Any deploy past half the 168-hour age bound renews them: demo by the
-  order-placing probe, and the funded receipt by the read-only instruments-info
-  freeze, which places no orders and needs no stopped window. Only mainnet holds
-  the 168-hour ceiling as a hard one, so its expiry would be an owner that
-  refuses to start; the other registered startup ceilings (warmup timeout,
-  INVOCATION_ID, stray-order gate) also bind mainnet only.
-- **The watchdog watches only the funded rules receipt.** Demo rule-receipt
-  freshness does not alert: nothing in the demo runtime path reads the receipt,
-  and a demo receipt in its back half renews itself on the next rollout, so a
-  demo WARNING only taught operators to ignore a WARNING. The mainnet liveness
-  scope validates the funded receipt through the loader that admits one and
-  pages WARNING inside 24 hours of expiry and CRITICAL past it, under its own
-  `venue_rules_age` key with the deploy-renews-it remedy
-  ([`check_fleet_liveness.py`](scripts/runtime/check_fleet_liveness.py)).
+- **The funded account stays in one-way position mode.** Startup verifies every
+  configured symbol read-only; it never changes account mode. An operator must
+  still avoid switching it after the check.
+- **A generation-changing rollout samples Bybit credential-wide inventory at
+  three boundaries.** Before prefetch or any stop, rollout verifies the
+  checkout-bound outgoing installed engine and release digest, then freezes an
+  immutable snapshot of that binary. The snapshot alone performs the pre-stop
+  and owners-stopped proofs. After quiescent installation, the final boundary
+  requires both that outgoing snapshot and the digest-bound installed target;
+  the incoming checkout and build candidate never attest. Each verifier
+  performs two complete scans with stable scope. An outgoing release without
+  `attest-flat` fails closed and needs a signed, reviewed out-of-band bootstrap.
+  Funded proofs use only the separately snapshotted read-only attestor key.
+  They cover ordinary, spread, RFQ, venue-native strategy, and reported
+  cross-account asset/bot inventory, but Bybit cannot enumerate every bot
+  instance; the funded UID is therefore also required to be dedicated to this
+  engine. The attestation is not an atomic venue snapshot, so manual trading,
+  bots, other trading keys, and asset movement are prohibited while it runs.
+  Demo is always scanned; any persisted funded surface also makes mainnet and
+  its attestor file mandatory. Funded and
+  `--require-flat` rollouts treat any blocker or incomplete read as status 3.
+  An unarmed demo-only rollout reports the same failure but continues unless
+  `--require-flat` is set ([docs/operations.md](docs/operations.md)).
 - **Unknown safety-critical state fails closed.**
-- **Deploy is one command from the primary checkout** (`scripts/ops.sh deploy
-  staged|rollout`). The manual GitHub workflow exposes `rollout`, `install`,
-  `activate`, `verify`; the two mainnet modes are deliberately absent from CI
-  ([docs/operations.md](docs/operations.md)). Installing over an armed funded
-  fleet requires stopping it: with real money armed and a `-mainnet` unit up,
-  `resolve_stop_first` turns stop-first off and `require_quiescent` refuses unless
-  `--stop-first` is passed explicitly. Push only from the primary checkout until
-  the pre-push hook's git-fixture tests are hermetic (a linked worktree run
-  corrupted the repo once).
+- **Service activation has a durable commit point.** Candidate services run
+  only under a root-watchdog-renewed six-second permit bound to the boot,
+  rollout PID/start ticks, release commit, and five artifact hashes. Trusted
+  launchers poll that authority every two seconds and stop their child when it
+  expires. Lease renewal records the permit identity before validation, takes a
+  non-creating pin, and revalidates it under lock; deletion or replacement
+  revokes without recreation or adoption. Deploy preflight and the launcher reject writable
+  critical checkout ancestry or Git metadata before trusting the commit. The
+  persistent six-hash completion receipt is installed only after the complete
+  topology is enabled, active, verified, and synced; it authorizes reboot
+  without any `/run` state. A crash before that receipt therefore leaves the
+  candidate stopped rather than partially bootable
+  ([docs/operations.md](docs/operations.md#activation-commit-protocol)).
+- **A funded-configured host changes or activates a generation only through
+  `scripts/ops.sh deploy rollout`.** Direct `install`, `activate`, and `staged`
+  refuse before mutation even while disarmed, and `ops.sh start|restart`
+  refuses funded units; fail-safe stop and disarm remain available. Demo-only
+  hosts retain the direct modes. The remote fail-safe paths execute no checkout
+  or virtualenv code: stop never reads the funded credential, and disarm uses
+  an isolated root-owned system interpreter plus an embedded stable atomic
+  rewrite only after the funded unit allowlist is stopped and disabled. The manual GitHub workflow may expose a mode,
+  but the host-side gate still decides whether it is legal
+  ([docs/operations.md](docs/operations.md)). Push only from the primary
+  checkout until the pre-push hook's git-fixture tests are hermetic (a linked
+  worktree run corrupted the repo once).
+- **Audit release evidence is pending.** This working tree is not yet the
+  pushed commit, so the configured Ubuntu workflow has not tested this exact
+  state. Do not deploy or call it release-qualified until that commit is pushed
+  and its Ubuntu CI and locked Rust jobs are green.
 - **The rollback floor is the one-line forward-compat commit `31ee68d`**:
   rolling back past it requires archiving each producer's event tape.
 - Three delisting candidates (`HIGHUSDT`, `PUMPBTCUSDT`, `WHITEWHALEUSDT`) have
@@ -447,7 +519,6 @@ re-diagnose a page that has already been explained.
 | `unowned_venue_order` after a stop triggers | Owner disowning its own just-consumed Full stop while Bybit's open-order cache still lists it. Bounded 10-minute terminal-visibility grace, identity evidence required. |
 | `waiting for queue-head market data: X:stale_book` | Lost/rejected orderbook subscribe. Socket rebuilds after 30 frameless seconds for a new subscription. |
 | `latest cycle is 0.1 min future-dated` / `future_book` | Local read/update races sampling wall time before the snapshot. Ordering fixed; true future timestamps still page. |
-| `ignoring foreign … execution … with no owned position to reduce` | Normal: the owner trading by hand on the same venue account. Recorded, never traded. Only a `venue=…:reconstructed=…:unbacked=…` line is a real fault. |
 | `engine_heartbeat_stale: … dated 1s in the future`, firing and clearing all day | Not a clock fault: the watchdog sampled its clock at the top of a ~2 s run and compared it to a file the engine rewrites every 5 s. It reads the file, then the clock. If this shape returns, a clock really is wrong. |
 
 **If the chat is loud and the fleet is green, treat the checks as the suspect.**
@@ -460,7 +531,6 @@ ones is indistinguishable from them.
 | --- | --- |
 | 2026-08-04 withdrawals await owner confirmation | The venue's own transaction log shows the money leaving through the account login (the API key holds no transfer/withdraw permission — probed, refused), so this was by hand. **If these withdrawals are not the owner's, treat the venue login as compromised immediately** |
 | Quote-lab capture spams its own log when disk-blocked | The 6 GB min-free guard stops tape writes but not the process's nohup traceback spam, which can fill the disk to 0 bytes and kill a deploy. Both capture processes on the host are currently killed; the spam shape is still unfixed. (The in-repo quote-lab replay stays: it is the machinery behind the registered entry recipes — CHANGELOG 2026-08-08.) |
-| No startup check pins margin/position mode | Cross + one-way are load-bearing (see Now); a venue-side flip is only caught at order rejection. Proposed, owner to decide |
 | Nothing bounds convergence toward a stale accepted target while producers are down | Deliberately not built — a liveness-coupled trading halt needing owner design |
 | Kline bootstrap logs `failed=N` on restart with an intact store | It re-fetches a window it already holds and counts zero new inserts as failure; bounded ~40–50 s per restart. Tracked follow-up |
 | The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 90 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |

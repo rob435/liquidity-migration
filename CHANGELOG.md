@@ -6,6 +6,70 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-27 — The seven execution-audit gaps become explicit Rust and
+  rollout contracts.** Sibling placements now validate and reserve in request
+  order, append together, cross one WAL barrier, and reach Bybit as overlapping
+  distinct-symbol HTTP chains over a ten-socket warm pool; same-symbol and
+  nonce-sensitive chains retain serial wire order. Each mutation endpoint has
+  a completion-anchored rolling quota, and native batch cancellation pulls a
+  halted book in bounded ten-order groups while private terminal updates stay
+  ahead of confirmation deadlines. Risk reservations include cumulative
+  opposite-side pending quantity and restart charges only each order's
+  unfilled remainder. Opening reprices require finite risk approval and retain
+  their full old/requested price range through ambiguity, rotation, and
+  restart, so high-price notional and low-price short-stop loss are both
+  charged until a definitive answer or cancel. Whole-position stop intent now belongs to the fill that
+  actually grows or crosses the position, never an unfilled sibling;
+  same-side growth cannot loosen the tighter existing level, pre-wire checks
+  include prior-wake live orders, and fresh account views actively repair any
+  venue regression or latch opening off. Malformed daily-loss anchors abort
+  startup instead of silently resetting the circuit breaker. Before fetch,
+  rollout digest-verifies and freezes the outgoing installed engine. That
+  immutable binary performs the pre-stop and owners-stopped flatness checks;
+  the final boundary requires both it and the digest-bound installed target,
+  while the incoming checkout and build candidate never attest. An outgoing
+  release without `attest-flat` requires a signed, reviewed out-of-band
+  bootstrap rather than falling back to incoming code. Mainnet checks
+  receive only a separate globally read-only query key from an exact-schema,
+  operator-owned attestor file, never the execution key. Direct install,
+  activate, staged, and funded unit start/restart paths no longer bypass
+  rollout on a funded-configured host. Mainnet inventory covers ordinary,
+  spread, RFQ, active venue-native strategy, and reported cross-account
+  asset/bot state. Nonadditive venue aggregates are not treated as an API
+  guarantee, while aggregate-only values cannot masquerade as cash unless
+  coin detail explicitly identifies positive USDT/USDC. Because Bybit cannot enumerate every bot instance,
+  funded identity also requires an account-bound acknowledgement that its UID
+  is dedicated to the engine with no hand trading, venue bots, copy trading, or
+  other trading API keys. Rollout activation now uses a root watchdog to renew
+  a boot- and process-bound ten-field six-second permit while trusted launchers
+  supervise the candidate topology; only a synced, verified six-field release
+  receipt survives reboot, so process death or power loss cannot preserve a
+  partial activation. Permit renewal now records the pre-validation inode,
+  takes a non-creating pin, and revalidates it under lock, so direct deletion or
+  a valid-looking replacement cannot race recreation or adoption. Remote
+  funded stop/disarm execute no checkout code; stop never reads credentials,
+  and disarm uses an isolated root-owned interpreter with an embedded strict
+  atomic rewrite after persistent quarantine. Deploy preflight and launchers reject
+  writable critical checkout ancestry or Git metadata. Bybit startup verifies one-way mode
+  for every configured or newly admitted symbol. Execution recovery aborts
+  instead of clipping intervals older than venue history. Ubuntu CI runs the
+  bounded-ID release soak that separates within-run ID cost from synthetic
+  recovery-history cost. UTC loss rollover now carries bounded durable pre-midnight equity
+  evidence (periodically and immediately on rises), preventing a crash or the
+  first post-midnight order from erasing a boundary loss without making every
+  account poll an unconditional fsync. Hyperliquid and Lighter testnets remain canary paths, while their
+  mainnets and MEXC mainnet are source-gated from `engine run` until exact-realm
+  live lifecycle evidence exists; public-feed continuity checks now match each
+  protocol's evidence. Funded risk gains a durable 10 USDT UTC-day account-loss
+  halt plus a stopped-engine, flat-account `loss-reset`; demo leaves it
+  disabled. Standing docs now match fail-closed foreign-activity handling,
+  direct adapter rule reads, and the remaining live-validation boundaries.
+  Funded Bybit identity now rejects the exposed key generation and unsafe key
+  shapes: keys must be created on or after 2026-08-27 22:30 UTC, UTA,
+  write-capable, allowlisted only to the declared production host IP,
+  ContractTrade Order+Position capable, and unable to withdraw. Creating the
+  replacement and revoking the old key remain external owner actions.
+
 - **2026-08-26 — The demo rule-receipt freshness alert is removed (owner
   directed).** The demo receipt no longer pages `demo_rules_age`; nothing in
   the demo runtime path reads the receipt, and a demo receipt in the back half

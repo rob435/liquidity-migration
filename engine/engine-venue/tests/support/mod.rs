@@ -9,6 +9,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -45,10 +46,21 @@ pub struct TestServer {
     pub addr: SocketAddr,
     seen: Arc<Mutex<Vec<Recorded>>>,
     connections: Arc<AtomicUsize>,
+    peak_in_flight: Arc<AtomicUsize>,
 }
 
 impl TestServer {
     pub async fn start<F>(handler: F) -> TestServer
+    where
+        F: Fn(&Recorded, usize) -> (u16, String) + Send + Sync + 'static,
+    {
+        Self::start_delayed(handler, Duration::ZERO).await
+    }
+
+    /// As [`Self::start`], but hold each complete request for `response_delay`
+    /// before acknowledging it. This gives concurrency tests a deterministic
+    /// wire-level overlap window without blocking a Tokio worker thread.
+    pub async fn start_delayed<F>(handler: F, response_delay: Duration) -> TestServer
     where
         F: Fn(&Recorded, usize) -> (u16, String) + Send + Sync + 'static,
     {
@@ -60,12 +72,28 @@ impl TestServer {
         let accepted = seen.clone();
         let connections = Arc::new(AtomicUsize::new(0));
         let counted = connections.clone();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let active = in_flight.clone();
+        let peak_in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = peak_in_flight.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 counted.fetch_add(1, Ordering::SeqCst);
                 let seen = accepted.clone();
                 let handler = handler.clone();
-                tokio::spawn(async move { serve(stream, seen, handler).await });
+                let in_flight = active.clone();
+                let peak_in_flight = peak.clone();
+                tokio::spawn(async move {
+                    serve(
+                        stream,
+                        seen,
+                        handler,
+                        response_delay,
+                        in_flight,
+                        peak_in_flight,
+                    )
+                    .await
+                });
             }
         });
 
@@ -73,6 +101,7 @@ impl TestServer {
             addr,
             seen,
             connections,
+            peak_in_flight,
         }
     }
 
@@ -80,6 +109,10 @@ impl TestServer {
     /// connection is the pool doing its job.
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
+    }
+
+    pub fn peak_in_flight(&self) -> usize {
+        self.peak_in_flight.load(Ordering::SeqCst)
     }
 
     pub fn base_url(&self) -> String {
@@ -91,18 +124,33 @@ impl TestServer {
     }
 
     pub fn to_path(&self, path: &str) -> Vec<Recorded> {
-        self.requests().into_iter().filter(|r| r.path == path).collect()
+        self.requests()
+            .into_iter()
+            .filter(|r| r.path == path)
+            .collect()
     }
 
     /// The one request to this path; panics if there was not exactly one.
     pub fn only(&self, path: &str) -> Recorded {
         let mut found = self.to_path(path);
-        assert_eq!(found.len(), 1, "expected one request to {path}, saw {}", found.len());
+        assert_eq!(
+            found.len(),
+            1,
+            "expected one request to {path}, saw {}",
+            found.len()
+        );
         found.remove(0)
     }
 }
 
-async fn serve(mut stream: TcpStream, seen: Arc<Mutex<Vec<Recorded>>>, handler: Handler) {
+async fn serve(
+    mut stream: TcpStream,
+    seen: Arc<Mutex<Vec<Recorded>>>,
+    handler: Handler,
+    response_delay: Duration,
+    in_flight: Arc<AtomicUsize>,
+    peak_in_flight: Arc<AtomicUsize>,
+) {
     let mut buf: Vec<u8> = Vec::new();
     loop {
         // Head first, then however many body bytes it declares.
@@ -134,11 +182,19 @@ async fn serve(mut stream: TcpStream, seen: Arc<Mutex<Vec<Recorded>>>, handler: 
         let (status, reply) = handler(&request, prior);
         seen.lock().unwrap().push(request);
 
+        let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        peak_in_flight.fetch_max(active, Ordering::SeqCst);
+        if !response_delay.is_zero() {
+            tokio::time::sleep(response_delay).await;
+        }
+
         let response = format!(
             "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
             reply.len()
         );
-        if stream.write_all(response.as_bytes()).await.is_err() {
+        let sent = stream.write_all(response.as_bytes()).await;
+        in_flight.fetch_sub(1, Ordering::SeqCst);
+        if sent.is_err() {
             return;
         }
     }

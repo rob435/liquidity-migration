@@ -158,7 +158,7 @@ impl ExecutionIds {
         }
     }
 
-    fn with_limits(capacity: usize, retention_ms: i64) -> Self {
+    pub(crate) fn with_limits(capacity: usize, retention_ms: i64) -> Self {
         Self {
             ids: HashSet::new(),
             oldest_first: VecDeque::new(),
@@ -166,6 +166,10 @@ impl ExecutionIds {
             capacity,
             retention_ms,
         }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.ids.len()
     }
 }
 

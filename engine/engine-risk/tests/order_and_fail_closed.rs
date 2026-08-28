@@ -80,10 +80,17 @@ fn a_stale_reading_still_lets_a_genuine_exit_through() {
     let decided = SEC + MAX_VIEW_AGE_NS + SEC;
 
     let out = k.assess(&exit(CARRY, BUSDT, Side::Sell, 7.0, 10.0, decided), &held);
-    assert_eq!(out, RiskVerdict::Allow { qty: 5.0 }, "clamped to the position");
+    assert_eq!(
+        out,
+        RiskVerdict::Allow { qty: 5.0 },
+        "clamped to the position"
+    );
 
     assert!(matches!(
-        k.assess(&entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, decided), &held),
+        k.assess(
+            &entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, decided),
+            &held
+        ),
         RiskVerdict::Deny {
             reason: DenyReason::StaleAccountView { .. }
         }
@@ -98,11 +105,51 @@ fn a_fresh_fill_is_immediately_available_to_a_reduce_only_exit() {
     k.register_order("fresh-entry", &filled, 3.0);
     k.on_update(&OrderUpdate::Fill {
         exec_id: String::new(),
-        client_order_id: "fresh-entry".to_string(), symbol: BUSDT, side: Side::Buy,
-        qty: 3.0, px: 10.0, fee: 0.0, is_maker: false, venue_ts_ms: 0, recv_ns: 2 * SEC,
+        client_order_id: "fresh-entry".to_string(),
+        symbol: BUSDT,
+        side: Side::Buy,
+        qty: 3.0,
+        px: 10.0,
+        fee: 0.0,
+        is_maker: false,
+        venue_ts_ms: 0,
+        recv_ns: 2 * SEC,
     });
     let out = exit(CARRY, BUSDT, Side::Sell, 9.0, 10.0, 3 * SEC);
-    assert_eq!(k.assess(&out, &flat(1_000.0, SEC)), RiskVerdict::Allow { qty: 3.0 });
+    assert_eq!(
+        k.assess(&out, &flat(1_000.0, SEC)),
+        RiskVerdict::Allow { qty: 3.0 }
+    );
+}
+
+#[test]
+fn an_ambiguous_short_reprice_reserves_both_notional_and_stop_loss_extremes() {
+    let mut cfg = demo_config();
+    cfg.envelope.reference_usdt = 100.0;
+    cfg.envelope.gross_notional_multiple = 1.15;
+    cfg.envelope.max_component_gross_notional_usdt = 1_000.0;
+    cfg.envelope.max_initial_margin_usdt = 1_000.0;
+
+    let original = entry(CARRY, BUSDT, Side::Sell, 1.0, 100.0, 110.0, NOW);
+    let sibling = entry(CARRY, BUSDT, Side::Sell, 0.001, 100.0, 110.0, NOW);
+    let account = flat(1_000.0, NOW);
+
+    let mut exact = Kernel::new(cfg.clone()).expect("config");
+    RiskKernel::register_order(&mut exact, "short", &original, 1.0);
+    assert_eq!(
+        exact.assess(&sibling, &account),
+        RiskVerdict::Allow { qty: 0.001 },
+        "the exact old price fits this deliberately narrow envelope"
+    );
+
+    let mut ambiguous = Kernel::new(cfg).expect("config");
+    RiskKernel::register_order_price_range(&mut ambiguous, "short", &original, 1.0, 50.0, 100.0);
+    assert!(matches!(
+        ambiguous.assess(&sibling, &account),
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+        }
+    ));
 }
 
 fn kernel() -> Kernel {
@@ -332,6 +379,69 @@ fn an_entry_that_crosses_through_flat_refuses() {
 }
 
 #[test]
+fn opposite_siblings_reserve_the_no_cross_path_cumulatively() {
+    let mut kernel = kernel();
+    let held = view(
+        250_000.0,
+        vec![position(BUSDT, Side::Buy, 1.0, 10.0, true)],
+        NOW,
+    );
+    let first = entry(CARRY, BUSDT, Side::Sell, 0.75, 10.0, 11.0, NOW);
+    assert_eq!(
+        kernel.assess(&first, &held),
+        RiskVerdict::Allow { qty: 0.75 }
+    );
+    kernel.register_order("sell-1", &first, 0.75);
+
+    let second = entry(CARRY, BUSDT, Side::Sell, 0.75, 10.0, 11.0, NOW);
+    assert!(matches!(
+        deny_reason(kernel.assess(&second, &held)),
+        DenyReason::UnknownState { ref detail }
+            if detail.contains("crosses through flat")
+    ));
+}
+
+#[test]
+fn a_fill_from_a_flat_two_sided_pair_blocks_extra_opposite_admission() {
+    let mut kernel = kernel();
+    let account = flat(250_000.0, NOW);
+    let buy = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW);
+    assert_eq!(
+        kernel.assess(&buy, &account),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
+    kernel.register_order("buy", &buy, 1.0);
+    let sell = entry(CARRY, BUSDT, Side::Sell, 1.0, 10.0, 11.0, NOW);
+    assert_eq!(
+        kernel.assess(&sell, &account),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
+    kernel.register_order("sell", &sell, 1.0);
+    RiskKernel::on_update(
+        &mut kernel,
+        &engine_types::OrderUpdate::Fill {
+            exec_id: "fill-buy".into(),
+            client_order_id: "buy".into(),
+            symbol: BUSDT,
+            side: Side::Buy,
+            qty: 1.0,
+            px: 10.0,
+            fee: 0.0,
+            is_maker: true,
+            venue_ts_ms: 1,
+            recv_ns: NOW + 1,
+        },
+    );
+
+    let extra_sell = entry(CARRY, BUSDT, Side::Sell, 0.1, 10.0, 11.0, NOW + 2);
+    assert!(matches!(
+        deny_reason(kernel.assess(&extra_sell, &account)),
+        DenyReason::UnknownState { ref detail }
+            if detail.contains("crosses through flat")
+    ));
+}
+
+#[test]
 fn a_view_from_after_the_decision_refuses() {
     let mut kernel = kernel();
     let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW);
@@ -342,5 +452,117 @@ fn a_view_from_after_the_decision_refuses() {
     assert!(matches!(
         deny_reason(kernel.assess(&intent, &ahead)),
         DenyReason::UnknownState { .. }
+    ));
+}
+
+#[test]
+fn an_opening_reprice_is_reassessed_without_double_counting_its_old_reservation() {
+    let mut cfg = demo_config();
+    cfg.envelope.max_component_gross_notional_usdt = 150.0;
+    cfg.envelope.max_initial_margin_usdt = 75.0;
+    let mut kernel = Kernel::new(cfg).unwrap();
+    let account = flat(250_000.0, NOW);
+    let original = entry(CARRY, BUSDT, Side::Buy, 1.0, 100.0, 90.0, NOW);
+    assert_eq!(
+        kernel.assess(&original, &account),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
+    kernel.register_order("resting-1", &original, 1.0);
+
+    let safe = entry(CARRY, BUSDT, Side::Buy, 1.0, 110.0, 90.0, NOW);
+    assert_eq!(
+        kernel.assess_price_amend("resting-1", &safe, &account),
+        RiskVerdict::Allow { qty: 1.0 },
+        "the order must replace, not stack on, its old reservation"
+    );
+
+    let hostile = entry(CARRY, BUSDT, Side::Buy, 1.0, 1_000.0, 90.0, NOW);
+    assert!(matches!(
+        kernel.assess_price_amend("resting-1", &hostile, &account),
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+                | DenyReason::ComponentGrossBreached { .. }
+                | DenyReason::InitialMarginBreached { .. }
+        }
+    ));
+    assert!(matches!(
+        kernel.assess_price_amend("missing", &safe, &account),
+        RiskVerdict::Deny {
+            reason: DenyReason::UnknownState { .. }
+        }
+    ));
+}
+
+fn narrow_wide_stop_kernel() -> Kernel {
+    let mut cfg = demo_config();
+    cfg.envelope.reference_usdt = 100.0;
+    cfg.envelope.gross_notional_multiple = 1.0;
+    cfg.envelope.max_component_gross_notional_usdt = 1_000.0;
+    cfg.envelope.max_initial_margin_usdt = 1_000.0;
+    Kernel::new(cfg).unwrap()
+}
+
+#[test]
+fn a_wide_stop_keeps_its_full_loss_charge_as_pending_filled_and_restarted() {
+    let account = flat(1_000.0, NOW);
+    let wide = entry(CARRY, BUSDT, Side::Buy, 4.0, 10.0, 2.0, NOW);
+    let next = entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW + 3);
+
+    // 40 * 0.80 = 32 of the 35 allowance. The next order costs another
+    // 3.5, so a sibling or a boot-restored in-flight reservation must refuse.
+    for id in ["sibling", "boot-restored"] {
+        let mut kernel = narrow_wide_stop_kernel();
+        assert_eq!(
+            kernel.assess(&wide, &account),
+            RiskVerdict::Allow { qty: 4.0 }
+        );
+        kernel.register_order(id, &wide, 4.0);
+        assert!(matches!(
+            kernel.assess(&next, &account),
+            RiskVerdict::Deny {
+                reason: DenyReason::EnvelopeBreached { .. }
+            }
+        ));
+    }
+
+    // Once the venue snapshot catches up, the reservation and recent-fill
+    // overlay disappear. Its actual stop level must carry the same 0.80
+    // charge instead of silently collapsing to the 0.35 disaster default.
+    let mut kernel = narrow_wide_stop_kernel();
+    kernel.register_order("filled", &wide, 4.0);
+    kernel.on_update(&engine_types::OrderUpdate::Fill {
+        exec_id: "wide-fill".into(),
+        client_order_id: "filled".into(),
+        symbol: BUSDT,
+        side: Side::Buy,
+        qty: 4.0,
+        px: 10.0,
+        fee: 0.0,
+        is_maker: true,
+        venue_ts_ms: 1,
+        recv_ns: NOW + 1,
+    });
+    let mut held = position(BUSDT, Side::Buy, 4.0, 10.0, true);
+    held.stop_px = 2.0;
+    let caught_up = view(1_000.0, vec![held], NOW + 2);
+    assert!(matches!(
+        kernel.assess(&next, &caught_up),
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+        }
+    ));
+}
+
+#[test]
+fn an_unpriceable_recovered_market_reservation_fails_closed() {
+    let mut kernel = narrow_wide_stop_kernel();
+    let market = market_entry(CARRY, BUSDT, Side::Buy, 1.0, 9.0, NOW);
+    kernel.register_order("boot-market", &market, 1.0);
+    let next = entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW + 1);
+    assert!(matches!(
+        kernel.assess(&next, &flat(1_000.0, NOW)),
+        RiskVerdict::Deny {
+            reason: DenyReason::UnknownState { .. }
+        }
     ));
 }

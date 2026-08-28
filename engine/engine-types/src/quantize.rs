@@ -3,10 +3,9 @@
 use crate::orders::{InstrumentRule, Side};
 
 /// How far a count of ticks may sit from a whole number and still be that
-/// whole number. The widest dust measured across every step size these venues
-/// use is one part in 10^16, so this is four orders of magnitude of headroom —
-/// and still 10^11 times finer than the half-step that would be a real
-/// difference.
+/// whole number. This is deliberately an absolute tolerance in step-count
+/// space. A relative tolerance grows into a real fraction of a tick for large
+/// orders and can silently round risk upward.
 const DUST: f64 = 1e-12;
 
 /// A count of whole steps, with float dust shaved before it is rounded.
@@ -24,7 +23,7 @@ pub fn steps(value: f64, step: f64) -> f64 {
 /// by a step — `qty * 10^decimals` carries the same dust.
 pub fn shave_dust(count: f64) -> f64 {
     let whole = count.round();
-    if (count - whole).abs() <= DUST * whole.abs().max(1.0) {
+    if (count - whole).abs() <= DUST {
         whole
     } else {
         count
@@ -46,11 +45,33 @@ pub fn quantize_px(px: f64, side: Side, rule: &InstrumentRule) -> f64 {
 /// Round a quantity DOWN to the step (never size up), returning `None` when
 /// the result falls below the venue minimum.
 pub fn quantize_qty(qty: f64, rule: &InstrumentRule) -> Option<f64> {
-    let stepped = round_clean(
-        steps(qty, rule.qty_step).floor() * rule.qty_step,
-        rule.qty_step,
-    );
-    if stepped + 1e-12 < rule.min_qty || stepped <= 0.0 {
+    if !qty.is_finite()
+        || qty <= 0.0
+        || !rule.qty_step.is_finite()
+        || rule.qty_step <= 0.0
+        || !rule.min_qty.is_finite()
+        || rule.min_qty < 0.0
+    {
+        return None;
+    }
+
+    let mut whole_steps = steps(qty, rule.qty_step).floor();
+    if !whole_steps.is_finite() || whole_steps < 1.0 {
+        return None;
+    }
+    let mut stepped = round_clean(whole_steps * rule.qty_step, rule.qty_step);
+
+    // Dust recovery is useful, but this final boundary is intentionally
+    // stricter: no representation artifact may enlarge approved risk.
+    if stepped > qty {
+        let smaller_steps = whole_steps - 1.0;
+        if smaller_steps >= whole_steps {
+            return None;
+        }
+        whole_steps = smaller_steps;
+        stepped = round_clean(whole_steps * rule.qty_step, rule.qty_step);
+    }
+    if !stepped.is_finite() || stepped > qty || stepped + 1e-12 < rule.min_qty || stepped <= 0.0 {
         return None;
     }
     Some(stepped)
@@ -104,11 +125,17 @@ mod tests {
         assert_eq!(quantize_qty(0.0019, &RULE), Some(0.001));
         assert_eq!(quantize_qty(0.0009, &RULE), None);
         assert_eq!(quantize_qty(0.0, &RULE), None);
+        assert_eq!(quantize_qty(f64::NAN, &RULE), None);
     }
 
     #[test]
     fn float_dust_is_shaved() {
-        let rule = InstrumentRule { tick_size: 0.1, qty_step: 0.1, min_qty: 0.1, min_notional: 0.0 };
+        let rule = InstrumentRule {
+            tick_size: 0.1,
+            qty_step: 0.1,
+            min_qty: 0.1,
+            min_notional: 0.0,
+        };
         assert_eq!(quantize_px(0.30000000000000004, Side::Buy, &rule), 0.3);
     }
 
@@ -118,15 +145,29 @@ mod tests {
         // 7.000000000000001. Rounding those to whole ticks without shaving the
         // dust moves a buy a tick down and a sell a tick up — silently, on
         // every order whose price the strategy took off the book.
-        for (px, tick) in [(0.3, 0.1), (2.9, 0.1), (8.2, 0.1), (0.29, 0.01), (112.35, 0.05)] {
+        for (px, tick) in [
+            (0.3, 0.1),
+            (2.9, 0.1),
+            (8.2, 0.1),
+            (0.29, 0.01),
+            (112.35, 0.05),
+        ] {
             let rule = InstrumentRule {
                 tick_size: tick,
                 qty_step: tick,
                 min_qty: 0.0,
                 min_notional: 0.0,
             };
-            assert_eq!(quantize_px(px, Side::Buy, &rule), px, "buy at {px} on {tick}");
-            assert_eq!(quantize_px(px, Side::Sell, &rule), px, "sell at {px} on {tick}");
+            assert_eq!(
+                quantize_px(px, Side::Buy, &rule),
+                px,
+                "buy at {px} on {tick}"
+            );
+            assert_eq!(
+                quantize_px(px, Side::Sell, &rule),
+                px,
+                "sell at {px} on {tick}"
+            );
             assert_eq!(quantize_qty(px, &rule), Some(px), "size {px} on {tick}");
         }
     }
@@ -135,7 +176,12 @@ mod tests {
     fn a_price_between_ticks_still_moves_to_the_passive_one() {
         // The other half: the shave must not swallow a real difference. Half a
         // tick out is a real difference and still rounds the passive way.
-        let rule = InstrumentRule { tick_size: 0.1, qty_step: 0.1, min_qty: 0.0, min_notional: 0.0 };
+        let rule = InstrumentRule {
+            tick_size: 0.1,
+            qty_step: 0.1,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        };
         assert_eq!(quantize_px(0.35, Side::Buy, &rule), 0.3);
         assert_eq!(quantize_px(0.35, Side::Sell, &rule), 0.4);
         assert_eq!(quantize_qty(0.35, &rule), Some(0.3));
@@ -148,6 +194,24 @@ mod tests {
         // A tenth of a step out is a real difference at every scale.
         assert_eq!(shave_dust(29.1), 29.1);
         assert_eq!(shave_dust(1_000_000_029.1), 1_000_000_029.1);
+        assert_eq!(shave_dust(1_000_000_000_000.75), 1_000_000_000_000.75);
         assert_eq!(shave_dust(0.0), 0.0);
+    }
+
+    #[test]
+    fn quantity_quantization_never_exceeds_a_huge_approved_input() {
+        let rule = InstrumentRule {
+            tick_size: 1.0,
+            qty_step: 1.0,
+            min_qty: 1.0,
+            min_notional: 0.0,
+        };
+        let approved = 1_000_000_000_000.75;
+        let quantized = quantize_qty(approved, &rule).expect("quantity remains tradable");
+        assert_eq!(quantized, 1_000_000_000_000.0);
+        assert!(quantized <= approved);
+
+        let just_below_one = f64::from_bits(1.0_f64.to_bits() - 1);
+        assert_eq!(quantize_qty(just_below_one, &rule), None);
     }
 }

@@ -7,15 +7,23 @@ use super::*;
 
 struct ClosedOrderFeed;
 impl OrderFeed for ClosedOrderFeed {
-    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> { Err(FeedError::Closed) }
+    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
+        Err(FeedError::Closed)
+    }
 }
 
 #[tokio::test]
 async fn a_dead_private_feed_stops_for_supervised_recovery() {
     let (mut engine, _) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    let outcome = engine.run(&mut ScriptFeed::quotes(symbol, 0, false), &mut ClosedOrderFeed,
-        std::future::pending::<()>()).await.unwrap();
+    let outcome = engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ClosedOrderFeed,
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
     assert_eq!(outcome.stopped_by, StopReason::FeedClosed);
 }
 
@@ -34,8 +42,8 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     let kinds = appends(&h.tape);
     let want = [
         "boot",
-        "note", // boot says which mode it is in
-        "names", // and what its sleeve and symbol ids mean
+        "note",       // boot says which mode it is in
+        "names",      // and what its sleeve and symbol ids mean
         "reconciled", // and what the venue said, against the log
         "intent",
         "verdict",
@@ -54,7 +62,10 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
         &Step::Send(h.sends.borrow()[0].client_order_id.clone()),
     )
     .unwrap();
-    assert!(sent_at < barrier_at, "the record is written before the fsync");
+    assert!(
+        sent_at < barrier_at,
+        "the record is written before the fsync"
+    );
     assert!(
         barrier_at < send_at,
         "the order is on disk before it is on the wire ({barrier_at} vs {send_at})"
@@ -64,6 +75,11 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     assert!(id.starts_with("eng-"), "id shape: {id}");
     assert!(id.len() <= 36, "id is short enough for the venue: {id}");
     assert_eq!(h.risk_saw.borrow().len(), 1, "risk hears the reply");
+    let clocks = h.risk_clocks.borrow();
+    assert!(
+        clocks.len() >= 2 && clocks.last() >= clocks.first(),
+        "risk time is advanced again at the order decision, after boot: {clocks:?}"
+    );
 }
 
 #[tokio::test]
@@ -140,7 +156,16 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     let kinds = appends(&h.tape);
     assert_eq!(
         kinds,
-        ["boot", "note", "names", "reconciled", "intent", "verdict", "note", "latency_ledger"]
+        [
+            "boot",
+            "note",
+            "names",
+            "reconciled",
+            "intent",
+            "verdict",
+            "note",
+            "latency_ledger"
+        ]
     );
     assert!(h.sends.borrow().is_empty());
     let note = note_saying(&h.records, "not sent");
@@ -153,9 +178,18 @@ async fn the_newest_control_anchor_in_the_log_is_restored_at_boot() {
     // latched trip — the newest anchor in the log is the guard's memory.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let replayed = vec![
-        WalRecord::ControlAnchor { source: "risk".into(), state: "{\"old\":true}".into() },
-        WalRecord::Note { source: "engine".into(), text: "unrelated".into() },
-        WalRecord::ControlAnchor { source: "risk".into(), state: "{\"newest\":true}".into() },
+        WalRecord::ControlAnchor {
+            source: "risk".into(),
+            state: "{\"old\":true}".into(),
+        },
+        WalRecord::Note {
+            source: "engine".into(),
+            text: "unrelated".into(),
+        },
+        WalRecord::ControlAnchor {
+            source: "risk".into(),
+            state: "{\"newest\":true}".into(),
+        },
     ];
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
@@ -175,6 +209,38 @@ async fn the_newest_control_anchor_in_the_log_is_restored_at_boot() {
     .expect("boot");
     drop(engine);
     assert_eq!(*restored.borrow(), vec!["{\"newest\":true}".to_string()]);
+}
+
+#[tokio::test]
+async fn a_rejected_inner_control_anchor_refuses_boot() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let replayed = vec![WalRecord::ControlAnchor {
+        source: "risk".into(),
+        state: "{malformed-inner-state".into(),
+    }];
+    let tape = tape();
+    let (wal, _records) = MockWal::new(tape.clone());
+    let (venue, _sends) = MockVenue::new(tape, &["BTCUSDT"]);
+    let (mut risk, _seen) = MockRisk::with(allow_all());
+    risk.restore_error = Some("invalid loss-guard control anchor".into());
+
+    let result = Engine::boot(
+        &settings(),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &replayed,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(EngineError::Boot(message))
+            if message.contains("cannot restore durable risk control anchor")
+                && message.contains("invalid loss-guard")
+    ));
 }
 
 #[tokio::test]
@@ -223,6 +289,75 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
 }
 
 #[tokio::test]
+async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
+    let id = "eng-1700000000000-5";
+    let replayed = vec![
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: id.into(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 10.0,
+                kind: OrderKind::Market,
+                stop: Some(StopSpec { trigger_px: 90.0 }),
+                reduce_only: false,
+            },
+            wire_ns: 3,
+            arrival_mid: 100.0,
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "partial".into(),
+                client_order_id: id.into(),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 9.0,
+                px: 100.0,
+                fee: 0.0,
+                is_maker: true,
+                venue_ts_ms: 1,
+                recv_ns: 1,
+            },
+        },
+    ];
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let tape = tape();
+    let (wal, _records) = MockWal::new(tape.clone());
+    let (mut venue, _sends) = MockVenue::new(tape, &["BTCUSDT"]);
+    venue.working = vec![still_working(id, "BTCUSDT", 10.0)];
+    venue
+        .account_readings
+        .borrow_mut()
+        .push_back(vec![engine_types::PositionView {
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 9.0,
+            entry_px: 100.0,
+            stop_px: 90.0,
+            stop_attached: true,
+            leverage: None,
+        }]);
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let registered = risk.registered.clone();
+
+    let engine = Engine::boot(
+        &settings(),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &replayed,
+    )
+    .await
+    .expect("boot");
+    drop(engine);
+
+    assert_eq!(*registered.borrow(), vec![(id.to_string(), 1.0)]);
+}
+
+#[tokio::test]
 async fn symbol_ids_survive_a_restart_in_the_log_order() {
     // Ids are interning positions, and every join boot makes against the
     // replayed records — whose fills are whose, what exposure the log
@@ -234,12 +369,7 @@ async fn symbol_ids_survive_a_restart_in_the_log_order() {
         symbols: vec!["ETHUSDT".into(), "HOMEUSDT".into(), "BTCUSDT".into()],
     }];
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (engine, _h) = build(allow_all(),
-        vec![Box::new(buyer)],
-        &["BTCUSDT"],
-        &replayed,
-    )
-    .await;
+    let (engine, _h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &replayed).await;
     let table = &engine.market().table;
     assert_eq!(table.get("ETHUSDT"), Some(SymbolId(0)));
     assert_eq!(
@@ -253,7 +383,6 @@ async fn symbol_ids_survive_a_restart_in_the_log_order() {
         "the config's own symbol keeps the log's id, not position zero"
     );
 }
-
 
 #[tokio::test]
 async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
@@ -331,7 +460,10 @@ fn minting_skips_an_id_the_log_already_knows() {
 async fn a_changed_control_anchor_is_written_and_made_durable() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
-    engine.risk.anchor_script.push_back("{\"day\":1}".to_string());
+    engine
+        .risk
+        .anchor_script
+        .push_back("{\"day\":1}".to_string());
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -346,7 +478,10 @@ async fn a_changed_control_anchor_is_written_and_made_durable() {
     let anchor_at = records.iter().position(
         |r| matches!(r, WalRecord::ControlAnchor { state, .. } if state == "{\"day\":1}"),
     );
-    assert!(anchor_at.is_some(), "the changed anchor never reached the log");
+    assert!(
+        anchor_at.is_some(),
+        "the changed anchor never reached the log"
+    );
     let tape = h.tape.borrow();
     let write = tape
         .iter()
@@ -424,10 +559,16 @@ impl Strategy for BurstEmitter {
                     stop: if exit {
                         None
                     } else {
-                        Some(StopSpec { trigger_px: quote.bid_px * 0.99 })
+                        Some(StopSpec {
+                            trigger_px: quote.bid_px * 0.99,
+                        })
                     },
                     reduce_only: exit,
-                    tag: if exit { "burst-exit".into() } else { "burst-entry".into() },
+                    tag: if exit {
+                        "burst-exit".into()
+                    } else {
+                        "burst-entry".into()
+                    },
                     decided_ns: ctx.now_ns(),
                     work: None,
                     leverage: None,
@@ -438,11 +579,456 @@ impl Strategy for BurstEmitter {
 }
 
 #[tokio::test]
+async fn sibling_orders_share_one_barrier_before_the_first_send() {
+    let burst = BurstEmitter {
+        symbol: "BTCUSDT".into(),
+        entries: 3,
+        exits: 0,
+        fired: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(h.sends.borrow().len(), 3);
+    let tape = h.tape.borrow();
+    let sent: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| {
+            matches!(step, Step::Append(kind) if kind == "order_sent").then_some(at)
+        })
+        .collect();
+    let sends: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| matches!(step, Step::Send(_)).then_some(at))
+        .collect();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sends.len(), 3);
+    assert!(
+        sent[2] < sends[0],
+        "every sibling is journaled before any send"
+    );
+    assert_eq!(
+        tape[sent[0]..sends[0]]
+            .iter()
+            .filter(|step| matches!(step, Step::Barrier))
+            .count(),
+        1,
+        "one durability barrier covers the batch"
+    );
+}
+
+struct StopSequence {
+    symbol: String,
+    stops: Vec<f64>,
+    fired: bool,
+}
+
+struct StopPerWake {
+    symbol: String,
+    stops: VecDeque<f64>,
+}
+
+impl Strategy for StopPerWake {
+    fn name(&self) -> &str {
+        "stop-per-wake"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event else {
+            return;
+        };
+        let Some(trigger_px) = self.stops.pop_front() else {
+            return;
+        };
+        ctx.place(Intent {
+            strategy: StrategyId(0),
+            symbol: *symbol,
+            side: Side::Buy,
+            qty: 0.1,
+            kind: OrderKind::Market,
+            stop: Some(StopSpec { trigger_px }),
+            reduce_only: false,
+            tag: "stop-per-wake".into(),
+            decided_ns: ctx.now_ns(),
+            work: None,
+            leverage: None,
+        });
+    }
+}
+
+impl Strategy for StopSequence {
+    fn name(&self) -> &str {
+        "stop-sequence"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event else {
+            return;
+        };
+        if self.fired {
+            return;
+        }
+        self.fired = true;
+        for (index, trigger_px) in self.stops.iter().copied().enumerate() {
+            ctx.place(Intent {
+                strategy: StrategyId(0),
+                symbol: *symbol,
+                side: Side::Buy,
+                qty: 0.1,
+                kind: OrderKind::Market,
+                stop: Some(StopSpec { trigger_px }),
+                reduce_only: false,
+                tag: format!("stop-{index}"),
+                decided_ns: ctx.now_ns(),
+                work: None,
+                leverage: None,
+            });
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_same_side_sibling_cannot_loosen_the_whole_position_stop() {
+    let strategy = StopSequence {
+        symbol: "BTCUSDT".into(),
+        stops: vec![95.0, 90.0],
+        fired: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(strategy)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.borrow();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].stop, Some(StopSpec { trigger_px: 95.0 }));
+    assert!(note_saying(&h.records, "would loosen").contains("whole Buy position"));
+}
+
+#[tokio::test]
+async fn same_side_siblings_may_tighten_the_whole_position_stop() {
+    let strategy = StopSequence {
+        symbol: "BTCUSDT".into(),
+        stops: vec![90.0, 95.0],
+        fired: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(strategy)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.borrow();
+    assert_eq!(sends.len(), 2);
+    assert_eq!(sends[0].stop, Some(StopSpec { trigger_px: 90.0 }));
+    assert_eq!(sends[1].stop, Some(StopSpec { trigger_px: 95.0 }));
+}
+
+#[tokio::test]
+async fn a_prior_wakes_unfilled_order_also_prevents_stop_loosening() {
+    let strategy = StopPerWake {
+        symbol: "BTCUSDT".into(),
+        stops: VecDeque::from([95.0, 90.0]),
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(strategy)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 2, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.borrow();
+    assert_eq!(sends.len(), 1, "the first order is still in flight");
+    assert_eq!(sends[0].stop, Some(StopSpec { trigger_px: 95.0 }));
+    assert!(note_saying(&h.records, "would loosen").contains("whole Buy position"));
+}
+
+#[tokio::test]
+async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
+    let id = "eng-protected-1";
+    let fill_ms = clock::wall_ms();
+    let replayed = vec![
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: id.into(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 1.0,
+                kind: OrderKind::Market,
+                stop: Some(StopSpec { trigger_px: 95.0 }),
+                reduce_only: false,
+            },
+            wire_ns: 1,
+            arrival_mid: 100.0,
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "protected-fill".into(),
+                client_order_id: id.into(),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 1.0,
+                px: 100.0,
+                fee: 0.0,
+                is_maker: true,
+                venue_ts_ms: fill_ms,
+                recv_ns: 1,
+            },
+        },
+    ];
+    let protected = engine_types::PositionView {
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 1.0,
+        entry_px: 100.0,
+        stop_px: 95.0,
+        stop_attached: true,
+        leverage: None,
+    };
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (mut engine, h) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &replayed,
+        Vec::new(),
+        vec![protected.clone()],
+    )
+    .await;
+    let mut loosened = protected;
+    loosened.stop_px = 90.0;
+    h.account_readings.borrow_mut().push_back(vec![loosened]);
+    let stops = h.stops.clone();
+    let shutdown = async move {
+        loop {
+            if !stops.borrow().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 2 }]),
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*h.stops.borrow(), vec![(SymbolId(0), 95.0)]);
+    assert!(h.records.borrow().iter().any(|record| matches!(
+        record,
+        WalRecord::Note { source, text }
+            if source == "stop-supervisor" && text.contains("95")
+    )));
+}
+
+#[tokio::test]
+async fn oversized_sibling_bursts_are_revalidated_after_each_bounded_send() {
+    let burst = BurstEmitter {
+        symbol: "BTCUSDT".into(),
+        entries: 11,
+        exits: 0,
+        fired: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let tape = h.tape.borrow();
+    let sent: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| {
+            matches!(step, Step::Append(kind) if kind == "order_sent").then_some(at)
+        })
+        .collect();
+    let sends: Vec<usize> = tape
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| matches!(step, Step::Send(_)).then_some(at))
+        .collect();
+    assert_eq!(sent.len(), 11);
+    assert_eq!(sends.len(), 11);
+    assert!(sent[9] < sends[0], "the first ten share one reservation");
+    assert!(
+        sends[9] < sent[10],
+        "the eleventh order was not revalidated after the preceding bounded send"
+    );
+    assert_eq!(
+        tape.iter()
+            .filter(|step| matches!(step, Step::Barrier))
+            .count(),
+        2,
+        "each bounded group gets one durability barrier"
+    );
+}
+
+struct ConflictingLeverageSiblings {
+    symbol: String,
+    fired: bool,
+}
+
+impl Strategy for ConflictingLeverageSiblings {
+    fn name(&self) -> &str {
+        "leverage-conflict"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        let EngineEvent::Market(MarketEvent::Quote { symbol, quote }) = event else {
+            return;
+        };
+        if self.fired {
+            return;
+        }
+        self.fired = true;
+        for (index, leverage) in [3.0, 5.0].into_iter().enumerate() {
+            ctx.place(Intent {
+                strategy: StrategyId(0),
+                symbol: *symbol,
+                side: Side::Buy,
+                qty: 0.01,
+                kind: OrderKind::Market,
+                stop: Some(StopSpec {
+                    trigger_px: quote.bid_px * 0.99,
+                }),
+                reduce_only: false,
+                tag: format!("leverage-{index}"),
+                decided_ns: ctx.now_ns(),
+                work: None,
+                leverage: Some(leverage),
+            });
+        }
+        // Risk-reducing work does not depend on the entry leverage and must
+        // not be stranded behind the conflicting siblings.
+        ctx.place(Intent {
+            strategy: StrategyId(0),
+            symbol: *symbol,
+            side: Side::Sell,
+            qty: 0.01,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            tag: "exit".into(),
+            decided_ns: ctx.now_ns(),
+            work: None,
+            leverage: None,
+        });
+    }
+}
+
+#[tokio::test]
+async fn same_symbol_siblings_with_conflicting_leverage_are_refused_before_mutation() {
+    let strategy = ConflictingLeverageSiblings {
+        symbol: "BTCUSDT".into(),
+        fired: false,
+    };
+    let (mut engine, h) = build(allow_all(), vec![Box::new(strategy)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        h.leverages.borrow().is_empty(),
+        "a rejected leverage epoch still mutated the venue"
+    );
+    let sends = h.sends.borrow();
+    assert_eq!(sends.len(), 1, "only the risk-reducing sibling may flow");
+    assert!(sends[0].reduce_only);
+    assert_eq!(
+        h.records
+            .borrow()
+            .iter()
+            .filter(|record| matches!(record, WalRecord::Intent { .. }))
+            .count(),
+        3,
+        "every sibling remains auditable"
+    );
+    assert_eq!(
+        h.records
+            .borrow()
+            .iter()
+            .filter(
+                |record| matches!(record, WalRecord::Note { source, .. } if source == "leverage")
+            )
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn a_flooded_wake_drops_entries_but_never_exits() {
     // The cap exists so a runaway strategy cannot wedge the loop — but a
     // de-risking order queued behind the flood must still get out, or the
     // strategy is stranded holding a position it believes it exited.
-    let burst = BurstEmitter { symbol: "BTCUSDT".into(), entries: 68, exits: 2, fired: false };
+    let burst = BurstEmitter {
+        symbol: "BTCUSDT".into(),
+        entries: 68,
+        exits: 2,
+        fired: false,
+    };
     let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
@@ -510,7 +1096,10 @@ async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
     // The venue rejects a reduce-only order carrying stop fields, and the
     // log must record what was actually sent — so the stop comes off at
     // request build, not just at the venue boundary.
-    let exiter = SloppyExiter { symbol: "BTCUSDT".into(), sent: false };
+    let exiter = SloppyExiter {
+        symbol: "BTCUSDT".into(),
+        sent: false,
+    };
     let (mut engine, h) = build(allow_all(), vec![Box::new(exiter)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
@@ -558,12 +1147,100 @@ async fn an_intent_with_an_unreal_number_never_reaches_the_log() {
     );
     assert!(h.sends.borrow().is_empty(), "nothing reached the venue");
     let note = note_saying(&h.records, "not a finite");
-    assert!(note.contains("buy"), "the note names the intent's tag: {note}");
+    assert!(
+        note.contains("buy"),
+        "the note names the intent's tag: {note}"
+    );
     for record in h.records.borrow().iter() {
         let bytes = serde_json::to_vec(record).expect("serializable");
-        let _: WalRecord = serde_json::from_slice(&bytes)
-            .expect("every log record must survive a read-back");
+        let _: WalRecord =
+            serde_json::from_slice(&bytes).expect("every log record must survive a read-back");
     }
+}
+
+#[test]
+fn invalid_kernel_verdicts_are_finite_fail_closed_records() {
+    let verdicts = [
+        RiskVerdict::Allow { qty: f64::NAN },
+        RiskVerdict::Allow { qty: 2.0 },
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached {
+                worst_case_loss_usdt: f64::INFINITY,
+                allowance_usdt: 1.0,
+            },
+        },
+    ];
+    for raw in verdicts {
+        let verdict = durable_risk_verdict(raw, 1.0, false);
+        assert!(matches!(
+            verdict,
+            RiskVerdict::Deny {
+                reason: DenyReason::UnknownState { .. }
+            }
+        ));
+        let record = WalRecord::Verdict {
+            client_order_id: None,
+            verdict,
+        };
+        let bytes = serde_json::to_vec(&record).expect("serializable");
+        let _: WalRecord = serde_json::from_slice(&bytes).expect("sanitized verdict must replay");
+    }
+}
+
+#[test]
+fn kernel_verdict_cannot_enlarge_a_request_by_even_one_ulp() {
+    let requested = 1.0_f64;
+    let one_ulp_larger = f64::from_bits(requested.to_bits() + 1);
+    let verdict = durable_risk_verdict(
+        RiskVerdict::Allow {
+            qty: one_ulp_larger,
+        },
+        requested,
+        false,
+    );
+    assert!(matches!(
+        verdict,
+        RiskVerdict::Deny {
+            reason: DenyReason::UnknownState { .. }
+        }
+    ));
+
+    // The former relative tolerance admitted this one-unit enlargement.
+    let large_requested = 1_000_000_000_000.0_f64;
+    let verdict = durable_risk_verdict(
+        RiskVerdict::Allow {
+            qty: large_requested + 1.0,
+        },
+        large_requested,
+        false,
+    );
+    assert!(matches!(
+        verdict,
+        RiskVerdict::Deny {
+            reason: DenyReason::UnknownState { .. }
+        }
+    ));
+}
+
+#[test]
+fn amend_verdict_quantity_must_match_exactly() {
+    let requested = 1.0_f64;
+    for qty in [
+        f64::from_bits(requested.to_bits() - 1),
+        f64::from_bits(requested.to_bits() + 1),
+    ] {
+        let verdict = durable_risk_verdict(RiskVerdict::Allow { qty }, requested, true);
+        assert!(matches!(
+            verdict,
+            RiskVerdict::Deny {
+                reason: DenyReason::UnknownState { .. }
+            }
+        ));
+    }
+    assert_eq!(
+        durable_risk_verdict(RiskVerdict::Allow { qty: requested }, requested, true,),
+        RiskVerdict::Allow { qty: requested }
+    );
 }
 
 #[tokio::test]
@@ -632,8 +1309,15 @@ async fn a_send_with_no_answer_leaves_the_order_in_flight() {
         .unwrap();
 
     assert_eq!(sends.borrow().len(), 1, "it did go out");
-    assert_eq!(engine.in_flight_ids().len(), 1, "and we do not know its fate");
-    assert!(risk_saw.borrow().is_empty(), "no reply, so nothing to tell risk");
+    assert_eq!(
+        engine.in_flight_ids().len(),
+        1,
+        "and we do not know its fate"
+    );
+    assert!(
+        risk_saw.borrow().is_empty(),
+        "no reply, so nothing to tell risk"
+    );
     assert!(note_saying(&records, "no answer").contains(&sends.borrow()[0].client_order_id));
 }
 
@@ -724,7 +1408,8 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
     ];
 
     let (buyer, heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (mut engine, h) = build_with_venue_orders(allow_all(),
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &replayed,
@@ -778,7 +1463,8 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
 async fn timers_fire_for_the_strategy_that_armed_them() {
     let (one, fired_one) = Ticker::new("BTCUSDT", 11, 3_000_000);
     let (two, fired_two) = Ticker::new("ETHUSDT", 22, 5_000_000);
-    let (mut engine, _h) = build(allow_all(),
+    let (mut engine, _h) = build(
+        allow_all(),
         vec![Box::new(one), Box::new(two)],
         &["BTCUSDT", "ETHUSDT"],
         &[],
@@ -829,7 +1515,8 @@ async fn timers_fire_for_the_strategy_that_armed_them() {
 async fn a_market_message_only_reaches_the_strategies_that_asked_for_it() {
     let (btc_buyer, btc_heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (eth_buyer, eth_heard) = Buyer::new("ETHUSDT", 1, 0.01);
-    let (mut engine, h) = build(allow_all(),
+    let (mut engine, h) = build(
+        allow_all(),
         vec![Box::new(btc_buyer), Box::new(eth_buyer)],
         &["BTCUSDT", "ETHUSDT"],
         &[],
@@ -848,7 +1535,10 @@ async fn a_market_message_only_reaches_the_strategies_that_asked_for_it() {
     assert_eq!(h.sends.borrow().len(), 1, "one quote, one order");
     assert_eq!(h.sends.borrow()[0].strategy, StrategyId(0));
     assert_eq!(btc_heard.borrow().len(), 1, "its owner hears the reply");
-    assert!(eth_heard.borrow().is_empty(), "the other strategy hears nothing");
+    assert!(
+        eth_heard.borrow().is_empty(),
+        "the other strategy hears nothing"
+    );
 }
 
 #[tokio::test]
@@ -860,9 +1550,17 @@ async fn the_group_flush_tick_pushes_the_log_out() {
     let (risk, _seen) = MockRisk::with(allow_all());
     let mut small_flush = settings();
     small_flush.group_flush_ms = 5;
-    let mut engine = Engine::boot(&small_flush, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
-        .await
-        .unwrap();
+    let mut engine = Engine::boot(
+        &small_flush,
+        "0",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &[],
+    )
+    .await
+    .unwrap();
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(

@@ -8,14 +8,12 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use engine_marketdata::MarketFeeds;
-use engine_risk::{
-    EnvelopeConfig, Kernel, KernelConfig,
-};
+use engine_risk::{EnvelopeConfig, Kernel, KernelConfig, LossGuardConfig};
 use engine_strategies::build_strategy;
 use engine_types::{
     AccountIdentity, Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
 };
-use engine_venue::{OrderFeeds, Venue, VenueName};
+use engine_venue::{InventoryProbe, OrderFeeds, Venue, VenueName};
 use engine_wal::WalWriter;
 use serde::Deserialize;
 
@@ -85,7 +83,10 @@ pub fn boot_subscriptions(symbols: &[Symbol], wanted: &[Subscription]) -> Vec<Su
             }
         }
         if !named {
-            subs.push(Subscription { symbol: name.clone(), feed: engine_types::Feed::Quote });
+            subs.push(Subscription {
+                symbol: name.clone(),
+                feed: engine_types::Feed::Quote,
+            });
         }
     }
     // `symbol_order` already appends every wanted name, so nothing should
@@ -133,6 +134,13 @@ pub fn venue(name: VenueName, symbols: Vec<Symbol>) -> Result<Venue, VenueError>
     Venue::build(name, symbols)
 }
 
+/// A credential-wide read capability with no order or account mutation API.
+/// Unlike a trading gateway, this may inspect a disarmed funded account so a
+/// generation-changing rollout can prove old exposure absent.
+pub fn inventory_probe(name: VenueName) -> Result<InventoryProbe, VenueError> {
+    InventoryProbe::build(name)
+}
+
 /// Every target book this engine watches, each bound to the one strategy that
 /// named its path. No paths means no watcher runs and no book ever reaches a
 /// strategy — *no decision*, which is not the same as an empty book.
@@ -178,11 +186,13 @@ pub fn target_books(
 
     if let Some(engine_path) = settings.target_book_path.as_ref() {
         if !paths.is_empty() {
-            return Err("[engine] target_book_path and a strategy's own book_path are two \
+            return Err(
+                "[engine] target_book_path and a strategy's own book_path are two \
                         ways of saying the same thing; keep the per-strategy one, which \
                         says whose book it is"
-                .to_string()
-                .into());
+                    .to_string()
+                    .into(),
+            );
         }
         match followers.as_slice() {
             [] => {
@@ -226,10 +236,7 @@ pub fn target_books(
                 path = %path.display(),
                 "watching for a target book"
             );
-            (
-                StrategyId(index as u16),
-                TargetBookWatcher::start(path),
-            )
+            (StrategyId(index as u16), TargetBookWatcher::start(path))
         })
         .collect();
     Ok(TargetBooks::new(watchers))
@@ -270,6 +277,10 @@ pub fn trades(settings: &EngineSection) -> Option<Trades> {
 #[serde(deny_unknown_fields)]
 struct RiskSection {
     max_account_view_age_s: u64,
+    /// Optional absolute UTC-day loss ceiling. Profiles carry the same field
+    /// in `account_risk`; direct risk blocks must be able to express it too.
+    #[serde(default)]
+    max_daily_loss_usdt: Option<f64>,
     leverage: f64,
     #[serde(default = "default_qty_tolerance")]
     qty_tolerance: f64,
@@ -326,6 +337,9 @@ pub fn risk(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
         .map_err(|e| format!("the [risk] block is wrong: {e}"))?;
     let cfg = KernelConfig {
         max_account_view_age_ns: parsed.max_account_view_age_s.saturating_mul(1_000_000_000),
+        loss_guard: LossGuardConfig {
+            max_daily_loss_usdt: parsed.max_daily_loss_usdt,
+        },
         envelope: EnvelopeConfig {
             tracks_equity: parsed.envelope.tracks_equity,
             reference_usdt: parsed.envelope.reference_usdt,
@@ -471,7 +485,12 @@ mod tests {
         "#
         ))
         .expect("test config parses");
-        StrategyConfig { name: "touch_sniper".into(), sleeve: None, book_path: None, params }
+        StrategyConfig {
+            name: "touch_sniper".into(),
+            sleeve: None,
+            book_path: None,
+            params,
+        }
     }
 
     fn quoter(symbol: &str) -> StrategyConfig {
@@ -486,7 +505,12 @@ mod tests {
         "#
         ))
         .expect("test config parses");
-        StrategyConfig { name: "quoter".into(), sleeve: None, book_path: None, params }
+        StrategyConfig {
+            name: "quoter".into(),
+            sleeve: None,
+            book_path: None,
+            params,
+        }
     }
 
     /// The shipped engine.toml `[risk]` block.
@@ -688,7 +712,7 @@ disaster_stop_fraction = 0.35
             leverage_authority: crate::config::LeverageAuthority::default(),
             target_book_path: engine_level_book.map(PathBuf::from),
             heartbeat_path: None,
-        trades_path: None,
+            trades_path: None,
         }
     }
 
@@ -870,21 +894,24 @@ mod deployed_templates {
             .and_then(|p| p.parent())
             .expect("the repo root is two above this crate");
         let text = std::fs::read_to_string(root.join("deploy").join(template))
-            .unwrap_or_else(|e| panic!("{template} is a shipped artifact and must be readable: {e}"))
+            .unwrap_or_else(|e| {
+                panic!("{template} is a shipped artifact and must be readable: {e}")
+            })
             .replace(
                 &format!("/opt/liquidity-migration/configs/{profile}"),
-                root.join("configs").join(profile).to_str().expect("a utf-8 path"),
+                root.join("configs")
+                    .join(profile)
+                    .to_str()
+                    .expect("a utf-8 path"),
             );
-        toml::from_str::<Config>(&text)
-            .unwrap_or_else(|e| panic!("{template} must parse: {e}"))
+        toml::from_str::<Config>(&text).unwrap_or_else(|e| panic!("{template} must parse: {e}"))
     }
 
     fn assemble(template: &str, profile: &str) -> Config {
         let config = config_from(template, profile);
         let built = strategies(&config.strategies)
             .unwrap_or_else(|e| panic!("{template} must build its strategies: {e}"));
-        risk(&config.risk)
-            .unwrap_or_else(|e| panic!("{template} must build its risk kernel: {e}"));
+        risk(&config.risk).unwrap_or_else(|e| panic!("{template} must build its risk kernel: {e}"));
         target_books(&config.engine, &config.strategies, &built)
             .unwrap_or_else(|e| panic!("{template} must wire its books: {e}"));
         config

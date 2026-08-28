@@ -41,6 +41,7 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 500.0);
     assert_eq!(cfg.envelope.max_initial_margin_usdt, 100.0);
     assert_eq!(cfg.leverage, 5.0);
+    assert_eq!(cfg.loss_guard.max_daily_loss_usdt, Some(10.0));
     assert_eq!(cfg.qty_tolerance, 1e-12);
 
     // 500 of gross against a 100 reference: exactly what leverage 5 funds.
@@ -64,6 +65,7 @@ fn the_committed_demo_profile_loads_pinned() {
     // No capital_reference block: the reference is pinned and never follows
     // the wallet.
     assert!(!cfg.envelope.tracks_equity);
+    assert_eq!(cfg.loss_guard.max_daily_loss_usdt, None);
 }
 
 #[test]
@@ -80,18 +82,15 @@ fn a_cap_the_engine_does_not_read_is_refused_rather_than_ignored() {
 }
 
 #[test]
-fn the_retired_daily_loss_ceiling_is_refused_rather_than_ignored() {
-    // The daily loss halt was removed 2026-08-20 on the owner's instruction.
-    // Every funded host had `max_daily_loss_usdt` in its installed profile at
-    // that moment, so the dangerous outcome is not refusal — it is an engine
-    // that reads the key, ignores it, and lets the operator believe a ceiling
-    // is still in force. Refusal names the key and stops the start.
-    let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
-    doc["account_risk"]["max_daily_loss_usdt"] = serde_json::json!(25.0);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs())
-        .expect_err("a retired ceiling was accepted");
-    assert!(err.to_string().contains("max_daily_loss_usdt"), "{err}");
+fn the_daily_loss_ceiling_is_parsed_and_validated() {
+    for value in [0.0, -1.0] {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        doc["account_risk"]["max_daily_loss_usdt"] = serde_json::json!(value);
+        let err = kernel_config_from_profile(&doc.to_string(), &inputs())
+            .expect_err("an invalid daily loss ceiling was accepted");
+        assert!(err.to_string().contains("max_daily_loss_usdt"), "{err}");
+    }
 }
 
 #[test]
@@ -127,7 +126,10 @@ fn some_other_json_document_is_not_an_operational_profile() {
         &inputs(),
     )
     .unwrap_err();
-    assert!(err.to_string().contains("not an operational profile"), "{err}");
+    assert!(
+        err.to_string().contains("not an operational profile"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -140,7 +142,8 @@ fn a_profile_whose_caps_do_not_nest_is_refused_at_load() {
     doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(1_000.0);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(
-        err.to_string().contains("max_component_gross_notional_usdt"),
+        err.to_string()
+            .contains("max_component_gross_notional_usdt"),
         "{err}"
     );
 }
@@ -155,7 +158,10 @@ fn a_profile_still_carrying_the_retired_symbol_cap_is_refused() {
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
     doc["account_risk"]["max_symbol_notional_usdt"] = serde_json::json!(50.0);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
-    assert!(err.to_string().contains("max_symbol_notional_usdt"), "{err}");
+    assert!(
+        err.to_string().contains("max_symbol_notional_usdt"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -164,8 +170,8 @@ fn the_two_profiles_are_not_accidentally_the_same_shape() {
     // change ever made them load identically, the funded account would be
     // running under demo limits, and every other assertion here would still
     // pass.
-    let demo = kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs())
-        .unwrap();
+    let demo =
+        kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs()).unwrap();
     let main =
         kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs()).unwrap();
     assert_ne!(demo, main);

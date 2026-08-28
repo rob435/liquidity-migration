@@ -97,16 +97,26 @@ cannot prove sleeve ownership.
 
 ## Rust risk and durability
 
-Risk admission lives only in `engine-risk`. The engine enforces the
-equity-anchored envelope, gross and margin caps, leverage and instrument rules,
-book age, account identity, working-order ownership, and venue-native stop
-discipline. Reduction-only work is never blocked by a growth cap.
+Risk admission lives only in `engine-risk`. The engine enforces the durable
+daily-loss halt, equity-anchored envelope, gross and margin caps, leverage and
+instrument rules, book age, account identity, working-order ownership, and
+venue-native stop discipline. Reduction-only work is never blocked by a growth
+cap or the daily-loss trip.
 
-Every order command and execution transition is written to the Rust WAL. A
-provider send happens only after the required durable state exists. Fills carry
-venue execution IDs and are idempotent by that identity. Private and public
-transport phases have explicit time and size bounds; malformed or stale input
-fails closed to no new exposure.
+Every order command and execution transition is written to the Rust WAL. For a
+contiguous group of sibling placements, the engine validates and reserves risk
+in deterministic order—including cumulative opposite-side pending quantity—
+appends every accepted `OrderSent` record, and crosses one durability barrier
+before any request leaves. The venue adapter then owns wire scheduling: Bybit
+overlaps distinct-symbol chains over a ten-connection warm pool and preserves
+same-symbol order, while the default preserves serial order for nonce-sensitive
+venues. A whole-position stop is tied to the fill that grows or crosses the
+position and can only stay equal or tighten on same-side growth. Cancels,
+amends, and stop changes
+flush a pending placement group first, so action order is preserved. Fills
+carry venue execution IDs and are idempotent by that identity. Private and
+public transport phases have explicit time and size bounds; malformed or stale
+input fails closed to no new exposure.
 
 ## Research boundary
 
@@ -127,7 +137,38 @@ cd engine && cargo test --workspace --all-targets
 cd engine && cargo run --release -- bench
 ```
 
-An execution-generation deployment remains blocked until the venue adapter can
-enumerate every raw position and order for the exact venue account, including
-unknown or delisted symbols. A configured-symbol scan is not a flat proof and
-must never be used to authorize state replacement.
+Generation-changing rollouts freeze the checkout- and digest-bound outgoing
+installed engine before target prefetch. That immutable snapshot performs the
+pre-stop and owners-stopped inventory checks. After quiescent installation, the
+final boundary requires both the outgoing snapshot and the digest-bound
+installed target; the incoming checkout and build candidate never attest.
+Mainnet verifiers receive only a separately snapshotted globally read-only
+attestor key, never the execution key.
+
+Activation is a two-authority commit protocol. Before the candidate topology
+starts, a root watchdog maintains a six-second tmpfs permit bound to the boot,
+rollout PID/start ticks, release commit, and five installed artifact hashes.
+It pins one inode and renews under an exclusive lock; launchers use shared locks,
+and an inode/path mismatch revokes without recreating a deleted permit. Trusted
+launchers also reject writable critical checkout ancestry or Git metadata before
+they trust the commit; deploy makes the same check before using Git. They
+supervise their children and poll that ten-field
+permit every two seconds. Only after the complete topology is enabled, active,
+verified, and synced does
+rollout atomically install the persistent six-field completion receipt and then
+retire the watchdog and permit. Thus process death or power loss before the
+receipt yields a stopped generation; receipt-permit-receipt reads make the
+handoff linearizable. After it, reboot authorization depends only on the
+digest-bound receipt and not on ephemeral `/run` state.
+
+Bybit discovers every advertised linear settlement coin, retains USDT and USDC,
+and strictly paginates linear, inverse, and option positions; unified-wallet
+assets and liabilities; and linear, inverse, option, and spot orders. Mainnet
+also reads spread orders, both RFQ quote roles and inquiries, active
+venue-native TWAP, chase, iceberg, and POV strategies, and cross-account asset
+and bot categories. Each verifier requires two full scans with stable scope.
+These are several venue reads, not an atomic snapshot, and Bybit cannot
+enumerate every bot instance; the funded UID therefore also requires a
+dedicated-account operator acknowledgement. Unknown and delisted rows stay
+visible by name. A configured-symbol scan is not a flat proof and never
+authorizes state replacement.

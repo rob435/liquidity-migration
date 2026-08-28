@@ -37,6 +37,13 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     );
     tracing::warn!("orders will be sent, and the risk kernel gates every one of them");
 
+    // Compilation and request-shape tests are not production evidence. Keep
+    // this before the log claim and before any credential or socket is opened;
+    // testnet realms remain runnable specifically so they can earn canary
+    // evidence without real capital.
+    let chosen = assembly::venue_name(&settings.venue)?;
+    chosen.require_engine_run_ready()?;
+
     // Building a strategy is reading its config block: no clock, no socket,
     // no decision. Nothing below has happened yet when the lease is taken.
     let strategies: Vec<Box<dyn Strategy>> = assembly::strategies(&loaded.config.strategies)?;
@@ -71,7 +78,6 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // The switch, turned once. All three of the venue's parts are built from
     // this one value, so a config cannot half-switch — send orders to one
     // venue and price them off another's book.
-    let chosen = assembly::venue_name(&settings.venue)?;
     let mut venue = assembly::venue(chosen, symbols.clone())?;
 
     // Held for the whole run. Dropped at the end of this function, and by the
@@ -81,6 +87,13 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let mut market_feed =
         assembly::market_feed(chosen, &assembly::boot_subscriptions(&symbols, &wanted));
     let mut order_feed = assembly::order_feed(chosen, symbols)?;
+
+    // Subscribe before any account/history snapshot. Once this readiness
+    // watermark is consumed, boot recovery covers everything through its
+    // REST endpoint and the live feed buffers everything after it. No order
+    // can be admitted while the private stream is still making its first
+    // dial or repeatedly failing authentication.
+    order_feed.await_ready().await?;
 
     let mut engine = Engine::boot_as(
         &settings,
@@ -101,7 +114,10 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     if let Some(heartbeat) = assembly::heartbeat(
         &settings,
         claimed.account.clone(),
-        claimed.lease.as_ref().map(|lease| lease.path().to_path_buf()),
+        claimed
+            .lease
+            .as_ref()
+            .map(|lease| lease.path().to_path_buf()),
     ) {
         engine.write_heartbeat(heartbeat);
     }
@@ -145,7 +161,10 @@ async fn single_writer(venue: &mut Venue) -> Result<Claim, Box<dyn Error>> {
                 lease = %lease.path().display(),
                 "this engine is the one writer for this account"
             );
-            Ok(Claim { lease: Some(lease), account: Some(who) })
+            Ok(Claim {
+                lease: Some(lease),
+                account: Some(who),
+            })
         }
         Err(LeaseError::AlreadyHeld { path, holder }) => {
             tracing::error!(

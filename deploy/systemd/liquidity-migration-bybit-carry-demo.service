@@ -14,7 +14,7 @@ EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/producer-demo.env
 EnvironmentFile=/etc/liquidity-migration/engine.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 Environment=DATA_ROOT=data/bybit-carry-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=EXECUTION_ENVIRONMENT=demo
@@ -51,8 +51,9 @@ Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-carry-demo.service main
+ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-carry-demo.service main
 Restart=always
+RestartPreventExitStatus=78
 RestartSec=30
 KillMode=control-group
 TimeoutStopSec=90

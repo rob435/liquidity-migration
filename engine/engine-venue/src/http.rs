@@ -58,7 +58,10 @@ impl HttpClient {
         // does not cost a fresh TLS handshake on the next order.
         let client = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(Duration::from_secs(600))
-            .pool_max_idle_per_host(8)
+            // A full sibling group can contain ten independent symbols. Keep
+            // all ten warmed HTTP/1.1 sockets plus headroom for account reads;
+            // evicting two here forces fresh TLS handshakes on the next burst.
+            .pool_max_idle_per_host(16)
             .build(https);
 
         Self {
@@ -131,12 +134,10 @@ impl HttpClient {
         };
         match tokio::time::timeout(self.request_timeout, exchange).await {
             Ok(result) => result,
-            Err(_) => {
-                Err(VenueError::Transport(format!(
-                    "request did not complete within {:?}",
-                    self.request_timeout
-                )))
-            }
+            Err(_) => Err(VenueError::Transport(format!(
+                "request did not complete within {:?}",
+                self.request_timeout
+            ))),
         }
     }
 }
@@ -235,7 +236,9 @@ mod tests {
         let mut client = HttpClient::new(format!("http://{addr}"));
         client.request_timeout = Duration::from_millis(50);
         let err = client.get("/stall", "", &[]).await.unwrap_err();
-        assert!(matches!(err, VenueError::Transport(ref text) if text.contains("did not complete")));
+        assert!(
+            matches!(err, VenueError::Transport(ref text) if text.contains("did not complete"))
+        );
         server.abort();
     }
 }

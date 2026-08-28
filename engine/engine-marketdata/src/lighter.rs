@@ -14,9 +14,14 @@
 //! that arrive before the venue's own snapshot are dropped rather than treated
 //! as a book of their own.
 //!
-//! **There is no ticker channel here.** The venue publishes no mark price,
-//! index price or funding rate on this socket, so no [`Ticker`] is ever
-//! emitted: a strategy that needs funding cannot get it from this venue's
+//! Each change names the prior matching-engine nonce in `begin_nonce`. A
+//! mismatch discards the ladder and redials before another quote can publish.
+//! API-server offsets must increase but may jump, so they are never treated as
+//! a contiguous sequence.
+//!
+//! Lighter also names its BBO-only stream `ticker`, but it carries no mark
+//! price, index price or funding rate. This adapter therefore emits no
+//! [`Ticker`]: a strategy that needs funding cannot get it from this venue's
 //! stream, and an invented zero would read as a real rate of zero — which for
 //! a carry sleeve is the difference between "no edge" and "no data".
 //!
@@ -24,10 +29,10 @@
 //! does: the engine drops `next_event`'s future several times a second, and a
 //! dial held inside it would start over from nothing every tick.
 
+use crate::symbols::intern;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use crate::symbols::intern;
 
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Quote, Subscription, SymbolId};
 use engine_venue::venues::lighter::markets::{engine_symbol, Market};
@@ -190,19 +195,42 @@ struct Book {
     /// Set by the venue's snapshot. Until it arrives the book is unknown, and
     /// a quote built from deltas alone would be a fiction.
     started: bool,
+    /// Matching-engine continuity. The next update's `begin_nonce` must name
+    /// this value; API-server offsets are not contiguous.
+    nonce: Option<u64>,
+    /// Offsets may jump, but the venue says they always increase on one
+    /// connection.
+    offset: Option<u64>,
     bids: BTreeMap<u64, f64>,
     asks: BTreeMap<u64, f64>,
 }
 
 impl Book {
+    fn clear(&mut self) {
+        self.started = false;
+        self.nonce = None;
+        self.offset = None;
+        self.bids.clear();
+        self.asks.clear();
+    }
+
     fn apply(&mut self, side: &Value, name: &str, replace: bool) {
-        let book = if name == "bids" { &mut self.bids } else { &mut self.asks };
+        let book = if name == "bids" {
+            &mut self.bids
+        } else {
+            &mut self.asks
+        };
         if replace {
             book.clear();
         }
-        let Some(levels) = side.get(name).and_then(Value::as_array) else { return };
+        let Some(levels) = side.get(name).and_then(Value::as_array) else {
+            return;
+        };
         for level in levels {
-            let Some(px) = level.get("price").and_then(Value::as_str).and_then(|p| p.parse::<f64>().ok())
+            let Some(px) = level
+                .get("price")
+                .and_then(Value::as_str)
+                .and_then(|p| p.parse::<f64>().ok())
             else {
                 continue;
             };
@@ -292,6 +320,9 @@ impl Worker {
             .iter()
             .map(|market| (market.index, engine_symbol(&market.symbol)))
             .collect();
+        // A new API server can use a very different offset. More importantly,
+        // no delta from the new socket may touch a book from the old one.
+        self.books.clear();
 
         let (mut socket, _) = connect_async(self.url.as_str())
             .await
@@ -300,7 +331,10 @@ impl Worker {
         for symbol in &wanted {
             self.subscribe(&mut socket, symbol).await?;
         }
-        info!(markets = self.wanted.len(), "lighter market feed subscribed");
+        info!(
+            markets = self.wanted.len(),
+            "lighter market feed subscribed"
+        );
         Ok(socket)
     }
 
@@ -366,9 +400,19 @@ impl Worker {
                                 }
                                 Ok(None) => (),
                                 Err(e) => {
+                                    let reset = MarketEvent::FeedReset {
+                                        recv_ns: engine_types::clock::mono_ns(),
+                                    };
+                                    if events.send(Ok(reset)).await.is_err() {
+                                        return Err(Gone);
+                                    }
                                     if events.send(Err(e)).await.is_err() {
                                         return Err(Gone);
                                     }
+                                    // The reset was delivered now; do not send
+                                    // it a second time after the redial.
+                                    self.connected_before = false;
+                                    return Ok(());
                                 }
                             }
                         }
@@ -406,20 +450,34 @@ impl Worker {
     fn decode(&mut self, text: &str) -> Result<Option<MarketEvent>, FeedError> {
         let frame: Value = serde_json::from_str(text)
             .map_err(|e| FeedError::BadMessage(format!("{e}: {}", first_chars(text))))?;
-        let channel = frame.get("channel").and_then(Value::as_str).unwrap_or_default();
-        let Some(index) = channel.strip_prefix("order_book:").and_then(|n| n.parse::<i16>().ok())
+        let channel = frame
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(index) = channel
+            .strip_prefix("order_book:")
+            .and_then(|n| n.parse::<i16>().ok())
         else {
             if frame.get("type").and_then(Value::as_str) == Some("error") {
-                let why = frame.get("message").and_then(Value::as_str).unwrap_or("no reason");
+                let why = frame
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason");
                 return Err(FeedError::Transport(format!(
                     "venue refused a market subscription: {why}"
                 )));
             }
             return Ok(None);
         };
-        let Some(symbol) = self.markets.get(&index) else { return Ok(None) };
-        let Some(id) = self.id_of(symbol) else { return Ok(None) };
-        let Some(rows) = frame.get("order_book") else { return Ok(None) };
+        let Some(symbol) = self.markets.get(&index) else {
+            return Ok(None);
+        };
+        let Some(id) = self.id_of(symbol) else {
+            return Ok(None);
+        };
+        let Some(rows) = frame.get("order_book") else {
+            return Ok(None);
+        };
 
         // A snapshot replaces the book; anything else changes it. Reading the
         // first level of either as the touch was the bug: on a change message
@@ -428,21 +486,58 @@ impl Worker {
             .get("type")
             .and_then(Value::as_str)
             .is_some_and(|kind| kind.starts_with("subscribed"));
+        let offset = frame
+            .get("offset")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| FeedError::BadMessage("lighter order book has no offset".to_string()))?;
+        let inner_offset = rows.get("offset").and_then(Value::as_u64).ok_or_else(|| {
+            FeedError::BadMessage("lighter order book has no inner offset".to_string())
+        })?;
+        if inner_offset != offset {
+            return Err(FeedError::BadMessage(format!(
+                "lighter order-book offsets disagree: frame={offset}, book={inner_offset}"
+            )));
+        }
+        let nonce = rows
+            .get("nonce")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| FeedError::BadMessage("lighter order book has no nonce".to_string()))?;
         let held = self.books.entry(index).or_default();
         if snapshot {
+            held.clear();
             held.started = true;
-        }
-        if !held.started {
+        } else if !held.started {
             // Changes before the venue's snapshot: nothing to change.
             return Ok(None);
+        } else {
+            let begin_nonce = rows
+                .get("begin_nonce")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    FeedError::BadMessage(
+                        "lighter order-book update has no begin_nonce".to_string(),
+                    )
+                })?;
+            let expected = held.nonce.expect("a started book has a nonce");
+            let prior_offset = held.offset.expect("a started book has an offset");
+            if begin_nonce != expected || nonce <= begin_nonce || offset <= prior_offset {
+                held.clear();
+                return Err(FeedError::BadMessage(format!(
+                    "lighter order-book continuity lost for {symbol}: begin_nonce={begin_nonce}, expected={expected}, nonce={nonce}, offset={offset}, prior_offset={prior_offset}"
+                )));
+            }
         }
         held.apply(rows, "bids", snapshot);
         held.apply(rows, "asks", snapshot);
+        held.nonce = Some(nonce);
+        held.offset = Some(offset);
 
         // Both sides, or nothing. A one-sided book read as a quote would put a
         // bid of zero into the engine's picture, and anything pricing against
         // it would cross the whole book.
-        let Some((bid, ask)) = held.touch() else { return Ok(None) };
+        let Some((bid, ask)) = held.touch() else {
+            return Ok(None);
+        };
         Ok(Some(MarketEvent::Quote {
             symbol: id,
             quote: Quote {
@@ -452,12 +547,9 @@ impl Worker {
                 ask_qty: ask.1,
                 venue_ts_ms: frame.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
                 recv_ns: engine_types::clock::mono_ns(),
-                // The venue numbers its updates, and the number is worth
-                // carrying: a gap in it is a gap in the book.
-                seq: frame
-                    .get("offset")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
+                // Matching-engine nonce, whose continuity was checked above.
+                // API-server offsets only have to increase and can jump.
+                seq: nonce,
             },
         }))
     }
@@ -469,9 +561,6 @@ impl Worker {
 }
 
 struct Gone;
-
-
-
 
 fn first_chars(text: &str) -> String {
     text.chars().take(160).collect()
@@ -514,7 +603,7 @@ mod tests {
             .decode(
                 r#"{"channel":"order_book:0","type":"subscribed/order_book",
                    "timestamp":1774884082326,"offset":1558300,
-                   "order_book":{"code":0,
+                   "order_book":{"code":0,"offset":1558300,"nonce":4037957053,"begin_nonce":0,
                      "asks":[{"price":"2064.54","size":"0.3285"},{"price":"2064.60","size":"1"}],
                      "bids":[{"price":"2064.10","size":"0.5"}]}}"#,
             )
@@ -528,7 +617,7 @@ mod tests {
                 assert_eq!(quote.ask_px, 2064.54, "the first ask is the touch");
                 assert_eq!(quote.ask_qty, 0.3285);
                 assert_eq!(quote.venue_ts_ms, 1774884082326);
-                assert_eq!(quote.seq, 1558300);
+                assert_eq!(quote.seq, 4037957053);
             }
             other => panic!("expected a quote, got {other:?}"),
         }
@@ -542,8 +631,8 @@ mod tests {
         // price nobody was quoting.
         let mut w = worker();
         w.decode(
-            r#"{"channel":"order_book:0","type":"subscribed/order_book","timestamp":1,
-               "order_book":{
+            r#"{"channel":"order_book:0","type":"subscribed/order_book","timestamp":1,"offset":1,
+               "order_book":{"offset":1,"nonce":10,"begin_nonce":0,
                  "bids":[{"price":"100.0","size":"1"},{"price":"99.0","size":"2"}],
                  "asks":[{"price":"101.0","size":"1"},{"price":"102.0","size":"2"}]}}"#,
         )
@@ -553,12 +642,15 @@ mod tests {
         // A change deep in the book leaves the touch where it was.
         let event = w
             .decode(
-                r#"{"channel":"order_book:0","type":"update/order_book","timestamp":2,
-                   "order_book":{"bids":[{"price":"98.0","size":"5"}],"asks":[]}}"#,
+                r#"{"channel":"order_book:0","type":"update/order_book","timestamp":2,"offset":5,
+                   "order_book":{"offset":5,"begin_nonce":10,"nonce":12,
+                   "bids":[{"price":"98.0","size":"5"}],"asks":[]}}"#,
             )
             .unwrap()
             .expect("a quote");
-        let MarketEvent::Quote { quote, .. } = event else { panic!("expected a quote") };
+        let MarketEvent::Quote { quote, .. } = event else {
+            panic!("expected a quote")
+        };
         assert_eq!(quote.bid_px, 100.0, "a deeper bid was read as the touch");
         assert_eq!(quote.ask_px, 101.0);
 
@@ -567,12 +659,15 @@ mod tests {
         // one hundred that nobody was making.
         let event = w
             .decode(
-                r#"{"channel":"order_book:0","type":"update/order_book","timestamp":3,
-                   "order_book":{"bids":[{"price":"100.0","size":"0"}],"asks":[]}}"#,
+                r#"{"channel":"order_book:0","type":"update/order_book","timestamp":3,"offset":6,
+                   "order_book":{"offset":6,"begin_nonce":12,"nonce":13,
+                   "bids":[{"price":"100.0","size":"0"}],"asks":[]}}"#,
             )
             .unwrap()
             .expect("a quote");
-        let MarketEvent::Quote { quote, .. } = event else { panic!("expected a quote") };
+        let MarketEvent::Quote { quote, .. } = event else {
+            panic!("expected a quote")
+        };
         assert_eq!(quote.bid_px, 99.0, "a deleted level stayed on the book");
         assert_eq!(quote.bid_qty, 2.0);
     }
@@ -584,8 +679,9 @@ mod tests {
         let mut w = worker();
         assert!(w
             .decode(
-                r#"{"channel":"order_book:0","type":"update/order_book","timestamp":1,
-                   "order_book":{"bids":[{"price":"1","size":"1"}],
+                r#"{"channel":"order_book:0","type":"update/order_book","timestamp":1,"offset":1,
+                   "order_book":{"offset":1,"begin_nonce":0,"nonce":1,
+                   "bids":[{"price":"1","size":"1"}],
                    "asks":[{"price":"2","size":"1"}]}}"#
             )
             .unwrap()
@@ -593,12 +689,79 @@ mod tests {
     }
 
     #[test]
+    fn a_nonce_gap_discards_the_book_and_cannot_publish_a_quote() {
+        let mut w = worker();
+        w.decode(
+            r#"{"channel":"order_book:0","type":"subscribed/order_book","timestamp":1,"offset":10,
+               "order_book":{"offset":10,"nonce":100,"begin_nonce":0,
+               "bids":[{"price":"100","size":"1"}],
+               "asks":[{"price":"101","size":"1"}]}}"#,
+        )
+        .unwrap()
+        .expect("the snapshot is a quote");
+
+        let gap = w.decode(
+            r#"{"channel":"order_book:0","type":"update/order_book","timestamp":2,"offset":11,
+               "order_book":{"offset":11,"begin_nonce":99,"nonce":101,
+               "bids":[{"price":"100","size":"0"}],
+               "asks":[{"price":"102","size":"1"}]}}"#,
+        );
+        assert!(matches!(gap, Err(FeedError::BadMessage(_))));
+        assert!(
+            !w.books.get(&0).unwrap().started,
+            "the partial book survived the gap"
+        );
+
+        let after = w
+            .decode(
+                r#"{"channel":"order_book:0","type":"update/order_book","timestamp":3,"offset":12,
+                   "order_book":{"offset":12,"begin_nonce":101,"nonce":102,
+                   "bids":[{"price":"99","size":"1"}],"asks":[]}}"#,
+            )
+            .unwrap();
+        assert!(after.is_none(), "a delta after the gap became a quote");
+    }
+
+    #[test]
+    fn offsets_may_jump_but_must_never_move_backwards() {
+        let mut w = worker();
+        w.decode(
+            r#"{"channel":"order_book:0","type":"subscribed/order_book","timestamp":1,"offset":10,
+               "order_book":{"offset":10,"nonce":100,"begin_nonce":0,
+               "bids":[{"price":"100","size":"1"}],
+               "asks":[{"price":"101","size":"1"}]}}"#,
+        )
+        .unwrap()
+        .expect("the snapshot is a quote");
+
+        // API-server offsets are monotone, not contiguous: this jump is
+        // valid because the matching-engine nonce chain is intact.
+        assert!(w
+            .decode(
+                r#"{"channel":"order_book:0","type":"update/order_book","timestamp":2,"offset":20,
+                   "order_book":{"offset":20,"begin_nonce":100,"nonce":101,
+                   "bids":[],"asks":[]}}"#,
+            )
+            .unwrap()
+            .is_some());
+
+        let regressed = w.decode(
+            r#"{"channel":"order_book:0","type":"update/order_book","timestamp":3,"offset":19,
+               "order_book":{"offset":19,"begin_nonce":101,"nonce":102,
+               "bids":[{"price":"99","size":"1"}],"asks":[]}}"#,
+        );
+        assert!(matches!(regressed, Err(FeedError::BadMessage(_))));
+        assert!(!w.books.get(&0).unwrap().started);
+    }
+
+    #[test]
     fn a_one_sided_book_is_not_a_quote() {
         let mut w = worker();
         assert!(w
             .decode(
-                r#"{"channel":"order_book:0","type":"subscribed/order_book","timestamp":1,
-                   "order_book":{"asks":[],"bids":[{"price":"1","size":"1"}]}}"#
+                r#"{"channel":"order_book:0","type":"subscribed/order_book","timestamp":1,"offset":1,
+                   "order_book":{"offset":1,"nonce":1,"begin_nonce":0,
+                   "asks":[],"bids":[{"price":"1","size":"1"}]}}"#
             )
             .unwrap()
             .is_none());
@@ -610,8 +773,9 @@ mod tests {
         let mut w = worker();
         assert!(w
             .decode(
-                r#"{"channel":"order_book:1","type":"subscribed/order_book","timestamp":1,
-                   "order_book":{"asks":[{"price":"2","size":"1"}],
+                r#"{"channel":"order_book:1","type":"subscribed/order_book","timestamp":1,"offset":1,
+                   "order_book":{"offset":1,"nonce":1,"begin_nonce":0,
+                   "asks":[{"price":"2","size":"1"}],
                    "bids":[{"price":"1","size":"1"}]}}"#
             )
             .unwrap()
@@ -619,8 +783,9 @@ mod tests {
         // A market number the venue never listed is not.
         assert!(w
             .decode(
-                r#"{"channel":"order_book:99","type":"subscribed/order_book","timestamp":1,
-                   "order_book":{"asks":[{"price":"2","size":"1"}],
+                r#"{"channel":"order_book:99","type":"subscribed/order_book","timestamp":1,"offset":1,
+                   "order_book":{"offset":1,"nonce":1,"begin_nonce":0,
+                   "asks":[{"price":"2","size":"1"}],
                    "bids":[{"price":"1","size":"1"}]}}"#
             )
             .unwrap()
@@ -634,8 +799,9 @@ mod tests {
         let mut w = worker();
         let event = w
             .decode(
-                r#"{"channel":"order_book:0","type":"subscribed/order_book","timestamp":1,
-                   "order_book":{"asks":[{"price":"2","size":"1"}],
+                r#"{"channel":"order_book:0","type":"subscribed/order_book","timestamp":1,"offset":1,
+                   "order_book":{"offset":1,"nonce":1,"begin_nonce":0,
+                   "asks":[{"price":"2","size":"1"}],
                    "bids":[{"price":"1","size":"1"}]}}"#,
             )
             .unwrap()
@@ -657,7 +823,10 @@ mod tests {
     fn a_symbol_admitted_later_gets_an_id() {
         let mut feed = LighterPublicFeed::for_test(
             "ws://127.0.0.1:1",
-            &[Subscription { symbol: "BTCUSDT".into(), feed: Feed::Quote }],
+            &[Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            }],
         );
         assert_eq!(feed.id_of("BTCUSDT"), Some(SymbolId(0)));
         assert_eq!(feed.admit("ETHUSDT", Feed::Quote), SymbolId(1));

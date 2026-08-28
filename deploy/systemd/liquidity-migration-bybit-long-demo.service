@@ -14,7 +14,7 @@ EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/producer-demo.env
 EnvironmentFile=/etc/liquidity-migration/engine.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 Environment=DATA_ROOT=data/bybit-long-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=EXECUTION_ENVIRONMENT=demo
@@ -49,8 +49,9 @@ Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/lon
 # gate stops contributing entries while everything else runs on.
 Environment=LONG_ENGINE_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/targets/llm-gate-candidates.json
 Environment=LONG_ENGINE_LLM_GATE_ENABLED=1
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-bybit-long-demo.service main
+ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-long-demo.service main
 Restart=always
+RestartPreventExitStatus=78
 RestartSec=30
 KillMode=control-group
 TimeoutStopSec=90

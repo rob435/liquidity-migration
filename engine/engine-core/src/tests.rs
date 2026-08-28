@@ -12,16 +12,16 @@ use std::time::Duration;
 
 use engine_types::{
     AccountIdentity, AccountView, AmendSpec, DenyReason, EngineEvent, Feed, FeedError,
-    InstrumentRule, Intent,
-    MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote,
-    RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription,
-    Symbol, SymbolId, TimerId, VenueCaps, VenueError, VenueGateway, Wal, WalError, WalRecord,
-    WorkPolicy, VenueExecution, VenueOrder,};
+    InstrumentRule, Intent, MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest,
+    OrderUpdate, Quote, RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId,
+    Subscription, Symbol, SymbolId, TimerId, VenueCaps, VenueError, VenueExecution, VenueGateway,
+    VenueOrder, Wal, WalError, WalRecord, WorkPolicy,
+};
 
 use crate::bench::{self, BenchOptions};
 use crate::clock;
 use crate::config::EngineSection;
-use crate::engine::{Engine, EngineError, StopReason, ENGINE_VERSION};
+use crate::engine::{durable_risk_verdict, Engine, EngineError, StopReason, ENGINE_VERSION};
 use crate::heartbeat::Heartbeat;
 use crate::testpath::temp_path;
 
@@ -57,6 +57,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::StopSet { .. } => "stop_set",
         WalRecord::CancelSent { .. } => "cancel_sent",
         WalRecord::AmendSent { .. } => "amend_sent",
+        WalRecord::AmendResolved { .. } => "amend_resolved",
         WalRecord::LatencyLedger { .. } => "latency_ledger",
         WalRecord::Note { .. } => "note",
         WalRecord::ControlAnchor { .. } => "control_anchor",
@@ -120,7 +121,11 @@ fn at(tape: &Tape, step: &Step) -> Option<usize> {
 /// fsyncs its own records, so a test about an order's barrier has to look
 /// past them.
 fn after(tape: &Tape, step: &Step, from: usize) -> Option<usize> {
-    tape.borrow().iter().skip(from).position(|s| s == step).map(|i| i + from)
+    tape.borrow()
+        .iter()
+        .skip(from)
+        .position(|s| s == step)
+        .map(|i| i + from)
 }
 
 /// The first note whose text contains `needle`. Boot writes a note of its
@@ -220,6 +225,8 @@ struct MockVenue {
     /// reading, so a test that wants a mid-run change seeds AFTER build and
     /// forces a refresh (a stream reset is the cheap way).
     account_readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
+    /// Make subsequent account reads fail, for stream-gap fail-closed tests.
+    account_view_fails: Rc<RefCell<bool>>,
     /// Every leverage the engine actually told the venue about, in order.
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Make set_leverage refuse, so a test can watch the order not go.
@@ -257,6 +264,7 @@ impl MockVenue {
                 reply: None,
                 working: Vec::new(),
                 account_readings: Rc::new(RefCell::new(VecDeque::new())),
+                account_view_fails: Rc::new(RefCell::new(false)),
                 leverages: Rc::new(RefCell::new(Vec::new())),
                 leverage_refuses: false,
                 executions: Rc::new(RefCell::new(Some(Vec::new()))),
@@ -326,7 +334,9 @@ impl VenueGateway for MockVenue {
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
         self.tape.borrow_mut().push(Step::Amend(id.to_string()));
-        self.amends.borrow_mut().push((symbol, id.to_string(), spec));
+        self.amends
+            .borrow_mut()
+            .push((symbol, id.to_string(), spec));
         Ok(())
     }
 
@@ -362,6 +372,11 @@ impl VenueGateway for MockVenue {
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         self.tape.borrow_mut().push(Step::ReadAccount);
+        if *self.account_view_fails.borrow() {
+            return Err(VenueError::Transport(
+                "scripted account-view failure".to_string(),
+            ));
+        }
         let positions = self
             .account_readings
             .borrow_mut()
@@ -390,10 +405,13 @@ impl VenueGateway for MockVenue {
 
 struct MockRisk {
     verdict: RiskVerdict,
+    amend_verdict: Option<RiskVerdict>,
     seen: Rc<RefCell<Vec<OrderUpdate>>>,
     restored: Rc<RefCell<Vec<String>>>,
+    restore_error: Option<String>,
     anchor_script: VecDeque<String>,
     registered: Rc<RefCell<Vec<(String, f64)>>>,
+    clocks: Rc<RefCell<Vec<u64>>>,
 }
 
 impl MockRisk {
@@ -403,10 +421,13 @@ impl MockRisk {
         (
             MockRisk {
                 verdict,
+                amend_verdict: None,
                 seen: seen.clone(),
                 restored: Rc::new(RefCell::new(Vec::new())),
+                restore_error: None,
                 anchor_script: VecDeque::new(),
                 registered: Rc::new(RefCell::new(Vec::new())),
+                clocks: Rc::new(RefCell::new(Vec::new())),
             },
             seen,
         )
@@ -425,6 +446,21 @@ impl RiskKernel for MockRisk {
         self.seen.borrow_mut().push(update.clone());
     }
 
+    fn assess_price_amend(
+        &mut self,
+        _client_order_id: &str,
+        intent: &Intent,
+        account: &AccountView,
+    ) -> RiskVerdict {
+        self.amend_verdict
+            .clone()
+            .unwrap_or_else(|| self.assess(intent, account))
+    }
+
+    fn observe_wall_clock_ns(&mut self, wall_ns: u64) {
+        self.clocks.borrow_mut().push(wall_ns);
+    }
+
     fn take_control_anchor(&mut self) -> Option<String> {
         self.anchor_script.pop_front()
     }
@@ -435,8 +471,12 @@ impl RiskKernel for MockRisk {
             .push((client_order_id.to_string(), approved_qty));
     }
 
-    fn restore_control_anchor(&mut self, state: &str) {
+    fn restore_control_anchor(&mut self, state: &str) -> Result<(), String> {
         self.restored.borrow_mut().push(state.to_string());
+        match &self.restore_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -743,10 +783,12 @@ struct Harness {
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
     stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     risk_saw: Rc<RefCell<Vec<OrderUpdate>>>,
+    risk_clocks: Rc<RefCell<Vec<u64>>>,
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Positions the venue's next account readings will report; see
     /// `MockVenue::account_readings`.
     account_readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
+    account_view_fails: Rc<RefCell<bool>>,
     /// The venue's execution history; see `MockVenue::executions`.
     executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
 }
@@ -758,7 +800,19 @@ async fn build_with_refusing_leverage(
     strategies: Vec<Box<dyn Strategy>>,
     symbols: &[&str],
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
-    build_inner(settings, verdict, strategies, symbols, &[], Vec::new(), true).await
+    build_inner(
+        settings,
+        verdict,
+        strategies,
+        symbols,
+        &[],
+        Vec::new(),
+        BuildOptions {
+            leverage_refuses: true,
+            amend_verdict: None,
+        },
+    )
+    .await
 }
 
 async fn build(
@@ -791,7 +845,38 @@ async fn build_with(
     replayed: &[WalRecord],
     working: Vec<VenueOrder>,
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
-    build_inner(settings, verdict, strategies, symbols, replayed, working, false).await
+    build_inner(
+        settings,
+        verdict,
+        strategies,
+        symbols,
+        replayed,
+        working,
+        BuildOptions::default(),
+    )
+    .await
+}
+
+async fn build_with_amend_verdict(
+    amend_verdict: RiskVerdict,
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+    replayed: &[WalRecord],
+    working: Vec<VenueOrder>,
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    build_inner(
+        &settings(),
+        allow_all(),
+        strategies,
+        symbols,
+        replayed,
+        working,
+        BuildOptions {
+            leverage_refuses: false,
+            amend_verdict: Some(amend_verdict),
+        },
+    )
+    .await
 }
 
 /// The same, with the venue already holding positions when boot reads it —
@@ -814,8 +899,10 @@ async fn build_with_venue_state(
     let stops = venue.stops.clone();
     let leverages = venue.leverages.clone();
     let account_readings = venue.account_readings.clone();
+    let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
+    let risk_clocks = risk.clocks.clone();
     let engine = Engine::boot(
         &settings(),
         "0000000000000000",
@@ -837,11 +924,19 @@ async fn build_with_venue_state(
             amends,
             stops,
             risk_saw,
+            risk_clocks,
             leverages,
             account_readings,
+            account_view_fails,
             executions,
         },
     )
+}
+
+#[derive(Default)]
+struct BuildOptions {
+    leverage_refuses: bool,
+    amend_verdict: Option<RiskVerdict>,
 }
 
 async fn build_inner(
@@ -851,20 +946,23 @@ async fn build_inner(
     symbols: &[&str],
     replayed: &[WalRecord],
     working: Vec<VenueOrder>,
-    leverage_refuses: bool,
+    options: BuildOptions,
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
     let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
     venue.working = working;
-    venue.leverage_refuses = leverage_refuses;
+    venue.leverage_refuses = options.leverage_refuses;
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let stops = venue.stops.clone();
     let leverages = venue.leverages.clone();
     let account_readings = venue.account_readings.clone();
+    let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
-    let (risk, risk_saw) = MockRisk::with(verdict);
+    let (mut risk, risk_saw) = MockRisk::with(verdict);
+    risk.amend_verdict = options.amend_verdict;
+    let risk_clocks = risk.clocks.clone();
     let engine = Engine::boot(
         settings,
         "0000000000000000",
@@ -886,8 +984,10 @@ async fn build_inner(
             amends,
             stops,
             risk_saw,
+            risk_clocks,
             leverages,
             account_readings,
+            account_view_fails,
             executions,
         },
     )
@@ -925,15 +1025,15 @@ fn allow_all() -> RiskVerdict {
     RiskVerdict::Allow { qty: f64::NAN }
 }
 
-mod covers;
 mod boot_rules;
+mod covers;
+mod fill_costs;
+mod gap_recovery;
+mod heartbeat;
 mod order_path;
 mod quote_staleness;
+mod reconciliation;
 mod resting_orders;
 mod rotation;
 mod target_books;
 mod worked_entries;
-mod reconciliation;
-mod heartbeat;
-mod fill_costs;
-mod gap_recovery;

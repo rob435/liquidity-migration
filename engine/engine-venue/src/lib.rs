@@ -59,15 +59,16 @@ mod tls;
 
 pub(crate) use clock::{mono_ns, wall_ms};
 
-pub use arming::{
-    check_arming, check_arming_with, env_flag, real_money_armed, REAL_MONEY_ENV,
-};
+pub use arming::{check_arming, check_arming_with, env_flag, real_money_armed, REAL_MONEY_ENV};
 pub use creds::Credentials;
 pub use registry::{
-    known_venues, OrderFeeds, Venue, VenueName, BYBIT_DEMO, BYBIT_MAINNET, HYPERLIQUID_MAINNET,
-    HYPERLIQUID_TESTNET, LIGHTER_MAINNET, LIGHTER_TESTNET, VARIATIONAL_MAINNET,
+    known_venues, InventoryProbe, OrderFeeds, Venue, VenueName, VenueReadiness, BYBIT_DEMO,
+    BYBIT_MAINNET, HYPERLIQUID_MAINNET, HYPERLIQUID_TESTNET, LIGHTER_MAINNET, LIGHTER_TESTNET,
+    VARIATIONAL_MAINNET,
 };
-pub use venues::bybit::{BybitGateway, BybitOrderFeed, VenueRealm, API_KEY_ENV, API_SECRET_ENV};
+pub use venues::bybit::{
+    BybitGateway, BybitInventoryProbe, BybitOrderFeed, VenueRealm, API_KEY_ENV, API_SECRET_ENV,
+};
 pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
 pub use venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};
 pub use venues::mexc::{MexcGateway, MexcOrderFeed, MexcRealm};

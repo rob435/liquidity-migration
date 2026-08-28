@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
+from liquidity_migration.policy.operational_profile import (
+    load_operational_profile_bytes,
+    profile_at_capital_reference,
+)
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "configs" / "operational.demo.json"
@@ -31,6 +34,43 @@ def test_tracked_operational_profile_is_coherent_and_feeds_account_owner() -> No
     assert profile.hedge.entry_leverage == 5.0
     assert profile.long.notional_multiplier == 6.0
     assert profile.carry.notional_multiplier == 3.0
+    assert profile.account_risk.max_daily_loss_usdt is None
+
+
+def test_daily_loss_is_explicit_positive_or_null() -> None:
+    payload = _payload()
+    risk = payload["account_risk"]
+    assert isinstance(risk, dict)
+
+    del risk["max_daily_loss_usdt"]
+    with pytest.raises(ValueError, match="missing fields: max_daily_loss_usdt"):
+        load_operational_profile_bytes(_bytes(payload))
+
+    for value in (0.0, -1.0, True, float("nan")):
+        risk["max_daily_loss_usdt"] = value
+        with pytest.raises(ValueError, match="account_risk.max_daily_loss_usdt"):
+            load_operational_profile_bytes(_bytes(payload))
+
+    risk["max_daily_loss_usdt"] = None
+    profile = load_operational_profile_bytes(_bytes(payload))
+    assert profile.account_risk.max_daily_loss_usdt is None
+
+
+def test_daily_loss_rescales_without_enabling_a_disabled_profile() -> None:
+    disabled = load_operational_profile_bytes(PROFILE_PATH.read_bytes())
+    assert (
+        profile_at_capital_reference(disabled, 500_000.0)
+        .account_risk.max_daily_loss_usdt
+        is None
+    )
+
+    payload = _payload()
+    risk = payload["account_risk"]
+    assert isinstance(risk, dict)
+    risk["max_daily_loss_usdt"] = 10.0
+    enabled = load_operational_profile_bytes(_bytes(payload))
+    rescaled = profile_at_capital_reference(enabled, 500_000.0)
+    assert rescaled.account_risk.max_daily_loss_usdt == 20.0
 
 
 @pytest.mark.parametrize("producer", ("long", "carry", "hedge"))

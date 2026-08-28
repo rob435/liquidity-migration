@@ -63,16 +63,13 @@ const CANCEL_AGAIN_AFTER_NS: u64 = 1_000_000_000;
 
 /// What this strategy has asked the venue to do about one of its orders.
 ///
-/// It has to remember, because the engine's order ledger does not. That ledger
-/// records the price an order was *sent* at and has no `AmendSent` arm at all
-/// (`engine-core/src/inflight.rs`), so `StrategyCtx::resting` reports the
-/// original price for the order's whole life however many times it has been
-/// moved since. A quoter measuring drift against that would find the same
-/// drift on every price and ask again for ever -- worse than asking twice to
-/// cancel, which at least ends when the venue confirms.
+/// It has to remember because market events can arrive while the venue's amend
+/// acknowledgement is still in flight. The engine ledger reserves the
+/// conservative old/new price and resolves it when the venue answers, but the
+/// strategy must still suppress duplicate requests during that round trip.
 ///
-/// The engine's own working supervisor keeps exactly this, for exactly this
-/// reason (`working.rs`, `WorkState::px` updated in `amended`).
+/// The engine's own working supervisor keeps the same short-lived request
+/// memory for the same reason.
 #[derive(Copy, Clone, Debug)]
 struct Asked {
     /// When we last asked for anything about this order.
@@ -196,7 +193,13 @@ impl Quoter {
                 return;
             }
         }
-        self.asked.insert(id.to_string(), Asked { at_ns: now_ns, moved_to: None });
+        self.asked.insert(
+            id.to_string(),
+            Asked {
+                at_ns: now_ns,
+                moved_to: None,
+            },
+        );
         ctx.cancel(symbol, id);
     }
 
@@ -218,12 +221,28 @@ impl Quoter {
         ctx: &mut dyn StrategyCtx,
     ) {
         if let Some(asked) = self.asked.get(id) {
-            if asked.moved_to.is_some_and(|at| (at - px).abs() < tick.max(0.0) * 0.5) {
+            if asked
+                .moved_to
+                .is_some_and(|at| (at - px).abs() < tick.max(0.0) * 0.5)
+            {
                 return;
             }
         }
-        self.asked.insert(id.to_string(), Asked { at_ns: now_ns, moved_to: Some(px) });
-        ctx.amend(symbol, id, engine_types::AmendSpec { px: Some(px), qty: None });
+        self.asked.insert(
+            id.to_string(),
+            Asked {
+                at_ns: now_ns,
+                moved_to: Some(px),
+            },
+        );
+        ctx.amend(
+            symbol,
+            id,
+            engine_types::AmendSpec {
+                px: Some(px),
+                qty: None,
+            },
+        );
     }
 
     fn requote(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) {
@@ -259,8 +278,11 @@ impl Quoter {
         // and leave it: there is one venue stop per position, so two sleeves
         // here would have one stop between them.
         if ctx.foreign_position(symbol) {
-            let mine: Vec<String> =
-                self.working.iter().map(|o| o.client_order_id.clone()).collect();
+            let mine: Vec<String> = self
+                .working
+                .iter()
+                .map(|o| o.client_order_id.clone())
+                .collect();
             for id in mine {
                 self.pull(symbol, &id, now_ns, ctx);
             }
@@ -273,15 +295,25 @@ impl Quoter {
         let quote = *ctx.quote(symbol);
         // This strategy's own fills, not the account's reading. See the header.
         let position = ctx.my_position(symbol);
-        let steps = plan_quotes(quote.bid_px, quote.ask_px, position, &self.working, self.rules);
+        let steps = plan_quotes(
+            quote.bid_px,
+            quote.ask_px,
+            position,
+            &self.working,
+            self.rules,
+        );
         for step in steps {
             match step {
-                QuoteStep::Place { side, px, qty, stop_px } => {
-                    self.place(symbol, side, px, qty, stop_px, &rule, ctx)
-                }
-                QuoteStep::Move { client_order_id, px } => {
-                    self.move_to(symbol, &client_order_id, px, rule.tick_size, now_ns, ctx)
-                }
+                QuoteStep::Place {
+                    side,
+                    px,
+                    qty,
+                    stop_px,
+                } => self.place(symbol, side, px, qty, stop_px, &rule, ctx),
+                QuoteStep::Move {
+                    client_order_id,
+                    px,
+                } => self.move_to(symbol, &client_order_id, px, rule.tick_size, now_ns, ctx),
                 QuoteStep::Pull { client_order_id } => {
                     self.pull(symbol, &client_order_id, now_ns, ctx)
                 }
@@ -292,11 +324,15 @@ impl Quoter {
     fn pull_all_on_feed_reset(&mut self, ctx: &mut dyn StrategyCtx) {
         let mut resting = Vec::new();
         ctx.resting(&mut resting);
-        let mine: Vec<(SymbolId, String)> = resting.iter()
+        let mine: Vec<(SymbolId, String)> = resting
+            .iter()
             .filter(|order| self.mine(order.symbol))
-            .map(|order| (order.symbol, order.client_order_id.to_string())).collect();
+            .map(|order| (order.symbol, order.client_order_id.to_string()))
+            .collect();
         let now_ns = ctx.now_ns();
-        for (symbol, id) in mine { self.pull(symbol, &id, now_ns, ctx); }
+        for (symbol, id) in mine {
+            self.pull(symbol, &id, now_ns, ctx);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -323,8 +359,13 @@ impl Quoter {
             qty,
             // Post-only: a maker that crosses has stopped being a maker, and
             // pays the taker fee for the privilege.
-            kind: OrderKind::Limit { px, tif: TimeInForce::PostOnly },
-            stop: Some(StopSpec { trigger_px: stop_px }),
+            kind: OrderKind::Limit {
+                px,
+                tif: TimeInForce::PostOnly,
+            },
+            stop: Some(StopSpec {
+                trigger_px: stop_px,
+            }),
             reduce_only: false,
             tag: QUOTE_TAG.to_string(),
             decided_ns: ctx.now_ns(),
@@ -347,7 +388,10 @@ impl Strategy for Quoter {
     fn subscriptions(&self) -> Vec<Subscription> {
         self.symbol_names
             .iter()
-            .map(|symbol| Subscription { symbol: symbol.clone(), feed: Feed::Quote })
+            .map(|symbol| Subscription {
+                symbol: symbol.clone(),
+                feed: Feed::Quote,
+            })
             .collect()
     }
 

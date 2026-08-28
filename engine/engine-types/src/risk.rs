@@ -39,8 +39,13 @@ pub struct AccountView {
 /// log and in tests.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DenyReason {
+    /// The account loss guard tripped at or below the UTC day's equity floor.
+    LossGuardTripped { equity_usdt: f64, floor_usdt: f64 },
     /// The order would breach the equity-anchored envelope.
-    EnvelopeBreached { worst_case_loss_usdt: f64, allowance_usdt: f64 },
+    EnvelopeBreached {
+        worst_case_loss_usdt: f64,
+        allowance_usdt: f64,
+    },
     /// The whole book's gross notional, added up without letting one symbol's
     /// exposure cancel another's, breaches the account's second gross ceiling.
     ComponentGrossBreached { gross_usdt: f64, cap_usdt: f64 },
@@ -49,12 +54,19 @@ pub enum DenyReason {
     /// The account's spare margin cannot fund the margin this order adds. A
     /// negative reading is ordinary when the owner hand-trades, and it refuses
     /// every entry until it recovers.
-    AvailableMarginExhausted { additional_margin_usdt: f64, available_usdt: f64 },
+    AvailableMarginExhausted {
+        additional_margin_usdt: f64,
+        available_usdt: f64,
+    },
     /// Read from the log, never written. The per-sleeve capital partition
     /// that produced it is gone; the shape is frozen by the logs that already
     /// hold it, because a frame the reader cannot parse stops the engine at
     /// boot.
-    PartitionExhausted { strategy: StrategyId, requested_usdt: f64, remaining_usdt: f64 },
+    PartitionExhausted {
+        strategy: StrategyId,
+        requested_usdt: f64,
+        remaining_usdt: f64,
+    },
     /// A position-opening intent carries no stop.
     MissingStop,
     /// The account view is too old to judge against.
@@ -69,7 +81,11 @@ pub enum DenyReason {
     /// Read from the log, never written. No kernel produces this reason, and
     /// the shape is frozen by the logs that already hold it: a frame the
     /// reader cannot parse stops the engine at boot.
-    SymbolNotionalBreached { symbol: SymbolId, notional_usdt: f64, cap_usdt: f64 },
+    SymbolNotionalBreached {
+        symbol: SymbolId,
+        notional_usdt: f64,
+        cap_usdt: f64,
+    },
 }
 
 /// The kernel's answer. `Allow.qty` may be smaller than the intent's if a
@@ -80,28 +96,67 @@ pub enum RiskVerdict {
     Deny { reason: DenyReason },
 }
 
-/// The two capital controls: the equity-anchored envelope and the stop
-/// discipline. Unknown state refuses the order. What was ported, and where
-/// these rules deliberately differ from the fleet they came from, is recorded
-/// in `engine-risk/PORT_NOTES.md` and pinned by the tests beside it.
+/// The account-level capital controls. Unknown state refuses the order.
 pub trait RiskKernel {
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict;
+    /// Reassess the remaining quantity of an existing opening order at a new
+    /// price. Implementations that track reservations override this to
+    /// temporarily exclude the order's old reservation; the conservative
+    /// default assesses with it still present and can therefore only
+    /// over-count, never bypass, standing exposure.
+    fn assess_price_amend(
+        &mut self,
+        _client_order_id: &str,
+        intent: &Intent,
+        account: &AccountView,
+    ) -> RiskVerdict {
+        self.assess(intent, account)
+    }
     /// Keep internal exposure/fill accounting current.
     fn on_update(&mut self, update: &OrderUpdate);
     /// Latest price for a symbol, for valuing exposure. Default: ignore.
     fn observe_price(&mut self, _symbol: SymbolId, _px: f64) {}
+    /// Wall time of the account reading being folded in. The daily loss
+    /// anchor rolls on the reading's UTC day, not on the decision clock.
+    fn observe_wall_clock_ns(&mut self, _wall_ns: u64) {}
+    /// Fold every fresh account reading into account-level circuit breakers.
+    /// This is independent of a new intent: a loss halt must trip while an
+    /// old entry is still resting, before a supervisor can amend or cross it.
+    fn observe_account_view(&mut self, _account: &AccountView) {}
+    /// Whether opening exposure is halted by durable account-level state.
+    /// Engines use this to pull already-live entries; new intents are still
+    /// denied through [`Self::assess`].
+    fn entries_halted(&self) -> bool {
+        false
+    }
     /// Bind an engine-minted client order id to the intent it approved, so an
     /// order in flight is exposure the caps can see. Default: ignore.
     fn register_order(&mut self, _client_order_id: &str, _intent: &Intent, _approved_qty: f64) {}
+    /// Register an order whose exact working price is temporarily ambiguous.
+    /// The range is durable replay evidence: notional uses its high end while
+    /// stop loss is evaluated across both ends. Kernels without range-aware
+    /// accounting retain their conservative ordinary registration behavior.
+    fn register_order_price_range(
+        &mut self,
+        client_order_id: &str,
+        intent: &Intent,
+        approved_qty: f64,
+        _low_px: f64,
+        _high_px: f64,
+    ) {
+        self.register_order(client_order_id, intent, approved_qty);
+    }
     /// Control state that must outlive the process. `Some` exactly when it
     /// changed since last taken; the engine writes it to the log and makes it
-    /// durable. No shipped kernel overrides this default — the state that
-    /// used it was the daily anchor and trip of a halt since removed, and
-    /// existing logs still carry those records. Default: none.
+    /// durable. Default: none.
     fn take_control_anchor(&mut self) -> Option<String> {
         None
     }
     /// Restore from the newest anchor found in the log, before the first
-    /// evaluation. Default: ignore.
-    fn restore_control_anchor(&mut self, _state: &str) {}
+    /// evaluation. A malformed anchor must refuse startup rather than silently
+    /// resetting a durable circuit breaker. Default: accept and ignore for
+    /// kernels that own no control state.
+    fn restore_control_anchor(&mut self, _state: &str) -> Result<(), String> {
+        Ok(())
+    }
 }

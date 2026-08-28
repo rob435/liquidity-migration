@@ -112,7 +112,6 @@ impl HyperliquidOrderFeed {
             account: self.account.clone(),
             decoder: Decoder::new(self.ids.clone()),
             backoff: Duration::ZERO,
-            connected_before: false,
         };
         tokio::spawn(worker.run(tx));
         self.updates = Some(rx);
@@ -141,7 +140,6 @@ struct Worker {
     account: String,
     decoder: Decoder,
     backoff: Duration,
-    connected_before: bool,
 }
 
 /// The engine dropped the feed: there is nobody left to hand updates to.
@@ -163,13 +161,12 @@ impl Worker {
             match self.connect().await {
                 Ok(socket) => {
                     let opened = Instant::now();
-                    if self.connected_before {
-                        let reset = OrderUpdate::StreamReset { recv_ns: mono_ns() };
-                        if hand_over(tx, Ok(reset)).await.is_err() {
-                            return Gone;
-                        }
+                    // First-connection readiness and reconnect watermark,
+                    // before any account update from this socket.
+                    let reset = OrderUpdate::StreamReset { recv_ns: mono_ns() };
+                    if hand_over(tx, Ok(reset)).await.is_err() {
+                        return Gone;
                     }
-                    self.connected_before = true;
                     // A fresh socket replays the fill snapshot, and the engine
                     // already holds those fills.
                     self.decoder.awaiting_snapshot = true;
@@ -260,16 +257,20 @@ impl Worker {
                         hand_over(tx, Ok(update)).await?;
                     }
                     if let Err(e) = read {
-                        let socket_is_useless = matches!(e, FeedError::Transport(_));
                         tracing::warn!(error = %e, "private stream frame");
                         hand_over(tx, Err(e)).await?;
-                        if socket_is_useless {
-                            return Ok(());
-                        }
+                        return Ok(());
                     }
                 }
                 Step::Dropped(why) => {
                     tracing::warn!(why, "private stream dropped, reconnecting");
+                    hand_over(
+                        tx,
+                        Err(FeedError::Transport(format!(
+                            "private stream unavailable: {why}"
+                        ))),
+                    )
+                    .await?;
                     return Ok(());
                 }
             }
@@ -331,8 +332,13 @@ impl Decoder {
             "orderUpdates" => self.order_updates(&frame),
             "userFills" => self.user_fills(&frame),
             "error" => {
-                let why = frame.get("data").and_then(Value::as_str).unwrap_or("no reason");
-                Err(FeedError::Transport(format!("venue refused a subscription: {why}")))
+                let why = frame
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason");
+                Err(FeedError::Transport(format!(
+                    "venue refused a subscription: {why}"
+                )))
             }
             // pong, subscriptionResponse, and anything else this feed did not
             // ask for.
@@ -346,14 +352,21 @@ impl Decoder {
             .and_then(Value::as_array)
             .ok_or_else(|| FeedError::BadMessage("orderUpdates carries no list".to_string()))?;
         for row in rows {
-            let Some(order) = row.get("order") else { continue };
+            let Some(order) = row.get("order") else {
+                continue;
+            };
             // Orders this engine did not name are not ours to route.
-            let Some(client_order_id) =
-                order.get("cloid").and_then(Value::as_str).and_then(cloid::from_cloid)
+            let Some(client_order_id) = order
+                .get("cloid")
+                .and_then(Value::as_str)
+                .and_then(cloid::from_cloid)
             else {
                 continue;
             };
-            let status = row.get("status").and_then(Value::as_str).unwrap_or_default();
+            let status = row
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let recv_ns = mono_ns();
             match status {
                 "open" => {
@@ -408,7 +421,10 @@ impl Decoder {
         let data = frame
             .get("data")
             .ok_or_else(|| FeedError::BadMessage("userFills carries no data".to_string()))?;
-        let is_snapshot = data.get("isSnapshot").and_then(Value::as_bool).unwrap_or(false);
+        let is_snapshot = data
+            .get("isSnapshot")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if is_snapshot && self.awaiting_snapshot {
             // Already in the engine's log; delivering them would double-count
             // every fill the account has recently had.
@@ -509,7 +525,12 @@ mod tests {
         ] {
             assert!(is_cancellation(killed), "{killed} reaches nothing");
         }
-        for refused in ["rejected", "tickRejected", "minTradeNtlRejected", "perpMarginRejected"] {
+        for refused in [
+            "rejected",
+            "tickRejected",
+            "minTradeNtlRejected",
+            "perpMarginRejected",
+        ] {
             assert!(is_rejection(refused), "{refused} reaches nothing");
         }
         // And the two that are deliberately not routed here stay that way.
@@ -609,7 +630,17 @@ mod tests {
         ))
         .unwrap();
         match d.pending.pop_front() {
-            Some(OrderUpdate::Fill { exec_id, symbol, side, qty, px, fee, is_maker, venue_ts_ms, .. }) => {
+            Some(OrderUpdate::Fill {
+                exec_id,
+                symbol,
+                side,
+                qty,
+                px,
+                fee,
+                is_maker,
+                venue_ts_ms,
+                ..
+            }) => {
                 assert_eq!(exec_id, "12");
                 assert_eq!(symbol, SymbolId(1));
                 assert_eq!(side, Side::Sell);
@@ -651,7 +682,10 @@ mod tests {
             ours()
         ))
         .unwrap();
-        assert!(d.pending.is_empty(), "a fill was routed from the order channel");
+        assert!(
+            d.pending.is_empty(),
+            "a fill was routed from the order channel"
+        );
     }
 
     #[test]
@@ -663,7 +697,10 @@ mod tests {
             ours()
         ))
         .unwrap();
-        assert!(matches!(d.pending.pop_front(), Some(OrderUpdate::Cancelled { .. })));
+        assert!(matches!(
+            d.pending.pop_front(),
+            Some(OrderUpdate::Cancelled { .. })
+        ));
 
         d.ingest(&format!(
             r#"{{"channel":"orderUpdates","data":[{{"order":{{"coin":"BTC","side":"B",
@@ -671,25 +708,34 @@ mod tests {
             ours()
         ))
         .unwrap();
-        assert!(matches!(d.pending.pop_front(), Some(OrderUpdate::Reject { .. })));
+        assert!(matches!(
+            d.pending.pop_front(),
+            Some(OrderUpdate::Reject { .. })
+        ));
     }
 
     #[test]
     fn a_refused_subscription_is_a_transport_failure_so_the_socket_is_redialled() {
         let mut d = decoder();
         let refused = d.ingest(r#"{"channel":"error","data":"Invalid subscription"}"#);
-        assert!(matches!(refused, Err(FeedError::Transport(_))), "{refused:?}");
+        assert!(
+            matches!(refused, Err(FeedError::Transport(_))),
+            "{refused:?}"
+        );
         // A pong is not.
         assert!(d.ingest(r#"{"channel":"pong"}"#).is_ok());
-        assert!(d.ingest(r#"{"channel":"subscriptionResponse","data":{}}"#).is_ok());
+        assert!(d
+            .ingest(r#"{"channel":"subscriptionResponse","data":{}}"#)
+            .is_ok());
     }
 
     #[test]
-    fn an_unreadable_frame_does_not_kill_the_socket() {
-        // One bad frame is a bad frame; only a refused subscription means the
-        // socket will never carry what was asked for.
+    fn an_unreadable_frame_surfaces_for_fail_closed_recovery() {
         let mut d = decoder();
-        assert!(matches!(d.ingest("{not json"), Err(FeedError::BadMessage(_))));
+        assert!(matches!(
+            d.ingest("{not json"),
+            Err(FeedError::BadMessage(_))
+        ));
     }
 
     #[test]
@@ -701,5 +747,4 @@ mod tests {
         assert_eq!(d.acked.len(), ACK_MEMORY);
         assert_eq!(d.acked_order.len(), ACK_MEMORY);
     }
-
 }

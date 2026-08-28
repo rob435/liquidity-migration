@@ -26,10 +26,7 @@ def make_config(tmp_path: Path, **overrides: object) -> ControlsConfig:
         "token": "tok",
         "chat_id": "777",
         "control_user_ids": frozenset(),
-        "repo_dir": tmp_path,
         "offset_path": tmp_path / "offset.json",
-        "host_sleeves_env": tmp_path / "sleeves.env",
-        "saved_sleeves_path": tmp_path / "sleeves_before_pause.txt",
     }
     values.update(overrides)
     return ControlsConfig(**values)  # type: ignore[arg-type]
@@ -97,6 +94,18 @@ def test_group_chat_press_needs_the_allow_list(tmp_path: Path) -> None:
     allowed = make_config(tmp_path, chat_id="-100200", control_user_ids=frozenset({42}))
     assert callback_authorized(press, allowed)
     assert not callback_authorized({"message": {"chat": {"id": -100200}}, "from": {"id": 43}}, allowed)
+
+
+def test_runtime_state_path_is_fixed_outside_the_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "777")
+    monkeypatch.setenv("LM_HOST_SLEEVES_ENV", "/tmp/caller-selected-sleeves")
+    monkeypatch.setenv("LM_RESOLVED_SLEEVES_ENV", "/tmp/caller-selected-resolved")
+    config = tc.load_config_from_environment()
+    assert config is not None
+    assert config.offset_path == tc.CONTROLS_STATE_DIR / "offset.json"
 
 
 # --------------------------------------------------------------------------
@@ -177,7 +186,7 @@ def test_panel_grows_mainnet_rows_when_owner_is_active(tmp_path: Path) -> None:
     panel.send_panel()
     flat = json.dumps(api.sent[-1]["keyboard"])
     assert "pause:mainnet" in flat
-    assert "resume:mainnet" in flat
+    assert "resume:mainnet" not in flat
     assert "close" not in flat
 
 
@@ -221,80 +230,86 @@ def test_drain_backlog_skips_queued_presses_and_advances_offset() -> None:
 
 
 # --------------------------------------------------------------------------
-# Fleet pause/resume file semantics (systemctl faked)
+# Fleet privilege delegation (subprocesses faked)
 # --------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def fleet_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config = make_config(tmp_path)
-    resolved = tmp_path / "sleeves.resolved.env"
-    monkeypatch.setenv("LM_RESOLVED_SLEEVES_ENV", str(resolved))
     fleet = VpsFleet(config)
     commands: list[list[str]] = []
 
     def fake_run(argv: list[str], *, timeout: float = 90.0) -> subprocess.CompletedProcess[str]:
         commands.append(argv)
-        if argv[0] == "bash":  # the resolve step
-            resolved.write_text("LONG_SLEEVE=on\nCONTINUOUS_SLEEVE=off\nCARRY_SLEEVE=on\n", encoding="utf-8")
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv == [*tc.CONTROL_COMMANDS["status-demo"]]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="paused=false\nLONG_SLEEVE=on\nCARRY_SLEEVE=on\n",
+                stderr="",
+            )
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 3, stdout="inactive\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(fleet, "_run", fake_run)
-    return config, fleet, commands, resolved
+    return config, fleet, commands
 
 
-def test_pause_saves_the_original_override_and_stops_producers(fleet_env) -> None:
-    config, fleet, commands, _ = fleet_env
-    config.host_sleeves_env.write_text("CONTINUOUS_SLEEVE=off\n# manual note\n", encoding="utf-8")
+def test_demo_pause_delegates_one_exact_helper_action(fleet_env) -> None:
+    _config, fleet, commands = fleet_env
     note = fleet.pause("demo")
     assert "paused" in note.lower()
-    assert config.saved_sleeves_path.read_text(encoding="utf-8") == "CONTINUOUS_SLEEVE=off\n# manual note\n"
-    written = config.host_sleeves_env.read_text(encoding="utf-8")
-    assert "LONG_SLEEVE=off" in written and "CARRY_SLEEVE=off" in written and "# manual note" in written
-    stopped = [argv[3] for argv in commands if argv[:3] == ["systemctl", "disable", "--now"]]
-    assert set(stopped) == set(tc.SLEEVE_UNITS.values())
-    # The retired CONTINUOUS producer unit no longer exists on the host; a
-    # pause that touched it would collect a spurious systemctl failure.
-    assert "liquidity-migration-bybit-continuous-demo.service" not in stopped
+    assert commands == [list(tc.CONTROL_COMMANDS["pause-demo"])]
+    assert all("disable" not in command for command in commands)
 
 
-def test_second_pause_keeps_the_first_saved_copy(fleet_env) -> None:
-    config, fleet, _, _ = fleet_env
-    config.host_sleeves_env.write_text("# original\n", encoding="utf-8")
-    fleet.pause("demo")
-    fleet.pause("demo")
-    assert config.saved_sleeves_path.read_text(encoding="utf-8") == "# original\n"
-
-
-def test_resume_restores_the_saved_override_verbatim(fleet_env) -> None:
-    config, fleet, commands, _ = fleet_env
-    config.host_sleeves_env.write_text("CONTINUOUS_SLEEVE=off\n", encoding="utf-8")
-    fleet.pause("demo")
-    commands.clear()
+def test_demo_resume_uses_helper_then_reads_helper_status(fleet_env) -> None:
+    _config, fleet, commands = fleet_env
     note = fleet.resume("demo")
     assert "resumed" in note.lower()
-    assert config.host_sleeves_env.read_text(encoding="utf-8") == "CONTINUOUS_SLEEVE=off\n"
-    assert not config.saved_sleeves_path.exists()
-    started = [argv[3] for argv in commands if argv[:3] == ["systemctl", "enable", "--now"]]
-    # The resolved file turns LONG and CARRY on; CONTINUOUS stays off.
-    assert set(started) == {
-        "liquidity-migration-bybit-long-demo.service",
-        "liquidity-migration-bybit-carry-demo.service",
-    }
+    assert commands == [
+        list(tc.CONTROL_COMMANDS["resume-demo"]),
+        list(tc.CONTROL_COMMANDS["status-demo"]),
+    ]
 
 
-def test_resume_after_pause_of_absent_file_deletes_the_override(fleet_env) -> None:
-    config, fleet, _, _ = fleet_env
-    fleet.pause("demo")
-    assert config.host_sleeves_env.exists()
-    fleet.resume("demo")
-    assert not config.host_sleeves_env.exists()
+def test_helper_status_is_exactly_parsed_and_rejects_extra_fields(fleet_env, monkeypatch) -> None:
+    _config, fleet, _commands = fleet_env
+    assert fleet.resolved_sleeves() == {"LONG_SLEEVE": "on", "CARRY_SLEEVE": "on"}
+
+    def malformed(argv: list[str], *, timeout: float = 90.0) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="paused=false\nLONG_SLEEVE=on\nCARRY_SLEEVE=on\nPATH=/tmp\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(fleet, "_run", malformed)
+    with pytest.raises(RuntimeError, match="unexpected status field"):
+        fleet.resolved_sleeves()
 
 
-def test_mainnet_pause_and_resume_touch_only_mainnet_units(fleet_env) -> None:
-    config, fleet, commands, _ = fleet_env
+def test_mainnet_pause_is_exact_and_mainnet_resume_is_never_privileged(fleet_env) -> None:
+    _config, fleet, commands = fleet_env
     fleet.pause("mainnet")
-    fleet.resume("mainnet")
-    touched = {argv[3] for argv in commands if argv[0] == "systemctl" and len(argv) > 3}
-    assert touched == set(tc.MAINNET_PRODUCER_UNITS)
-    assert not config.host_sleeves_env.exists()
+    refusal = fleet.resume("mainnet")
+    assert commands == [list(tc.CONTROL_COMMANDS["pause-mainnet"])]
+    assert "rollout-only" in refusal
+
+
+def test_control_action_allowlist_cannot_forward_paths_units_or_environment(fleet_env) -> None:
+    _config, fleet, commands = fleet_env
+    with pytest.raises(ValueError, match="unsupported control action"):
+        fleet._control("pause-demo /etc/passwd")
+    assert commands == []
+    assert set(tc.CONTROL_COMMANDS) == {
+        "pause-demo",
+        "resume-demo",
+        "pause-mainnet",
+        "status-demo",
+    }
+    for action, command in tc.CONTROL_COMMANDS.items():
+        assert command == ("/usr/bin/sudo", "-n", tc.CONTROL_HELPER, action)

@@ -32,6 +32,8 @@ def _credential(tmp_path: Path, **overrides: str) -> Path:
         {
             "BYBIT_REAL_API_KEY": "test-key",
             "BYBIT_REAL_API_SECRET": "test-secret",
+            "BYBIT_REAL_API_KEY_IP": "203.0.113.7",
+            "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID": "7000001",
             "REAL_MONEY": "true",
             "TELEGRAM_BOT_TOKEN": "test-token",
             "TELEGRAM_CHAT_ID": "test-chat",
@@ -50,15 +52,21 @@ def _producer_source(tmp_path: Path, profile: Path, *, realm: str = "mainnet") -
         tmp_path / "producer-mainnet-source.env",
         (
             f"PRODUCER_REALM={realm}\n"
-            f"CANDIDATE_UNIVERSE_FILE={candidate}\n"
-            f"OPERATIONAL_PROFILE_FILE={profile}\n"
+            f"CANDIDATE_UNIVERSE_FILE={candidate.as_posix()}\n"
+            f"OPERATIONAL_PROFILE_FILE={profile.as_posix()}\n"
         ),
     )
 
 
 def test_committed_profile_is_the_default_render() -> None:
-    data, _profile = render_real_money_profile()
+    data, profile = render_real_money_profile()
     assert data == (REPO / "configs" / "operational.mainnet.json").read_bytes()
+    assert profile.account_risk.max_daily_loss_usdt == 10.0
+
+
+def test_funded_daily_loss_scales_with_the_profile_reference() -> None:
+    _data, profile = render_real_money_profile(capital_reference_usdt=200.0)
+    assert profile.account_risk.max_daily_loss_usdt == 20.0
 
 
 def test_templates_are_strict_and_ship_disarmed_without_secrets() -> None:
@@ -119,6 +127,20 @@ def test_preflight_rejects_wrong_realm_missing_input_and_profile_drift(tmp_path:
 
     failed = {row.name for row in rows if not row.ok}
     assert {"PRODUCER_REALM", "CANDIDATE_UNIVERSE_FILE", "profile matches dials"} <= failed
+
+
+@pytest.mark.parametrize("bad_ip", ("", "*", "0.0.0.0", "127.0.0.1", "203.0.113.0/24"))
+def test_preflight_rejects_missing_wildcard_or_non_host_ip(
+    tmp_path: Path, bad_ip: str
+) -> None:
+    credential = _credential(tmp_path, BYBIT_REAL_API_KEY_IP=bad_ip)
+    rendered, _profile = render_real_money_profile()
+    profile = _private_file(tmp_path / "profile.json", rendered)
+    producer = _producer_source(tmp_path, profile)
+
+    rows = preflight(credential_env=credential, producer_env=producer)
+
+    assert not next(row for row in rows if row.name == "BYBIT_REAL_API_KEY_IP").ok
 
 
 def test_preflight_json_is_machine_readable(

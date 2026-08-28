@@ -82,7 +82,8 @@ impl Strategy for Amender {
 
 #[tokio::test]
 async fn a_cancel_is_written_down_and_reaches_the_venue_without_an_fsync() {
-    let (mut engine, h) = build(allow_all(),
+    let (mut engine, h) = build(
+        allow_all(),
         vec![Box::new(Canceller::new("BTCUSDT", "eng-old-1"))],
         &["BTCUSDT"],
         &[],
@@ -130,7 +131,6 @@ async fn a_cancel_is_written_down_and_reaches_the_venue_without_an_fsync() {
         "a cancel paid for a barrier"
     );
 }
-
 
 /// Fires a burst of entries with cancels behind them, all in one wake.
 struct MixedBurst {
@@ -269,16 +269,38 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
 }
 
 #[tokio::test]
-async fn an_amend_reaches_the_venue_where_it_can_be_honoured() {
+async fn an_async_amend_ack_keeps_its_range_and_queues_cancellation() {
     let amender = Amender {
         symbol: "BTCUSDT".into(),
         order: "eng-old-1".into(),
         fired: false,
     };
-    let (mut engine, h) = build(allow_all(),
+    let old = OrderRequest {
+        client_order_id: "eng-old-1".into(),
+        strategy: StrategyId(0),
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.01,
+        kind: OrderKind::Limit {
+            px: 29_000.0,
+            tif: engine_types::TimeInForce::Gtc,
+        },
+        stop: Some(StopSpec {
+            trigger_px: 28_000.0,
+        }),
+        reduce_only: false,
+    };
+    let replayed = [WalRecord::OrderSent {
+        request: old,
+        wire_ns: 1,
+        arrival_mid: 29_500.0,
+    }];
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
         vec![Box::new(amender)],
         &["BTCUSDT"],
-        &[],
+        &replayed,
+        vec![still_working("eng-old-1", "BTCUSDT", 0.01)],
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
@@ -297,14 +319,83 @@ async fn an_amend_reaches_the_venue_where_it_can_be_honoured() {
     assert_eq!(amends[0].1, "eng-old-1");
     assert_eq!(amends[0].2.px, Some(30_000.0), "the new price, unchanged");
     assert_eq!(amends[0].2.qty, None, "and no size change was asked for");
+    assert_eq!(h.cancels.borrow().len(), 1, "ambiguous order is pulled");
+    assert!(!h
+        .records
+        .borrow()
+        .iter()
+        .any(|record| matches!(record, WalRecord::AmendResolved { .. })));
     let written = at(&h.tape, &Step::Append("amend_sent".into())).unwrap();
     let sent = at(&h.tape, &Step::Amend("eng-old-1".into())).unwrap();
     assert!(written < sent, "written down before it went out");
-    // Repricing cannot create exposure, so it rides the group flush.
+    // Repricing can multiply notional and stop distance, so its conservative
+    // replacement reservation is durable before the venue call.
     assert!(
-        only_the_shutdown_barrier(&h.tape),
-        "a reprice paid for a barrier"
+        h.tape
+            .borrow()
+            .iter()
+            .any(|step| matches!(step, Step::Barrier)),
+        "an opening reprice did not pay for its risk barrier"
     );
+    assert!(
+        h.risk_clocks.borrow().len() >= 2,
+        "opening-amend risk time was not advanced after boot"
+    );
+}
+
+#[tokio::test]
+async fn a_nonfinite_amend_approval_never_reaches_the_venue() {
+    let amender = Amender {
+        symbol: "BTCUSDT".into(),
+        order: "eng-old-1".into(),
+        fired: false,
+    };
+    let old = OrderRequest {
+        client_order_id: "eng-old-1".into(),
+        strategy: StrategyId(0),
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.01,
+        kind: OrderKind::Limit {
+            px: 29_000.0,
+            tif: engine_types::TimeInForce::Gtc,
+        },
+        stop: Some(StopSpec {
+            trigger_px: 28_000.0,
+        }),
+        reduce_only: false,
+    };
+    let replayed = [WalRecord::OrderSent {
+        request: old,
+        wire_ns: 1,
+        arrival_mid: 29_500.0,
+    }];
+    let (mut engine, h) = build_with_amend_verdict(
+        RiskVerdict::Allow { qty: f64::NAN },
+        vec![Box::new(amender)],
+        &["BTCUSDT"],
+        &replayed,
+        vec![still_working("eng-old-1", "BTCUSDT", 0.01)],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert!(h.amends.borrow().is_empty());
+    assert!(!appends(&h.tape).contains(&"amend_sent".to_string()));
+    assert!(note_saying(&h.records, "not amended").contains("invalid quantity verdict"));
+    for record in h.records.borrow().iter() {
+        let bytes = serde_json::to_vec(record).expect("serializable");
+        let _: WalRecord =
+            serde_json::from_slice(&bytes).expect("sanitized amend records must replay");
+    }
 }
 
 /// Raises one named order's size on its first quote.
@@ -545,7 +636,8 @@ async fn each_strategy_reads_only_its_own_working_orders() {
 
     let (one, seen_one) = Watcher::new("BTCUSDT");
     let (two, seen_two) = Watcher::new("BTCUSDT");
-    let (mut engine, _h) = build_with_venue_orders(allow_all(),
+    let (mut engine, _h) = build_with_venue_orders(
+        allow_all(),
         vec![Box::new(one), Box::new(two)],
         &["BTCUSDT"],
         &replayed,
@@ -582,12 +674,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
 #[tokio::test]
 async fn an_order_this_strategy_placed_is_in_its_book_until_it_ends() {
     let (watcher, seen) = Watcher::buying("BTCUSDT", 0.01);
-    let (mut engine, h) = build(allow_all(),
-        vec![Box::new(watcher)],
-        &["BTCUSDT"],
-        &[],
-    )
-    .await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(watcher)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -641,7 +728,10 @@ async fn an_order_the_log_has_ended_leaves_the_strategys_book() {
         .unwrap();
 
     assert_eq!(sends.borrow().len(), 1, "one order really was placed");
-    assert!(engine.in_flight_ids().is_empty(), "and the venue refused it");
+    assert!(
+        engine.in_flight_ids().is_empty(),
+        "and the venue refused it"
+    );
     for (n, snapshot) in seen.borrow().iter().enumerate() {
         assert!(
             snapshot.is_empty(),

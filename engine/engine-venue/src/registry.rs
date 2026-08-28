@@ -34,12 +34,13 @@
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::market::{FeedError, OrderFeed};
 use engine_types::orders::{
-    AmendSpec, InstrumentRule, OrderAck, OrderRequest, OrderUpdate, VenueExecution, VenueOrder,
+    AccountInventory, AmendSpec, InstrumentRule, OrderAck, OrderRequest, OrderUpdate,
+    VenueExecution, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
 
-use crate::venues::bybit::{BybitGateway, BybitOrderFeed, VenueRealm};
+use crate::venues::bybit::{BybitGateway, BybitInventoryProbe, BybitOrderFeed, VenueRealm};
 use crate::venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
 use crate::venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};
 use crate::venues::mexc::{MexcGateway, MexcOrderFeed, MexcRealm};
@@ -96,6 +97,39 @@ pub enum VenueName {
     LighterMainnet,
     MexcMainnet,
     VariationalMainnet,
+}
+
+/// Evidence state attached to every selectable venue realm.
+///
+/// A compiled adapter is not production evidence. Moving a realm from
+/// `ProductionBlocked` to `LiveProven` is a reviewed source change made only
+/// after the smallest permitted order and cancel/fill lifecycle has been
+/// observed on that exact venue.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum VenueReadiness {
+    LiveProven,
+    /// Offline conformance is green; this practice realm exists to gather the
+    /// missing live evidence with test funds.
+    TestnetCanary,
+    /// Real capital is blocked until exact-venue live evidence exists.
+    ProductionBlocked,
+    /// Public data only; no trading API is available to this adapter.
+    ReadOnly,
+}
+
+impl VenueReadiness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LiveProven => "live-proven",
+            Self::TestnetCanary => "testnet-canary",
+            Self::ProductionBlocked => "production-blocked",
+            Self::ReadOnly => "read-only",
+        }
+    }
+
+    pub fn permits_engine_run(self) -> bool {
+        matches!(self, Self::LiveProven | Self::TestnetCanary)
+    }
 }
 
 impl VenueName {
@@ -223,6 +257,34 @@ impl VenueName {
             VenueName::VariationalMainnet => VariationalRealm::Mainnet.is_real_money(),
         }
     }
+
+    /// Production evidence, kept beside the one exhaustive realm registry so
+    /// a newly added venue cannot silently inherit somebody else's status.
+    pub fn readiness(self) -> VenueReadiness {
+        match self {
+            VenueName::BybitDemo | VenueName::BybitMainnet => VenueReadiness::LiveProven,
+            VenueName::HyperliquidTestnet | VenueName::LighterTestnet => {
+                VenueReadiness::TestnetCanary
+            }
+            VenueName::HyperliquidMainnet | VenueName::LighterMainnet | VenueName::MexcMainnet => {
+                VenueReadiness::ProductionBlocked
+            }
+            VenueName::VariationalMainnet => VenueReadiness::ReadOnly,
+        }
+    }
+
+    /// Refuse before the engine opens a log, credential, or socket when this
+    /// realm has not earned the evidence its capital class needs.
+    pub fn require_engine_run_ready(self) -> Result<(), VenueError> {
+        if self.readiness().permits_engine_run() {
+            return Ok(());
+        }
+        Err(VenueError::BadRequest(format!(
+            "{} readiness is {}; the execution engine is blocked until this exact realm has reviewed live order lifecycle evidence",
+            self.as_str(),
+            self.readiness().as_str()
+        )))
+    }
 }
 
 impl std::fmt::Display for VenueName {
@@ -241,14 +303,48 @@ pub enum Venue {
     Variational(VariationalGateway),
 }
 
+/// Credential-wide read capability used by generation-changing rollouts.
+///
+/// Deliberately separate from [`Venue`]: a disarmed funded account must still
+/// be readable for a flatness proof, but the resulting value must not carry a
+/// method that can place, cancel, amend, or otherwise mutate an order.
+pub enum InventoryProbe {
+    Bybit(BybitInventoryProbe),
+}
+
+impl InventoryProbe {
+    pub fn build(name: VenueName) -> Result<Self, VenueError> {
+        match name {
+            VenueName::BybitDemo => Ok(Self::Bybit(BybitInventoryProbe::new(VenueRealm::Demo)?)),
+            VenueName::BybitMainnet => {
+                Ok(Self::Bybit(BybitInventoryProbe::new(VenueRealm::Mainnet)?))
+            }
+            other => Err(VenueError::BadRequest(format!(
+                "{} has no credential-wide inventory probe; flatness cannot be attested",
+                other.as_str()
+            ))),
+        }
+    }
+
+    pub async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        match self {
+            Self::Bybit(probe) => probe.account_identity().await,
+        }
+    }
+
+    pub async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
+        match self {
+            Self::Bybit(probe) => probe.account_inventory().await,
+        }
+    }
+}
+
 impl Venue {
     /// Build the venue this name selects. The realm comes from the name, and
     /// credentials come from the environment for that realm.
     pub fn build(name: VenueName, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
         Ok(match name {
-            VenueName::BybitDemo => {
-                Venue::Bybit(BybitGateway::new(VenueRealm::Demo, symbols)?)
-            }
+            VenueName::BybitDemo => Venue::Bybit(BybitGateway::new(VenueRealm::Demo, symbols)?),
             VenueName::BybitMainnet => {
                 Venue::Bybit(BybitGateway::new(VenueRealm::Mainnet, symbols)?)
             }
@@ -352,6 +448,16 @@ impl VenueGateway for Venue {
         }
     }
 
+    async fn send_orders(&mut self, reqs: &[OrderRequest]) -> Vec<Result<OrderAck, VenueError>> {
+        match self {
+            Venue::Bybit(gw) => gw.send_orders(reqs).await,
+            Venue::Hyperliquid(gw) => gw.send_orders(reqs).await,
+            Venue::Lighter(gw) => gw.send_orders(reqs).await,
+            Venue::Mexc(gw) => gw.send_orders(reqs).await,
+            Venue::Variational(gw) => gw.send_orders(reqs).await,
+        }
+    }
+
     async fn cancel_order(
         &mut self,
         symbol: SymbolId,
@@ -363,6 +469,19 @@ impl VenueGateway for Venue {
             Venue::Lighter(gw) => gw.cancel_order(symbol, client_order_id).await,
             Venue::Mexc(gw) => gw.cancel_order(symbol, client_order_id).await,
             Venue::Variational(gw) => gw.cancel_order(symbol, client_order_id).await,
+        }
+    }
+
+    async fn cancel_orders(
+        &mut self,
+        requests: &[(SymbolId, String)],
+    ) -> Vec<Result<(), VenueError>> {
+        match self {
+            Venue::Bybit(gw) => gw.cancel_orders(requests).await,
+            Venue::Hyperliquid(gw) => gw.cancel_orders(requests).await,
+            Venue::Lighter(gw) => gw.cancel_orders(requests).await,
+            Venue::Mexc(gw) => gw.cancel_orders(requests).await,
+            Venue::Variational(gw) => gw.cancel_orders(requests).await,
         }
     }
 
@@ -451,6 +570,16 @@ impl VenueGateway for Venue {
         }
     }
 
+    async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
+        match self {
+            Venue::Bybit(gw) => gw.account_inventory().await,
+            Venue::Hyperliquid(gw) => gw.account_inventory().await,
+            Venue::Lighter(gw) => gw.account_inventory().await,
+            Venue::Mexc(gw) => gw.account_inventory().await,
+            Venue::Variational(gw) => gw.account_inventory().await,
+        }
+    }
+
     async fn executions(
         &mut self,
         start_ms: i64,
@@ -501,12 +630,14 @@ impl OrderFeeds {
             VenueName::BybitMainnet => {
                 OrderFeeds::Bybit(BybitOrderFeed::new(VenueRealm::Mainnet, symbols)?)
             }
-            VenueName::HyperliquidTestnet => OrderFeeds::Hyperliquid(
-                HyperliquidOrderFeed::new(HyperliquidRealm::Testnet, symbols)?,
-            ),
-            VenueName::HyperliquidMainnet => OrderFeeds::Hyperliquid(
-                HyperliquidOrderFeed::new(HyperliquidRealm::Mainnet, symbols)?,
-            ),
+            VenueName::HyperliquidTestnet => OrderFeeds::Hyperliquid(HyperliquidOrderFeed::new(
+                HyperliquidRealm::Testnet,
+                symbols,
+            )?),
+            VenueName::HyperliquidMainnet => OrderFeeds::Hyperliquid(HyperliquidOrderFeed::new(
+                HyperliquidRealm::Mainnet,
+                symbols,
+            )?),
             VenueName::LighterTestnet => {
                 OrderFeeds::Lighter(LighterOrderFeed::new(LighterRealm::Testnet)?)
             }
@@ -516,6 +647,24 @@ impl OrderFeeds {
             VenueName::MexcMainnet => OrderFeeds::Mexc(MexcOrderFeed::new(MexcRealm::Mainnet)?),
             VenueName::VariationalMainnet => OrderFeeds::Silent,
         })
+    }
+
+    /// Establish the private-account observation channel before boot takes
+    /// any snapshots. The first reset is a readiness watermark emitted only
+    /// after the venue subscription is live; history recovery can then cover
+    /// up to its own end while subsequent socket updates wait in this feed's
+    /// queue. That closes the otherwise unobservable window between boot REST
+    /// reads and the first lazy websocket poll.
+    pub async fn await_ready(&mut self) -> Result<(), FeedError> {
+        if matches!(self, OrderFeeds::Silent) {
+            return Ok(());
+        }
+        match self.next_update().await? {
+            OrderUpdate::StreamReset { .. } => Ok(()),
+            other => Err(FeedError::BadMessage(format!(
+                "private feed produced {other:?} before its readiness watermark"
+            ))),
+        }
     }
 }
 
@@ -566,7 +715,14 @@ mod tests {
         // "mainnet" is a realm, not a venue. Accepting it here would mean two
         // spellings reach the funded account, and only one of them is the one
         // the fence and the docs talk about.
-        for near_miss in ["mainnet", "demo", "bybit_main", "BYBIT_MAINNET", "hyperliquid", ""] {
+        for near_miss in [
+            "mainnet",
+            "demo",
+            "bybit_main",
+            "BYBIT_MAINNET",
+            "hyperliquid",
+            "",
+        ] {
             assert!(
                 VenueName::parse(near_miss).is_err(),
                 "{near_miss:?} was accepted as a venue name"
@@ -611,7 +767,10 @@ mod tests {
         let mut seen: Vec<&str> = Vec::new();
         for name in known_venues() {
             let realm = VenueName::parse(name).unwrap().realm();
-            assert!(!seen.contains(&realm), "{realm} is claimed by two venue names");
+            assert!(
+                !seen.contains(&realm),
+                "{realm} is claimed by two venue names"
+            );
             seen.push(realm);
         }
     }
@@ -624,9 +783,42 @@ mod tests {
         for name in known_venues() {
             let parsed = VenueName::parse(name).unwrap();
             if parsed.is_real_money() {
-                assert!(name.contains("mainnet"), "{name} moves real money and does not say so");
+                assert!(
+                    name.contains("mainnet"),
+                    "{name} moves real money and does not say so"
+                );
             } else {
-                assert!(!name.contains("mainnet"), "{name} reads like real money and is not");
+                assert!(
+                    !name.contains("mainnet"),
+                    "{name} reads like real money and is not"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_readiness_is_explicit_for_every_registered_realm() {
+        for venue in VenueName::ALL {
+            match venue {
+                VenueName::BybitDemo | VenueName::BybitMainnet => {
+                    assert_eq!(venue.readiness(), VenueReadiness::LiveProven);
+                    venue.require_engine_run_ready().unwrap();
+                }
+                VenueName::HyperliquidTestnet | VenueName::LighterTestnet => {
+                    assert_eq!(venue.readiness(), VenueReadiness::TestnetCanary);
+                    venue.require_engine_run_ready().unwrap();
+                }
+                VenueName::HyperliquidMainnet
+                | VenueName::LighterMainnet
+                | VenueName::MexcMainnet => {
+                    assert_eq!(venue.readiness(), VenueReadiness::ProductionBlocked);
+                    let error = venue.require_engine_run_ready().unwrap_err().to_string();
+                    assert!(error.contains("production-blocked"), "{error}");
+                }
+                VenueName::VariationalMainnet => {
+                    assert_eq!(venue.readiness(), VenueReadiness::ReadOnly);
+                    assert!(venue.require_engine_run_ready().is_err());
+                }
             }
         }
     }

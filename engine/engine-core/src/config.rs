@@ -17,8 +17,14 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug)]
 pub enum ConfigError {
-    Read { path: String, source: std::io::Error },
-    Parse { path: String, detail: String },
+    Read {
+        path: String,
+        source: std::io::Error,
+    },
+    Parse {
+        path: String,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -149,6 +155,8 @@ fn default_group_flush_ms() -> u64 {
     250
 }
 
+pub(crate) const MAX_GROUP_FLUSH_MS: u64 = 1_000;
+
 fn default_wal_rotate_mb() -> u64 {
     256
 }
@@ -180,11 +188,24 @@ pub fn load(path: &Path) -> Result<LoadedConfig, ConfigError> {
         path: path.display().to_string(),
         detail: e.to_string(),
     })?;
+    validate(&config).map_err(|detail| ConfigError::Parse {
+        path: path.display().to_string(),
+        detail,
+    })?;
     Ok(LoadedConfig {
         config,
         sha256,
         path: path.to_path_buf(),
     })
+}
+
+fn validate(config: &Config) -> Result<(), String> {
+    if !(1..=MAX_GROUP_FLUSH_MS).contains(&config.engine.group_flush_ms) {
+        return Err(format!(
+            "engine.group_flush_ms must be between 1 and {MAX_GROUP_FLUSH_MS}; larger values delay account refresh, halt cancellation, and durability work"
+        ));
+    }
+    Ok(())
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -235,7 +256,8 @@ symbols = ["BTCUSDT"]
                 .unwrap();
         assert_eq!(sole.engine.leverage_authority, LeverageAuthority::Sole);
         assert_eq!(
-            cfg.engine.venue, engine_venue::BYBIT_DEMO,
+            cfg.engine.venue,
+            engine_venue::BYBIT_DEMO,
             "a config written before the key existed still means the demo venue"
         );
         assert_eq!(
@@ -251,8 +273,23 @@ symbols = ["BTCUSDT"]
         let s = &cfg.strategies[0];
         assert_eq!(s.name, "quote_taker");
         assert_eq!(s.sleeve_name(), "quotes");
-        assert_eq!(s.params.get("every_nth_quote").unwrap().as_integer(), Some(20));
+        assert_eq!(
+            s.params.get("every_nth_quote").unwrap().as_integer(),
+            Some(20)
+        );
         assert!(s.params.get("name").is_none(), "name is not a param");
+    }
+
+    #[test]
+    fn group_flush_cannot_stall_control_work() {
+        for bad in [0, MAX_GROUP_FLUSH_MS + 1, u64::MAX] {
+            let src = SAMPLE.replace(
+                "account_view_max_age_ms = 4000",
+                &format!("account_view_max_age_ms = 4000\ngroup_flush_ms = {bad}"),
+            );
+            let cfg: Config = toml::from_str(&src).unwrap();
+            assert!(validate(&cfg).is_err(), "accepted {bad} ms");
+        }
     }
 
     #[test]

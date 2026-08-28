@@ -7,25 +7,42 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=liquidity-controls
+Group=liquidity-controls
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET REAL_MONEY
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/liquidity-migration/scripts/run_authorized_runtime.sh liquidity-migration-telegram-controls.service main
+Environment=TELEGRAM_CONTROLS_STATE_DIR=/var/lib/liquidity-migration-telegram-controls
+ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-telegram-controls.service main
 Restart=always
+RestartPreventExitStatus=78
 RestartSec=15
 KillMode=control-group
 TimeoutStopSec=30
-NoNewPrivileges=true
-InaccessiblePaths=/etc/liquidity-migration/bybit-mainnet.env
+# sudo is usable only for the four exact argv in the root-owned, digest-bound
+# liquidity-migration-controls sudoers fragment. The bot itself owns no venue,
+# config, unit, checkout, or trust-root write access.
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
-# /etc/liquidity-migration: pause writes the sleeve override and the resolved
-# toggle file through the same deploy library the rollout uses.
-ReadWritePaths=/opt/liquidity-migration /etc/liquidity-migration
+PrivateDevices=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=-/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine.toml -/etc/liquidity-migration/engine-mainnet.toml -/etc/liquidity-migration/producer-demo.env -/etc/liquidity-migration/producer-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env -/etc/liquidity-migration/attestor-bootstrap -/etc/liquidity-migration/rollout-attestor-operator-public.pem
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+StateDirectory=liquidity-migration-telegram-controls
+StateDirectoryMode=0700
 MemoryMax=256M
 # An operator surface must not preempt the producers (Nice=5) or owners (-5).
 Nice=10

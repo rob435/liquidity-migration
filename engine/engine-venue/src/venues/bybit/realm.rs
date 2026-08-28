@@ -105,6 +105,16 @@ impl VenueRealm {
         }
     }
 
+    /// Credentials available to the deployment attestor. Mainnet uses a
+    /// physically separate read-only API key, so an inventory proof never
+    /// receives the execution key merely because it needs signed reads.
+    pub fn inventory_credential_vars(self) -> (&'static str, &'static str) {
+        match self {
+            VenueRealm::Demo => self.credential_vars(),
+            VenueRealm::Mainnet => ("BYBIT_ATTEST_API_KEY", "BYBIT_ATTEST_API_SECRET"),
+        }
+    }
+
     /// Whether this realm moves real capital. Used where the distinction is
     /// about money rather than about which host to call.
     pub fn is_real_money(self) -> bool {
@@ -116,6 +126,14 @@ impl VenueRealm {
     pub fn credentials(self) -> Result<Credentials, VenueError> {
         let (key_var, secret_var) = self.credential_vars();
         Credentials::from_env(self.as_str(), self.is_real_money(), key_var, secret_var)
+    }
+
+    /// Credentials for the read-only deployment inventory capability. This
+    /// may read a disarmed funded account, but the resulting type has no send
+    /// or mutation methods.
+    pub(crate) fn inventory_credentials(self) -> Result<Credentials, VenueError> {
+        let (key_var, secret_var) = self.inventory_credential_vars();
+        Credentials::from_env_read_only(self.as_str(), self.is_real_money(), key_var, secret_var)
     }
 
     /// Credentials for this realm, supplied rather than read. Tests and the
@@ -141,7 +159,10 @@ mod tests {
         assert_eq!(VenueRealm::parse("demo").unwrap(), VenueRealm::Demo);
         assert_eq!(VenueRealm::parse("mainnet").unwrap(), VenueRealm::Mainnet);
         // Operators type these into env files.
-        assert_eq!(VenueRealm::parse("  MainNet \n").unwrap(), VenueRealm::Mainnet);
+        assert_eq!(
+            VenueRealm::parse("  MainNet \n").unwrap(),
+            VenueRealm::Mainnet
+        );
         for refused in ["", " ", "testnet", "main", "prod", "live", "real", "demo1"] {
             assert!(
                 VenueRealm::parse(refused).is_err(),
@@ -174,6 +195,11 @@ mod tests {
                 assert_ne!(demo_var, main_var);
             }
         }
+        let (ak, as_) = main.inventory_credential_vars();
+        assert_eq!(ak, "BYBIT_ATTEST_API_KEY");
+        assert_eq!(as_, "BYBIT_ATTEST_API_SECRET");
+        assert_ne!(ak, mk);
+        assert_ne!(as_, ms);
     }
 
     #[test]
@@ -181,7 +207,10 @@ mod tests {
         // Not an oversight: Bybit publishes no demo price feed, and the demo
         // account matches against the mainnet book. A separate host here
         // would be one that does not exist.
-        assert_eq!(VenueRealm::Demo.public_ws(), VenueRealm::Mainnet.public_ws());
+        assert_eq!(
+            VenueRealm::Demo.public_ws(),
+            VenueRealm::Mainnet.public_ws()
+        );
     }
 
     #[test]

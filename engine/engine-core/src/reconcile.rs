@@ -17,9 +17,9 @@
 //! does not guess whose it is, does not cancel it, and does not trade on top
 //! of it. It says so and stops opening.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use engine_types::{AccountView, OrderRequest, OrderUpdate, Side, SymbolId, WalRecord, VenueOrder};
+use engine_types::{AccountView, OrderRequest, OrderUpdate, Side, SymbolId, VenueOrder, WalRecord};
 
 use crate::inflight::LedgerOfOrders;
 
@@ -27,6 +27,16 @@ use crate::inflight::LedgerOfOrders;
 /// known. Real comparisons use the symbol's own quantity step instead — see
 /// [`tolerance`].
 const QTY_EPS: f64 = 1e-9;
+
+/// A durable stop belongs to a position direction, not merely a symbol. A
+/// two-sided quote may have opening siblings in both directions, and an
+/// unfilled later sibling must never overwrite protection for the side that
+/// actually filled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct IntendedPositionStop {
+    pub side: Side,
+    pub trigger_px: f64,
+}
 
 /// How far the log's running total may sit from the venue's before it counts
 /// as somebody else's trading.
@@ -58,17 +68,32 @@ pub enum Finding {
     /// it sits in a symbol a strategy subscribed to: the owner hand-trades
     /// this account, and an order in a symbol the engine cannot even address
     /// is news rather than a problem.
-    ForeignOrder { client_order_id: String, symbol: String, ours_to_trade: bool },
-    /// A position with nothing to take it off if the price runs. `repair_px`
-    /// is the stop the log says was intended for that symbol, when the log
-    /// knows one.
-    UnprotectedPosition { symbol: SymbolId, repair_px: Option<f64> },
+    ForeignOrder {
+        client_order_id: String,
+        symbol: String,
+        ours_to_trade: bool,
+    },
+    /// A position with no valid stop, or with a venue stop looser than the
+    /// durable intent. `venue_px` is absent when no valid stop exists;
+    /// `repair_px` is absent when the log cannot prove a safe level.
+    UnderprotectedPosition {
+        symbol: SymbolId,
+        venue_px: Option<f64>,
+        repair_px: Option<f64>,
+    },
     /// The venue holds more (or less) in a symbol than the log's own fills
     /// account for. Somebody else is trading this symbol.
-    UnaccountedExposure { symbol: SymbolId, venue_qty: f64, logged_qty: f64 },
+    UnaccountedExposure {
+        symbol: SymbolId,
+        venue_qty: f64,
+        logged_qty: f64,
+    },
     /// The private stream or execution history reported a fill whose order
     /// this log never recorded sending.
-    ForeignFill { client_order_id: String, symbol: SymbolId },
+    ForeignFill {
+        client_order_id: String,
+        symbol: SymbolId,
+    },
 }
 
 impl Finding {
@@ -85,7 +110,7 @@ impl Finding {
             Finding::UnaccountedExposure { .. } => true,
             // Only when the log cannot say where the stop belongs. A stop it
             // can put back is a repair, not a reason to stop trading.
-            Finding::UnprotectedPosition { repair_px, .. } => repair_px.is_none(),
+            Finding::UnderprotectedPosition { repair_px, .. } => repair_px.is_none(),
             Finding::OrderStillWorking { .. } | Finding::OrderVanished { .. } => false,
         }
     }
@@ -124,7 +149,11 @@ impl Reconciliation {
         self.findings
             .iter()
             .filter_map(|f| match f {
-                Finding::UnprotectedPosition { symbol, repair_px: Some(px) } => Some((*symbol, *px)),
+                Finding::UnderprotectedPosition {
+                    symbol,
+                    repair_px: Some(px),
+                    ..
+                } => Some((*symbol, *px)),
                 _ => None,
             })
             .collect()
@@ -144,29 +173,65 @@ fn describe(finding: &Finding) -> String {
         Finding::OrderVanished { client_order_id } => format!(
             "{client_order_id} was working when the engine stopped and the venue no longer has it"
         ),
-        Finding::ForeignOrder { client_order_id, symbol, ours_to_trade: true } => format!(
+        Finding::ForeignOrder {
+            client_order_id,
+            symbol,
+            ours_to_trade: true,
+        } => format!(
             "{symbol}: an order this engine did not place is working ({client_order_id}), \
              in a symbol a strategy here trades"
         ),
-        Finding::ForeignOrder { client_order_id, symbol, ours_to_trade: false } => format!(
+        Finding::ForeignOrder {
+            client_order_id,
+            symbol,
+            ours_to_trade: false,
+        } => format!(
             "{symbol}: somebody else is working an order ({client_order_id}); no strategy here \
              trades that symbol"
         ),
-        Finding::UnprotectedPosition { symbol, repair_px: Some(px) } => {
-            format!("symbol {}: held with no stop; the log says it belongs at {px}", symbol.0)
-        }
-        Finding::UnprotectedPosition { symbol, repair_px: None } => format!(
-            "symbol {}: held with no stop, and the log does not say where one belongs",
+        Finding::UnderprotectedPosition {
+            symbol,
+            venue_px: None,
+            repair_px: Some(px),
+        } => format!(
+            "symbol {}: held with no valid stop; the log says it belongs at {px}",
             symbol.0
         ),
-        Finding::UnaccountedExposure { symbol, venue_qty, logged_qty } => format!(
+        Finding::UnderprotectedPosition {
+            symbol,
+            venue_px: Some(venue_px),
+            repair_px: Some(px),
+        } => format!(
+            "symbol {}: venue stop {venue_px} is looser than the durable intended stop {px}",
+            symbol.0
+        ),
+        Finding::UnderprotectedPosition {
+            symbol,
+            repair_px: None,
+            ..
+        } => format!(
+            "symbol {}: held with no valid stop, and the log does not say where one belongs",
+            symbol.0
+        ),
+        Finding::UnaccountedExposure {
+            symbol,
+            venue_qty,
+            logged_qty,
+        } => format!(
             "symbol {}: the venue holds {venue_qty} and this log accounts for {logged_qty}",
             symbol.0
         ),
-        Finding::ForeignFill { client_order_id, symbol } => format!(
+        Finding::ForeignFill {
+            client_order_id,
+            symbol,
+        } => format!(
             "symbol {}: a fill names an order this engine did not send ({})",
             symbol.0,
-            if client_order_id.is_empty() { "blank client id" } else { client_order_id }
+            if client_order_id.is_empty() {
+                "blank client id"
+            } else {
+                client_order_id
+            }
         ),
     }
 }
@@ -188,15 +253,20 @@ pub fn reconcile(
     account: &AccountView,
     resolve: impl Fn(&str) -> Option<SymbolId>,
     qty_step_of: impl Fn(SymbolId) -> Option<f64>,
+    px_tick_of: impl Fn(SymbolId) -> Option<f64>,
 ) -> Reconciliation {
     let mut findings = Vec::new();
 
     // Orders the log still shows working, against the venue's own list.
     for id in log.in_flight_ids() {
         if venue_orders.iter().any(|o| o.client_order_id == id) {
-            findings.push(Finding::OrderStillWorking { client_order_id: id.to_string() });
+            findings.push(Finding::OrderStillWorking {
+                client_order_id: id.to_string(),
+            });
         } else {
-            findings.push(Finding::OrderVanished { client_order_id: id.to_string() });
+            findings.push(Finding::OrderVanished {
+                client_order_id: id.to_string(),
+            });
         }
     }
 
@@ -216,14 +286,28 @@ pub fn reconcile(
 
     findings.extend(foreign_fills(replayed));
 
-    let logged = logged_exposure(replayed);
-    let intended = intended_stops(replayed);
+    let (logged, intended) = position_state(replayed);
 
     for position in &account.positions {
-        if !position.stop_attached {
-            findings.push(Finding::UnprotectedPosition {
+        let intended_px = intended
+            .get(&position.symbol.0)
+            .filter(|stop| stop.side == position.side)
+            .map(|stop| stop.trigger_px)
+            .filter(|px| px.is_finite() && *px > 0.0);
+        let venue_px =
+            (position.stop_attached && position.stop_px.is_finite() && position.stop_px > 0.0)
+                .then_some(position.stop_px);
+        let px_tolerance = tolerance(px_tick_of(position.symbol));
+        let venue_is_looser = match (position.side, venue_px, intended_px) {
+            (Side::Buy, Some(venue), Some(want)) => venue + px_tolerance < want,
+            (Side::Sell, Some(venue), Some(want)) => venue - px_tolerance > want,
+            _ => false,
+        };
+        if venue_px.is_none() || venue_is_looser {
+            findings.push(Finding::UnderprotectedPosition {
                 symbol: position.symbol,
-                repair_px: intended.get(&position.symbol.0).copied(),
+                venue_px,
+                repair_px: intended_px,
             });
         }
         let venue_qty = signed(position.side, position.qty);
@@ -255,9 +339,18 @@ fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
                 sent.insert(request.client_order_id.clone());
             }
             WalRecord::OrderUpdate {
-                update: OrderUpdate::Fill { client_order_id, symbol, .. },
+                update:
+                    OrderUpdate::Fill {
+                        client_order_id,
+                        symbol,
+                        ..
+                    },
             }
-            | WalRecord::RecoveredFill { client_order_id, symbol, .. } => {
+            | WalRecord::RecoveredFill {
+                client_order_id,
+                symbol,
+                ..
+            } => {
                 if client_order_id.is_empty() || !sent.contains(client_order_id) {
                     findings.push(Finding::ForeignFill {
                         client_order_id: client_order_id.clone(),
@@ -279,28 +372,208 @@ fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
     findings
 }
 
-/// Fold one fill into a per-symbol running total — the one arithmetic behind
-/// [`logged_exposure`], used by the boot scan and by the engine's own live
-/// copy, so a segment restated at rotation cannot drift from a replay.
-pub(crate) fn note_fill(out: &mut BTreeMap<u16, f64>, symbol: SymbolId, side: Side, qty: f64) {
-    if !qty.is_finite() {
-        return;
-    }
-    let total = out.entry(symbol.0).or_insert(0.0);
-    *total += signed(side, qty);
-    if total.abs() <= QTY_EPS {
-        out.remove(&symbol.0);
+fn side_of(signed_qty: f64) -> Option<Side> {
+    if signed_qty > QTY_EPS {
+        Some(Side::Buy)
+    } else if signed_qty < -QTY_EPS {
+        Some(Side::Sell)
+    } else {
+        None
     }
 }
 
-/// Remember the stop an opening order asked for, per symbol. The other half
-/// of [`intended_stops`], shared with the engine's live copy for the same
-/// reason as [`note_fill`].
-pub(crate) fn note_intended_stop(out: &mut BTreeMap<u16, f64>, request: &OrderRequest) {
-    let OrderRequest { symbol, stop: Some(stop), reduce_only: false, .. } = request else {
+fn request_stop_for_fill(
+    request: Option<&OrderRequest>,
+    symbol: SymbolId,
+    side: Side,
+) -> Option<f64> {
+    let request = request.filter(|request| {
+        request.symbol == symbol && request.side == side && !request.reduce_only
+    })?;
+    let trigger_px = request.stop?.trigger_px;
+    (trigger_px.is_finite() && trigger_px > 0.0).then_some(trigger_px)
+}
+
+/// Fold one owned fill into both trusted exposure and its stop intent. This
+/// is the single arithmetic used by live processing and WAL replay.
+///
+/// A reduction keeps the current stop. Flat removes it. A fill that grows or
+/// crosses the position advances intent only from that fill's own opening
+/// request; a missing, malformed, mismatched, or reduce-only request clears
+/// repair authority instead of borrowing a sibling's stop.
+pub(crate) fn note_owned_fill(
+    exposure: &mut BTreeMap<u16, f64>,
+    intended: &mut BTreeMap<u16, IntendedPositionStop>,
+    request: Option<&OrderRequest>,
+    symbol: SymbolId,
+    side: Side,
+    qty: f64,
+) {
+    if !qty.is_finite() || qty <= 0.0 {
         return;
-    };
-    out.insert(symbol.0, stop.trigger_px);
+    }
+
+    let prior = exposure.get(&symbol.0).copied().unwrap_or(0.0);
+    let next = prior + signed(side, qty);
+    if side_of(next).is_none() {
+        exposure.remove(&symbol.0);
+        intended.remove(&symbol.0);
+        return;
+    }
+
+    exposure.insert(symbol.0, next);
+    let next_side = side_of(next).expect("non-flat quantity has a side");
+    let crossed_or_opened = side_of(prior) != Some(next_side);
+    let grew = next.abs() > prior.abs() + QTY_EPS;
+    if crossed_or_opened {
+        match request_stop_for_fill(request, symbol, side) {
+            Some(trigger_px) => {
+                intended.insert(
+                    symbol.0,
+                    IntendedPositionStop {
+                        side: next_side,
+                        trigger_px,
+                    },
+                );
+            }
+            None => {
+                intended.remove(&symbol.0);
+            }
+        }
+    } else if grew {
+        if let Some(candidate) = request_stop_for_fill(request, symbol, side) {
+            let trigger_px = match intended.get(&symbol.0) {
+                Some(current) if current.side == next_side => match next_side {
+                    Side::Buy => current.trigger_px.max(candidate),
+                    Side::Sell => current.trigger_px.min(candidate),
+                },
+                _ => candidate,
+            };
+            intended.insert(
+                symbol.0,
+                IntendedPositionStop {
+                    side: next_side,
+                    trigger_px,
+                },
+            );
+        }
+    } else if intended
+        .get(&symbol.0)
+        .is_some_and(|stop| stop.side != next_side)
+    {
+        intended.remove(&symbol.0);
+    }
+}
+
+fn matching_intended_stop(
+    row: &engine_types::IntendedStop,
+    exposure: &BTreeMap<u16, f64>,
+) -> Option<(u16, IntendedPositionStop)> {
+    let side = row.side?;
+    let trigger_px = row.trigger_px;
+    if !trigger_px.is_finite()
+        || trigger_px <= 0.0
+        || side_of(exposure.get(&row.symbol.0).copied().unwrap_or(0.0)) != Some(side)
+    {
+        return None;
+    }
+    Some((row.symbol.0, IntendedPositionStop { side, trigger_px }))
+}
+
+fn position_state(
+    replayed: &[WalRecord],
+) -> (BTreeMap<u16, f64>, BTreeMap<u16, IntendedPositionStop>) {
+    let mut exposure = BTreeMap::new();
+    let mut intended = BTreeMap::new();
+    let mut sent: HashMap<String, OrderRequest> = HashMap::new();
+
+    for record in replayed {
+        match record {
+            WalRecord::OrderSent { request, .. } => {
+                sent.insert(request.client_order_id.clone(), request.clone());
+            }
+            WalRecord::OrderUpdate {
+                update:
+                    OrderUpdate::Fill {
+                        client_order_id,
+                        symbol,
+                        side,
+                        qty,
+                        ..
+                    },
+            }
+            | WalRecord::RecoveredFill {
+                client_order_id,
+                symbol,
+                side,
+                qty,
+                ..
+            } => {
+                if let Some(request) = sent.get(client_order_id) {
+                    note_owned_fill(
+                        &mut exposure,
+                        &mut intended,
+                        Some(request),
+                        *symbol,
+                        *side,
+                        *qty,
+                    );
+                }
+            }
+            WalRecord::StopSet {
+                symbol, trigger_px, ..
+            } => {
+                if trigger_px.is_finite() && *trigger_px > 0.0 {
+                    if let Some(side) = side_of(exposure.get(&symbol.0).copied().unwrap_or(0.0)) {
+                        intended.insert(
+                            symbol.0,
+                            IntendedPositionStop {
+                                side,
+                                trigger_px: *trigger_px,
+                            },
+                        );
+                    }
+                }
+            }
+            WalRecord::SegmentBase {
+                logged_exposure,
+                intended_stops,
+                open_orders,
+                ..
+            } => {
+                exposure = logged_exposure
+                    .iter()
+                    .filter(|row| row.signed_qty.is_finite() && row.signed_qty.abs() > QTY_EPS)
+                    .map(|row| (row.symbol.0, row.signed_qty))
+                    .collect();
+                intended = intended_stops
+                    .iter()
+                    .filter_map(|row| matching_intended_stop(row, &exposure))
+                    .collect();
+                sent = open_orders
+                    .iter()
+                    .map(|order| (order.request.client_order_id.clone(), order.request.clone()))
+                    .collect();
+            }
+            WalRecord::LatchCleared {
+                restated_exposure, ..
+            } => {
+                exposure = restated_exposure
+                    .iter()
+                    .filter(|row| row.signed_qty.is_finite() && row.signed_qty.abs() > QTY_EPS)
+                    .map(|row| (row.symbol.0, row.signed_qty))
+                    .collect();
+                // The operator accepted the venue's quantity, not an old
+                // order's stop provenance. Reusing a same-direction stop from
+                // before the clear could attach one writer's intent to
+                // another writer's position, so repair authority starts empty.
+                intended.clear();
+            }
+            _ => {}
+        }
+    }
+
+    (exposure, intended)
 }
 
 /// Signed quantity per symbol from fills that join to orders this log sent.
@@ -308,68 +581,14 @@ pub(crate) fn note_intended_stop(out: &mut BTreeMap<u16, f64>, request: &OrderRe
 /// exposure. A segment restatement is "set", not "add": at its place in the
 /// stream it is exactly what the records before it added up to.
 pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
-    let mut out: BTreeMap<u16, f64> = BTreeMap::new();
-    let mut sent: HashSet<String> = HashSet::new();
-    for record in replayed {
-        match record {
-            WalRecord::OrderSent { request, .. } => {
-                sent.insert(request.client_order_id.clone());
-            }
-            WalRecord::OrderUpdate {
-                update: OrderUpdate::Fill { client_order_id, symbol, side, qty, .. },
-            }
-            | WalRecord::RecoveredFill { client_order_id, symbol, side, qty, .. } => {
-                if !client_order_id.is_empty() && sent.contains(client_order_id) {
-                    note_fill(&mut out, *symbol, *side, *qty);
-                }
-            }
-            WalRecord::SegmentBase { logged_exposure, open_orders, .. } => {
-                out = logged_exposure
-                    .iter()
-                    .map(|row| (row.symbol.0, row.signed_qty))
-                    .collect();
-                sent = open_orders
-                    .iter()
-                    .map(|order| order.request.client_order_id.clone())
-                    .collect();
-            }
-            // An operator restated the ledger to the venue's positions after
-            // looking at the findings. "Set", like a rotation's restatement.
-            WalRecord::LatchCleared { restated_exposure, .. } => {
-                out = restated_exposure
-                    .iter()
-                    .map(|row| (row.symbol.0, row.signed_qty))
-                    .collect();
-            }
-            _ => {}
-        }
-    }
-    out.retain(|_, qty| qty.abs() > QTY_EPS);
-    out
+    position_state(replayed).0
 }
 
-/// The stop each symbol's most recent opening order asked for. A restart loses
-/// the strategy's own memory of where a stop belongs, but the log kept it, so
-/// a stop that the venue dropped can be put back exactly where it was meant to
-/// be rather than at a level the engine invented.
-pub(crate) fn intended_stops(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
-    let mut out: BTreeMap<u16, f64> = BTreeMap::new();
-    for record in replayed {
-        match record {
-            WalRecord::OrderSent { request, .. } => note_intended_stop(&mut out, request),
-            WalRecord::StopSet { symbol, trigger_px, .. } => {
-                out.insert(symbol.0, *trigger_px);
-            }
-            WalRecord::SegmentBase { intended_stops, .. } => {
-                out = intended_stops
-                    .iter()
-                    .map(|row| (row.symbol.0, row.trigger_px))
-                    .collect();
-            }
-            _ => {}
-        }
-    }
-    out
+/// The stop belonging to each trusted filled position. Merely sending an
+/// opposite-side sibling cannot alter this state; only an owned fill that
+/// grows or crosses the position can do so.
+pub(crate) fn intended_stops(replayed: &[WalRecord]) -> BTreeMap<u16, IntendedPositionStop> {
+    position_state(replayed).1
 }
 
 fn signed(side: Side, qty: f64) -> f64 {
@@ -394,7 +613,7 @@ mod tests {
             kind: OrderKind::Market,
             stop: stop.map(|trigger_px| StopSpec { trigger_px }),
             reduce_only: false,
-            }
+        }
     }
 
     fn sent(id: &str, symbol: u16, side: Side, qty: f64, stop: Option<f64>) -> WalRecord {
@@ -434,11 +653,24 @@ mod tests {
     }
 
     fn account(positions: Vec<PositionView>) -> AccountView {
-        AccountView { equity_usdt: 1_000.0, available_usdt: 900.0, positions, observed_ns: 1 }
+        AccountView {
+            equity_usdt: 1_000.0,
+            available_usdt: 900.0,
+            positions,
+            observed_ns: 1,
+        }
     }
 
     fn held(symbol: u16, side: Side, qty: f64, stop_attached: bool) -> PositionView {
-        PositionView { symbol: SymbolId(symbol), side, qty, entry_px: 100.0, stop_px: 0.0, stop_attached, leverage: None }
+        PositionView {
+            symbol: SymbolId(symbol),
+            side,
+            qty,
+            entry_px: 100.0,
+            stop_px: if stop_attached { 100.0 } else { 0.0 },
+            stop_attached,
+            leverage: None,
+        }
     }
 
     /// Stands in for the engine's symbol table: BTCUSDT is subscribed, and
@@ -454,7 +686,7 @@ mod tests {
 
     fn run(replayed: &[WalRecord], venue: &[VenueOrder], acct: &AccountView) -> Reconciliation {
         let log = LedgerOfOrders::from_records(replayed);
-        reconcile(&log, replayed, venue, acct, names, steps)
+        reconcile(&log, replayed, venue, acct, names, steps, |_| Some(0.5))
     }
 
     #[test]
@@ -470,7 +702,9 @@ mod tests {
         let out = run(&log, &[venue_order("eng-1", "BTCUSDT")], &account(vec![]));
         assert_eq!(
             out.findings,
-            vec![Finding::OrderStillWorking { client_order_id: "eng-1".into() }]
+            vec![Finding::OrderStillWorking {
+                client_order_id: "eng-1".into()
+            }]
         );
         assert!(!out.must_not_open(), "agreeing is not a reason to stop");
     }
@@ -481,13 +715,22 @@ mod tests {
         // in the account reading, which is the picture that matters.
         let log = vec![sent("eng-1", 0, Side::Buy, 1.0, Some(90.0))];
         let out = run(&log, &[], &account(vec![]));
-        assert_eq!(out.findings, vec![Finding::OrderVanished { client_order_id: "eng-1".into() }]);
+        assert_eq!(
+            out.findings,
+            vec![Finding::OrderVanished {
+                client_order_id: "eng-1".into()
+            }]
+        );
         assert!(!out.must_not_open());
     }
 
     #[test]
     fn an_order_this_engine_never_placed_stops_it_opening() {
-        let out = run(&[], &[venue_order("somebody-else-7", "BTCUSDT")], &account(vec![]));
+        let out = run(
+            &[],
+            &[venue_order("somebody-else-7", "BTCUSDT")],
+            &account(vec![]),
+        );
         assert_eq!(
             out.findings,
             vec![Finding::ForeignOrder {
@@ -496,7 +739,10 @@ mod tests {
                 ours_to_trade: true,
             }]
         );
-        assert!(out.must_not_open(), "a second writer makes every risk number wrong");
+        assert!(
+            out.must_not_open(),
+            "a second writer makes every risk number wrong"
+        );
     }
 
     #[test]
@@ -504,7 +750,11 @@ mod tests {
         // The owner trades this account by hand. An order in a symbol no
         // strategy subscribed to cannot touch anything the engine does, and
         // stopping for it would mean the engine stops most days.
-        let out = run(&[], &[venue_order("owners-own-3", "DOGEUSDT")], &account(vec![]));
+        let out = run(
+            &[],
+            &[venue_order("owners-own-3", "DOGEUSDT")],
+            &account(vec![]),
+        );
         assert_eq!(out.findings.len(), 1);
         assert!(!out.must_not_open(), "{:?}", out.findings);
         assert!(out.lines()[0].contains("DOGEUSDT"));
@@ -523,14 +773,20 @@ mod tests {
 
     #[test]
     fn a_position_the_log_accounts_for_is_not_unaccounted() {
-        let log = vec![sent("eng-1", 3, Side::Buy, 2.0, Some(90.0)), fill("eng-1", 3, Side::Buy, 2.0)];
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 2.0, Some(90.0)),
+            fill("eng-1", 3, Side::Buy, 2.0),
+        ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 2.0, true)]));
         assert!(out.findings.is_empty(), "{:?}", out.findings);
     }
 
     #[test]
     fn a_position_bigger_than_the_logs_own_fills_stops_it_opening() {
-        let log = vec![sent("eng-1", 3, Side::Buy, 1.0, Some(90.0)), fill("eng-1", 3, Side::Buy, 1.0)];
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 1.0, Some(90.0)),
+            fill("eng-1", 3, Side::Buy, 1.0),
+        ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.5, true)]));
         assert_eq!(
             out.findings,
@@ -550,7 +806,10 @@ mod tests {
         // exposure becomes the engine's own problem.
         let out = run(&[], &[], &account(vec![held(3, Side::Buy, 1.0, true)]));
         assert!(out.must_not_open());
-        assert!(matches!(out.findings[0], Finding::UnaccountedExposure { .. }));
+        assert!(matches!(
+            out.findings[0],
+            Finding::UnaccountedExposure { .. }
+        ));
     }
 
     #[test]
@@ -570,31 +829,98 @@ mod tests {
 
     #[test]
     fn a_difference_of_one_whole_step_is_real() {
-        let log = vec![sent("eng-1", 3, Side::Buy, 1.0, Some(90.0)), fill("eng-1", 3, Side::Buy, 1.0)];
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 1.0, Some(90.0)),
+            fill("eng-1", 3, Side::Buy, 1.0),
+        ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.001, true)]));
-        assert!(out.must_not_open(), "one step is the smallest position a venue can hold");
+        assert!(
+            out.must_not_open(),
+            "one step is the smallest position a venue can hold"
+        );
     }
 
     #[test]
     fn a_short_the_log_accounts_for_nets_out() {
-        let log = vec![sent("eng-1", 3, Side::Sell, 2.0, Some(110.0)), fill("eng-1", 3, Side::Sell, 2.0)];
+        let log = vec![
+            sent("eng-1", 3, Side::Sell, 2.0, Some(110.0)),
+            fill("eng-1", 3, Side::Sell, 2.0),
+        ];
         let out = run(&log, &[], &account(vec![held(3, Side::Sell, 2.0, true)]));
         assert!(out.findings.is_empty(), "{:?}", out.findings);
     }
 
     #[test]
     fn an_unprotected_position_is_repaired_at_the_level_the_log_intended() {
-        let log = vec![sent("eng-1", 3, Side::Buy, 1.0, Some(88.5)), fill("eng-1", 3, Side::Buy, 1.0)];
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 1.0, Some(88.5)),
+            fill("eng-1", 3, Side::Buy, 1.0),
+        ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.0, false)]));
         assert_eq!(out.stop_repairs(), vec![(SymbolId(3), 88.5)]);
-        assert!(!out.must_not_open(), "a stop it can put back is a repair, not a halt");
+        assert!(
+            !out.must_not_open(),
+            "a stop it can put back is a repair, not a halt"
+        );
+    }
+
+    #[test]
+    fn an_attached_but_looser_long_stop_is_repaired() {
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 1.0, Some(90.0)),
+            fill("eng-1", 3, Side::Buy, 1.0),
+        ];
+        let mut position = held(3, Side::Buy, 1.0, true);
+        position.stop_px = 85.0;
+
+        let out = run(&log, &[], &account(vec![position]));
+
+        assert_eq!(out.stop_repairs(), vec![(SymbolId(3), 90.0)]);
+    }
+
+    #[test]
+    fn an_attached_but_looser_short_stop_is_repaired() {
+        let log = vec![
+            sent("eng-1", 3, Side::Sell, 1.0, Some(110.0)),
+            fill("eng-1", 3, Side::Sell, 1.0),
+        ];
+        let mut position = held(3, Side::Sell, 1.0, true);
+        position.stop_px = 115.0;
+
+        let out = run(&log, &[], &account(vec![position]));
+
+        assert_eq!(out.stop_repairs(), vec![(SymbolId(3), 110.0)]);
+    }
+
+    #[test]
+    fn an_equal_or_tighter_attached_stop_is_never_loosened() {
+        for (side, intended, venue) in [
+            (Side::Buy, 90.0, 95.0),
+            (Side::Buy, 90.0, 90.0),
+            (Side::Sell, 110.0, 105.0),
+            (Side::Sell, 110.0, 110.0),
+        ] {
+            let log = vec![
+                sent("eng-1", 3, side, 1.0, Some(intended)),
+                fill("eng-1", 3, side, 1.0),
+            ];
+            let mut position = held(3, side, 1.0, true);
+            position.stop_px = venue;
+
+            let out = run(&log, &[], &account(vec![position]));
+
+            assert!(out.stop_repairs().is_empty(), "{side:?} {out:?}");
+        }
     }
 
     #[test]
     fn an_unprotected_position_the_log_cannot_place_a_stop_for_stops_it_opening() {
         let out = run(&[], &[], &account(vec![held(3, Side::Buy, 1.0, false)]));
         assert!(out.stop_repairs().is_empty(), "no level to repair to");
-        assert!(out.must_not_open(), "guessing a stop level is worse than refusing");
+        assert!(
+            out.must_not_open(),
+            "guessing a stop level is worse than refusing"
+        );
     }
 
     #[test]
@@ -604,7 +930,11 @@ mod tests {
         exit.reduce_only = true;
         let log = vec![
             sent("eng-1", 3, Side::Buy, 1.0, Some(88.5)),
-            WalRecord::OrderSent { request: exit, wire_ns: 2, arrival_mid: 0.0 },
+            WalRecord::OrderSent {
+                request: exit,
+                wire_ns: 2,
+                arrival_mid: 0.0,
+            },
             fill("eng-1", 3, Side::Buy, 1.0),
         ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.0, false)]));
@@ -621,6 +951,128 @@ mod tests {
         ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 2.0, false)]));
         assert_eq!(out.stop_repairs(), vec![(SymbolId(3), 85.0)]);
+    }
+
+    #[test]
+    fn two_sided_siblings_follow_the_buy_that_fills_first() {
+        let log = vec![
+            sent("buy", 3, Side::Buy, 1.0, Some(90.0)),
+            sent("sell", 3, Side::Sell, 1.0, Some(110.0)),
+            fill("buy", 3, Side::Buy, 1.0),
+        ];
+
+        let stops = intended_stops(&log);
+        assert_eq!(
+            stops.get(&3),
+            Some(&IntendedPositionStop {
+                side: Side::Buy,
+                trigger_px: 90.0,
+            })
+        );
+        let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.0, false)]));
+        assert_eq!(out.stop_repairs(), vec![(SymbolId(3), 90.0)]);
+    }
+
+    #[test]
+    fn two_sided_siblings_follow_the_sell_that_fills_first() {
+        let log = vec![
+            sent("buy", 3, Side::Buy, 1.0, Some(90.0)),
+            sent("sell", 3, Side::Sell, 1.0, Some(110.0)),
+            fill("sell", 3, Side::Sell, 1.0),
+        ];
+
+        let stops = intended_stops(&log);
+        assert_eq!(
+            stops.get(&3),
+            Some(&IntendedPositionStop {
+                side: Side::Sell,
+                trigger_px: 110.0,
+            })
+        );
+        let out = run(&log, &[], &account(vec![held(3, Side::Sell, 1.0, false)]));
+        assert_eq!(out.stop_repairs(), vec![(SymbolId(3), 110.0)]);
+    }
+
+    #[test]
+    fn a_rejected_opposite_sibling_never_controls_stop_repair() {
+        let log = vec![
+            sent("buy", 3, Side::Buy, 1.0, Some(90.0)),
+            sent("sell", 3, Side::Sell, 1.0, Some(110.0)),
+            WalRecord::OrderUpdate {
+                update: OrderUpdate::Reject {
+                    client_order_id: "sell".into(),
+                    code: 10001,
+                    reason: "rejected".into(),
+                },
+            },
+            fill("buy", 3, Side::Buy, 1.0),
+        ];
+
+        let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.0, false)]));
+        assert_eq!(out.stop_repairs(), vec![(SymbolId(3), 90.0)]);
+    }
+
+    #[test]
+    fn a_reduction_keeps_the_stop_and_a_cross_takes_the_new_orders_stop() {
+        let log = vec![
+            sent("buy", 3, Side::Buy, 2.0, Some(90.0)),
+            fill("buy", 3, Side::Buy, 2.0),
+            sent("sell", 3, Side::Sell, 3.0, Some(110.0)),
+            fill("sell", 3, Side::Sell, 1.0),
+        ];
+        assert_eq!(
+            intended_stops(&log).get(&3),
+            Some(&IntendedPositionStop {
+                side: Side::Buy,
+                trigger_px: 90.0,
+            })
+        );
+
+        let mut crossed = log;
+        crossed.push(fill("sell", 3, Side::Sell, 2.0));
+        assert_eq!(
+            intended_stops(&crossed).get(&3),
+            Some(&IntendedPositionStop {
+                side: Side::Sell,
+                trigger_px: 110.0,
+            })
+        );
+    }
+
+    #[test]
+    fn same_side_growth_can_t_loosen_a_long_positions_stop() {
+        let log = vec![
+            sent("first", 3, Side::Buy, 1.0, Some(95.0)),
+            fill("first", 3, Side::Buy, 1.0),
+            sent("grow", 3, Side::Buy, 1.0, Some(90.0)),
+            fill("grow", 3, Side::Buy, 1.0),
+        ];
+
+        assert_eq!(
+            intended_stops(&log).get(&3),
+            Some(&IntendedPositionStop {
+                side: Side::Buy,
+                trigger_px: 95.0,
+            })
+        );
+    }
+
+    #[test]
+    fn same_side_growth_can_t_loosen_a_short_positions_stop() {
+        let log = vec![
+            sent("first", 3, Side::Sell, 1.0, Some(105.0)),
+            fill("first", 3, Side::Sell, 1.0),
+            sent("grow", 3, Side::Sell, 1.0, Some(110.0)),
+            fill("grow", 3, Side::Sell, 1.0),
+        ];
+
+        assert_eq!(
+            intended_stops(&log).get(&3),
+            Some(&IntendedPositionStop {
+                side: Side::Sell,
+                trigger_px: 105.0,
+            })
+        );
     }
 
     fn recovered(exec: &str, id: &str, symbol: u16, side: Side, qty: f64) -> WalRecord {
@@ -648,7 +1100,10 @@ mod tests {
             fill("eng-1", 3, Side::Buy, 2.0),
         ];
         let without = run(&log, &[], &account(vec![held(3, Side::Buy, 3.0, true)]));
-        assert!(without.must_not_open(), "the gap fill is unaccounted until recovered");
+        assert!(
+            without.must_not_open(),
+            "the gap fill is unaccounted until recovered"
+        );
         let mut with = log.clone();
         with.push(recovered("2f6e", "eng-1", 3, Side::Buy, 1.0));
         let out = run(&with, &[], &account(vec![held(3, Side::Buy, 3.0, true)]));
@@ -656,7 +1111,9 @@ mod tests {
         // the same gap), which reports and does not stop anything.
         assert!(!out.must_not_open(), "{:?}", out.findings);
         assert!(
-            !out.findings.iter().any(|f| matches!(f, Finding::UnaccountedExposure { .. })),
+            !out.findings
+                .iter()
+                .any(|f| matches!(f, Finding::UnaccountedExposure { .. })),
             "{:?}",
             out.findings
         );

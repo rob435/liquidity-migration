@@ -40,7 +40,11 @@ pub fn describe(records: &[WalRecord], torn_tail: bool) -> ReplayReport {
         names.learn(record);
         lines.push(format!("{:>6}  {}", index + 1, one_line(record, &names)));
         ledger.apply(record);
-        let now: Vec<String> = ledger.in_flight_ids().iter().map(|s| s.to_string()).collect();
+        let now: Vec<String> = ledger
+            .in_flight_ids()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         if now != last_in_flight {
             lines.push(format!("        still out there: {}", listed(&now)));
             last_in_flight = now;
@@ -88,8 +92,15 @@ impl LogNames {
     /// it once at the end would name every id after the last table.
     pub fn learn(&mut self, record: &WalRecord) {
         match record {
-            WalRecord::Names { strategies, symbols }
-            | WalRecord::SegmentBase { strategies, symbols, .. } => {
+            WalRecord::Names {
+                strategies,
+                symbols,
+            }
+            | WalRecord::SegmentBase {
+                strategies,
+                symbols,
+                ..
+            } => {
                 self.strategies = strategies.clone();
                 self.symbols = symbols.clone();
             }
@@ -205,6 +216,10 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             },
             pretty(*wire_ns)
         ),
+        WalRecord::AmendResolved {
+            client_order_id,
+            effective_px,
+        } => format!("move known {client_order_id} is working at {effective_px}"),
         WalRecord::LatencyLedger {
             window_s,
             events,
@@ -241,7 +256,10 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 late => format!(" (read {late} ms late)"),
             }
         ),
-        WalRecord::Names { strategies, symbols } => format!(
+        WalRecord::Names {
+            strategies,
+            symbols,
+        } => format!(
             "names      {} sleeve(s): {}; {} symbol(s): {}",
             strategies.len(),
             listed(strategies),
@@ -252,7 +270,14 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
         WalRecord::ControlAnchor { source, state } => {
             format!("anchor     [{source}] {state}")
         }
-        WalRecord::RecoveredFill { client_order_id, symbol, side, qty, px, .. } => format!(
+        WalRecord::RecoveredFill {
+            client_order_id,
+            symbol,
+            side,
+            qty,
+            px,
+            ..
+        } => format!(
             "recovered  {side:?} {qty} of {} at {px}{} — the stream never delivered this fill",
             names.symbol(*symbol),
             match client_order_id.as_str() {
@@ -272,16 +297,29 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        WalRecord::LatchCleared { note, restated_exposure, findings, .. } => format!(
+        WalRecord::LatchCleared {
+            note,
+            restated_exposure,
+            findings,
+            ..
+        } => format!(
             "cleared    an operator looked at the log: may-open resets, exposure restated \
              over {} symbol(s) ({note}){}",
             restated_exposure.len(),
-            findings.iter().map(|f| format!("\n             absorbed: {f}")).collect::<String>()
+            findings
+                .iter()
+                .map(|f| format!("\n             absorbed: {f}"))
+                .collect::<String>()
         ),
-        WalRecord::Reconciled { findings, may_open, .. } => format!(
+        WalRecord::Reconciled {
+            findings, may_open, ..
+        } => format!(
             "reconciled {} finding(s), may open: {may_open}{}",
             findings.len(),
-            findings.iter().map(|f| format!("\n             {f}")).collect::<String>()
+            findings
+                .iter()
+                .map(|f| format!("\n             {f}"))
+                .collect::<String>()
         ),
         WalRecord::SegmentBase {
             wall_ts_ms,
@@ -321,7 +359,9 @@ fn update_words(update: &engine_types::OrderUpdate, names: &LogNames) -> String 
             fee,
             ..
         } => format!("{client_order_id} filled {qty} at {px}, fee {fee}"),
-        U::Cancelled { client_order_id, .. } => format!("{client_order_id} cancelled"),
+        U::Cancelled {
+            client_order_id, ..
+        } => format!("{client_order_id} cancelled"),
         U::StopAttached {
             symbol, trigger_px, ..
         } => format!("stop on {} at {trigger_px}", names.symbol(*symbol)),

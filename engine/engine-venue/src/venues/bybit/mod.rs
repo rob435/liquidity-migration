@@ -12,7 +12,7 @@ mod rest;
 mod sign;
 mod ws;
 
-pub use gateway::BybitGateway;
+pub use gateway::{BybitGateway, BybitInventoryProbe};
 pub use realm::VenueRealm;
 pub use ws::BybitOrderFeed;
 

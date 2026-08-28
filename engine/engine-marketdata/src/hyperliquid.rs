@@ -5,6 +5,10 @@
 //! credentials — and both are per coin, so a symbol taken on after boot is
 //! subscribed while the socket stays up.
 //!
+//! The BBO channel has a venue time but no sequence number. Time regressions
+//! reset the feed; forward gaps cannot be detected from this channel and
+//! [`Quote::seq`] remains zero rather than inventing continuity.
+//!
 //! **The funding rate here is not the same number Bybit publishes.** Bybit
 //! quotes the rate for its next eight-hourly settlement; Hyperliquid pays
 //! every hour, and the `funding` field is that hourly rate — one eighth of the
@@ -24,7 +28,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Quote, Subscription, SymbolId, Ticker};
+use engine_types::{
+    Feed, FeedError, MarketEvent, MarketFeed, Quote, Subscription, SymbolId, Ticker,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
@@ -142,6 +148,7 @@ impl HyperliquidPublicFeed {
             admissions: admit_rx,
             backoff: Duration::ZERO,
             connected_before: false,
+            bbo_times: HashMap::new(),
         };
         let handle = tokio::spawn(worker.run(events));
         self.inbox = Some(Inbox {
@@ -183,6 +190,9 @@ struct Worker {
     admissions: mpsc::UnboundedReceiver<Vec<Subscription>>,
     backoff: Duration,
     connected_before: bool,
+    /// The BBO channel has no sequence number. Its venue time can reject
+    /// out-of-order data, but cannot prove that a forward update was missed.
+    bbo_times: HashMap<SymbolId, i64>,
 }
 
 impl Worker {
@@ -230,12 +240,16 @@ impl Worker {
 
     async fn connect(&mut self) -> Result<Socket, FeedError> {
         install_crypto_provider();
+        self.bbo_times.clear();
         let (mut socket, _) = connect_async(self.url.as_str())
             .await
             .map_err(|e| FeedError::Transport(e.to_string()))?;
         let subs = self.subs.clone();
         self.subscribe(&mut socket, &subs).await?;
-        info!(symbols = self.subs.len(), "hyperliquid market feed subscribed");
+        info!(
+            symbols = self.subs.len(),
+            "hyperliquid market feed subscribed"
+        );
         Ok(socket)
     }
 
@@ -300,9 +314,17 @@ impl Worker {
                                 }
                                 Ok(None) => (),
                                 Err(e) => {
+                                    let reset = MarketEvent::FeedReset {
+                                        recv_ns: engine_types::clock::mono_ns(),
+                                    };
+                                    if events.send(Ok(reset)).await.is_err() {
+                                        return Err(Gone);
+                                    }
                                     if events.send(Err(e)).await.is_err() {
                                         return Err(Gone);
                                     }
+                                    self.connected_before = false;
+                                    return Ok(());
                                 }
                             }
                         }
@@ -345,10 +367,13 @@ impl Worker {
         };
         let recv_ns = engine_types::clock::mono_ns();
         match channel {
-            "bbo" => Ok(self.decode_bbo(&frame, recv_ns)),
+            "bbo" => self.decode_bbo(&frame, recv_ns),
             "activeAssetCtx" => Ok(self.decode_ctx(&frame, recv_ns)),
             "error" => {
-                let why = frame.get("data").and_then(Value::as_str).unwrap_or("no reason");
+                let why = frame
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason");
                 Err(FeedError::Transport(format!(
                     "venue refused a market subscription: {why}"
                 )))
@@ -357,30 +382,65 @@ impl Worker {
         }
     }
 
-    fn decode_bbo(&self, frame: &Value, recv_ns: u64) -> Option<MarketEvent> {
-        let data = frame.get("data")?;
-        let symbol = symbol_of(data.get("coin")?.as_str()?);
-        let id = self.id_of(&symbol)?;
-        let levels = data.get("bbo")?.as_array()?;
+    fn decode_bbo(
+        &mut self,
+        frame: &Value,
+        recv_ns: u64,
+    ) -> Result<Option<MarketEvent>, FeedError> {
+        let Some(data) = frame.get("data") else {
+            return Ok(None);
+        };
+        let Some(coin) = data.get("coin").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let symbol = symbol_of(coin);
+        let Some(id) = self.id_of(&symbol) else {
+            return Ok(None);
+        };
+        let venue_ts_ms = data
+            .get("time")
+            .and_then(Value::as_i64)
+            .filter(|time| *time > 0)
+            .ok_or_else(|| {
+                FeedError::BadMessage(format!("hyperliquid BBO for {symbol} has no positive time"))
+            })?;
+        if self
+            .bbo_times
+            .get(&id)
+            .is_some_and(|prior| venue_ts_ms < *prior)
+        {
+            self.bbo_times.clear();
+            return Err(FeedError::BadMessage(format!(
+                "hyperliquid BBO time regressed for {symbol}: {venue_ts_ms}"
+            )));
+        }
+        let Some(levels) = data.get("bbo").and_then(Value::as_array) else {
+            return Ok(None);
+        };
+        self.bbo_times.insert(id, venue_ts_ms);
         // Either side may be absent when nothing is resting there. A zeroed
         // price would read as a real one, so a half-empty book is not an
         // event at all.
-        let bid = levels.first().and_then(level)?;
-        let ask = levels.get(1).and_then(level)?;
-        Some(MarketEvent::Quote {
+        let Some(bid) = levels.first().and_then(level) else {
+            return Ok(None);
+        };
+        let Some(ask) = levels.get(1).and_then(level) else {
+            return Ok(None);
+        };
+        Ok(Some(MarketEvent::Quote {
             symbol: id,
             quote: Quote {
                 bid_px: bid.0,
                 bid_qty: bid.1,
                 ask_px: ask.0,
                 ask_qty: ask.1,
-                venue_ts_ms: data.get("time").and_then(Value::as_i64).unwrap_or(0),
+                venue_ts_ms,
                 recv_ns,
                 // The venue numbers no sequence on this channel. Zero is
                 // "not stated"; nothing here claims continuity it cannot see.
                 seq: 0,
             },
-        })
+        }))
     }
 
     fn decode_ctx(&self, frame: &Value, recv_ns: u64) -> Option<MarketEvent> {
@@ -501,6 +561,7 @@ mod tests {
             admissions: rx,
             backoff: Duration::ZERO,
             connected_before: false,
+            bbo_times: HashMap::new(),
         }
     }
 
@@ -563,6 +624,25 @@ mod tests {
     }
 
     #[test]
+    fn a_bbo_time_regression_is_rejected_before_it_can_publish() {
+        let mut w = worker();
+        assert!(w
+            .decode(
+                r#"{"channel":"bbo","data":{"coin":"BTC","time":2000,
+                   "bbo":[{"px":"100","sz":"1","n":1},{"px":"101","sz":"1","n":1}]}}"#,
+            )
+            .unwrap()
+            .is_some());
+
+        let regressed = w.decode(
+            r#"{"channel":"bbo","data":{"coin":"BTC","time":1999,
+               "bbo":[{"px":"90","sz":"1","n":1},{"px":"91","sz":"1","n":1}]}}"#,
+        );
+        assert!(matches!(regressed, Err(FeedError::BadMessage(_))));
+        assert!(w.bbo_times.is_empty(), "a regressed epoch remained trusted");
+    }
+
+    #[test]
     fn an_asset_context_becomes_a_ticker() {
         let mut w = worker();
         let event = w
@@ -607,8 +687,10 @@ mod tests {
     fn a_symbol_this_feed_does_not_follow_is_not_an_event() {
         let mut w = worker();
         assert!(w
-            .decode(r#"{"channel":"bbo","data":{"coin":"DOGE","time":1,
-                       "bbo":[{"px":"1","sz":"1","n":1},{"px":"2","sz":"1","n":1}]}}"#)
+            .decode(
+                r#"{"channel":"bbo","data":{"coin":"DOGE","time":1,
+                       "bbo":[{"px":"1","sz":"1","n":1},{"px":"2","sz":"1","n":1}]}}"#
+            )
             .unwrap()
             .is_none());
     }
@@ -633,7 +715,10 @@ mod tests {
     fn one_symbol_asked_for_twice_is_subscribed_once() {
         let mut feed = HyperliquidPublicFeed::with_url(
             "ws://127.0.0.1:1",
-            &[Subscription { symbol: "BTCUSDT".into(), feed: Feed::Quote }],
+            &[Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            }],
         );
         assert_eq!(feed.subs.len(), 1);
         feed.admit("BTCUSDT", Feed::Quote);

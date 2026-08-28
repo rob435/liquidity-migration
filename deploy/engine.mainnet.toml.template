@@ -46,12 +46,11 @@ account_view_max_age_ms = 5000
 # way). Exits always flow, whatever the age.
 max_quote_age_ms = 30000
 
-# The owner hand-trades this account, so leverage authority is SHARED: the
-# engine forgets what it set the moment a symbol goes flat and re-confirms
-# with the venue before the next entry. That round trip is the price of a
-# second pair of hands on the account — do not set "sole" here while
-# hand-trading happens at all. (This is also the default when the key is
-# absent.)
+# Keep leverage authority SHARED as a conservative venue-truth check: the
+# engine forgets what it set when a symbol goes flat and re-confirms with the
+# venue before the next entry. This does not authorize another writer. The
+# funded UID contract forbids hand trading, venue bots, copy trading, and other
+# trading API keys. (This is also the default when the key is absent.)
 leverage_authority = "shared"
 
 # ---------------------------------------------------------------------------

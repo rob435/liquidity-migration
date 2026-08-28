@@ -72,11 +72,12 @@ def test_help_lists_only_current_operator_routes() -> None:
         "equity",
         "research-refresh",
         "flatten",
+        "attest-flat",
+        "loss-reset",
         "real-money",
         "deploy",
     ):
         assert command in result.stdout
-    assert "reset" not in result.stdout
 
 
 def test_unknown_command_fails_with_usage() -> None:
@@ -134,6 +135,93 @@ def test_flatten_payload_hands_its_arguments_to_the_remote_script(tmp_path: Path
     assert "--dry-run" not in executed
 
 
+def test_flatness_and_loss_controls_use_the_installed_rust_engine(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+
+    attestation = _run("attest-flat", "--environment", "demo", env=environment)
+    assert attestation.returncode == 0, attestation.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( attest-flat demo '' dry-run )" in payload
+    assert "engine_binary=/opt/liquidity-migration-engine/bin/engine" in payload
+    assert (
+        "runtime_launcher=/opt/liquidity-migration-engine/bin/run-authorized-runtime"
+        in payload
+    )
+    assert "marker_launcher_digest" in payload
+    for field in (
+        "marker_helper_digest",
+        "marker_sudoers_digest",
+        "marker_bot_digest",
+    ):
+        assert field in payload
+    assert "installed trusted runtime launcher digest mismatch" in payload
+    assert "installed Telegram control helper digest mismatch" in payload
+    assert "installed controls sudoers boundary mismatch" in payload
+    assert "installed Telegram controls bot digest mismatch" in payload
+    assert "/usr/sbin/visudo -cf" in payload
+    assert 'engine_args=("$action")' in payload
+    assert 'EnvironmentFile=$credential_file' in payload
+    assert 'EnvironmentFile=$env_file' in payload
+    assert payload.index('EnvironmentFile=$env_file') < payload.index(
+        'EnvironmentFile=$credential_file'
+    )
+    assert 'UnsetEnvironment=$unset_environment' in payload
+    for key in ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET", "REAL_MONEY"):
+        assert key in payload
+    assert "/etc/liquidity-migration/bybit-mainnet-attestor.env" in payload
+    assert "/etc/liquidity-migration/bybit-mainnet.env" not in payload
+    assert 'stat -c %a "$credential_file"' in payload
+    for key in (
+        "BYBIT_ATTEST_API_KEY",
+        "BYBIT_ATTEST_API_SECRET",
+        "BYBIT_ATTEST_API_KEY_IP",
+        "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID",
+    ):
+        assert key in payload
+    assert payload.count('sha256sum "$engine_binary"') >= 2
+    assert "installed Rust engine changed during engine control" in payload
+
+    reset = _run(
+        "loss-reset",
+        "--environment",
+        "mainnet",
+        "--note",
+        "incident 47 reviewed; owner approved",
+        "--execute",
+        env=environment,
+    )
+    assert reset.returncode == 0, reset.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert (
+        "REMOTE_ARGS=( loss-reset mainnet "
+        "incident\\ 47\\ reviewed\\;\\ owner\\ approved execute )"
+    ) in payload
+    assert 'systemctl is-active --quiet "$unit"' in payload
+    assert 'engine_args+=(--note "$note")' in payload
+    assert '[ "$execute_mode" = execute ] && engine_args+=(--execute)' in payload
+    assert '--property="ReadWritePaths=/run/lock/liquidity-migration $state_dir"' in payload
+    assert '"$engine_binary" "${engine_args[@]}"' in payload
+    assert "/etc/liquidity-migration/bybit-mainnet-attestor.env" in payload
+    assert "/etc/liquidity-migration/bybit-mainnet.env" not in payload
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("attest-flat",),
+        ("attest-flat", "--environment", "paper"),
+        ("loss-reset", "--environment", "demo"),
+        ("loss-reset", "--note", "reason"),
+        ("loss-reset", "--environment", "demo", "--note", "   "),
+        ("loss-reset", "--environment", "demo", "--note", "reason", "--bogus"),
+    ],
+)
+def test_flatness_and_loss_controls_reject_incomplete_arguments(argv: tuple[str, ...]) -> None:
+    result = _run(*argv)
+    assert result.returncode == 2
+    assert "Usage:" in result.stderr
+
+
 def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> None:
     capture, environment = _ssh_capture(tmp_path)
 
@@ -162,6 +250,47 @@ def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> Non
         assert f'exec systemctl {verb} "${{REMOTE_ARGS[@]}}"' in payload
         assert "REMOTE_ARGS=( liquidity-migration-bybit-long-demo.service )" in payload
         assert _run(verb, env=environment).returncode == 2
+
+
+@pytest.mark.parametrize("verb", ["start", "restart"])
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "engine-mainnet.service",
+        "engine-mainnet",
+        "bybit-carry-mainnet.service",
+        "mainnet-liveness.timer",
+    ],
+)
+def test_direct_funded_unit_activation_is_not_an_ops_bypass(
+    verb: str, unit: str
+) -> None:
+    result = _run(verb, unit)
+    assert result.returncode == 2
+    assert "funded units is forbidden" in result.stderr
+    assert "deploy rollout" in result.stderr
+
+
+@pytest.mark.parametrize("verb", ["start", "restart", "stop"])
+def test_mutating_unit_verbs_reject_non_unit_syntax(verb: str) -> None:
+    result = _run(verb, "bad/name")
+    assert result.returncode == 2
+    assert "invalid systemd unit name" in result.stderr
+
+
+def test_funded_units_can_still_be_stopped_fail_safe(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("stop", "engine-mainnet.service", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( liquidity-migration-engine-mainnet.service )" in payload
+
+
+@pytest.mark.parametrize("verb", ["start", "restart"])
+def test_unit_activation_refuses_unreviewed_aliases(verb: str) -> None:
+    result = _run(verb, "engine-live-alias.service")
+    assert result.returncode == 2
+    assert "exact reviewed demo/observer unit" in result.stderr
 
 
 def test_real_money_allowlist_covers_the_arming_subcommands() -> None:

@@ -71,6 +71,14 @@ pub enum WalRecord {
         spec: AmendSpec,
         wire_ns: u64,
     },
+    /// A definitive venue answer to an amend. Until this arrives, replay
+    /// keeps the full old/requested price range reserved: its high end prices
+    /// notional and both ends price stop loss. An accepted/rejected answer
+    /// narrows that conservative ambiguity to the price actually working.
+    AmendResolved {
+        client_order_id: String,
+        effective_px: f64,
+    },
     /// What the ids in this log mean.
     ///
     /// Both [`StrategyId`] and [`SymbolId`] are indexes handed out by
@@ -135,9 +143,8 @@ pub enum WalRecord {
     },
     /// Control state that must outlive the process. Written (and made
     /// durable) the moment it changes; the newest one is restored at boot.
-    /// Every one of these in an existing log is the daily anchor and trip
-    /// latch of the loss halt that has since been removed. The variant stays
-    /// so those logs still parse — an unreadable record refuses the boot.
+    /// The risk kernel uses this for the UTC opening-equity anchor and daily
+    /// loss trip latch; other controls may own independent source names.
     ControlAnchor {
         source: String,
         state: String,
@@ -289,6 +296,11 @@ pub struct SymbolTotal {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IntendedStop {
     pub symbol: SymbolId,
+    /// Direction of the position this stop protects. Older segment bases did
+    /// not carry it; those rows deserialize as unknown and are deliberately
+    /// not trusted for automatic repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<Side>,
     pub trigger_px: f64,
 }
 
@@ -310,6 +322,12 @@ pub struct OpenOrderState {
     pub arrival_mid: f64,
     pub acked: bool,
     pub filled_qty: f64,
+    /// Plausible working-price bounds after an amend whose answer was lost.
+    /// Zero in older segments means "derive the exact price from request".
+    #[serde(default)]
+    pub reservation_low_px: f64,
+    #[serde(default)]
+    pub reservation_high_px: f64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -357,7 +375,8 @@ mod tests {
     fn a_refusal_the_kernel_no_longer_produces_still_reads_back() {
         let frame = r#"{"kind":"verdict","client_order_id":null,"verdict":{"Deny":{"reason":{"SymbolNotionalBreached":{"symbol":11,"notional_usdt":156255.2326,"cap_usdt":125000.0}}}}}"#;
 
-        let record: WalRecord = serde_json::from_str(frame).expect("an old refusal must still parse");
+        let record: WalRecord =
+            serde_json::from_str(frame).expect("an old refusal must still parse");
 
         let WalRecord::Verdict { verdict, .. } = record else {
             panic!("expected a verdict record");
@@ -369,5 +388,15 @@ mod tests {
         assert!(rendered.contains("SymbolNotionalBreached"), "{rendered}");
         assert!(rendered.contains("156255.2326"), "{rendered}");
         assert!(rendered.contains("125000.0"), "{rendered}");
+    }
+
+    #[test]
+    fn a_legacy_intended_stop_reads_as_direction_unknown() {
+        let row: IntendedStop = serde_json::from_str(r#"{"symbol":3,"trigger_px":90.0}"#)
+            .expect("legacy segment rows must still parse");
+
+        assert_eq!(row.symbol, SymbolId(3));
+        assert_eq!(row.side, None);
+        assert_eq!(row.trigger_px, 90.0);
     }
 }

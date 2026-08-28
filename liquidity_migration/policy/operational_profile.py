@@ -72,6 +72,7 @@ class AccountRiskSettings:
     max_account_gross_notional_usdt: float
     max_initial_margin_usdt: float
     max_leverage: float
+    max_daily_loss_usdt: float | None
     quantity_tolerance: float
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +154,7 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         "max_account_gross_notional_usdt",
         "max_initial_margin_usdt",
         "max_leverage",
+        "max_daily_loss_usdt",
         "quantity_tolerance",
     }
     row = _object(value, label="operational profile account_risk", fields=fields)
@@ -171,6 +173,14 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         ),
         max_leverage=_positive_float(
             row["max_leverage"], label="account_risk.max_leverage"
+        ),
+        max_daily_loss_usdt=(
+            None
+            if row["max_daily_loss_usdt"] is None
+            else _positive_float(
+                row["max_daily_loss_usdt"],
+                label="account_risk.max_daily_loss_usdt",
+            )
         ),
         quantity_tolerance=_positive_float(
             row["quantity_tolerance"], label="account_risk.quantity_tolerance"
@@ -363,6 +373,11 @@ def profile_at_capital_reference(
             max_account_gross_notional_usdt=risk.max_account_gross_notional_usdt * scale,
             max_initial_margin_usdt=risk.max_initial_margin_usdt * scale,
             max_leverage=risk.max_leverage,
+            max_daily_loss_usdt=(
+                None
+                if risk.max_daily_loss_usdt is None
+                else risk.max_daily_loss_usdt * scale
+            ),
             quantity_tolerance=risk.quantity_tolerance,
         ),
     )

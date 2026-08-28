@@ -30,11 +30,11 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
-use crate::{mono_ns, wall_ms};
-use crate::creds::Credentials;
-use crate::json::{int_field, num_field, opt_num_field, str_field};
 use super::realm::VenueRealm;
 use super::sign::ws_signature;
+use crate::creds::Credentials;
+use crate::json::{int_field, num_field, opt_num_field, str_field};
+use crate::{mono_ns, wall_ms};
 
 /// Bybit drops a private socket that goes quiet for 30 seconds.
 const PING_EVERY: Duration = Duration::from_secs(20);
@@ -121,7 +121,6 @@ impl BybitOrderFeed {
             creds: self.creds.clone(),
             decoder: Decoder::new(self.ids.clone()),
             backoff: Duration::ZERO,
-            connected_before: false,
         };
         tokio::spawn(worker.run(tx));
         self.updates = Some(rx);
@@ -154,7 +153,6 @@ struct Worker {
     creds: Credentials,
     decoder: Decoder,
     backoff: Duration,
-    connected_before: bool,
 }
 
 /// The engine dropped the feed: there is nobody left to hand updates to.
@@ -185,17 +183,15 @@ impl Worker {
             match self.connect().await {
                 Ok(socket) => {
                     let opened = Instant::now();
-                    if self.connected_before {
-                        // Updates that happened while we were away are lost;
-                        // the engine must refresh its account view rather
-                        // than trust the gap. This goes out before anything
-                        // read off the new socket.
-                        let reset = OrderUpdate::StreamReset { recv_ns: mono_ns() };
-                        if hand_over(tx, Ok(reset)).await.is_err() {
-                            return Gone;
-                        }
+                    // This is both the first-connection readiness watermark
+                    // and the reconnect gap marker. It goes out before any
+                    // frame from the new socket, so boot can establish the
+                    // stream before taking REST snapshots and a running
+                    // engine can recover history before accepting more risk.
+                    let reset = OrderUpdate::StreamReset { recv_ns: mono_ns() };
+                    if hand_over(tx, Ok(reset)).await.is_err() {
+                        return Gone;
                     }
-                    self.connected_before = true;
                     if self.pump(socket, tx).await.is_err() {
                         return Gone;
                     }
@@ -279,15 +275,12 @@ impl Worker {
                     Err(e) => Step::Dropped(e.to_string()),
                 },
                 Wake::Frame(Some(Ok(Message::Text(text)))) => Step::Text(text),
-                Wake::Frame(Some(Ok(Message::Ping(payload)))) => match send_message(
-                    &mut socket,
-                    Message::Pong(payload),
-                )
-                .await
-                {
-                    Ok(()) => Step::Idle,
-                    Err(e) => Step::Dropped(e.to_string()),
-                },
+                Wake::Frame(Some(Ok(Message::Ping(payload)))) => {
+                    match send_message(&mut socket, Message::Pong(payload)).await {
+                        Ok(()) => Step::Idle,
+                        Err(e) => Step::Dropped(e.to_string()),
+                    }
+                }
                 Wake::Frame(Some(Ok(Message::Pong(_)))) => Step::Ponged,
                 Wake::Frame(Some(Ok(Message::Close(_)))) => {
                     Step::Dropped("venue closed the socket".to_string())
@@ -314,18 +307,24 @@ impl Worker {
                         hand_over(tx, Ok(update)).await?;
                     }
                     if let Err(e) = read {
-                        // A refused op leaves a socket that will never carry
-                        // what we asked for; one unreadable frame does not.
-                        let socket_is_useless = matches!(e, FeedError::Transport(_));
                         tracing::warn!(error = %e, "private stream frame");
                         hand_over(tx, Err(e)).await?;
-                        if socket_is_useless {
-                            return Ok(());
-                        }
+                        // Once any account frame is unreadable, continuing on
+                        // this socket provides no recovery watermark. Redial
+                        // so the next successful subscription emits a reset
+                        // and history closes the unknown interval.
+                        return Ok(());
                     }
                 }
                 Step::Dropped(why) => {
                     tracing::warn!(why, "private stream dropped, reconnecting");
+                    hand_over(
+                        tx,
+                        Err(FeedError::Transport(format!(
+                            "private stream unavailable: {why}"
+                        ))),
+                    )
+                    .await?;
                     return Ok(());
                 }
             }
@@ -365,7 +364,10 @@ impl Decoder {
         // Control replies (pong, subscribe acks) carry no topic.
         let Some(topic) = frame.get("topic").and_then(Value::as_str) else {
             if frame.get("success").and_then(Value::as_bool) == Some(false) {
-                let why = frame.get("ret_msg").and_then(Value::as_str).unwrap_or("no reason");
+                let why = frame
+                    .get("ret_msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason");
                 return Err(FeedError::Transport(format!("venue refused an op: {why}")));
             }
             return Ok(matches!(
@@ -373,7 +375,11 @@ impl Decoder {
                 Some("ping" | "pong")
             ));
         };
-        let rows = frame.get("data").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+        let rows = frame
+            .get("data")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let recv_ns = mono_ns();
         let execution_topic = topic.starts_with("execution");
         let mut first_error = None;
@@ -479,9 +485,9 @@ async fn await_op(socket: &mut Socket, op: &str, timeout: Duration) -> Result<()
         }
         // The venue hung up mid-handshake. That is a hiccup to dial through,
         // not the end of the feed.
-        Err(FeedError::Transport(
-            format!("the venue closed the socket during {op}"),
-        ))
+        Err(FeedError::Transport(format!(
+            "the venue closed the socket during {op}"
+        )))
     })
     .await
     .map_err(|_| FeedError::Transport(format!("no {op} reply from the venue")))??;
@@ -489,8 +495,13 @@ async fn await_op(socket: &mut Socket, op: &str, timeout: Duration) -> Result<()
     if reply.get("success").and_then(Value::as_bool) == Some(true) {
         return Ok(());
     }
-    let why = reply.get("ret_msg").and_then(Value::as_str).unwrap_or("no reason");
-    Err(FeedError::Transport(format!("private stream {op} refused: {why}")))
+    let why = reply
+        .get("ret_msg")
+        .and_then(Value::as_str)
+        .unwrap_or("no reason");
+    Err(FeedError::Transport(format!(
+        "private stream {op} refused: {why}"
+    )))
 }
 
 /// One `order` row. `None` for rows that say nothing the engine acts on.
@@ -580,7 +591,9 @@ pub(crate) fn map_execution_row(
         qty,
         px,
         // A maker rebate comes back negative; it is a fee either way.
-        fee: opt_num_field(row, "execFee").map_err(bad_field)?.unwrap_or(0.0),
+        fee: opt_num_field(row, "execFee")
+            .map_err(bad_field)?
+            .unwrap_or(0.0),
         // Absent means taker. The venue sends this on every execution, so an
         // absent one is a message shape we do not know — and the expensive
         // side is the safe thing to assume about a fill we cannot classify.
@@ -671,7 +684,10 @@ mod tests {
         for status in ["Cancelled", "Deactivated"] {
             let row = json!({"orderId": "abc", "orderLinkId": "eng-9", "orderStatus": status});
             match map_order_row(&row, 5).unwrap().unwrap() {
-                OrderUpdate::Cancelled { client_order_id, recv_ns } => {
+                OrderUpdate::Cancelled {
+                    client_order_id,
+                    recv_ns,
+                } => {
                     assert_eq!(client_order_id, "eng-9");
                     assert_eq!(recv_ns, 5);
                 }
@@ -687,7 +703,11 @@ mod tests {
             "rejectReason": "EC_PostOnlyWillTakeLiquidity"
         });
         match map_order_row(&row, 1).unwrap().unwrap() {
-            OrderUpdate::Reject { client_order_id, reason, .. } => {
+            OrderUpdate::Reject {
+                client_order_id,
+                reason,
+                ..
+            } => {
                 assert_eq!(client_order_id, "eng-3");
                 assert_eq!(reason, "EC_PostOnlyWillTakeLiquidity");
             }
@@ -878,10 +898,9 @@ mod tests {
     fn both_bybit_keep_alive_reply_shapes_are_recognized() {
         let mut feed = decoder_for(&[]);
         assert!(feed.ingest(r#"{"op":"pong"}"#).unwrap());
-        assert!(
-            feed.ingest(r#"{"success":true,"ret_msg":"pong","op":"ping"}"#)
-                .unwrap()
-        );
+        assert!(feed
+            .ingest(r#"{"success":true,"ret_msg":"pong","op":"ping"}"#)
+            .unwrap());
         assert!(!feed.ingest(r#"{"op":"subscribe","success":true}"#).unwrap());
         assert!(feed.ingest("not json").is_err());
     }
@@ -917,7 +936,12 @@ mod tests {
             "symbol": "BTCUSDT", "side": "Sell", "execType": "Trade"
         });
         match map_execution_row(&row, &resolve, 7).unwrap().unwrap() {
-            OrderUpdate::Fill { exec_id, client_order_id, symbol, .. } => {
+            OrderUpdate::Fill {
+                exec_id,
+                client_order_id,
+                symbol,
+                ..
+            } => {
                 assert_eq!(exec_id, "native-stop-1");
                 assert!(client_order_id.is_empty());
                 assert_eq!(symbol, SymbolId(0));
@@ -939,17 +963,24 @@ mod tests {
                  "execTime": "2", "orderLinkId": "eng-2", "symbol": "BTCUSDT",
                  "side": "Buy", "execType": "Trade"}
             ]
-        }).to_string();
+        })
+        .to_string();
 
         assert!(feed.ingest(&frame).is_err());
-        assert!(matches!(feed.pending.pop_front(), Some(OrderUpdate::Fill { exec_id, .. }) if exec_id == "good"));
-        assert!(matches!(feed.pending.pop_front(), Some(OrderUpdate::StreamReset { .. })));
+        assert!(
+            matches!(feed.pending.pop_front(), Some(OrderUpdate::Fill { exec_id, .. }) if exec_id == "good")
+        );
+        assert!(matches!(
+            feed.pending.pop_front(),
+            Some(OrderUpdate::StreamReset { .. })
+        ));
     }
 
     #[test]
     fn control_frames_are_ignored_and_failures_surface() {
         let mut feed = decoder_for(&["BTCUSDT"]);
-        feed.ingest(r#"{"op":"pong","success":true,"ret_msg":"pong"}"#).unwrap();
+        feed.ingest(r#"{"op":"pong","success":true,"ret_msg":"pong"}"#)
+            .unwrap();
         feed.ingest(r#"{"op":"subscribe","success":true}"#).unwrap();
         assert!(feed.pending.is_empty());
 

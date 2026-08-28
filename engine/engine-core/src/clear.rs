@@ -59,12 +59,14 @@ pub async fn run(config_path: &Path, note: &str, execute: bool) -> Result<(), Bo
 
     let account = venue.account_view().await?;
     let working = venue.working_orders().await?;
-    let mut steps: Vec<Option<f64>> = vec![None; names.symbols.len()];
+    let mut quantity_steps: Vec<Option<f64>> = vec![None; names.symbols.len()];
+    let mut price_ticks: Vec<Option<f64>> = vec![None; names.symbols.len()];
     match venue.instrument_rules().await {
         Ok(rules) => {
             for (name, rule) in rules {
                 if let Some(at) = names.symbols.iter().position(|n| *n == name) {
-                    steps[at] = Some(rule.qty_step);
+                    quantity_steps[at] = Some(rule.qty_step);
+                    price_ticks[at] = Some(rule.tick_size);
                 }
             }
         }
@@ -84,7 +86,8 @@ pub async fn run(config_path: &Path, note: &str, execute: bool) -> Result<(), Bo
                 .position(|n| n == name)
                 .map(|at| SymbolId(at as u16))
         },
-        |id| steps.get(id.0 as usize).copied().flatten(),
+        |id| quantity_steps.get(id.0 as usize).copied().flatten(),
+        |id| price_ticks.get(id.0 as usize).copied().flatten(),
     );
 
     if found.findings.is_empty() {

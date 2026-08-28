@@ -7,8 +7,12 @@ use engine_types::{Action, InstrumentRule, OrderKind, Side};
 use super::plug::Quoter;
 use crate::mock_ctx::{Harness, RestingSeed};
 
-const RULE: InstrumentRule =
-    InstrumentRule { tick_size: 0.01, qty_step: 0.001, min_qty: 0.001, min_notional: 5.0 };
+const RULE: InstrumentRule = InstrumentRule {
+    tick_size: 0.01,
+    qty_step: 0.001,
+    min_qty: 0.001,
+    min_notional: 5.0,
+};
 
 fn config() -> toml::Value {
     let src = r#"
@@ -44,10 +48,19 @@ fn it_quotes_both_sides_post_only_with_a_stop() {
     assert_eq!(placed.len(), 2, "a maker quotes both sides");
     for intent in &placed {
         assert!(
-            matches!(intent.kind, OrderKind::Limit { tif: engine_types::TimeInForce::PostOnly, .. }),
+            matches!(
+                intent.kind,
+                OrderKind::Limit {
+                    tif: engine_types::TimeInForce::PostOnly,
+                    ..
+                }
+            ),
             "a maker that crosses is not a maker"
         );
-        assert!(intent.stop.is_some(), "the kernel refuses an opening order with no stop");
+        assert!(
+            intent.stop.is_some(),
+            "the kernel refuses an opening order with no stop"
+        );
         assert!(!intent.reduce_only);
     }
     assert!(placed.iter().any(|i| i.side == Side::Buy));
@@ -64,7 +77,10 @@ fn a_quote_that_has_drifted_is_moved_not_replaced() {
         client_order_id: "eng-1".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 90.0, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px: 90.0,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
@@ -78,7 +94,11 @@ fn a_quote_that_has_drifted_is_moved_not_replaced() {
         .collect();
     assert_eq!(amends.len(), 1, "the stale bid is moved");
     match &amends[0] {
-        Action::Amend { client_order_id, spec, .. } => {
+        Action::Amend {
+            client_order_id,
+            spec,
+            ..
+        } => {
             assert_eq!(client_order_id, "eng-1");
             assert_eq!(spec.px, Some(99.9));
             assert_eq!(spec.qty, None, "only the price changed");
@@ -99,7 +119,10 @@ fn a_full_side_is_pulled_rather_than_left_in_the_market() {
         client_order_id: "eng-bid".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px: 99.9,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
@@ -111,7 +134,11 @@ fn a_full_side_is_pulled_rather_than_left_in_the_market() {
         .into_iter()
         .filter(|a| matches!(a, Action::Cancel { .. }))
         .collect();
-    assert_eq!(cancels.len(), 1, "the side that would breach the ceiling comes out");
+    assert_eq!(
+        cancels.len(),
+        1,
+        "the side that would breach the ceiling comes out"
+    );
 }
 
 #[test]
@@ -123,7 +150,10 @@ fn an_empty_book_pulls_the_quotes() {
             client_order_id: id.into(),
             symbol,
             side,
-            kind: OrderKind::Limit { px: 100.0, tif: engine_types::TimeInForce::PostOnly },
+            kind: OrderKind::Limit {
+                px: 100.0,
+                tif: engine_types::TimeInForce::PostOnly,
+            },
             qty: 0.1,
             filled_qty: 0.0,
             reduce_only: false,
@@ -145,23 +175,33 @@ fn a_quote_under_the_venue_minimum_is_not_emitted() {
     let mut h = Harness::new(Box::new(quoter));
     h.ctx.set_rule(
         "BTCUSDT",
-        InstrumentRule { tick_size: 0.01, qty_step: 0.001, min_qty: 0.001, min_notional: 5000.0 },
+        InstrumentRule {
+            tick_size: 0.01,
+            qty_step: 0.001,
+            min_qty: 0.001,
+            min_notional: 5000.0,
+        },
     );
     h.quote("BTCUSDT", 99.0, 101.0);
-    assert!(h.drain_actions().is_empty(), "1 USDT of notional is not a quote");
+    assert!(
+        h.drain_actions().is_empty(),
+        "1 USDT of notional is not a quote"
+    );
 }
 
 #[test]
 fn a_requote_tolerance_wider_than_the_quote_is_refused() {
     // It would mean a quote that can never be worth moving.
-    let bad: toml::Value = toml::from_str(r#"
+    let bad: toml::Value = toml::from_str(
+        r#"
         symbols = ["BTCUSDT"]
         half_spread_bps = 2.0
         requote_bps = 10.0
         qty = 0.1
         max_position = 0.3
         stop_loss_fraction = 0.35
-    "#)
+    "#,
+    )
     .expect("test config parses");
     let Err(err) = Quoter::from_params(engine_types::StrategyId(0), &bad) else {
         panic!("a tolerance wider than the quote should be refused");
@@ -171,14 +211,16 @@ fn a_requote_tolerance_wider_than_the_quote_is_refused() {
 
 #[test]
 fn a_stop_fraction_of_one_is_refused() {
-    let bad: toml::Value = toml::from_str(r#"
+    let bad: toml::Value = toml::from_str(
+        r#"
         symbols = ["BTCUSDT"]
         half_spread_bps = 10.0
         requote_bps = 2.0
         qty = 0.1
         max_position = 0.3
         stop_loss_fraction = 1.0
-    "#)
+    "#,
+    )
     .expect("test config parses");
     assert!(Quoter::from_params(engine_types::StrategyId(0), &bad).is_err());
 }
@@ -248,7 +290,11 @@ fn the_account_reading_does_not_decide_this_makers_inventory() {
     h.ctx.set_hand_position("BTCUSDT", Side::Buy, 0.3, 100.0);
     h.quote("BTCUSDT", 99.0, 101.0);
     let intents = placed(&mut h);
-    assert_eq!(intents.len(), 2, "our own book is flat, so both sides are quoted");
+    assert_eq!(
+        intents.len(),
+        2,
+        "our own book is flat, so both sides are quoted"
+    );
 }
 
 #[test]
@@ -275,7 +321,11 @@ fn a_fill_is_a_wake_and_the_quotes_are_rebuilt_on_it() {
     // The bid filled. Nothing is resting for it any more, and we are long.
     h.maker_fill("eng-bid", "BTCUSDT", Side::Buy, 0.1, 99.9);
     let after = placed(&mut h);
-    assert_eq!(after.len(), 2, "quoted again on the fill, with no new price");
+    assert_eq!(
+        after.len(),
+        2,
+        "quoted again on the fill, with no new price"
+    );
 }
 
 #[test]
@@ -300,8 +350,14 @@ fn a_long_book_leans_its_quotes_down_and_a_short_one_leans_them_up() {
         placed(&mut h)
     };
     for side in [Side::Buy, Side::Sell] {
-        assert!(price_of(&long, side) < price_of(&flat, side), "long leans down on {side:?}");
-        assert!(price_of(&short, side) > price_of(&flat, side), "short leans up on {side:?}");
+        assert!(
+            price_of(&long, side) < price_of(&flat, side),
+            "long leans down on {side:?}"
+        );
+        assert!(
+            price_of(&short, side) > price_of(&flat, side),
+            "short leans up on {side:?}"
+        );
     }
 }
 
@@ -340,7 +396,10 @@ fn a_name_another_sleeve_is_holding_is_left_alone() {
         client_order_id: "eng-bid".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px: 99.9,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
@@ -404,7 +463,10 @@ fn one_order_is_asked_to_cancel_once_however_many_prices_arrive() {
         client_order_id: "eng-bid".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px: 99.9,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
@@ -427,9 +489,19 @@ fn a_feed_reset_pulls_every_resting_quote() {
     let mut h = quoter_over(&["BTCUSDT"], 0.0);
     let symbol = h.ctx.id_of("BTCUSDT");
     for (id, side, px) in [("eng-bid", Side::Buy, 99.9), ("eng-ask", Side::Sell, 100.1)] {
-        h.ctx.resting.push(RestingSeed { client_order_id: id.into(), symbol, side,
-            kind: OrderKind::Limit { px, tif: engine_types::TimeInForce::PostOnly }, qty: 0.1,
-            filled_qty: 0.0, reduce_only: false, acked: true });
+        h.ctx.resting.push(RestingSeed {
+            client_order_id: id.into(),
+            symbol,
+            side,
+            kind: OrderKind::Limit {
+                px,
+                tif: engine_types::TimeInForce::PostOnly,
+            },
+            qty: 0.1,
+            filled_qty: 0.0,
+            reduce_only: false,
+            acked: true,
+        });
     }
     h.feed_reset();
     assert_eq!(cancel_count(&mut h), 2);
@@ -445,7 +517,10 @@ fn a_full_side_is_not_asked_to_cancel_on_every_price_either() {
         client_order_id: "eng-bid".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px: 99.9,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
@@ -474,7 +549,10 @@ fn a_cancel_the_venue_never_took_is_asked_again_after_a_while() {
         client_order_id: "eng-bid".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px: 99.9,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
@@ -487,9 +565,14 @@ fn a_cancel_the_venue_never_took_is_asked_again_after_a_while() {
 
     // The order is still resting a second and a half later: the venue never
     // took it.
-    h.ctx.set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 1_500_000_000);
+    h.ctx
+        .set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 1_500_000_000);
     h.quote("BTCUSDT", 99.0, 101.0);
-    assert_eq!(cancel_count(&mut h), 1, "asked again once the window passed");
+    assert_eq!(
+        cancel_count(&mut h),
+        1,
+        "asked again once the window passed"
+    );
 }
 
 #[test]
@@ -503,7 +586,10 @@ fn an_order_that_went_away_is_forgotten_rather_than_remembered_for_ever() {
         client_order_id: "eng-bid".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px: 99.9,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
@@ -521,14 +607,21 @@ fn an_order_that_went_away_is_forgotten_rather_than_remembered_for_ever() {
         client_order_id: "eng-bid".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 99.9, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px: 99.9,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
         acked: true,
     });
     h.quote("BTCUSDT", 99.0, 101.0);
-    assert_eq!(cancel_count(&mut h), 1, "a fresh order is asked, not skipped");
+    assert_eq!(
+        cancel_count(&mut h),
+        1,
+        "a fresh order is asked, not skipped"
+    );
 }
 
 fn cancel_count(h: &mut Harness) -> usize {
@@ -551,7 +644,10 @@ fn seed_bid(h: &mut Harness, id: &str, symbol: &str, px: f64) {
         client_order_id: id.into(),
         symbol: id_of,
         side: Side::Buy,
-        kind: OrderKind::Limit { px, tif: engine_types::TimeInForce::PostOnly },
+        kind: OrderKind::Limit {
+            px,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
         qty: 0.1,
         filled_qty: 0.0,
         reduce_only: false,
@@ -561,12 +657,9 @@ fn seed_bid(h: &mut Harness, id: &str, symbol: &str, px: f64) {
 
 #[test]
 fn an_order_is_asked_to_move_once_for_one_move_of_the_market() {
-    // The engine's order ledger records the price an order was *sent* at and
-    // is never updated by an amend -- `inflight.rs` has no `AmendSent` arm at
-    // all. So `resting` reports the original price for the order's whole life,
-    // and a quoter that measured drift against it would ask again on every
-    // price, for ever, with no terminating condition. Worse than the cancel
-    // loop: that one ended when the venue confirmed.
+    // Several market events can arrive before an amend acknowledgement. The
+    // strategy remembers its request during that window so one market move
+    // cannot fan out into duplicate signed venue calls.
     let mut h = quoter_over(&["BTCUSDT"], 0.0);
     seed_bid(&mut h, "eng-bid", "BTCUSDT", 99.90);
     for _ in 0..10 {
@@ -585,7 +678,11 @@ fn a_market_that_keeps_moving_keeps_the_quote_with_it() {
     h.quote("BTCUSDT", 99.1, 101.1);
     assert_eq!(amend_count(&mut h), 1);
     h.quote("BTCUSDT", 105.0, 107.0);
-    assert_eq!(amend_count(&mut h), 1, "the market moved again, so we move again");
+    assert_eq!(
+        amend_count(&mut h),
+        1,
+        "the market moved again, so we move again"
+    );
 }
 
 #[test]
@@ -604,5 +701,9 @@ fn pacing_one_symbol_does_not_forget_another() {
     h.quote("BTCUSDT", 99.0, 101.0);
     let _ = h.drain_actions();
     h.quote("ETHUSDT", 199.0, 201.0);
-    assert_eq!(cancel_count(&mut h), 0, "still inside the window, still asked");
+    assert_eq!(
+        cancel_count(&mut h),
+        0,
+        "still inside the window, still asked"
+    );
 }

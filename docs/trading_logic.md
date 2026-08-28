@@ -148,9 +148,11 @@ exit business and stays. Both the drop and the skip are counted
 
 **The book is absolute, but only over the engine's own positions.** Silence about a symbol
 means hold none of it — of what this engine opened. Exposure no order of its own ever
-opened is left alone entirely: not entered, not exited, whoever put it there. A position
-the owner places by hand is attributed to nobody, so without that it read as a name the
-book does not mention, and every pass closed it again.
+opened is left alone entirely: not entered, not exited, whoever put it there. Attribution
+prevents an unowned position from being treated as an omitted owned target and closed.
+On the funded dedicated UID, any such outside exposure breaches the operating contract
+and can latch new entries off; this isolation is incident behavior, not permission for a
+second trading authority.
 
 **The producer's record fails closed.** `long-demo-state.json` is the producer's only
 memory of what it asked for. A record that exists but cannot be read back (torn JSON, an
@@ -413,8 +415,10 @@ sizing surface. Caps are a fraction of observed wallet equity
 contraction immediate, expansion behind a dead band, unknown equity moves nothing).
 Every cap is account-wide: no sleeve holds a private share, so one sleeve may
 spend the account's whole envelope.
-There is no daily loss ceiling: the owner's standing decision is per-position safety, so the
-venue-native stop on each position is what bounds a loss.
+The funded profile stops new risk when total venue account equity is at least 10 USDT below
+its UTC-day opening anchor. The durable trip does not block genuine reduce-only exits and
+requires the stopped-engine, flat-account `engine loss-reset` workflow to clear. Demo leaves
+this account-wide ceiling disabled with `max_daily_loss_usdt: null`.
 
 **The venue stop is exchange-native, one Full-position stop per symbol.** The
 installer is the engine ([`gateway.rs`](../engine/engine-venue/src/venues/bybit/gateway.rs)

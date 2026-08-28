@@ -49,6 +49,27 @@ impl Credentials {
         })
     }
 
+    /// Read credentials for a capability that cannot send or mutate.
+    ///
+    /// This deliberately does not consult `REAL_MONEY`: a stopped, disarmed
+    /// funded account still has to be proved flat before a shared binary can
+    /// cross a generation boundary. The constructor is crate-private, and its
+    /// only live caller wraps the credentials in `InventoryProbe`, whose
+    /// public API exposes identity and inventory reads only.
+    pub(crate) fn from_env_read_only(
+        realm: &str,
+        real_money: bool,
+        key_var: &str,
+        secret_var: &str,
+    ) -> Result<Self, VenueError> {
+        Ok(Self {
+            realm: realm.to_string(),
+            real_money,
+            key: read(key_var)?,
+            secret: read(secret_var)?,
+        })
+    }
+
     /// Build credentials directly. Tests and the mock venue only; the live
     /// path is [`Credentials::from_env`], which is the one that checks arming.
     pub fn new(
@@ -124,7 +145,10 @@ mod tests {
         let creds = Credentials::new("demo", false, "key-12345", "super-secret");
         let shown = format!("{creds:?}");
         assert!(!shown.contains("key-12345"), "the full key leaked: {shown}");
-        assert!(shown.contains("2345"), "the tail identifies the key: {shown}");
+        assert!(
+            shown.contains("2345"),
+            "the tail identifies the key: {shown}"
+        );
         assert!(!shown.contains("super-secret"));
     }
 

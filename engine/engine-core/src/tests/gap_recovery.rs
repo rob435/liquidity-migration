@@ -80,7 +80,9 @@ async fn a_recovered_fill_reaches_the_risk_kernel() {
     // would leave the position counted twice for the life of the process —
     // once as a reservation nothing ever ends, once in the account view — and
     // every later entry would be judged against the sum.
-    let Recovered { risk_saw, records, .. } = recover_one_fill().await;
+    let Recovered {
+        risk_saw, records, ..
+    } = recover_one_fill().await;
 
     assert!(
         records
@@ -172,7 +174,12 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
         WalRecord::Reconciled { may_open: false, findings, .. }
             if findings.iter().any(|line| line.contains("blank client id"))
     )));
-    let WalRecord::SegmentBase { may_open, logged_exposure, .. } = engine.rotation_base(2) else {
+    let WalRecord::SegmentBase {
+        may_open,
+        logged_exposure,
+        ..
+    } = engine.rotation_base(2)
+    else {
         unreachable!()
     };
     assert!(!may_open);
@@ -185,26 +192,58 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
     let (mut engine, h) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let fill = OrderUpdate::Fill {
-        exec_id: "exec-once".to_string(), client_order_id: "external".to_string(),
-        symbol, side: Side::Buy, qty: 1.0, px: 100.0, fee: 0.0,
-        is_maker: false, venue_ts_ms: clock::wall_ms(), recv_ns: 1,
+        exec_id: "exec-once".to_string(),
+        client_order_id: "external".to_string(),
+        symbol,
+        side: Side::Buy,
+        qty: 1.0,
+        px: 100.0,
+        fee: 0.0,
+        is_maker: false,
+        venue_ts_ms: clock::wall_ms(),
+        recv_ns: 1,
     };
-    engine.run(
-        &mut ScriptFeed::quotes(symbol, 0, false),
-        &mut ScriptOrderFeed::playing(vec![fill.clone(), fill]),
-        tokio::time::sleep(Duration::from_millis(20)),
-    ).await.unwrap();
-    let journaled = h.records.borrow().iter().filter(|record| matches!(
-        record, WalRecord::OrderUpdate { update: OrderUpdate::Fill { exec_id, .. } }
-            if exec_id == "exec-once"
-    )).count();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![fill.clone(), fill]),
+            tokio::time::sleep(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+    let journaled = h
+        .records
+        .borrow()
+        .iter()
+        .filter(|record| {
+            matches!(
+                record, WalRecord::OrderUpdate { update: OrderUpdate::Fill { exec_id, .. } }
+                    if exec_id == "exec-once"
+            )
+        })
+        .count();
     assert_eq!(journaled, 1);
-    assert_eq!(h.risk_saw.borrow().iter().filter(|u| matches!(u, OrderUpdate::Fill { .. })).count(), 1);
-    let WalRecord::SegmentBase { may_open, logged_exposure, .. } = engine.rotation_base(1) else {
+    assert_eq!(
+        h.risk_saw
+            .borrow()
+            .iter()
+            .filter(|u| matches!(u, OrderUpdate::Fill { .. }))
+            .count(),
+        1
+    );
+    let WalRecord::SegmentBase {
+        may_open,
+        logged_exposure,
+        ..
+    } = engine.rotation_base(1)
+    else {
         unreachable!()
     };
     assert!(!may_open, "an unowned live fill latches entries off");
-    assert!(logged_exposure.is_empty(), "an unowned fill is not trusted exposure");
+    assert!(
+        logged_exposure.is_empty(),
+        "an unowned fill is not trusted exposure"
+    );
 }
 
 #[tokio::test]
@@ -226,6 +265,73 @@ async fn execution_history_failure_after_a_gap_stops_the_run_and_latches_entries
         record,
         WalRecord::Reconciled { may_open: false, findings, .. }
             if findings.iter().any(|line| line.contains("execution history is unavailable"))
+    )));
+    let WalRecord::SegmentBase { may_open, .. } = engine.rotation_base(1) else {
+        unreachable!()
+    };
+    assert!(!may_open);
+}
+
+#[tokio::test]
+async fn failed_gap_account_refresh_denies_the_next_entry_immediately() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    *h.account_view_fails.borrow_mut() = true;
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert!(h.sends.borrow().is_empty());
+    assert!(h.records.borrow().iter().any(|record| matches!(
+        record,
+        WalRecord::Verdict {
+            verdict: RiskVerdict::Deny { reason: DenyReason::UnknownState { detail } },
+            ..
+        } if detail.contains("private account stream")
+    )));
+}
+
+#[tokio::test]
+async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
+    let (mut engine, h) = build(allow_all(), Vec::new(), &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    *h.executions.borrow_mut() = Some(vec![VenueExecution {
+        exec_id: "foreign-unknown-1".into(),
+        client_order_id: "manual-order".into(),
+        symbol: "DELISTEDUSDT".into(),
+        side: Side::Buy,
+        qty: 3.0,
+        px: 2.0,
+        fee: 0.0,
+        is_maker: false,
+        venue_ts_ms: clock::wall_ms(),
+    }]);
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            tokio::time::sleep(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+
+    assert!(h.records.borrow().iter().any(|record| matches!(
+        record,
+        WalRecord::Note { source, text }
+            if source == "fill-recovery" && text.contains("DELISTEDUSDT")
+    )));
+    assert!(h.records.borrow().iter().any(|record| matches!(
+        record,
+        WalRecord::Reconciled { may_open: false, findings, .. }
+            if findings.iter().any(|line| line.contains("DELISTEDUSDT"))
     )));
     let WalRecord::SegmentBase { may_open, .. } = engine.rotation_base(1) else {
         unreachable!()
@@ -258,7 +364,39 @@ async fn execution_history_failure_aborts_boot() {
     )
     .await;
 
-    assert!(matches!(result, Err(EngineError::Boot(message)) if message.contains("execution history")));
+    assert!(
+        matches!(result, Err(EngineError::Boot(message)) if message.contains("execution history"))
+    );
+}
+
+#[tokio::test]
+async fn a_log_older_than_the_venue_history_window_aborts_boot() {
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    let (risk, _) = MockRisk::with(allow_all());
+    let (buyer, _) = Buyer::new("BTCUSDT", 0, 0.01);
+    let replayed = vec![WalRecord::Boot {
+        version: ENGINE_VERSION.into(),
+        config_sha256: "old".into(),
+        wall_ts_ms: clock::wall_ms() - 8 * 24 * 60 * 60 * 1_000,
+    }];
+
+    let result = Engine::boot(
+        &settings(),
+        "new",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &replayed,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(EngineError::Boot(message)) if message.contains("beyond the venue execution-history reach")
+    ));
 }
 
 #[tokio::test]
@@ -269,8 +407,15 @@ async fn a_recovered_fill_is_in_what_the_trading_cost() {
     let Recovered { costs, counted, .. } = recover_one_fill().await;
 
     assert_eq!(costs.fills, 1, "the cost ledger never heard about it");
-    assert_eq!(counted, 1, "and could not say how much of itself arrived late");
-    assert!((costs.notional_usdt - 300.0).abs() < 1e-9, "{}", costs.notional_usdt);
+    assert_eq!(
+        counted, 1,
+        "and could not say how much of itself arrived late"
+    );
+    assert!(
+        (costs.notional_usdt - 300.0).abs() < 1e-9,
+        "{}",
+        costs.notional_usdt
+    );
 }
 
 #[tokio::test]
@@ -298,11 +443,15 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
-        &[WalRecord::OrderUpdate { update: already.clone() }],
+        &[WalRecord::OrderUpdate {
+            update: already.clone(),
+        }],
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    let OrderUpdate::Fill { venue_ts_ms, .. } = already else { unreachable!() };
+    let OrderUpdate::Fill { venue_ts_ms, .. } = already else {
+        unreachable!()
+    };
 
     // Both what the last run already heard and one it never did, so the pass
     // has something to finish on whichever way the dedup goes.

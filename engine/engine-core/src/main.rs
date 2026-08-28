@@ -42,12 +42,28 @@ engine — the execution loop
       Reads the host's credentials and touches no network. Never prints a
       secret.
 
+  engine venues
+      List every compiled venue/realm and its live-evidence gate.
+
+  engine strategies
+      List every strategy plug that a [[strategy]] config block can load.
+
+  engine attest-flat --config engine.toml
+      Read every account position and open order surface known by the venue
+      adapter. Succeeds only when the credential-wide inventory is fresh and
+      empty. Sends no orders and changes no venue state.
+
   engine reconcile-clear --config engine.toml [--note TEXT] [--execute]
       The deliberate look the may-open latch waits for. Stop the engine
       first (this takes the log's own lock). Shows the standing findings;
       with --execute, restates the exposure ledger to the venue's positions
       and resets the latch, keeping the findings in the log as the receipt.
       The next boot still runs its own comparison.
+
+  engine loss-reset --config engine.toml --note TEXT [--execute]
+      Inspect the durable daily-loss halt while the engine is stopped. Requires
+      a credential-wide flat account; --execute appends an auditable cleared
+      anchor. Without --execute, writes nothing.
 ";
 
 fn main() -> ExitCode {
@@ -137,6 +153,34 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
+        "venues" => {
+            println!("name\tvenue\trealm\treal_money\treadiness");
+            for chosen in engine_venue::VenueName::ALL {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    chosen.as_str(),
+                    chosen.venue(),
+                    chosen.realm(),
+                    chosen.is_real_money(),
+                    chosen.readiness().as_str()
+                );
+            }
+            Ok(())
+        }
+        "strategies" => {
+            for name in engine_strategies::known_strategies() {
+                println!("{name}");
+            }
+            Ok(())
+        }
+        "attest-flat" => {
+            let config = PathBuf::from(
+                value(args, "--config")
+                    .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
+                    .unwrap_or("engine.toml".into()),
+            );
+            runtime()?.block_on(engine_core::flatness::run(&config))
+        }
         "replay" => {
             let path = value(args, "--wal").ok_or("replay needs --wal PATH")?;
             let report = replay::read(&PathBuf::from(path))?;
@@ -180,6 +224,16 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             let note = value(args, "--note").unwrap_or("operator reconcile-clear".into());
             let execute = args.iter().any(|a| a == "--execute");
             runtime()?.block_on(engine_core::clear::run(&config, &note, execute))
+        }
+        "loss-reset" => {
+            let config = PathBuf::from(
+                value(args, "--config")
+                    .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
+                    .unwrap_or("engine.toml".into()),
+            );
+            let note = value(args, "--note").ok_or("loss-reset needs --note TEXT")?;
+            let execute = args.iter().any(|a| a == "--execute");
+            runtime()?.block_on(engine_core::loss_reset::run(&config, &note, execute))
         }
         "-h" | "--help" | "help" => {
             print!("{USAGE}");

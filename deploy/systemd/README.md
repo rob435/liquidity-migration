@@ -74,9 +74,85 @@ binary, started through `start_mainnet_fleet` when `REAL_MONEY=true` in
 the whole of what decides whether the funded engine trades. See the Real-money
 section of [`../../docs/operations.md`](../../docs/operations.md).
 
+Persisting any funded surface makes rollout the only path allowed to change or
+activate the installed generation. Direct install, activate, and staged modes
+refuse, as do `ops.sh start` and `restart` for funded units. Stop and disarm stay
+available for fail-safe action.
+
+Those two remote fail-safe paths never import or execute the deployed checkout.
+They quarantine and verify the exact funded-unit allowlist first; stop does not
+read credentials, while disarm uses an isolated root-owned system interpreter
+and embedded strict parser for the stable, atomic `REAL_MONEY=false` rewrite.
+
+Every managed runtime unit starts through the fixed, root-owned trusted
+launcher. During rollout that launcher accepts an ephemeral root-owned
+`/run/liquidity-migration/activation.permit` with exactly ten ordered fields:
+the engine, launcher, control-helper, sudoers, and Telegram-bot release hashes;
+then `boot_id`, rollout `owner_pid`, `owner_start_ticks`, and
+`not_after_epoch`. A root transient watchdog verifies the PID/start-ticks and
+boot binding, pins the one-link permit inode, and refreshes the six-second lease
+once per second under an exclusive lock. Launchers read under a shared lock.
+The watchdog verifies pathname identity and link count around every write, so
+unlink, replacement, or hard-linking revokes without permit recreation. Each
+launcher supervises its workload and polls authority every two seconds, so
+rollout or watchdog death, PID reuse, expiry, replacement, or digest drift
+terminates an incomplete activation even though service users retain
+`ProtectProc=invisible`.
+
+At watchdog startup, the permit's device/inode is recorded before content
+validation. The watchdog then takes a non-creating read pin, compares that pin
+with the recorded identity and current pathname, and revalidates the content
+under an exclusive lock before renewal. Thus an unlink or even a valid-looking
+replacement in either startup gap is rejected rather than adopted.
+
+After the entire intended topology is enabled, active, and verified, rollout
+syncs it and atomically writes the persistent root-owned
+`/opt/liquidity-migration-engine/bin/activation.complete` receipt. Its exact six
+ordered fields are `commit`, `sha256`, `launcher_sha256`,
+`control_helper_sha256`, `controls_sudoers_sha256`, and
+`telegram_bot_sha256`. The receipt is synced and validated before the watchdog
+and permit are retired. Launchers check receipt, permit, then receipt again, so
+a validator straddling the handoff cannot miss both authorities. The receipt
+authorizes a verified complete generation after reboot without depending on the
+ephemeral `/run` directory; a power loss before that commit instead leaves
+enabled units unable to cross the launcher. Tmpfiles recreate the empty
+runtime/lock boundary only, never either authority file.
+
 The engines are installed by the exact systemd manifest and run under distinct
 unprivileged identities. Their root-only credential files are loaded by PID 1;
 producer and observer processes receive only non-secret projections.
+
+Before deploy trusts the checkout, and again before checkout code runs, the
+deploy preflight and trusted launcher reject group/world-writable or
+non-root-owned critical checkout ancestors. They also recursively require Git
+metadata to be root-owned, non-writable by group/other, and composed only of
+regular files and directories; deploy uses umask `0022` for new metadata. The
+runtime identities cannot rewrite the source or metadata that the release
+marker authenticates.
+
+Rollout flatness checks also use transient systemd services under the matching
+engine identity. Before prefetch, rollout verifies and freezes the outgoing
+installed engine against its checkout-bound release marker and SHA-256. That
+immutable snapshot performs the pre-stop and owners-stopped checks. The final
+installed-generation boundary runs both the outgoing snapshot and the
+digest-bound installed target; no build-candidate binary attests.
+
+PID 1 loads the engine environment plus the realm credential. For funded
+checks that credential is the operator-owned, root:root mode-0600
+`/etc/liquidity-migration/bybit-mainnet-attestor.env`, containing exactly the
+four read-only attestor/UID assignments. The transient unit explicitly removes
+the execution key and `REAL_MONEY`; persistent services never load the attestor
+file. Demo is always checked, while any persisted funded surface makes mainnet
+mandatory. Every verifier requires two complete scans with stable scope.
+Funded identity also requires the dedicated-UID acknowledgement because Bybit
+cannot list every bot instance. That operating contract prohibits manual
+trading, venue bots, copy trading, and other trading keys at all times; asset
+moves are also prohibited while a rollout or manual attestation runs.
+`scripts/ops.sh attest-flat --environment demo|mainnet` and `loss-reset
+--environment demo|mainnet --note TEXT [--execute]` use the same transient
+service boundary for installed-generation operator checks. Mainnet controls
+receive only the read-only attestor key; the reset wrapper also refuses while
+that realm's engine or producers are active.
 
 ## Watchdog timers
 
@@ -103,7 +179,6 @@ only the nonterminal queue-head L2 subscription transition (latched at 30s; the
 terminal timeout still pages). Missing, stale, reconciliation, and capital
 health failures are never suppressed.
 
-Only the mainnet watchdog pages on rule-receipt age because mainnet enforces the
-168-hour ceiling as a hard start refusal. Deployment validates the declared
-receipt but never renews it or mutates venue state; an operator must install a
-fresh reviewed read-only receipt before expiry.
+Instrument rules are not a watchdog or deploy input. Each Rust engine asks its
+selected venue adapter for current rules at boot and refuses to start if that
+read fails or omits a configured symbol.

@@ -38,6 +38,13 @@ Operator commands:
                                without --execute. The producers are stopped,
                                not disabled -- turn the sleeve off to make it
                                stick across a deploy
+  attest-flat --environment demo|mainnet
+                               run the installed Rust adapter's credential-wide
+                               two-scan flatness proof (read-only)
+  loss-reset --environment demo|mainnet --note TEXT [--execute]
+                               prove the realm stopped and flat, then inspect
+                               or durably clear its daily-loss halt; dry-run by
+                               default
   research-refresh [ARGS...]   append-first data/features/backtest workflow
   real-money preflight         report every remaining arming step (read-only)
   real-money render-profile [--execute --output PATH]
@@ -110,6 +117,213 @@ remote_python_module() {
 exec .venv/bin/python -m "${REMOTE_ARGS[@]}"' "$module" "$@"
 }
 
+remote_engine_control() {
+  local action="$1" realm="$2" note="$3" execute_mode="$4"
+  remote_exec '
+action="${REMOTE_ARGS[0]}"
+realm="${REMOTE_ARGS[1]}"
+note="${REMOTE_ARGS[2]}"
+execute_mode="${REMOTE_ARGS[3]}"
+engine_binary=/opt/liquidity-migration-engine/bin/engine
+runtime_launcher=/opt/liquidity-migration-engine/bin/run-authorized-runtime
+control_helper=/opt/liquidity-migration-engine/bin/telegram-control-helper
+controls_sudoers=/etc/sudoers.d/liquidity-migration-controls
+telegram_controls_bot=/opt/liquidity-migration/liquidity_migration/ops/telegram_controls.py
+release_marker=/opt/liquidity-migration-engine/bin/engine.release
+runtime_group=liquidity-migration
+maintenance_lock=/run/liquidity-migration/maintenance.lock
+
+[ -f "$maintenance_lock" ] && [ ! -L "$maintenance_lock" ] \
+  && [ "$(stat -c %u "$maintenance_lock")" -eq 0 ] \
+  || { echo "trusted maintenance lock is missing" >&2; exit 3; }
+exec 9<>"$maintenance_lock"
+flock --exclusive --nonblock 9 \
+  || { echo "another deploy or maintenance control is active" >&2; exit 4; }
+
+case "$realm" in
+  demo)
+    env_file=/etc/liquidity-migration/engine.env
+    credential_file=/etc/liquidity-migration/bybit-demo.env
+    runtime_user=liquidity-engine-demo
+    state_dir=/var/lib/liquidity-migration-engine
+    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    realm_units=(
+      liquidity-migration-bybit-long-demo.service
+      liquidity-migration-bybit-carry-demo.service
+      liquidity-migration-engine.service
+    )
+    ;;
+  mainnet)
+    env_file=/etc/liquidity-migration/engine-mainnet.env
+    credential_file=/etc/liquidity-migration/bybit-mainnet-attestor.env
+    runtime_user=liquidity-engine-mainnet
+    state_dir=/var/lib/liquidity-migration-engine-mainnet
+    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    realm_units=(
+      liquidity-migration-bybit-long-mainnet.service
+      liquidity-migration-bybit-carry-mainnet.service
+      liquidity-migration-engine-mainnet.service
+    )
+    ;;
+  *) echo "invalid engine-control realm: $realm" >&2; exit 2 ;;
+esac
+
+[ -x "$engine_binary" ] \
+  || { echo "installed Rust engine is missing: $engine_binary" >&2; exit 3; }
+[ -f "$engine_binary" ] && [ ! -L "$engine_binary" ] \
+  && [ "$(stat -c %u "$engine_binary")" -eq 0 ] \
+  && [ "$(stat -c %a "$engine_binary")" = 755 ] \
+  || { echo "installed Rust engine is not a trusted root-owned release" >&2; exit 3; }
+[ -f "$release_marker" ] && [ ! -L "$release_marker" ] \
+  && [ "$(stat -c %u "$release_marker")" -eq 0 ] \
+  && [ "$(stat -c %g "$release_marker")" -eq 0 ] \
+  && [ "$(stat -c %a "$release_marker")" = 644 ] \
+  || { echo "installed Rust engine release marker is untrusted" >&2; exit 3; }
+marker_commit="$(sed -n "s/^commit=//p" "$release_marker")"
+marker_digest="$(sed -n "s/^sha256=//p" "$release_marker")"
+marker_launcher_digest="$(sed -n "s/^launcher_sha256=//p" "$release_marker")"
+marker_helper_digest="$(sed -n "s/^control_helper_sha256=//p" "$release_marker")"
+marker_sudoers_digest="$(sed -n "s/^controls_sudoers_sha256=//p" "$release_marker")"
+marker_bot_digest="$(sed -n "s/^telegram_bot_sha256=//p" "$release_marker")"
+repo_commit="$(/usr/bin/git -C "$REPO_DIR" rev-parse HEAD)" \
+  || { echo "cannot read installed checkout commit" >&2; exit 3; }
+[[ "$marker_commit" =~ ^[0-9a-f]{40}$ && "$marker_commit" = "$repo_commit" ]] \
+  || { echo "installed Rust engine release is not checkout-bound" >&2; exit 3; }
+[[ "$marker_digest" =~ ^[0-9a-f]{64}$ ]] \
+  && [ "$(sha256sum "$engine_binary" | awk "{print \$1}")" = "$marker_digest" ] \
+  || { echo "installed Rust engine release digest mismatch" >&2; exit 3; }
+[[ "$marker_launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
+  && [ -f "$runtime_launcher" ] && [ ! -L "$runtime_launcher" ] \
+  && [ "$(stat -c %u "$runtime_launcher")" -eq 0 ] \
+  && [ "$(stat -c %g "$runtime_launcher")" -eq 0 ] \
+  && [ "$(stat -c %a "$runtime_launcher")" = 755 ] \
+  && [ "$(sha256sum "$runtime_launcher" | awk "{print \$1}")" = "$marker_launcher_digest" ] \
+  || { echo "installed trusted runtime launcher digest mismatch" >&2; exit 3; }
+[[ "$marker_helper_digest" =~ ^[0-9a-f]{64}$ ]] \
+  && [[ "$marker_sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
+  && [[ "$marker_bot_digest" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "installed release marker has invalid control boundary digests" >&2; exit 3; }
+expected_marker="$(printf "commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nrustc=1.90.0" \
+  "$marker_commit" "$marker_digest" "$marker_launcher_digest" \
+  "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest")"
+[ "$(cat "$release_marker")" = "$expected_marker" ] \
+  || { echo "installed release marker schema is invalid" >&2; exit 3; }
+[ -f "$control_helper" ] && [ ! -L "$control_helper" ] \
+  && [ "$(stat -c %u "$control_helper")" -eq 0 ] \
+  && [ "$(stat -c %g "$control_helper")" -eq 0 ] \
+  && [ "$(stat -c %a "$control_helper")" = 755 ] \
+  && [ "$(sha256sum "$control_helper" | awk "{print \$1}")" = "$marker_helper_digest" ] \
+  || { echo "installed Telegram control helper digest mismatch" >&2; exit 3; }
+[ -f "$controls_sudoers" ] && [ ! -L "$controls_sudoers" ] \
+  && [ "$(stat -c %u "$controls_sudoers")" -eq 0 ] \
+  && [ "$(stat -c %g "$controls_sudoers")" -eq 0 ] \
+  && [ "$(stat -c %a "$controls_sudoers")" = 440 ] \
+  && [ "$(sha256sum "$controls_sudoers" | awk "{print \$1}")" = "$marker_sudoers_digest" ] \
+  && /usr/sbin/visudo -cf "$controls_sudoers" >/dev/null \
+  || { echo "installed controls sudoers boundary mismatch" >&2; exit 3; }
+[ -f "$telegram_controls_bot" ] && [ ! -L "$telegram_controls_bot" ] \
+  && [ "$(stat -c %u "$telegram_controls_bot")" -eq 0 ] \
+  && [ "$(stat -c %g "$telegram_controls_bot")" -eq 0 ] \
+  && [ "$(stat -c %a "$telegram_controls_bot")" = 644 ] \
+  && [ "$(sha256sum "$telegram_controls_bot" | awk "{print \$1}")" = "$marker_bot_digest" ] \
+  || { echo "installed Telegram controls bot digest mismatch" >&2; exit 3; }
+[ -d "$state_dir" ] \
+  || { echo "engine state directory is missing: $state_dir" >&2; exit 3; }
+for path in "$env_file" "$credential_file"; do
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    || { echo "engine-control input is missing or linked: $path" >&2; exit 3; }
+done
+
+if [ "$realm" = mainnet ]; then
+  [ "$(stat -c %u "$credential_file")" -eq 0 ] \
+    && [ "$(stat -c %g "$credential_file")" -eq 0 ] \
+    && [ "$(stat -c %a "$credential_file")" = 600 ] \
+    || { echo "mainnet attestor environment must be root:root mode 0600" >&2; exit 3; }
+  awk "
+BEGIN {
+  allowed[\"BYBIT_ATTEST_API_KEY\"] = 1
+  allowed[\"BYBIT_ATTEST_API_SECRET\"] = 1
+  allowed[\"BYBIT_ATTEST_API_KEY_IP\"] = 1
+  allowed[\"BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID\"] = 1
+}
+/^[[:space:]]*$/ || /^#/ { next }
+{
+  separator = index(\$0, \"=\")
+  if (separator < 2) exit 1
+  key = substr(\$0, 1, separator - 1)
+  value = substr(\$0, separator + 1)
+  if (!(key in allowed) || seen[key]++ || value == \"\") exit 1
+}
+END {
+  if (seen[\"BYBIT_ATTEST_API_KEY\"] != 1 ||
+      seen[\"BYBIT_ATTEST_API_SECRET\"] != 1 ||
+      seen[\"BYBIT_ATTEST_API_KEY_IP\"] != 1 ||
+      seen[\"BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID\"] != 1) exit 1
+}
+" "$credential_file" \
+    || { echo "mainnet attestor environment has invalid assignments" >&2; exit 3; }
+fi
+
+engine_args=("$action")
+sandbox_properties=(
+  --property=NoNewPrivileges=true
+  --property=PrivateTmp=true
+  --property=ProtectProc=invisible
+  --property=ProcSubset=pid
+  --property=ProtectSystem=strict
+  --property=ProtectHome=true
+  --property=UMask=0027
+)
+case "$action" in
+  attest-flat)
+    [ -z "$note" ] && [ "$execute_mode" = dry-run ] \
+      || { echo "invalid attest-flat control arguments" >&2; exit 2; }
+    ;;
+  loss-reset)
+    for unit in "${realm_units[@]}"; do
+      if systemctl is-active --quiet "$unit"; then
+        echo "loss-reset refused: stop the complete $realm realm first ($unit is active)" >&2
+        exit 4
+      fi
+    done
+    engine_args+=(--note "$note")
+    [ "$execute_mode" = execute ] && engine_args+=(--execute)
+    sandbox_properties+=(
+      --property="ReadWritePaths=/run/lock/liquidity-migration $state_dir"
+    )
+    ;;
+  *) echo "invalid engine-control action: $action" >&2; exit 2 ;;
+esac
+
+# systemd parses the private EnvironmentFiles, then drops privileges. Funded
+# controls receive only the dedicated read-only attestor key, never the live
+# order-writing key. Secrets never enter this router or its argv.
+control_status=0
+if systemd-run --quiet --wait --pipe --collect --service-type=exec \
+    --unit="liquidity-migration-${action}-${realm}-$$" \
+    --property="User=$runtime_user" \
+    --property="Group=$runtime_group" \
+    --property="WorkingDirectory=$state_dir" \
+    --property="EnvironmentFile=$env_file" \
+    --property="EnvironmentFile=$credential_file" \
+    --property="UnsetEnvironment=$unset_environment" \
+    "${sandbox_properties[@]}" \
+    "$engine_binary" "${engine_args[@]}"; then
+  control_status=0
+else
+  control_status=$?
+fi
+[ "$(sha256sum "$engine_binary" | awk "{print \$1}")" = "$marker_digest" ] \
+  || { echo "installed Rust engine changed during engine control" >&2; exit 3; }
+[ "$(sha256sum "$runtime_launcher" | awk "{print \$1}")" = "$marker_launcher_digest" ] \
+  && [ "$(sha256sum "$control_helper" | awk "{print \$1}")" = "$marker_helper_digest" ] \
+  && [ "$(sha256sum "$controls_sudoers" | awk "{print \$1}")" = "$marker_sudoers_digest" ] \
+  && [ "$(sha256sum "$telegram_controls_bot" | awk "{print \$1}")" = "$marker_bot_digest" ] \
+  || { echo "installed release control boundary changed during engine control" >&2; exit 3; }
+exit "$control_status"
+' "$action" "$realm" "$note" "$execute_mode"
+}
+
 command="${1:-help}"
 if [[ "$#" -gt 0 ]]; then
   shift
@@ -134,6 +348,31 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
   restart|stop|start)
     [[ "$#" -ge 1 ]] || die_usage "$command requires at least one unit name"
     qualified_units "$@"
+    for unit in "${QUALIFIED_UNITS[@]}"; do
+      [[ "$unit" =~ ^liquidity-migration-[A-Za-z0-9_.@:-]+$ ]] \
+        || die_usage "invalid systemd unit name '$unit'"
+      if [[ "$command" != stop ]]; then
+        case "$unit" in
+          liquidity-migration-engine.service|\
+          liquidity-migration-bybit-long-demo.service|\
+          liquidity-migration-bybit-carry-demo.service|\
+          liquidity-migration-demo-liveness.service|\
+          liquidity-migration-demo-liveness.timer|\
+          liquidity-migration-telegram-controls.service|\
+          liquidity-migration-llm-ledger.service|\
+          liquidity-migration-llm-ledger.timer|\
+          liquidity-migration-trade-notify.service|\
+          liquidity-migration-trade-notify.timer)
+            ;;
+          liquidity-migration-*mainnet*)
+            die_usage "$command of funded units is forbidden; use deploy rollout --profile operational"
+            ;;
+          *)
+            die_usage "$command is allowed only for an exact reviewed demo/observer unit"
+            ;;
+        esac
+      fi
+    done
     remote_exec "exec systemctl $command \"\${REMOTE_ARGS[@]}\"" "${QUALIFIED_UNITS[@]}"
     ;;
   equity)
@@ -184,6 +423,52 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
     # script with no argv at all — which flatten_account.sh refuses.
     remote_exec 'exec bash "$REPO_DIR/scripts/vps/flatten_account.sh" "${REMOTE_ARGS[@]}"' \
       ${flatten_args[@]+"${flatten_args[@]}"}
+    ;;
+  attest-flat)
+    [[ "$#" -eq 2 && "$1" == "--environment" ]] \
+      || die_usage "attest-flat requires --environment demo|mainnet"
+    case "$2" in
+      demo|mainnet) ;;
+      *) die_usage "attest-flat environment must be demo or mainnet" ;;
+    esac
+    remote_engine_control attest-flat "$2" "" dry-run
+    ;;
+  loss-reset)
+    loss_realm=""
+    loss_note=""
+    loss_execute=dry-run
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --environment)
+          [[ "$#" -ge 2 && -z "$loss_realm" ]] \
+            || die_usage "loss-reset needs one --environment demo|mainnet"
+          loss_realm="$2"
+          shift 2
+          ;;
+        --note)
+          [[ "$#" -ge 2 && -z "$loss_note" ]] \
+            || die_usage "loss-reset needs one non-empty --note TEXT"
+          loss_note="$2"
+          shift 2
+          ;;
+        --execute)
+          [[ "$loss_execute" == dry-run ]] \
+            || die_usage "loss-reset accepts --execute only once"
+          loss_execute=execute
+          shift
+          ;;
+        *) die_usage "unknown loss-reset argument '$1'" ;;
+      esac
+    done
+    case "$loss_realm" in
+      demo|mainnet) ;;
+      *) die_usage "loss-reset requires --environment demo|mainnet" ;;
+    esac
+    [[ -n "${loss_note//[[:space:]]/}" ]] \
+      || die_usage "loss-reset requires a non-empty --note TEXT"
+    [[ "${#loss_note}" -le 512 ]] \
+      || die_usage "loss-reset note must be at most 512 characters"
+    remote_engine_control loss-reset "$loss_realm" "$loss_note" "$loss_execute"
     ;;
   deploy)
     # A leading --execute is accepted and discarded, for callers that still pass it.

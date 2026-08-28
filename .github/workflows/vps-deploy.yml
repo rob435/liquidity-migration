@@ -59,6 +59,17 @@ jobs:
       - name: Release tests (locked)
         run: cargo test --workspace --all-targets --release --locked
         working-directory: engine
+      - name: Account-state soak (bounded, CPU and heap only)
+        run: >-
+          cargo run --release --locked -p engine-core
+          --example account_state_soak --
+          --operations 2000000
+          --live-ids 65536
+          --sample-ops 4096
+          --history-rows 0,1000,10000,100000
+          --repeats 3
+          --json
+        working-directory: engine
       - name: Build and smoke-test deploy artifact (locked)
         run: |
           cargo build --release --locked

@@ -16,7 +16,7 @@
 mod common;
 
 use common::*;
-use engine_risk::{EnvelopeConfig, Kernel, KernelConfig};
+use engine_risk::{EnvelopeConfig, Kernel, KernelConfig, LossGuardConfig};
 use engine_types::orders::Side;
 use engine_types::risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 
@@ -26,6 +26,9 @@ const NOW: u64 = SEC;
 fn mainnet_config() -> KernelConfig {
     KernelConfig {
         max_account_view_age_ns: MAX_VIEW_AGE_NS,
+        loss_guard: LossGuardConfig {
+            max_daily_loss_usdt: None,
+        },
         envelope: EnvelopeConfig {
             tracks_equity: true,
             reference_usdt: 100.0,
@@ -409,7 +412,9 @@ fn an_exit_is_never_blocked_by_the_account_caps() {
 // book nobody can reach.
 fn a_config_whose_caps_do_not_nest_is_refused() {
     let mut gross_over_account = mainnet_config();
-    gross_over_account.envelope.max_component_gross_notional_usdt = 176.0;
+    gross_over_account
+        .envelope
+        .max_component_gross_notional_usdt = 176.0;
     assert!(Kernel::new(gross_over_account)
         .err()
         .expect("must refuse")

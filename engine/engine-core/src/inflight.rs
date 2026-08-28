@@ -20,7 +20,10 @@ pub const NEVER_SENT_PREFIX: &str = "no send: ";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ending {
-    Rejected { code: i64, reason: String },
+    Rejected {
+        code: i64,
+        reason: String,
+    },
     Cancelled,
     Filled,
     /// Written down and never sent. Only ever read from an older log.
@@ -40,6 +43,10 @@ pub struct OrderRec {
     /// been sent in an earlier boot, and this ledger is what a boot rebuilds
     /// from the log.
     pub arrival_mid: f64,
+    /// Exact for an ordinary order; a range while an amend outcome is
+    /// unknown. Rotation persists both ends so restart cannot narrow risk.
+    pub reservation_low_px: f64,
+    pub reservation_high_px: f64,
 }
 
 impl OrderRec {
@@ -72,6 +79,7 @@ impl LedgerOfOrders {
                 wire_ns,
                 arrival_mid,
             } => {
+                let exact_px = limit_px(request);
                 self.orders.insert(
                     request.client_order_id.clone(),
                     OrderRec {
@@ -81,6 +89,8 @@ impl LedgerOfOrders {
                         filled_qty: 0.0,
                         ending: None,
                         arrival_mid: *arrival_mid,
+                        reservation_low_px: exact_px,
+                        reservation_high_px: exact_px,
                     },
                 );
             }
@@ -103,6 +113,49 @@ impl LedgerOfOrders {
                     }
                 }
             }
+            WalRecord::AmendSent {
+                client_order_id,
+                spec,
+                ..
+            } => {
+                if let (Some(rec), Some(requested_px)) =
+                    (self.orders.get_mut(client_order_id), spec.px)
+                {
+                    if rec.in_flight() {
+                        if let engine_types::OrderKind::Limit { px, tif } = rec.request.kind {
+                            // The request may have reached the venue even if
+                            // the process died before its answer. Preserve the
+                            // full plausible range: high prices dominate
+                            // notional, low prices can dominate short-stop loss.
+                            let prior_low = positive_or(rec.reservation_low_px, px);
+                            let prior_high = positive_or(rec.reservation_high_px, px);
+                            rec.reservation_low_px = prior_low.min(requested_px);
+                            rec.reservation_high_px = prior_high.max(requested_px);
+                            rec.request.kind = engine_types::OrderKind::Limit {
+                                px: rec.reservation_high_px,
+                                tif,
+                            };
+                        }
+                    }
+                }
+            }
+            WalRecord::AmendResolved {
+                client_order_id,
+                effective_px,
+            } => {
+                if let Some(rec) = self.orders.get_mut(client_order_id) {
+                    if rec.in_flight() {
+                        if let engine_types::OrderKind::Limit { tif, .. } = rec.request.kind {
+                            rec.request.kind = engine_types::OrderKind::Limit {
+                                px: *effective_px,
+                                tif,
+                            };
+                            rec.reservation_low_px = *effective_px;
+                            rec.reservation_high_px = *effective_px;
+                        }
+                    }
+                }
+            }
             WalRecord::Note { source, text } if source == "shadow" => {
                 if let Some(rest) = text.strip_prefix(NEVER_SENT_PREFIX) {
                     let id = rest.split_whitespace().next().unwrap_or_default();
@@ -119,6 +172,7 @@ impl LedgerOfOrders {
             // next restart — charged to nobody, reconcile's to notice.
             WalRecord::SegmentBase { open_orders, .. } => {
                 for open in open_orders {
+                    let exact_px = limit_px(&open.request);
                     self.orders.insert(
                         open.request.client_order_id.clone(),
                         OrderRec {
@@ -128,6 +182,8 @@ impl LedgerOfOrders {
                             filled_qty: open.filled_qty,
                             ending: None,
                             arrival_mid: open.arrival_mid,
+                            reservation_low_px: positive_or(open.reservation_low_px, exact_px),
+                            reservation_high_px: positive_or(open.reservation_high_px, exact_px),
                         },
                     );
                 }
@@ -139,7 +195,9 @@ impl LedgerOfOrders {
     pub fn apply_update(&mut self, update: &OrderUpdate) {
         let id = client_order_id(update);
         let Some(id) = id else { return };
-        let Some(rec) = self.orders.get_mut(id) else { return };
+        let Some(rec) = self.orders.get_mut(id) else {
+            return;
+        };
         match update {
             OrderUpdate::Ack(_) => rec.acked = true,
             OrderUpdate::Reject { code, reason, .. } => {
@@ -187,14 +245,35 @@ impl LedgerOfOrders {
     }
 }
 
+fn limit_px(request: &OrderRequest) -> f64 {
+    match request.kind {
+        engine_types::OrderKind::Limit { px, .. } if px.is_finite() && px > 0.0 => px,
+        _ => 0.0,
+    }
+}
+
+fn positive_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
 /// Which order an update is about. `StopAttached` names a symbol and
 /// `StreamReset` names nothing, so they belong to nobody here.
 pub fn client_order_id(update: &OrderUpdate) -> Option<&str> {
     match update {
         OrderUpdate::Ack(ack) => Some(&ack.client_order_id),
-        OrderUpdate::Reject { client_order_id, .. } => Some(client_order_id),
-        OrderUpdate::Fill { client_order_id, .. } => Some(client_order_id),
-        OrderUpdate::Cancelled { client_order_id, .. } => Some(client_order_id),
+        OrderUpdate::Reject {
+            client_order_id, ..
+        } => Some(client_order_id),
+        OrderUpdate::Fill {
+            client_order_id, ..
+        } => Some(client_order_id),
+        OrderUpdate::Cancelled {
+            client_order_id, ..
+        } => Some(client_order_id),
         OrderUpdate::StopAttached { .. } | OrderUpdate::StreamReset { .. } => None,
     }
 }
@@ -249,7 +328,7 @@ impl OrderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_types::{OrderAck, OrderKind, Side, SymbolId};
+    use engine_types::{AmendSpec, OrderAck, OrderKind, Side, SymbolId, TimeInForce};
 
     #[test]
     fn a_minted_id_carries_no_millisecond_of_its_own() {
@@ -258,7 +337,12 @@ mod tests {
         // which an absolute millisecond stamp plus a usable counter does not
         // fit; without the rounding the venue hands back an id this engine
         // never minted, silently.
-        for boot_ms in [1_762_000_000_123i64, 1_762_000_000_999, 1_762_000_000_000, 1] {
+        for boot_ms in [
+            1_762_000_000_123i64,
+            1_762_000_000_999,
+            1_762_000_000_000,
+            1,
+        ] {
             let registry = OrderRegistry::new(OrderRegistry::boot_prefix(boot_ms));
             let mut n = 0u64;
             let id = crate::engine::mint_unused(registry.prefix(), &mut n, |_| false);
@@ -361,7 +445,8 @@ mod tests {
     fn a_part_fill_stays_in_flight_and_the_rest_ends_it() {
         let ledger = LedgerOfOrders::from_records(&[sent("a", 1.0), fill("a", 0.4)]);
         assert_eq!(ledger.in_flight_ids(), vec!["a"]);
-        let ledger = LedgerOfOrders::from_records(&[sent("a", 1.0), fill("a", 0.4), fill("a", 0.6)]);
+        let ledger =
+            LedgerOfOrders::from_records(&[sent("a", 1.0), fill("a", 0.4), fill("a", 0.6)]);
         assert!(ledger.in_flight_ids().is_empty());
         assert_eq!(ledger.orders["a"].ending, Some(Ending::Filled));
     }
@@ -386,6 +471,66 @@ mod tests {
             },
         ]);
         assert!(ledger.in_flight_ids().is_empty());
+    }
+
+    #[test]
+    fn replay_reserves_the_worst_price_until_an_amend_is_resolved() {
+        let mut original = request("a", 1.0);
+        original.kind = OrderKind::Limit {
+            px: 100.0,
+            tif: TimeInForce::Gtc,
+        };
+        let sent = WalRecord::OrderSent {
+            request: original,
+            wire_ns: 1,
+            arrival_mid: 100.0,
+        };
+        let amend = WalRecord::AmendSent {
+            symbol: SymbolId(0),
+            client_order_id: "a".into(),
+            spec: AmendSpec {
+                px: Some(1_000.0),
+                qty: None,
+            },
+            wire_ns: 2,
+        };
+        let unresolved = LedgerOfOrders::from_records(&[sent.clone(), amend.clone()]);
+        assert!(matches!(
+            unresolved.orders["a"].request.kind,
+            OrderKind::Limit { px: 1_000.0, .. }
+        ));
+        assert_eq!(unresolved.orders["a"].reservation_low_px, 100.0);
+        assert_eq!(unresolved.orders["a"].reservation_high_px, 1_000.0);
+
+        let rejected = LedgerOfOrders::from_records(&[
+            sent.clone(),
+            amend.clone(),
+            WalRecord::AmendResolved {
+                client_order_id: "a".into(),
+                effective_px: 100.0,
+            },
+        ]);
+        assert!(matches!(
+            rejected.orders["a"].request.kind,
+            OrderKind::Limit { px: 100.0, .. }
+        ));
+        assert_eq!(rejected.orders["a"].reservation_low_px, 100.0);
+        assert_eq!(rejected.orders["a"].reservation_high_px, 100.0);
+
+        let accepted = LedgerOfOrders::from_records(&[
+            sent,
+            amend,
+            WalRecord::AmendResolved {
+                client_order_id: "a".into(),
+                effective_px: 1_000.0,
+            },
+        ]);
+        assert!(matches!(
+            accepted.orders["a"].request.kind,
+            OrderKind::Limit { px: 1_000.0, .. }
+        ));
+        assert_eq!(accepted.orders["a"].reservation_low_px, 1_000.0);
+        assert_eq!(accepted.orders["a"].reservation_high_px, 1_000.0);
     }
 
     #[test]

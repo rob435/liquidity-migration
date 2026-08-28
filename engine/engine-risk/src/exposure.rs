@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use engine_types::ids::SymbolId;
+use engine_types::orders::Side;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Pending {
@@ -14,6 +15,16 @@ pub(crate) struct Pending {
     /// The price the order was approved at. An order in flight is valued at
     /// this or the current price, whichever is higher.
     pub px: f64,
+    /// Worst distance from a plausible fill price to the order's own stop.
+    /// Persisted with the reservation so sibling and later admissions cannot
+    /// reprice a wide stop at only the generic disaster fraction.
+    pub stop_fraction: f64,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct RecentExposure {
+    pub signed_qty: f64,
+    pub stop_fraction: f64,
 }
 
 fn pending_px(pending: &Pending, price: &impl Fn(SymbolId) -> Option<f64>) -> Option<f64> {
@@ -33,7 +44,7 @@ pub(crate) struct Book {
     /// Every fill with when it arrived. A fill newer than the account view
     /// is in neither the view nor the reservations, and the envelope must
     /// still see it; entries the view has caught up with are pruned.
-    recent_fills: Vec<(u64, u16, f64)>,
+    recent_fills: Vec<(u64, u16, f64, f64)>,
 }
 
 impl Book {
@@ -51,6 +62,10 @@ impl Book {
         self.pending.insert(client_order_id.to_string(), pending);
     }
 
+    pub(crate) fn take(&mut self, client_order_id: &str) -> Option<Pending> {
+        self.pending.remove(client_order_id)
+    }
+
     pub(crate) fn forget(&mut self, client_order_id: &str) {
         self.pending.remove(client_order_id);
     }
@@ -62,7 +77,13 @@ impl Book {
         signed_qty: f64,
         recv_ns: u64,
     ) {
-        self.recent_fills.push((recv_ns, symbol.0, signed_qty));
+        let stop_fraction = self
+            .pending
+            .get(client_order_id)
+            .map(|pending| pending.stop_fraction)
+            .unwrap_or(f64::MAX);
+        self.recent_fills
+            .push((recv_ns, symbol.0, signed_qty, stop_fraction));
         let Some(pending) = self.pending.get_mut(client_order_id) else {
             // A fill for an order the kernel never reserved — a second writer
             // on the account. The account view is what carries it.
@@ -94,35 +115,58 @@ impl Book {
             .sum()
     }
 
+    /// Non-reduce-only quantity already admitted on one side. Admission uses
+    /// the opposite-side total as a worst-case path: those orders may all fill
+    /// before any same-side reservation does, so netting them would hide a
+    /// possible cross through flat.
+    pub(crate) fn pending_open_qty(&self, symbol: SymbolId, side: Side) -> f64 {
+        let sign = match side {
+            Side::Buy => 1.0,
+            Side::Sell => -1.0,
+        };
+        self.pending
+            .values()
+            .filter(|pending| {
+                !pending.reduce_only
+                    && pending.symbol == symbol
+                    && pending.signed_qty.signum() == sign
+            })
+            .map(|pending| pending.signed_qty.abs())
+            .sum()
+    }
+
     /// Per-symbol net quantity of fills newer than the account view, pruning
     /// what the view has caught up with. The envelope adds these to the
     /// view's positions so a just-filled order is never counted nowhere.
-    pub(crate) fn fills_after(&mut self, observed_ns: u64) -> HashMap<u16, f64> {
-        self.recent_fills.retain(|(ns, _, _)| *ns > observed_ns);
-        let mut net: HashMap<u16, f64> = HashMap::new();
-        for (_, symbol, qty) in &self.recent_fills {
-            *net.entry(*symbol).or_insert(0.0) += qty;
+    pub(crate) fn fills_after(&mut self, observed_ns: u64) -> HashMap<u16, RecentExposure> {
+        self.prune_through(observed_ns);
+        let mut net: HashMap<u16, RecentExposure> = HashMap::new();
+        for (_, symbol, qty, stop_fraction) in &self.recent_fills {
+            let row = net.entry(*symbol).or_default();
+            row.signed_qty += qty;
+            row.stop_fraction = row.stop_fraction.max(*stop_fraction);
         }
         net
+    }
+
+    pub(crate) fn prune_through(&mut self, observed_ns: u64) {
+        self.recent_fills.retain(|(ns, _, _, _)| *ns > observed_ns);
     }
 
     /// Notional in flight per symbol, not yet visible in the account view.
     /// `None` when an in-flight order cannot be priced. Per symbol rather than
     /// one total because the per-symbol cap needs to know where it sits.
-    pub(crate) fn pending_notional_by_symbol(
+    pub(crate) fn pending_risk_rows(
         &self,
         price: impl Fn(SymbolId) -> Option<f64>,
-    ) -> Option<Vec<(u16, f64)>> {
-        let mut out: Vec<(u16, f64)> = Vec::new();
+    ) -> Option<Vec<(u16, f64, f64)>> {
+        let mut out: Vec<(u16, f64, f64)> = Vec::new();
         for pending in self.pending.values() {
             if pending.reduce_only || pending.signed_qty == 0.0 {
                 continue;
             }
             let notional = pending.signed_qty.abs() * pending_px(pending, &price)?;
-            match out.iter_mut().find(|(symbol, _)| *symbol == pending.symbol.0) {
-                Some((_, running)) => *running += notional,
-                None => out.push((pending.symbol.0, notional)),
-            }
+            out.push((pending.symbol.0, notional, pending.stop_fraction));
         }
         Some(out)
     }
@@ -138,6 +182,7 @@ mod tests {
             signed_qty: qty,
             reduce_only: false,
             px: 10.0,
+            stop_fraction: 0.1,
         }
     }
 
@@ -146,10 +191,39 @@ mod tests {
         let mut book = Book::default();
         book.register("a-1", entry(4, 3.0));
         book.on_fill("a-1", SymbolId(4), 2.0, 1);
-        assert_eq!(book.pending.len(), 1, "a partial fill keeps the reservation");
+        assert_eq!(
+            book.pending.len(),
+            1,
+            "a partial fill keeps the reservation"
+        );
         book.on_fill("a-1", SymbolId(4), 1.0, 2);
-        assert!(book.pending.is_empty(), "a fully filled order must not stay reserved");
+        assert!(
+            book.pending.is_empty(),
+            "a fully filled order must not stay reserved"
+        );
         // What filled is the account view's to carry from here.
-        assert_eq!(book.fills_after(0).get(&4).copied(), Some(3.0));
+        assert_eq!(book.fills_after(0).get(&4).unwrap().signed_qty, 3.0);
+    }
+
+    #[test]
+    fn a_fill_during_an_account_scan_survives_the_scan_start_stamp() {
+        let scan_started_ns = 100;
+        let fill_received_ns = 150;
+        let rest_completed_ns = 200;
+        let mut book = Book::default();
+        book.register("race-1", entry(7, 2.0));
+        book.on_fill("race-1", SymbolId(7), 2.0, fill_received_ns);
+
+        // The gateway stamps the view at scan start. Stamping it at REST
+        // completion would prune this fill even though the venue generated
+        // the flat snapshot before the fill occurred.
+        assert_eq!(
+            book.fills_after(scan_started_ns)
+                .get(&7)
+                .unwrap()
+                .signed_qty,
+            2.0
+        );
+        assert!(book.fills_after(rest_completed_ns).is_empty());
     }
 }

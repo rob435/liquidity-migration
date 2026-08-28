@@ -3,11 +3,13 @@
 
 mod support;
 
+use std::time::Duration;
+
 use engine_types::{
     AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce,
     VenueError, VenueGateway,
 };
-use engine_venue::{BybitGateway, VenueRealm};
+use engine_venue::{BybitGateway, Venue, VenueRealm};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use support::{Recorded, TestServer};
@@ -17,6 +19,19 @@ const SECRET: &str = "demoSecret00000000000000000001";
 
 fn gateway(server: &TestServer) -> BybitGateway {
     BybitGateway::for_test(
+        &server.base_url(),
+        VenueRealm::Demo,
+        VenueRealm::Demo.credentials_for_test(KEY, SECRET),
+        vec![
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+            "SOLUSDT".to_string(),
+        ],
+    )
+}
+
+fn startup_gateway(server: &TestServer) -> BybitGateway {
+    BybitGateway::for_test_with_position_mode_check(
         &server.base_url(),
         VenueRealm::Demo,
         VenueRealm::Demo.credentials_for_test(KEY, SECRET),
@@ -32,7 +47,9 @@ fn market_order() -> OrderRequest {
         side: Side::Buy,
         qty: 0.001,
         kind: OrderKind::Market,
-        stop: Some(StopSpec { trigger_px: 93000.5 }),
+        stop: Some(StopSpec {
+            trigger_px: 93000.5,
+        }),
         reduce_only: false,
     }
 }
@@ -42,7 +59,33 @@ fn ok(result: &str) -> (u16, String) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    (200, format!(r#"{{"retCode":0,"retMsg":"OK","result":{result},"time":{now}}}"#))
+    (
+        200,
+        format!(r#"{{"retCode":0,"retMsg":"OK","result":{result},"time":{now}}}"#),
+    )
+}
+
+fn batch_ok(result: &str, ret_ext_info: &str) -> (u16, String) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    (
+        200,
+        format!(
+            r#"{{"retCode":0,"retMsg":"OK","result":{result},"retExtInfo":{ret_ext_info},"time":{now}}}"#
+        ),
+    )
+}
+
+fn one_way_position(request: &Recorded) -> (u16, String) {
+    let symbol = request
+        .query
+        .strip_prefix("category=linear&symbol=")
+        .expect("an explicit linear symbol query");
+    ok(&format!(
+        r#"{{"category":"linear","list":[{{"symbol":"{symbol}","positionIdx":0,"side":"","size":"0"}}],"nextPageCursor":""}}"#
+    ))
 }
 
 /// Recompute the signature here, from the timestamp and payload the gateway
@@ -57,7 +100,9 @@ fn expected_signature(payload: &str, timestamp: &str) -> String {
 fn assert_signed(request: &Recorded, payload: &str) {
     assert_eq!(request.header("x-bapi-api-key"), Some(KEY));
     assert_eq!(request.header("x-bapi-recv-window"), Some("5000"));
-    let timestamp = request.header("x-bapi-timestamp").expect("timestamp header");
+    let timestamp = request
+        .header("x-bapi-timestamp")
+        .expect("timestamp header");
     assert!(timestamp.parse::<i64>().unwrap() > 1_600_000_000_000);
     assert_eq!(
         request.header("x-bapi-sign"),
@@ -99,6 +144,93 @@ async fn send_order_posts_the_documented_shape() {
     // A market order carries no price and lets the venue apply its own IOC.
     assert!(body.get("price").is_none());
     assert!(body.get("timeInForce").is_none());
+}
+
+#[tokio::test]
+async fn sibling_orders_are_on_the_wire_together() {
+    // Each complete request is held briefly before acknowledgement. A serial
+    // gateway can therefore reach only one in flight; the batch path reaches
+    // all three during that deterministic overlap window.
+    let server = TestServer::start_delayed(
+        |request, prior| {
+            assert_eq!(request.path, "/v5/order/create");
+            ok(&format!(r#"{{"orderId":"ord-{prior}"}}"#))
+        },
+        Duration::from_millis(100),
+    )
+    .await;
+    let mut gw = gateway(&server);
+    let requests: Vec<_> = (0..3)
+        .map(|index| {
+            let mut request = market_order();
+            request.client_order_id = format!("eng-sibling-{index}");
+            request.symbol = SymbolId(index);
+            request
+        })
+        .collect();
+
+    let replies = gw.send_orders(&requests).await;
+    assert!(replies.iter().all(Result::is_ok), "{replies:?}");
+    assert_eq!(server.peak_in_flight(), 3);
+    assert_eq!(server.to_path("/v5/order/create").len(), 3);
+}
+
+#[tokio::test]
+async fn same_symbol_siblings_keep_request_order_on_the_wire() {
+    let server = TestServer::start_delayed(
+        |request, prior| {
+            assert_eq!(request.path, "/v5/order/create");
+            ok(&format!(r#"{{"orderId":"ord-{prior}"}}"#))
+        },
+        Duration::from_millis(40),
+    )
+    .await;
+    let mut gw = gateway(&server);
+    let requests: Vec<_> = (0..3)
+        .map(|index| {
+            let mut request = market_order();
+            request.client_order_id = format!("eng-same-symbol-{index}");
+            request
+        })
+        .collect();
+
+    let replies = gw.send_orders(&requests).await;
+
+    assert!(replies.iter().all(Result::is_ok), "{replies:?}");
+    assert_eq!(server.peak_in_flight(), 1);
+    let wire_ids: Vec<_> = server
+        .to_path("/v5/order/create")
+        .iter()
+        .map(|request| request.json()["orderLinkId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        wire_ids,
+        [
+            "eng-same-symbol-0",
+            "eng-same-symbol-1",
+            "eng-same-symbol-2"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_oversized_sibling_batch_is_refused_before_the_wire() {
+    let server = TestServer::start(|_, _| ok(r#"{"orderId":"unexpected"}"#)).await;
+    let mut gw = gateway(&server);
+    let requests: Vec<_> = (0..11)
+        .map(|index| {
+            let mut request = market_order();
+            request.client_order_id = format!("eng-oversized-{index}");
+            request
+        })
+        .collect();
+
+    let replies = gw.send_orders(&requests).await;
+    assert_eq!(replies.len(), requests.len());
+    assert!(replies
+        .iter()
+        .all(|reply| matches!(reply, Err(VenueError::BadRequest(_)))));
+    assert!(server.requests().is_empty());
 }
 
 #[tokio::test]
@@ -156,14 +288,23 @@ async fn a_reduce_only_order_never_renders_a_stop_even_when_handed_one() {
 
     let body = server.only("/v5/order/create").json();
     assert_eq!(body["reduceOnly"], true);
-    assert!(body.get("stopLoss").is_none(), "stopLoss on a reduce-only order");
-    assert!(body.get("tpslMode").is_none(), "tpslMode on a reduce-only order");
+    assert!(
+        body.get("stopLoss").is_none(),
+        "stopLoss on a reduce-only order"
+    );
+    assert!(
+        body.get("tpslMode").is_none(),
+        "tpslMode on a reduce-only order"
+    );
 }
 
 #[tokio::test]
 async fn a_non_zero_retcode_is_a_rejection() {
     let server = TestServer::start(|_, _| {
-        (200, r#"{"retCode":110007,"retMsg":"ab not enough for new order","result":{}}"#.to_string())
+        (
+            200,
+            r#"{"retCode":110007,"retMsg":"ab not enough for new order","result":{}}"#.to_string(),
+        )
     })
     .await;
     let mut gw = gateway(&server);
@@ -224,6 +365,127 @@ async fn cancel_goes_by_our_own_order_id() {
 }
 
 #[tokio::test]
+async fn cancel_batch_posts_one_ordered_request_and_preserves_partial_rejection() {
+    let server = TestServer::start(|_, _| {
+        batch_ok(
+            r#"{"list":[{"category":"linear","symbol":"BTCUSDT","orderId":"ord-1","orderLinkId":"eng-1"},{"category":"linear","symbol":"ETHUSDT","orderId":"","orderLinkId":"eng-2"}]}"#,
+            r#"{"list":[{"code":"0","msg":"OK"},{"code":"110001","msg":"Order does not exist"}]}"#,
+        )
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let requests = vec![
+        (SymbolId(0), "eng-1".to_string()),
+        (SymbolId(1), "eng-2".to_string()),
+    ];
+
+    let replies = gw.cancel_orders(&requests).await;
+
+    assert_eq!(replies.len(), 2);
+    assert!(replies[0].is_ok());
+    assert!(matches!(
+        &replies[1],
+        Err(VenueError::Rejected { code: 110001, message })
+            if message == "Order does not exist"
+    ));
+    assert!(server.to_path("/v5/order/cancel").is_empty());
+    let request = server.only("/v5/order/cancel-batch");
+    assert_eq!(request.method, "POST");
+    assert_signed(&request, &request.body);
+    let body = request.json();
+    assert_eq!(body["category"], "linear");
+    assert_eq!(body["request"].as_array().unwrap().len(), 2);
+    assert_eq!(body["request"][0]["symbol"], "BTCUSDT");
+    assert_eq!(body["request"][0]["orderLinkId"], "eng-1");
+    assert_eq!(body["request"][1]["symbol"], "ETHUSDT");
+    assert_eq!(body["request"][1]["orderLinkId"], "eng-2");
+}
+
+#[tokio::test]
+async fn ten_cancels_use_one_quota_exact_native_batch_call() {
+    let server = TestServer::start(|request, _| {
+        assert_eq!(request.path, "/v5/order/cancel-batch");
+        let body = request.json();
+        let submitted = body["request"].as_array().unwrap();
+        let identities: Vec<_> = submitted
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                serde_json::json!({
+                    "category": "linear",
+                    "symbol": item["symbol"].clone(),
+                    "orderId": format!("venue-{index}"),
+                    "orderLinkId": item["orderLinkId"].clone()
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = submitted
+            .iter()
+            .map(|_| serde_json::json!({"code": 0, "msg": "OK"}))
+            .collect();
+        batch_ok(
+            &serde_json::json!({"list": identities}).to_string(),
+            &serde_json::json!({"list": outcomes}).to_string(),
+        )
+    })
+    .await;
+    // Exercise the production enum as well as the concrete adapter. Missing
+    // this dispatch once silently selected the trait's serial fallback.
+    let mut gw = Venue::Bybit(gateway(&server));
+    let requests: Vec<_> = (0..10)
+        .map(|index| (SymbolId((index % 2) as u16), format!("eng-cancel-{index}")))
+        .collect();
+
+    let replies = gw.cancel_orders(&requests).await;
+
+    assert_eq!(replies.len(), requests.len());
+    assert!(replies.iter().all(Result::is_ok), "{replies:?}");
+    let request = server.only("/v5/order/cancel-batch");
+    assert_eq!(request.json()["request"].as_array().unwrap().len(), 10);
+}
+
+#[tokio::test]
+async fn cancel_batch_identity_mismatch_fails_every_item_closed() {
+    let server = TestServer::start(|_, _| {
+        batch_ok(
+            r#"{"list":[{"orderLinkId":"eng-2"},{"orderLinkId":"eng-1"}]}"#,
+            r#"{"list":[{"code":0,"msg":"OK"},{"code":0,"msg":"OK"}]}"#,
+        )
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let requests = vec![
+        (SymbolId(0), "eng-1".to_string()),
+        (SymbolId(1), "eng-2".to_string()),
+    ];
+
+    let replies = gw.cancel_orders(&requests).await;
+
+    assert_eq!(replies.len(), requests.len());
+    assert!(replies
+        .iter()
+        .all(|reply| matches!(reply, Err(VenueError::BadReply(_)))));
+    assert_eq!(server.to_path("/v5/order/cancel-batch").len(), 1);
+}
+
+#[tokio::test]
+async fn an_oversized_cancel_batch_is_refused_before_the_wire() {
+    let server = TestServer::start(|_, _| batch_ok(r#"{"list":[]}"#, r#"{"list":[]}"#)).await;
+    let mut gw = gateway(&server);
+    let requests: Vec<_> = (0..11)
+        .map(|index| (SymbolId(0), format!("eng-oversized-cancel-{index}")))
+        .collect();
+
+    let replies = gw.cancel_orders(&requests).await;
+
+    assert_eq!(replies.len(), requests.len());
+    assert!(replies
+        .iter()
+        .all(|reply| matches!(reply, Err(VenueError::BadRequest(_)))));
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
 async fn an_amend_carries_only_the_field_it_changes() {
     // An echoed-back price is not a no-op at the venue: it costs the order
     // its place in the queue, which is the one thing amending is for.
@@ -281,14 +543,34 @@ async fn an_amend_that_changes_nothing_never_reaches_the_venue() {
     let mut gw = gateway(&server);
 
     assert!(matches!(
-        gw.amend_order(SymbolId(0), "eng-1", AmendSpec { px: None, qty: None }).await,
+        gw.amend_order(
+            SymbolId(0),
+            "eng-1",
+            AmendSpec {
+                px: None,
+                qty: None
+            }
+        )
+        .await,
         Err(VenueError::BadRequest(_))
     ));
-    let mut bad_size = AmendSpec { px: None, qty: Some(f64::NAN) };
-    assert!(gw.amend_order(SymbolId(0), "eng-1", bad_size).await.is_err());
+    let mut bad_size = AmendSpec {
+        px: None,
+        qty: Some(f64::NAN),
+    };
+    assert!(gw
+        .amend_order(SymbolId(0), "eng-1", bad_size)
+        .await
+        .is_err());
     bad_size.qty = Some(0.0);
-    assert!(gw.amend_order(SymbolId(0), "eng-1", bad_size).await.is_err());
-    assert!(server.requests().is_empty(), "nothing should have been sent");
+    assert!(gw
+        .amend_order(SymbolId(0), "eng-1", bad_size)
+        .await
+        .is_err());
+    assert!(
+        server.requests().is_empty(),
+        "nothing should have been sent"
+    );
 }
 
 #[tokio::test]
@@ -297,7 +579,10 @@ async fn the_gateway_says_what_bybit_can_actually_do() {
     // strategy believing it has something it does not.
     let server = TestServer::start(|_, _| ok("{}")).await;
     let caps = gateway(&server).caps();
-    assert!(caps.native_position_stop, "trading-stop holds the position stop");
+    assert!(
+        caps.native_position_stop,
+        "trading-stop holds the position stop"
+    );
     assert!(caps.amend_in_place, "/v5/order/amend");
 }
 
@@ -360,6 +645,73 @@ async fn account_view_reads_wallet_and_positions() {
 }
 
 #[tokio::test]
+async fn mainnet_inventory_reads_unfiltered_cross_account_assets() {
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/v5/market/instruments-info" => {
+            ok(r#"{"category":"linear","list":[],"nextPageCursor":""}"#)
+        }
+        "/v5/account/wallet-balance" => ok(
+            r#"{"list":[{"accountType":"UNIFIED","coin":[]}]}"#,
+        ),
+        "/v5/asset/asset-overview" => {
+            let snapshot_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            ok(&format!(
+                r#"{{"totalEquity":"0","list":[{{"accountType":"TradingBot","totalEquity":"0","valuationCurrency":"USD","snapshotTime":"{snapshot_ms}","categories":[{{"category":"Futures Grid Bot","equity":"0","coinDetail":[]}}]}}]}}"#
+            ))
+        }
+        "/v5/position/list" => {
+            let category = request
+                .query
+                .strip_prefix("category=")
+                .and_then(|query| query.split('&').next())
+                .unwrap();
+            ok(&format!(
+                r#"{{"category":"{category}","list":[],"nextPageCursor":""}}"#
+            ))
+        }
+        "/v5/order/realtime" => {
+            let category = request
+                .query
+                .strip_prefix("category=")
+                .and_then(|query| query.split('&').next())
+                .unwrap();
+            ok(&format!(
+                r#"{{"category":"{category}","list":[],"nextPageCursor":""}}"#
+            ))
+        }
+        "/v5/spread/order/realtime" => ok(r#"{"list":[],"nextPageCursor":""}"#),
+        "/v5/rfq/quote-realtime" | "/v5/rfq/rfq-realtime" => ok(r#"{"list":[]}"#),
+        "/v5/strategy/list" => ok(r#"{"list":[],"nextCursor":""}"#),
+        other => panic!("unexpected path {other}"),
+    })
+    .await;
+    let mut gw = BybitGateway::for_test(
+        &server.base_url(),
+        VenueRealm::Mainnet,
+        VenueRealm::Mainnet.credentials_for_test(KEY, SECRET),
+        Vec::new(),
+    );
+
+    let inventory = gw.account_inventory().await.unwrap();
+    assert!(inventory.positions.is_empty());
+    assert_eq!(inventory.open_orders.len(), 1);
+    assert_eq!(inventory.open_orders[0].product, "asset_account:TradingBot");
+    assert_eq!(inventory.open_orders[0].symbol, "Futures Grid Bot");
+
+    let request = server.only("/v5/asset/asset-overview");
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.query, "",
+        "the scan must not select one account type"
+    );
+    assert_eq!(request.body, "");
+    assert_signed(&request, "");
+}
+
+#[tokio::test]
 async fn blank_wallet_totals_fail_rather_than_read_as_zero() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/account/wallet-balance" => ok(r#"{"list":[{"accountType":"UNIFIED",
@@ -387,7 +739,10 @@ async fn instrument_rules_follow_the_page_cursor() {
                  "lotSizeFilter":{"qtyStep":"0.001","minOrderQty":"0.001","minNotionalValue":"5"}}
              ],"nextPageCursor":"page%3D2"}"#)
         } else {
-            assert_eq!(request.query, "category=linear&limit=1000&cursor=page%253D2");
+            assert_eq!(
+                request.query,
+                "category=linear&limit=1000&cursor=page%253D2"
+            );
             ok(r#"{"category":"linear","list":[
                 {"symbol":"ETHUSDT","priceFilter":{"tickSize":"0.01"},
                  "lotSizeFilter":{"qtyStep":"0.01","minOrderQty":"0.01","minNotionalValue":"5"}}
@@ -415,10 +770,14 @@ async fn warm_opens_the_connection_on_the_public_time_endpoint() {
 
     gw.warm().await.unwrap();
 
-    let request = server.only("/v5/market/time");
-    assert_eq!(request.method, "GET");
-    assert_eq!(request.query, "");
-    assert!(request.header("x-bapi-sign").is_none());
+    let requests = server.to_path("/v5/market/time");
+    assert_eq!(requests.len(), 10, "the full HTTP/1.1 order pool is warm");
+    assert_eq!(server.connections(), 10);
+    for request in requests {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.query, "");
+        assert!(request.header("x-bapi-sign").is_none());
+    }
 }
 
 #[tokio::test]
@@ -433,10 +792,10 @@ async fn the_warm_connection_is_reused_for_the_order() {
     gw.warm().await.unwrap();
     gw.send_order(&market_order()).await.unwrap();
 
-    // Two requests down one socket: the order did not pay for a new
-    // connection, which is the whole point of warming.
-    assert_eq!(server.requests().len(), 2);
-    assert_eq!(server.connections(), 1);
+    // Ten warmups and one order, still on the original ten sockets: the
+    // order did not pay for a new connection.
+    assert_eq!(server.requests().len(), 11);
+    assert_eq!(server.connections(), 10);
 }
 
 #[tokio::test]
@@ -447,7 +806,34 @@ async fn a_symbol_the_gateway_does_not_know_never_reaches_the_venue() {
     let mut request = market_order();
     request.symbol = SymbolId(9);
     assert!(gw.send_order(&request).await.is_err());
-    assert!(server.requests().is_empty(), "nothing should have been sent");
+    assert!(
+        server.requests().is_empty(),
+        "nothing should have been sent"
+    );
+}
+
+#[tokio::test]
+async fn a_runtime_symbol_is_checked_once_before_its_first_order() {
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/v5/position/list" => one_way_position(request),
+        "/v5/order/create" => ok(r#"{"orderId":"ord-runtime"}"#),
+        other => panic!("unexpected path {other}"),
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let symbol = gw.add_symbol("SOLUSDT");
+    let mut order = market_order();
+    order.symbol = symbol;
+    order.stop = None;
+
+    gw.send_order(&order).await.unwrap();
+    order.client_order_id = "eng-runtime-2".to_string();
+    gw.send_order(&order).await.unwrap();
+
+    let checks = server.to_path("/v5/position/list");
+    assert_eq!(checks.len(), 1, "the successful proof is cached");
+    assert_eq!(checks[0].query, "category=linear&symbol=SOLUSDT");
+    assert_eq!(server.to_path("/v5/order/create").len(), 2);
 }
 
 #[tokio::test]
@@ -460,16 +846,25 @@ async fn an_unquantized_quantity_never_reaches_the_venue() {
     assert!(gw.send_order(&request).await.is_err());
     request.qty = 0.0;
     assert!(gw.send_order(&request).await.is_err());
-    assert!(server.requests().is_empty(), "nothing should have been sent");
+    assert!(
+        server.requests().is_empty(),
+        "nothing should have been sent"
+    );
 }
 
 #[tokio::test]
 async fn account_identity_asks_the_venue_whose_account_this_is() {
-    let server = TestServer::start(|_, _| {
-        ok(&format!(r#"{{"id":"1","apiKey":"{KEY}","userID":6039967,"readOnly":0}}"#))
+    let server = TestServer::start(|request, _| {
+        if request.path == "/v5/position/list" {
+            one_way_position(request)
+        } else {
+            ok(&format!(
+                r#"{{"id":"1","apiKey":"{KEY}","userID":6039967,"readOnly":0}}"#
+            ))
+        }
     })
     .await;
-    let mut gw = gateway(&server);
+    let mut gw = startup_gateway(&server);
 
     let who = gw.account_identity().await.unwrap();
     assert_eq!(who.user_id, "6039967");
@@ -479,17 +874,65 @@ async fn account_identity_asks_the_venue_whose_account_this_is() {
     assert_eq!(request.method, "GET");
     assert_eq!(request.query, "", "the identity read takes no parameters");
     assert_signed(&request, "");
+
+    let checks = server.to_path("/v5/position/list");
+    assert_eq!(checks.len(), 2, "every configured symbol is checked");
+    assert_eq!(checks[0].method, "GET");
+    assert_eq!(checks[0].query, "category=linear&symbol=BTCUSDT");
+    assert_eq!(checks[1].query, "category=linear&symbol=ETHUSDT");
+    for check in checks {
+        assert_signed(&check, &check.query);
+        assert!(check.body.is_empty());
+    }
 }
 
 #[tokio::test]
 async fn an_account_number_sent_as_text_reads_the_same() {
     // Bybit sends userID as a number here and as a string elsewhere. Both
     // have to land on the same lock file name or the two engines miss.
-    let server = TestServer::start(|_, _| {
-        ok(&format!(r#"{{"apiKey":"{KEY}","userID":"0006039967"}}"#))
+    let server = TestServer::start(|request, _| {
+        if request.path == "/v5/position/list" {
+            one_way_position(request)
+        } else {
+            ok(&format!(r#"{{"apiKey":"{KEY}","userID":"0006039967"}}"#))
+        }
     })
     .await;
-    assert_eq!(gateway(&server).account_identity().await.unwrap().user_id, "6039967");
+    assert_eq!(
+        startup_gateway(&server)
+            .account_identity()
+            .await
+            .unwrap()
+            .user_id,
+        "6039967"
+    );
+}
+
+#[tokio::test]
+async fn hedge_mode_refuses_startup_before_any_order_can_be_sent() {
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/v5/position/list" if request.query.ends_with("BTCUSDT") => one_way_position(request),
+        "/v5/position/list" => ok(
+            r#"{"category":"linear","list":[{"symbol":"ETHUSDT","positionIdx":1,"side":"","size":"0"},{"symbol":"ETHUSDT","positionIdx":2,"side":"","size":"0"}],"nextPageCursor":""}"#,
+        ),
+        _ => ok(&format!(r#"{{"apiKey":"{KEY}","userID":6039967}}"#)),
+    })
+    .await;
+
+    let refused = startup_gateway(&server)
+        .account_identity()
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, VenueError::BadReply(_)), "{refused:?}");
+    assert!(refused.to_string().contains("ETHUSDT"), "{refused}");
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|request| request.method == "GET"),
+        "startup verification must not change account settings"
+    );
+    assert!(server.to_path("/v5/order/create").is_empty());
 }
 
 #[tokio::test]
@@ -497,10 +940,8 @@ async fn an_identity_about_a_different_api_key_is_refused() {
     // Whatever produced this reply, it was not the key we signed with — so
     // the account number in it is somebody else's, and taking a lock in that
     // name would leave this account unguarded.
-    let server = TestServer::start(|_, _| {
-        ok(r#"{"apiKey":"someoneElsesKey0001","userID":9999999}"#)
-    })
-    .await;
+    let server =
+        TestServer::start(|_, _| ok(r#"{"apiKey":"someoneElsesKey0001","userID":9999999}"#)).await;
     let refused = gateway(&server).account_identity().await;
     assert!(
         matches!(refused, Err(VenueError::Credentials(_))),
@@ -510,8 +951,11 @@ async fn an_identity_about_a_different_api_key_is_refused() {
 
 #[tokio::test]
 async fn an_identity_with_no_usable_account_number_is_refused() {
-    for result in [r#"{"apiKey":"KEYHERE"}"#, r#"{"apiKey":"KEYHERE","userID":0}"#,
-                   r#"{"apiKey":"KEYHERE","userID":"nope"}"#] {
+    for result in [
+        r#"{"apiKey":"KEYHERE"}"#,
+        r#"{"apiKey":"KEYHERE","userID":0}"#,
+        r#"{"apiKey":"KEYHERE","userID":"nope"}"#,
+    ] {
         let body = result.replace("KEYHERE", KEY);
         let server = TestServer::start(move |_, _| ok(&body)).await;
         let refused = gateway(&server).account_identity().await;

@@ -1,21 +1,19 @@
 """Owner control buttons in the Telegram main chat.
 
-A small always-on daemon long-polls the notification bot for button presses
-and runs three owner actions per environment:
+A small unprivileged daemon long-polls the notification bot for button presses.
+Host mutations cross one fixed sudo boundary into a root-owned, release-digest-
+bound helper with an exact action allow-list:
 
 ``pause``
-    Stop opening or closing anything new. Writes the sleeve toggles off in the
-    host override (``/etc/liquidity-migration/sleeves.env``), regenerates the
-    resolved toggle file with the same deploy library the rollout uses, and
-    stops the producer units. The account owner, its protections, and the
-    watchdog keep running; standing positions stay open. Because the pause is
-    the designed host narrowing, it survives reboots and deploys, and the
-    watchdog reads it as "deliberately off" rather than an outage.
+    Stop opening or closing anything new. The helper writes the demo sleeve
+    narrowing atomically and disables the corresponding producer units. The
+    account owner, its protections, and the watchdog keep running; standing
+    positions stay open.
 
 ``resume``
-    Restore the sleeve override file to exactly what it was before the pause
-    (a manual owner narrowing is preserved), regenerate the resolved toggles,
-    and start whichever producers resolve on.
+    Demo only: restore the exact pre-pause sleeve override and start whichever
+    producers resolve on. Funded resume is deliberately rollout-only and is
+    never exposed by this bot.
 
 There is no ``close`` button. ``scripts/ops.sh flatten --execute`` takes an
 account to zero on the engine's own path, and it is an operator command rather
@@ -23,9 +21,8 @@ than a button on purpose: it stops the producers, and a
 button that quietly stops a sleeve is the kind of thing somebody presses to see
 what it does. Pause still stops new decisions.
 
-Mainnet rows appear only while the mainnet owner unit is active, i.e. after
-the owner's own arming act; this module never arms anything. Pausing mainnet
-stops its producer units directly (mainnet has no sleeve toggles).
+The mainnet pause row appears only while the mainnet owner unit is active, i.e.
+after the owner's own arming act; this module never arms or resumes anything.
 
 Authorization: only updates from the configured chat are honored. Button
 presses additionally require the presser to be the chat itself (a private
@@ -47,8 +44,6 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +71,12 @@ MAINNET_PRODUCER_UNITS = (
     "liquidity-migration-bybit-long-mainnet.service",
 )
 DEMO_OWNER_UNIT = "liquidity-migration-engine.service"
+CONTROL_HELPER = "/opt/liquidity-migration-engine/bin/telegram-control-helper"
+CONTROL_COMMANDS: dict[str, tuple[str, ...]] = {
+    action: ("/usr/bin/sudo", "-n", CONTROL_HELPER, action)
+    for action in ("pause-demo", "resume-demo", "pause-mainnet", "status-demo")
+}
+CONTROLS_STATE_DIR = Path("/var/lib/liquidity-migration-telegram-controls")
 
 _PAUSE_MARKER = "# paused by telegram-controls; resume restores the saved original"
 _ENVIRONMENTS = ("demo", "mainnet")
@@ -93,17 +94,12 @@ class ControlsConfig:
     #: press buttons. A group chat therefore refuses every press until the
     #: owner lists user ids in TELEGRAM_CONTROL_USER_IDS.
     control_user_ids: frozenset[int]
-    repo_dir: Path
     offset_path: Path
-    host_sleeves_env: Path
-    #: Verbatim copy of the host override taken at pause time; resume restores
-    #: it so a manual owner narrowing survives a pause/resume round trip.
-    saved_sleeves_path: Path
     poll_timeout_seconds: int = 50
     api_timeout_seconds: float = 20.0
 
 
-def load_config_from_environment(repo_dir: Path) -> ControlsConfig | None:
+def load_config_from_environment() -> ControlsConfig | None:
     """Build the config from the unit's environment; None when the bot is unconfigured."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -118,15 +114,11 @@ def load_config_from_environment(repo_dir: Path) -> ControlsConfig | None:
                 user_ids.add(int(piece))
             except ValueError:
                 logger.warning("ignoring non-numeric TELEGRAM_CONTROL_USER_IDS entry: %r", piece)
-    state_dir = repo_dir / "data" / "telegram-controls"
     return ControlsConfig(
         token=token,
         chat_id=chat_id,
         control_user_ids=frozenset(user_ids),
-        repo_dir=repo_dir,
-        offset_path=state_dir / "offset.json",
-        host_sleeves_env=Path(os.environ.get("LM_HOST_SLEEVES_ENV") or "/etc/liquidity-migration/sleeves.env"),
-        saved_sleeves_path=state_dir / "sleeves_before_pause.txt",
+        offset_path=CONTROLS_STATE_DIR / "offset.json",
     )
 
 
@@ -250,13 +242,41 @@ class TelegramApi:
 
 
 class VpsFleet:
-    """The subprocess side: unit state and sleeve toggles."""
+    """Read unit state directly; route every mutation through the fixed helper."""
 
     def __init__(self, config: ControlsConfig) -> None:
         self._config = config
 
     def _run(self, argv: list[str], *, timeout: float = 90.0) -> subprocess.CompletedProcess[str]:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+
+    def _control(self, action: str) -> str:
+        command = CONTROL_COMMANDS.get(action)
+        if command is None:
+            raise ValueError(f"unsupported control action: {action}")
+        proc = self._run(list(command))
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()[:300]
+            raise RuntimeError(f"privileged control helper refused {action}: {detail or proc.returncode}")
+        return proc.stdout.strip()
+
+    def _demo_status(self) -> tuple[bool, dict[str, str]]:
+        values: dict[str, str] = {}
+        for line in self._control("status-demo").splitlines():
+            if "=" not in line:
+                raise RuntimeError("privileged control helper returned malformed status")
+            key, value = line.split("=", 1)
+            if key in values or key not in {"paused", *SLEEVE_UNITS}:
+                raise RuntimeError("privileged control helper returned an unexpected status field")
+            values[key] = value
+        if set(values) != {"paused", *SLEEVE_UNITS}:
+            raise RuntimeError("privileged control helper returned incomplete status")
+        if values["paused"] not in {"true", "false"}:
+            raise RuntimeError("privileged control helper returned an invalid pause state")
+        toggles = {key: values[key] for key in SLEEVE_UNITS}
+        if any(value not in {"on", "off"} for value in toggles.values()):
+            raise RuntimeError("privileged control helper returned an invalid sleeve state")
+        return values["paused"] == "true", toggles
 
     def unit_active(self, unit: str) -> str:
         proc = self._run(["systemctl", "is-active", unit], timeout=15.0)
@@ -267,90 +287,24 @@ class VpsFleet:
 
     def paused(self, environment: str) -> bool:
         if environment == "demo":
-            return self._config.saved_sleeves_path.exists()
-        return all(self.unit_active(unit) != "active" for unit in MAINNET_PRODUCER_UNITS)
+            return self._demo_status()[0]
+        if environment == "mainnet":
+            return all(self.unit_active(unit) != "active" for unit in MAINNET_PRODUCER_UNITS)
+        raise ValueError(f"unsupported environment: {environment}")
 
     def resolved_sleeves(self) -> dict[str, str]:
-        resolved = Path(os.environ.get("LM_RESOLVED_SLEEVES_ENV") or "/etc/liquidity-migration/sleeves.resolved.env")
-        toggles: dict[str, str] = {}
-        try:
-            for line in resolved.read_text(encoding="utf-8").splitlines():
-                if "=" in line and not line.lstrip().startswith("#"):
-                    key, value = line.split("=", 1)
-                    toggles[key.strip()] = value.strip()
-        except OSError:
-            pass
-        return toggles
-
-    def _resolve_sleeves(self) -> None:
-        """Regenerate the resolved toggle file with the deploy's own library.
-
-        The hedge-timer line is computed by the deploy, not by the toggle
-        loader, so the previous value is carried over verbatim.
-        """
-        script = (
-            "set -euo pipefail\n"
-            f'cd "{self._config.repo_dir}"\n'
-            "source deploy/lib_sleeves.sh\n"
-            'prev_hedge=""\n'
-            'if [ -f "$LM_RESOLVED_SLEEVES_ENV" ]; then\n'
-            "  prev_hedge=\"$(sed -n 's/^CONTINUOUS_HEDGE_TIMER=//p' \"$LM_RESOLVED_SLEEVES_ENV\" | head -1)\"\n"
-            "fi\n"
-            "lm_load_sleeve_toggles\n"
-            'if [ -n "$prev_hedge" ]; then CONTINUOUS_HEDGE_TIMER="$prev_hedge"; fi\n'
-            "lm_write_resolved_sleeve_toggles\n"
-        )
-        proc = self._run(["bash", "-c", script], timeout=30.0)
-        if proc.returncode != 0:
-            raise RuntimeError(f"sleeve toggle resolve failed: {(proc.stderr or proc.stdout)[:300]}")
-
-    def _write_host_sleeves(self, content: str | None) -> None:
-        path = self._config.host_sleeves_env
-        if content is None:
-            path.unlink(missing_ok=True)
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.controls.tmp")
-        tmp.write_text(content, encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-
-    def _stop_units(self, units: list[str]) -> list[str]:
-        failures: list[str] = []
-        for unit in units:
-            proc = self._run(["systemctl", "disable", "--now", unit])
-            if proc.returncode != 0 and "does not exist" not in (proc.stderr or ""):
-                failures.append(f"{unit}: {(proc.stderr or proc.stdout).strip()[:120]}")
-        return failures
-
-    def _start_units(self, units: list[str]) -> list[str]:
-        failures: list[str] = []
-        for unit in units:
-            proc = self._run(["systemctl", "enable", "--now", unit])
-            if proc.returncode != 0:
-                failures.append(f"{unit}: {(proc.stderr or proc.stdout).strip()[:120]}")
-        return failures
+        return self._demo_status()[1]
 
     def pause(self, environment: str) -> str:
+        action = {"demo": "pause-demo", "mainnet": "pause-mainnet"}.get(environment)
+        if action is None:
+            raise ValueError(f"unsupported environment: {environment}")
+        self._control(action)
         if environment == "mainnet":
-            failures = self._stop_units(list(MAINNET_PRODUCER_UNITS))
-            if failures:
-                return "🚨 Mainnet pause hit trouble: " + "; ".join(failures)
             return (
                 "⏸ Real-money trading is paused: both mainnet producers are stopped.\n"
                 "Open positions stay open and protected by the account owner."
             )
-        saved = self._config.saved_sleeves_path
-        current = self._config.host_sleeves_env.read_text(encoding="utf-8") if self._config.host_sleeves_env.exists() else None
-        if not saved.exists():
-            # Second pause press must not overwrite the true pre-pause copy.
-            saved.parent.mkdir(parents=True, exist_ok=True)
-            saved.write_text("<absent>" if current is None else current, encoding="utf-8")
-        self._write_host_sleeves(sleeve_pause_rewrite(current))
-        self._resolve_sleeves()
-        failures = self._stop_units(list(SLEEVE_UNITS.values()))
-        if failures:
-            return "🚨 Pause hit trouble: " + "; ".join(failures)
         return (
             "⏸ Demo trading is paused: producers are stopped and the sleeves are marked off, "
             "so the watchdog will not page about them.\n"
@@ -360,40 +314,30 @@ class VpsFleet:
 
     def resume(self, environment: str) -> str:
         if environment == "mainnet":
-            failures = self._start_units(list(MAINNET_PRODUCER_UNITS))
-            if failures:
-                return "🚨 Mainnet resume hit trouble: " + "; ".join(failures)
-            return "▶️ Real-money trading resumed: both mainnet producers are running again."
-        saved = self._config.saved_sleeves_path
-        if saved.exists():
-            original = saved.read_text(encoding="utf-8")
-            self._write_host_sleeves(None if original == "<absent>" else original)
-        else:
-            current = (
-                self._config.host_sleeves_env.read_text(encoding="utf-8")
-                if self._config.host_sleeves_env.exists()
-                else None
+            return (
+                "🚫 Real-money resume is rollout-only. Use the reviewed funded rollout "
+                "path so flatness, generation, and activation receipts are reverified."
             )
-            self._write_host_sleeves(sleeve_strip_rewrite(current))
-        self._resolve_sleeves()
+        if environment != "demo":
+            raise ValueError(f"unsupported environment: {environment}")
+        self._control("resume-demo")
         toggles = self.resolved_sleeves()
-        to_start = [unit for key, unit in SLEEVE_UNITS.items() if toggles.get(key, "off").lower() in ("on", "1", "true", "yes")]
-        failures = self._start_units(to_start)
-        saved.unlink(missing_ok=True)
-        if failures:
-            return "🚨 Resume hit trouble: " + "; ".join(failures)
-        names = ", ".join(unit.removeprefix("liquidity-migration-bybit-").removesuffix(".service") for unit in to_start)
+        names = ", ".join(
+            unit.removeprefix("liquidity-migration-bybit-").removesuffix(".service")
+            for key, unit in SLEEVE_UNITS.items()
+            if toggles[key] == "on"
+        )
         return f"▶️ Demo trading resumed: {names or 'no sleeve resolves on'}."
 
     def status_text(self) -> str:
         now = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
-        toggles = self.resolved_sleeves()
+        paused, toggles = self._demo_status()
         lines = [f"📊 Fleet status · {now}"]
         lines.append(f"demo owner: {self.unit_active(DEMO_OWNER_UNIT)}")
         for key, unit in SLEEVE_UNITS.items():
             sleeve = key.removesuffix("_SLEEVE").lower()
-            lines.append(f"demo {sleeve}: unit {self.unit_active(unit)}, sleeve {toggles.get(key, '?')}")
-        lines.append("demo trading: PAUSED by controls" if self.paused("demo") else "demo trading: on")
+            lines.append(f"demo {sleeve}: unit {self.unit_active(unit)}, sleeve {toggles[key]}")
+        lines.append("demo trading: PAUSED by controls" if paused else "demo trading: on")
         if self.mainnet_present():
             producer_states = ", ".join(
                 f"{unit.removeprefix('liquidity-migration-bybit-').removesuffix('.service')}={self.unit_active(unit)}"
@@ -437,7 +381,6 @@ class ControlPanel:
             rows.append(
                 [
                     {"text": "⏸ Pause real money", "callback_data": "pause:mainnet"},
-                    {"text": "▶️ Resume real money", "callback_data": "resume:mainnet"},
                 ]
             )
         return rows
@@ -568,12 +511,11 @@ def serve_forever(config: ControlsConfig, api: TelegramApi, panel: ControlPanel,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo-dir", type=Path, default=_REPO_ROOT)
     parser.add_argument("--once", action="store_true", help="serve a single poll batch and exit (for smoke tests)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    config = load_config_from_environment(args.repo_dir)
+    config = load_config_from_environment()
     if config is None:
         # Stay alive so the deploy's unit verification reads "active" and the
         # gap is visible in this journal rather than as a crash loop.

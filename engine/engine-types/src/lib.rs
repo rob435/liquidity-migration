@@ -26,9 +26,9 @@ pub use market::{
     Feed, FeedError, MarketEvent, MarketFeed, MarketState, OrderFeed, Quote, Subscription, Ticker,
 };
 pub use orders::{
-    Action, AmendSpec, Intent, InstrumentRule, OrderAck, OrderFacts, OrderKind, OrderRequest,
-    OrderUpdate, RestingOrder, Side, StopSpec, TimeInForce, VenueError, VenueExecution,
-    VenueOrder, WorkPolicy,
+    AccountInventory, AccountOrder, AccountPosition, Action, AmendSpec, InstrumentRule, Intent,
+    OrderAck, OrderFacts, OrderKind, OrderRequest, OrderUpdate, RestingOrder, Side, StopSpec,
+    TimeInForce, VenueError, VenueExecution, VenueOrder, WorkPolicy,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{EngineEvent, Strategy, StrategyCtx};
@@ -103,12 +103,39 @@ pub trait VenueGateway {
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError>;
     /// Place an order. The caller has already made the intent durable.
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError>;
+    /// Place a group whose durable records share one barrier.
+    ///
+    /// Results are in request order and there is exactly one result per
+    /// request. The default keeps wire order strict for venues whose nonces
+    /// must arrive in sequence. Adapters that can safely overlap requests or
+    /// use a native batch endpoint override it.
+    async fn send_orders(&mut self, reqs: &[OrderRequest]) -> Vec<Result<OrderAck, VenueError>> {
+        let mut out = Vec::with_capacity(reqs.len());
+        for req in reqs {
+            out.push(self.send_order(req).await);
+        }
+        out
+    }
     /// Cancel by the engine's own client order id.
     async fn cancel_order(
         &mut self,
         symbol: SymbolId,
         client_order_id: &str,
     ) -> Result<(), VenueError>;
+    /// Cancel a group of known orders. Results are in request order and there
+    /// is exactly one result per request. The default preserves compatibility
+    /// for adapters without a native batch endpoint; adapters with one should
+    /// override this so a circuit breaker can pull a book in one wire turn.
+    async fn cancel_orders(
+        &mut self,
+        requests: &[(SymbolId, String)],
+    ) -> Vec<Result<(), VenueError>> {
+        let mut out = Vec::with_capacity(requests.len());
+        for (symbol, client_order_id) in requests {
+            out.push(self.cancel_order(*symbol, client_order_id).await);
+        }
+        out
+    }
     /// Reprice or resize a resting order in place. Only called when
     /// [`VenueCaps::amend_in_place`] is true.
     async fn amend_order(
@@ -159,12 +186,27 @@ pub trait VenueGateway {
     /// placed it. Read at boot: the log says what this engine sent, and only
     /// the venue can say what is actually out there.
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError>;
+    /// Complete machine-enumerable credential inventory for deployment
+    /// flatness checks.
+    ///
+    /// This is wider than the symbols configured in the engine. An adapter
+    /// must scan every listable product, asset-account, and settlement surface
+    /// its credentials can reach, including unknown and delisted symbols, or
+    /// return an error. If a venue exposes latent automation that no API can
+    /// enumerate, the adapter must additionally enforce a venue-specific
+    /// dedicated-account contract during identity verification; a sample-time
+    /// zero balance alone is not proof that such automation is absent.
+    async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
+        Err(VenueError::BadRequest(
+            "this venue cannot prove account-wide flatness".to_string(),
+        ))
+    }
     /// Every execution on this account between the two wall-clock times,
     /// whoever ordered it — the venue's own history, read to recover fills
     /// the private stream never delivered (an engine-down gap, a reconnect
-    /// gap). Callers treat an error as "history unavailable" and fall back
-    /// to today's behaviour, so the default refusal costs nothing beyond
-    /// the recovery it cannot do.
+    /// gap). Recovery fails closed when the required interval is unavailable;
+    /// the default refusal therefore prevents a boot that cannot prove it
+    /// recovered the whole gap.
     async fn executions(
         &mut self,
         start_ms: i64,

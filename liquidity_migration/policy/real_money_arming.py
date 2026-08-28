@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import stat
@@ -62,7 +63,12 @@ def _read_environment(path: Path) -> tuple[Mapping[str, str] | None, CheckResult
     if not stat.S_ISREG(metadata.st_mode):
         return None, CheckResult(path.name, False, f"{path} is not a regular file")
     mode = stat.S_IMODE(metadata.st_mode)
-    if metadata.st_uid not in {0, os.geteuid()} or mode != 0o600:
+    # Windows neither exposes an effective UID nor reports POSIX chmod bits
+    # faithfully. Production runs on Linux, where this remains an exact
+    # root/current-owner + 0600 gate; Windows development can still parse and
+    # test the policy without pretending its synthetic 0666 is authoritative.
+    effective_uid = os.geteuid() if hasattr(os, "geteuid") else metadata.st_uid
+    if os.name != "nt" and (metadata.st_uid not in {0, effective_uid} or mode != 0o600):
         return None, CheckResult(
             path.name,
             False,
@@ -78,7 +84,12 @@ def _read_environment(path: Path) -> tuple[Mapping[str, str] | None, CheckResult
             f"{path} is unreadable: {exc}",
             "use strict KEY=value lines only",
         )
-    return values, CheckResult(path.name, True, f"{path} is root-owned 0600 and parses")
+    detail = (
+        f"{path} is root-owned 0600 and parses"
+        if os.name != "nt"
+        else f"{path} parses (POSIX ownership is enforced on the Linux runtime host)"
+    )
+    return values, CheckResult(path.name, True, detail)
 
 
 def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
@@ -103,6 +114,30 @@ def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 "" if absent else f"remove {key}",
             )
         )
+    raw_ip = values.get("BYBIT_REAL_API_KEY_IP", "").strip()
+    try:
+        address = ipaddress.ip_address(raw_ip)
+        safe_ip = not (address.is_unspecified or address.is_loopback or address.is_multicast)
+    except ValueError:
+        safe_ip = False
+    results.append(
+        CheckResult(
+            "BYBIT_REAL_API_KEY_IP",
+            safe_ip,
+            "one literal host IP is set" if safe_ip else "missing, wildcard, or not a host IP",
+            "set the one public host IP in both this file and the Bybit key allowlist",
+        )
+    )
+    exclusive_uid = values.get("BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID", "").strip()
+    exclusive_ok = exclusive_uid.isascii() and exclusive_uid.isdigit() and int(exclusive_uid or 0) > 0
+    results.append(
+        CheckResult(
+            "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID",
+            exclusive_ok,
+            "an exact dedicated UID is acknowledged" if exclusive_ok else "missing or not a venue UID",
+            "dedicate the funded UID to this engine, close all venue bots/other writers, then set its exact numeric UID",
+        )
+    )
     raw = values.get("REAL_MONEY", "").strip().lower()
     armed = raw in TRUE_ENV_VALUES
     if raw and raw not in TRUE_ENV_VALUES and raw not in FALSE_ENV_VALUES:
@@ -281,16 +316,19 @@ def _default_telegram(args: argparse.Namespace) -> int:
         0o600,
     )
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(scratch, credential)
-        directory = os.open(credential.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name != "nt":
+            directory = os.open(
+                credential.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     except BaseException:
         scratch.unlink(missing_ok=True)
         raise

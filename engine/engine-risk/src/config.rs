@@ -30,6 +30,22 @@ fn positive(value: f64, name: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Daily loss ceiling against the UTC day's opening equity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LossGuardConfig {
+    /// `None` disables the ceiling. Must be positive when set.
+    pub max_daily_loss_usdt: Option<f64>,
+}
+
+impl LossGuardConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        match self.max_daily_loss_usdt {
+            None => Ok(()),
+            Some(ceiling) => positive(ceiling, "max_daily_loss_usdt"),
+        }
+    }
+}
+
 /// The equity-anchored envelope: a capital reference that follows the wallet,
 /// and the worst-case-loss allowance derived from it.
 #[derive(Clone, Debug, PartialEq)]
@@ -95,9 +111,7 @@ impl EnvelopeConfig {
             ));
         }
         if self.max_initial_margin_usdt > self.reference_usdt {
-            return Err(bad(
-                "max_initial_margin_usdt cannot exceed reference_usdt",
-            ));
+            return Err(bad("max_initial_margin_usdt cannot exceed reference_usdt"));
         }
         Ok(())
     }
@@ -113,6 +127,7 @@ impl EnvelopeConfig {
 pub struct KernelConfig {
     /// An account view older than this is not evidence about the account now.
     pub max_account_view_age_ns: u64,
+    pub loss_guard: LossGuardConfig,
     pub envelope: EnvelopeConfig,
     /// Account leverage, used to turn gross notional into initial margin.
     pub leverage: f64,
@@ -122,6 +137,7 @@ pub struct KernelConfig {
 
 impl KernelConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.loss_guard.validate()?;
         self.envelope.validate()?;
         positive(self.leverage, "leverage")?;
         if !self.qty_tolerance.is_finite() || self.qty_tolerance < 0.0 {

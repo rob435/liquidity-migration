@@ -25,7 +25,7 @@
 
 use serde_json::Value;
 
-use crate::config::{ConfigError, EnvelopeConfig, KernelConfig};
+use crate::config::{ConfigError, EnvelopeConfig, KernelConfig, LossGuardConfig};
 
 /// The only schema this reads. A profile from the future is refused rather
 /// than read optimistically — the fields it added would be the interesting
@@ -56,6 +56,7 @@ const ACCOUNT_RISK_KEYS: &[&str] = &[
     "max_account_gross_notional_usdt",
     "max_initial_margin_usdt",
     "max_leverage",
+    "max_daily_loss_usdt",
     "quantity_tolerance",
 ];
 
@@ -159,7 +160,12 @@ pub fn kernel_config_from_profile(
         .as_object()
         .ok_or_else(|| bad("the operational profile must be a JSON object"))?;
 
-    reject_unknown_keys(root, TOP_LEVEL_KEYS, PRODUCER_BLOCKS, "the operational profile")?;
+    reject_unknown_keys(
+        root,
+        TOP_LEVEL_KEYS,
+        PRODUCER_BLOCKS,
+        "the operational profile",
+    )?;
 
     match root.get("schema_version").and_then(Value::as_i64) {
         Some(PROFILE_SCHEMA_VERSION) => {}
@@ -195,59 +201,59 @@ pub fn kernel_config_from_profile(
     // in money at the declared reference; this is that same number.
     let gross_notional_multiple = account_gross / reference_usdt;
 
-    let (tracks_equity, equity_fraction, floor_usdt, expand_dead_band_fraction) =
-        match root.get("capital_reference") {
-            None => (
-                false,
-                1.0,
-                // No capital_reference block means the reference is pinned, and
-                // the floor is only ever read on the equity-tracking path. The
-                // reference itself is the honest value for "the reference never
-                // falls below this" when it never moves; Python's 0.0 default
-                // would trip the kernel's own positivity check for a number
-                // that cannot be reached.
-                reference_usdt,
-                0.05,
-            ),
-            Some(value) => {
-                let row = value
-                    .as_object()
-                    .ok_or_else(|| bad("capital_reference must be an object"))?;
-                reject_unknown_keys(row, CAPITAL_REFERENCE_KEYS, &[], "capital_reference")?;
-                let mode = row
-                    .get("mode")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| bad("capital_reference is missing mode"))?;
-                let tracks = match mode {
-                    MODE_ACCOUNT_EQUITY => true,
-                    MODE_FIXED => false,
-                    other => {
-                        return Err(bad(format!(
-                            "capital_reference.mode must be {MODE_FIXED:?} or \
+    let (tracks_equity, equity_fraction, floor_usdt, expand_dead_band_fraction) = match root
+        .get("capital_reference")
+    {
+        None => (
+            false,
+            1.0,
+            // No capital_reference block means the reference is pinned, and
+            // the floor is only ever read on the equity-tracking path. The
+            // reference itself is the honest value for "the reference never
+            // falls below this" when it never moves; Python's 0.0 default
+            // would trip the kernel's own positivity check for a number
+            // that cannot be reached.
+            reference_usdt,
+            0.05,
+        ),
+        Some(value) => {
+            let row = value
+                .as_object()
+                .ok_or_else(|| bad("capital_reference must be an object"))?;
+            reject_unknown_keys(row, CAPITAL_REFERENCE_KEYS, &[], "capital_reference")?;
+            let mode = row
+                .get("mode")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad("capital_reference is missing mode"))?;
+            let tracks = match mode {
+                MODE_ACCOUNT_EQUITY => true,
+                MODE_FIXED => false,
+                other => {
+                    return Err(bad(format!(
+                        "capital_reference.mode must be {MODE_FIXED:?} or \
                              {MODE_ACCOUNT_EQUITY:?}; got {other:?}"
-                        )))
-                    }
-                };
-                let fraction =
-                    optional_number(row, "equity_fraction", "capital_reference")?.unwrap_or(1.0);
-                let dead_band =
-                    optional_number(row, "expand_dead_band_fraction", "capital_reference")?
-                        .unwrap_or(0.05);
-                let floor = optional_number(row, "floor_usdt", "capital_reference")?
-                    .unwrap_or(if tracks { 0.0 } else { reference_usdt });
-                if tracks && floor <= 0.0 {
-                    return Err(bad(
-                        "capital_reference.floor_usdt must be positive in account_equity mode",
-                    ));
+                    )))
                 }
-                if floor > reference_usdt {
-                    return Err(bad(
-                        "capital_reference.floor_usdt cannot exceed capital_reference_usdt",
-                    ));
-                }
-                (tracks, fraction, floor, dead_band)
+            };
+            let fraction =
+                optional_number(row, "equity_fraction", "capital_reference")?.unwrap_or(1.0);
+            let dead_band = optional_number(row, "expand_dead_band_fraction", "capital_reference")?
+                .unwrap_or(0.05);
+            let floor = optional_number(row, "floor_usdt", "capital_reference")?
+                .unwrap_or(if tracks { 0.0 } else { reference_usdt });
+            if tracks && floor <= 0.0 {
+                return Err(bad(
+                    "capital_reference.floor_usdt must be positive in account_equity mode",
+                ));
             }
-        };
+            if floor > reference_usdt {
+                return Err(bad(
+                    "capital_reference.floor_usdt cannot exceed capital_reference_usdt",
+                ));
+            }
+            (tracks, fraction, floor, dead_band)
+        }
+    };
 
     let envelope = EnvelopeConfig {
         tracks_equity,
@@ -267,6 +273,9 @@ pub fn kernel_config_from_profile(
 
     let config = KernelConfig {
         max_account_view_age_ns: inputs.max_account_view_age_ns,
+        loss_guard: LossGuardConfig {
+            max_daily_loss_usdt: optional_number(account, "max_daily_loss_usdt", "account_risk")?,
+        },
         envelope,
         leverage: number(account, "max_leverage", "account_risk")?,
         qty_tolerance: number(account, "quantity_tolerance", "account_risk")?,

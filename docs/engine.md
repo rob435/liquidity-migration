@@ -52,6 +52,8 @@ and the five steps to register one. It is compiled and tested with the rest so
 it cannot rot, and left out of the `PLUGS` table so no config can run it by
 accident.
 
+`engine strategies` lists the plugs the current binary can load.
+
 A plug overrides only the per-event hooks it acts on — `on_market`,
 `on_timer`, `on_order`, `on_targets`, `on_intent_refused` — and the ones it
 ignores do nothing by default. The one exhaustive match over engine events
@@ -74,10 +76,12 @@ re-register them against the wrong strategy's share of capital.
 
 ## The one-sentence design
 
-One process, one thread, one loop: a market message arrives on a socket, is
-parsed once into shared memory, the strategy decides, the risk kernel gates,
-the order record is made durable in the append-only log, the signed order
-leaves on a pre-warmed connection — all without leaving that loop.
+One process, one thread, one loop: a market message is parsed once into shared
+memory, the strategy decides, and risk is reserved in deterministic order.
+Sibling placements are appended together, made durable with one barrier, then
+handed to the selected venue adapter. Bybit overlaps distinct-symbol signed
+HTTP chains over ten pre-warmed connections and preserves strict wire order
+within each symbol because one-way positions share one Full stop.
 
 ## Honest latency contract
 
@@ -121,6 +125,56 @@ running fleet):
 The box's CPU is slower than the laptop's, so thinking costs more; its disk
 is faster to make durable, so the chain is shorter overall.
 
+### Sibling placement groups
+
+One decision can emit several adjacent placements. The engine validates and
+reserves them in deterministic request order, appends every accepted order,
+and uses one durability barrier for the group. Only then does it call
+`VenueGateway::send_orders`. Bybit overlaps independent symbol chains and sends
+siblings within one symbol serially; the default adapter implementation remains
+serial for venues whose nonces require wire order. A cancel, amend, or stop
+change flushes the placement group first. Create, cancel, batch-cancel, amend,
+trading-stop, leverage, and startup position reads each have their own
+completion-anchored rolling quota. Bybit's HTTP/1.1 pool retains sixteen idle
+sockets, so a ten-symbol burst does not evict its own warmed connections.
+
+An opening reprice is assessed again before wire and gets the same durability
+barrier as a placement. Until the venue gives a definitive answer, replay
+retains the full old/requested price range: the high end charges notional and
+both ends charge stop loss. The current venue contract has no correlated
+private confirmation of an effective amend price, and Bybit's REST success is
+only asynchronous acceptance, so every accepted or transport-ambiguous
+opening reprice is canceled rather than falsely resolved; its range remains
+reserved until cancellation is confirmed.
+
+The latency tables here measure the single-order path. No live venue sample
+establishes current sibling-group completion time, so they are not a claim
+about multi-order latency.
+
+### Long-run account-state probe
+
+The execution-ID set is bounded, but venue history can still make recovery
+slower. Measure both effects inside one release process from `engine/`:
+
+```text
+cargo run -p engine-core --release --example account_state_soak -- --operations 2000000 --live-ids 65536 --sample-ops 4096 --history-rows 0,1000,10000,100000 --repeats 3
+```
+
+Add `--json` for machine-readable output. Both formats identify the engine
+version, target OS and architecture, and whether the build is optimized. The
+first phase prewarms the real bounded execution-ID set, retains 65,536 IDs, and
+samples early, middle, and late insert-plus-duplicate paths. The second drives
+the real engine boot path
+with already-decoded synthetic execution history at each requested size and a
+zero-I/O counting WAL. Steady-state percentiles are quantiles of each 4,096-op
+window's mean nanoseconds per operation, not single-operation tail latency;
+boot percentiles are per-boot samples. The probe excludes network time, JSON
+decoding, venue query time, and disk durability. Ubuntu CI executes this exact
+bounded workload in release mode and retains its JSON in the job log. That is
+runner evidence, not a target-host or venue-history claim: run the same release
+command on the target class and compare windows within one run, then measure
+real fetch and decode separately when venue history is the suspect.
+
 ### Against the real venue
 
 Measured 2026-08-18 from the live demo engine's own log — all 67 real orders
@@ -156,10 +210,10 @@ parallel and integrate by type-check.
 | Crate | Owns |
 | --- | --- |
 | `engine-types` | every shared type and trait: events, intents, orders, log records, the `Strategy` trait, and the capability traits (`Wal`, `VenueGateway`, `RiskKernel`) |
-| `engine-wal` | the append-only log: CRC-framed records, buffered appends, an explicit durability barrier for order sends, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
-| `engine-marketdata` | every venue's public feed: subscribe or poll, parse once into flat per-symbol state, stamp arrival time. Bybit's feed sequence-checks and resyncs on lost continuity; the other three do not. One enum, built from the same venue name as the gateway |
-| `engine-venue` | five venue adapters, one directory each, practice or funded by realm: each venue's own signing, pre-warmed keep-alive TLS, order create/cancel/amend, stop attach, leverage, position and balance reads, and the realm's private order stream |
-| `engine-risk` | the capital controls: equity-anchored envelope, account-wide caps, stop-attach discipline. Fail-closed |
+| `engine-wal` | the append-only log: CRC-framed records, buffered appends, one explicit durability barrier per sibling placement group, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
+| `engine-marketdata` | every venue's public feed: subscribe or poll, parse once into flat per-symbol state, stamp arrival time. Bybit and MEXC enforce their numbered depth chains and resync on gaps; Lighter enforces its nonce chain; Hyperliquid rejects timestamp regression but its protocol cannot prove forward continuity. One enum is built from the same venue name as the gateway |
+| `engine-venue` | five venue adapters, one directory each: realm selection, signing, live instrument rules, pre-warmed keep-alive TLS, and the account, order, and stream capabilities that venue supports. Unsupported capabilities fail explicitly |
+| `engine-risk` | the capital controls: durable account daily-loss halt, equity-anchored envelope, account-wide caps, stop-attach discipline. Fail-closed |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
 | `engine-strategies` | the plugs: a registry from name + TOML to a boxed `Strategy` |
 
@@ -187,8 +241,37 @@ parallel and integrate by type-check.
   hosts for public prices and no credential to use them; it takes them from the
   realm tables instead of writing its own.
 
-  Nothing has ever been sent to the funded account. The path exists, is fenced,
-  and is tested; it has not been exercised.
+  Bybit is the only adapter with live-order evidence. Compile and request-shape
+  tests are the evidence boundary for the other adapters; they are not
+  production validation.
+- **Bybit proves one-way mode before startup completes.** During account
+  identity, the adapter makes one signed read-only position query per configured
+  symbol and requires exactly one matching `linear` row with `positionIdx 0`
+  and no next page. Any missing, duplicate, malformed, hedge-mode, rejected, or
+  failed response stops startup. A symbol added after boot is checked before its
+  first order, stop, or leverage request. The engine never changes venue mode,
+  does not check margin mode, and cannot prevent an operator changing mode after
+  a successful check.
+- **Funded Bybit identity enforces the replacement key.** The venue must report
+  a UTA, write-capable key created on or after 2026-08-27 22:30 UTC, with
+  ContractTrade Order and Position, no Wallet Withdraw, and exactly the one host
+  IP declared by `BYBIT_REAL_API_KEY_IP`. A mismatch stops identity before the
+  account is accepted. `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` must also equal
+  the authenticated UID. That value is an operator acknowledgement that the
+  funded UID has no hand trading, venue bots, copy trading, or other trading API
+  keys; it is required because Bybit exposes no account-wide list for every bot
+  family and is not itself a machine proof of exclusivity. The owner rotation
+  workflow is in [`operations.md`](operations.md) §Funded key rotation.
+- **Funded inventory uses a different, globally read-only key.** The narrow
+  `InventoryProbe` reads `BYBIT_ATTEST_API_KEY` and
+  `BYBIT_ATTEST_API_SECRET`, verifies UTA,
+  creation time, exact single-host IP, the required ContractTrade and Wallet
+  query scopes, global read-only status, and no withdrawal permission. The
+  transient mainnet `attest-flat` and `loss-reset` services remove the execution
+  key and `REAL_MONEY` from their environments. Persistent engines never load
+  the attestor file. Rollout snapshots the outgoing installed verifier before
+  prefetch; the final boundary requires both that immutable verifier and the
+  digest-bound installed target, never a build candidate.
 - **The engine sends orders, and the risk kernel gates every one.** It carries
   no mode of its own: whether the funded fleet runs at all is `REAL_MONEY` in
   the host credential file, and nothing else. Logs written before that was the
@@ -207,8 +290,12 @@ parallel and integrate by type-check.
     deaf in and writes what it missed as `recovered_fill` records — deduped
     by the venue's execution id and against recently delivered fills, durable
     before the log is compared to the venue, attributed through the order
-    that produced them when the log knows it. When history is unavailable the
-    comparison runs on the log alone.
+    that produced them when the log knows it. A failed history request aborts
+    boot. After a live private-stream gap, the same failure durably latches
+    `may_open=false` and stops the run. Boot also aborts when the required
+    recovery interval predates the venue's history reach; clipping the interval
+    would silently omit fills. `reconcile-clear` is the explicit review path
+    for older debt.
   - **The clear.** `engine reconcile-clear --config engine.toml [--execute]`
     is "somebody looks at the log" made executable, for debt older than the
     venue's history (about a week). It holds the log's own lock (so the
@@ -219,11 +306,26 @@ parallel and integrate by type-check.
     The next boot still runs the same comparison and latches again on
     anything that stands — the clear resets the memory, never the check.
 - **The capital controls are the kernel's, and unknown state refuses the
-  order.** The equity-anchored envelope and the stop-attach discipline live in
-  `engine-risk`, each with table-driven tests over its decision semantics.
-  Every cap is account-wide: no sleeve holds a private share, so any one of
-  them can spend the lot. The tests are the executable decision contract.
-- **One writer per account.** The engine takes the fleet's own lease: one
+  order.** The daily-loss halt, equity-anchored envelope, and stop-attach
+  discipline live in `engine-risk`, each with table-driven tests over its
+  decision semantics. Every cap is account-wide: no sleeve holds a private
+  share, so any one of them can spend the lot. The tests are the executable
+  decision contract.
+- **The funded daily-loss trip is durable and operator-cleared.** Its first
+  fresh account view of the UTC day anchors total account equity. At equity no
+  more than 10 USDT below that opening, new risk stops and genuine reduce-only
+  exits continue. The anchor and trip cross a WAL barrier and survive restart;
+  a trip does not clear on recovery or day change. `scripts/ops.sh loss-reset
+  --environment demo|mainnet --note TEXT [--execute]` requires that realm's
+  engine and producers stopped and a fresh, credential-wide flat account.
+  Mainnet venue reads use only the read-only attestor key. Dry-run writes
+  nothing; execute writes the local WAL note and cleared anchor durably without
+  gaining venue-mutation authority.
+- **Instrument rules come from the selected Rust adapter at boot.** The engine
+  aborts when the fetch fails or when a configured symbol has no rule. Quantity
+  steps, price ticks, and venue minimums are live startup inputs, not deploy
+  receipts.
+- **One local engine per account.** The engine takes the fleet's own lease: one
   kernel `flock` per venue account, at
   `/run/lock/liquidity-migration/{venue}-{realm}-user-{account}.lock`, joined
   exactly — same directory, same name from the venue's own authenticated
@@ -237,6 +339,8 @@ parallel and integrate by type-check.
   heartbeat and no expiry — the kernel drops the lock
   when the holder dies, which is the only expiry that cannot be wrong. The log
   file is claimed the same way, so two engines cannot share one log either.
+  A kernel lease cannot stop a venue UI, bot, or different API key. The funded
+  dedicated-UID contract excludes those external writers separately.
 
 ## Worked entries
 
@@ -439,16 +543,21 @@ Boot is the one moment the two pictures can be compared:
   will ever arrive, and left "in flight" it would charge those caps on every
   future boot and hold the one-order-per-symbol gate closed against its symbol,
   exits included. Nothing is re-sent.
-- An order the log never placed is reported. If it is in a symbol a strategy
-  here trades, the engine stops opening; if it is in a symbol no strategy can
-  even address, it is news — the owner hand-trades this account, and stopping
-  for that would mean stopping most days. An order with no client id is the
-  exchange's own stop, not a second writer.
-- A position the log's own fills cannot account for stops the engine opening.
-  Reducing stays allowed: taking exposure off is safe whoever put it on.
-- A position with no stop gets back the stop **the log says it was opened
-  behind**. If the log cannot say, the engine refuses rather than inventing a
-  level.
+- An order the log never placed is reported. If it is in a symbol a configured
+  strategy trades, the engine durably stops opening. An order in an
+  unaddressable symbol is reported without opening the latch. A blank client id
+  is accepted as venue-native only when the adapter positively identifies a
+  full reduce-only stop; ambiguous working orders invalidate the snapshot.
+- A fill that cannot join to an order in the log and position quantity the
+  log's own fills cannot account for durably stop the engine opening. Neither
+  becomes trusted exposure. Reducing and stop protection stay allowed.
+- A position with a missing or looser stop gets back the directionally tighter
+  stop proved by the fills that actually built that position. Merely sending,
+  rejecting, or leaving an opposite sibling unfilled cannot change repair
+  authority. Same-side growth retains the tighter prior level; a genuine cross
+  takes the crossing order's stop. Every fresh account view supervises this
+  invariant and latches opening off if repair fails. If the log cannot prove a
+  side and level, the engine refuses rather than inventing either.
 
 The latch is written into the log and read on the next boot, because a restart
 that cleared it would turn "stop and tell somebody" into "stop until the next
@@ -468,7 +577,9 @@ Every new segment begins with one restatement record (`SegmentBase`) carrying
 everything boot replay needs from the segments before it: the id tables, the
 may-open latch, every still-open order with its
 partial fills, whose fills built each position, the per-symbol fill totals
-reconciliation compares the venue against, and the intended stop per symbol.
+reconciliation compares the venue against, and the fill-owned intended stop
+with its position direction. Legacy restatements without a direction still
+parse, but cannot authorize an automatic repair.
 So boot replays only the newest segment it can trust, and recovers the same
 engine it would have from the whole history. The restatement is one
 checksummed frame, which makes "complete enough to trust" a single mechanical
@@ -519,16 +630,38 @@ back.
 
 Five are compiled in, and one name in `engine.toml` picks between them:
 
-| `venue =` | What it is | Real money |
+| `venue =` | What it is | Readiness |
 | --- | --- | --- |
-| `bybit_demo` | Bybit's practice account | no |
-| `bybit_mainnet` | Bybit's funded account | **yes** |
-| `hyperliquid_testnet` | Hyperliquid's testnet | no |
-| `hyperliquid_mainnet` | Hyperliquid's funded account | **yes** |
-| `lighter_testnet` | Lighter's testnet rollup | no |
-| `lighter_mainnet` | Lighter's funded account | **yes** |
-| `mexc_mainnet` | MEXC's funded futures account — its only realm | **yes** |
-| `variational_mainnet` | Variational, read-only | no orders possible |
+| `bybit_demo` | Bybit's practice account | `live-proven` |
+| `bybit_mainnet` | Bybit's funded account | `live-proven` |
+| `hyperliquid_testnet` | Hyperliquid's testnet | `testnet-canary` |
+| `hyperliquid_mainnet` | Hyperliquid's funded account | `production-blocked` |
+| `lighter_testnet` | Lighter's testnet rollup | `testnet-canary` |
+| `lighter_mainnet` | Lighter's funded account | `production-blocked` |
+| `mexc_mainnet` | MEXC funded futures — its only realm | `production-blocked` |
+| `variational_mainnet` | Variational public data | `read-only` |
+
+`engine venues` prints this table from the binary's exhaustive registry.
+`engine run` refuses `production-blocked` and `read-only` realms before it opens
+the WAL, reads credentials, or opens a socket. Moving an exact realm to
+`live-proven` is a reviewed source change backed by its live order lifecycle;
+another realm's result does not qualify it. Testnet-canary status permits the
+Hyperliquid and Lighter practice realms only so they can gather that evidence.
+
+Only Bybit has live-order evidence. Hyperliquid, Lighter, and MEXC compile and
+pass offline adapter tests only. Feed continuity is
+protocol-specific: MEXC requires consecutive unmerged-depth versions and emits
+no ticker-derived quote before a depth epoch exists; Lighter requires each
+update range to begin at the prior nonce and advance; Hyperliquid rejects a
+same-symbol BBO timestamp regression but cannot detect a forward gap. Lighter
+cannot open until its leverage transaction exists, MEXC has no practice realm, and
+Variational has no account or trading API. Do not treat a successful build as
+authority to arm any of these paths.
+
+MEXC still prices from the complete ticker touch. The quote's sequence field is
+the latest continuously observed depth version, not proof that the ticker and
+that depth update are the same causal snapshot. Its incremental depth is not a
+complete ladder without a separate snapshot bootstrap.
 
 **One name decides three things**: the gateway that sends orders, the private
 stream that reports what happened to them, and the public feed the strategies
@@ -587,7 +720,8 @@ it had been given something else.
 - **MEXC has no practice account.** Bybit has a demo realm, Hyperliquid and
   Lighter have testnets; MEXC publishes no testnet host for the futures API at
   all, so `mexc_mainnet` is the only spelling and every MEXC order is real
-  money. Nothing in that adapter has run against the venue.
+  money. It has no live-order evidence and `engine run` keeps it
+  `production-blocked`.
 - **MEXC counts contracts, not coins.** One contract is `contractSize` of the
   base coin — 0.0001 BTC, 1 XRP, 100 TUT — and fewer than a quarter of its
   contracts have that equal to 1. Sizes cross that boundary through the venue's
@@ -636,15 +770,19 @@ Six steps, five in `engine-venue` and one next door:
 1. A directory under `src/venues/`, with `realm.rs` holding its hosts,
    credential variable names, and whether each realm is real money. That file
    is the only place its hosts may appear.
-2. Implement `VenueGateway` — nine required methods; `add_symbol`,
-   `set_leverage` and `executions` carry defaults, twelve in all. Take
-   `executions` seriously: its default refuses, so an adapter that leaves it
-   alone runs with fill-gap recovery off. State the capabilities honestly.
+2. Implement the required `VenueGateway` methods and state capabilities
+   honestly. The default `send_orders` is serial; override it only when the
+   venue's signing and nonce rules permit overlap or it offers a native batch.
+   The `executions` default refuses, so missing history stops recovery.
+   Credential-wide inventory belongs in a separate read-only `InventoryProbe`
+   wrapper with no mutation methods; leaving it out keeps flatness attestation
+   unavailable rather than falling back to configured symbols.
 3. A variant in `VenueName` **and in `VenueName::ALL`**, then in `Venue` and
-   `OrderFeeds` (`engine-venue/src/registry.rs`). `ALL` is the one list: the
-   parser walks it, the refusal names it, and every completeness check
-   iterates it. A venue left out of it is one no config can select — refused
-   at boot — rather than one that works and no test ever visits.
+   `OrderFeeds`, plus `InventoryProbe` when the venue has the complete read
+   (`engine-venue/src/registry.rs`). Give every exact realm an explicit
+   `VenueReadiness`; a new mainnet stays `production-blocked` until reviewed
+   live lifecycle evidence promotes that exact realm. `ALL` is the one list:
+   the parser, discovery output, refusal, and completeness checks walk it.
 4. A variant in `MarketFeeds` (`engine-marketdata/src/feeds.rs`). Its switch
    test matches exhaustively, so this does not compile until the test says
    which name reaches the new feed.
@@ -667,30 +805,30 @@ Six steps, five in `engine-venue` and one next door:
 | Stating leverage at the venue | Done. The leverage a decision was sized at travels with it, and an order whose leverage cannot be set is not sent. Entries only |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
 | Venue reconciliation and restart recovery | Done. Boot reads the venue's working orders and compares them, and the account, against the log |
-| Stop verify, repair, and a durable breach latch | Done. A position missing its stop gets back the one the log says it was opened behind; exposure the log cannot account for latches the engine out of opening |
+| Stop verify, repair, and a durable breach latch | Done. A missing or looser stop returns to the directionally tighter level proved by position-growing fills; unfilled siblings cannot control it, fresh views supervise it, and an unrepairable breach latches opening off |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | Done, by feeding the fleet's own watchdog rather than growing a second one. The engine writes a heartbeat file; `check_fleet_liveness.py` reads it and pages on stale, unreadable, or latched. Off unless a path is configured |
-| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` is a venue the engine can be pointed at, and it refuses to build unless `REAL_MONEY` is armed in the host credential file — the only toggle there is. **It has not yet been watched trading** — see below |
+| Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` refuses to build unless `REAL_MONEY` is armed in the host credential file — the only toggle there is. Current operational status lives in `STATE.md` and `scripts/ops.sh status` |
 | Saying what the fills cost | Done. `is_maker` kept from the venue, `M0` written on every send, arrival shortfall / effective spread / fee / all-in derived, and the signed markout at 1s/15s/1m/5m written when its horizon comes due. `engine fills --wal PATH` is the read; five of the numbers are in the heartbeat |
 | Saying what its own ids mean | Done. Strategy and symbol ids are positions, so the log records both tables — at boot and again whenever a book names a new symbol |
 | A strategy reading its own position | Done. `my_position` is that strategy's own fills, moving the instant one arrives. The account reading beside it lags seconds and, on a two-sleeve account, is the sum of both |
 | A strategy reading what it has in flight | Done. `in_flight` (`engine-core/src/covers.rs`) is the engine's own note of what a strategy sent that the account reading has not absorbed yet — booked at the send, at the quantized size that actually went, and released as the reading catches up or a reject, cancel, or refused exit ends it. Every plug gets the one truthful reading |
 | Following a symbol a book names late | Done. A name the engine has never followed is taken on when a book asks for it: interned, subscribed, added to the gateway, taught to the private stream, and given an instrument rule. The four tables that map names to ids are checked against each other and a symbol they disagree about is dropped rather than traded |
 
-### What is left
+### Evidence boundary
 
-**Evidence.** Nothing above has ever run against real money. The mainnet path
-exists, is fenced, and is tested; it has never carried an order. A capability
-that has not been exercised is a claim, and the only thing that turns it into a
-fact is running it against the account, for long enough to watch it.
+Bybit is the only venue with live-order evidence. Hyperliquid, Lighter, and
+MEXC have compile and offline adapter evidence only. Variational has no account
+or order API. A capability that has not been exercised against its venue is a
+claim, not production proof.
 
 **The engine is the account owner, in the repository and on the host.** It
 reads the venue, writes `account_equity_usdt` into its heartbeat, both
 producers size from that equity, both write an absolute target book, and the
 engine reads each book, routes it to its own sleeve, and takes on symbols the
 books name that no config listed. It is **live on the demo account** and holds
-that account's single-writer lease. The funded engine has not yet been watched
-trading.
+that account's single-writer lease. Funded status is read from
+`scripts/ops.sh status`; `STATE.md` records the current operational snapshot.
 
 - **The producers size from the engine.** They read `account_equity_usdt` and
   `account_observed_wall_ts_ms` out of the heartbeat and plan every entry as
@@ -731,7 +869,7 @@ The pieces, all in `deploy/`:
 
 | File | What it is |
 | --- | --- |
-| `systemd/liquidity-migration-engine-mainnet.service` | The unit. Deliberately does **not** conflict with anything else on the box: what stops two writers is the kernel lease; a systemd conflict does not |
+| `systemd/liquidity-migration-engine-mainnet.service` | The unit. Deliberately does **not** conflict with anything else on the box: the kernel lease stops a second local engine, while the dedicated-UID contract excludes hand trading, venue bots, and other trading keys |
 | `engine.mainnet.toml.template` | The engine's config: `venue = "bybit_mainnet"`, capital limits loaded from `configs/operational.mainnet.json` itself, one block per sleeve with its own book path |
 | `engine.mainnet.env.template` | Unit settings: which config, where the heartbeat goes |
 
@@ -755,8 +893,8 @@ nobody else's.**
 - No carry or continuous *decision* inside the engine — a carry decision is a
   batch over ninety days of funding and bars, so it stays in research and
   reaches the engine as a target book.
-- No funded record yet. The mainnet path is built, fenced and deployed; it has
-  not been watched trading.
+- No production proof for Hyperliquid, Lighter, or MEXC. Their adapters have
+  offline test evidence only; Variational is market-data-only.
 - No market impact measurement. `engine fills` anchors on the top of book,
   which is the only book the engine carries. Walking a depth-50 book is the
   Python half's job and stays there.
