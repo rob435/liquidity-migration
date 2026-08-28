@@ -133,9 +133,20 @@ def records_from_payload(raw: Any) -> list[ExodusShortRecord]:
     from a torn local file without a strategy decision.
     """
 
-    if not isinstance(raw, Mapping) or set(raw) != {"schema_version", "open"}:
+    if not isinstance(raw, Mapping):
         raise ValueError("exodus state must contain exactly schema_version and open")
-    if raw["schema_version"] not in {1, 2} or isinstance(raw["schema_version"], bool):
+    keys = set(raw)
+    if keys == {"open"}:
+        # The first deployed writer predated explicit schema versions.  Its
+        # row shape is exactly schema v1, so preserve those records with their
+        # legacy notional sizing instead of mistaking retained state for
+        # corruption.  Every other unversioned shape remains invalid.
+        schema_version = 1
+    elif keys == {"schema_version", "open"}:
+        schema_version = raw["schema_version"]
+    else:
+        raise ValueError("exodus state must contain exactly schema_version and open")
+    if schema_version not in {1, 2} or isinstance(schema_version, bool):
         raise ValueError("unsupported exodus state schema_version")
     rows = raw["open"]
     if not isinstance(rows, list):
@@ -143,7 +154,7 @@ def records_from_payload(raw: Any) -> list[ExodusShortRecord]:
     records: list[ExodusShortRecord] = []
     symbols: set[str] = set()
     expected = {"symbol", "notional_usdt", "settlement_ts_ms", "fired_ts_ms"}
-    if raw["schema_version"] == 2:
+    if schema_version == 2:
         expected.add("target_qty")
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping) or set(row) != expected:

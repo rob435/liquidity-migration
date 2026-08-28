@@ -190,12 +190,48 @@ class TestStateFile:
         }
         assert records_from_payload(payload)[0].target_qty is None
 
+    def test_original_unversioned_empty_state_remains_readable(self) -> None:
+        assert records_from_payload({"open": []}) == []
+
+    def test_original_unversioned_record_migrates_losslessly(
+        self, cfg: ExodusShortConfig
+    ) -> None:
+        legacy = {
+            "open": [
+                {
+                    "symbol": "AUSDT",
+                    "notional_usdt": 54.0,
+                    "settlement_ts_ms": S,
+                    "fired_ts_ms": S - 10 * MIN_MS,
+                }
+            ]
+        }
+        records = records_from_payload(legacy)
+        assert records[0].target_qty is None
+        target = json.loads(
+            render_exodus_book(
+                records,
+                cfg=cfg,
+                now_ms=S - 10 * MIN_MS,
+                source="exodus_short",
+            )
+        )["targets"][0]
+        assert target["notional_usdt"] == -54.0
+        assert target["target_qty"] is None
+
+        migrated = records_to_payload(records)
+        assert migrated["schema_version"] == 2
+        assert migrated["open"][0]["target_qty"] is None
+        assert records_from_payload(migrated) == records
+
     @pytest.mark.parametrize(
         "payload",
         [
             {"schema_version": 1, "open": [{"symbol": "AUSDT"}]},
             "not a mapping",
             {"schema_version": 1, "open": "not a list"},
+            {},
+            {"open": [], "unexpected": True},
         ],
     )
     def test_a_torn_state_file_fails_closed(self, payload) -> None:

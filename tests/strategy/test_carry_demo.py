@@ -1329,6 +1329,25 @@ class TestExodusShort:
         assert receipt == {}
         assert not module._exodus_state_path(tmp_path).exists()
 
+    def test_original_unversioned_empty_state_publishes_a_fresh_book(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book_path = self._arm(monkeypatch, tmp_path)
+        module._exodus_state_path(tmp_path).write_text(
+            '{"open": []}\n', encoding="utf-8"
+        )
+        receipt = module._run_exodus_short(
+            state=CarryCycleState(),
+            root=tmp_path,
+            fires=[],
+            carry_holdings=None,
+            entry_leverage=2.0,
+            now_ms=self.SETTLE - 10 * 60_000,
+        )
+        assert receipt["exodus_error"] == ""
+        assert receipt["exodus_open_names"] == 0
+        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
+
     def test_a_fire_opens_the_exact_abandoned_quantity_as_a_short(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
