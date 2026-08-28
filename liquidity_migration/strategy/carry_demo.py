@@ -1729,18 +1729,29 @@ def _write_engine_target_book(
     entry_leverage: float,
     strategy_profile: str,
 ) -> PublishedTargetBook:
-    """Durably publish one decided absolute book to the Rust engine."""
+    """Durably publish one decided absolute book to the Rust engine.
+
+    The daily decision has two distinct deadlines. Its rows may only open or
+    grow through the measured six-hour signal window, while the absolute book
+    remains serveable until the decision itself is operationally stale. The
+    latter lets a late-day restart publish a valid hold/reduction book without
+    re-authorizing an old entry.
+    """
     path_text = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
     if not path_text:
         raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust target book")
     if not sizing_equity_usdt > 0.0:
         raise ValueError("cannot write a target book without positive sizing equity")
+    entry_valid_until_ms = (
+        decision_ts_ms + SIGNAL_VALIDITY_MS - ENTRY_PUBLISH_GUARD_MS
+    )
     targets = [
         EngineTarget(
             symbol=symbol,
             notional_usdt=float(weight) * sizing_equity_usdt * notional_multiplier,
             stop_loss_fraction=stop_loss_fraction,
             leverage=entry_leverage,
+            entry_valid_until_ms=entry_valid_until_ms,
         )
         for symbol, weight in sorted(desired.items())
     ]
@@ -1749,7 +1760,7 @@ def _write_engine_target_book(
         render_target_book(
             source=strategy_profile,
             decision_ts_ms=decision_ts_ms,
-            valid_until_ms=decision_ts_ms + SIGNAL_VALIDITY_MS,
+            valid_until_ms=decision_ts_ms + DECISION_STALE_MS,
             targets=targets,
         ),
     )

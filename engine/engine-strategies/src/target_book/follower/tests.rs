@@ -328,6 +328,42 @@ fn expiry_cancels_a_working_entry_before_it_can_fill_late() {
 }
 
 #[test]
+fn target_expiry_cancels_a_working_entry_while_the_book_stays_live() {
+    let mut h = resting_bench(&["KAITOUSDT"], 10.0);
+    let deadline = NOW_MS + 1_000;
+    let mut wanted = target("KAITOUSDT", 100.0);
+    wanted.entry_valid_until_ms = Some(deadline);
+    h.targets(book(vec![wanted]));
+    assert_eq!(h.drain().len(), 1, "the target starts inside its window");
+
+    let symbol = h.ctx.id_of("KAITOUSDT");
+    h.rest(RestingSeed {
+        client_order_id: "eng-2".to_string(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Limit {
+            px: 9.5,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
+        qty: 10.0,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+
+    h.ctx.set_wall_ms(deadline);
+    h.quote("KAITOUSDT", 9.5, 10.5);
+
+    assert_eq!(
+        h.one_action(),
+        Action::Cancel {
+            symbol,
+            client_order_id: "eng-2".to_string(),
+        }
+    );
+}
+
+#[test]
 fn an_entry_the_kernel_refused_is_not_re_emitted_on_every_quote() {
     // The shape that filled a trading box's disk: the funded engine wanted a
     // book it could never acquire, the kernel refused every entry for want of

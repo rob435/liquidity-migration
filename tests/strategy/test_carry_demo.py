@@ -638,14 +638,22 @@ def _write_book(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: An
 
 def test_target_book_records_the_decided_notionals(tmp_path, monkeypatch) -> None:
     book = json.loads(_write_book(tmp_path, monkeypatch).read_text(encoding="utf-8"))
+    entry_deadline = (
+        1786665600000
+        + module.SIGNAL_VALIDITY_MS
+        - module.ENTRY_PUBLISH_GUARD_MS
+    )
+    assert book["version"] == 2
     assert book["source"] == "carry_hold_v4_live_v1"
     assert book["decision_ts_ms"] == 1786665600000
-    assert book["valid_until_ms"] == 1786665600000 + module.SIGNAL_VALIDITY_MS
+    assert book["valid_until_ms"] == 1786665600000 + module.DECISION_STALE_MS
     by_symbol = {row["symbol"]: row for row in book["targets"]}
     # weight * sizing equity * multiplier, which is what the sleeve sizes with.
     assert by_symbol["KAITOUSDT"]["notional_usdt"] == pytest.approx(100.0)
     assert by_symbol["COTIUSDT"]["notional_usdt"] == pytest.approx(50.0)
     assert by_symbol["KAITOUSDT"]["stop_loss_fraction"] == 0.35
+    assert by_symbol["KAITOUSDT"]["entry_valid_until_ms"] == entry_deadline
+    assert by_symbol["COTIUSDT"]["entry_valid_until_ms"] == entry_deadline
 
 
 def test_no_path_means_no_book(tmp_path, monkeypatch) -> None:

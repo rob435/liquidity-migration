@@ -133,6 +133,45 @@ def test_engine_blocker_does_not_starve_later_carry_candidates(tmp_path, monkeyp
     assert [target.symbol for target in active.targets] == ["BUSDT", "CUSDT"]
 
 
+def test_late_restart_renews_the_book_without_reopening_expired_entries(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "carry.json"
+    monkeypatch.setenv(ENGINE_TARGET_BOOK_PATH_ENV, str(path))
+    decision_ts_ms = NOW_MS - 22 * 60 * 60_000
+    decision = CarryDecision(
+        decision_ts_ms=decision_ts_ms,
+        weights={"AUSDT": 0.1, "BUSDT": 0.1},
+        universe_size=100,
+        replay_days=90,
+        gross=0.2,
+    )
+
+    plan = _carry_target_plan(
+        decision=decision,
+        standing_rows={"AUSDT": ("long", 10.0, 10.0)},
+        trail_by_symbol={},
+        demo=CarryDemoCycleConfig(strategy_profile="v7"),
+        equity_usdt=1_000.0,
+        engine_account_health_error="",
+        cycle_now_ms=NOW_MS,
+        cycle_state=CarryCycleState(),
+    )
+    active = read_target_book(path)
+
+    assert plan.entry_validity_expired_skips == 1
+    assert [target.symbol for target in active.targets] == ["AUSDT"]
+    assert active.decision_ts_ms == decision_ts_ms
+    assert active.valid_until_ms == decision_ts_ms + carry_module.DECISION_STALE_MS
+    assert active.valid_until_ms > NOW_MS
+    assert active.targets[0].entry_valid_until_ms == (
+        decision_ts_ms
+        + carry_module.SIGNAL_VALIDITY_MS
+        - carry_module.ENTRY_PUBLISH_GUARD_MS
+    )
+    assert active.targets[0].entry_valid_until_ms <= NOW_MS
+
+
 def test_exodus_state_write_failure_keeps_memory_after_cover_book_publishes(
     tmp_path, monkeypatch
 ) -> None:

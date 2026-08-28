@@ -772,6 +772,21 @@ mod tests {
     }
 
     #[test]
+    fn an_expired_target_deadline_blocks_a_growing_resize() {
+        let facts = Facts::default().holding("A", 5.0, Side::Buy, 10.0);
+        let mut wanted = target("A", 100.0);
+        wanted.entry_valid_until_ms = Some(NOW);
+
+        let plan = plan_now(&[wanted], &["A".into()], &facts);
+
+        assert!(plan.steps.is_empty());
+        assert!(matches!(
+            plan.skipped.as_slice(),
+            [Skipped::EntryWindowClosed { symbol }] if symbol == "A"
+        ));
+    }
+
+    #[test]
     fn a_target_deadline_cannot_extend_the_book_cutoff() {
         let mut wanted = target("A", 100.0);
         wanted.entry_valid_until_ms = Some(VALID + 60_000);
