@@ -469,6 +469,14 @@ def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:
     ) in build
     assert '"$ENGINE_LAUNCHER.new"' in build
     assert (
+        'install -d -o root -g root -m 0755 "${ENGINE_BINARY%/*}"'
+        in build
+    )
+    assert (
+        'install -d -o root -g liquidity-migration -m 0755 "${ENGINE_BINARY%/*}"'
+        not in build
+    )
+    assert (
         build.index('mv -f "$ENGINE_BINARY.new"')
         < build.index('mv -f "$ENGINE_LAUNCHER.new"')
         < build.index('mv -f "$ENGINE_CONTROL_HELPER.new"')
@@ -482,6 +490,15 @@ def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:
     assert 'actual_helper_digest" = "$marker_helper_digest' in verify
     assert 'actual_sudoers_digest" = "$marker_sudoers_digest' in verify
     assert 'actual_bot_digest" = "$marker_bot_digest' in verify
+    for boundary in (
+        '[ ! -L "${ENGINE_BINARY%/*}" ]',
+        'readlink -f "${ENGINE_BINARY%/*}"',
+        'stat -c %u "${ENGINE_BINARY%/*}"',
+        'stat -c %g "${ENGINE_BINARY%/*}"',
+        'stat -c %a "${ENGINE_BINARY%/*}"',
+        "root:root mode 0755 fixed boundary",
+    ):
+        assert boundary in verify
     assert _read("rust-toolchain.toml").split('channel = "', 1)[1].split('"', 1)[0] == "1.90.0"
 
 

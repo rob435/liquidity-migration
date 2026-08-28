@@ -43,7 +43,9 @@ edit STATE.md to match.
   reconciles legacy demo-engine environments with the committed exact account,
   venue, and realm binding before the build. Missing bindings are appended
   atomically while host-only dials are preserved; empty or conflicting bindings
-  abort without modifying the file.
+  abort without modifying the file. The installed release directory is now
+  root:root mode `0755`, matching the activation watchdog's trust boundary, and
+  release verification checks that parent before permit creation.
 
 - **2026-08-28 — Exodus handoff uses the position actually abandoned.**
   A v7 pre-settlement fire now snapshots the fresh carry-attributed venue

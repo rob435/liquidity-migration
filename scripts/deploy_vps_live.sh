@@ -1951,7 +1951,7 @@ build_engine() {
     /bin/bash -n "$helper_source" \
         || fail "Telegram control helper source has invalid shell syntax"
     require_clean_head
-    install -d -o root -g liquidity-migration -m 0755 "${ENGINE_BINARY%/*}" \
+    install -d -o root -g root -m 0755 "${ENGINE_BINARY%/*}" \
         || fail "cannot create the engine binary directory"
     install -d -o root -g root -m 0755 "${CONTROLS_SUDOERS%/*}" \
         || fail "cannot create the sudoers fragment directory"
@@ -2051,6 +2051,12 @@ verify_engine_release() {
         launcher-optional|launcher-required) ;;
         *) fail "invalid engine release launcher policy: $launcher_policy" ;;
     esac
+    [ -d "${ENGINE_BINARY%/*}" ] && [ ! -L "${ENGINE_BINARY%/*}" ] \
+        && [ "$(readlink -f "${ENGINE_BINARY%/*}")" = "${ENGINE_BINARY%/*}" ] \
+        && [ "$(stat -c %u "${ENGINE_BINARY%/*}")" -eq 0 ] \
+        && [ "$(stat -c %g "${ENGINE_BINARY%/*}")" -eq 0 ] \
+        && [ "$(stat -c %a "${ENGINE_BINARY%/*}")" = 755 ] \
+        || fail "engine release directory is not the root:root mode 0755 fixed boundary"
     [ -f "$ENGINE_BINARY" ] && [ ! -L "$ENGINE_BINARY" ] \
         && [ -x "$ENGINE_BINARY" ] \
         && [ "$(stat -c %u "$ENGINE_BINARY")" -eq 0 ] \
