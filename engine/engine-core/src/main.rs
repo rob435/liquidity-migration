@@ -124,7 +124,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             );
             println!("{}", result.table());
             println!(
-                "  the fsync is inside \"write it down\"; \"venue answers\" is a local socket,\n  \
+                "  the fsync is inside \"write it down\"; \"API round trip\" is a local socket,\n  \
                  so the real venue's ~175ms round trip is not in these numbers."
             );
             Ok(())
