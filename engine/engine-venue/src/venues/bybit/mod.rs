@@ -10,6 +10,7 @@ pub mod realm;
 mod parse;
 mod rest;
 mod sign;
+mod trade_ws;
 mod ws;
 
 pub use gateway::{BybitGateway, BybitInventoryProbe};

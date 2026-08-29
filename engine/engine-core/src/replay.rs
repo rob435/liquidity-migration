@@ -225,14 +225,67 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             events,
             decide_p50_ns,
             decide_p99_ns,
+            durable_p50_ns,
+            durable_p99_ns,
             wire_p50_ns,
             wire_p99_ns,
+            ack_p50_ns,
+            ack_p99_ns,
+            dispatch_queue_p50_ns,
+            dispatch_queue_p99_ns,
+            venue_task_p50_ns,
+            venue_task_p99_ns,
+            core_resume_p50_ns,
+            core_resume_p99_ns,
+            end_to_end_p50_ns,
+            end_to_end_p99_ns,
         } => format!(
-            "latency    {window_s}s, {events} messages; think {} / {}, submit result {} / {}",
+            "latency    {window_s}s, {events} messages; think {} / {}, durable {} / {}, dispatch {} / {}, venue {} / {}, API round trip {} / {}, core resume {} / {}, submit result {} / {}, end to end {} / {}",
             pretty(*decide_p50_ns),
             pretty(*decide_p99_ns),
+            pretty(*durable_p50_ns),
+            pretty(*durable_p99_ns),
+            pretty(*dispatch_queue_p50_ns),
+            pretty(*dispatch_queue_p99_ns),
+            pretty(*venue_task_p50_ns),
+            pretty(*venue_task_p99_ns),
+            pretty(*ack_p50_ns),
+            pretty(*ack_p99_ns),
+            pretty(*core_resume_p50_ns),
+            pretty(*core_resume_p99_ns),
             pretty(*wire_p50_ns),
-            pretty(*wire_p99_ns)
+            pretty(*wire_p99_ns),
+            pretty(*end_to_end_p50_ns),
+            pretty(*end_to_end_p99_ns),
+        ),
+        WalRecord::VenueTiming {
+            operation,
+            client_order_id,
+            queued_ns,
+            task_started_ns,
+            socket_write_ns,
+            ack_ns,
+            task_completed_ns,
+            core_handled_ns,
+            ..
+        } => format!(
+            "timing     {operation} {client_order_id}: queue {}, task {}, socket {}, ack {}, resume {}",
+            pretty(task_started_ns.saturating_sub(*queued_ns)),
+            pretty(task_completed_ns.saturating_sub(*task_started_ns)),
+            socket_write_ns.map(|at| pretty(at.saturating_sub(*task_started_ns))).unwrap_or_else(|| "unknown".to_string()),
+            ack_ns.map(|at| pretty(at.saturating_sub(socket_write_ns.unwrap_or(*task_started_ns)))).unwrap_or_else(|| "unknown".to_string()),
+            pretty(core_handled_ns.saturating_sub(*task_completed_ns)),
+        ),
+        WalRecord::FastExecution {
+            client_order_id,
+            symbol,
+            side,
+            qty,
+            px,
+            ..
+        } => format!(
+            "fast fill  {side:?} {qty} of {} at {px} for {client_order_id}",
+            names.symbol(*symbol)
         ),
         WalRecord::Markout {
             client_order_id,
@@ -359,6 +412,12 @@ fn update_words(update: &engine_types::OrderUpdate, names: &LogNames) -> String 
             fee,
             ..
         } => format!("{client_order_id} filled {qty} at {px}, fee {fee}"),
+        U::FastFill {
+            client_order_id,
+            qty,
+            px,
+            ..
+        } => format!("{client_order_id} fast-filled {qty} at {px}; fee follows"),
         U::Cancelled {
             client_order_id, ..
         } => format!("{client_order_id} cancelled"),

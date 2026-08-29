@@ -35,7 +35,7 @@ async fn a_live_stop_move_is_validated_and_survives_rotation() {
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine.run(&mut ScriptFeed::quotes(symbol, 3, true), &mut ScriptOrderFeed::empty(),
         std::future::pending::<()>()).await.unwrap();
-    assert_eq!(*h.stops.borrow(), vec![(symbol, 90.0)]);
+    assert_eq!(*h.stops.lock().unwrap(), vec![(symbol, 90.0)]);
     let WalRecord::SegmentBase { intended_stops, .. } = engine.rotation_base(7) else { panic!() };
     assert_eq!(intended_stops[0].trigger_px, 90.0);
 }
@@ -219,7 +219,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
 
     let reconciled_may_open = |records: &Rc<RefCell<Vec<WalRecord>>>| {
         records
-            .borrow()
+            .lock().unwrap()
             .iter()
             .find_map(|record| match record {
                 WalRecord::Reconciled { may_open, .. } => Some(*may_open),
@@ -233,7 +233,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         let tape = tape();
         let (wal, records) = MockWal::new(tape.clone());
         let (venue, _) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
-        venue.account_readings.borrow_mut().push_back(held.clone());
+        venue.account_readings.lock().unwrap().push_back(held.clone());
         let (risk, _) = MockRisk::with(allow_all());
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
         let engine = Engine::boot(
@@ -257,7 +257,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         let tape = tape();
         let (wal, records) = MockWal::new(tape.clone());
         let (venue, _) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
-        venue.account_readings.borrow_mut().push_back(held.clone());
+        venue.account_readings.lock().unwrap().push_back(held.clone());
         let (risk, _) = MockRisk::with(allow_all());
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
         let _engine = Engine::boot(
@@ -283,7 +283,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         let tape = tape();
         let (wal, records) = MockWal::new(tape.clone());
         let (venue, _) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
-        venue.account_readings.borrow_mut().push_back(held);
+        venue.account_readings.lock().unwrap().push_back(held);
         let (risk, _) = MockRisk::with(allow_all());
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
         let _engine = Engine::boot(

@@ -7,8 +7,89 @@ use crate::ids::{SymbolId, SymbolTable};
 pub enum Feed {
     /// Best bid/ask (venue orderbook depth-1 stream).
     Quote,
+    /// Reconstructed order book through level 50.
+    Depth,
+    /// Aggressor-side public trades.
+    Trades,
     /// Ticker: last, mark, index, funding.
     Ticker,
+}
+
+pub const BOOK_DEPTH: usize = 50;
+
+/// One price level. Copy, fixed-size, no heap.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BookLevel {
+    pub px: f64,
+    pub qty: f64,
+}
+
+/// A reconstructed 50-level book. Only the first `bid_len` and `ask_len`
+/// entries are populated; bids descend and asks ascend.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Depth {
+    pub bids: [BookLevel; BOOK_DEPTH],
+    pub asks: [BookLevel; BOOK_DEPTH],
+    pub bid_len: u8,
+    pub ask_len: u8,
+    /// Bybit's book update id.
+    pub update_id: u64,
+    /// Venue cross-sequence, used to order book and trade events.
+    pub seq: u64,
+    pub venue_ts_ms: i64,
+    pub recv_ns: u64,
+}
+
+impl Default for Depth {
+    fn default() -> Self {
+        Self {
+            bids: [BookLevel::default(); BOOK_DEPTH],
+            asks: [BookLevel::default(); BOOK_DEPTH],
+            bid_len: 0,
+            ask_len: 0,
+            update_id: 0,
+            seq: 0,
+            venue_ts_ms: 0,
+            recv_ns: 0,
+        }
+    }
+}
+
+impl Depth {
+    pub fn best_bid(&self) -> Option<BookLevel> {
+        (self.bid_len > 0).then(|| self.bids[0])
+    }
+
+    pub fn best_ask(&self) -> Option<BookLevel> {
+        (self.ask_len > 0).then(|| self.asks[0])
+    }
+
+    pub fn quote(&self) -> Quote {
+        let bid = self.best_bid().unwrap_or_default();
+        let ask = self.best_ask().unwrap_or_default();
+        Quote {
+            bid_px: bid.px,
+            bid_qty: bid.qty,
+            ask_px: ask.px,
+            ask_qty: ask.qty,
+            venue_ts_ms: self.venue_ts_ms,
+            recv_ns: self.recv_ns,
+            seq: self.seq,
+        }
+    }
+}
+
+/// Public trades aggregated over one venue message. `buy_qty` means buyers
+/// crossed the spread; `sell_qty` means sellers did.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TradeFlow {
+    pub buy_qty: f64,
+    pub sell_qty: f64,
+    pub last_px: f64,
+    pub trade_count: u16,
+    pub seq: u64,
+    pub venue_ts_ms: i64,
+    pub recv_ns: u64,
 }
 
 /// A strategy's request for market data, collected at boot.
@@ -47,9 +128,13 @@ pub struct Ticker {
 
 /// One parsed market message, delivered to strategies immediately after the
 /// shared [`MarketState`] has been updated with it.
+// L50 stays inline so every 20 ms book update remains allocation-free.
+#[allow(clippy::large_enum_variant)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MarketEvent {
     Quote { symbol: SymbolId, quote: Quote },
+    Depth { symbol: SymbolId, depth: Depth },
+    Trades { symbol: SymbolId, trades: TradeFlow },
     Ticker { symbol: SymbolId, ticker: Ticker },
     /// The feed reconnected; per-symbol sequences reset. Strategies holding
     /// assumptions keyed to continuity must re-arm.
@@ -113,6 +198,8 @@ pub trait OrderFeed {
 pub struct MarketState {
     pub table: SymbolTable,
     pub quotes: Vec<Quote>,
+    pub depths: Vec<Depth>,
+    pub trades: Vec<TradeFlow>,
     pub tickers: Vec<Ticker>,
 }
 
@@ -123,6 +210,8 @@ impl MarketState {
         let need = self.table.len();
         if self.quotes.len() < need {
             self.quotes.resize(need, Quote::default());
+            self.depths.resize(need, Depth::default());
+            self.trades.resize(need, TradeFlow::default());
             self.tickers.resize(need, Ticker::default());
         }
         id
@@ -136,15 +225,30 @@ impl MarketState {
         &self.tickers[id.0 as usize]
     }
 
+    pub fn depth(&self, id: SymbolId) -> &Depth {
+        &self.depths[id.0 as usize]
+    }
+
+    pub fn trade_flow(&self, id: SymbolId) -> &TradeFlow {
+        &self.trades[id.0 as usize]
+    }
+
     pub fn apply(&mut self, event: &MarketEvent) {
         match *event {
             MarketEvent::Quote { symbol, quote } => self.quotes[symbol.0 as usize] = quote,
+            MarketEvent::Depth { symbol, depth } => {
+                self.quotes[symbol.0 as usize] = depth.quote();
+                self.depths[symbol.0 as usize] = depth;
+            }
+            MarketEvent::Trades { symbol, trades } => self.trades[symbol.0 as usize] = trades,
             MarketEvent::Ticker { symbol, ticker } => self.tickers[symbol.0 as usize] = ticker,
             // The reset arrives before the new epoch's first price. Clearing
             // here means nobody reads a pre-gap price as current — a zeroed
             // quote is visibly absent, a stale one lies.
             MarketEvent::FeedReset { .. } => {
                 self.quotes.fill(Quote::default());
+                self.depths.fill(Depth::default());
+                self.trades.fill(TradeFlow::default());
                 self.tickers.fill(Ticker::default());
             }
         }
@@ -166,6 +270,8 @@ mod tests {
         assert_eq!(market.quote(id).bid_px, 10.0);
         market.apply(&MarketEvent::FeedReset { recv_ns: 1 });
         assert_eq!(*market.quote(id), Quote::default());
+        assert_eq!(*market.depth(id), Depth::default());
+        assert_eq!(*market.trade_flow(id), TradeFlow::default());
         assert_eq!(*market.ticker(id), Ticker::default());
     }
 }

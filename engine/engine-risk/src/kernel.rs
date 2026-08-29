@@ -447,7 +447,9 @@ impl RiskKernel for Kernel {
             OrderUpdate::Reject {
                 client_order_id, ..
             } => self.book.forget(client_order_id),
-            OrderUpdate::Ack(_) | OrderUpdate::StopAttached { .. } => {}
+            OrderUpdate::Ack(_)
+            | OrderUpdate::FastFill { .. }
+            | OrderUpdate::StopAttached { .. } => {}
             // A private-stream gap loses nothing here: registered orders may
             // still fill, and the engine refreshes the account view that
             // `assess` judges against.

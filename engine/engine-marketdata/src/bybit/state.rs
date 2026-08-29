@@ -4,12 +4,17 @@
 //! returns the market event, nothing, or the verdict that the stream lost
 //! continuity and must be resynced. The socket layer obeys that verdict.
 
-use engine_types::{MarketEvent, Quote, Subscription, SymbolId, SymbolTable, Ticker};
+use engine_types::{
+    BookLevel, Depth, MarketEvent, Subscription, SymbolId, SymbolTable, Ticker, TradeFlow,
+    BOOK_DEPTH,
+};
 
-use crate::bybit::parse::{BookFrame, Level, ParsedFrame, TickerFrame};
+use crate::bybit::parse::{BookFrame, Levels, ParsedFrame, TickerFrame, TradeFrame};
 
 /// What the feed should do with a frame it just parsed.
 #[derive(Copy, Clone, Debug, PartialEq)]
+// The event owns an inline L50 update so applying a book does not allocate.
+#[allow(clippy::large_enum_variant)]
 pub enum Applied {
     /// Hand this to the strategies.
     Event(MarketEvent),
@@ -31,8 +36,7 @@ pub enum ResyncReason {
 
 #[derive(Copy, Clone, Debug, Default)]
 struct BookState {
-    bid: Option<Level>,
-    ask: Option<Level>,
+    depth: Depth,
     last_update_id: u64,
     has_snapshot: bool,
 }
@@ -49,6 +53,7 @@ struct TickerState {
 pub struct FeedState {
     table: SymbolTable,
     books: Vec<BookState>,
+    depths: Vec<BookState>,
     tickers: Vec<TickerState>,
 }
 
@@ -69,6 +74,7 @@ impl FeedState {
         let need = self.table.len();
         if self.books.len() < need {
             self.books.resize(need, BookState::default());
+            self.depths.resize(need, BookState::default());
             self.tickers.resize(need, TickerState::default());
         }
         id
@@ -96,6 +102,9 @@ impl FeedState {
         for b in &mut self.books {
             *b = BookState::default();
         }
+        for b in &mut self.depths {
+            *b = BookState::default();
+        }
         for t in &mut self.tickers {
             *t = TickerState::default();
         }
@@ -105,6 +114,7 @@ impl FeedState {
     pub fn apply(&mut self, frame: &ParsedFrame<'_>, recv_ns: u64) -> Applied {
         match frame {
             ParsedFrame::Book(b) => self.apply_book(b, recv_ns),
+            ParsedFrame::Trades(t) => self.apply_trades(t, recv_ns),
             ParsedFrame::Ticker(t) => self.apply_ticker(t, recv_ns),
             ParsedFrame::Ack { success, .. } => {
                 if *success {
@@ -121,12 +131,30 @@ impl FeedState {
         let Some(id) = self.table.get(frame.symbol) else {
             return Applied::Nothing;
         };
-        let state = &mut self.books[id.0 as usize];
+        let state = match frame.depth {
+            1 => &mut self.books[id.0 as usize],
+            50 => &mut self.depths[id.0 as usize],
+            _ => return Applied::Nothing,
+        };
 
         if frame.snapshot {
-            // A snapshot is the whole side; it also heals any earlier gap.
-            state.bid = frame.bids.and_then(|l| l.best()).filter(|l| l.qty > 0.0);
-            state.ask = frame.asks.and_then(|l| l.best()).filter(|l| l.qty > 0.0);
+            state.depth = Depth::default();
+            if let Some(bids) = frame.bids {
+                replace_side(
+                    &mut state.depth.bids,
+                    &mut state.depth.bid_len,
+                    bids,
+                    true,
+                );
+            }
+            if let Some(asks) = frame.asks {
+                replace_side(
+                    &mut state.depth.asks,
+                    &mut state.depth.ask_len,
+                    asks,
+                    false,
+                );
+            }
             state.has_snapshot = true;
         } else {
             if !state.has_snapshot {
@@ -135,31 +163,81 @@ impl FeedState {
             if frame.update_id != state.last_update_id + 1 {
                 return Applied::Resync(ResyncReason::SequenceGap);
             }
-            // An absent or empty side did not change; a zero quantity removes.
-            if let Some(best) = frame.bids.and_then(|l| l.best()) {
-                state.bid = if best.qty > 0.0 { Some(best) } else { None };
+            if let Some(bids) = frame.bids {
+                if !bids.is_empty() {
+                    if frame.depth == 1 {
+                        replace_side(
+                            &mut state.depth.bids,
+                            &mut state.depth.bid_len,
+                            bids,
+                            true,
+                        );
+                    } else {
+                        apply_side(
+                            &mut state.depth.bids,
+                            &mut state.depth.bid_len,
+                            bids,
+                            true,
+                        );
+                    }
+                }
             }
-            if let Some(best) = frame.asks.and_then(|l| l.best()) {
-                state.ask = if best.qty > 0.0 { Some(best) } else { None };
+            if let Some(asks) = frame.asks {
+                if !asks.is_empty() {
+                    if frame.depth == 1 {
+                        replace_side(
+                            &mut state.depth.asks,
+                            &mut state.depth.ask_len,
+                            asks,
+                            false,
+                        );
+                    } else {
+                        apply_side(
+                            &mut state.depth.asks,
+                            &mut state.depth.ask_len,
+                            asks,
+                            false,
+                        );
+                    }
+                }
             }
         }
         state.last_update_id = frame.update_id;
+        state.depth.update_id = frame.update_id;
+        state.depth.seq = if frame.seq == 0 { frame.update_id } else { frame.seq };
+        state.depth.venue_ts_ms = frame.venue_ts_ms;
+        state.depth.recv_ns = recv_ns;
 
-        // Half a book is not a quote. Publishing a zero would let a strategy
-        // read an infinite spread as a real one.
-        let (Some(bid), Some(ask)) = (state.bid, state.ask) else {
+        if state.depth.bid_len == 0 || state.depth.ask_len == 0 {
+            return Applied::Nothing;
+        }
+        if frame.depth == 1 {
+            Applied::Event(MarketEvent::Quote {
+                symbol: id,
+                quote: state.depth.quote(),
+            })
+        } else {
+            Applied::Event(MarketEvent::Depth {
+                symbol: id,
+                depth: state.depth,
+            })
+        }
+    }
+
+    fn apply_trades(&mut self, frame: &TradeFrame<'_>, recv_ns: u64) -> Applied {
+        let Some(id) = self.table.get(frame.symbol) else {
             return Applied::Nothing;
         };
-        Applied::Event(MarketEvent::Quote {
+        Applied::Event(MarketEvent::Trades {
             symbol: id,
-            quote: Quote {
-                bid_px: bid.px,
-                bid_qty: bid.qty,
-                ask_px: ask.px,
-                ask_qty: ask.qty,
+            trades: TradeFlow {
+                buy_qty: frame.buy_qty,
+                sell_qty: frame.sell_qty,
+                last_px: frame.last_px,
+                trade_count: frame.trade_count,
+                seq: frame.seq,
                 venue_ts_ms: frame.venue_ts_ms,
                 recv_ns,
-                seq: frame.update_id,
             },
         })
     }
@@ -204,11 +282,62 @@ impl FeedState {
     }
 }
 
+fn replace_side(
+    out: &mut [BookLevel; BOOK_DEPTH],
+    len: &mut u8,
+    levels: Levels,
+    bids: bool,
+) {
+    *out = [BookLevel::default(); BOOK_DEPTH];
+    *len = 0;
+    apply_side(out, len, levels, bids);
+}
+
+fn apply_side(
+    out: &mut [BookLevel; BOOK_DEPTH],
+    len: &mut u8,
+    changes: Levels,
+    bids: bool,
+) {
+    for change in changes.iter() {
+        let active = *len as usize;
+        if let Some(index) = out[..active].iter().position(|level| level.px == change.px) {
+            if change.qty > 0.0 {
+                out[index].qty = change.qty;
+            } else {
+                out.copy_within(index + 1..active, index);
+                out[active - 1] = BookLevel::default();
+                *len -= 1;
+            }
+            continue;
+        }
+        if change.qty <= 0.0 {
+            continue;
+        }
+        let insert = out[..active]
+            .iter()
+            .position(|level| if bids { change.px > level.px } else { change.px < level.px })
+            .unwrap_or(active);
+        if insert >= BOOK_DEPTH {
+            continue;
+        }
+        let new_len = (active + 1).min(BOOK_DEPTH);
+        if insert + 1 < new_len {
+            out.copy_within(insert..new_len - 1, insert + 1);
+        }
+        out[insert] = BookLevel {
+            px: change.px,
+            qty: change.qty,
+        };
+        *len = new_len as u8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bybit::parse::parse_frame;
-    use engine_types::Feed;
+    use engine_types::{Feed, Quote};
 
     fn subs() -> Vec<Subscription> {
         vec![
@@ -248,6 +377,20 @@ mod tests {
         match applied {
             Applied::Event(MarketEvent::Ticker { ticker, .. }) => ticker,
             other => panic!("expected a ticker, got {other:?}"),
+        }
+    }
+
+    fn depth(applied: Applied) -> Depth {
+        match applied {
+            Applied::Event(MarketEvent::Depth { depth, .. }) => depth,
+            other => panic!("expected depth, got {other:?}"),
+        }
+    }
+
+    fn trades(applied: Applied) -> TradeFlow {
+        match applied {
+            Applied::Event(MarketEvent::Trades { trades, .. }) => trades,
+            other => panic!("expected trades, got {other:?}"),
         }
     }
 
@@ -476,5 +619,36 @@ mod tests {
         assert_eq!(s.table().len(), 1);
         assert_eq!(s.symbol_id("BTCUSDT"), Some(SymbolId(0)));
         assert_eq!(s.symbol_id("ETHUSDT"), None);
+    }
+
+    #[test]
+    fn l50_deltas_update_delete_and_insert_without_losing_the_rest() {
+        let mut state = feed_state();
+        let snapshot = r#"{"topic":"orderbook.50.BTCUSDT","ts":10,"type":"snapshot","data":{"s":"BTCUSDT","b":[["100","1"],["99","2"],["98","3"]],"a":[["101","4"],["102","5"]],"u":100,"seq":1000},"cts":9}"#;
+        let first = depth(apply(&mut state, snapshot));
+        assert_eq!(first.bid_len, 3);
+        assert_eq!(first.ask_len, 2);
+
+        let delta = r#"{"topic":"orderbook.50.BTCUSDT","ts":11,"type":"delta","data":{"s":"BTCUSDT","b":[["100","0"],["99","7"],["99.5","6"]],"a":[["100.5","8"]],"u":101,"seq":1001},"cts":10}"#;
+        let next = depth(apply(&mut state, delta));
+        assert_eq!(next.bids[0], BookLevel { px: 99.5, qty: 6.0 });
+        assert_eq!(next.bids[1], BookLevel { px: 99.0, qty: 7.0 });
+        assert_eq!(next.bids[2], BookLevel { px: 98.0, qty: 3.0 });
+        assert_eq!(next.asks[0], BookLevel { px: 100.5, qty: 8.0 });
+        assert_eq!(next.asks[1], BookLevel { px: 101.0, qty: 4.0 });
+        assert_eq!(next.seq, 1001);
+        assert_eq!(next.update_id, 101);
+    }
+
+    #[test]
+    fn public_trade_flow_becomes_a_fixed_market_event() {
+        let mut state = feed_state();
+        let raw = r#"{"topic":"publicTrade.BTCUSDT","ts":1003,"data":[{"T":1000,"s":"BTCUSDT","S":"Buy","v":"2","p":"100.1","seq":10},{"T":1002,"s":"BTCUSDT","S":"Sell","v":"0.5","p":"100.0","seq":12}]}"#;
+        let flow = trades(apply(&mut state, raw));
+        assert_eq!(flow.buy_qty, 2.0);
+        assert_eq!(flow.sell_qty, 0.5);
+        assert_eq!(flow.last_px, 100.0);
+        assert_eq!(flow.seq, 12);
+        assert_eq!(flow.recv_ns, 42);
     }
 }

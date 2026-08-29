@@ -381,6 +381,7 @@ impl Decoder {
                     self.pending.push_back(OrderUpdate::Ack(OrderAck {
                         client_order_id,
                         venue_order_id: oid.to_string(),
+                        sent_ns: 0,
                         ack_ns: recv_ns,
                     }));
                 }

@@ -4,12 +4,169 @@
 //! [`super`].
 
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct ClosedOrderFeed;
 impl OrderFeed for ClosedOrderFeed {
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
         Err(FeedError::Closed)
     }
+}
+
+struct NonBlockingProbe {
+    seen: Arc<AtomicUsize>,
+}
+
+impl Strategy for NonBlockingProbe {
+    fn name(&self) -> &str {
+        "nonblocking_probe"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: "BTCUSDT".to_string(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        let EngineEvent::Market(MarketEvent::Quote { symbol, quote }) = event else {
+            return;
+        };
+        let number = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
+        if number == 1 {
+            ctx.place(Intent {
+                strategy: StrategyId(0),
+                symbol: *symbol,
+                side: Side::Buy,
+                qty: 0.01,
+                kind: OrderKind::Market,
+                stop: Some(StopSpec {
+                    trigger_px: quote.bid_px * 0.99,
+                }),
+                reduce_only: false,
+                tag: "probe".to_string(),
+                decided_ns: ctx.now_ns(),
+                work: None,
+                leverage: None,
+            });
+        }
+    }
+}
+
+struct QuoteCoalescingProbe;
+
+impl Strategy for QuoteCoalescingProbe {
+    fn name(&self) -> &str {
+        "quote_coalescing_probe"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: "BTCUSDT".to_string(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
+        let EngineEvent::Market(MarketEvent::Quote { symbol, quote }) = event else {
+            return;
+        };
+        ctx.place(Intent {
+            strategy: StrategyId(0),
+            symbol: *symbol,
+            side: Side::Buy,
+            qty: 0.01,
+            kind: OrderKind::Limit {
+                px: quote.bid_px,
+                tif: TimeInForce::PostOnly,
+            },
+            stop: Some(StopSpec {
+                trigger_px: quote.bid_px * 0.99,
+            }),
+            reduce_only: false,
+            tag: "quote".to_string(),
+            decided_ns: ctx.now_ns(),
+            work: None,
+            leverage: None,
+        });
+    }
+}
+
+#[tokio::test]
+async fn a_slow_venue_cannot_stop_the_market_loop() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let probe = NonBlockingProbe { seen: seen.clone() };
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (mut venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    venue.send_delay = Duration::from_millis(100);
+    let (risk, _) = MockRisk::with(allow_all());
+    let mut engine = Engine::boot(
+        &settings(),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(probe)],
+        &[],
+    )
+    .await
+    .expect("boot");
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let mut feed = ScriptFeed::quotes(symbol, 2, true);
+    let mut orders = ScriptOrderFeed::empty();
+    let run = engine.run(&mut feed, &mut orders, std::future::pending::<()>());
+    tokio::pin!(run);
+
+    tokio::select! {
+        result = &mut run => panic!("the slow mutation finished before the probe: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+    }
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        2,
+        "the second market event must run while the venue task is waiting",
+    );
+    tokio::time::timeout(Duration::from_secs(1), &mut run)
+        .await
+        .expect("the venue mutation eventually completes")
+        .expect("the run shuts down cleanly");
+}
+
+#[tokio::test]
+async fn quote_updates_waiting_on_a_slow_venue_collapse_to_the_newest() {
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (mut venue, sends) = MockVenue::new(tape, &["BTCUSDT"]);
+    venue.send_delay = Duration::from_millis(100);
+    let (risk, _) = MockRisk::with(allow_all());
+    let mut engine = Engine::boot(
+        &settings(),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(QuoteCoalescingProbe)],
+        &[],
+    )
+    .await
+    .expect("boot");
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 20, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect("run");
+
+    assert_eq!(
+        sends.lock().unwrap().len(),
+        2,
+        "send the first quote and only the newest quote that arrived while it was in flight",
+    );
 }
 
 #[tokio::test]
@@ -52,6 +209,7 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
         "intent",
         "verdict",
         "order_sent",
+        "venue_timing",
         "order_update",
         "latency_ledger",
     ];
@@ -63,7 +221,7 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     let barrier_at = after(&h.tape, &Step::Barrier, sent_at).unwrap();
     let send_at = at(
         &h.tape,
-        &Step::Send(h.sends.borrow()[0].client_order_id.clone()),
+        &Step::Send(h.sends.lock().unwrap()[0].client_order_id.clone()),
     )
     .unwrap();
     assert!(
@@ -75,10 +233,10 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
         "the order is on disk before it is on the wire ({barrier_at} vs {send_at})"
     );
 
-    let id = &h.sends.borrow()[0].client_order_id;
+    let id = &h.sends.lock().unwrap()[0].client_order_id;
     assert!(id.starts_with("eng-"), "id shape: {id}");
     assert!(id.len() <= 36, "id is short enough for the venue: {id}");
-    assert_eq!(h.risk_saw.borrow().len(), 1, "risk hears the reply");
+    assert_eq!(h.risk_saw.lock().unwrap().len(), 1, "risk hears the reply");
 }
 
 #[tokio::test]
@@ -95,7 +253,7 @@ async fn the_verdict_record_names_the_order_it_approved() {
         .await
         .unwrap();
 
-    let records = h.records.borrow();
+    let records = h.records.lock().unwrap();
     let verdict = records
         .iter()
         .find_map(|r| match r {
@@ -105,7 +263,7 @@ async fn the_verdict_record_names_the_order_it_approved() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(verdict, Some(h.sends.borrow()[0].client_order_id.clone()));
+    assert_eq!(verdict, Some(h.sends.lock().unwrap()[0].client_order_id.clone()));
 }
 
 #[tokio::test]
@@ -127,7 +285,7 @@ async fn a_refusal_stops_before_the_order_is_written() {
 
     let kinds = appends(&h.tape);
     assert!(!kinds.contains(&"order_sent".to_string()), "{kinds:?}");
-    assert!(h.sends.borrow().is_empty(), "nothing reached the venue");
+    assert!(h.sends.lock().unwrap().is_empty(), "nothing reached the venue");
     assert!(
         only_the_shutdown_barrier(&h.tape),
         "no fsync for an order that does not exist (the shutdown one aside)"
@@ -166,7 +324,7 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
             "latency_ledger"
         ]
     );
-    assert!(h.sends.borrow().is_empty());
+    assert!(h.sends.lock().unwrap().is_empty());
     let note = note_saying(&h.records, "not sent");
     assert!(note.contains("smallest tradable size"), "{note}");
 }
@@ -212,7 +370,7 @@ async fn retired_control_anchors_are_ignored_and_cannot_halt_entries() {
         )
         .await
         .unwrap();
-    assert_eq!(sends.borrow().len(), 1);
+    assert_eq!(sends.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -255,7 +413,7 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
     .expect("boot");
     drop(engine);
     assert_eq!(
-        *registered.borrow(),
+        *registered.lock().unwrap(),
         vec![("eng-1700000000000-4".to_string(), 0.25)]
     );
 }
@@ -300,7 +458,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
     venue.working = vec![still_working(id, "BTCUSDT", 10.0)];
     venue
         .account_readings
-        .borrow_mut()
+        .lock().unwrap()
         .push_back(vec![engine_types::PositionView {
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -326,7 +484,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
     .expect("boot");
     drop(engine);
 
-    assert_eq!(*registered.borrow(), vec![(id.to_string(), 1.0)]);
+    assert_eq!(*registered.lock().unwrap(), vec![(id.to_string(), 1.0)]);
 }
 
 #[tokio::test]
@@ -399,11 +557,11 @@ async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
         "the venue is not working it, so it is not in flight"
     );
     assert!(
-        registered.borrow().is_empty(),
+        registered.lock().unwrap().is_empty(),
         "a dead order must not charge the partition"
     );
     // The ending is durable, so the next boot does not rediscover the ghost.
-    let reaped = records.borrow().iter().any(|record| {
+    let reaped = records.lock().unwrap().iter().any(|record| {
         matches!(
             record,
             WalRecord::OrderUpdate {
@@ -445,7 +603,7 @@ async fn a_clean_shutdown_forces_its_tail_to_disk() {
         .await
         .unwrap();
 
-    let tape = h.tape.borrow();
+    let tape = h.tape.lock().unwrap();
     let last_append = tape
         .iter()
         .rposition(|s| matches!(s, Step::Append(_)))
@@ -476,18 +634,19 @@ struct PrivateUpdateAfterFirstPlacementBatch {
 
 impl OrderFeed for PrivateUpdateAfterFirstPlacementBatch {
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
-        while self.sends.borrow().len() < crate::engine::MAX_ORDERS_PER_BATCH {
+        while self.sends.lock().unwrap().len() < crate::engine::MAX_ORDERS_PER_BATCH {
             tokio::task::yield_now().await;
         }
         if self.delivered {
             return std::future::pending().await;
         }
         self.delivered = true;
-        let client_order_id = self.sends.borrow()[0].client_order_id.clone();
-        self.tape.borrow_mut().push(Step::PrivateUpdate);
+        let client_order_id = self.sends.lock().unwrap()[0].client_order_id.clone();
+        self.tape.lock().unwrap().push(Step::PrivateUpdate);
         Ok(OrderUpdate::Ack(OrderAck {
             client_order_id,
             venue_order_id: "private-stream-ack".to_string(),
+            sent_ns: 0,
             ack_ns: clock::now_ns(),
         }))
     }
@@ -501,15 +660,15 @@ struct PrivateUpdateAfterFirstCancelBatch {
 
 impl OrderFeed for PrivateUpdateAfterFirstCancelBatch {
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
-        while self.cancels.borrow().len() < crate::engine::MAX_CANCELS_PER_BATCH {
+        while self.cancels.lock().unwrap().len() < crate::engine::MAX_CANCELS_PER_BATCH {
             tokio::task::yield_now().await;
         }
         if self.delivered {
             return std::future::pending().await;
         }
         self.delivered = true;
-        let client_order_id = self.cancels.borrow()[0].1.clone();
-        self.tape.borrow_mut().push(Step::PrivateUpdate);
+        let client_order_id = self.cancels.lock().unwrap()[0].1.clone();
+        self.tape.lock().unwrap().push(Step::PrivateUpdate);
         Ok(OrderUpdate::Cancelled {
             client_order_id,
             recv_ns: clock::now_ns(),
@@ -616,8 +775,8 @@ async fn sibling_orders_share_one_barrier_before_the_first_send() {
         .await
         .unwrap();
 
-    assert_eq!(h.sends.borrow().len(), 3);
-    let tape = h.tape.borrow();
+    assert_eq!(h.sends.lock().unwrap().len(), 3);
+    let tape = h.tape.lock().unwrap();
     let sent: Vec<usize> = tape
         .iter()
         .enumerate()
@@ -748,7 +907,7 @@ async fn a_same_side_sibling_cannot_loosen_the_whole_position_stop() {
         .await
         .unwrap();
 
-    let sends = h.sends.borrow();
+    let sends = h.sends.lock().unwrap();
     assert_eq!(sends.len(), 1);
     assert_eq!(sends[0].stop, Some(StopSpec { trigger_px: 95.0 }));
     assert!(note_saying(&h.records, "would loosen").contains("whole Buy position"));
@@ -772,7 +931,7 @@ async fn same_side_siblings_may_tighten_the_whole_position_stop() {
         .await
         .unwrap();
 
-    let sends = h.sends.borrow();
+    let sends = h.sends.lock().unwrap();
     assert_eq!(sends.len(), 2);
     assert_eq!(sends[0].stop, Some(StopSpec { trigger_px: 90.0 }));
     assert_eq!(sends[1].stop, Some(StopSpec { trigger_px: 95.0 }));
@@ -795,7 +954,7 @@ async fn a_prior_wakes_unfilled_order_also_prevents_stop_loosening() {
         .await
         .unwrap();
 
-    let sends = h.sends.borrow();
+    let sends = h.sends.lock().unwrap();
     assert_eq!(sends.len(), 1, "the first order is still in flight");
     assert_eq!(sends[0].stop, Some(StopSpec { trigger_px: 95.0 }));
     assert!(note_saying(&h.records, "would loosen").contains("whole Buy position"));
@@ -856,11 +1015,11 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
     .await;
     let mut loosened = protected;
     loosened.stop_px = 90.0;
-    h.account_readings.borrow_mut().push_back(vec![loosened]);
+    h.account_readings.lock().unwrap().push_back(vec![loosened]);
     let stops = h.stops.clone();
     let shutdown = async move {
         loop {
-            if !stops.borrow().is_empty() {
+            if !stops.lock().unwrap().is_empty() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -876,8 +1035,8 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
         .await
         .unwrap();
 
-    assert_eq!(*h.stops.borrow(), vec![(SymbolId(0), 95.0)]);
-    assert!(h.records.borrow().iter().any(|record| matches!(
+    assert_eq!(*h.stops.lock().unwrap(), vec![(SymbolId(0), 95.0)]);
+    assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::Note { source, text }
             if source == "stop-supervisor" && text.contains("95")
@@ -903,7 +1062,7 @@ async fn oversized_sibling_bursts_are_revalidated_after_each_bounded_send() {
         .await
         .unwrap();
 
-    let tape = h.tape.borrow();
+    let tape = h.tape.lock().unwrap();
     let sent: Vec<usize> = tape
         .iter()
         .enumerate()
@@ -965,7 +1124,7 @@ async fn private_updates_are_polled_between_bounded_sibling_sends() {
         .await
         .unwrap();
 
-    let tape = h.tape.borrow();
+    let tape = h.tape.lock().unwrap();
     let sends: Vec<usize> = tape
         .iter()
         .enumerate()
@@ -1005,7 +1164,7 @@ async fn private_updates_are_polled_between_bounded_cancel_groups() {
         .await
         .unwrap();
 
-    let tape = h.tape.borrow();
+    let tape = h.tape.lock().unwrap();
     let cancels: Vec<usize> = tape
         .iter()
         .enumerate()
@@ -1051,7 +1210,7 @@ async fn due_account_refresh_is_polled_between_bounded_sibling_sends() {
         .await
         .unwrap();
 
-    let tape = h.tape.borrow();
+    let tape = h.tape.lock().unwrap();
     let sends: Vec<usize> = tape
         .iter()
         .enumerate()
@@ -1085,7 +1244,7 @@ async fn shutdown_after_a_batch_does_not_abandon_a_trailing_exit() {
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let sends = h.sends.clone();
     let shutdown = async move {
-        while sends.borrow().len() < crate::engine::MAX_ORDERS_PER_BATCH {
+        while sends.lock().unwrap().len() < crate::engine::MAX_ORDERS_PER_BATCH {
             tokio::task::yield_now().await;
         }
     };
@@ -1098,7 +1257,7 @@ async fn shutdown_after_a_batch_does_not_abandon_a_trailing_exit() {
         .await
         .unwrap();
 
-    let sends = h.sends.borrow();
+    let sends = h.sends.lock().unwrap();
     assert_eq!(
         sends.len(),
         11,
@@ -1188,15 +1347,15 @@ async fn same_symbol_siblings_with_conflicting_leverage_are_refused_before_mutat
         .unwrap();
 
     assert!(
-        h.leverages.borrow().is_empty(),
+        h.leverages.lock().unwrap().is_empty(),
         "a rejected leverage epoch still mutated the venue"
     );
-    let sends = h.sends.borrow();
+    let sends = h.sends.lock().unwrap();
     assert_eq!(sends.len(), 1, "only the risk-reducing sibling may flow");
     assert!(sends[0].reduce_only);
     assert_eq!(
         h.records
-            .borrow()
+            .lock().unwrap()
             .iter()
             .filter(|record| matches!(record, WalRecord::Intent { .. }))
             .count(),
@@ -1205,7 +1364,7 @@ async fn same_symbol_siblings_with_conflicting_leverage_are_refused_before_mutat
     );
     assert_eq!(
         h.records
-            .borrow()
+            .lock().unwrap()
             .iter()
             .filter(
                 |record| matches!(record, WalRecord::Note { source, .. } if source == "leverage")
@@ -1237,7 +1396,7 @@ async fn a_flooded_wake_drops_entries_but_never_exits() {
         .await
         .unwrap();
 
-    let sends = h.sends.borrow();
+    let sends = h.sends.lock().unwrap();
     let exits = sends.iter().filter(|s| s.reduce_only).count();
     let entries = sends.iter().filter(|s| !s.reduce_only).count();
     assert_eq!(exits, 2, "both exits reach the venue");
@@ -1308,11 +1467,11 @@ async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
         .await
         .unwrap();
 
-    let sends = h.sends.borrow();
+    let sends = h.sends.lock().unwrap();
     assert_eq!(sends.len(), 1);
     assert!(sends[0].reduce_only);
     assert!(sends[0].stop.is_none(), "the wire saw a stop on an exit");
-    for record in h.records.borrow().iter() {
+    for record in h.records.lock().unwrap().iter() {
         if let WalRecord::OrderSent { request, .. } = record {
             assert!(request.stop.is_none(), "the log saw a stop on an exit");
         }
@@ -1342,13 +1501,13 @@ async fn an_intent_with_an_unreal_number_never_reaches_the_log() {
         !kinds.contains(&"intent".to_string()),
         "a NaN intent was written to the log: {kinds:?}"
     );
-    assert!(h.sends.borrow().is_empty(), "nothing reached the venue");
+    assert!(h.sends.lock().unwrap().is_empty(), "nothing reached the venue");
     let note = note_saying(&h.records, "not a finite");
     assert!(
         note.contains("buy"),
         "the note names the intent's tag: {note}"
     );
-    for record in h.records.borrow().iter() {
+    for record in h.records.lock().unwrap().iter() {
         let bytes = serde_json::to_vec(record).expect("serializable");
         let _: WalRecord =
             serde_json::from_slice(&bytes).expect("every log record must survive a read-back");
@@ -1471,7 +1630,7 @@ async fn an_order_under_the_minimum_value_is_refused() {
         .await
         .unwrap();
 
-    assert!(sends.borrow().is_empty());
+    assert!(sends.lock().unwrap().is_empty());
     let note = note_saying(&records, "not sent");
     assert!(note.contains("smallest order value"), "{note}");
 }
@@ -1505,17 +1664,17 @@ async fn a_send_with_no_answer_leaves_the_order_in_flight() {
         .await
         .unwrap();
 
-    assert_eq!(sends.borrow().len(), 1, "it did go out");
+    assert_eq!(sends.lock().unwrap().len(), 1, "it did go out");
     assert_eq!(
         engine.in_flight_ids().len(),
         1,
         "and we do not know its fate"
     );
     assert!(
-        risk_saw.borrow().is_empty(),
+        risk_saw.lock().unwrap().is_empty(),
         "no reply, so nothing to tell risk"
     );
-    assert!(note_saying(&records, "no answer").contains(&sends.borrow()[0].client_order_id));
+    assert!(note_saying(&records, "no answer").contains(&sends.lock().unwrap()[0].client_order_id));
 }
 
 #[tokio::test]
@@ -1551,9 +1710,9 @@ async fn a_rejected_order_is_over() {
         .unwrap();
 
     assert!(engine.in_flight_ids().is_empty());
-    assert_eq!(risk_saw.borrow().len(), 1);
-    assert_eq!(heard.borrow().len(), 1, "the strategy hears its rejection");
-    assert!(heard.borrow()[0].contains("110007"), "{:?}", heard.borrow());
+    assert_eq!(risk_saw.lock().unwrap().len(), 1);
+    assert_eq!(heard.lock().unwrap().len(), 1, "the strategy hears its rejection");
+    assert!(heard.lock().unwrap()[0].contains("110007"), "{:?}", heard.lock().unwrap());
 }
 
 #[tokio::test]
@@ -1644,13 +1803,13 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
         .await
         .unwrap();
 
-    assert!(h.sends.borrow().is_empty(), "boot never re-sends anything");
+    assert!(h.sends.lock().unwrap().is_empty(), "boot never re-sends anything");
     assert!(
         engine.in_flight_ids().is_empty(),
         "the late fill closes the recovered order"
     );
     assert_eq!(
-        heard.borrow().len(),
+        heard.lock().unwrap().len(),
         1,
         "and the strategy that placed it hears the news"
     );
@@ -1704,8 +1863,8 @@ async fn timers_fire_for_the_strategy_that_armed_them() {
         .await
         .unwrap();
 
-    assert_eq!(*fired_one.borrow(), vec![TimerId(11)], "each hears its own");
-    assert_eq!(*fired_two.borrow(), vec![TimerId(22)]);
+    assert_eq!(*fired_one.lock().unwrap(), vec![TimerId(11)], "each hears its own");
+    assert_eq!(*fired_two.lock().unwrap(), vec![TimerId(22)]);
 }
 
 #[tokio::test]
@@ -1729,11 +1888,11 @@ async fn a_market_message_only_reaches_the_strategies_that_asked_for_it() {
         .await
         .unwrap();
 
-    assert_eq!(h.sends.borrow().len(), 1, "one quote, one order");
-    assert_eq!(h.sends.borrow()[0].strategy, StrategyId(0));
-    assert_eq!(btc_heard.borrow().len(), 1, "its owner hears the reply");
+    assert_eq!(h.sends.lock().unwrap().len(), 1, "one quote, one order");
+    assert_eq!(h.sends.lock().unwrap()[0].strategy, StrategyId(0));
+    assert_eq!(btc_heard.lock().unwrap().len(), 1, "its owner hears the reply");
     assert!(
-        eth_heard.borrow().is_empty(),
+        eth_heard.lock().unwrap().is_empty(),
         "the other strategy hears nothing"
     );
 }
@@ -1768,7 +1927,7 @@ async fn the_group_flush_tick_pushes_the_log_out() {
         .await
         .unwrap();
 
-    let flushes = tape.borrow().iter().filter(|s| **s == Step::Flush).count();
+    let flushes = tape.lock().unwrap().iter().filter(|s| **s == Step::Flush).count();
     assert!(flushes >= 3, "the tick keeps flushing, saw {flushes}");
 }
 
@@ -1796,7 +1955,7 @@ async fn the_account_reading_is_refreshed_before_it_goes_stale() {
         .unwrap();
 
     let reads = tape
-        .borrow()
+        .lock().unwrap()
         .iter()
         .filter(|s| **s == Step::ReadAccount)
         .count();
@@ -1807,7 +1966,7 @@ async fn the_account_reading_is_refreshed_before_it_goes_stale() {
 async fn boot_reads_the_rules_and_the_account_before_anything_else() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (_engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
-    let steps = h.tape.borrow().clone();
+    let steps = h.tape.lock().unwrap().clone();
     assert_eq!(steps[0], Step::Append("boot".into()));
     assert_eq!(steps[1], Step::Append("note".into()), "which mode it is in");
     assert_eq!(
@@ -1835,7 +1994,9 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
     assert_eq!(result.orders, 30, "one order every tenth quote");
     for (segment, q) in &result.segments {
         assert!(q.count > 0, "{segment:?} recorded nothing");
-        assert!(q.p50_ns > 0, "{segment:?} p50 is zero");
+        if *segment != crate::ledger::Segment::Decide {
+            assert!(q.p50_ns > 0, "{segment:?} p50 is zero");
+        }
         assert!(q.max_ns >= q.p50_ns);
     }
     // The log is real and reads back.

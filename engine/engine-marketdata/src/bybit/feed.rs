@@ -121,6 +121,29 @@ impl Handoff {
         if state.closed {
             return false;
         }
+        if let Ok(MarketEvent::Trades {
+            symbol,
+            trades: incoming,
+        }) = &item
+        {
+            for queued in state.items.iter_mut().rev() {
+                let Some(queued_key) = market_key(queued) else { break };
+                if queued_key == (symbol.0, 2) {
+                    if let Ok(MarketEvent::Trades { trades, .. }) = queued {
+                        trades.buy_qty += incoming.buy_qty;
+                        trades.sell_qty += incoming.sell_qty;
+                        trades.trade_count = trades.trade_count.saturating_add(incoming.trade_count);
+                        if incoming.seq >= trades.seq {
+                            trades.last_px = incoming.last_px;
+                            trades.seq = incoming.seq;
+                            trades.venue_ts_ms = incoming.venue_ts_ms;
+                            trades.recv_ns = incoming.recv_ns;
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
         if let Some(key) = market_key(&item) {
             for queued in state.items.iter_mut().rev() {
                 let Some(queued_key) = market_key(queued) else { break };
@@ -165,14 +188,18 @@ impl Handoff {
     }
 }
 
-fn market_key(item: &Result<MarketEvent, FeedError>) -> Option<(u16, bool)> {
+fn market_key(item: &Result<MarketEvent, FeedError>) -> Option<(u16, u8)> {
     match item {
-        Ok(MarketEvent::Quote { symbol, .. }) => Some((symbol.0, false)),
-        Ok(MarketEvent::Ticker { symbol, .. }) => Some((symbol.0, true)),
+        Ok(MarketEvent::Quote { symbol, .. }) => Some((symbol.0, 0)),
+        Ok(MarketEvent::Depth { symbol, .. }) => Some((symbol.0, 1)),
+        Ok(MarketEvent::Trades { symbol, .. }) => Some((symbol.0, 2)),
+        Ok(MarketEvent::Ticker { symbol, .. }) => Some((symbol.0, 3)),
         Ok(MarketEvent::FeedReset { .. }) | Err(_) => None,
     }
 }
 
+// Carries the fixed L50 value without allocating on every socket frame.
+#[allow(clippy::large_enum_variant)]
 enum Step {
     Event(MarketEvent),
     Idle,
@@ -657,6 +684,8 @@ fn topic_for(sub: &Subscription) -> String {
     match sub.feed {
         // Depth 1 is the venue's fastest book stream, pushed every 10ms.
         Feed::Quote => format!("orderbook.1.{}", sub.symbol),
+        Feed::Depth => format!("orderbook.50.{}", sub.symbol),
+        Feed::Trades => format!("publicTrade.{}", sub.symbol),
         Feed::Ticker => format!("tickers.{}", sub.symbol),
     }
 }
@@ -757,6 +786,24 @@ mod tests {
     }
 
     #[test]
+    fn l50_and_public_trades_use_the_exact_bybit_topics() {
+        assert_eq!(
+            topic_for(&Subscription {
+                symbol: "ONTUSDT".into(),
+                feed: Feed::Depth,
+            }),
+            "orderbook.50.ONTUSDT",
+        );
+        assert_eq!(
+            topic_for(&Subscription {
+                symbol: "ONTUSDT".into(),
+                feed: Feed::Trades,
+            }),
+            "publicTrade.ONTUSDT",
+        );
+    }
+
+    #[test]
     fn the_subscribe_frame_is_the_venue_shape() {
         let topics = vec!["orderbook.1.BTCUSDT".to_string(), "tickers.BTCUSDT".into()];
         assert_eq!(
@@ -804,6 +851,33 @@ mod tests {
         assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(1), quote })) if quote.bid_px == 20.0));
         assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::FeedReset { recv_ns: 7 }))));
         assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(0), quote })) if quote.bid_px == 12.0));
+    }
+
+    #[tokio::test]
+    async fn the_handoff_adds_trade_flow_instead_of_dropping_bursts() {
+        let handoff = Handoff::new();
+        let flow = |buy_qty, sell_qty, seq| MarketEvent::Trades {
+            symbol: SymbolId(0),
+            trades: engine_types::TradeFlow {
+                buy_qty,
+                sell_qty,
+                last_px: seq as f64,
+                trade_count: 1,
+                seq,
+                recv_ns: seq,
+                ..engine_types::TradeFlow::default()
+            },
+        };
+        assert!(handoff.push(Ok(flow(1.0, 0.0, 1))));
+        assert!(handoff.push(Ok(flow(0.0, 2.0, 2))));
+        let Some(Ok(MarketEvent::Trades { trades, .. })) = handoff.recv().await else {
+            panic!("expected merged trade flow");
+        };
+        assert_eq!(trades.buy_qty, 1.0);
+        assert_eq!(trades.sell_qty, 2.0);
+        assert_eq!(trades.trade_count, 2);
+        assert_eq!(trades.last_px, 2.0);
+        assert_eq!(trades.seq, 2);
     }
 
     const ACK: &str =
@@ -1174,10 +1248,54 @@ mod tests {
                     assert!(ticker.mark_px > 0.0, "no mark price: {ticker:?}");
                     tickers += 1;
                 }
-                MarketEvent::FeedReset { .. } => {}
+                MarketEvent::FeedReset { .. }
+                | MarketEvent::Depth { .. }
+                | MarketEvent::Trades { .. } => {}
             }
         }
         assert!(quotes >= 5, "only {quotes} quotes arrived");
         assert!(tickers >= 1, "only {tickers} tickers arrived");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs network"]
+    async fn live_public_feed_delivers_l50_and_aggressor_trades() {
+        let mut feed = BybitPublicFeed::new(&[
+            Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Depth,
+            },
+            Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Trades,
+            },
+        ]);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let mut depth_seen = false;
+        let mut trades_seen = false;
+        while (!depth_seen || !trades_seen) && tokio::time::Instant::now() < deadline {
+            let event = tokio::time::timeout_at(deadline, feed.next_event())
+                .await
+                .expect("a frame within the deadline")
+                .expect("feed stays healthy");
+            match event {
+                MarketEvent::Depth { depth, .. } => {
+                    assert!(depth.bid_len > 1, "not a deep book: {depth:?}");
+                    assert!(depth.ask_len > 1, "not a deep book: {depth:?}");
+                    assert!(depth.best_ask().unwrap().px > depth.best_bid().unwrap().px);
+                    depth_seen = true;
+                }
+                MarketEvent::Trades { trades, .. } => {
+                    assert!(trades.trade_count > 0);
+                    assert!(trades.last_px > 0.0);
+                    trades_seen = true;
+                }
+                MarketEvent::FeedReset { .. }
+                | MarketEvent::Quote { .. }
+                | MarketEvent::Ticker { .. } => {}
+            }
+        }
+        assert!(depth_seen, "no L50 event arrived");
+        assert!(trades_seen, "no public trade event arrived");
     }
 }

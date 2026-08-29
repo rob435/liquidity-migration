@@ -81,14 +81,14 @@ disaster_stop_fraction = 0.35
 max_account_view_age_s = 120
 
 # ---------------------------------------------------------------------------
-# The three sleeves
+# The four sleeves
 # ---------------------------------------------------------------------------
 # Each reads its own book. Books are routed, not broadcast: each one reaches its
 # own sleeve and no other. That is what stops two followers on one account acting
 # on each other's decisions — the venue holds one position per symbol and keeps
 # no note of who asked for it.
 #
-# There is no per-sleeve capital share. All three draw on the account-wide caps
+# There is no per-sleeve capital share. All four draw on the account-wide caps
 # and any one can spend the lot.
 #
 # `symbols` is the universe each sleeve starts with. A name a book mentions
@@ -128,12 +128,43 @@ book_path = "/var/lib/liquidity-migration/targets/exodus-mainnet.json"
 rest_entries = false
 symbols = ["DOGEUSDT"]
 
+[[strategy]]
+name = "quoter"
+sleeve = "maker_canary"
+# Append-only identity: after this sleeve first enters the WAL it stays in the
+# config. `false` is the post-trial state: it pulls its own quotes and closes
+# only inventory attributed to this sleeve.
+quote_enabled = true
+symbols = ["AGIUSDT"]
+
+# One venue-minimum-sized quote on each side. One fill is already near the
+# ceiling, so the filled side stops accumulating and inventory skew makes the
+# reducing side easier to hit.
+qty_usdt = 5.25
+max_position_usdt = 6.0
+half_spread_bps = 6.5
+requote_bps = 2.5
+skew_bps = 4.0
+stop_loss_fraction = 0.08
+
+# Conservative short-horizon price: L1 microprice, weighted L50 imbalance,
+# public aggressor flow, movement and queue value. These are execution inputs,
+# not a claim that the sleeve has forward profit evidence.
+maker_fee_bps = 2.0
+min_edge_bps = 4.0
+volatility_multiplier = 2.0
+toxicity_bps = 4.0
+book_lean_bps = 1.5
+trade_lean_bps = 1.5
+signal_half_life_ms = 250.0
+queue_reprice_edge_bps = 1.5
+
 # NOTE ON THE SYMBOL LISTS ABOVE. They are a seed, not a universe. The engine
 # takes on any name a book asks for while it runs, so these only save the
 # admission round trip for the names each sleeve holds most often -- replacing
 # them with the real universes is an optimisation, not a precondition.
 #
-# The three lists must not overlap: the engine refuses a config where two
+# The four lists must not overlap: the engine refuses a config where two
 # strategies claim one symbol. That check only sees this file, though, and the
 # books can name the same symbol hours after boot. The engine handles that at
 # run time -- whichever sleeve is holding a name keeps it and the other leaves

@@ -100,13 +100,13 @@ async fn a_cancel_is_written_down_and_reaches_the_venue_without_an_fsync() {
         .unwrap();
 
     assert_eq!(
-        *h.cancels.borrow(),
+        *h.cancels.lock().unwrap(),
         vec![(symbol, "eng-old-1".to_string())],
         "the cancel reached the gateway"
     );
     let record = h
         .records
-        .borrow()
+        .lock().unwrap()
         .iter()
         .find_map(|r| match r {
             WalRecord::CancelSent {
@@ -204,12 +204,12 @@ async fn a_flooded_wake_drops_entries_but_never_cancels() {
         .unwrap();
 
     assert_eq!(
-        h.cancels.borrow().len(),
+        h.cancels.lock().unwrap().len(),
         3,
         "every cancel reached the venue, queued behind the flood"
     );
     assert_eq!(
-        h.sends.borrow().len(),
+        h.sends.lock().unwrap().len(),
         64,
         "the flood of entries stopped at the cap"
     );
@@ -254,9 +254,9 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
         .await
         .unwrap();
 
-    assert!(amends.borrow().is_empty(), "nothing reached the venue");
+    assert!(amends.lock().unwrap().is_empty(), "nothing reached the venue");
     assert!(
-        cancels.borrow().is_empty(),
+        cancels.lock().unwrap().is_empty(),
         "and it was not quietly turned into a cancel"
     );
     assert!(
@@ -313,16 +313,16 @@ async fn an_async_amend_ack_keeps_its_range_and_queues_cancellation() {
         .await
         .unwrap();
 
-    let amends = h.amends.borrow();
+    let amends = h.amends.lock().unwrap();
     assert_eq!(amends.len(), 1);
     assert_eq!(amends[0].0, symbol);
     assert_eq!(amends[0].1, "eng-old-1");
     assert_eq!(amends[0].2.px, Some(30_000.0), "the new price, unchanged");
     assert_eq!(amends[0].2.qty, None, "and no size change was asked for");
-    assert_eq!(h.cancels.borrow().len(), 1, "ambiguous order is pulled");
+    assert_eq!(h.cancels.lock().unwrap().len(), 1, "ambiguous order is pulled");
     assert!(!h
         .records
-        .borrow()
+        .lock().unwrap()
         .iter()
         .any(|record| matches!(record, WalRecord::AmendResolved { .. })));
     let written = at(&h.tape, &Step::Append("amend_sent".into())).unwrap();
@@ -332,7 +332,7 @@ async fn an_async_amend_ack_keeps_its_range_and_queues_cancellation() {
     // replacement reservation is durable before the venue call.
     assert!(
         h.tape
-            .borrow()
+            .lock().unwrap()
             .iter()
             .any(|step| matches!(step, Step::Barrier)),
         "an opening reprice did not pay for its risk barrier"
@@ -384,10 +384,10 @@ async fn a_nonfinite_amend_approval_never_reaches_the_venue() {
         .await
         .unwrap();
 
-    assert!(h.amends.borrow().is_empty());
+    assert!(h.amends.lock().unwrap().is_empty());
     assert!(!appends(&h.tape).contains(&"amend_sent".to_string()));
     assert!(note_saying(&h.records, "not amended").contains("invalid quantity verdict"));
-    for record in h.records.borrow().iter() {
+    for record in h.records.lock().unwrap().iter() {
         let bytes = serde_json::to_vec(record).expect("serializable");
         let _: WalRecord =
             serde_json::from_slice(&bytes).expect("sanitized amend records must replay");
@@ -453,8 +453,8 @@ async fn a_quantity_amend_is_refused_until_risk_and_ledger_can_resize_together()
         .await
         .unwrap();
 
-    assert!(h.amends.borrow().is_empty());
-    assert!(h.records.borrow().iter().any(|record| matches!(record,
+    assert!(h.amends.lock().unwrap().is_empty());
+    assert!(h.records.lock().unwrap().iter().any(|record| matches!(record,
         WalRecord::Note { text, .. } if text.contains("quantity changes are unsupported"))));
 }
 
@@ -490,7 +490,7 @@ async fn an_entry_carrying_a_stop_is_refused_where_the_venue_keeps_none() {
         .await
         .unwrap();
 
-    assert!(sends.borrow().is_empty(), "nothing reached the venue");
+    assert!(sends.lock().unwrap().is_empty(), "nothing reached the venue");
     assert!(
         !appends(&tape).contains(&"order_sent".to_string()),
         "and nothing was written down as sent"
@@ -546,7 +546,7 @@ impl Strategy for Watcher {
         let mut mine = Vec::new();
         ctx.resting(&mut mine);
         self.seen
-            .borrow_mut()
+            .lock().unwrap()
             .push(mine.iter().map(|o| o.client_order_id.to_string()).collect());
 
         if let (EngineEvent::Market(MarketEvent::Quote { symbol, quote }), Some(qty), false) =
@@ -656,12 +656,12 @@ async fn each_strategy_reads_only_its_own_working_orders() {
         .unwrap();
 
     assert_eq!(
-        *seen_one.borrow(),
+        *seen_one.lock().unwrap(),
         vec![vec!["eng-1700000000000-1".to_string()]],
         "its own working order, and nothing else the log knows about"
     );
     assert_eq!(
-        *seen_two.borrow(),
+        *seen_two.lock().unwrap(),
         vec![vec!["eng-1700000000000-2".to_string()]],
         "the other strategy's book is its own"
     );
@@ -681,8 +681,8 @@ async fn an_order_this_strategy_placed_is_in_its_book_until_it_ends() {
         .await
         .unwrap();
 
-    let id = h.sends.borrow()[0].client_order_id.clone();
-    let seen = seen.borrow();
+    let id = h.sends.lock().unwrap()[0].client_order_id.clone();
+    let seen = seen.lock().unwrap();
     assert_eq!(seen[0], Vec::<String>::new(), "nothing placed yet");
     // An ack is not an ending, so the order is still the strategy's to pull.
     assert_eq!(seen.last().unwrap(), &vec![id], "acked and still working");
@@ -723,16 +723,17 @@ async fn an_order_the_log_has_ended_leaves_the_strategys_book() {
         .await
         .unwrap();
 
-    assert_eq!(sends.borrow().len(), 1, "one order really was placed");
+    assert_eq!(sends.lock().unwrap().len(), 1, "one order really was placed");
     assert!(
         engine.in_flight_ids().is_empty(),
         "and the venue refused it"
     );
-    for (n, snapshot) in seen.borrow().iter().enumerate() {
-        assert!(
-            snapshot.is_empty(),
-            "a rejected order was still in the book at wake {n}: {snapshot:?}"
-        );
-    }
-    assert!(seen.borrow().len() >= 3, "it was woken after the rejection");
+    let seen = seen.lock().unwrap();
+    assert!(seen.first().unwrap().is_empty(), "nothing was placed before the first quote");
+    assert!(
+        seen.iter().any(|snapshot| snapshot == &vec![sends.lock().unwrap()[0].client_order_id.clone()]),
+        "market processing stayed live while the venue answer was pending"
+    );
+    assert!(seen.last().unwrap().is_empty(), "the rejection ended the order");
+    assert!(seen.len() >= 3, "it was woken after the rejection");
 }

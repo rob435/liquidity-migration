@@ -2,7 +2,7 @@
 //! verb it reaches for. The arithmetic is tested in `plan.rs`; these check the
 //! wiring — that a maker can place, move and pull through the engine.
 
-use engine_types::{Action, InstrumentRule, OrderKind, Side};
+use engine_types::{Action, Feed, InstrumentRule, OrderKind, Side};
 
 use super::plug::Quoter;
 use crate::mock_ctx::{Harness, RestingSeed};
@@ -706,4 +706,135 @@ fn pacing_one_symbol_does_not_forget_another() {
         0,
         "still inside the window, still asked"
     );
+}
+
+fn micro_bench(extra: &str) -> Harness {
+    let src = format!(
+        r#"
+        symbols = ["BTCUSDT"]
+        half_spread_bps = 5.0
+        requote_bps = 1.0
+        qty_usdt = 10.0
+        max_position_usdt = 30.0
+        stop_loss_fraction = 0.35
+        signal_half_life_ms = 250.0
+        {extra}
+        "#
+    );
+    let config: toml::Value = toml::from_str(&src).expect("micro config parses");
+    let quoter = Quoter::from_params(engine_types::StrategyId(0), &config).unwrap();
+    let mut h = Harness::new(Box::new(quoter));
+    h.ctx.set_rule("BTCUSDT", RULE);
+    h
+}
+
+fn placed_orders(actions: Vec<Action>) -> Vec<(Side, f64, f64)> {
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            Action::Place(intent) => match intent.kind {
+                OrderKind::Limit { px, .. } => Some((intent.side, px, intent.qty)),
+                OrderKind::Market => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn side_px(orders: &[(Side, f64, f64)], side: Side) -> f64 {
+    orders
+        .iter()
+        .find(|order| order.0 == side)
+        .map(|order| order.1)
+        .unwrap_or_else(|| panic!("no {side:?} in {orders:?}"))
+}
+
+#[test]
+fn the_live_quoter_asks_for_l50_and_aggressor_trades() {
+    let h = micro_bench("maker_fee_bps = 2.0");
+    let subscriptions = h.strategy.subscriptions();
+    assert_eq!(subscriptions.len(), 2);
+    assert!(subscriptions.iter().any(|sub| sub.feed == Feed::Depth));
+    assert!(subscriptions.iter().any(|sub| sub.feed == Feed::Trades));
+    assert!(!subscriptions.iter().any(|sub| sub.feed == Feed::Quote));
+}
+
+#[test]
+fn a_disabled_quoter_drains_once_instead_of_leaving_inventory_behind() {
+    let mut h = micro_bench("quote_enabled = false");
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let exits: Vec<_> = h
+        .drain_actions()
+        .into_iter()
+        .filter_map(|action| match action {
+            Action::Place(intent) => Some(intent),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(exits.len(), 1, "one outstanding drain, not one per book update");
+    assert!(exits[0].reduce_only);
+    assert_eq!(exits[0].side, Side::Sell);
+    assert_eq!(exits[0].qty, 0.05);
+    assert!(matches!(exits[0].kind, OrderKind::Market));
+    assert!(exits[0].stop.is_none());
+}
+
+#[test]
+fn buy_aggressors_move_both_quotes_up() {
+    let mut h = micro_bench("trade_lean_bps = 8.0");
+    h.depth("BTCUSDT", &[(99.9, 1.0), (99.8, 1.0)], &[(100.1, 1.0), (100.2, 1.0)]);
+    let before = placed_orders(h.drain_actions());
+
+    h.ctx.set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 250_000_000);
+    h.trades("BTCUSDT", 10.0, 0.0, 100.1);
+    let after = placed_orders(h.drain_actions());
+    assert!(side_px(&after, Side::Buy) > side_px(&before, Side::Buy));
+    assert!(side_px(&after, Side::Sell) > side_px(&before, Side::Sell));
+}
+
+#[test]
+fn short_horizon_movement_widens_the_market() {
+    let mut h = micro_bench("volatility_multiplier = 2.0");
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let calm = placed_orders(h.drain_actions());
+    let calm_width = side_px(&calm, Side::Sell) - side_px(&calm, Side::Buy);
+
+    h.ctx.set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 250_000_000);
+    h.depth("BTCUSDT", &[(100.9, 1.0)], &[(101.1, 1.0)]);
+    let moving = placed_orders(h.drain_actions());
+    let moving_width = side_px(&moving, Side::Sell) - side_px(&moving, Side::Buy);
+    assert!(moving_width > calm_width * 5.0, "{moving_width} vs {calm_width}");
+}
+
+#[test]
+fn quote_and_position_size_can_be_constant_money_across_names() {
+    let mut h = micro_bench("maker_fee_bps = 2.0");
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let orders = placed_orders(h.drain_actions());
+    for (_, _, qty) in orders {
+        assert!((qty - 0.1).abs() < 1e-12, "10 USDT at 100 should be 0.1 base");
+    }
+}
+
+#[test]
+fn a_good_queue_needs_more_edge_before_it_is_abandoned() {
+    let mut h = micro_bench("queue_reprice_edge_bps = 4.0");
+    seed_bid(&mut h, "eng-bid", "BTCUSDT", 99.93);
+    h.depth("BTCUSDT", &[(99.93, 0.1)], &[(100.07, 0.1)]);
+    assert_eq!(amend_count(&mut h), 0, "two bps is not enough to discard this queue");
+}
+
+#[test]
+fn the_authoritative_fill_replaces_the_fast_inventory_instead_of_adding_to_it() {
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    h.quote("BTCUSDT", 99.0, 101.0);
+    let _ = h.drain_actions();
+    h.fast_fill("exec-1", "eng-bid", "BTCUSDT", Side::Buy, 0.15, 100.0);
+    let _ = h.drain_actions();
+    h.maker_fill_with_exec("exec-1", "eng-bid", "BTCUSDT", Side::Buy, 0.15, 100.0);
+    let orders = placed_orders(h.drain_actions());
+    assert!(orders.iter().any(|order| order.0 == Side::Buy));
+    assert!(orders.iter().any(|order| order.0 == Side::Sell));
 }

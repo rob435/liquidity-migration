@@ -109,6 +109,14 @@ impl StrategyCtx for Ctx<'_> {
         self.market.quote(symbol)
     }
 
+    fn depth(&self, symbol: SymbolId) -> &engine_types::Depth {
+        self.market.depth(symbol)
+    }
+
+    fn trade_flow(&self, symbol: SymbolId) -> &engine_types::TradeFlow {
+        self.market.trade_flow(symbol)
+    }
+
     fn ticker(&self, symbol: SymbolId) -> &Ticker {
         self.market.ticker(symbol)
     }

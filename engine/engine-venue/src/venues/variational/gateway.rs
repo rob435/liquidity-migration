@@ -100,6 +100,7 @@ impl VariationalGateway {
     }
 }
 
+#[engine_types::async_trait]
 impl VenueGateway for VariationalGateway {
     fn caps(&self) -> VenueCaps {
         // Every one false, and none of them a guess: there is no endpoint

@@ -14,5 +14,5 @@ pub mod plug;
 #[cfg(test)]
 mod plug_tests;
 
-pub use plan::{QuoteRules, QuoteStep, Resting, plan_quotes};
+pub use plan::{plan_quotes, plan_quotes_at, QuoteRules, QuoteStep, Resting};
 pub use plug::Quoter;

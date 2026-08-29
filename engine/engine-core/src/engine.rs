@@ -1,14 +1,10 @@
 //! The loop.
 //!
-//! One process, one thread, one loop. The runtime is tokio's
-//! `new_current_thread`, and nothing on the hot path is spawned, sent to a
-//! pool, or shared with another thread: a market message is parsed by the
-//! feed, applied to the shared picture, handed to the strategies that asked
-//! for it, and the intent that comes back is logged, judged, made durable and
-//! sent — all on the same thread, so there is no lock and no hand-off to
-//! account for in the latency numbers. The only threads in the whole binary
-//! belong to the bench's pretend venue, which stands in for a machine that is
-//! genuinely somewhere else.
+//! One process and one deterministic state owner. Market data, strategy
+//! decisions, risk and the durable ledger stay on the current-thread runtime.
+//! A bounded actor owns venue I/O, so a slow API round trip cannot stop market
+//! events, private fills or timers. Every queue and resume boundary is stamped
+//! into the latency ledger.
 //!
 //! What the loop waits on, all in one `select!`:
 //!
@@ -31,7 +27,7 @@
 //! leaves an order the log knows about and no reply for it, which is exactly
 //! what `engine replay` shows as in flight.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::time::Duration;
 
@@ -57,6 +53,7 @@ use crate::reconcile;
 use crate::routing::Routing;
 use crate::targets::TargetBooks;
 use crate::trades::Trades;
+use crate::venue_runtime::{MutationCompletion, VenueClient};
 use crate::working::{self, WorkingOrders};
 
 /// A strategy that emits from every order update it hears could keep the loop
@@ -119,6 +116,7 @@ fn newest_stamp_ms(replayed: &[WalRecord]) -> Option<i64> {
                 update: OrderUpdate::Fill { venue_ts_ms, .. },
             } => Some(*venue_ts_ms),
             WalRecord::RecoveredFill { venue_ts_ms, .. } => Some(*venue_ts_ms),
+            WalRecord::FastExecution { venue_ts_ms, .. } => Some(*venue_ts_ms),
             WalRecord::Markout { fill_ts_ms, .. } => Some(*fill_ts_ms),
             _ => None,
         };
@@ -183,6 +181,29 @@ struct PreparedOrder {
     origin_ns: u64,
 }
 
+enum PendingMutation {
+    Orders {
+        requests: Vec<OrderRequest>,
+        timings: Vec<(u64, u64)>,
+        queued_ns: u64,
+    },
+    Cancels {
+        requests: Vec<(SymbolId, String)>,
+        queued_ns: u64,
+    },
+    Amend {
+        symbol: SymbolId,
+        client_order_id: String,
+        spec: AmendSpec,
+        existing: crate::inflight::OrderRec,
+        amended_intent: Box<Intent>,
+        remaining_qty: f64,
+        old_px: f64,
+        tif: TimeInForce,
+        queued_ns: u64,
+    },
+}
+
 /// One strategy wake suspended at a clean venue-mutation boundary.
 ///
 /// The counters stay live across the cooperative turn so returning to the
@@ -211,7 +232,16 @@ enum HaltCancelState {
 pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     pub wal: W,
     pub risk: R,
-    pub venue: V,
+    venue: VenueClient,
+    venue_completions: tokio::sync::mpsc::Receiver<MutationCompletion>,
+    pending_mutations: HashMap<u64, PendingMutation>,
+    busy_symbols: HashMap<SymbolId, usize>,
+    deferred_actions: HashMap<SymbolId, VecDeque<(Action, u64)>>,
+    /// Actions released by a completed symbol mutation, retaining the market
+    /// wake that produced each one. The per-wake flood budget and latency
+    /// origin therefore survive a slow venue round trip.
+    ready_actions: VecDeque<(Action, u64)>,
+    _venue: std::marker::PhantomData<V>,
     strategies: Vec<Box<dyn Strategy>>,
     names: Vec<String>,
     market: MarketState,
@@ -702,10 +732,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
 
         let now = clock::now_ns();
+        let (venue, venue_completions) = VenueClient::spawn(venue);
         let mut engine = Engine {
             wal,
             risk,
             venue,
+            venue_completions,
+            pending_mutations: HashMap::new(),
+            busy_symbols: HashMap::new(),
+            deferred_actions: HashMap::new(),
+            ready_actions: VecDeque::new(),
+            _venue: std::marker::PhantomData,
             strategies,
             names,
             market,
@@ -1129,6 +1166,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             tokio::time::sleep(Duration::from_millis(1)).await;
                         }
                     },
+                    completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
+                        let completion = completion.ok_or_else(|| EngineError::State(
+                            "venue task stopped with mutations still outstanding".to_string()
+                        ))?;
+                        self.take_completion_turn(completion, order_feed).await?;
+                    },
                     _ = flush_tick.tick() => self.on_tick().await?,
                     _ = tokio::time::sleep(timer_wait.unwrap_or_default()), if timer_wait.is_some() => {
                         self.on_timers().await?;
@@ -1142,6 +1185,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     event = market_feed.next_event() => match event {
                         Ok(event) => self.on_market(event).await?,
                         Err(engine_types::FeedError::Closed) => {
+                            self.settle_after_market_close(order_feed).await?;
                             stopped_by = StopReason::FeedClosed;
                             break;
                         }
@@ -1238,9 +1282,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                 },
+                completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
+                    let completion = completion.ok_or_else(|| EngineError::State(
+                        "venue task stopped with mutations still outstanding".to_string()
+                    ))?;
+                    self.take_completion_turn(completion, order_feed).await?;
+                },
                 event = market_feed.next_event() => match event {
                     Ok(event) => self.on_market(event).await?,
                     Err(engine_types::FeedError::Closed) => {
+                        self.settle_after_market_close(order_feed).await?;
                         stopped_by = StopReason::FeedClosed;
                         break;
                     }
@@ -1284,10 +1335,88 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         })
     }
 
+    async fn take_completion_turn<O: OrderFeed>(
+        &mut self,
+        completion: MutationCompletion,
+        order_feed: &mut O,
+    ) -> Result<(), EngineError> {
+        self.take_venue_completion(completion).await?;
+        let private_update = tokio::select! {
+            biased;
+            update = order_feed.next_update() => Some(update),
+            _ = std::future::ready(()) => None,
+        };
+        match private_update {
+            Some(Ok(update)) => self.take_update(update).await?,
+            Some(Err(engine_types::FeedError::Closed)) => {
+                return Err(EngineError::State(
+                    "private order feed closed while a venue mutation completed".to_string(),
+                ));
+            }
+            Some(Err(error)) => {
+                self.invalidate_private_stream()?;
+                tracing::warn!(error = %error, "order feed hiccup after venue mutation");
+            }
+            None => {}
+        }
+        self.drain(clock::now_ns()).await
+    }
+
+    async fn settle_after_market_close<O: OrderFeed>(
+        &mut self,
+        order_feed: &mut O,
+    ) -> Result<(), EngineError> {
+        while !self.pending_mutations.is_empty() {
+            let completion = tokio::time::timeout(
+                Duration::from_secs(10),
+                self.venue_completions.recv(),
+            )
+            .await
+            .map_err(|_| {
+                EngineError::State(format!(
+                    "market feed closed with {} venue mutations still outstanding",
+                    self.pending_mutations.len()
+                ))
+            })?
+            .ok_or_else(|| {
+                EngineError::State(
+                    "venue task stopped while the market-close tail was draining".to_string(),
+                )
+            })?;
+            self.take_completion_turn(completion, order_feed).await?;
+        }
+        Ok(())
+    }
+
     /// Last ledger line on the way out, and the whole tail forced to disk:
     /// a graceful stop that leaves its closing updates in the page cache
     /// tells the next boot's audit a lie.
     pub async fn finish(&mut self) -> Result<(), EngineError> {
+        while !self.pending_mutations.is_empty() {
+            let completion = tokio::time::timeout(
+                Duration::from_secs(10),
+                self.venue_completions.recv(),
+            )
+            .await
+            .map_err(|_| {
+                EngineError::State(format!(
+                    "graceful stop timed out with {} venue mutations outstanding",
+                    self.pending_mutations.len()
+                ))
+            })?
+            .ok_or_else(|| {
+                EngineError::State(
+                    "venue task stopped during graceful mutation drain".to_string(),
+                )
+            })?;
+            self.take_venue_completion(completion).await?;
+            self.drain(clock::now_ns()).await?;
+        }
+        if !self.deferred_actions.is_empty() || !self.ready_actions.is_empty() {
+            return Err(EngineError::State(
+                "graceful stop found deferred actions without a live venue mutation".to_string(),
+            ));
+        }
         let now = clock::now_ns();
         let record = self.ledger.record_for_wal(now);
         self.wal.append(&record)?;
@@ -1303,6 +1432,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             MarketEvent::Quote { symbol, quote } if quote.bid_px > 0.0 && quote.ask_px > 0.0 => {
                 self.risk
                     .observe_price(symbol, (quote.bid_px + quote.ask_px) / 2.0);
+            }
+            MarketEvent::Depth { symbol, depth }
+                if depth.best_bid().is_some() && depth.best_ask().is_some() =>
+            {
+                let quote = depth.quote();
+                self.risk
+                    .observe_price(symbol, (quote.bid_px + quote.ask_px) / 2.0);
+            }
+            MarketEvent::Trades { symbol, trades } if trades.last_px > 0.0 => {
+                self.risk.observe_price(symbol, trades.last_px);
             }
             MarketEvent::Ticker { symbol, ticker } if ticker.last_px > 0.0 => {
                 self.risk.observe_price(symbol, ticker.last_px);
@@ -1349,6 +1488,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             match event {
                 MarketEvent::Quote { symbol, .. } => {
                     for sid in routing.quote_listeners(symbol) {
+                        feed(*sid);
+                    }
+                }
+                MarketEvent::Depth { symbol, .. } => {
+                    for sid in routing.depth_listeners(symbol) {
+                        feed(*sid);
+                    }
+                }
+                MarketEvent::Trades { symbol, .. } => {
+                    for sid in routing.trade_listeners(symbol) {
                         feed(*sid);
                     }
                 }
@@ -1441,7 +1590,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for wanted in wanted {
             let name = wanted.name;
             let core_id = self.market.add_symbol(&name);
-            let venue_id = self.venue.add_symbol(&name);
+            let venue_id = self.venue.add_symbol_async(&name).await?;
             let mut feeds = Vec::new();
             for (_, feed) in &wanted.listeners {
                 if !feeds.contains(feed) {
@@ -2066,7 +2215,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 orders_sent: *orders_sent,
                 strategies: names,
                 decide: ledger.quantiles(Segment::Decide),
+                durable: ledger.quantiles(Segment::Durable),
                 wire: ledger.quantiles(Segment::Wire),
+                ack: ledger.quantiles(Segment::Ack),
+                dispatch_queue: ledger.quantiles(Segment::DispatchQueue),
+                venue_task: ledger.quantiles(Segment::VenueTask),
+                core_resume: ledger.quantiles(Segment::CoreResume),
+                end_to_end: ledger.quantiles(Segment::EndToEnd),
                 equity_usdt: account.equity_usdt,
                 available_usdt: account.available_usdt,
                 // The age, not the stamp: this engine's clock is monotonic
@@ -2087,11 +2242,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             handled: 0,
             adding_dropped: 0,
         });
-        let origin_ns = progress.origin_ns;
         let mut placements = Vec::new();
         let mut cancellations = Vec::new();
         let mut hard_cap_hit = false;
         loop {
+            if self.pending.is_empty() {
+                self.load_ready_wake(&mut progress);
+            }
             while let Some(action) = self.pending.pop_front() {
                 progress.handled += 1;
                 // Past the cap, whatever adds risk is dropped but whatever sheds
@@ -2122,13 +2279,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     break;
                 }
 
+                let symbol = action.symbol();
+                if self.busy_symbols.contains_key(&symbol) {
+                    self.defer_action(action, progress.origin_ns);
+                    continue;
+                }
+
                 // Do not cross a placement boundary with the next verb
                 // already consumed. If a real send happened, put this action
                 // back at the front and let the run loop poll account-safety
                 // inputs before resuming the same FIFO wake.
                 if !matches!(&action, Action::Place(_)) && !placements.is_empty() {
                     let sent = self
-                        .process_intents(std::mem::take(&mut placements), origin_ns)
+                        .process_intents(std::mem::take(&mut placements), progress.origin_ns)
                         .await?;
                     if sent {
                         progress.handled -= 1;
@@ -2157,7 +2320,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         placements.push(intent);
                         if placements.len() == MAX_ORDERS_PER_BATCH {
                             let sent = self
-                                .process_intents(std::mem::take(&mut placements), origin_ns)
+                                .process_intents(
+                                    std::mem::take(&mut placements),
+                                    progress.origin_ns,
+                                )
                                 .await?;
                             if sent && !self.pending.is_empty() {
                                 return self.pause_drain(progress);
@@ -2184,7 +2350,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         spec,
                     } => {
                         let taken = self
-                            .process_amend(symbol, &client_order_id, spec, origin_ns)
+                            .process_amend(
+                                symbol,
+                                &client_order_id,
+                                spec,
+                                progress.origin_ns,
+                            )
                             .await?;
                         self.working
                             .amended(&client_order_id, spec.px, taken, clock::now_ns());
@@ -2201,7 +2372,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
             }
             let sent = self
-                .process_intents(std::mem::take(&mut placements), origin_ns)
+                .process_intents(std::mem::take(&mut placements), progress.origin_ns)
                 .await?;
             if sent && !hard_cap_hit && !self.pending.is_empty() {
                 return self.pause_drain(progress);
@@ -2211,6 +2382,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .await?;
             if cancelled && !hard_cap_hit && !self.pending.is_empty() {
                 return self.pause_drain(progress);
+            }
+            if !hard_cap_hit && self.pending.is_empty() && !self.ready_actions.is_empty() {
+                self.load_ready_wake(&mut progress);
+                continue;
             }
             if hard_cap_hit || self.pending.is_empty() {
                 break;
@@ -2239,6 +2414,117 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     fn pause_drain(&mut self, progress: DrainProgress) -> Result<(), EngineError> {
         self.drain_progress = Some(progress);
         Ok(())
+    }
+
+    fn defer_action(&mut self, action: Action, origin_ns: u64) {
+        let queue = self.deferred_actions.entry(action.symbol()).or_default();
+        match &action {
+            Action::Amend {
+                client_order_id, ..
+            } => {
+                if queue.iter().any(|(queued, _)| {
+                    matches!(queued, Action::Cancel { client_order_id: queued_id, .. } if queued_id == client_order_id)
+                }) {
+                    return;
+                }
+                queue.retain(|(queued, _)| {
+                    !matches!(queued, Action::Amend { client_order_id: queued_id, .. } if queued_id == client_order_id)
+                });
+            }
+            Action::Cancel {
+                client_order_id, ..
+            } => {
+                if queue.iter().any(|(queued, _)| {
+                    matches!(queued, Action::Cancel { client_order_id: queued_id, .. } if queued_id == client_order_id)
+                }) {
+                    return;
+                }
+                queue.retain(|(queued, _)| {
+                    !matches!(queued, Action::Amend { client_order_id: queued_id, .. } if queued_id == client_order_id)
+                });
+            }
+            Action::SetStop { .. } => {
+                queue.retain(|(queued, _)| !matches!(queued, Action::SetStop { .. }));
+            }
+            Action::Place(intent)
+                if !intent.reduce_only
+                    && intent.tag == "quote"
+                    && matches!(
+                        intent.kind,
+                        OrderKind::Limit {
+                            tif: TimeInForce::PostOnly,
+                            ..
+                        }
+                    ) =>
+            {
+                queue.retain(|(queued, _)| {
+                    !matches!(
+                        queued,
+                        Action::Place(older)
+                            if !older.reduce_only
+                                && older.strategy == intent.strategy
+                                && older.side == intent.side
+                                && older.tag == intent.tag
+                                && matches!(
+                                    older.kind,
+                                    OrderKind::Limit {
+                                        tif: TimeInForce::PostOnly,
+                                        ..
+                                    }
+                                )
+                    )
+                });
+            }
+            Action::Place(_) => {}
+        }
+        queue.push_back((action, origin_ns));
+    }
+
+    fn load_ready_wake(&mut self, progress: &mut DrainProgress) {
+        let Some((action, origin_ns)) = self.ready_actions.pop_front() else {
+            return;
+        };
+        *progress = DrainProgress {
+            origin_ns,
+            handled: 0,
+            adding_dropped: 0,
+        };
+        self.pending.push_back(action);
+        while self
+            .ready_actions
+            .front()
+            .is_some_and(|(_, queued_origin)| *queued_origin == origin_ns)
+        {
+            let (action, _) = self.ready_actions.pop_front().expect("front checked above");
+            self.pending.push_back(action);
+        }
+    }
+
+    fn mark_symbols_busy(&mut self, symbols: impl IntoIterator<Item = SymbolId>) {
+        for symbol in symbols {
+            *self.busy_symbols.entry(symbol).or_default() += 1;
+        }
+    }
+
+    fn release_symbols(&mut self, symbols: impl IntoIterator<Item = SymbolId>) {
+        let mut ready = Vec::new();
+        for symbol in symbols {
+            let Some(count) = self.busy_symbols.get_mut(&symbol) else {
+                continue;
+            };
+            *count -= 1;
+            if *count == 0 {
+                self.busy_symbols.remove(&symbol);
+                ready.push(symbol);
+            }
+        }
+        for symbol in ready {
+            if let Some(mut queued) = self.deferred_actions.remove(&symbol) {
+                while let Some((action, origin_ns)) = queued.pop_front() {
+                    self.ready_actions.push_back((action, origin_ns));
+                }
+            }
+        }
     }
 
     /// Judge and reserve one sibling. The caller makes every accepted sibling
@@ -2687,70 +2973,437 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             timings.push((order.decided_ns, order.origin_ns));
         }
 
-        let send_started_ns = clock::now_ns();
-        let replies = self.venue.send_orders(&requests).await;
-        let returned_ns = clock::now_ns();
-        if replies.len() != requests.len() {
-            self.wal.append(&WalRecord::Note {
-                source: "engine".into(),
-                text: format!(
-                    "venue returned {} answers for {} submitted orders; missing answers remain in flight",
-                    replies.len(),
-                    requests.len()
-                ),
-            })?;
-        }
+        let queued_ns = clock::now_ns();
+        let command_id = self.venue.dispatch_orders(requests.clone())?;
+        self.mark_symbols_busy(requests.iter().map(|request| request.symbol));
+        self.pending_mutations.insert(
+            command_id,
+            PendingMutation::Orders {
+                requests,
+                timings,
+                queued_ns,
+            },
+        );
+        Ok(true)
+    }
 
-        let mut replies = replies.into_iter();
-        for (request, (decided_ns, origin_ns)) in requests.into_iter().zip(timings) {
-            self.ledger
-                .record(Segment::Wire, returned_ns.saturating_sub(decided_ns));
-            let reply = replies.next().unwrap_or_else(|| {
-                Err(VenueError::BadReply(
-                    "the venue omitted this order from its batch reply".to_string(),
-                ))
-            });
-            let update = match reply {
-                Ok(ack) => {
-                    let ack_ns = if ack.ack_ns > send_started_ns {
-                        ack.ack_ns
-                    } else {
-                        returned_ns
-                    };
-                    self.ledger
-                        .record(Segment::Ack, ack_ns.saturating_sub(send_started_ns));
-                    Some(OrderUpdate::Ack(ack))
-                }
-                Err(VenueError::Rejected { code, message }) => Some(OrderUpdate::Reject {
-                    client_order_id: request.client_order_id.clone(),
-                    code,
-                    reason: message,
-                }),
-                Err(VenueError::BadRequest(detail)) => Some(OrderUpdate::Reject {
-                    client_order_id: request.client_order_id.clone(),
-                    code: 0,
-                    reason: format!("never sent: {detail}"),
-                }),
-                Err(other) => {
-                    tracing::error!(id = %request.client_order_id, error = %other, "send failed with no answer");
+    async fn take_venue_completion(
+        &mut self,
+        completion: MutationCompletion,
+    ) -> Result<(), EngineError> {
+        let command_id = match &completion {
+            MutationCompletion::Orders { command_id, .. }
+            | MutationCompletion::Cancels { command_id, .. }
+            | MutationCompletion::Amend { command_id, .. } => *command_id,
+        };
+        let pending = self.pending_mutations.remove(&command_id).ok_or_else(|| {
+            EngineError::State(format!(
+                "venue task returned unknown mutation command {command_id}"
+            ))
+        })?;
+
+        match (pending, completion) {
+            (
+                PendingMutation::Orders {
+                    requests,
+                    timings,
+                    queued_ns,
+                },
+                MutationCompletion::Orders {
+                    started_ns,
+                    completed_ns,
+                    replies,
+                    ..
+                },
+            ) => {
+                if replies.len() != requests.len() {
                     self.wal.append(&WalRecord::Note {
                         source: "engine".into(),
                         text: format!(
-                            "{} sent with no answer ({other}); still counted as in flight",
-                            request.client_order_id
+                            "venue returned {} answers for {} submitted orders; missing answers remain in flight",
+                            replies.len(),
+                            requests.len()
                         ),
                     })?;
-                    None
                 }
-            };
-
-            self.ledger
-                .record(Segment::EndToEnd, clock::now_ns().saturating_sub(origin_ns));
-            if let Some(update) = update {
-                self.take_update(update).await?;
+                tracing::debug!(
+                    command_id,
+                    queue_ns = started_ns.saturating_sub(queued_ns),
+                    venue_ns = completed_ns.saturating_sub(started_ns),
+                    "placement command completed"
+                );
+                let symbols: Vec<_> = requests.iter().map(|request| request.symbol).collect();
+                let mut replies = replies.into_iter();
+                for (request, (decided_ns, origin_ns)) in requests.into_iter().zip(timings) {
+                    let core_handled_ns = clock::now_ns();
+                    self.ledger
+                        .record(Segment::Wire, completed_ns.saturating_sub(decided_ns));
+                    self.ledger.record(
+                        Segment::DispatchQueue,
+                        started_ns.saturating_sub(queued_ns),
+                    );
+                    self.ledger.record(
+                        Segment::VenueTask,
+                        completed_ns.saturating_sub(started_ns),
+                    );
+                    self.ledger.record(
+                        Segment::CoreResume,
+                        core_handled_ns.saturating_sub(completed_ns),
+                    );
+                    let reply = replies.next().unwrap_or_else(|| {
+                        Err(VenueError::BadReply(
+                            "the venue omitted this order from its batch reply".to_string(),
+                        ))
+                    });
+                    let (socket_write_ns, ack_timing_ns) = match &reply {
+                        Ok(ack) => (
+                            (ack.sent_ns > 0).then_some(ack.sent_ns),
+                            Some(if ack.ack_ns > started_ns {
+                                ack.ack_ns
+                            } else {
+                                completed_ns
+                            }),
+                        ),
+                        Err(_) => (None, None),
+                    };
+                    self.wal.append(&WalRecord::VenueTiming {
+                        command_id,
+                        operation: "place".to_string(),
+                        client_order_id: request.client_order_id.clone(),
+                        queued_ns,
+                        task_started_ns: started_ns,
+                        socket_write_ns,
+                        ack_ns: ack_timing_ns,
+                        task_completed_ns: completed_ns,
+                        core_handled_ns,
+                    })?;
+                    let update = match reply {
+                        Ok(ack) => {
+                            let ack_ns = if ack.ack_ns > started_ns {
+                                ack.ack_ns
+                            } else {
+                                completed_ns
+                            };
+                            if ack.sent_ns > 0 {
+                                self.ledger
+                                    .record(Segment::Ack, ack_ns.saturating_sub(ack.sent_ns));
+                            }
+                            Some(OrderUpdate::Ack(ack))
+                        }
+                        Err(VenueError::Rejected { code, message }) => {
+                            Some(OrderUpdate::Reject {
+                                client_order_id: request.client_order_id.clone(),
+                                code,
+                                reason: message,
+                            })
+                        }
+                        Err(VenueError::BadRequest(detail)) => Some(OrderUpdate::Reject {
+                            client_order_id: request.client_order_id.clone(),
+                            code: 0,
+                            reason: format!("never sent: {detail}"),
+                        }),
+                        Err(other) => {
+                            tracing::error!(id = %request.client_order_id, error = %other, "send failed with no answer");
+                            self.wal.append(&WalRecord::Note {
+                                source: "engine".into(),
+                                text: format!(
+                                    "{} sent with no answer ({other}); still counted as in flight",
+                                    request.client_order_id
+                                ),
+                            })?;
+                            None
+                        }
+                    };
+                    self.ledger.record(
+                        Segment::EndToEnd,
+                        clock::now_ns().saturating_sub(origin_ns),
+                    );
+                    if let Some(update) = update {
+                        self.take_update(update).await?;
+                    }
+                }
+                self.release_symbols(symbols);
+            }
+            (
+                PendingMutation::Cancels {
+                    requests,
+                    queued_ns,
+                },
+                MutationCompletion::Cancels {
+                    started_ns,
+                    completed_ns,
+                    timing,
+                    replies,
+                    ..
+                },
+            ) => {
+                if replies.len() != requests.len() {
+                    self.wal.append(&WalRecord::Note {
+                        source: "engine".into(),
+                        text: format!(
+                            "venue returned {} answers for {} submitted cancels; missing answers remain in flight",
+                            replies.len(),
+                            requests.len()
+                        ),
+                    })?;
+                }
+                tracing::debug!(
+                    command_id,
+                    venue_ns = completed_ns.saturating_sub(started_ns),
+                    "cancel command completed"
+                );
+                let symbols: Vec<_> = requests.iter().map(|(symbol, _)| *symbol).collect();
+                if let Some(mark) = timing {
+                    self.ledger
+                        .record(Segment::Ack, mark.ack_ns.saturating_sub(mark.sent_ns));
+                }
+                let mut replies = replies.into_iter();
+                let mut halt_failure = None;
+                let accepted_deadline =
+                    clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
+                for (_, client_order_id) in requests {
+                    let core_handled_ns = clock::now_ns();
+                    self.ledger.record(
+                        Segment::DispatchQueue,
+                        started_ns.saturating_sub(queued_ns),
+                    );
+                    self.ledger.record(
+                        Segment::VenueTask,
+                        completed_ns.saturating_sub(started_ns),
+                    );
+                    self.ledger.record(
+                        Segment::CoreResume,
+                        core_handled_ns.saturating_sub(completed_ns),
+                    );
+                    self.wal.append(&WalRecord::VenueTiming {
+                        command_id,
+                        operation: "cancel".to_string(),
+                        client_order_id: client_order_id.clone(),
+                        queued_ns,
+                        task_started_ns: started_ns,
+                        socket_write_ns: timing.map(|mark| mark.sent_ns),
+                        ack_ns: timing.map(|mark| mark.ack_ns),
+                        task_completed_ns: completed_ns,
+                        core_handled_ns,
+                    })?;
+                    let reply = replies.next().unwrap_or_else(|| {
+                        Err(VenueError::BadReply(
+                            "the venue omitted this order from its cancel-batch reply".to_string(),
+                        ))
+                    });
+                    let taken = match reply {
+                        Ok(()) => true,
+                        Err(VenueError::BadRequest(detail)) => {
+                            tracing::error!(id = client_order_id, detail, "cancel never sent");
+                            self.wal.append(&WalRecord::Note {
+                                source: "engine".into(),
+                                text: format!("cancel of {client_order_id} never sent: {detail}"),
+                            })?;
+                            if self.halt_cancels.contains_key(&client_order_id) {
+                                halt_failure = Some(format!("{client_order_id}: {detail}"));
+                            }
+                            false
+                        }
+                        Err(VenueError::Rejected { code, message }) => {
+                            tracing::error!(id = client_order_id, code, message, "cancel rejected");
+                            self.wal.append(&WalRecord::Note {
+                                source: "engine".into(),
+                                text: format!(
+                                    "cancel of {client_order_id} rejected ({code}: {message}); the order is still counted as working"
+                                ),
+                            })?;
+                            if self.halt_cancels.contains_key(&client_order_id) {
+                                halt_failure =
+                                    Some(format!("{client_order_id}: {code}: {message}"));
+                            }
+                            false
+                        }
+                        Err(other) => {
+                            tracing::error!(id = client_order_id, error = %other, "cancel failed with no answer");
+                            self.wal.append(&WalRecord::Note {
+                                source: "engine".into(),
+                                text: format!(
+                                    "cancel of {client_order_id} sent with no answer ({other}); the order is still counted as working"
+                                ),
+                            })?;
+                            if self.halt_cancels.contains_key(&client_order_id) {
+                                halt_failure = Some(format!("{client_order_id}: {other}"));
+                            }
+                            false
+                        }
+                    };
+                    self.working.cancelled(&client_order_id, taken);
+                    if taken {
+                        if let Some(state) = self.halt_cancels.get_mut(&client_order_id) {
+                            *state = HaltCancelState::AwaitingPrivate {
+                                deadline_ns: accepted_deadline,
+                            };
+                        }
+                    }
+                }
+                self.release_symbols(symbols);
+                if let Some(detail) = halt_failure {
+                    return Err(EngineError::State(format!(
+                        "account-level halt left at least one opening cancel unconfirmed ({detail}); restarting for venue reconciliation"
+                    )));
+                }
+            }
+            (
+                PendingMutation::Amend {
+                    symbol,
+                    client_order_id,
+                    spec,
+                    existing,
+                    amended_intent,
+                    remaining_qty,
+                    old_px,
+                    tif,
+                    queued_ns,
+                },
+                MutationCompletion::Amend {
+                    started_ns,
+                    completed_ns,
+                    timing,
+                    reply,
+                    ..
+                },
+            ) => {
+                let core_handled_ns = clock::now_ns();
+                self.ledger.record(
+                    Segment::DispatchQueue,
+                    started_ns.saturating_sub(queued_ns),
+                );
+                self.ledger.record(
+                    Segment::VenueTask,
+                    completed_ns.saturating_sub(started_ns),
+                );
+                self.ledger.record(
+                    Segment::CoreResume,
+                    core_handled_ns.saturating_sub(completed_ns),
+                );
+                if let Some(mark) = timing {
+                    self.ledger
+                        .record(Segment::Ack, mark.ack_ns.saturating_sub(mark.sent_ns));
+                }
+                self.wal.append(&WalRecord::VenueTiming {
+                    command_id,
+                    operation: "amend".to_string(),
+                    client_order_id: client_order_id.clone(),
+                    queued_ns,
+                    task_started_ns: started_ns,
+                    socket_write_ns: timing.map(|mark| mark.sent_ns),
+                    ack_ns: timing.map(|mark| mark.ack_ns),
+                    task_completed_ns: completed_ns,
+                    core_handled_ns,
+                })?;
+                tracing::debug!(
+                    command_id,
+                    venue_ns = completed_ns.saturating_sub(started_ns),
+                    "amend command completed"
+                );
+                match reply {
+                    Ok(()) => {
+                        self.wal.append(&WalRecord::Note {
+                            source: "engine".into(),
+                            text: format!(
+                                "amend of {client_order_id} was accepted asynchronously; its price remains ambiguous and cancellation is queued"
+                            ),
+                        })?;
+                        self.pending.push_front(Action::Cancel {
+                            symbol,
+                            client_order_id: client_order_id.clone(),
+                        });
+                    }
+                    Err(VenueError::BadRequest(detail)) => {
+                        tracing::error!(id = client_order_id, detail, "amend never sent");
+                        self.resolve_failed_amend(
+                            &client_order_id,
+                            &existing,
+                            &amended_intent,
+                            remaining_qty,
+                            old_px,
+                            tif,
+                        )?;
+                        self.wal.append(&WalRecord::Note {
+                            source: "engine".into(),
+                            text: format!("amend of {client_order_id} never sent: {detail}"),
+                        })?;
+                    }
+                    Err(VenueError::Rejected { code, message }) => {
+                        self.resolve_failed_amend(
+                            &client_order_id,
+                            &existing,
+                            &amended_intent,
+                            remaining_qty,
+                            old_px,
+                            tif,
+                        )?;
+                        self.wal.append(&WalRecord::Note {
+                            source: "engine".into(),
+                            text: format!(
+                                "amend of {client_order_id} rejected by venue ({code}: {message})"
+                            ),
+                        })?;
+                    }
+                    Err(other) => {
+                        tracing::error!(id = client_order_id, error = %other, "amend failed with no answer");
+                        self.wal.append(&WalRecord::Note {
+                            source: "engine".into(),
+                            text: format!(
+                                "amend of {client_order_id} sent with no answer ({other}); its price and size are unconfirmed"
+                            ),
+                        })?;
+                        self.pending.push_front(Action::Cancel {
+                            symbol,
+                            client_order_id: client_order_id.clone(),
+                        });
+                    }
+                }
+                self.working
+                    .amended(&client_order_id, spec.px, false, clock::now_ns());
+                self.release_symbols([symbol]);
+            }
+            (pending, completion) => {
+                let pending_kind = match pending {
+                    PendingMutation::Orders { .. } => "orders",
+                    PendingMutation::Cancels { .. } => "cancels",
+                    PendingMutation::Amend { .. } => "amend",
+                };
+                let completion_kind = match completion {
+                    MutationCompletion::Orders { .. } => "orders",
+                    MutationCompletion::Cancels { .. } => "cancels",
+                    MutationCompletion::Amend { .. } => "amend",
+                };
+                return Err(EngineError::State(format!(
+                    "venue task returned {completion_kind} for pending {pending_kind} command {command_id}"
+                )));
             }
         }
-        Ok(true)
+        Ok(())
+    }
+
+    fn resolve_failed_amend(
+        &mut self,
+        client_order_id: &str,
+        existing: &crate::inflight::OrderRec,
+        amended_intent: &Intent,
+        remaining_qty: f64,
+        old_px: f64,
+        tif: TimeInForce,
+    ) -> Result<(), EngineError> {
+        let resolved = WalRecord::AmendResolved {
+            client_order_id: client_order_id.to_string(),
+            effective_px: old_px,
+        };
+        self.wal.append(&resolved)?;
+        self.orders.apply(&resolved);
+        if !existing.request.reduce_only {
+            let mut old = amended_intent.clone();
+            old.kind = OrderKind::Limit { px: old_px, tif };
+            self.risk
+                .register_order(client_order_id, &old, remaining_qty);
+        }
+        Ok(())
     }
 
     /// Pull a resting order.
@@ -2871,26 +3524,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if requests.is_empty() {
             return Ok(false);
         }
-        if let [(symbol, client_order_id)] = requests.as_slice() {
-            let symbol = *symbol;
-            let client_order_id = client_order_id.clone();
-            let taken = self
-                .process_cancel(symbol, &client_order_id, clock::now_ns())
-                .await?;
-            self.working.cancelled(&client_order_id, taken);
-            if let Some(state) = self.halt_cancels.get_mut(&client_order_id) {
-                if taken {
-                    *state = HaltCancelState::AwaitingPrivate {
-                        deadline_ns: clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS),
-                    };
-                } else {
-                    return Err(EngineError::State(format!(
-                        "account-level halt could not cancel opening order {client_order_id}; restarting for venue reconciliation"
-                    )));
-                }
-            }
-            return Ok(true);
-        }
         if requests.len() > MAX_CANCELS_PER_BATCH {
             return Err(EngineError::State(format!(
                 "cancel batch has {} orders; hard maximum is {MAX_CANCELS_PER_BATCH}",
@@ -2905,130 +3538,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 wire_ns,
             })?;
         }
-
-        let replies = self.venue.cancel_orders(&requests).await;
-        if replies.len() != requests.len() {
-            self.wal.append(&WalRecord::Note {
-                source: "engine".into(),
-                text: format!(
-                    "venue returned {} answers for {} submitted cancels; missing answers remain in flight",
-                    replies.len(),
-                    requests.len()
-                ),
-            })?;
-        }
-        let mut replies = replies.into_iter();
-        let mut halt_failure = None;
-        let accepted_deadline = clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
-        for (_, client_order_id) in requests {
-            let reply = replies.next().unwrap_or_else(|| {
-                Err(VenueError::BadReply(
-                    "the venue omitted this order from its cancel-batch reply".to_string(),
-                ))
-            });
-            let taken = match reply {
-                Ok(()) => true,
-                Err(VenueError::BadRequest(detail)) => {
-                    tracing::error!(id = client_order_id, detail, "cancel never sent");
-                    self.wal.append(&WalRecord::Note {
-                        source: "engine".into(),
-                        text: format!("cancel of {client_order_id} never sent: {detail}"),
-                    })?;
-                    if self.halt_cancels.contains_key(&client_order_id) {
-                        halt_failure = Some(format!("{client_order_id}: {detail}"));
-                    }
-                    false
-                }
-                Err(VenueError::Rejected { code, message }) => {
-                    tracing::error!(id = client_order_id, code, message, "cancel rejected");
-                    self.wal.append(&WalRecord::Note {
-                        source: "engine".into(),
-                        text: format!(
-                            "cancel of {client_order_id} rejected ({code}: {message}); the order is still counted as working"
-                        ),
-                    })?;
-                    if self.halt_cancels.contains_key(&client_order_id) {
-                        halt_failure = Some(format!("{client_order_id}: {code}: {message}"));
-                    }
-                    false
-                }
-                Err(other) => {
-                    tracing::error!(id = client_order_id, error = %other, "cancel failed with no answer");
-                    self.wal.append(&WalRecord::Note {
-                        source: "engine".into(),
-                        text: format!(
-                            "cancel of {client_order_id} sent with no answer ({other}); the order is still counted as working"
-                        ),
-                    })?;
-                    if self.halt_cancels.contains_key(&client_order_id) {
-                        halt_failure = Some(format!("{client_order_id}: {other}"));
-                    }
-                    false
-                }
-            };
-            self.working.cancelled(&client_order_id, taken);
-            if taken {
-                if let Some(state) = self.halt_cancels.get_mut(&client_order_id) {
-                    *state = HaltCancelState::AwaitingPrivate {
-                        deadline_ns: accepted_deadline,
-                    };
-                }
-            }
-        }
-        if let Some(detail) = halt_failure {
-            return Err(EngineError::State(format!(
-                "account-level halt left at least one opening cancel unconfirmed ({detail}); restarting for venue reconciliation"
-            )));
-        }
+        let queued_ns = clock::now_ns();
+        let command_id = self.venue.dispatch_cancels(requests.clone())?;
+        self.mark_symbols_busy(requests.iter().map(|(symbol, _)| *symbol));
+        self.pending_mutations
+            .insert(command_id, PendingMutation::Cancels { requests, queued_ns });
         Ok(true)
     }
 
-    async fn process_cancel(
-        &mut self,
-        symbol: SymbolId,
-        client_order_id: &str,
-        _origin_ns: u64,
-    ) -> Result<bool, EngineError> {
-        self.wal.append(&WalRecord::CancelSent {
-            symbol,
-            client_order_id: client_order_id.to_string(),
-            wire_ns: clock::now_ns(),
-        })?;
-
-        match self.venue.cancel_order(symbol, client_order_id).await {
-            Ok(()) => Ok(true),
-            // A request that could not be built never left the box: the
-            // resting order is untouched, which is certainty rather than
-            // doubt. No synthetic reject — that would end an order at the
-            // venue's expense in our own book only.
-            Err(VenueError::BadRequest(detail)) => {
-                tracing::error!(id = client_order_id, detail, "cancel never sent");
-                self.wal.append(&WalRecord::Note {
-                    source: "engine".into(),
-                    text: format!("cancel of {client_order_id} never sent: {detail}"),
-                })?;
-                Ok(false)
-            }
-            Err(other) => {
-                // We do not know whether the venue got it. The order stays in
-                // flight either way, and the private stream will say if it
-                // went; a retry from here is how one gets cancelled twice.
-                tracing::error!(id = client_order_id, error = %other, "cancel failed with no answer");
-                self.wal.append(&WalRecord::Note {
-                    source: "engine".into(),
-                    text: format!(
-                        "cancel of {client_order_id} sent with no answer ({other}); the order is still counted as working"
-                    ),
-                })?;
-                Ok(false)
-            }
-        }
-    }
-
-    /// True when the change went through; see [`process_cancel`] for what the
-    /// answer means.
-    ///
-    /// [`process_cancel`]: Engine::process_cancel
     async fn process_amend(
         &mut self,
         symbol: SymbolId,
@@ -3233,83 +3750,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.wal.barrier()?;
         }
 
-        match self.venue.amend_order(symbol, client_order_id, spec).await {
-            Ok(()) => {
-                // Bybit's REST success acknowledges only that an asynchronous
-                // amend request was accepted. No private update in the common
-                // contract proves its effective price/version yet, so old and
-                // requested prices both remain possible. Keep the range
-                // charged and cancel rather than falsely resolving it.
-                self.wal.append(&WalRecord::Note {
-                    source: "engine".into(),
-                    text: format!(
-                        "amend of {client_order_id} was accepted asynchronously; its price remains ambiguous and cancellation is queued"
-                    ),
-                })?;
-                self.pending.push_front(Action::Cancel {
-                    symbol,
-                    client_order_id: client_order_id.to_string(),
-                });
-                Ok(false)
-            }
-            Err(VenueError::BadRequest(detail)) => {
-                tracing::error!(id = client_order_id, detail, "amend never sent");
-                let resolved = WalRecord::AmendResolved {
-                    client_order_id: client_order_id.to_string(),
-                    effective_px: old_px,
-                };
-                self.wal.append(&resolved)?;
-                self.orders.apply(&resolved);
-                if !existing.request.reduce_only {
-                    let mut old = amended_intent.clone();
-                    old.kind = OrderKind::Limit { px: old_px, tif };
-                    self.risk
-                        .register_order(client_order_id, &old, remaining_qty);
-                }
-                self.wal.append(&WalRecord::Note {
-                    source: "engine".into(),
-                    text: format!("amend of {client_order_id} never sent: {detail}"),
-                })?;
-                Ok(false)
-            }
-            Err(VenueError::Rejected { code, message }) => {
-                let resolved = WalRecord::AmendResolved {
-                    client_order_id: client_order_id.to_string(),
-                    effective_px: old_px,
-                };
-                self.wal.append(&resolved)?;
-                self.orders.apply(&resolved);
-                if !existing.request.reduce_only {
-                    let mut old = amended_intent.clone();
-                    old.kind = OrderKind::Limit { px: old_px, tif };
-                    self.risk
-                        .register_order(client_order_id, &old, remaining_qty);
-                }
-                self.wal.append(&WalRecord::Note {
-                    source: "engine".into(),
-                    text: format!(
-                        "amend of {client_order_id} rejected by venue ({code}: {message})"
-                    ),
-                })?;
-                Ok(false)
-            }
-            Err(other) => {
-                // The order is still working; we just do not know at which
-                // price. Keep both outcomes charged and cancel it.
-                tracing::error!(id = client_order_id, error = %other, "amend failed with no answer");
-                self.wal.append(&WalRecord::Note {
-                    source: "engine".into(),
-                    text: format!(
-                        "amend of {client_order_id} sent with no answer ({other}); its price and size are unconfirmed"
-                    ),
-                })?;
-                self.pending.push_front(Action::Cancel {
-                    symbol,
-                    client_order_id: client_order_id.to_string(),
-                });
-                Ok(false)
-            }
-        }
+        let queued_ns = clock::now_ns();
+        let command_id = self
+            .venue
+            .dispatch_amend(symbol, client_order_id.to_string(), spec)?;
+        self.mark_symbols_busy([symbol]);
+        self.pending_mutations.insert(
+            command_id,
+            PendingMutation::Amend {
+                symbol,
+                client_order_id: client_order_id.to_string(),
+                spec,
+                existing,
+                amended_intent: Box::new(amended_intent),
+                remaining_qty,
+                old_px,
+                tif,
+                queued_ns,
+            },
+        );
+        Ok(false)
     }
 
     /// After a private-stream gap: ask the venue what traded while the
@@ -3513,6 +3973,34 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Every order update, wherever it came from, goes through here.
     async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
+        if let OrderUpdate::FastFill {
+            exec_id,
+            client_order_id,
+            venue_order_id,
+            symbol,
+            side,
+            qty,
+            px,
+            is_maker,
+            venue_ts_ms,
+            recv_ns,
+        } = &update
+        {
+            self.wal.append(&WalRecord::FastExecution {
+                exec_id: exec_id.clone(),
+                client_order_id: client_order_id.clone(),
+                venue_order_id: venue_order_id.clone(),
+                symbol: *symbol,
+                side: *side,
+                qty: *qty,
+                px: *px,
+                is_maker: *is_maker,
+                venue_ts_ms: *venue_ts_ms,
+                recv_ns: *recv_ns,
+            })?;
+            self.route_order_update(update);
+            return Ok(());
+        }
         let stream_reset = matches!(&update, OrderUpdate::StreamReset { .. });
         if stream_reset {
             // No other event is processed while this handler awaits the two
@@ -3687,6 +4175,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.queue_halted_entry_cancels()?;
         }
 
+        self.route_order_update(update);
+        Ok(())
+    }
+
+    fn route_order_update(&mut self, update: OrderUpdate) {
         let now = clock::now_ns();
         let event = EngineEvent::Order(update.clone());
         match inflight::client_order_id(&update) {
@@ -3768,7 +4261,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
             }
         }
-        Ok(())
     }
 
     fn refuse(
@@ -4153,6 +4645,8 @@ fn unreal_number(intent: &Intent) -> Option<&'static str> {
 fn arrival_ns(event: &MarketEvent, fallback: u64) -> u64 {
     let stamp = match event {
         MarketEvent::Quote { quote, .. } => quote.recv_ns,
+        MarketEvent::Depth { depth, .. } => depth.recv_ns,
+        MarketEvent::Trades { trades, .. } => trades.recv_ns,
         MarketEvent::Ticker { ticker, .. } => ticker.recv_ns,
         MarketEvent::FeedReset { recv_ns } => *recv_ns,
     };

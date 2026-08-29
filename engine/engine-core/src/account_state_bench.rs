@@ -529,6 +529,7 @@ struct HistoryVenue {
     account: AccountView,
 }
 
+#[engine_types::async_trait]
 impl VenueGateway for HistoryVenue {
     fn caps(&self) -> VenueCaps {
         VenueCaps {

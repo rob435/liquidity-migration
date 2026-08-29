@@ -5,8 +5,10 @@
 use std::fmt;
 
 use engine_types::FeedError;
-use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use serde::de::{self, value::MapAccessDeserializer, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
+
+use engine_types::BOOK_DEPTH;
 
 /// One book level, already numeric.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -15,17 +17,21 @@ pub struct Level {
     pub qty: f64,
 }
 
-/// The levels one side of a book message carried. The engine subscribes at
-/// depth 1 and consumes only the best level, so only that one is kept; `len`
-/// still counts everything the message held, which is how a deeper push than
-/// expected stays visible.
-///
 /// An absent side is `Option::None` at the frame level; an empty `Levels`
 /// means the venue sent `[]`, which says "this side did not change".
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Levels {
-    best: Option<Level>,
-    len: u16,
+    levels: [Level; BOOK_DEPTH],
+    len: u8,
+}
+
+impl Default for Levels {
+    fn default() -> Self {
+        Self {
+            levels: [Level::default(); BOOK_DEPTH],
+            len: 0,
+        }
+    }
 }
 
 impl Levels {
@@ -40,7 +46,11 @@ impl Levels {
     /// The side's best level: index 0, which is where Bybit puts it on both
     /// sides (bids descending, asks ascending).
     pub fn best(&self) -> Option<Level> {
-        self.best
+        (self.len > 0).then(|| self.levels[0])
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Level> + '_ {
+        self.levels[..self.len()].iter().copied()
     }
 }
 
@@ -48,12 +58,26 @@ impl Levels {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct BookFrame<'a> {
     pub symbol: &'a str,
+    pub depth: u8,
     /// True for `type: "snapshot"`, and for the `u == 1` service restart.
     pub snapshot: bool,
     pub update_id: u64,
+    pub seq: u64,
     /// Absent means the message did not mention this side.
     pub bids: Option<Levels>,
     pub asks: Option<Levels>,
+    pub venue_ts_ms: i64,
+}
+
+/// Public trades in one venue push, aggregated without retaining a heap list.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct TradeFrame<'a> {
+    pub symbol: &'a str,
+    pub buy_qty: f64,
+    pub sell_qty: f64,
+    pub last_px: f64,
+    pub trade_count: u16,
+    pub seq: u64,
     pub venue_ts_ms: i64,
 }
 
@@ -73,8 +97,11 @@ pub struct TickerFrame<'a> {
 
 /// What one received frame turned out to be.
 #[derive(Copy, Clone, Debug, PartialEq)]
+// Book frames keep their fixed level arrays inline to avoid per-frame heaps.
+#[allow(clippy::large_enum_variant)]
 pub enum ParsedFrame<'a> {
     Book(BookFrame<'a>),
+    Trades(TradeFrame<'a>),
     Ticker(TickerFrame<'a>),
     /// A subscribe/unsubscribe reply.
     Ack {
@@ -126,9 +153,18 @@ fn frame_from(env: Envelope<'_>) -> Result<ParsedFrame<'_>, FeedError> {
         return Ok(ParsedFrame::Ignored);
     }
     let snapshot = env.msg_type != Some("delta");
-    let data = env.data.unwrap_or_default();
 
     if topic.starts_with("orderbook.") {
+        let depth = topic
+            .split('.')
+            .nth(1)
+            .and_then(|value| value.parse::<u8>().ok())
+            .ok_or_else(|| FeedError::BadMessage(format!("invalid orderbook topic {topic}")))?;
+        let DataPayload::Fields(data) = env.data.unwrap_or_default() else {
+            return Err(FeedError::BadMessage(format!(
+                "orderbook frame for {symbol} has array data"
+            )));
+        };
         let Some(update_id) = data.u else {
             return Err(FeedError::BadMessage(format!(
                 "orderbook frame for {symbol} has no update id"
@@ -139,15 +175,42 @@ fn frame_from(env: Envelope<'_>) -> Result<ParsedFrame<'_>, FeedError> {
         let venue_ts_ms = env.cts.or(env.ts).unwrap_or(0);
         return Ok(ParsedFrame::Book(BookFrame {
             symbol,
+            depth,
             snapshot: snapshot || update_id == 1,
             update_id,
+            seq: data.seq.unwrap_or(0),
             bids: data.b,
             asks: data.a,
             venue_ts_ms,
         }));
     }
 
+    if topic.starts_with("publicTrade.") {
+        let DataPayload::Trades(rows) = env.data.unwrap_or_default() else {
+            return Err(FeedError::BadMessage(format!(
+                "public trade frame for {symbol} has object data"
+            )));
+        };
+        if rows.trade_count == 0 {
+            return Ok(ParsedFrame::Ignored);
+        }
+        return Ok(ParsedFrame::Trades(TradeFrame {
+            symbol,
+            buy_qty: rows.buy_qty,
+            sell_qty: rows.sell_qty,
+            last_px: rows.last_px,
+            trade_count: rows.trade_count,
+            seq: rows.seq,
+            venue_ts_ms: rows.venue_ts_ms.or(env.ts).unwrap_or(0),
+        }));
+    }
+
     if topic.starts_with("tickers.") {
+        let DataPayload::Fields(data) = env.data.unwrap_or_default() else {
+            return Err(FeedError::BadMessage(format!(
+                "ticker frame for {symbol} has array data"
+            )));
+        };
         return Ok(ParsedFrame::Ticker(TickerFrame {
             symbol,
             snapshot,
@@ -180,7 +243,46 @@ struct Envelope<'a> {
     #[serde(borrow, default)]
     ret_msg: Option<&'a str>,
     #[serde(default)]
-    data: Option<DataFields>,
+    data: Option<DataPayload>,
+}
+
+// Serde fills the fixed L50 arrays directly; boxing would add one allocation.
+#[allow(clippy::large_enum_variant)]
+enum DataPayload {
+    Fields(DataFields),
+    Trades(TradeRows),
+}
+
+impl Default for DataPayload {
+    fn default() -> Self {
+        Self::Fields(DataFields::default())
+    }
+}
+
+impl<'de> Deserialize<'de> for DataPayload {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct PayloadVisitor;
+        impl<'de> Visitor<'de> for PayloadVisitor {
+            type Value = DataPayload;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an object payload or public-trade row array")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                DataFields::deserialize(MapAccessDeserializer::new(map)).map(DataPayload::Fields)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut rows = TradeRows::default();
+                while let Some(row) = seq.next_element::<TradeRow>()? {
+                    rows.push(row);
+                }
+                Ok(DataPayload::Trades(rows))
+            }
+        }
+        d.deserialize_any(PayloadVisitor)
+    }
 }
 
 /// The union of the two payload shapes the engine subscribes to. Orderbook
@@ -194,6 +296,8 @@ struct DataFields {
     a: Option<Levels>,
     #[serde(default)]
     u: Option<u64>,
+    #[serde(default)]
+    seq: Option<u64>,
 
     #[serde(rename = "lastPrice", default, deserialize_with = "opt_f64")]
     last_price: Option<f64>,
@@ -207,6 +311,75 @@ struct DataFields {
     next_funding_time: Option<i64>,
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+struct TradeRows {
+    buy_qty: f64,
+    sell_qty: f64,
+    last_px: f64,
+    trade_count: u16,
+    seq: u64,
+    venue_ts_ms: Option<i64>,
+}
+
+impl TradeRows {
+    fn push(&mut self, row: TradeRow) {
+        match row.side {
+            TradeSide::Buy => self.buy_qty += row.qty,
+            TradeSide::Sell => self.sell_qty += row.qty,
+            TradeSide::Unknown => return,
+        }
+        self.trade_count = self.trade_count.saturating_add(1);
+        if row.seq >= self.seq {
+            self.seq = row.seq;
+            self.last_px = row.px;
+            self.venue_ts_ms = Some(row.venue_ts_ms);
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct TradeRow {
+    #[serde(rename = "S")]
+    side: TradeSide,
+    #[serde(rename = "v", deserialize_with = "required_f64")]
+    qty: f64,
+    #[serde(rename = "p", deserialize_with = "required_f64")]
+    px: f64,
+    #[serde(rename = "T")]
+    venue_ts_ms: i64,
+    #[serde(default)]
+    seq: u64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TradeSide {
+    Buy,
+    Sell,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for TradeSide {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct SideVisitor;
+        impl Visitor<'_> for SideVisitor {
+            type Value = TradeSide;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("Buy or Sell")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(match value {
+                    "Buy" => TradeSide::Buy,
+                    "Sell" => TradeSide::Sell,
+                    _ => TradeSide::Unknown,
+                })
+            }
+        }
+        d.deserialize_str(SideVisitor)
+    }
+}
+
 impl<'de> Deserialize<'de> for Levels {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct V;
@@ -218,10 +391,10 @@ impl<'de> Deserialize<'de> for Levels {
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Levels, A::Error> {
                 let mut out = Levels::default();
                 while let Some(level) = seq.next_element::<Level>()? {
-                    if out.len == 0 {
-                        out.best = Some(level);
+                    if (out.len as usize) < BOOK_DEPTH {
+                        out.levels[out.len as usize] = level;
+                        out.len += 1;
                     }
-                    out.len = out.len.saturating_add(1);
                 }
                 Ok(out)
             }
@@ -270,6 +443,11 @@ impl<'de> Deserialize<'de> for Num {
 
 fn opt_f64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
     d.deserialize_any(NumVisitor)
+}
+
+fn required_f64<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    d.deserialize_any(NumVisitor)?
+        .ok_or_else(|| de::Error::custom("expected a number, found nothing"))
 }
 
 fn opt_i64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
@@ -345,6 +523,13 @@ mod tests {
         match parse_frame(raw).expect("parses") {
             ParsedFrame::Ticker(t) => t,
             other => panic!("expected a ticker frame, got {other:?}"),
+        }
+    }
+
+    fn trades(raw: &str) -> TradeFrame<'_> {
+        match parse_frame(raw).expect("parses") {
+            ParsedFrame::Trades(t) => t,
+            other => panic!("expected public trades, got {other:?}"),
         }
     }
 
@@ -479,5 +664,34 @@ mod tests {
         let bids = book(raw).bids.unwrap();
         assert_eq!(bids.best(), Some(Level { px: 10.0, qty: 1.0 }));
         assert_eq!(bids.len(), 3);
+    }
+
+    #[test]
+    fn public_trades_are_aggregated_by_aggressor_without_a_row_vector() {
+        let raw = r#"{"topic":"publicTrade.BTCUSDT","type":"snapshot","ts":1003,"data":[{"T":1000,"s":"BTCUSDT","S":"Buy","v":"1.25","p":"100.1","seq":10},{"T":1001,"s":"BTCUSDT","S":"Sell","v":"0.50","p":"100.0","seq":11},{"T":1002,"s":"BTCUSDT","S":"Buy","v":"0.25","p":"100.2","seq":12}]}"#;
+        let trades = trades(raw);
+        assert_eq!(trades.symbol, "BTCUSDT");
+        assert_eq!(trades.buy_qty, 1.5);
+        assert_eq!(trades.sell_qty, 0.5);
+        assert_eq!(trades.trade_count, 3);
+        assert_eq!(trades.last_px, 100.2);
+        assert_eq!(trades.seq, 12);
+        assert_eq!(trades.venue_ts_ms, 1002);
+    }
+
+    #[test]
+    fn l50_keeps_every_received_level_through_the_fixed_capacity() {
+        let bids = (0..50)
+            .map(|index| format!(r#"["{}","1"]"#, 100 - index))
+            .collect::<Vec<_>>()
+            .join(",");
+        let raw = format!(
+            r#"{{"topic":"orderbook.50.BTCUSDT","ts":1,"type":"snapshot","data":{{"s":"BTCUSDT","b":[{bids}],"a":[["101","1"]],"u":5,"seq":9}},"cts":1}}"#
+        );
+        let book = book(&raw);
+        assert_eq!(book.depth, 50);
+        assert_eq!(book.seq, 9);
+        assert_eq!(book.bids.unwrap().len(), 50);
+        assert_eq!(book.bids.unwrap().iter().last().unwrap().px, 51.0);
     }
 }

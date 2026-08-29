@@ -364,7 +364,10 @@ async fn the_feed_authenticates_subscribes_and_maps_what_arrives() {
 
     let subscribe = &seen[1];
     assert_eq!(subscribe["op"], "subscribe");
-    assert_eq!(subscribe["args"], json!(["order", "execution"]));
+    assert_eq!(
+        subscribe["args"],
+        json!(["order", "execution.fast", "execution"])
+    );
 }
 
 #[tokio::test]

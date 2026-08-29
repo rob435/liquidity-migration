@@ -19,7 +19,7 @@ async fn the_order_record_carries_the_midpoint_it_will_be_judged_against() {
         .await
         .unwrap();
 
-    let records = h.records.borrow();
+    let records = h.records.lock().unwrap();
     let anchor = records
         .iter()
         .find_map(|r| match r {
@@ -160,7 +160,7 @@ async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
 
     assert_eq!(engine.strategy_names(), &["carry".to_string(), "long".to_string()]);
     let said = records
-        .borrow()
+        .lock().unwrap()
         .iter()
         .find_map(|r| match r {
             WalRecord::Names { strategies, .. } => Some(strategies.clone()),
@@ -177,7 +177,7 @@ async fn a_sleeve_with_no_name_of_its_own_keeps_the_plugs() {
     let (_engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let said = h
         .records
-        .borrow()
+        .lock().unwrap()
         .iter()
         .find_map(|r| match r {
             WalRecord::Names { strategies, .. } => Some(strategies.clone()),

@@ -78,18 +78,21 @@ re-register them against the wrong strategy's share of capital.
 
 ## The one-sentence design
 
-One process, one thread, one loop: a market message is parsed once into shared
-memory, the strategy decides, and risk is reserved in deterministic order.
-Sibling placements are appended together, made durable with one barrier, then
-handed to the selected venue adapter. Bybit overlaps distinct-symbol signed
-HTTP chains over ten pre-warmed connections and preserves strict wire order
-within each symbol because one-way positions share one Full stop.
+One process, one deterministic core loop and one bounded venue task: a market
+message is parsed once into shared memory, the strategy decides, risk is
+reserved in order, and durable mutations are queued without waiting for venue
+I/O. Bybit mainnet sends create, batch-create, cancel, batch-cancel and amend on
+one warm authenticated trade WebSocket. Same-symbol opening siblings keep wire
+order because one-way positions share one Full stop.
 
 ## Honest latency contract
 
-Geography is not ours to fix in software. From the current box, one round trip
-to the venue is ~175 ms; no rebuild changes that. What the engine owns is our
-side of the wire, and that is what we measure and promise:
+Geography is not ours to fix in software. What the engine owns is its side of
+the wire, and that is measured separately from socket-write-to-venue-ack time.
+The durable log records queue admission, venue-task start, socket write,
+acknowledgement, task completion and core resume for every accepted mainnet
+place, cancel and amend. A transport that cannot expose one of those marks
+writes `null`; it never substitutes a nearby timestamp.
 
 Measured 2026-08-13 by `engine bench` (the real loop, real HMAC signing,
 the real log with its fsync in the chain, a pretend venue on the same box;
@@ -138,14 +141,19 @@ pre-index path reached 265 µs. This isolates the in-process scaling cost from
 
 One decision can emit several adjacent placements. The engine validates and
 reserves them in deterministic request order, appends every accepted order,
-and uses one durability barrier for the group. Only then does it call
-`VenueGateway::send_orders`. Bybit overlaps independent symbol chains and sends
-siblings within one symbol serially; the default adapter implementation remains
-serial for venues whose nonces require wire order. A cancel, amend, or stop
-change flushes the placement group first. Create, cancel, batch-cancel, amend,
-trading-stop, leverage, and startup position reads each have their own
-completion-anchored rolling quota. Bybit's HTTP/1.1 pool retains sixteen idle
-sockets, so a ten-symbol burst does not evict its own warmed connections.
+and uses one durability barrier for the group. Only then does it enqueue the
+group to the venue task. The core loop keeps reading market, order and control
+events while the venue waits. Bybit mainnet uses native trade-WebSocket batches
+for independent symbols and sends same-symbol opening siblings serially; demo
+and adapters without that endpoint keep their documented fallback. A cancel,
+amend, or stop change flushes the placement group first. Create, cancel,
+batch-cancel, amend, trading-stop, leverage, and startup position reads each
+have their own completion-anchored rolling quota.
+
+The bounded actor coalesces superseded work per symbol: a cancel replaces an
+unsent amend, the newest amend replaces an older one, and duplicate cancels do
+not consume venue quota. It does not retry a mutation after an ambiguous socket
+failure; reconciliation decides what the venue actually holds.
 
 An opening reprice is assessed again before wire and gets the same durability
 barrier as a placement. Until the venue gives a definitive answer, replay
@@ -831,6 +839,10 @@ Six steps, five in `engine-venue` and one next door:
 | One account, more than one sleeve | Done. Each sleeve names its own book path and that book reaches that sleeve only |
 | Stating leverage at the venue | Done. The leverage a decision was sized at travels with it, and an order whose leverage cannot be set is not sent. Entries only |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
+| Non-blocking order management | Done. Durable mutations enter a bounded venue task; market data continues while acknowledgements are outstanding, and per-symbol coalescing removes superseded amend/cancel work before it reaches the wire |
+| Persistent Bybit order transport | Done on mainnet. Create/cancel/amend and their native batches use one authenticated trade WebSocket; demo keeps REST because Bybit does not offer the trade socket there |
+| L50 and aggressor-flow quoting | Done for Bybit. The public feed reconstructs 50 levels from snapshot/delta sequence, aggregates trade bursts by aggressor, and the quoter combines microprice, weighted book pressure, short movement, trade pressure, inventory and queue value. `quote_enabled = false` pulls its book and drains only its attributed inventory |
+| Fast fill reaction | Done for Bybit. `execution.fast` wakes the owning strategy early, including maker rows whose client id is blank after joining through venue order id; ordinary `execution` remains the fee-bearing accounting authority |
 | Venue reconciliation and restart recovery | Done. Boot reads the venue's working orders and compares them, and the account, against the log |
 | Stop verify, repair, and a durable breach latch | Done. A missing or looser stop returns to the directionally tighter level proved by position-growing fills; unfilled siblings cannot control it, fresh views supervise it, and an unrepairable breach latches opening off |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
@@ -922,8 +934,8 @@ nobody else's.**
   reaches the engine as a target book.
 - No production proof for Hyperliquid, Lighter, or MEXC. Their adapters have
   offline test evidence only; Variational is market-data-only.
-- No market impact measurement. `engine fills` anchors on the top of book,
-  which is the only book the engine carries. Walking a depth-50 book is the
-  Python half's job and stays there.
+- No full market-impact model. The live Bybit path carries and reconstructs
+  depth 50 for quoting, but `engine fills` still grades arrival and markouts
+  from the touch rather than claiming a counterfactual fill through the book.
 - No FPGA/kernel-bypass pretensions: the venue is an HTTPS cloud service and
   single-digit milliseconds on-box is already far below its floor.

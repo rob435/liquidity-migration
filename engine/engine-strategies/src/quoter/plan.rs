@@ -91,10 +91,35 @@ pub fn plan_quotes(
     resting: &[Resting],
     rules: QuoteRules,
 ) -> Vec<QuoteStep> {
+    plan_quotes_at(
+        bid_px,
+        ask_px,
+        (bid_px + ask_px) / 2.0,
+        position,
+        resting,
+        rules,
+    )
+}
+
+/// The same order decision around an externally estimated fair price. The
+/// live quoter supplies this from depth and trades; the plain wrapper above
+/// keeps the original midpoint contract for simple callers and replay tests.
+pub fn plan_quotes_at(
+    bid_px: f64,
+    ask_px: f64,
+    fair_px: f64,
+    position: f64,
+    resting: &[Resting],
+    rules: QuoteRules,
+) -> Vec<QuoteStep> {
     let mut steps = Vec::new();
-    let usable = bid_px > 0.0 && ask_px > 0.0 && ask_px >= bid_px;
+    let usable = bid_px > 0.0
+        && ask_px > 0.0
+        && ask_px >= bid_px
+        && fair_px.is_finite()
+        && fair_px > 0.0;
     let mid = (bid_px + ask_px) / 2.0;
-    let centre = centre(mid, position, rules);
+    let centre = centre(fair_px, position, rules);
 
     for side in [Side::Buy, Side::Sell] {
         let working = resting.iter().find(|r| r.side == side);

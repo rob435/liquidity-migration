@@ -9,6 +9,8 @@ use engine_types::{Feed, StrategyId, SymbolId};
 #[derive(Default, Debug)]
 pub struct Routing {
     quote: Vec<Vec<StrategyId>>,
+    depth: Vec<Vec<StrategyId>>,
+    trades: Vec<Vec<StrategyId>>,
     ticker: Vec<Vec<StrategyId>>,
 }
 
@@ -17,6 +19,8 @@ impl Routing {
         let index = symbol.0 as usize;
         let list = match feed {
             Feed::Quote => &mut self.quote,
+            Feed::Depth => &mut self.depth,
+            Feed::Trades => &mut self.trades,
             Feed::Ticker => &mut self.ticker,
         };
         if list.len() <= index {
@@ -29,6 +33,8 @@ impl Routing {
 
     pub fn size_to(&mut self, symbols: usize) {
         self.quote.resize(symbols, Vec::new());
+        self.depth.resize(symbols, Vec::new());
+        self.trades.resize(symbols, Vec::new());
         self.ticker.resize(symbols, Vec::new());
     }
 
@@ -46,10 +52,29 @@ impl Routing {
             .unwrap_or(&[])
     }
 
+    pub fn depth_listeners(&self, symbol: SymbolId) -> &[StrategyId] {
+        self.depth
+            .get(symbol.0 as usize)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn trade_listeners(&self, symbol: SymbolId) -> &[StrategyId] {
+        self.trades
+            .get(symbol.0 as usize)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Everyone watching this symbol on any feed, each named once.
     pub fn all_listeners(&self, symbol: SymbolId) -> Vec<StrategyId> {
         let mut out = self.quote_listeners(symbol).to_vec();
-        for sid in self.ticker_listeners(symbol) {
+        for sid in self
+            .depth_listeners(symbol)
+            .iter()
+            .chain(self.trade_listeners(symbol))
+            .chain(self.ticker_listeners(symbol))
+        {
             if !out.contains(sid) {
                 out.push(*sid);
             }

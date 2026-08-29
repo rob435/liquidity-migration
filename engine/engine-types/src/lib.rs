@@ -21,9 +21,11 @@ pub mod strategy;
 pub mod targets;
 pub mod wal;
 
+pub use async_trait::async_trait;
 pub use ids::{StrategyId, Symbol, SymbolId, SymbolTable, TimerId};
 pub use market::{
-    Feed, FeedError, MarketEvent, MarketFeed, MarketState, OrderFeed, Quote, Subscription, Ticker,
+    BookLevel, Depth, Feed, FeedError, MarketEvent, MarketFeed, MarketState, OrderFeed, Quote,
+    Subscription, Ticker, TradeFlow, BOOK_DEPTH,
 };
 pub use orders::{
     AccountInventory, AccountOrder, AccountPosition, Action, AmendSpec, InstrumentRule, Intent,
@@ -92,8 +94,8 @@ pub struct VenueCaps {
 /// Whether a given adapter is allowed to touch real money is that adapter's
 /// own decision, made in its own crate — this trait deliberately cannot
 /// express an endpoint.
-#[allow(async_fn_in_trait)]
-pub trait VenueGateway {
+#[async_trait]
+pub trait VenueGateway: Send + 'static {
     /// What this venue can do. Read before asking it for anything exotic.
     fn caps(&self) -> VenueCaps;
     /// Whose account these credentials open. Asked once at boot, before
@@ -144,6 +146,12 @@ pub trait VenueGateway {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError>;
+    /// Exact timing marks for the most recent cancel or amend when the
+    /// transport exposes them. Taking the value clears it so an older
+    /// request can never be attributed to a later command.
+    fn take_mutation_timing(&mut self) -> Option<VenueMutationTiming> {
+        None
+    }
     /// Attach or move a position stop (stop-loss trigger price).
     ///
     /// Called whatever the caps say. Reconciliation puts back a stop the log
@@ -217,4 +225,10 @@ pub trait VenueGateway {
             "this venue cannot list its execution history".to_string(),
         ))
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VenueMutationTiming {
+    pub sent_ns: u64,
+    pub ack_ns: u64,
 }

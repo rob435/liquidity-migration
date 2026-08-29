@@ -63,6 +63,7 @@ impl Strategy for CoverProbe {
             EngineEvent::Timer { .. } => "timer",
             EngineEvent::Order(OrderUpdate::Ack(_)) => "ack",
             EngineEvent::Order(OrderUpdate::Fill { .. }) => "fill",
+            EngineEvent::Order(OrderUpdate::FastFill { .. }) => "fast-fill",
             EngineEvent::Order(OrderUpdate::Cancelled { .. }) => "cancelled",
             EngineEvent::Order(OrderUpdate::Reject { .. }) => "reject",
             EngineEvent::Order(OrderUpdate::StopAttached { .. }) => "stop",
@@ -70,7 +71,7 @@ impl Strategy for CoverProbe {
             EngineEvent::Targets(_) => "book",
             EngineEvent::IntentRefused { .. } => "refused",
         };
-        self.seen.borrow_mut().push((tag, ctx.in_flight(symbol)));
+        self.seen.lock().unwrap().push((tag, ctx.in_flight(symbol)));
         if let EngineEvent::Market(MarketEvent::Quote { quote, .. }) = event {
             if let Some((signed_qty, reduce_only)) = self.plan.pop_front() {
                 let side = if signed_qty >= 0.0 { Side::Buy } else { Side::Sell };
@@ -96,19 +97,19 @@ impl Strategy for CoverProbe {
 
 /// The newest in-flight reading recorded at a wake of this kind.
 fn read_at(seen: &Wakes, tag: &str) -> f64 {
-    seen.borrow()
+    seen.lock().unwrap()
         .iter()
         .rev()
         .find(|(t, _)| *t == tag)
         .map(|(_, v)| *v)
-        .unwrap_or_else(|| panic!("no {tag} wake was recorded: {:?}", seen.borrow()))
+        .unwrap_or_else(|| panic!("no {tag} wake was recorded: {:?}", seen.lock().unwrap()))
 }
 
 /// Stop the loop once the probe has been woken by this kind of event, or
 /// give up so a failure reads as an assertion and not a hung test.
 async fn until_woken_by(seen: Wakes, tag: &'static str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !seen.borrow().iter().any(|(t, _)| *t == tag)
+    while !seen.lock().unwrap().iter().any(|(t, _)| *t == tag)
         && tokio::time::Instant::now() < deadline
     {
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -174,7 +175,7 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
     // Then: a stream reset forces a fresh reading, which reports 0.004. The
     // stop-attach news right behind it is just a wake the probe can sample
     // the post-reading number at.
-    h.account_readings.borrow_mut().push_back(vec![PositionView {
+    h.account_readings.lock().unwrap().push_back(vec![PositionView {
         symbol,
         side: Side::Buy,
         qty: 0.004,
@@ -281,7 +282,7 @@ async fn a_cancel_releases_only_the_unfilled_remainder() {
         )
         .await
         .unwrap();
-    let id = h.sends.borrow()[0].client_order_id.clone();
+    let id = h.sends.lock().unwrap()[0].client_order_id.clone();
 
     engine
         .run(
@@ -361,4 +362,3 @@ async fn a_reject_releases_the_whole_send() {
         "a rejected send leaves nothing in flight, got {at_reject}"
     );
 }
-

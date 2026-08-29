@@ -488,6 +488,8 @@ fn next_funding_ms(now_ms: i64) -> i64 {
 fn channel_for(feed: Feed) -> &'static str {
     match feed {
         Feed::Quote => "bbo",
+        Feed::Depth => "l2Book",
+        Feed::Trades => "trades",
         Feed::Ticker => "activeAssetCtx",
     }
 }

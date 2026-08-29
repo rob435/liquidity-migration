@@ -9,7 +9,7 @@ async fn until_recovered(records: Rc<RefCell<Vec<WalRecord>>>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         if records
-            .borrow()
+            .lock().unwrap()
             .iter()
             .any(|r| matches!(r, WalRecord::RecoveredFill { .. }))
         {
@@ -42,11 +42,11 @@ async fn recover_one_fill() -> Recovered {
         )
         .await
         .unwrap();
-    let sent = h.sends.borrow()[0].client_order_id.clone();
-    h.risk_saw.borrow_mut().clear();
+    let sent = h.sends.lock().unwrap()[0].client_order_id.clone();
+    h.risk_saw.lock().unwrap().clear();
 
     // The venue traded it while the stream was away.
-    *h.executions.borrow_mut() = Some(vec![VenueExecution {
+    *h.executions.lock().unwrap() = Some(vec![VenueExecution {
         exec_id: "e-1".into(),
         client_order_id: sent,
         symbol: "BTCUSDT".into(),
@@ -86,13 +86,13 @@ async fn a_recovered_fill_reaches_the_risk_kernel() {
 
     assert!(
         records
-            .borrow()
+            .lock().unwrap()
             .iter()
             .any(|r| matches!(r, WalRecord::RecoveredFill { .. })),
         "the recovery itself has to have happened for this test to say anything"
     );
     let fills: Vec<f64> = risk_saw
-        .borrow()
+        .lock().unwrap()
         .iter()
         .filter_map(|u| match u {
             OrderUpdate::Fill { qty, .. } => Some(*qty),
@@ -116,7 +116,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
         )
         .await
         .unwrap();
-    let sent = h.sends.borrow()[0].client_order_id.clone();
+    let sent = h.sends.lock().unwrap()[0].client_order_id.clone();
     engine
         .run(
             &mut ScriptFeed::quotes(symbol, 0, false),
@@ -148,7 +148,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
     };
     assert_eq!(attributed_qty(&engine), 0.01);
 
-    *h.executions.borrow_mut() = Some(vec![VenueExecution {
+    *h.executions.lock().unwrap() = Some(vec![VenueExecution {
         exec_id: "native-stop-exec".into(),
         client_order_id: String::new(),
         symbol: "BTCUSDT".into(),
@@ -169,7 +169,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
         .unwrap();
 
     assert_eq!(attributed_qty(&engine), 0.01);
-    assert!(h.records.borrow().iter().any(|record| matches!(
+    assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::Reconciled { may_open: false, findings, .. }
             if findings.iter().any(|line| line.contains("blank client id"))
@@ -216,7 +216,7 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
         .unwrap();
     let journaled = h
         .records
-        .borrow()
+        .lock().unwrap()
         .iter()
         .filter(|record| {
             matches!(
@@ -228,7 +228,7 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
     assert_eq!(journaled, 1);
     assert_eq!(
         h.risk_saw
-            .borrow()
+            .lock().unwrap()
             .iter()
             .filter(|u| matches!(u, OrderUpdate::Fill { .. }))
             .count(),
@@ -254,7 +254,7 @@ async fn execution_history_failure_after_a_gap_stops_the_run_and_latches_entries
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    *h.executions.borrow_mut() = None;
+    *h.executions.lock().unwrap() = None;
 
     let result = engine
         .run(
@@ -265,7 +265,7 @@ async fn execution_history_failure_after_a_gap_stops_the_run_and_latches_entries
         .await;
 
     assert!(matches!(result, Err(EngineError::Venue(_))));
-    assert!(h.records.borrow().iter().any(|record| matches!(
+    assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::Reconciled { may_open: false, findings, .. }
             if findings.iter().any(|line| line.contains("execution history is unavailable"))
@@ -281,7 +281,7 @@ async fn failed_gap_account_refresh_denies_the_next_entry_immediately() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    *h.account_view_fails.borrow_mut() = true;
+    *h.account_view_fails.lock().unwrap() = true;
 
     engine
         .run(
@@ -292,8 +292,8 @@ async fn failed_gap_account_refresh_denies_the_next_entry_immediately() {
         .await
         .unwrap();
 
-    assert!(h.sends.borrow().is_empty());
-    assert!(h.records.borrow().iter().any(|record| matches!(
+    assert!(h.sends.lock().unwrap().is_empty());
+    assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::Verdict {
             verdict: RiskVerdict::Deny { reason: DenyReason::UnknownState { detail } },
@@ -307,7 +307,7 @@ async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    *h.executions.borrow_mut() = Some(vec![VenueExecution {
+    *h.executions.lock().unwrap() = Some(vec![VenueExecution {
         exec_id: "foreign-unknown-1".into(),
         client_order_id: "manual-order".into(),
         symbol: "DELISTEDUSDT".into(),
@@ -328,12 +328,12 @@ async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
         .await
         .unwrap();
 
-    assert!(h.records.borrow().iter().any(|record| matches!(
+    assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::Note { source, text }
             if source == "fill-recovery" && text.contains("DELISTEDUSDT")
     )));
-    assert!(h.records.borrow().iter().any(|record| matches!(
+    assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::Reconciled { may_open: false, findings, .. }
             if findings.iter().any(|line| line.contains("DELISTEDUSDT"))
@@ -349,7 +349,7 @@ async fn execution_history_failure_aborts_boot() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
     let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
-    *venue.executions.borrow_mut() = None;
+    *venue.executions.lock().unwrap() = None;
     let (risk, _) = MockRisk::with(allow_all());
     let (buyer, _) = Buyer::new("BTCUSDT", 0, 0.01);
     let replayed = vec![WalRecord::Boot {
@@ -460,7 +460,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
 
     // Both what the last run already heard and one it never did, so the pass
     // has something to finish on whichever way the dedup goes.
-    *h.executions.borrow_mut() = Some(vec![
+    *h.executions.lock().unwrap() = Some(vec![
         VenueExecution {
             exec_id: "e-old".into(),
             client_order_id: "eng-last-run-1".into(),
@@ -508,7 +508,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
 
     let recovered: Vec<String> = h
         .records
-        .borrow()
+        .lock().unwrap()
         .iter()
         .filter_map(|r| match r {
             WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.clone()),

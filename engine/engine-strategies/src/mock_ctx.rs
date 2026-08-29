@@ -22,9 +22,9 @@
 use std::collections::{HashMap, HashSet};
 
 use engine_types::{
-    Action, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderAck, OrderKind,
+    Action, Depth, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderAck, OrderKind,
     OrderUpdate, PositionView, Quote, RestingOrder, Side, Strategy, StrategyCtx, SymbolId,
-    TargetBook, Ticker, TimerId,
+    TargetBook, Ticker, TimerId, TradeFlow,
 };
 
 /// A timer the strategy asked for, and when it comes due.
@@ -52,6 +52,8 @@ pub struct RestingSeed {
 pub struct MockCtx {
     symbols: HashMap<String, SymbolId>,
     quotes: Vec<Quote>,
+    depths: Vec<Depth>,
+    trades: Vec<TradeFlow>,
     tickers: Vec<Ticker>,
     /// What the engine's account reading would say is held. Empty unless a
     /// test seeds it.
@@ -97,6 +99,8 @@ impl MockCtx {
         Self {
             symbols: HashMap::new(),
             quotes: Vec::new(),
+            depths: Vec::new(),
+            trades: Vec::new(),
             tickers: Vec::new(),
             positions: HashMap::new(),
             foreign: HashSet::new(),
@@ -123,6 +127,8 @@ impl MockCtx {
         let id = SymbolId(self.quotes.len() as u16);
         self.symbols.insert(name.to_string(), id);
         self.quotes.push(Quote::default());
+        self.depths.push(Depth::default());
+        self.trades.push(TradeFlow::default());
         self.tickers.push(Ticker::default());
         id
     }
@@ -231,6 +237,14 @@ impl MockCtx {
 impl StrategyCtx for MockCtx {
     fn quote(&self, symbol: SymbolId) -> &Quote {
         &self.quotes[symbol.0 as usize]
+    }
+
+    fn depth(&self, symbol: SymbolId) -> &Depth {
+        &self.depths[symbol.0 as usize]
+    }
+
+    fn trade_flow(&self, symbol: SymbolId) -> &TradeFlow {
+        &self.trades[symbol.0 as usize]
     }
 
     fn ticker(&self, symbol: SymbolId) -> &Ticker {
@@ -351,6 +365,44 @@ impl Harness {
         self.deliver(EngineEvent::Market(MarketEvent::Quote { symbol: id, quote }));
     }
 
+    /// A reconstructed book update. Levels must already be in venue order:
+    /// bids descending and asks ascending.
+    pub fn depth(&mut self, symbol: &str, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
+        let id = self.ctx.id_of(symbol);
+        let mut depth = Depth {
+            bid_len: bids.len().min(engine_types::BOOK_DEPTH) as u8,
+            ask_len: asks.len().min(engine_types::BOOK_DEPTH) as u8,
+            ..Depth::default()
+        };
+        for (slot, (px, qty)) in depth.bids.iter_mut().zip(bids) {
+            *slot = engine_types::BookLevel { px: *px, qty: *qty };
+        }
+        for (slot, (px, qty)) in depth.asks.iter_mut().zip(asks) {
+            *slot = engine_types::BookLevel { px: *px, qty: *qty };
+        }
+        depth.recv_ns = self.ctx.now_ns;
+        depth.seq = self.ctx.depths[id.0 as usize].seq + 1;
+        depth.update_id = depth.seq;
+        self.ctx.depths[id.0 as usize] = depth;
+        self.ctx.quotes[id.0 as usize] = depth.quote();
+        self.deliver(EngineEvent::Market(MarketEvent::Depth { symbol: id, depth }));
+    }
+
+    pub fn trades(&mut self, symbol: &str, buy_qty: f64, sell_qty: f64, last_px: f64) {
+        let id = self.ctx.id_of(symbol);
+        let trades = TradeFlow {
+            buy_qty,
+            sell_qty,
+            last_px,
+            trade_count: ((buy_qty > 0.0) as u16) + ((sell_qty > 0.0) as u16),
+            seq: self.ctx.trades[id.0 as usize].seq + 1,
+            venue_ts_ms: 0,
+            recv_ns: self.ctx.now_ns,
+        };
+        self.ctx.trades[id.0 as usize] = trades;
+        self.deliver(EngineEvent::Market(MarketEvent::Trades { symbol: id, trades }));
+    }
+
     /// A target book reaching the strategies. Only ever delivered when a
     /// whole book was read, which is why there is no verb here for "the book
     /// was unreadable": that case delivers nothing at all.
@@ -383,6 +435,7 @@ impl Harness {
         let ack = OrderAck {
             client_order_id: client_order_id.to_string(),
             venue_order_id: format!("v-{client_order_id}"),
+            sent_ns: 0,
             ack_ns: self.ctx.now_ns,
         };
         self.deliver(EngineEvent::Order(OrderUpdate::Ack(ack)));
@@ -405,6 +458,55 @@ impl Harness {
         px: f64,
     ) {
         self.fill_as(client_order_id, symbol, side, qty, px, true);
+    }
+
+    pub fn fast_fill(
+        &mut self,
+        exec_id: &str,
+        client_order_id: &str,
+        symbol: &str,
+        side: Side,
+        qty: f64,
+        px: f64,
+    ) {
+        let id = self.ctx.id_of(symbol);
+        self.deliver(EngineEvent::Order(OrderUpdate::FastFill {
+            exec_id: exec_id.to_string(),
+            client_order_id: client_order_id.to_string(),
+            venue_order_id: format!("v-{client_order_id}"),
+            symbol: id,
+            side,
+            qty,
+            px,
+            is_maker: true,
+            venue_ts_ms: 0,
+            recv_ns: self.ctx.now_ns,
+        }));
+    }
+
+    pub fn maker_fill_with_exec(
+        &mut self,
+        exec_id: &str,
+        client_order_id: &str,
+        symbol: &str,
+        side: Side,
+        qty: f64,
+        px: f64,
+    ) {
+        let id = self.ctx.id_of(symbol);
+        self.ctx.charge_fill(id, side, qty);
+        self.deliver(EngineEvent::Order(OrderUpdate::Fill {
+            exec_id: exec_id.to_string(),
+            client_order_id: client_order_id.to_string(),
+            symbol: id,
+            side,
+            qty,
+            px,
+            fee: 0.0,
+            is_maker: true,
+            venue_ts_ms: 0,
+            recv_ns: self.ctx.now_ns,
+        }));
     }
 
     fn fill_as(

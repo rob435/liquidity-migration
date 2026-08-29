@@ -1,6 +1,6 @@
 //! The latency ledger: how long each part of our own side of the wire took.
 //!
-//! Four segments, all measured on the one monotonic clock:
+//! Timing segments, all measured on the one monotonic clock:
 //!
 //! - **decide** — market message arrived (`recv_ns`) until the strategy's
 //!   intent was decided.
@@ -10,8 +10,11 @@
 //!   shadow mode, until the point where the send was skipped). This includes
 //!   the adapter's request, response, and reply parsing; it is not a socket
 //!   write timestamp.
-//! - **API round trip** — the send call started until the adapter stamped a
-//!   parsed venue acknowledgement. This one is mostly geography.
+//! - **API round trip** — socket write completion until the adapter parsed
+//!   the venue acknowledgement. This excludes local queueing and signing.
+//! - **dispatch queue** — command queued until the venue task began it.
+//! - **venue task** — venue task start until the adapter returned.
+//! - **core resume** — adapter return until the engine handled the result.
 //!
 //! **market to submit result** is market message in until the batch submit
 //! call returned and result handling began.
@@ -43,6 +46,9 @@ pub enum Segment {
     Durable,
     Wire,
     Ack,
+    DispatchQueue,
+    VenueTask,
+    CoreResume,
     EndToEnd,
 }
 
@@ -53,6 +59,9 @@ impl Segment {
             Segment::Durable => "write it down",
             Segment::Wire => "submit result",
             Segment::Ack => "API round trip",
+            Segment::DispatchQueue => "dispatch queue",
+            Segment::VenueTask => "venue task",
+            Segment::CoreResume => "core resume",
             Segment::EndToEnd => "market to submit result",
         }
     }
@@ -63,6 +72,9 @@ pub struct LatencyLedger {
     durable: Histogram<u64>,
     wire: Histogram<u64>,
     ack: Histogram<u64>,
+    dispatch_queue: Histogram<u64>,
+    venue_task: Histogram<u64>,
+    core_resume: Histogram<u64>,
     end_to_end: Histogram<u64>,
     events: u64,
     window_start_ns: u64,
@@ -76,6 +88,9 @@ impl LatencyLedger {
             durable: make(),
             wire: make(),
             ack: make(),
+            dispatch_queue: make(),
+            venue_task: make(),
+            core_resume: make(),
             end_to_end: make(),
             events: 0,
             window_start_ns: now_ns,
@@ -97,6 +112,9 @@ impl LatencyLedger {
             Segment::Durable => &self.durable,
             Segment::Wire => &self.wire,
             Segment::Ack => &self.ack,
+            Segment::DispatchQueue => &self.dispatch_queue,
+            Segment::VenueTask => &self.venue_task,
+            Segment::CoreResume => &self.core_resume,
             Segment::EndToEnd => &self.end_to_end,
         };
         Quantiles {
@@ -123,14 +141,32 @@ impl LatencyLedger {
     /// The log record for the window just ended.
     pub fn record_for_wal(&self, now_ns: u64) -> WalRecord {
         let decide = self.quantiles(Segment::Decide);
+        let durable = self.quantiles(Segment::Durable);
         let wire = self.quantiles(Segment::Wire);
+        let ack = self.quantiles(Segment::Ack);
+        let dispatch_queue = self.quantiles(Segment::DispatchQueue);
+        let venue_task = self.quantiles(Segment::VenueTask);
+        let core_resume = self.quantiles(Segment::CoreResume);
+        let end_to_end = self.quantiles(Segment::EndToEnd);
         WalRecord::LatencyLedger {
             window_s: (now_ns.saturating_sub(self.window_start_ns) / 1_000_000_000) as u32,
             events: self.events,
             decide_p50_ns: decide.p50_ns,
             decide_p99_ns: decide.p99_ns,
+            durable_p50_ns: durable.p50_ns,
+            durable_p99_ns: durable.p99_ns,
             wire_p50_ns: wire.p50_ns,
             wire_p99_ns: wire.p99_ns,
+            ack_p50_ns: ack.p50_ns,
+            ack_p99_ns: ack.p99_ns,
+            dispatch_queue_p50_ns: dispatch_queue.p50_ns,
+            dispatch_queue_p99_ns: dispatch_queue.p99_ns,
+            venue_task_p50_ns: venue_task.p50_ns,
+            venue_task_p99_ns: venue_task.p99_ns,
+            core_resume_p50_ns: core_resume.p50_ns,
+            core_resume_p99_ns: core_resume.p99_ns,
+            end_to_end_p50_ns: end_to_end.p50_ns,
+            end_to_end_p99_ns: end_to_end.p99_ns,
         }
     }
 
@@ -139,6 +175,9 @@ impl LatencyLedger {
         self.durable.reset();
         self.wire.reset();
         self.ack.reset();
+        self.dispatch_queue.reset();
+        self.venue_task.reset();
+        self.core_resume.reset();
         self.end_to_end.reset();
         self.events = 0;
         self.window_start_ns = now_ns;
@@ -158,6 +197,9 @@ impl LatencyLedger {
             Segment::Durable,
             Segment::Wire,
             Segment::Ack,
+            Segment::DispatchQueue,
+            Segment::VenueTask,
+            Segment::CoreResume,
             Segment::EndToEnd,
         ] {
             let q = self.quantiles(segment);
@@ -180,6 +222,9 @@ impl LatencyLedger {
             Segment::Durable => &mut self.durable,
             Segment::Wire => &mut self.wire,
             Segment::Ack => &mut self.ack,
+            Segment::DispatchQueue => &mut self.dispatch_queue,
+            Segment::VenueTask => &mut self.venue_task,
+            Segment::CoreResume => &mut self.core_resume,
             Segment::EndToEnd => &mut self.end_to_end,
         }
     }

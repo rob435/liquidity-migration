@@ -360,10 +360,15 @@ def test_both_realms_state_sole_leverage_authority() -> None:
         assert config["engine"]["leverage_authority"] == "sole", template
 
 
-def test_funded_exodus_is_wired_from_producer_to_engine_and_activation() -> None:
+def test_funded_exodus_and_maker_canary_are_wired_to_the_engine() -> None:
     config = tomllib.loads(_read("deploy/engine.mainnet.toml.template"))
     strategies = config["strategy"]
-    assert [row["sleeve"] for row in strategies] == ["carry", "long", "exodus"]
+    assert [row["sleeve"] for row in strategies] == [
+        "carry",
+        "long",
+        "exodus",
+        "maker_canary",
+    ]
     exodus = strategies[2]
     assert exodus == {
         "name": "target_book",
@@ -372,6 +377,12 @@ def test_funded_exodus_is_wired_from_producer_to_engine_and_activation() -> None
         "rest_entries": False,
         "symbols": ["DOGEUSDT"],
     }
+    maker = strategies[3]
+    assert maker["name"] == "quoter"
+    assert maker["quote_enabled"] is True
+    assert maker["symbols"] == ["AGIUSDT"]
+    assert maker["qty_usdt"] == 5.25
+    assert maker["max_position_usdt"] == 6.0
 
     carry_unit = _read(
         "deploy/systemd/liquidity-migration-bybit-carry-mainnet.service"

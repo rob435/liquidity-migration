@@ -133,8 +133,62 @@ pub enum WalRecord {
         events: u64,
         decide_p50_ns: u64,
         decide_p99_ns: u64,
+        #[serde(default)]
+        durable_p50_ns: u64,
+        #[serde(default)]
+        durable_p99_ns: u64,
         wire_p50_ns: u64,
         wire_p99_ns: u64,
+        #[serde(default)]
+        ack_p50_ns: u64,
+        #[serde(default)]
+        ack_p99_ns: u64,
+        #[serde(default)]
+        dispatch_queue_p50_ns: u64,
+        #[serde(default)]
+        dispatch_queue_p99_ns: u64,
+        #[serde(default)]
+        venue_task_p50_ns: u64,
+        #[serde(default)]
+        venue_task_p99_ns: u64,
+        #[serde(default)]
+        core_resume_p50_ns: u64,
+        #[serde(default)]
+        core_resume_p99_ns: u64,
+        #[serde(default)]
+        end_to_end_p50_ns: u64,
+        #[serde(default)]
+        end_to_end_p99_ns: u64,
+    },
+    /// Exact monotonic timing marks for one venue mutation item. These are
+    /// the reconstructable measurements; histogram rows above are only the
+    /// quick roll-up.
+    VenueTiming {
+        command_id: u64,
+        operation: String,
+        client_order_id: String,
+        queued_ns: u64,
+        task_started_ns: u64,
+        /// Exact transport hand-off when the adapter exposes it.
+        socket_write_ns: Option<u64>,
+        /// Parsed venue acknowledgement for placements.
+        ack_ns: Option<u64>,
+        task_completed_ns: u64,
+        core_handled_ns: u64,
+    },
+    /// Early fill signal from Bybit's fee-less fast stream. The ordinary
+    /// authoritative fill follows separately and owns position accounting.
+    FastExecution {
+        exec_id: String,
+        client_order_id: String,
+        venue_order_id: String,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        px: f64,
+        is_maker: bool,
+        venue_ts_ms: i64,
+        recv_ns: u64,
     },
     /// Free-form strategy note, tagged and rare.
     Note {

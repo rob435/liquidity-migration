@@ -352,6 +352,10 @@ pub struct OrderRequest {
 pub struct OrderAck {
     pub client_order_id: String,
     pub venue_order_id: String,
+    /// Engine monotonic nanoseconds when the request bytes were handed to
+    /// the transport. Zero when an adapter cannot expose that boundary.
+    #[serde(default)]
+    pub sent_ns: u64,
     /// Engine monotonic nanoseconds when the venue reply was parsed.
     pub ack_ns: u64,
 }
@@ -400,6 +404,21 @@ pub enum OrderUpdate {
         /// cannot tell us, and counting an unknown as a maker would flatter
         /// every number computed from it.
         #[serde(default)]
+        is_maker: bool,
+        venue_ts_ms: i64,
+        recv_ns: u64,
+    },
+    /// Earlier, fee-less fill notice from the venue's fast execution topic.
+    /// Strategies may react to it; the ordinary `Fill` remains the only
+    /// accounting authority and follows with the fee and full fields.
+    FastFill {
+        exec_id: String,
+        client_order_id: String,
+        venue_order_id: String,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        px: f64,
         is_maker: bool,
         venue_ts_ms: i64,
         recv_ns: u64,

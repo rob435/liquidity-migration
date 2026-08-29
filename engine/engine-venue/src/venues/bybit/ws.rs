@@ -245,7 +245,8 @@ impl Worker {
         send(&mut socket, auth.to_string()).await?;
         await_auth(&mut socket).await?;
 
-        let subscribe = json!({"op": "subscribe", "args": ["order", "execution"]});
+        let subscribe =
+            json!({"op": "subscribe", "args": ["order", "execution.fast", "execution"]});
         send(&mut socket, subscribe.to_string()).await?;
         await_op(&mut socket, "subscribe", SUBSCRIBE_REPLY_TIMEOUT).await?;
 
@@ -344,6 +345,12 @@ struct Decoder {
     pending: VecDeque<OrderUpdate>,
     acked: HashSet<String>,
     acked_order: VecDeque<String>,
+    order_links: HashMap<String, String>,
+    order_link_order: VecDeque<String>,
+    fast_execs: HashSet<String>,
+    fast_exec_order: VecDeque<String>,
+    full_execs: HashSet<String>,
+    full_exec_order: VecDeque<String>,
 }
 
 impl Decoder {
@@ -353,6 +360,12 @@ impl Decoder {
             pending: VecDeque::new(),
             acked: HashSet::new(),
             acked_order: VecDeque::new(),
+            order_links: HashMap::new(),
+            order_link_order: VecDeque::new(),
+            fast_execs: HashSet::new(),
+            fast_exec_order: VecDeque::new(),
+            full_execs: HashSet::new(),
+            full_exec_order: VecDeque::new(),
         }
     }
 
@@ -381,13 +394,29 @@ impl Decoder {
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let recv_ns = mono_ns();
-        let execution_topic = topic.starts_with("execution");
+        let fast_topic = topic.starts_with("execution.fast");
+        let execution_topic = topic.starts_with("execution") && !fast_topic;
         let mut first_error = None;
         let mut execution_row_failed = false;
 
         for row in rows {
             let mapped = if topic.starts_with("order") {
+                if let (Ok(order_id), Ok(client_order_id)) =
+                    (field(row, "orderId"), field(row, "orderLinkId"))
+                {
+                    if !order_id.is_empty() && !client_order_id.is_empty() {
+                        self.remember_order_link(order_id, client_order_id);
+                    }
+                }
                 map_order_row(row, recv_ns)
+            } else if fast_topic {
+                let ids = self.ids.read().expect("the symbol map lock is poisoned");
+                map_fast_execution_row(
+                    row,
+                    &|name: &str| ids.get(name).copied(),
+                    &self.order_links,
+                    recv_ns,
+                )
             } else if execution_topic {
                 let ids = self.ids.read().expect("the symbol map lock is poisoned");
                 map_execution_row(row, &|name: &str| ids.get(name).copied(), recv_ns)
@@ -405,6 +434,23 @@ impl Decoder {
                 }
             };
             if let Some(update) = update {
+                if let OrderUpdate::FastFill { ref exec_id, .. } = update {
+                    // The two topics are independent. When the ordinary,
+                    // fee-bearing execution wins the race, a later fast row
+                    // is stale news and must not recreate temporary inventory
+                    // the authoritative fill has already settled.
+                    if self.full_execs.contains(exec_id) {
+                        continue;
+                    }
+                    if !self.remember_fast_exec(exec_id) {
+                        continue;
+                    }
+                }
+                if let OrderUpdate::Fill { ref exec_id, .. } = update {
+                    if !exec_id.is_empty() {
+                        self.remember_full_exec(exec_id);
+                    }
+                }
                 if let OrderUpdate::Ack(ref ack) = update {
                     // The venue repeats New on later changes; the engine
                     // hears one ack per order.
@@ -433,6 +479,41 @@ impl Decoder {
             }
         }
         true
+    }
+
+    fn remember_order_link(&mut self, order_id: String, client_order_id: String) {
+        if self.order_links.insert(order_id.clone(), client_order_id).is_none() {
+            self.order_link_order.push_back(order_id);
+        }
+        while self.order_link_order.len() > ACK_MEMORY {
+            if let Some(old) = self.order_link_order.pop_front() {
+                self.order_links.remove(&old);
+            }
+        }
+    }
+
+    fn remember_fast_exec(&mut self, exec_id: &str) -> bool {
+        if !self.fast_execs.insert(exec_id.to_string()) {
+            return false;
+        }
+        self.fast_exec_order.push_back(exec_id.to_string());
+        while self.fast_exec_order.len() > ACK_MEMORY {
+            if let Some(old) = self.fast_exec_order.pop_front() {
+                self.fast_execs.remove(&old);
+            }
+        }
+        true
+    }
+
+    fn remember_full_exec(&mut self, exec_id: &str) {
+        if self.full_execs.insert(exec_id.to_string()) {
+            self.full_exec_order.push_back(exec_id.to_string());
+        }
+        while self.full_exec_order.len() > ACK_MEMORY {
+            if let Some(old) = self.full_exec_order.pop_front() {
+                self.full_execs.remove(&old);
+            }
+        }
     }
 }
 
@@ -516,6 +597,7 @@ pub(crate) fn map_order_row(row: &Value, recv_ns: u64) -> Result<Option<OrderUpd
         "New" | "Untriggered" => OrderUpdate::Ack(OrderAck {
             client_order_id,
             venue_order_id: field(row, "orderId")?,
+            sent_ns: 0,
             ack_ns: recv_ns,
         }),
         "Cancelled" | "Deactivated" => OrderUpdate::Cancelled {
@@ -597,6 +679,68 @@ pub(crate) fn map_execution_row(
         // Absent means taker. The venue sends this on every execution, so an
         // absent one is a message shape we do not know — and the expensive
         // side is the safe thing to assume about a fill we cannot classify.
+        is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
+        venue_ts_ms,
+        recv_ns,
+    }))
+}
+
+/// One row from `execution.fast`. It has no fee, so this is an early strategy
+/// signal only; the ordinary execution topic remains the accounting fill.
+pub(crate) fn map_fast_execution_row(
+    row: &Value,
+    resolve: &dyn Fn(&str) -> Option<SymbolId>,
+    order_links: &HashMap<String, String>,
+    recv_ns: u64,
+) -> Result<Option<OrderUpdate>, FeedError> {
+    let exec_id = field(row, "execId")?;
+    let venue_order_id = field(row, "orderId")?;
+    if exec_id.is_empty() || venue_order_id.is_empty() {
+        return Err(FeedError::BadMessage(
+            "a fast execution has no execution or order id".to_string(),
+        ));
+    }
+    let direct_link = field(row, "orderLinkId")?;
+    let client_order_id = if direct_link.is_empty() {
+        order_links.get(&venue_order_id).cloned().unwrap_or_default()
+    } else {
+        direct_link
+    };
+    // Maker rows deliberately omit orderLinkId. If the order topic has not
+    // joined venue id to our id yet, wait for the full execution row rather
+    // than guessing ownership.
+    if client_order_id.is_empty() {
+        return Ok(None);
+    }
+    let symbol_name = field(row, "symbol")?;
+    let Some(symbol) = resolve(&symbol_name) else {
+        return Ok(None);
+    };
+    let side = match field(row, "side")?.as_str() {
+        "Buy" => Side::Buy,
+        "Sell" => Side::Sell,
+        other => {
+            return Err(FeedError::BadMessage(format!(
+                "fast execution {exec_id} has unknown side {other:?}"
+            )))
+        }
+    };
+    let qty = number(row, "execQty")?;
+    let px = number(row, "execPrice")?;
+    let venue_ts_ms = int_field(row, "execTime").map_err(bad_field)?;
+    if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
+        return Err(FeedError::BadMessage(format!(
+            "fast execution {exec_id} has non-positive quantity, price, or timestamp"
+        )));
+    }
+    Ok(Some(OrderUpdate::FastFill {
+        exec_id,
+        client_order_id,
+        venue_order_id,
+        symbol,
+        side,
+        qty,
+        px,
         is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
         venue_ts_ms,
         recv_ns,
@@ -772,6 +916,116 @@ mod tests {
             }
             other => panic!("expected Fill, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_maker_fast_fill_joins_the_blank_link_through_the_venue_order_id() {
+        let row = json!({
+            "execId": "fast-1",
+            "orderId": "venue-1",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.25",
+            "execPrice": "100.1",
+            "execTime": "1746270400353",
+            "isMaker": true
+        });
+        let links = HashMap::from([("venue-1".to_string(), "eng-1".to_string())]);
+        match map_fast_execution_row(&row, &resolve, &links, 99)
+            .unwrap()
+            .unwrap()
+        {
+            OrderUpdate::FastFill {
+                exec_id,
+                client_order_id,
+                venue_order_id,
+                is_maker,
+                ..
+            } => {
+                assert_eq!(exec_id, "fast-1");
+                assert_eq!(client_order_id, "eng-1");
+                assert_eq!(venue_order_id, "venue-1");
+                assert!(is_maker);
+            }
+            other => panic!("expected FastFill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fast_fill_before_the_order_join_waits_for_the_full_execution() {
+        let row = json!({
+            "execId": "fast-1", "orderId": "venue-1", "orderLinkId": "",
+            "symbol": "BTCUSDT", "side": "Sell", "execQty": "1",
+            "execPrice": "100", "execTime": "1746270400353", "isMaker": true
+        });
+        assert!(map_fast_execution_row(&row, &resolve, &HashMap::new(), 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn the_decoder_emits_one_fast_fill_after_the_order_join() {
+        let mut decoder = decoder_for(&["BTCUSDT"]);
+        decoder
+            .ingest(
+                &json!({"topic":"order","data":[{
+                    "orderId":"venue-1", "orderLinkId":"eng-1", "orderStatus":"New"
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+        let _ack = decoder.pending.pop_front().expect("order ack");
+        let fast = json!({"topic":"execution.fast","data":[{
+            "execId":"fast-1", "orderId":"venue-1", "orderLinkId":"",
+            "symbol":"BTCUSDT", "side":"Buy", "execQty":"0.1",
+            "execPrice":"100", "execTime":"1746270400353", "isMaker":true
+        }]})
+        .to_string();
+        decoder.ingest(&fast).unwrap();
+        decoder.ingest(&fast).unwrap();
+        assert!(matches!(decoder.pending.pop_front(), Some(OrderUpdate::FastFill { .. })));
+        assert!(decoder.pending.is_empty(), "duplicate fast exec id was suppressed");
+    }
+
+    #[test]
+    fn an_authoritative_fill_that_arrives_first_suppresses_stale_fast_news() {
+        let mut decoder = decoder_for(&["BTCUSDT"]);
+        decoder
+            .ingest(
+                &json!({"topic":"order","data":[{
+                    "orderId":"venue-1", "orderLinkId":"eng-1", "orderStatus":"New"
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+        let _ack = decoder.pending.pop_front().expect("order ack");
+        decoder
+            .ingest(
+                &json!({"topic":"execution","data":[{
+                    "execId":"exec-1", "orderId":"venue-1", "orderLinkId":"eng-1",
+                    "symbol":"BTCUSDT", "side":"Buy", "execQty":"0.1",
+                    "execPrice":"100", "execFee":"-0.001", "execTime":"1746270400353",
+                    "execType":"Trade", "isMaker":true
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            decoder.pending.pop_front(),
+            Some(OrderUpdate::Fill { .. })
+        ));
+        decoder
+            .ingest(
+                &json!({"topic":"execution.fast","data":[{
+                    "execId":"exec-1", "orderId":"venue-1", "orderLinkId":"",
+                    "symbol":"BTCUSDT", "side":"Buy", "execQty":"0.1",
+                    "execPrice":"100", "execTime":"1746270400353", "isMaker":true
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+        assert!(decoder.pending.is_empty());
     }
 
     #[test]

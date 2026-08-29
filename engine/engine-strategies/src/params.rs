@@ -88,6 +88,20 @@ impl<'a> Params<'a> {
         }
     }
 
+    pub(crate) fn opt_nonnegative(
+        &self,
+        param: &'static str,
+    ) -> Result<Option<f64>, BuildError> {
+        let Some(value) = self.table.get(param) else {
+            return Ok(None);
+        };
+        let n = self.as_number(param, value)?;
+        if n < 0.0 {
+            return Err(self.invalid(param, format!("expected at least 0, got {n}")));
+        }
+        Ok(Some(n))
+    }
+
     /// A true/false switch, with a value to use when the config is silent.
     /// A key that is present but not a boolean is refused rather than read as
     /// true — `rest_entries = "yes"` should be an error, not a surprise.
@@ -113,6 +127,14 @@ impl<'a> Params<'a> {
     }
 
     fn as_positive(&self, param: &'static str, value: &toml::Value) -> Result<f64, BuildError> {
+        let n = self.as_number(param, value)?;
+        if n <= 0.0 {
+            return Err(self.invalid(param, format!("expected a number above 0, got {n}")));
+        }
+        Ok(n)
+    }
+
+    fn as_number(&self, param: &'static str, value: &toml::Value) -> Result<f64, BuildError> {
         let n = match value {
             toml::Value::Float(f) => *f,
             toml::Value::Integer(i) => *i as f64,
@@ -122,9 +144,6 @@ impl<'a> Params<'a> {
         };
         if !n.is_finite() {
             return Err(self.invalid(param, format!("expected a real number, got {n}")));
-        }
-        if n <= 0.0 {
-            return Err(self.invalid(param, format!("expected a number above 0, got {n}")));
         }
         Ok(n)
     }

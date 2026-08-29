@@ -28,6 +28,7 @@ pub mod routing;
 pub mod runner;
 pub mod targets;
 pub mod trades;
+mod venue_runtime;
 pub mod working;
 
 #[cfg(test)]

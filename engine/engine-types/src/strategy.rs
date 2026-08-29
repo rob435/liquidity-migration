@@ -1,10 +1,12 @@
 use crate::ids::{SymbolId, TimerId};
-use crate::market::{MarketEvent, Quote, Subscription, Ticker};
+use crate::market::{Depth, MarketEvent, Quote, Subscription, Ticker, TradeFlow};
 use crate::orders::{Action, AmendSpec, InstrumentRule, Intent, OrderFacts, OrderUpdate, RestingOrder};
 use crate::risk::PositionView;
 use crate::targets::TargetBook;
 
 /// Everything a strategy can be woken by.
+// The inline L50 market variant keeps strategy wakes allocation-free.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     Market(MarketEvent),
@@ -35,6 +37,8 @@ pub enum EngineEvent {
 /// access, no log access, no clock other than these.
 pub trait StrategyCtx {
     fn quote(&self, symbol: SymbolId) -> &Quote;
+    fn depth(&self, symbol: SymbolId) -> &Depth;
+    fn trade_flow(&self, symbol: SymbolId) -> &TradeFlow;
     fn ticker(&self, symbol: SymbolId) -> &Ticker;
     fn symbol_id(&self, name: &str) -> Option<SymbolId>;
     fn now_ns(&self) -> u64;

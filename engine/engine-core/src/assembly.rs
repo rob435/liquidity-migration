@@ -948,10 +948,10 @@ mod deployed_templates {
     }
 
     #[test]
-    fn the_mainnet_template_runs_carry_then_long_then_exodus() {
+    fn the_mainnet_template_appends_the_maker_canary_after_existing_sleeves() {
         let config = config_from("engine.mainnet.toml.template", "operational.mainnet.json");
         let sleeves: Vec<&str> = config.strategies.iter().map(|s| s.sleeve_name()).collect();
-        assert_eq!(sleeves, ["carry", "long", "exodus"]);
+        assert_eq!(sleeves, ["carry", "long", "exodus", "maker_canary"]);
     }
 
     #[test]
@@ -973,12 +973,12 @@ mod deployed_templates {
     }
 
     #[test]
-    fn each_sleeve_in_the_mainnet_template_reads_its_own_book() {
+    fn each_target_book_sleeve_in_the_mainnet_template_reads_its_own_book() {
         let config = config_from("engine.mainnet.toml.template", "operational.mainnet.json");
         let paths: Vec<&std::path::Path> = config
             .strategies
             .iter()
-            .map(|s| s.book_path.as_deref().expect("every sleeve names a book"))
+            .filter_map(|s| s.book_path.as_deref())
             .collect();
         assert_eq!(paths.len(), 3);
         for (i, a) in paths.iter().enumerate() {

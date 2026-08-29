@@ -5,7 +5,7 @@
 //! the host is derived from that realm rather than passed alongside it, so the
 //! two cannot disagree.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use engine_types::ids::{Symbol, SymbolId};
@@ -14,7 +14,9 @@ use engine_types::orders::{
     OrderKind, OrderRequest, Side, TimeInForce, VenueExecution, VenueOrder,
 };
 use engine_types::risk::AccountView;
-use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
+use engine_types::{
+    AccountIdentity, VenueCaps, VenueError, VenueGateway, VenueMutationTiming,
+};
 use serde_json::{Map, Value};
 
 use super::parse::{
@@ -27,6 +29,7 @@ use super::parse::{
 use super::realm::VenueRealm;
 use super::rest::RestClient;
 use super::sign::RECV_WINDOW_MS;
+use super::trade_ws::TradeClient;
 use super::CATEGORY;
 use crate::creds::Credentials;
 use crate::fmt::venue_num;
@@ -82,6 +85,7 @@ const MAX_PAGES: usize = 20;
 pub struct BybitGateway {
     realm: VenueRealm,
     rest: RestClient,
+    trade: Option<TradeClient>,
     names: Vec<Symbol>,
     ids: HashMap<Symbol, SymbolId>,
     one_way_verified: Vec<bool>,
@@ -94,6 +98,7 @@ pub struct BybitGateway {
     leverage_limiter: RollingRateLimiter,
     position_read_limiter: RollingRateLimiter,
     attestation_key: bool,
+    last_mutation_timing: Option<VenueMutationTiming>,
 }
 
 #[derive(Default)]
@@ -176,7 +181,8 @@ pub struct BybitInventoryProbe {
 impl BybitInventoryProbe {
     pub fn new(realm: VenueRealm) -> Result<Self, VenueError> {
         let credentials = realm.inventory_credentials()?;
-        let mut gateway = BybitGateway::build(realm, realm.rest_base(), credentials, Vec::new());
+        let mut gateway =
+            BybitGateway::build(realm, realm.rest_base(), credentials, Vec::new(), None);
         gateway.attestation_key = realm == VenueRealm::Mainnet;
         Ok(Self { gateway })
     }
@@ -204,7 +210,7 @@ impl BybitGateway {
     /// `i` is the name of `SymbolId(i)`.
     pub fn new(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
         let creds = realm.credentials()?;
-        let built = Self::build(realm, realm.rest_base(), creds, symbols);
+        let built = Self::build(realm, realm.rest_base(), creds, symbols, realm.trade_ws());
         // The Python fleet reads the resolved endpoint back and compares it to
         // the realm it asked for (`bybit._require_realm_endpoint`), because
         // there the transport picks its own host from a separate argument.
@@ -234,7 +240,7 @@ impl BybitGateway {
         creds: Credentials,
         symbols: Vec<Symbol>,
     ) -> Self {
-        let mut gateway = Self::build(realm, base_url, creds, symbols);
+        let mut gateway = Self::build(realm, base_url, creds, symbols, None);
         gateway.one_way_verified.fill(true);
         gateway
     }
@@ -248,7 +254,7 @@ impl BybitGateway {
         creds: Credentials,
         symbols: Vec<Symbol>,
     ) -> Self {
-        Self::build(realm, base_url, creds, symbols)
+        Self::build(realm, base_url, creds, symbols, None)
     }
 
     /// Which account this gateway addresses: the realm it was built for, and
@@ -257,7 +263,13 @@ impl BybitGateway {
         self.realm
     }
 
-    fn build(realm: VenueRealm, base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
+    fn build(
+        realm: VenueRealm,
+        base_url: &str,
+        creds: Credentials,
+        symbols: Vec<Symbol>,
+        trade_url: Option<&str>,
+    ) -> Self {
         let one_way_verified = vec![false; symbols.len()];
         let ids = symbols
             .iter()
@@ -266,7 +278,8 @@ impl BybitGateway {
             .collect();
         Self {
             realm,
-            rest: RestClient::new(base_url, creds),
+            rest: RestClient::new(base_url, creds.clone()),
+            trade: trade_url.map(|url| TradeClient::new(url, creds)),
             names: symbols,
             ids,
             one_way_verified,
@@ -279,6 +292,7 @@ impl BybitGateway {
             leverage_limiter: RollingRateLimiter::default(),
             position_read_limiter: RollingRateLimiter::default(),
             attestation_key: false,
+            last_mutation_timing: None,
         }
     }
 
@@ -300,6 +314,9 @@ impl BybitGateway {
             Ok::<(), VenueError>(())
         });
         futures_util::future::try_join_all(checks).await?;
+        if let Some(trade) = &mut self.trade {
+            trade.warm().await?;
+        }
         self.clock_checked = true;
         Ok(())
     }
@@ -423,12 +440,110 @@ impl BybitGateway {
         Ok(Value::Object(body))
     }
 
-    async fn send_one(&self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
+    async fn send_one(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
         let body = self.order_body(req)?;
+        if let Some(trade) = &mut self.trade {
+            let reply = trade.request("order.create", vec![body]).await?;
+            let mut ack = parse_order_ack(&reply.data, &req.client_order_id, reply.ack_ns)?;
+            ack.sent_ns = reply.sent_ns;
+            return Ok(ack);
+        }
+        self.send_one_rest(req, body).await
+    }
+
+    async fn send_one_rest(
+        &self,
+        req: &OrderRequest,
+        body: Value,
+    ) -> Result<OrderAck, VenueError> {
         let envelope = self.rest.post_signed(PATH_ORDER_CREATE, &body).await?;
         let ack_ns = mono_ns();
         let result = venue_result(envelope)?;
         parse_order_ack(&result, &req.client_order_id, ack_ns)
+    }
+
+    async fn send_trade_batch(
+        &mut self,
+        reqs: &[OrderRequest],
+    ) -> Vec<Result<OrderAck, VenueError>> {
+        let mut items = Vec::with_capacity(reqs.len());
+        for req in reqs {
+            let mut body = match self.order_body(req) {
+                Ok(Value::Object(body)) => body,
+                Ok(_) => unreachable!("order body is an object"),
+                Err(error) => {
+                    return reqs
+                        .iter()
+                        .map(|_| Err(copy_venue_error(&error)))
+                        .collect()
+                }
+            };
+            body.remove("category");
+            items.push(Value::Object(body));
+        }
+        let args = vec![serde_json::json!({
+            "category": CATEGORY,
+            "request": items,
+        })];
+        let reply = match self
+            .trade
+            .as_mut()
+            .expect("called only with WebSocket transport")
+            .request("order.create-batch", args)
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                return reqs
+                    .iter()
+                    .map(|_| Err(copy_venue_error(&error)))
+                    .collect()
+            }
+        };
+        let rows = reply
+            .data
+            .get("list")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let statuses = reply
+            .ret_ext_info
+            .get("list")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if rows.len() != reqs.len() || statuses.len() != reqs.len() {
+            let error = VenueError::BadReply(format!(
+                "WebSocket batch returned {} rows and {} statuses for {} orders",
+                rows.len(),
+                statuses.len(),
+                reqs.len()
+            ));
+            return reqs
+                .iter()
+                .map(|_| Err(copy_venue_error(&error)))
+                .collect();
+        }
+        reqs.iter()
+            .zip(rows)
+            .zip(statuses)
+            .map(|((req, row), status)| {
+                let code = status.get("code").and_then(Value::as_i64).unwrap_or(-1);
+                let message = status
+                    .get("msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or("batch item carries no status message");
+                if code != 0 {
+                    return Err(VenueError::Rejected {
+                        code,
+                        message: message.to_string(),
+                    });
+                }
+                let mut ack = parse_order_ack(row, &req.client_order_id, reply.ack_ns)?;
+                ack.sent_ns = reply.sent_ns;
+                Ok(ack)
+            })
+            .collect()
     }
 
     async fn reserve_create_capacity(&mut self, count: usize) {
@@ -605,6 +720,7 @@ impl BybitGateway {
     }
 }
 
+#[engine_types::async_trait]
 impl VenueGateway for BybitGateway {
     fn caps(&self) -> VenueCaps {
         VenueCaps {
@@ -647,6 +763,22 @@ impl VenueGateway for BybitGateway {
             }
         }
         self.reserve_create_capacity(reqs.len()).await;
+        if self.trade.is_some() {
+            let replies = if reqs.len() == 1 {
+                vec![self.send_one(&reqs[0]).await]
+            } else if !trade_batch_preserves_stops(reqs) {
+                let mut replies = Vec::with_capacity(reqs.len());
+                for request in reqs {
+                    replies.push(self.send_one(request).await);
+                }
+                replies
+            } else {
+                self.send_trade_batch(reqs).await
+            };
+            self.create_limiter
+                .anchor_completion(Instant::now(), reqs.len());
+            return replies;
+        }
         // One-way positions have one position-level Full stop. Preserve each
         // symbol's submission order so later siblings cannot overtake the stop
         // state intended by earlier ones, while unrelated symbols still use
@@ -661,7 +793,12 @@ impl VenueGateway for BybitGateway {
         let chains = chains.into_values().map(|chain| async {
             let mut replies = Vec::with_capacity(chain.len());
             for (index, request) in chain {
-                replies.push((index, self.send_one(request).await));
+                let body = self.order_body(request);
+                let reply = match body {
+                    Ok(body) => self.send_one_rest(request, body).await,
+                    Err(error) => Err(error),
+                };
+                replies.push((index, reply));
             }
             replies
         });
@@ -681,12 +818,25 @@ impl VenueGateway for BybitGateway {
         symbol: SymbolId,
         client_order_id: &str,
     ) -> Result<(), VenueError> {
+        self.last_mutation_timing = None;
         let mut body = Map::new();
         body.insert("category".into(), CATEGORY.into());
         body.insert("symbol".into(), self.name_of(symbol)?.into());
         body.insert("orderLinkId".into(), client_order_id.into());
 
         reserve_rate_capacity(&mut self.cancel_limiter, 1, ORDER_CANCELS_PER_SECOND).await;
+        if let Some(trade) = &mut self.trade {
+            let reply = trade
+                .request("order.cancel", vec![Value::Object(body)])
+                .await;
+            self.cancel_limiter.anchor_completion(Instant::now(), 1);
+            let reply = reply?;
+            self.last_mutation_timing = Some(VenueMutationTiming {
+                sent_ns: reply.sent_ns,
+                ack_ns: reply.ack_ns,
+            });
+            return Ok(());
+        }
         let envelope = self
             .rest
             .post_signed(PATH_ORDER_CANCEL, &Value::Object(body))
@@ -701,6 +851,7 @@ impl VenueGateway for BybitGateway {
         &mut self,
         requests: &[(SymbolId, String)],
     ) -> Vec<Result<(), VenueError>> {
+        self.last_mutation_timing = None;
         if requests.is_empty() {
             return Vec::new();
         }
@@ -737,6 +888,55 @@ impl VenueGateway for BybitGateway {
             ORDER_CANCEL_BATCHES_PER_SECOND,
         )
         .await;
+        if let Some(trade) = &mut self.trade {
+            let reply = trade
+                .request("order.cancel-batch", vec![Value::Object(body)])
+                .await;
+            self.cancel_batch_limiter
+                .anchor_completion(Instant::now(), requests.len());
+            let reply = match reply {
+                Ok(reply) => reply,
+                Err(error) => return cancel_batch_error(requests.len(), error),
+            };
+            self.last_mutation_timing = Some(VenueMutationTiming {
+                sent_ns: reply.sent_ns,
+                ack_ns: reply.ack_ns,
+            });
+            let statuses = reply
+                .ret_ext_info
+                .get("list")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if statuses.len() != requests.len() {
+                return cancel_batch_error(
+                    requests.len(),
+                    VenueError::BadReply(format!(
+                        "WebSocket cancel batch returned {} statuses for {} orders",
+                        statuses.len(),
+                        requests.len()
+                    )),
+                );
+            }
+            return statuses
+                .iter()
+                .map(|status| {
+                    let code = status.get("code").and_then(Value::as_i64).unwrap_or(-1);
+                    if code == 0 {
+                        Ok(())
+                    } else {
+                        Err(VenueError::Rejected {
+                            code,
+                            message: status
+                                .get("msg")
+                                .and_then(Value::as_str)
+                                .unwrap_or("cancel batch item carries no message")
+                                .to_string(),
+                        })
+                    }
+                })
+                .collect();
+        }
         let envelope = self
             .rest
             .post_signed(PATH_ORDER_CANCEL_BATCH, &Value::Object(body))
@@ -766,6 +966,7 @@ impl VenueGateway for BybitGateway {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
+        self.last_mutation_timing = None;
         if spec.px.is_none() && spec.qty.is_none() {
             return Err(VenueError::BadRequest(
                 "an amend that changes neither price nor size".to_string(),
@@ -786,6 +987,18 @@ impl VenueGateway for BybitGateway {
         }
 
         reserve_rate_capacity(&mut self.amend_limiter, 1, ORDER_AMENDS_PER_SECOND).await;
+        if let Some(trade) = &mut self.trade {
+            let reply = trade
+                .request("order.amend", vec![Value::Object(body)])
+                .await;
+            self.amend_limiter.anchor_completion(Instant::now(), 1);
+            let reply = reply?;
+            self.last_mutation_timing = Some(VenueMutationTiming {
+                sent_ns: reply.sent_ns,
+                ack_ns: reply.ack_ns,
+            });
+            return Ok(());
+        }
         let envelope = self
             .rest
             .post_signed(PATH_ORDER_AMEND, &Value::Object(body))
@@ -794,6 +1007,10 @@ impl VenueGateway for BybitGateway {
         let envelope = envelope?;
         venue_result(envelope)?;
         Ok(())
+    }
+
+    fn take_mutation_timing(&mut self) -> Option<VenueMutationTiming> {
+        self.last_mutation_timing.take()
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
@@ -1244,6 +1461,19 @@ impl VenueGateway for BybitGateway {
     }
 }
 
+fn trade_batch_preserves_stops(reqs: &[OrderRequest]) -> bool {
+    let mut stopped_openings = HashSet::new();
+    for request in reqs {
+        if request.stop.is_some()
+            && !request.reduce_only
+            && !stopped_openings.insert(request.symbol)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn validate_server_clock(
     envelope: &Value,
     sent_ms: i64,
@@ -1339,6 +1569,34 @@ mod tests {
         assert_eq!(tif_str(TimeInForce::Gtc), "GTC");
         assert_eq!(tif_str(TimeInForce::Ioc), "IOC");
         assert_eq!(tif_str(TimeInForce::PostOnly), "PostOnly");
+    }
+
+    fn stopped_order(id: &str, symbol: u16) -> OrderRequest {
+        OrderRequest {
+            client_order_id: id.to_string(),
+            strategy: engine_types::StrategyId(0),
+            symbol: SymbolId(symbol),
+            side: Side::Buy,
+            qty: 1.0,
+            kind: OrderKind::Limit {
+                px: 10.0,
+                tif: TimeInForce::PostOnly,
+            },
+            stop: Some(engine_types::StopSpec { trigger_px: 8.0 }),
+            reduce_only: false,
+        }
+    }
+
+    #[test]
+    fn two_opening_stops_on_one_symbol_are_not_sent_as_one_batch() {
+        let first = stopped_order("bid", 0);
+        let mut second = stopped_order("ask", 0);
+        second.side = Side::Sell;
+        assert!(!trade_batch_preserves_stops(&[first.clone(), second]));
+        assert!(trade_batch_preserves_stops(&[
+            first,
+            stopped_order("other", 1),
+        ]));
     }
 
     #[test]

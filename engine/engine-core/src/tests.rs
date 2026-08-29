@@ -4,9 +4,8 @@
 //! was written and the order sent, but that they happened in that order —
 //! which is the whole promise of the durability barrier.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::sync::{Arc as Rc, Mutex as RefCell};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,8 +13,8 @@ use engine_types::{
     AccountIdentity, AccountView, AmendSpec, DenyReason, EngineEvent, Feed, FeedError,
     InstrumentRule, Intent, MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest,
     OrderUpdate, Quote, RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId,
-    Subscription, Symbol, SymbolId, TimerId, VenueCaps, VenueError, VenueExecution, VenueGateway,
-    VenueOrder, Wal, WalError, WalRecord, WorkPolicy,
+    Subscription, Symbol, SymbolId, TimeInForce, TimerId, VenueCaps, VenueError, VenueExecution,
+    VenueGateway, VenueOrder, Wal, WalError, WalRecord, WorkPolicy,
 };
 
 use crate::bench::{self, BenchOptions};
@@ -70,6 +69,8 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::AmendSent { .. } => "amend_sent",
         WalRecord::AmendResolved { .. } => "amend_resolved",
         WalRecord::LatencyLedger { .. } => "latency_ledger",
+        WalRecord::VenueTiming { .. } => "venue_timing",
+        WalRecord::FastExecution { .. } => "fast_execution",
         WalRecord::Note { .. } => "note",
         WalRecord::ControlAnchor { .. } => "control_anchor",
         WalRecord::Reconciled { .. } => "reconciled",
@@ -91,7 +92,7 @@ fn kind_of(record: &WalRecord) -> String {
 /// it is not on any order's path.
 fn only_the_shutdown_barrier(tape: &Tape) -> bool {
     let start = after_boot(tape);
-    let tape = tape.borrow();
+    let tape = tape.lock().unwrap();
     let barriers: Vec<usize> = tape
         .iter()
         .enumerate()
@@ -108,7 +109,7 @@ fn only_the_shutdown_barrier(tape: &Tape) -> bool {
 /// cannot lose a latch it has just set. That fsync is not on any order's
 /// path, and a test measuring what an order costs has to start after it.
 fn after_boot(tape: &Tape) -> usize {
-    let tape = tape.borrow();
+    let tape = tape.lock().unwrap();
     let reconciled = tape
         .iter()
         .position(|s| matches!(s, Step::Append(kind) if kind == "reconciled"));
@@ -125,14 +126,14 @@ fn after_boot(tape: &Tape) -> usize {
 
 /// Where a step first appears on the tape.
 fn at(tape: &Tape, step: &Step) -> Option<usize> {
-    tape.borrow().iter().position(|s| s == step)
+    tape.lock().unwrap().iter().position(|s| s == step)
 }
 
 /// Where a step first appears after some earlier point. Boot writes and
 /// fsyncs its own records, so a test about an order's barrier has to look
 /// past them.
 fn after(tape: &Tape, step: &Step, from: usize) -> Option<usize> {
-    tape.borrow()
+    tape.lock().unwrap()
         .iter()
         .skip(from)
         .position(|s| s == step)
@@ -143,7 +144,7 @@ fn after(tape: &Tape, step: &Step, from: usize) -> Option<usize> {
 /// own, so tests look for the one they mean.
 fn note_saying(records: &Rc<RefCell<Vec<WalRecord>>>, needle: &str) -> String {
     records
-        .borrow()
+        .lock().unwrap()
         .iter()
         .find_map(|r| match r {
             WalRecord::Note { text, .. } if text.contains(needle) => Some(text.clone()),
@@ -153,7 +154,7 @@ fn note_saying(records: &Rc<RefCell<Vec<WalRecord>>>, needle: &str) -> String {
 }
 
 fn appends(tape: &Tape) -> Vec<String> {
-    tape.borrow()
+    tape.lock().unwrap()
         .iter()
         .filter_map(|s| match s {
             Step::Append(kind) => Some(kind.clone()),
@@ -193,18 +194,18 @@ impl Wal for MockWal {
             return Err(WalError::Io(std::io::Error::other("test failure")));
         }
         self.seq += 1;
-        self.tape.borrow_mut().push(Step::Append(kind));
-        self.records.borrow_mut().push(record.clone());
+        self.tape.lock().unwrap().push(Step::Append(kind));
+        self.records.lock().unwrap().push(record.clone());
         Ok(self.seq)
     }
 
     fn barrier(&mut self) -> Result<(), WalError> {
-        self.tape.borrow_mut().push(Step::Barrier);
+        self.tape.lock().unwrap().push(Step::Barrier);
         Ok(())
     }
 
     fn flush(&mut self) -> Result<(), WalError> {
-        self.tape.borrow_mut().push(Step::Flush);
+        self.tape.lock().unwrap().push(Step::Flush);
         Ok(())
     }
 }
@@ -228,6 +229,7 @@ struct MockVenue {
     stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     caps: VenueCaps,
     reply: Option<VenueError>,
+    send_delay: Duration,
     /// What the venue would say it is working. Seeded by a test that wants
     /// boot to find an order the log does not know about.
     working: Vec<VenueOrder>,
@@ -273,6 +275,7 @@ impl MockVenue {
                 stops: Rc::new(RefCell::new(Vec::new())),
                 caps: bybit_like_caps(),
                 reply: None,
+                send_delay: Duration::ZERO,
                 working: Vec::new(),
                 account_readings: Rc::new(RefCell::new(VecDeque::new())),
                 account_view_fails: Rc::new(RefCell::new(false)),
@@ -285,6 +288,7 @@ impl MockVenue {
     }
 }
 
+#[engine_types::async_trait]
 impl VenueGateway for MockVenue {
     fn caps(&self) -> VenueCaps {
         self.caps
@@ -300,9 +304,12 @@ impl VenueGateway for MockVenue {
 
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
         self.tape
-            .borrow_mut()
+            .lock().unwrap()
             .push(Step::Send(req.client_order_id.clone()));
-        self.sends.borrow_mut().push(req.clone());
+        self.sends.lock().unwrap().push(req.clone());
+        if !self.send_delay.is_zero() {
+            tokio::time::sleep(self.send_delay).await;
+        }
         if let Some(e) = &self.reply {
             return Err(match e {
                 VenueError::Rejected { code, message } => VenueError::Rejected {
@@ -315,6 +322,7 @@ impl VenueGateway for MockVenue {
         Ok(OrderAck {
             client_order_id: req.client_order_id.clone(),
             venue_order_id: format!("v-{}", req.client_order_id),
+            sent_ns: 0,
             ack_ns: clock::now_ns(),
         })
     }
@@ -324,7 +332,7 @@ impl VenueGateway for MockVenue {
         _start_ms: i64,
         _end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        match self.executions.borrow().as_ref() {
+        match self.executions.lock().unwrap().as_ref() {
             Some(execs) => Ok(execs.clone()),
             None => Err(VenueError::BadRequest(
                 "this venue cannot list its execution history".to_string(),
@@ -333,8 +341,8 @@ impl VenueGateway for MockVenue {
     }
 
     async fn cancel_order(&mut self, symbol: SymbolId, id: &str) -> Result<(), VenueError> {
-        self.tape.borrow_mut().push(Step::Cancel(id.to_string()));
-        self.cancels.borrow_mut().push((symbol, id.to_string()));
+        self.tape.lock().unwrap().push(Step::Cancel(id.to_string()));
+        self.cancels.lock().unwrap().push((symbol, id.to_string()));
         Ok(())
     }
 
@@ -344,15 +352,15 @@ impl VenueGateway for MockVenue {
         id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
-        self.tape.borrow_mut().push(Step::Amend(id.to_string()));
+        self.tape.lock().unwrap().push(Step::Amend(id.to_string()));
         self.amends
-            .borrow_mut()
+            .lock().unwrap()
             .push((symbol, id.to_string(), spec));
         Ok(())
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
-        self.stops.borrow_mut().push((symbol, trigger_px));
+        self.stops.lock().unwrap().push((symbol, trigger_px));
         Ok(())
     }
 
@@ -374,7 +382,7 @@ impl VenueGateway for MockVenue {
     }
 
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
-        self.leverages.borrow_mut().push((symbol, leverage));
+        self.leverages.lock().unwrap().push((symbol, leverage));
         if self.leverage_refuses {
             return Err(VenueError::Rejected {
                 code: 110044,
@@ -385,15 +393,15 @@ impl VenueGateway for MockVenue {
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
-        self.tape.borrow_mut().push(Step::ReadAccount);
-        if *self.account_view_fails.borrow() {
+        self.tape.lock().unwrap().push(Step::ReadAccount);
+        if *self.account_view_fails.lock().unwrap() {
             return Err(VenueError::Transport(
                 "scripted account-view failure".to_string(),
             ));
         }
         let positions = self
             .account_readings
-            .borrow_mut()
+            .lock().unwrap()
             .pop_front()
             .unwrap_or_default();
         Ok(AccountView {
@@ -405,7 +413,7 @@ impl VenueGateway for MockVenue {
     }
 
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
-        self.tape.borrow_mut().push(Step::ReadRules);
+        self.tape.lock().unwrap().push(Step::ReadRules);
         Ok(self.rules.clone())
     }
 
@@ -449,7 +457,7 @@ impl RiskKernel for MockRisk {
     }
 
     fn on_update(&mut self, update: &OrderUpdate) {
-        self.seen.borrow_mut().push(update.clone());
+        self.seen.lock().unwrap().push(update.clone());
     }
 
     fn assess_price_amend(
@@ -465,7 +473,7 @@ impl RiskKernel for MockRisk {
 
     fn register_order(&mut self, client_order_id: &str, _intent: &Intent, approved_qty: f64) {
         self.registered
-            .borrow_mut()
+            .lock().unwrap()
             .push((client_order_id.to_string(), approved_qty));
     }
 }
@@ -541,7 +549,7 @@ impl MarketFeed for ScriptFeed {
     fn admit(&mut self, symbol: &str, _feed: engine_types::Feed) -> Option<SymbolId> {
         if let Some((_, id)) = self
             .admitted
-            .borrow()
+            .lock().unwrap()
             .iter()
             .find(|(known, _)| known == symbol)
         {
@@ -553,7 +561,7 @@ impl MarketFeed for ScriptFeed {
             SymbolId(self.known)
         };
         self.known += 1;
-        self.admitted.borrow_mut().push((symbol.to_string(), id));
+        self.admitted.lock().unwrap().push((symbol.to_string(), id));
         Some(id)
     }
 
@@ -592,7 +600,7 @@ impl ScriptOrderFeed {
 
 impl OrderFeed for ScriptOrderFeed {
     fn learn(&mut self, symbol: &str, id: SymbolId) {
-        self.learned.borrow_mut().push((symbol.to_string(), id));
+        self.learned.lock().unwrap().push((symbol.to_string(), id));
     }
 
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
@@ -685,7 +693,7 @@ impl Strategy for Buyer {
                 });
             }
             EngineEvent::Order(update) => {
-                self.heard.borrow_mut().push(format!("{update:?}"));
+                self.heard.lock().unwrap().push(format!("{update:?}"));
             }
             _ => {}
         }
@@ -735,7 +743,7 @@ impl Strategy for Ticker {
                 self.armed = true;
                 ctx.arm_timer(self.timer, self.after_ns);
             }
-            EngineEvent::Timer { id, .. } => self.fired.borrow_mut().push(*id),
+            EngineEvent::Timer { id, .. } => self.fired.lock().unwrap().push(*id),
             _ => {}
         }
     }
@@ -890,7 +898,7 @@ async fn build_with_venue_state(
     let (wal, records) = MockWal::new(tape.clone());
     let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
     venue.working = working;
-    venue.account_readings.borrow_mut().push_back(held);
+    venue.account_readings.lock().unwrap().push_back(held);
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let stops = venue.stops.clone();

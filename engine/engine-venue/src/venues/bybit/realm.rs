@@ -85,6 +85,15 @@ impl VenueRealm {
         }
     }
 
+    /// WebSocket order entry. Bybit exposes it on mainnet only; demo keeps
+    /// the signed REST path.
+    pub fn trade_ws(self) -> Option<&'static str> {
+        match self {
+            VenueRealm::Demo => None,
+            VenueRealm::Mainnet => Some("wss://stream.bybit.com/v5/trade"),
+        }
+    }
+
     /// Public market data. One stream serves both realms: Bybit runs no
     /// separate demo price feed, and the demo account matches against these
     /// same prices. Written here rather than in the market-data crate so that

@@ -18,8 +18,8 @@ async fn a_quiet_account_leaves_the_engine_free_to_trade() {
         )
         .await
         .unwrap();
-    assert_eq!(h.sends.borrow().len(), 1, "nothing was in the way");
-    let latched = h.records.borrow().iter().any(|r| {
+    assert_eq!(h.sends.lock().unwrap().len(), 1, "nothing was in the way");
+    let latched = h.records.lock().unwrap().iter().any(|r| {
         matches!(r, WalRecord::Reconciled { may_open, .. } if !may_open)
     });
     assert!(!latched, "there was nothing to latch on");
@@ -47,8 +47,8 @@ async fn an_order_this_engine_never_placed_stops_it_opening() {
         .await
         .unwrap();
 
-    assert!(h.sends.borrow().is_empty(), "no order should have left the box");
-    let records = h.records.borrow();
+    assert!(h.sends.lock().unwrap().is_empty(), "no order should have left the box");
+    let records = h.records.lock().unwrap();
     assert!(
         records.iter().any(|r| matches!(r, WalRecord::Reconciled { may_open: false, .. })),
         "boot must write down that it stopped opening"
@@ -83,7 +83,7 @@ async fn a_hand_trade_in_a_symbol_nobody_here_trades_does_not_stop_it() {
         )
         .await
         .unwrap();
-    assert_eq!(h.sends.borrow().len(), 1, "it should still be trading");
+    assert_eq!(h.sends.lock().unwrap().len(), 1, "it should still be trading");
 }
 
 #[tokio::test]
@@ -116,7 +116,7 @@ async fn an_operators_clear_resets_the_latch() {
         )
         .await
         .unwrap();
-    assert_eq!(h.sends.borrow().len(), 1, "the clear must lift the latch");
+    assert_eq!(h.sends.lock().unwrap().len(), 1, "the clear must lift the latch");
 }
 
 #[tokio::test]
@@ -153,8 +153,8 @@ async fn a_clear_resets_the_memory_not_the_check() {
         )
         .await
         .unwrap();
-    assert!(h.sends.borrow().is_empty(), "a fresh finding must latch again");
-    let records = h.records.borrow();
+    assert!(h.sends.lock().unwrap().is_empty(), "a fresh finding must latch again");
+    let records = h.records.lock().unwrap();
     assert!(
         records.iter().any(|r| matches!(r, WalRecord::Reconciled { may_open: false, .. })),
         "the new latch must be written down"
@@ -182,7 +182,7 @@ impl Strategy for ForeignProbe {
 
     fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
         if let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event {
-            self.saw.borrow_mut().push(ctx.foreign_position(*symbol));
+            self.saw.lock().unwrap().push(ctx.foreign_position(*symbol));
         }
     }
 }
@@ -247,12 +247,12 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
         .await
         .unwrap();
 
-    assert!(!saw.borrow().is_empty(), "the probe must have been asked something");
+    assert!(!saw.lock().unwrap().is_empty(), "the probe must have been asked something");
     assert!(
-        saw.borrow().iter().all(|foreign| !foreign),
+        saw.lock().unwrap().iter().all(|foreign| !foreign),
         "a flat symbol is nobody's; the stale claim must not survive boot"
     );
-    let records = h.records.borrow();
+    let records = h.records.lock().unwrap();
     assert!(
         records.iter().any(|r| matches!(r, WalRecord::ClaimsDropped { .. })),
         "the drop must be durable in the log, not just in memory"
@@ -315,7 +315,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     // The log the next boot replays: the old fills, everything the first
     // boot wrote (the drop included), then the second sleeve's own entry.
     let mut log = previous.clone();
-    log.extend(h.records.borrow().iter().cloned());
+    log.extend(h.records.lock().unwrap().iter().cloned());
     log.push(WalRecord::OrderSent {
         request: OrderRequest {
             client_order_id: "eng-new-1".to_string(),
@@ -377,9 +377,9 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
         .await
         .unwrap();
 
-    assert!(!saw2.borrow().is_empty(), "the probe must have been asked something");
+    assert!(!saw2.lock().unwrap().is_empty(), "the probe must have been asked something");
     assert!(
-        saw2.borrow().iter().all(|foreign| !foreign),
+        saw2.lock().unwrap().iter().all(|foreign| !foreign),
         "the position is the second sleeve's own; the old claim must not come back"
     );
 }
@@ -407,5 +407,5 @@ async fn a_latch_from_an_earlier_boot_survives_the_restart() {
         )
         .await
         .unwrap();
-    assert!(h.sends.borrow().is_empty(), "the latch did not survive the restart");
+    assert!(h.sends.lock().unwrap().is_empty(), "the latch did not survive the restart");
 }

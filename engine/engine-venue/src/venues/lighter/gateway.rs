@@ -347,6 +347,7 @@ impl LighterGateway {
     }
 }
 
+#[engine_types::async_trait]
 impl VenueGateway for LighterGateway {
     fn caps(&self) -> VenueCaps {
         VenueCaps {
@@ -466,6 +467,7 @@ impl VenueGateway for LighterGateway {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            sent_ns: 0,
             ack_ns,
         })
     }

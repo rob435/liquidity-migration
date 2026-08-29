@@ -40,7 +40,7 @@ impl Strategy for BookListener {
     fn on_event(&mut self, event: &EngineEvent, _ctx: &mut dyn StrategyCtx) {
         if let EngineEvent::Targets(book) = event {
             self.heard
-                .borrow_mut()
+                .lock().unwrap()
                 .push(format!("{} x{}", book.source, book.targets.len()));
         }
     }
@@ -54,7 +54,7 @@ const BOOK_JSON: &str = r#"{"version":1,"source":"carry","decision_ts_ms":170000
 /// after a while so a failure reads as an assertion and not a hung test.
 async fn until_heard(heard: Rc<RefCell<Vec<String>>>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while heard.borrow().is_empty() && tokio::time::Instant::now() < deadline {
+    while heard.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
@@ -83,10 +83,10 @@ async fn an_entry_states_its_leverage_before_the_order_goes() {
         .await
         .unwrap();
 
-    assert_eq!(h.leverages.borrow().as_slice(), [(SymbolId(0), 2.0)]);
-    assert_eq!(h.sends.borrow().len(), 1, "the order still went");
+    assert_eq!(h.leverages.lock().unwrap().as_slice(), [(SymbolId(0), 2.0)]);
+    assert_eq!(h.sends.lock().unwrap().len(), 1, "the order still went");
     // Order matters: the venue heard about leverage before it heard the order.
-    let tape = h.tape.borrow();
+    let tape = h.tape.lock().unwrap();
     assert!(
         tape.iter().any(|step| matches!(step, Step::Send(_))),
         "no send on the tape: {tape:?}"
@@ -110,12 +110,12 @@ async fn a_second_entry_on_the_same_symbol_does_not_pay_for_leverage_twice() {
         .await
         .unwrap();
 
-    assert_eq!(h.sends.borrow().len(), 3, "three entries went");
+    assert_eq!(h.sends.lock().unwrap().len(), 3, "three entries went");
     assert_eq!(
-        h.leverages.borrow().len(),
+        h.leverages.lock().unwrap().len(),
         1,
         "leverage was stated more than once for one symbol: {:?}",
-        h.leverages.borrow()
+        h.leverages.lock().unwrap()
     );
 }
 
@@ -138,9 +138,9 @@ async fn an_exit_does_not_wait_on_leverage() {
         .unwrap();
 
     assert!(
-        h.leverages.borrow().is_empty(),
+        h.leverages.lock().unwrap().is_empty(),
         "an exit stopped to set leverage: {:?}",
-        h.leverages.borrow()
+        h.leverages.lock().unwrap()
     );
 }
 
@@ -167,9 +167,9 @@ async fn an_order_whose_leverage_will_not_set_is_not_sent() {
         .await
         .unwrap();
 
-    assert_eq!(h.leverages.borrow().len(), 1, "it tried");
+    assert_eq!(h.leverages.lock().unwrap().len(), 1, "it tried");
     assert!(
-        h.sends.borrow().is_empty(),
+        h.sends.lock().unwrap().is_empty(),
         "an order went at a leverage the venue would not accept"
     );
 }
@@ -224,7 +224,7 @@ async fn a_book_on_disk_reaches_the_strategies_through_the_loop() {
         .unwrap();
 
     assert_eq!(
-        heard.borrow().as_slice(),
+        heard.lock().unwrap().as_slice(),
         ["carry x1"],
         "the book reached the strategy whole"
     );
@@ -315,7 +315,7 @@ impl MarketFeed for QuoteAfterAdmission {
             let admitted = self
                 .inner
                 .admitted
-                .borrow()
+                .lock().unwrap()
                 .iter()
                 .find(|(name, _)| name == "ETHUSDT")
                 .map(|(_, id)| *id);
@@ -345,7 +345,7 @@ impl MarketFeed for QuoteAfterAdmission {
 /// Wait until both sleeves have heard something, or give up.
 async fn until_both_heard(a: Rc<RefCell<Vec<String>>>, b: Rc<RefCell<Vec<String>>>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while (a.borrow().is_empty() || b.borrow().is_empty())
+    while (a.lock().unwrap().is_empty() || b.lock().unwrap().is_empty())
         && tokio::time::Instant::now() < deadline
     {
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -389,12 +389,12 @@ async fn each_sleeve_hears_only_its_own_book() {
         .unwrap();
 
     assert_eq!(
-        carry_heard.borrow().as_slice(),
+        carry_heard.lock().unwrap().as_slice(),
         ["carry x1"],
         "the carry sleeve heard something other than its own book"
     );
     assert_eq!(
-        long_heard.borrow().as_slice(),
+        long_heard.lock().unwrap().as_slice(),
         ["long x2"],
         "the long sleeve heard something other than its own book"
     );
@@ -436,10 +436,10 @@ async fn a_symbol_a_book_names_late_is_taken_on() {
         .expect("the engine now follows the symbol the book named");
     // All three of the other tables that map names to ids agree, which is the
     // only thing that makes the id safe to place an order against.
-    assert_eq!(admitted.borrow().as_slice(), [("ETHUSDT".to_string(), id)]);
-    assert_eq!(learned.borrow().as_slice(), [("ETHUSDT".to_string(), id)]);
+    assert_eq!(admitted.lock().unwrap().as_slice(), [("ETHUSDT".to_string(), id)]);
+    assert_eq!(learned.lock().unwrap().as_slice(), [("ETHUSDT".to_string(), id)]);
     assert!(
-        h.sends.borrow().is_empty(),
+        h.sends.lock().unwrap().is_empty(),
         "taking on a symbol is not a reason to trade it"
     );
 }
@@ -467,7 +467,7 @@ async fn a_post_admission_quote_reaches_the_requesting_follower() {
     let sends = h.sends.clone();
     let shutdown = async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while sends.borrow().is_empty() && tokio::time::Instant::now() < deadline {
+        while sends.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     };
@@ -486,10 +486,10 @@ async fn a_post_admission_quote_reaches_the_requesting_follower() {
         feed: Feed::Quote,
     }));
     assert_eq!(
-        admitted.borrow().as_slice(),
+        admitted.lock().unwrap().as_slice(),
         [("ETHUSDT".to_string(), dynamic_id)]
     );
-    let sent = h.sends.borrow();
+    let sent = h.sends.lock().unwrap();
     assert_eq!(
         sent.len(),
         1,
@@ -523,7 +523,7 @@ async fn a_symbol_the_parts_disagree_about_is_not_traded() {
         .unwrap();
 
     assert!(
-        learned.borrow().is_empty(),
+        learned.lock().unwrap().is_empty(),
         "a symbol the parts disagree about was passed on as usable"
     );
     // BTCUSDT, which was there before, is untouched: one bad symbol does not
@@ -560,7 +560,7 @@ async fn an_unreadable_book_wakes_nobody() {
         .await
         .unwrap();
 
-    assert!(heard.borrow().is_empty(), "nothing was delivered");
+    assert!(heard.lock().unwrap().is_empty(), "nothing was delivered");
 }
 
 #[tokio::test]
@@ -577,8 +577,8 @@ async fn with_no_watcher_the_loop_runs_as_it_always_did() {
         )
         .await
         .unwrap();
-    assert!(heard.borrow().is_empty());
-    assert!(h.sends.borrow().is_empty());
+    assert!(heard.lock().unwrap().is_empty());
+    assert!(h.sends.lock().unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------- authority
@@ -589,7 +589,7 @@ async fn until_reading_consumed(
     readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !readings.borrow().is_empty() && tokio::time::Instant::now() < deadline {
+    while !readings.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
@@ -615,7 +615,7 @@ async fn flat_spell_leverage_calls(section: EngineSection) -> usize {
         .unwrap();
 
     // The account reads back flat — the moment shared authority forgets.
-    h.account_readings.borrow_mut().push_back(Vec::new());
+    h.account_readings.lock().unwrap().push_back(Vec::new());
     engine
         .run(
             &mut ScriptFeed::quotes(symbol, 0, false),
@@ -635,8 +635,8 @@ async fn flat_spell_leverage_calls(section: EngineSection) -> usize {
         .await
         .unwrap();
 
-    assert_eq!(h.sends.borrow().len(), 2, "both entries went");
-    let count = h.leverages.borrow().len();
+    assert_eq!(h.sends.lock().unwrap().len(), 2, "both entries went");
+    let count = h.leverages.lock().unwrap().len();
     count
 }
 
@@ -679,10 +679,10 @@ async fn a_venue_row_contradicting_the_cache_evicts_the_trust() {
         )
         .await
         .unwrap();
-    assert_eq!(h.leverages.borrow().len(), 1);
+    assert_eq!(h.leverages.lock().unwrap().len(), 1);
 
     // The venue says the held position runs at 5x. This engine set 2x.
-    h.account_readings.borrow_mut().push_back(vec![engine_types::PositionView {
+    h.account_readings.lock().unwrap().push_back(vec![engine_types::PositionView {
         symbol,
         side: Side::Buy,
         qty: 0.01,
@@ -712,12 +712,12 @@ async fn a_venue_row_contradicting_the_cache_evicts_the_trust() {
         .unwrap();
 
     assert_eq!(
-        h.leverages.borrow().len(),
+        h.leverages.lock().unwrap().len(),
         2,
         "the contradicted trust was evicted, so the next entry confirmed inline"
     );
     assert!(
-        h.records.borrow().iter().any(|record| matches!(
+        h.records.lock().unwrap().iter().any(|record| matches!(
             record,
             WalRecord::Note { source, .. } if source == "leverage-authority"
         )),
@@ -755,9 +755,9 @@ async fn a_book_arrival_pre_arms_leverage_before_any_entry() {
         .unwrap();
 
     assert_eq!(
-        h.leverages.borrow().as_slice(),
+        h.leverages.lock().unwrap().as_slice(),
         [(SymbolId(0), 2.0)],
         "the book's leverage was armed at arrival, before any entry existed"
     );
-    assert!(h.sends.borrow().is_empty(), "no order went; only the arm");
+    assert!(h.sends.lock().unwrap().is_empty(), "no order went; only the arm");
 }

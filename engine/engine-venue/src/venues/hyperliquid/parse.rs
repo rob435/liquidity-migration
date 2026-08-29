@@ -109,6 +109,7 @@ pub(crate) fn parse_order_ack(
     Ok(OrderAck {
         client_order_id: client_order_id.to_string(),
         venue_order_id: oid.to_string(),
+        sent_ns: 0,
         ack_ns,
     })
 }

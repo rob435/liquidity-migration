@@ -216,6 +216,7 @@ impl MexcGateway {
     }
 }
 
+#[engine_types::async_trait]
 impl VenueGateway for MexcGateway {
     fn caps(&self) -> VenueCaps {
         VenueCaps {
@@ -294,6 +295,7 @@ impl VenueGateway for MexcGateway {
         Ok(OrderAck {
             client_order_id: req.client_order_id.clone(),
             venue_order_id: parse_order_ack(data)?,
+            sent_ns: 0,
             ack_ns: mono_ns(),
         })
     }

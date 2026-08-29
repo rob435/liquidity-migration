@@ -295,6 +295,8 @@ impl std::fmt::Display for VenueName {
 
 /// The venue the engine is trading through, chosen at assembly and then
 /// carried by value: static dispatch, no vtable on the order path.
+// Built once at boot; keeping adapters inline preserves static dispatch.
+#[allow(clippy::large_enum_variant)]
 pub enum Venue {
     Bybit(BybitGateway),
     Hyperliquid(HyperliquidGateway),
@@ -427,6 +429,7 @@ impl Venue {
 /// Every method hands straight to the chosen adapter. Nothing is decided
 /// here: a wrapper that quietly substituted behaviour would be a venue the
 /// caller never picked.
+#[engine_types::async_trait]
 impl VenueGateway for Venue {
     fn caps(&self) -> VenueCaps {
         match self {

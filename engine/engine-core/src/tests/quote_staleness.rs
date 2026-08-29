@@ -73,7 +73,7 @@ impl Strategy for Opener {
                 });
             }
             EngineEvent::IntentRefused { symbol, reduce_only, .. } => {
-                self.refused.borrow_mut().push((*symbol, *reduce_only));
+                self.refused.lock().unwrap().push((*symbol, *reduce_only));
             }
             _ => {}
         }
@@ -121,7 +121,7 @@ fn age_the_clock() {
 
 fn stale_quote_denials(records: &Rc<RefCell<Vec<WalRecord>>>) -> Vec<(u64, u64)> {
     records
-        .borrow()
+        .lock().unwrap()
         .iter()
         .filter_map(|record| match record {
             WalRecord::Verdict {
@@ -143,8 +143,8 @@ async fn an_entry_against_a_fresh_quote_passes() {
         .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
         .await
         .unwrap();
-    assert_eq!(h.sends.borrow().len(), 1, "a fresh quote opens");
-    assert!(refused.borrow().is_empty());
+    assert_eq!(h.sends.lock().unwrap().len(), 1, "a fresh quote opens");
+    assert!(refused.lock().unwrap().is_empty());
     assert!(stale_quote_denials(&h.records).is_empty());
 }
 
@@ -169,14 +169,14 @@ async fn an_entry_against_a_quote_past_the_bound_is_refused_and_the_strategy_hea
         .await
         .unwrap();
 
-    assert!(h.sends.borrow().is_empty(), "nothing reaches the venue");
+    assert!(h.sends.lock().unwrap().is_empty(), "nothing reaches the venue");
     let denials = stale_quote_denials(&h.records);
     assert_eq!(denials.len(), 1, "the refusal is written down as a verdict");
     let (age_ns, max_age_ns) = denials[0];
     assert_eq!(max_age_ns, 5_000_000, "the bound is the configured one");
     assert!(age_ns > max_age_ns, "and the age really was past it: {age_ns}");
     assert_eq!(
-        refused.borrow().as_slice(),
+        refused.lock().unwrap().as_slice(),
         &[(SymbolId(0), false)],
         "the strategy hears IntentRefused for its symbol"
     );
@@ -201,12 +201,12 @@ async fn an_exit_under_the_same_staleness_flows() {
         .await
         .unwrap();
     assert_eq!(
-        h.sends.borrow().len(),
+        h.sends.lock().unwrap().len(),
         1,
         "taking risk off never waits on a fresh price"
     );
-    assert!(h.sends.borrow()[0].reduce_only);
-    assert!(refused.borrow().is_empty());
+    assert!(h.sends.lock().unwrap()[0].reduce_only);
+    assert!(refused.lock().unwrap().is_empty());
     assert!(stale_quote_denials(&h.records).is_empty());
 }
 
@@ -228,7 +228,7 @@ async fn a_symbol_that_never_quoted_is_refused_for_entries() {
         .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
         .await
         .unwrap();
-    assert!(h.sends.borrow().is_empty());
+    assert!(h.sends.lock().unwrap().is_empty());
     assert_eq!(stale_quote_denials(&h.records).len(), 1);
-    assert_eq!(refused.borrow().as_slice(), &[(eth, false)]);
+    assert_eq!(refused.lock().unwrap().as_slice(), &[(eth, false)]);
 }

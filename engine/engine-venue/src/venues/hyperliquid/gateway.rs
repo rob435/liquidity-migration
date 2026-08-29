@@ -330,6 +330,7 @@ impl HyperliquidGateway {
     }
 }
 
+#[engine_types::async_trait]
 impl VenueGateway for HyperliquidGateway {
     fn caps(&self) -> VenueCaps {
         VenueCaps {

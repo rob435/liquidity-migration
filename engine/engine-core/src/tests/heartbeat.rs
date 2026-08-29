@@ -188,7 +188,7 @@ async fn a_running_engine_leaves_a_heartbeat_saying_how_it_is() {
     assert_eq!(fields["market_events"], 2, "both quotes were seen");
     assert_eq!(
         fields["orders_sent"].as_u64(),
-        Some(h.sends.borrow().len() as u64),
+        Some(h.sends.lock().unwrap().len() as u64),
         "the count in the file is the count that went out"
     );
     // An outside reader has no access to the engine's monotonic clock, so the
@@ -227,7 +227,7 @@ async fn an_engine_latched_out_of_opening_says_so_in_its_heartbeat() {
         .await
         .unwrap();
 
-    assert!(h.sends.borrow().is_empty(), "it is latched, so nothing went out");
+    assert!(h.sends.lock().unwrap().is_empty(), "it is latched, so nothing went out");
     let fields = heartbeat_at(path.path());
     assert_eq!(fields["may_open"].as_bool(), Some(false));
     assert!(
@@ -268,7 +268,7 @@ async fn a_heartbeat_that_cannot_be_written_does_not_stop_the_engine() {
     drop(guard);
 
     assert_eq!(outcome.market_events, 1, "the loop kept running");
-    assert_eq!(h.sends.borrow().len(), 1, "and the order still went out");
+    assert_eq!(h.sends.lock().unwrap().len(), 1, "and the order still went out");
     assert!(!path.exists(), "nothing was written");
     // Said once, not on every one of the several ticks in that window: this
     // path is wrong every time it is tried.

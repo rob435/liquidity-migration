@@ -206,6 +206,9 @@ fn summarise(ledger: &LatencyLedger, events: u64, orders: u64) -> BenchResult {
         Segment::Durable,
         Segment::Wire,
         Segment::Ack,
+        Segment::DispatchQueue,
+        Segment::VenueTask,
+        Segment::CoreResume,
         Segment::EndToEnd,
     ]
     .into_iter()
@@ -431,6 +434,7 @@ pub struct HttpVenue {
     buf: Vec<u8>,
     symbols: Vec<Symbol>,
     key: Vec<u8>,
+    last_sent_ns: u64,
 }
 
 impl HttpVenue {
@@ -442,6 +446,7 @@ impl HttpVenue {
             buf: Vec::with_capacity(8 * 1024),
             symbols,
             key: b"bench-secret-key".to_vec(),
+            last_sent_ns: 0,
         }
     }
 
@@ -499,6 +504,7 @@ impl HttpVenue {
             .write_all(request.as_bytes())
             .await
             .map_err(|e| VenueError::Transport(e.to_string()))?;
+        self.last_sent_ns = clock::now_ns();
 
         self.buf.clear();
         let body = read_http_body(self.stream.as_mut().unwrap(), &mut self.buf).await?;
@@ -506,6 +512,7 @@ impl HttpVenue {
     }
 }
 
+#[engine_types::async_trait]
 impl VenueGateway for HttpVenue {
     /// The same answers Bybit gives, so the bench walks the same paths the
     /// shipping gateway walks.
@@ -564,6 +571,7 @@ impl VenueGateway for HttpVenue {
         Ok(OrderAck {
             client_order_id: req.client_order_id.clone(),
             venue_order_id,
+            sent_ns: self.last_sent_ns,
             ack_ns,
         })
     }

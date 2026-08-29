@@ -64,10 +64,16 @@ pub struct Facts<'a> {
     pub market_events: u64,
     pub orders_sent: u64,
     pub strategies: &'a [String],
-    /// The latency ledger's current window: thinking time and time to the
-    /// wire. A part nothing has been recorded into is written as null.
+    /// The latency ledger's current window. A part nothing has been recorded
+    /// into is written as null.
     pub decide: Quantiles,
+    pub durable: Quantiles,
     pub wire: Quantiles,
+    pub ack: Quantiles,
+    pub dispatch_queue: Quantiles,
+    pub venue_task: Quantiles,
+    pub core_resume: Quantiles,
+    pub end_to_end: Quantiles,
     /// The account as the venue last described it, and how old that reading
     /// is. This is not telemetry like the rest of this struct: the target
     /// producers size their entries from the equity here. All three are
@@ -231,6 +237,8 @@ impl Heartbeat {
             ),
             ("decide_p50_ns", figure(facts.decide.count, facts.decide.p50_ns)),
             ("decide_p99_ns", figure(facts.decide.count, facts.decide.p99_ns)),
+            ("durable_p50_ns", figure(facts.durable.count, facts.durable.p50_ns)),
+            ("durable_p99_ns", figure(facts.durable.count, facts.durable.p99_ns)),
             ("entry_blockers", blockers(facts.entry_blockers)),
             ("engine_version", quoted(ENGINE_VERSION)),
             ("fills", facts.costs.fills.to_string()),
@@ -273,6 +281,40 @@ impl Heartbeat {
             ("wire_p50_ns", figure(facts.wire.count, facts.wire.p50_ns)),
             ("wire_p99_ns", figure(facts.wire.count, facts.wire.p99_ns)),
             ("working_entries", working_entries(facts.working_entries)),
+            ("ack_p50_ns", figure(facts.ack.count, facts.ack.p50_ns)),
+            ("ack_p99_ns", figure(facts.ack.count, facts.ack.p99_ns)),
+            (
+                "dispatch_queue_p50_ns",
+                figure(facts.dispatch_queue.count, facts.dispatch_queue.p50_ns),
+            ),
+            (
+                "dispatch_queue_p99_ns",
+                figure(facts.dispatch_queue.count, facts.dispatch_queue.p99_ns),
+            ),
+            (
+                "venue_task_p50_ns",
+                figure(facts.venue_task.count, facts.venue_task.p50_ns),
+            ),
+            (
+                "venue_task_p99_ns",
+                figure(facts.venue_task.count, facts.venue_task.p99_ns),
+            ),
+            (
+                "core_resume_p50_ns",
+                figure(facts.core_resume.count, facts.core_resume.p50_ns),
+            ),
+            (
+                "core_resume_p99_ns",
+                figure(facts.core_resume.count, facts.core_resume.p99_ns),
+            ),
+            (
+                "end_to_end_p50_ns",
+                figure(facts.end_to_end.count, facts.end_to_end.p50_ns),
+            ),
+            (
+                "end_to_end_p99_ns",
+                figure(facts.end_to_end.count, facts.end_to_end.p99_ns),
+            ),
         ];
         fields.sort_by_key(|(key, _)| *key);
         let body: Vec<String> = fields
@@ -440,13 +482,23 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 27] = [
+    const KEYS: [&str; 39] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
         "account_user_id",
+        "ack_p50_ns",
+        "ack_p99_ns",
+        "core_resume_p50_ns",
+        "core_resume_p99_ns",
         "decide_p50_ns",
         "decide_p99_ns",
+        "dispatch_queue_p50_ns",
+        "dispatch_queue_p99_ns",
+        "durable_p50_ns",
+        "durable_p99_ns",
+        "end_to_end_p50_ns",
+        "end_to_end_p99_ns",
         "engine_version",
         "entry_blockers",
         "fill_all_in_arrival_bps",
@@ -464,6 +516,8 @@ mod tests {
         "realm",
         "strategies",
         "venue",
+        "venue_task_p50_ns",
+        "venue_task_p99_ns",
         "wall_ts_ms",
         "wire_p50_ns",
         "wire_p99_ns",
@@ -513,7 +567,13 @@ mod tests {
             orders_sent: 7,
             strategies,
             decide: measured(7, 83, 400),
+            durable: measured(7, 10_000, 20_000),
             wire: measured(7, 2_600_000, 4_100_000),
+            ack: measured(7, 2_500_000, 4_000_000),
+            dispatch_queue: measured(7, 1_000, 2_000),
+            venue_task: measured(7, 2_550_000, 4_050_000),
+            core_resume: measured(7, 2_000, 3_000),
+            end_to_end: measured(7, 2_700_000, 4_200_000),
             equity_usdt: 10_250.5,
             available_usdt: 4_100.25,
             // Two seconds old, on the engine's own monotonic clock.
@@ -941,7 +1001,13 @@ mod fill_cost_tests {
             orders_sent: 1,
             strategies: &[],
             decide: Quantiles::default(),
+            durable: Quantiles::default(),
             wire: Quantiles::default(),
+            ack: Quantiles::default(),
+            dispatch_queue: Quantiles::default(),
+            venue_task: Quantiles::default(),
+            core_resume: Quantiles::default(),
+            end_to_end: Quantiles::default(),
             equity_usdt: 100.0,
             available_usdt: 100.0,
             account_age_ns: Some(1),

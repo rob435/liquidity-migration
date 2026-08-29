@@ -279,7 +279,9 @@ impl LedgerOfOrders {
                         rec.ending = Some(Ending::Filled);
                     }
                 }
-                OrderUpdate::StopAttached { .. } | OrderUpdate::StreamReset { .. } => {}
+                OrderUpdate::FastFill { .. }
+                | OrderUpdate::StopAttached { .. }
+                | OrderUpdate::StreamReset { .. } => {}
             }
             (was_live && !rec.in_flight()).then_some((stop, opening))
         };
@@ -449,6 +451,9 @@ pub fn client_order_id(update: &OrderUpdate) -> Option<&str> {
         OrderUpdate::Fill {
             client_order_id, ..
         } => Some(client_order_id),
+        OrderUpdate::FastFill {
+            client_order_id, ..
+        } => Some(client_order_id),
         OrderUpdate::Cancelled {
             client_order_id, ..
         } => Some(client_order_id),
@@ -593,6 +598,7 @@ mod tests {
                 update: OrderUpdate::Ack(OrderAck {
                     client_order_id: "a".into(),
                     venue_order_id: "v".into(),
+                    sent_ns: 0,
                     ack_ns: 5,
                 }),
             },

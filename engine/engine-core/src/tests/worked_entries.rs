@@ -19,7 +19,7 @@ async fn an_entry_asked_to_be_worked_rests_at_the_touch_instead_of_crossing() {
         .await
         .unwrap();
 
-    let sends = h.sends.borrow();
+    let sends = h.sends.lock().unwrap();
     assert_eq!(sends.len(), 1);
     assert_eq!(
         sends[0].kind,
@@ -48,7 +48,7 @@ async fn a_spread_too_thin_to_pay_for_still_sends_the_market_order() {
         .await
         .unwrap();
 
-    assert_eq!(h.sends.borrow()[0].kind, OrderKind::Market);
+    assert_eq!(h.sends.lock().unwrap()[0].kind, OrderKind::Market);
 }
 
 #[tokio::test]
@@ -110,7 +110,7 @@ async fn an_exit_is_sent_as_written_even_when_it_asks_to_be_worked() {
         .unwrap();
 
     assert_eq!(
-        h.sends.borrow()[0].kind,
+        h.sends.lock().unwrap()[0].kind,
         OrderKind::Market,
         "the spread was wide enough to rest in; it is an exit that stops it"
     );
@@ -147,8 +147,8 @@ async fn the_group_flush_tick_walks_a_resting_entry_after_the_market() {
         .await
         .unwrap();
 
-    let id = sends.borrow()[0].client_order_id.clone();
-    let amends = amends.borrow();
+    let id = sends.lock().unwrap()[0].client_order_id.clone();
+    let amends = amends.lock().unwrap();
     assert!(!amends.is_empty(), "the overtaken order was not moved");
     assert_eq!(amends[0].1, id);
     assert_eq!(
@@ -191,13 +191,13 @@ async fn repricing_a_resting_entry_reserves_its_price_range_before_the_wire() {
         .await
         .unwrap();
     assert!(
-        !amends.borrow().is_empty(),
+        !amends.lock().unwrap().is_empty(),
         "there was a reprice to measure"
     );
 
     // The changed reservation and AmendSent record must reach the durability
     // barrier before the venue sees the amend.
-    let steps = tape.borrow();
+    let steps = tape.lock().unwrap();
     let mut checked = 0;
     for (i, step) in steps.iter().enumerate() {
         if *step != Step::Append("amend_sent".into()) {
