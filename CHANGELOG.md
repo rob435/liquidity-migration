@@ -6,6 +6,14 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — `engine wal-cost` measures the storage's share of the order
+  path.** The WAL crate already timed one buffered append against one
+  durability barrier — the fsync a send waits for — but only a test could reach
+  it. It is now a subcommand, so the cost can be read on the host that runs the
+  fleet and again against a memory-backed path, which bounds what
+  power-loss-protected storage would buy before any durability redesign is
+  argued from guesswork.
+
 - **2026-08-29 — The funded engine takes sole leverage authority.**
   The owner has stopped hand-trading the funded account, and the funded UID
   contract already forbids venue bots, copy trading, and other trading API

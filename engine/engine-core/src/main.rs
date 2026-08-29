@@ -42,6 +42,13 @@ engine — the execution loop
       Reads the host's credentials and touches no network. Never prints a
       secret.
 
+  engine wal-cost --wal PATH [--appends N] [--barriers N]
+      What one buffered append and one durability barrier cost on the
+      filesystem holding PATH. The barrier is the fsync the order path waits
+      for before a send, so this is the storage's share of the order path.
+      Point --wal at the real state directory and again at a memory-backed
+      one to bound what faster storage would buy.
+
   engine venues
       List every compiled venue/realm and its live-evidence gate.
 
@@ -123,6 +130,19 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
                 "  the fsync is inside \"write it down\"; \"API round trip\" is a local socket,\n  \
                  so the real venue's ~175ms round trip is not in these numbers."
             );
+            Ok(())
+        }
+        "wal-cost" => {
+            let path = PathBuf::from(
+                value(args, "--wal").ok_or("wal-cost needs --wal PATH")?,
+            );
+            let appends: usize = value(args, "--appends").unwrap_or("20000".into()).parse()?;
+            let barriers: usize = value(args, "--barriers").unwrap_or("200".into()).parse()?;
+            let costs = engine_wal::measure(&path, appends, barriers)?;
+            println!("wal-cost path={}", path.display());
+            println!("{costs}");
+            println!("  the barrier is the fsync the order path waits for before a send.");
+            println!("  compare against a memory-backed path to bound what faster storage buys.");
             Ok(())
         }
         "venue-key" => {
