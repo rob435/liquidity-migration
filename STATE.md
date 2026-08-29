@@ -406,9 +406,11 @@ The execution host at `208.84.103.4` carries exactly the unit files in
 the only practice book.
 
 Private account-market persistence is off. Public forward persistence is on:
-L50, trades, mark/index price, the crowd fee (funding), open interest and
-liquidations are written with local and venue times, verified into compressed
-segments, and retained for 30 days within a 60 GB / 25 GB-free disk boundary.
+the 10 ms L1 touch, L50, trades, mark/index price, the crowd fee (funding),
+open interest and liquidations are written with local and venue times, verified
+into compressed segments, and retained for 30 days within a 60 GB / 25 GB-free
+disk boundary. L1 and L50 rows name their depth and keep separate sequence
+state while retaining the venue cross-sequence that orders them.
 Live L2 readiness and exact decision-book capture are also on.
 
 ## Risk envelope

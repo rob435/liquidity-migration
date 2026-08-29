@@ -54,6 +54,7 @@ def test_normalizer_preserves_book_order_and_public_trade_arrivals() -> None:
     )
 
     assert snapshot["kind"] == "orderbook_snapshot"
+    assert snapshot["depth"] == 50
     assert snapshot["exchange_engine_ts_ns"] == 1_799_999_999_999_000_000
     assert not snapshot["sequence_gap"]
     assert delta["previous_update_id"] == 10
@@ -75,11 +76,30 @@ def test_symbol_file_is_commentable_and_deduplicated(tmp_path: Path) -> None:
 
 def test_capture_subscribes_to_each_causal_public_feed() -> None:
     assert subscription_topics(["AGIUSDT"], 50) == [
+        "orderbook.1.AGIUSDT",
         "orderbook.50.AGIUSDT",
         "publicTrade.AGIUSDT",
         "tickers.AGIUSDT",
         "allLiquidation.AGIUSDT",
     ]
+
+
+def test_book_depths_keep_independent_sequence_state() -> None:
+    normalizer = Normalizer()
+    deep = normalizer.rows(book_message(), 1_800_000_000_010_000_000)[0]
+    touch_message = book_message(update=50, sequence=500)
+    touch_message["topic"] = "orderbook.1.AGIUSDT"
+    touch = normalizer.rows(touch_message, 1_800_000_000_020_000_000)[0]
+    deep_delta = normalizer.rows(
+        book_message("delta", 11, 101),
+        1_800_000_000_030_000_000,
+    )[0]
+
+    assert deep["depth"] == 50
+    assert touch["depth"] == 1
+    assert touch["previous_update_id"] == 0
+    assert deep_delta["previous_update_id"] == 10
+    assert not deep_delta["sequence_gap"]
 
 
 def test_normalizer_preserves_ticker_deltas_and_liquidations() -> None:

@@ -6,6 +6,13 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The forward tape records the fast touch.** The recorder now
+  keeps Bybit's 10 ms L1 snapshots beside its L50 book, trades, ticker and
+  liquidation feeds. Every book row names its depth; L1 and L50 keep separate
+  update histories and retain the venue cross-sequence that orders the feeds.
+  A 15-second, 34-symbol live probe measured 14.5 KB/s of added raw WebSocket
+  payload against 96.3 KB/s for the existing feeds.
+
 - **2026-08-30 — The first toxic-flow canary stopped early, and whole-position
   dust can now close.** The registered run produced 10 new attributed fills,
   all maker: 8.81 bp all-in arrival cost and -14.52 bp signed one-minute

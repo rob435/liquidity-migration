@@ -63,6 +63,7 @@ def subscription_topics(symbols: Iterable[str], depth: int) -> list[str]:
         topic
         for symbol in symbols
         for topic in (
+            f"orderbook.1.{symbol}",
             f"orderbook.{depth}.{symbol}",
             f"publicTrade.{symbol}",
             f"tickers.{symbol}",
@@ -101,11 +102,16 @@ class Normalizer:
         symbol = str(data.get("s") or "").upper()
         if not symbol:
             return []
+        topic = str(message.get("topic") or "")
+        try:
+            depth = int(topic.split(".", 2)[1])
+        except (IndexError, ValueError):
+            return []
         update_id = int(data.get("u") or 0)
         cross_sequence = int(data.get("seq") or 0)
         message_type = str(message.get("type") or "").lower()
         snapshot = message_type == "snapshot" or update_id == 1
-        previous = self.sequences.setdefault(symbol, SequenceState())
+        previous = self.sequences.setdefault(topic, SequenceState())
         gap = not snapshot and (
             not previous.healthy
             or (cross_sequence > 0 and previous.cross_sequence > 0 and cross_sequence <= previous.cross_sequence)
@@ -115,6 +121,7 @@ class Normalizer:
         row = {
             "kind": kind,
             "symbol": symbol,
+            "depth": depth,
             "local_receive_ts_ns": received_ns,
             "exchange_system_ts_ns": int(message.get("ts") or 0) * 1_000_000,
             "exchange_engine_ts_ns": int(message.get("cts") or 0) * 1_000_000,
