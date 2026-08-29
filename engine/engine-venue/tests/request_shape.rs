@@ -13,6 +13,8 @@ use engine_venue::{BybitGateway, Venue, VenueRealm};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use support::{Recorded, TestServer};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 const KEY: &str = "demoKey000000000001";
 const SECRET: &str = "demoSecret00000000000000000001";
@@ -779,6 +781,39 @@ async fn warm_opens_the_connection_on_the_public_time_endpoint() {
         assert_eq!(request.query, "");
         assert!(request.header("x-bapi-sign").is_none());
     }
+}
+
+#[tokio::test]
+async fn a_refused_trade_socket_keeps_the_warm_rest_order_path() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let trade_url = format!("ws://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 2048];
+        let _ = stream.read(&mut request).await;
+        stream
+            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/v5/market/time" => ok(r#"{"timeSecond":"1700000000"}"#),
+        "/v5/order/create" => ok(r#"{"orderId":"rest-fallback"}"#),
+        path => panic!("unexpected REST path after trade refusal: {path}"),
+    })
+    .await;
+    let mut gw = BybitGateway::for_test_with_trade_transport(
+        &server.base_url(),
+        &trade_url,
+        VenueRealm::Mainnet,
+        VenueRealm::Mainnet.credentials_for_test(KEY, SECRET),
+        vec!["BTCUSDT".to_string()],
+    );
+
+    gw.warm().await.expect("REST warm remains usable");
+    let ack = gw.send_order(&market_order()).await.expect("REST fallback");
+    assert_eq!(ack.venue_order_id, "rest-fallback");
+    assert_eq!(server.to_path("/v5/order/create").len(), 1);
 }
 
 #[tokio::test]

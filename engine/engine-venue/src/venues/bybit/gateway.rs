@@ -245,6 +245,20 @@ impl BybitGateway {
         gateway
     }
 
+    /// Point both transports at local servers. Tests only.
+    #[doc(hidden)]
+    pub fn for_test_with_trade_transport(
+        base_url: &str,
+        trade_url: &str,
+        realm: VenueRealm,
+        creds: Credentials,
+        symbols: Vec<Symbol>,
+    ) -> Self {
+        let mut gateway = Self::build(realm, base_url, creds, symbols, Some(trade_url));
+        gateway.one_way_verified.fill(true);
+        gateway
+    }
+
     /// Point the gateway at a local server and retain the live startup mode
     /// check. Request-shape tests use this; production uses [`Self::new`].
     #[doc(hidden)]
@@ -314,8 +328,16 @@ impl BybitGateway {
             Ok::<(), VenueError>(())
         });
         futures_util::future::try_join_all(checks).await?;
-        if let Some(trade) = &mut self.trade {
-            trade.warm().await?;
+        let trade_warm = match &mut self.trade {
+            Some(trade) => trade.warm().await,
+            None => Ok(()),
+        };
+        if let Err(error) = trade_warm {
+            tracing::warn!(
+                error = %error,
+                "Bybit trade WebSocket unavailable; using signed REST for order mutations this run"
+            );
+            self.trade = None;
         }
         self.clock_checked = true;
         Ok(())

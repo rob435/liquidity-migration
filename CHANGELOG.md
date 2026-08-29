@@ -6,6 +6,15 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — Bybit trade-WebSocket refusal no longer prevents account
+  recovery.** The official `wss://stream.bybit.com/v5/trade` edge accepts the
+  same handshake from the operator laptop but returns HTTP 403 before
+  authentication to `208.84.103.4`; public REST and public/private WebSockets
+  remain reachable from the host. The gateway still warms and authenticates
+  the trade socket at every boot, but a failed warm now records the exact
+  error and uses the already-warmed signed REST mutation path for that run.
+  Private `execution.fast` remains independent.
+
 - **2026-08-29 — Fast execution subscriptions are realm-specific.** Bybit
   demo refuses `execution.fast`, while mainnet exposes it. The first maker-path
   rollout therefore stopped at demo activation and its rollout transaction
