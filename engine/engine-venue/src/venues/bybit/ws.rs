@@ -64,6 +64,7 @@ type Handover = Result<OrderUpdate, FeedError>;
 pub struct BybitOrderFeed {
     url: String,
     creds: Credentials,
+    fast_execution: bool,
     /// Name to id, shared with the socket task's decoder.
     ///
     /// The private stream is subscribed per account, not per symbol, so
@@ -82,15 +83,35 @@ impl BybitOrderFeed {
     /// owner has armed `REAL_MONEY`.
     pub fn new(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
         let creds = realm.credentials()?;
-        Ok(Self::build(realm.private_ws(), creds, symbols))
+        Ok(Self::build(
+            realm.private_ws(),
+            creds,
+            symbols,
+            realm.fast_execution(),
+        ))
     }
 
     /// Point the feed at a local server. Tests and the mock venue only.
     pub fn for_test(url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
-        Self::build(url, creds, symbols)
+        Self::build(url, creds, symbols, true)
     }
 
-    fn build(url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
+    /// Exercise a realm's exact subscription shape against a local server.
+    pub fn for_test_realm(
+        url: &str,
+        creds: Credentials,
+        symbols: Vec<Symbol>,
+        realm: VenueRealm,
+    ) -> Self {
+        Self::build(url, creds, symbols, realm.fast_execution())
+    }
+
+    fn build(
+        url: &str,
+        creds: Credentials,
+        symbols: Vec<Symbol>,
+        fast_execution: bool,
+    ) -> Self {
         let ids = symbols
             .iter()
             .enumerate()
@@ -99,6 +120,7 @@ impl BybitOrderFeed {
         Self {
             url: url.to_string(),
             creds,
+            fast_execution,
             ids: Arc::new(RwLock::new(ids)),
             updates: None,
         }
@@ -119,6 +141,7 @@ impl BybitOrderFeed {
         let worker = Worker {
             url: self.url.clone(),
             creds: self.creds.clone(),
+            fast_execution: self.fast_execution,
             decoder: Decoder::new(self.ids.clone()),
             backoff: Duration::ZERO,
         };
@@ -151,6 +174,7 @@ impl OrderFeed for BybitOrderFeed {
 struct Worker {
     url: String,
     creds: Credentials,
+    fast_execution: bool,
     decoder: Decoder,
     backoff: Duration,
 }
@@ -245,8 +269,11 @@ impl Worker {
         send(&mut socket, auth.to_string()).await?;
         await_auth(&mut socket).await?;
 
-        let subscribe =
-            json!({"op": "subscribe", "args": ["order", "execution.fast", "execution"]});
+        let subscribe = if self.fast_execution {
+            json!({"op": "subscribe", "args": ["order", "execution.fast", "execution"]})
+        } else {
+            json!({"op": "subscribe", "args": ["order", "execution"]})
+        };
         send(&mut socket, subscribe.to_string()).await?;
         await_op(&mut socket, "subscribe", SUBSCRIBE_REPLY_TIMEOUT).await?;
 

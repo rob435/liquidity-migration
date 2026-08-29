@@ -371,6 +371,25 @@ async fn the_feed_authenticates_subscribes_and_maps_what_arrives() {
 }
 
 #[tokio::test]
+async fn demo_does_not_request_the_mainnet_only_fast_execution_topic() {
+    let (url, seen) = start(Vec::new()).await;
+    let mut feed = BybitOrderFeed::for_test_realm(
+        &url,
+        VenueRealm::Demo.credentials_for_test(KEY, SECRET),
+        vec!["BTCUSDT".to_string()],
+        VenueRealm::Demo,
+    );
+
+    assert!(matches!(
+        feed.next_update().await.unwrap(),
+        OrderUpdate::StreamReset { .. }
+    ));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[1]["op"], "subscribe");
+    assert_eq!(seen[1]["args"], json!(["order", "execution"]));
+}
+
+#[tokio::test]
 async fn a_refused_auth_is_reported_not_swallowed() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

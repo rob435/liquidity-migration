@@ -6,6 +6,13 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — Fast execution subscriptions are realm-specific.** Bybit
+  demo refuses `execution.fast`, while mainnet exposes it. The first maker-path
+  rollout therefore stopped at demo activation and its rollout transaction
+  left every managed unit stopped; the funded engine never started and no
+  order was sent. Demo now subscribes to `order` and fee-bearing `execution`;
+  mainnet adds `execution.fast` for early strategy reaction.
+
 - **2026-08-29 — The funded fleet moved to `208.84.103.4`.** The host passed
   strict SSH identity, exact two-IP key identity, signed account, public and
   private stream, target-book, commit, unit, and activation checks. The overdue

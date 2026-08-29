@@ -94,6 +94,12 @@ impl VenueRealm {
         }
     }
 
+    /// The low-latency execution topic is exposed on the mainnet private
+    /// stream. Demo refuses a subscription that includes it.
+    pub fn fast_execution(self) -> bool {
+        matches!(self, VenueRealm::Mainnet)
+    }
+
     /// Public market data. One stream serves both realms: Bybit runs no
     /// separate demo price feed, and the demo account matches against these
     /// same prices. Written here rather than in the market-data crate so that
