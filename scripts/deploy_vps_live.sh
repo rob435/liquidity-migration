@@ -71,7 +71,7 @@ case "$MODE" in
         ;;
 esac
 
-SSH_TARGET="${SSH_TARGET:-root@116.202.15.128}"
+SSH_TARGET="${SSH_TARGET:-root@208.84.103.4}"
 SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3}"
 REPO_URL="${REPO_URL:-https://github.com/rob435/liquidity-migration.git}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
@@ -1674,7 +1674,7 @@ prepare_disposable_engine_build_root() {
     [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \
         || fail "engine build parent is group/other writable"
     if [ ! -e "$ENGINE_BUILD_DIR" ] && [ ! -L "$ENGINE_BUILD_DIR" ]; then
-        install -d -o root -g root -m 0700 "$ENGINE_BUILD_DIR" \
+        install -d -o root -g root -m 0755 "$ENGINE_BUILD_DIR" \
             || fail "cannot create the disposable engine build root"
     fi
     [ -d "$ENGINE_BUILD_DIR" ] && [ ! -L "$ENGINE_BUILD_DIR" ] \
@@ -1682,6 +1682,9 @@ prepare_disposable_engine_build_root() {
         && [ "$(stat -c %u "$ENGINE_BUILD_DIR")" -eq 0 ] \
         && [ "$(stat -c %g "$ENGINE_BUILD_DIR")" -eq 0 ] \
         || fail "engine build root is linked, redirected, or not root-owned"
+    # Cargo runs as the isolated builder and must be able to traverse this source-only root.
+    chmod 0755 "$ENGINE_BUILD_DIR" \
+        || fail "cannot make the engine build root readable by the isolated builder"
     mode="$(stat -c %a "$ENGINE_BUILD_DIR")" \
         || fail "cannot inspect engine build root mode"
     [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \

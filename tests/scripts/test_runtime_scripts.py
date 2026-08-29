@@ -888,6 +888,8 @@ def test_engine_prefetch_scrubs_only_its_disposable_build_clone() -> None:
     assert '/proc/self/mountinfo' in prepare
     assert 'index($5, root "/") == 1' in prepare
     assert "0022" in prepare
+    assert 'install -d -o root -g root -m 0755 "$ENGINE_BUILD_DIR"' in prepare
+    assert 'chmod 0755 "$ENGINE_BUILD_DIR"' in prepare
     assert "prepare_disposable_engine_build_root" in compile_commit
     assert "engine_git clean -ffdx --quiet" in compile_commit
     assert compile_commit.index("prepare_disposable_engine_build_root") < (
