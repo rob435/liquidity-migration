@@ -307,6 +307,61 @@ fn our_own_fills_do_decide_it() {
     let intents = placed(&mut h);
     assert_eq!(intents.len(), 1, "the buy side is at its ceiling");
     assert_eq!(intents[0].side, Side::Sell);
+    assert!(intents[0].reduce_only);
+    assert!(intents[0].stop.is_none());
+}
+
+#[test]
+fn the_inventory_exit_is_reduce_only_and_capped_at_what_is_held() {
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+    h.quote("BTCUSDT", 99.0, 101.0);
+    let intents = placed(&mut h);
+    let exit = intents
+        .iter()
+        .find(|intent| intent.side == Side::Sell)
+        .expect("long inventory needs an ask");
+    assert!(exit.reduce_only);
+    assert_eq!(exit.qty, 0.05, "the ask cannot sell through flat");
+    assert!(
+        exit.stop.is_none(),
+        "an exit does not replace the position stop"
+    );
+
+    let bid = intents
+        .iter()
+        .find(|intent| intent.side == Side::Buy)
+        .expect("inventory below the ceiling may still quote a bid");
+    assert!(!bid.reduce_only);
+    assert!(bid.stop.is_some());
+}
+
+#[test]
+fn an_opening_quote_on_the_new_exit_side_is_cancelled_before_replacement() {
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "flat-book-ask".into(),
+        symbol,
+        side: Side::Sell,
+        kind: OrderKind::Limit {
+            px: 100.1,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+
+    h.quote("BTCUSDT", 99.0, 101.0);
+    let actions = h.drain_actions();
+    assert_eq!(actions.len(), 1, "replacement waits for the cancel receipt");
+    assert!(matches!(
+        &actions[0],
+        Action::Cancel { client_order_id, .. } if client_order_id == "flat-book-ask"
+    ));
 }
 
 #[test]

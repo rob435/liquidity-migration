@@ -508,6 +508,28 @@ impl Quoter {
             self.asked
                 .retain(|id, _| book.iter().any(|o| o.client_order_id == id));
         }
+        let position = ctx.my_position(symbol)
+            + self
+                .fast_inventory
+                .get(&symbol)
+                .copied()
+                .unwrap_or_default();
+        let position_tolerance = (position.abs() * 1e-9).max(1e-12);
+        let unsafe_quotes: Vec<String> = out
+            .iter()
+            .filter(|order| order.symbol == symbol)
+            .filter(|order| order.px().is_some())
+            .filter(|order| {
+                let should_reduce = match order.side {
+                    Side::Buy => position < -position_tolerance,
+                    Side::Sell => position > position_tolerance,
+                };
+                order.reduce_only != should_reduce
+                    || (should_reduce
+                        && order.remaining_qty() > position.abs() + position_tolerance)
+            })
+            .map(|order| order.client_order_id.to_string())
+            .collect();
         for order in out.iter().filter(|o| o.symbol == symbol) {
             if let Some(px) = order.px() {
                 self.working.push(Resting {
@@ -547,8 +569,6 @@ impl Quoter {
             if !self.working.is_empty() || self.flatten_pending.contains(&symbol) {
                 return;
             }
-            let position = ctx.my_position(symbol)
-                + self.fast_inventory.get(&symbol).copied().unwrap_or_default();
             if position.abs() > 1e-12 {
                 self.flatten_pending.insert(symbol);
                 ctx.place(Intent {
@@ -568,14 +588,24 @@ impl Quoter {
             return;
         }
 
+        // A flat book has two opening quotes. Once either fills, the other
+        // side is an exit, not permission to pass through flat and open the
+        // opposite position. Pull the stale shape first and wait for its
+        // terminal update before replacing it. Cancel and replace in one wake
+        // would leave both orders live during the venue round trip.
+        if !unsafe_quotes.is_empty() {
+            for id in unsafe_quotes {
+                self.pull(symbol, &id, now_ns, ctx);
+            }
+            return;
+        }
+
         let Some(rule) = ctx.instrument(symbol) else {
             return;
         };
         let quote = *ctx.quote(symbol);
         let depth = *ctx.depth(symbol);
         // This strategy's own fills, not the account's reading. See the header.
-        let position = ctx.my_position(symbol)
-            + self.fast_inventory.get(&symbol).copied().unwrap_or_default();
         let (fair, priced) = self.priced_rules(symbol, quote, &depth);
         let steps = plan_quotes_at(
             quote.bid_px,
@@ -594,8 +624,19 @@ impl Quoter {
                     ..
                 } => {
                     let px = maker_px(side, px, quote.bid_px, quote.ask_px, rule.tick_size);
-                    let stop_px = stop_for(px, side, priced.stop_loss_fraction);
-                    self.place(symbol, side, px, qty, stop_px, &rule, ctx)
+                    let reduce_only = match side {
+                        Side::Buy => position < -position_tolerance,
+                        Side::Sell => position > position_tolerance,
+                    };
+                    let qty = if reduce_only {
+                        qty.min(position.abs())
+                    } else {
+                        qty
+                    };
+                    let stop = (!reduce_only).then(|| StopSpec {
+                        trigger_px: stop_for(px, side, priced.stop_loss_fraction),
+                    });
+                    self.place(symbol, side, px, qty, stop, reduce_only, &rule, ctx)
                 }
                 QuoteStep::Move {
                     client_order_id,
@@ -677,7 +718,8 @@ impl Quoter {
         side: Side,
         px: f64,
         qty: f64,
-        stop_px: f64,
+        stop: Option<StopSpec>,
+        reduce_only: bool,
         rule: &InstrumentRule,
         ctx: &mut dyn StrategyCtx,
     ) {
@@ -698,10 +740,8 @@ impl Quoter {
                 px,
                 tif: TimeInForce::PostOnly,
             },
-            stop: Some(StopSpec {
-                trigger_px: stop_px,
-            }),
-            reduce_only: false,
+            stop,
+            reduce_only,
             tag: QUOTE_TAG.to_string(),
             decided_ns: ctx.now_ns(),
             // A maker already places where it means to and moves its own

@@ -20,7 +20,7 @@ file.
   whole fleet up. That host file is how a sleeve is held down — it can only
   turn one off, never on — and the Telegram pause button writes it.
 
-  The funded account has 150.96 USDT equity and is flat; the funded engine
+  The funded account has roughly 151 USDT equity and is flat; the funded engine
   trades it when a book asks for exposure. The demo account carries the larger
   practice book. Exact live truth is `scripts/ops.sh status`, never this prose.
 
@@ -53,6 +53,12 @@ file.
   stops. The ledger holds no venue credentials. Kill switches:
   `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit, or stop
   `llm-ledger.timer`. Detail: `docs/trading_logic.md` §LLM GATE.
+
+- **The fourth registered sleeve, `maker_canary`, is disabled.** Its AGIUSDT
+  block remains in the funded engine config because strategy ids in the log
+  are append-only. With `quote_enabled = false` it places no quotes, pulls any
+  of its working orders, and closes only inventory attributed to that sleeve.
+  The ordinary CARRY, LONG and Exodus books remain independent of it.
 
 - **LONG runs at 6.0× and carry at 3.0×; Exodus copies carry's filled quantity
   (owner directive, both fleets).** Sizing dials are read directly by

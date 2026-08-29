@@ -131,15 +131,15 @@ symbols = ["DOGEUSDT"]
 [[strategy]]
 name = "quoter"
 sleeve = "maker_canary"
-# Append-only identity: after this sleeve first enters the WAL it stays in the
-# config. `false` is the post-trial state: it pulls its own quotes and closes
-# only inventory attributed to this sleeve.
-quote_enabled = true
+# Append-only identity: the WAL owns this strategy id, so the block stays in
+# the config. `false` pulls its own quotes and closes only inventory attributed
+# to this sleeve.
+quote_enabled = false
 symbols = ["AGIUSDT"]
 
-# One venue-minimum-sized quote on each side. One fill is already near the
-# ceiling, so the filled side stops accumulating and inventory skew makes the
-# reducing side easier to hit.
+# One venue-minimum-sized quote on each side. One fill brings inventory near
+# the ceiling, so the filled side stops accumulating and inventory skew makes
+# the reducing side easier to hit.
 qty_usdt = 5.25
 max_position_usdt = 6.0
 half_spread_bps = 6.5

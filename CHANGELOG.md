@@ -6,6 +6,18 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — The minimum-size funded maker trial found and closed an
+  inventory-ordering fault.** The AGI canary sent two orders and its first
+  venue fill was a 750-unit maker buy at 0.006919, about 5.19 USDT. The next
+  planned ask was larger than the position and still marked as an opening
+  order, so the risk kernel correctly refused to let it cross through flat.
+  A quote on the inventory-reducing side is now reduce-only, capped at the
+  quantity held, and carries no replacement stop. An old opening quote on
+  that side is cancelled to a terminal venue update before its replacement is
+  sent. The registered mainnet canary stays in the append-only strategy table
+  with `quote_enabled = false`, which pulls its orders and drains only its own
+  inventory.
+
 - **2026-08-29 — Bybit trade-WebSocket refusal no longer prevents account
   recovery.** The official `wss://stream.bybit.com/v5/trade` edge accepts the
   same handshake from the operator laptop but returns HTTP 403 before
