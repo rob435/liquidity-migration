@@ -110,6 +110,19 @@ class BookMirror:
         levels = state.bids if side == "Buy" else state.asks
         return levels.get(price, 0.0)
 
+    def levels(self, symbol: str, side: str, *, limit: int = 50) -> list[tuple[float, float]]:
+        """The displayed ladder in venue order, bounded to ``limit`` levels."""
+
+        if side not in {"Buy", "Sell"}:
+            raise ValueError("side must be 'Buy' or 'Sell'")
+        if limit < 0:
+            raise ValueError("limit must not be negative")
+        state = self._books.get(symbol.upper())
+        if state is None:
+            return []
+        levels = state.bids if side == "Buy" else state.asks
+        return sorted(levels.items(), reverse=side == "Buy")[:limit]
+
     def healthy(self, symbol: str) -> bool:
         """False until the first snapshot, after a gap until the next clean
         snapshot, or while the book is crossed (best bid at or above best ask)."""

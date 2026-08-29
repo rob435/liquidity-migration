@@ -44,6 +44,10 @@ pub struct Quantiles {
 pub enum Segment {
     Decide,
     Durable,
+    /// What the order path actually waited for the disk, after the barrier
+    /// was moved alongside the send. Usually zero: the venue's round trip
+    /// outlasts the disk's. A number here is the disk winning that race.
+    BarrierWait,
     Wire,
     Ack,
     DispatchQueue,
@@ -57,6 +61,7 @@ impl Segment {
         match self {
             Segment::Decide => "think",
             Segment::Durable => "write it down",
+            Segment::BarrierWait => "still waiting on the disk",
             Segment::Wire => "submit result",
             Segment::Ack => "API round trip",
             Segment::DispatchQueue => "dispatch queue",
@@ -70,6 +75,7 @@ impl Segment {
 pub struct LatencyLedger {
     decide: Histogram<u64>,
     durable: Histogram<u64>,
+    barrier_wait: Histogram<u64>,
     wire: Histogram<u64>,
     ack: Histogram<u64>,
     dispatch_queue: Histogram<u64>,
@@ -86,6 +92,7 @@ impl LatencyLedger {
         LatencyLedger {
             decide: make(),
             durable: make(),
+            barrier_wait: make(),
             wire: make(),
             ack: make(),
             dispatch_queue: make(),
@@ -110,6 +117,7 @@ impl LatencyLedger {
         let h = match segment {
             Segment::Decide => &self.decide,
             Segment::Durable => &self.durable,
+            Segment::BarrierWait => &self.barrier_wait,
             Segment::Wire => &self.wire,
             Segment::Ack => &self.ack,
             Segment::DispatchQueue => &self.dispatch_queue,
@@ -142,6 +150,7 @@ impl LatencyLedger {
     pub fn record_for_wal(&self, now_ns: u64) -> WalRecord {
         let decide = self.quantiles(Segment::Decide);
         let durable = self.quantiles(Segment::Durable);
+        let barrier_wait = self.quantiles(Segment::BarrierWait);
         let wire = self.quantiles(Segment::Wire);
         let ack = self.quantiles(Segment::Ack);
         let dispatch_queue = self.quantiles(Segment::DispatchQueue);
@@ -155,6 +164,8 @@ impl LatencyLedger {
             decide_p99_ns: decide.p99_ns,
             durable_p50_ns: durable.p50_ns,
             durable_p99_ns: durable.p99_ns,
+            barrier_wait_p50_ns: barrier_wait.p50_ns,
+            barrier_wait_p99_ns: barrier_wait.p99_ns,
             wire_p50_ns: wire.p50_ns,
             wire_p99_ns: wire.p99_ns,
             ack_p50_ns: ack.p50_ns,
@@ -195,6 +206,7 @@ impl LatencyLedger {
         for segment in [
             Segment::Decide,
             Segment::Durable,
+            Segment::BarrierWait,
             Segment::Wire,
             Segment::Ack,
             Segment::DispatchQueue,
@@ -220,6 +232,7 @@ impl LatencyLedger {
         match segment {
             Segment::Decide => &mut self.decide,
             Segment::Durable => &mut self.durable,
+            Segment::BarrierWait => &mut self.barrier_wait,
             Segment::Wire => &mut self.wire,
             Segment::Ack => &mut self.ack,
             Segment::DispatchQueue => &mut self.dispatch_queue,
@@ -268,7 +281,12 @@ mod tests {
         assert!(!ledger.due(WINDOW_NS - 1));
         assert!(ledger.due(WINDOW_NS));
         match ledger.record_for_wal(WINDOW_NS) {
-            WalRecord::LatencyLedger { window_s, events, wire_p50_ns, .. } => {
+            WalRecord::LatencyLedger {
+                window_s,
+                events,
+                wire_p50_ns,
+                ..
+            } => {
                 assert_eq!(window_s, 60);
                 assert_eq!(events, 1);
                 assert!(wire_p50_ns > 0);

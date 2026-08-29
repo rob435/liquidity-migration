@@ -19,9 +19,12 @@ async fn a_quiet_account_leaves_the_engine_free_to_trade() {
         .await
         .unwrap();
     assert_eq!(h.sends.lock().unwrap().len(), 1, "nothing was in the way");
-    let latched = h.records.lock().unwrap().iter().any(|r| {
-        matches!(r, WalRecord::Reconciled { may_open, .. } if !may_open)
-    });
+    let latched = h
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| matches!(r, WalRecord::Reconciled { may_open, .. } if !may_open));
     assert!(!latched, "there was nothing to latch on");
 }
 
@@ -30,7 +33,8 @@ async fn an_order_this_engine_never_placed_stops_it_opening() {
     // Another writer on the account makes every number the kernel works from
     // measure somebody else's trading as well as its own.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build_with_venue_orders(allow_all(),
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &[],
@@ -47,18 +51,32 @@ async fn an_order_this_engine_never_placed_stops_it_opening() {
         .await
         .unwrap();
 
-    assert!(h.sends.lock().unwrap().is_empty(), "no order should have left the box");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "no order should have left the box"
+    );
     let records = h.records.lock().unwrap();
     assert!(
-        records.iter().any(|r| matches!(r, WalRecord::Reconciled { may_open: false, .. })),
+        records.iter().any(|r| matches!(
+            r,
+            WalRecord::Reconciled {
+                may_open: false,
+                ..
+            }
+        )),
         "boot must write down that it stopped opening"
     );
     // The intent is still recorded, and refused. A strategy that is never
     // told no is a strategy nobody can debug.
-    assert!(records.iter().any(|r| matches!(r, WalRecord::Intent { .. })));
+    assert!(records
+        .iter()
+        .any(|r| matches!(r, WalRecord::Intent { .. })));
     assert!(records.iter().any(|r| matches!(
         r,
-        WalRecord::Verdict { client_order_id: None, verdict: RiskVerdict::Deny { .. } }
+        WalRecord::Verdict {
+            client_order_id: None,
+            verdict: RiskVerdict::Deny { .. }
+        }
     )));
 }
 
@@ -67,7 +85,8 @@ async fn a_hand_trade_in_a_symbol_nobody_here_trades_does_not_stop_it() {
     // The owner trades this account by hand. Stopping for an order in a
     // symbol no strategy can even address would mean stopping most days.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build_with_venue_orders(allow_all(),
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &[],
@@ -83,7 +102,11 @@ async fn a_hand_trade_in_a_symbol_nobody_here_trades_does_not_stop_it() {
         )
         .await
         .unwrap();
-    assert_eq!(h.sends.lock().unwrap().len(), 1, "it should still be trading");
+    assert_eq!(
+        h.sends.lock().unwrap().len(),
+        1,
+        "it should still be trading"
+    );
 }
 
 #[tokio::test]
@@ -105,8 +128,7 @@ async fn an_operators_clear_resets_the_latch() {
         },
     ];
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -116,7 +138,11 @@ async fn an_operators_clear_resets_the_latch() {
         )
         .await
         .unwrap();
-    assert_eq!(h.sends.lock().unwrap().len(), 1, "the clear must lift the latch");
+    assert_eq!(
+        h.sends.lock().unwrap().len(),
+        1,
+        "the clear must lift the latch"
+    );
 }
 
 #[tokio::test]
@@ -137,7 +163,8 @@ async fn a_clear_resets_the_memory_not_the_check() {
         },
     ];
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
-    let (mut engine, h) = build_with_venue_orders(allow_all(),
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &earlier,
@@ -153,10 +180,19 @@ async fn a_clear_resets_the_memory_not_the_check() {
         )
         .await
         .unwrap();
-    assert!(h.sends.lock().unwrap().is_empty(), "a fresh finding must latch again");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "a fresh finding must latch again"
+    );
     let records = h.records.lock().unwrap();
     assert!(
-        records.iter().any(|r| matches!(r, WalRecord::Reconciled { may_open: false, .. })),
+        records.iter().any(|r| matches!(
+            r,
+            WalRecord::Reconciled {
+                may_open: false,
+                ..
+            }
+        )),
         "the new latch must be written down"
     );
 }
@@ -230,8 +266,12 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
     // Strategy 0 answers to the old log's "carry"; the probe is strategy 1.
     let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
     let saw = Rc::new(RefCell::new(Vec::new()));
-    let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw.clone() };
-    let (mut engine, h) = build(allow_all(),
+    let probe = ForeignProbe {
+        symbol: "ZECUSDT".to_string(),
+        saw: saw.clone(),
+    };
+    let (mut engine, h) = build(
+        allow_all(),
         vec![Box::new(idle), Box::new(probe)],
         &["ZECUSDT"],
         &previous,
@@ -247,14 +287,19 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
         .await
         .unwrap();
 
-    assert!(!saw.lock().unwrap().is_empty(), "the probe must have been asked something");
+    assert!(
+        !saw.lock().unwrap().is_empty(),
+        "the probe must have been asked something"
+    );
     assert!(
         saw.lock().unwrap().iter().all(|foreign| !foreign),
         "a flat symbol is nobody's; the stale claim must not survive boot"
     );
     let records = h.records.lock().unwrap();
     assert!(
-        records.iter().any(|r| matches!(r, WalRecord::ClaimsDropped { .. })),
+        records
+            .iter()
+            .any(|r| matches!(r, WalRecord::ClaimsDropped { .. })),
         "the drop must be durable in the log, not just in memory"
     );
 }
@@ -304,8 +349,12 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     // First boot: flat venue, the claim drops and the drop is written down.
     let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
     let saw = Rc::new(RefCell::new(Vec::new()));
-    let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw.clone() };
-    let (_engine, h) = build(allow_all(),
+    let probe = ForeignProbe {
+        symbol: "ZECUSDT".to_string(),
+        saw: saw.clone(),
+    };
+    let (_engine, h) = build(
+        allow_all(),
         vec![Box::new(idle), Box::new(probe)],
         &["ZECUSDT"],
         &previous,
@@ -350,7 +399,10 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     // from coming back.
     let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
     let saw2 = Rc::new(RefCell::new(Vec::new()));
-    let probe = ForeignProbe { symbol: "ZECUSDT".to_string(), saw: saw2.clone() };
+    let probe = ForeignProbe {
+        symbol: "ZECUSDT".to_string(),
+        saw: saw2.clone(),
+    };
     let (mut engine, _h) = build_with_venue_state(
         allow_all(),
         vec![Box::new(idle), Box::new(probe)],
@@ -362,7 +414,8 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
             side: Side::Buy,
             qty: 0.5,
             entry_px: 100.0,
-            stop_attached: true, stop_px: 0.0,
+            stop_attached: true,
+            stop_px: 0.0,
             leverage: None,
         }],
     )
@@ -377,7 +430,10 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
         .await
         .unwrap();
 
-    assert!(!saw2.lock().unwrap().is_empty(), "the probe must have been asked something");
+    assert!(
+        !saw2.lock().unwrap().is_empty(),
+        "the probe must have been asked something"
+    );
     assert!(
         saw2.lock().unwrap().iter().all(|foreign| !foreign),
         "the position is the second sleeve's own; the old claim must not come back"
@@ -396,8 +452,7 @@ async fn a_latch_from_an_earlier_boot_survives_the_restart() {
     }];
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     // The venue is quiet now: whatever it was has gone. The latch still holds.
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &earlier).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -407,5 +462,8 @@ async fn a_latch_from_an_earlier_boot_survives_the_restart() {
         )
         .await
         .unwrap();
-    assert!(h.sends.lock().unwrap().is_empty(), "the latch did not survive the restart");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "the latch did not survive the restart"
+    );
 }

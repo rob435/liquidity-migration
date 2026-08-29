@@ -102,7 +102,10 @@ fn an_order_the_log_has_ended_stops_being_worked() {
     ]);
     let market = market(100.0, 102.0);
     assert!(one_pass(&mut working, &ledger, &market, due_ns()).is_empty());
-    assert!(working.is_empty(), "a filled order is not something to reprice");
+    assert!(
+        working.is_empty(),
+        "a filled order is not something to reprice"
+    );
 }
 
 #[test]
@@ -126,7 +129,10 @@ fn a_move_reaches_the_queue_as_a_price_only_amend() {
         vec![Action::Amend {
             symbol: SYMBOL,
             client_order_id: "a".into(),
-            spec: AmendSpec { px: Some(100.0), qty: None },
+            spec: AmendSpec {
+                px: Some(100.0),
+                qty: None
+            },
         }]
     );
 }
@@ -157,7 +163,10 @@ fn a_move_the_venue_refused_leaves_the_order_where_it_was() {
         vec![Action::Amend {
             symbol: SYMBOL,
             client_order_id: "a".into(),
-            spec: AmendSpec { px: Some(100.0), qty: None },
+            spec: AmendSpec {
+                px: Some(100.0),
+                qty: None
+            },
         }]
     );
 }
@@ -182,7 +191,10 @@ fn a_failed_cancel_does_not_latch() {
     let out = one_pass(&mut working, &ledger, &market, window_over + grace_over);
     assert_eq!(
         out,
-        vec![Action::Cancel { symbol: SYMBOL, client_order_id: "a".into() }]
+        vec![Action::Cancel {
+            symbol: SYMBOL,
+            client_order_id: "a".into()
+        }]
     );
     working.cancelled("a", false);
 
@@ -190,7 +202,10 @@ fn a_failed_cancel_does_not_latch() {
     let later = window_over + grace_over + due_ns();
     assert_eq!(
         one_pass(&mut working, &ledger, &market, later),
-        vec![Action::Cancel { symbol: SYMBOL, client_order_id: "a".into() }],
+        vec![Action::Cancel {
+            symbol: SYMBOL,
+            client_order_id: "a".into()
+        }],
         "a refused cancel has to be asked for again"
     );
 }
@@ -229,7 +244,10 @@ fn a_cross_the_venue_refused_is_retried_and_does_not_count_as_crossed() {
         vec![Action::Amend {
             symbol: SYMBOL,
             client_order_id: "a".into(),
-            spec: AmendSpec { px: Some(102.0), qty: None },
+            spec: AmendSpec {
+                px: Some(102.0),
+                qty: None
+            },
         }]
     );
 }
@@ -248,7 +266,10 @@ fn a_dark_book_at_the_window_end_starts_the_grace_clock_without_an_action() {
     let grace_over = window_over + policy.cross_grace_ms * 1_000_000;
     assert_eq!(
         one_pass(&mut working, &ledger, &dark, grace_over),
-        vec![Action::Cancel { symbol: SYMBOL, client_order_id: "a".into() }]
+        vec![Action::Cancel {
+            symbol: SYMBOL,
+            client_order_id: "a".into()
+        }]
     );
 }
 

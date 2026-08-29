@@ -22,11 +22,7 @@ struct Opener {
 }
 
 impl Opener {
-    fn new(
-        subscribe: &[&str],
-        target: &str,
-        reduce_only: bool,
-    ) -> (Self, Refusals) {
+    fn new(subscribe: &[&str], target: &str, reduce_only: bool) -> (Self, Refusals) {
         let refused = Rc::new(RefCell::new(Vec::new()));
         (
             Opener {
@@ -49,7 +45,10 @@ impl Strategy for Opener {
     fn subscriptions(&self) -> Vec<Subscription> {
         self.subscribe
             .iter()
-            .map(|symbol| Subscription { symbol: symbol.clone(), feed: Feed::Quote })
+            .map(|symbol| Subscription {
+                symbol: symbol.clone(),
+                feed: Feed::Quote,
+            })
             .collect()
     }
 
@@ -57,7 +56,9 @@ impl Strategy for Opener {
         match event {
             EngineEvent::Market(MarketEvent::Quote { .. }) if !self.placed => {
                 self.placed = true;
-                let symbol = ctx.symbol_id(&self.target).expect("the target is subscribed");
+                let symbol = ctx
+                    .symbol_id(&self.target)
+                    .expect("the target is subscribed");
                 ctx.place(Intent {
                     strategy: StrategyId(0),
                     symbol,
@@ -72,7 +73,11 @@ impl Strategy for Opener {
                     leverage: None,
                 });
             }
-            EngineEvent::IntentRefused { symbol, reduce_only, .. } => {
+            EngineEvent::IntentRefused {
+                symbol,
+                reduce_only,
+                ..
+            } => {
                 self.refused.lock().unwrap().push((*symbol, *reduce_only));
             }
             _ => {}
@@ -106,7 +111,10 @@ fn feed_with_stamp(recv_ns: u64) -> ScriptFeed {
 /// Settings with a quote bound tight enough to test against a hand-aged
 /// stamp, and everything else as the bench has it.
 fn tight(max_quote_age_ms: u64) -> EngineSection {
-    EngineSection { max_quote_age_ms, ..settings() }
+    EngineSection {
+        max_quote_age_ms,
+        ..settings()
+    }
 }
 
 /// The engine's clock origin is the process's first call; make sure enough
@@ -121,11 +129,15 @@ fn age_the_clock() {
 
 fn stale_quote_denials(records: &Rc<RefCell<Vec<WalRecord>>>) -> Vec<(u64, u64)> {
     records
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .filter_map(|record| match record {
             WalRecord::Verdict {
-                verdict: RiskVerdict::Deny { reason: DenyReason::StaleQuote { age_ns, max_age_ns } },
+                verdict:
+                    RiskVerdict::Deny {
+                        reason: DenyReason::StaleQuote { age_ns, max_age_ns },
+                    },
                 ..
             } => Some((*age_ns, *max_age_ns)),
             _ => None,
@@ -136,11 +148,14 @@ fn stale_quote_denials(records: &Rc<RefCell<Vec<WalRecord>>>) -> Vec<(u64, u64)>
 #[tokio::test]
 async fn an_entry_against_a_fresh_quote_passes() {
     let (opener, refused) = Opener::new(&["BTCUSDT"], "BTCUSDT", false);
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(opener)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(opener)], &["BTCUSDT"], &[]).await;
     let mut feed = feed_with_stamp(clock::now_ns());
     engine
-        .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
+        .run(
+            &mut feed,
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
         .await
         .unwrap();
     assert_eq!(h.sends.lock().unwrap().len(), 1, "a fresh quote opens");
@@ -165,16 +180,26 @@ async fn an_entry_against_a_quote_past_the_bound_is_refused_and_the_strategy_hea
     // moved — the silent-socket shape.
     let mut feed = feed_with_stamp(1);
     engine
-        .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
+        .run(
+            &mut feed,
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
         .await
         .unwrap();
 
-    assert!(h.sends.lock().unwrap().is_empty(), "nothing reaches the venue");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "nothing reaches the venue"
+    );
     let denials = stale_quote_denials(&h.records);
     assert_eq!(denials.len(), 1, "the refusal is written down as a verdict");
     let (age_ns, max_age_ns) = denials[0];
     assert_eq!(max_age_ns, 5_000_000, "the bound is the configured one");
-    assert!(age_ns > max_age_ns, "and the age really was past it: {age_ns}");
+    assert!(
+        age_ns > max_age_ns,
+        "and the age really was past it: {age_ns}"
+    );
     assert_eq!(
         refused.lock().unwrap().as_slice(),
         &[(SymbolId(0), false)],
@@ -197,7 +222,11 @@ async fn an_exit_under_the_same_staleness_flows() {
     .await;
     let mut feed = feed_with_stamp(1);
     engine
-        .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
+        .run(
+            &mut feed,
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -216,7 +245,8 @@ async fn a_symbol_that_never_quoted_is_refused_for_entries() {
     // though every quote on the tape is fresh: the absence of a price is the
     // stalest price there is.
     let (opener, refused) = Opener::new(&["BTCUSDT", "ETHUSDT"], "ETHUSDT", false);
-    let (mut engine, h) = build(allow_all(),
+    let (mut engine, h) = build(
+        allow_all(),
         vec![Box::new(opener)],
         &["BTCUSDT", "ETHUSDT"],
         &[],
@@ -225,7 +255,11 @@ async fn a_symbol_that_never_quoted_is_refused_for_entries() {
     let eth = engine.market().table.get("ETHUSDT").unwrap();
     let mut feed = feed_with_stamp(clock::now_ns());
     engine
-        .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
+        .run(
+            &mut feed,
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
         .await
         .unwrap();
     assert!(h.sends.lock().unwrap().is_empty());

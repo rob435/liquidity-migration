@@ -106,12 +106,7 @@ impl BybitOrderFeed {
         Self::build(url, creds, symbols, realm.fast_execution())
     }
 
-    fn build(
-        url: &str,
-        creds: Credentials,
-        symbols: Vec<Symbol>,
-        fast_execution: bool,
-    ) -> Self {
+    fn build(url: &str, creds: Credentials, symbols: Vec<Symbol>, fast_execution: bool) -> Self {
         let ids = symbols
             .iter()
             .enumerate()
@@ -480,8 +475,15 @@ impl Decoder {
                 }
                 if let OrderUpdate::Ack(ref ack) = update {
                     // The venue repeats New on later changes; the engine
-                    // hears one ack per order.
+                    // hears one ack per order. The repeat is not nothing,
+                    // though: it is where the venue states the price a
+                    // resting order is now working at, which is the only
+                    // answer an accepted amend ever gets.
                     if !self.remember_ack(&ack.client_order_id) {
+                        if let Some(amended) = amended_from_row(row, &ack.client_order_id, recv_ns)
+                        {
+                            self.pending.push_back(amended);
+                        }
                         continue;
                     }
                 }
@@ -509,7 +511,11 @@ impl Decoder {
     }
 
     fn remember_order_link(&mut self, order_id: String, client_order_id: String) {
-        if self.order_links.insert(order_id.clone(), client_order_id).is_none() {
+        if self
+            .order_links
+            .insert(order_id.clone(), client_order_id)
+            .is_none()
+        {
             self.order_link_order.push_back(order_id);
         }
         while self.order_link_order.len() > ACK_MEMORY {
@@ -647,6 +653,33 @@ pub(crate) fn map_order_row(row: &Value, recv_ns: u64) -> Result<Option<OrderUpd
     Ok(Some(update))
 }
 
+/// A republished resting order, read as the price it is working at.
+///
+/// `None` rather than an error for anything unreadable. This row is a repeat
+/// the engine would otherwise have dropped, so silence leaves it exactly
+/// where it was — whereas a wrong price here would end an amend's ambiguity
+/// with a number the venue never said.
+fn amended_from_row(row: &Value, client_order_id: &str, recv_ns: u64) -> Option<OrderUpdate> {
+    let px = number(row, "price").ok()?;
+    if !px.is_finite() || px <= 0.0 {
+        return None;
+    }
+    // What is still working, not what was ordered. Bybit names it leavesQty;
+    // an order that has partly filled is smaller than the qty it was sent at.
+    let qty = number(row, "leavesQty")
+        .or_else(|_| number(row, "qty"))
+        .ok()?;
+    if !qty.is_finite() || qty <= 0.0 {
+        return None;
+    }
+    Some(OrderUpdate::Amended {
+        client_order_id: client_order_id.to_string(),
+        px,
+        qty,
+        recv_ns,
+    })
+}
+
 /// One `execution` row.
 pub(crate) fn map_execution_row(
     row: &Value,
@@ -729,7 +762,10 @@ pub(crate) fn map_fast_execution_row(
     }
     let direct_link = field(row, "orderLinkId")?;
     let client_order_id = if direct_link.is_empty() {
-        order_links.get(&venue_order_id).cloned().unwrap_or_default()
+        order_links
+            .get(&venue_order_id)
+            .cloned()
+            .unwrap_or_default()
     } else {
         direct_link
     };
@@ -1011,8 +1047,87 @@ mod tests {
         .to_string();
         decoder.ingest(&fast).unwrap();
         decoder.ingest(&fast).unwrap();
-        assert!(matches!(decoder.pending.pop_front(), Some(OrderUpdate::FastFill { .. })));
-        assert!(decoder.pending.is_empty(), "duplicate fast exec id was suppressed");
+        assert!(matches!(
+            decoder.pending.pop_front(),
+            Some(OrderUpdate::FastFill { .. })
+        ));
+        assert!(
+            decoder.pending.is_empty(),
+            "duplicate fast exec id was suppressed"
+        );
+    }
+
+    #[test]
+    fn a_republished_resting_order_is_the_price_it_is_working_at() {
+        // The venue answers an amend by saying it took the request. It says
+        // what price the order ended up at only here, by republishing the
+        // order as New a second time — which the engine had been dropping as
+        // a repeat ack.
+        let mut decoder = decoder_for(&["BTCUSDT"]);
+        let row = |px: &str, leaves: &str| {
+            json!({"topic":"order","data":[{
+                "orderId":"venue-1", "orderLinkId":"eng-1", "orderStatus":"New",
+                "price": px, "qty": "0.5", "leavesQty": leaves
+            }]})
+            .to_string()
+        };
+        decoder.ingest(&row("100", "0.5")).unwrap();
+        assert!(
+            matches!(decoder.pending.pop_front(), Some(OrderUpdate::Ack(_))),
+            "the first New is still the order's one acknowledgement"
+        );
+
+        decoder.ingest(&row("101.5", "0.4")).unwrap();
+        match decoder.pending.pop_front() {
+            Some(OrderUpdate::Amended {
+                client_order_id,
+                px,
+                qty,
+                ..
+            }) => {
+                assert_eq!(client_order_id, "eng-1");
+                assert_eq!(px, 101.5);
+                // What is still working, not what was ordered: this order
+                // partly filled while the amend was in flight.
+                assert_eq!(qty, 0.4);
+            }
+            other => panic!("the repeat said nothing about the price: {other:?}"),
+        }
+        assert!(decoder.pending.is_empty());
+    }
+
+    #[test]
+    fn a_republished_order_with_no_readable_price_says_nothing() {
+        // Silence leaves the amend exactly where it was, which is what an
+        // unreadable row should cost. A number invented here would settle a
+        // reservation at a price the venue never stated.
+        let mut decoder = decoder_for(&["BTCUSDT"]);
+        decoder
+            .ingest(
+                &json!({"topic":"order","data":[{
+                    "orderId":"venue-1", "orderLinkId":"eng-1", "orderStatus":"New",
+                    "price":"100", "qty":"0.5", "leavesQty":"0.5"
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+        decoder.pending.pop_front().expect("the first ack");
+
+        for repeat in [
+            json!({"orderId":"venue-1", "orderLinkId":"eng-1", "orderStatus":"New"}),
+            json!({"orderId":"venue-1", "orderLinkId":"eng-1", "orderStatus":"New",
+                   "price":"0", "leavesQty":"0.5"}),
+            json!({"orderId":"venue-1", "orderLinkId":"eng-1", "orderStatus":"New",
+                   "price":"101", "leavesQty":"0"}),
+        ] {
+            decoder
+                .ingest(&json!({"topic":"order","data":[repeat]}).to_string())
+                .unwrap();
+            assert!(
+                decoder.pending.is_empty(),
+                "an unreadable repeat became news anyway"
+            );
+        }
     }
 
     #[test]

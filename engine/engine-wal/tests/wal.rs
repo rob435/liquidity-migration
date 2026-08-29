@@ -29,7 +29,10 @@ fn every_variant() -> Vec<WalRecord> {
                 symbol: SymbolId(11),
                 side: Side::Sell,
                 qty: 1.25,
-                kind: OrderKind::Limit { px: 3120.75, tif: TimeInForce::PostOnly },
+                kind: OrderKind::Limit {
+                    px: 3120.75,
+                    tif: TimeInForce::PostOnly,
+                },
                 stop: Some(StopSpec { trigger_px: 3200.0 }),
                 reduce_only: false,
                 tag: "entry".to_string(),
@@ -45,7 +48,10 @@ fn every_variant() -> Vec<WalRecord> {
         WalRecord::Verdict {
             client_order_id: None,
             verdict: RiskVerdict::Deny {
-                reason: DenyReason::StaleAccountView { age_ns: 9_000_000_000, max_age_ns: 2_000_000_000 },
+                reason: DenyReason::StaleAccountView {
+                    age_ns: 9_000_000_000,
+                    max_age_ns: 2_000_000_000,
+                },
             },
         },
         WalRecord::OrderSent {
@@ -83,6 +89,8 @@ fn every_variant() -> Vec<WalRecord> {
             decide_p99_ns: 22_800,
             durable_p50_ns: 10_000,
             durable_p99_ns: 20_000,
+            barrier_wait_p50_ns: 1_500,
+            barrier_wait_p99_ns: 9_000,
             wire_p50_ns: 700_000,
             wire_p99_ns: 2_900_000,
             ack_p50_ns: 600_000,
@@ -96,12 +104,18 @@ fn every_variant() -> Vec<WalRecord> {
             end_to_end_p50_ns: 720_000,
             end_to_end_p99_ns: 3_000_000,
         },
-        WalRecord::Note { source: "test".to_string(), text: "unicode ok: µs ✓".to_string() },
+        WalRecord::Note {
+            source: "test".to_string(),
+            text: "unicode ok: µs ✓".to_string(),
+        },
     ]
 }
 
 fn note(text: &str) -> WalRecord {
-    WalRecord::Note { source: "test".to_string(), text: text.to_string() }
+    WalRecord::Note {
+        source: "test".to_string(),
+        text: text.to_string(),
+    }
 }
 
 /// Walk the raw file and report every frame as (start offset, payload length).
@@ -121,7 +135,11 @@ fn frame_spans(path: &Path) -> Vec<(u64, u32)> {
 }
 
 fn flip_byte(path: &Path, offset: u64) {
-    let mut file = OpenOptions::new().read(true).write(true).open(path).unwrap();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
     let mut byte = [0u8; 1];
     file.seek(SeekFrom::Start(offset)).unwrap();
     std::io::Read::read_exact(&mut file, &mut byte).unwrap();
@@ -174,7 +192,12 @@ fn torn_tail_is_cut_and_appending_resumes() {
     // Cut the last frame in half: a crash between two writes.
     let torn_at = last_start + 8 + u64::from(spans[4].1) / 2;
     assert!(torn_at < full_len);
-    OpenOptions::new().write(true).open(&path).unwrap().set_len(torn_at).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(torn_at)
+        .unwrap();
 
     let (mut wal, replayed) = WalWriter::open(&path).unwrap();
     assert_eq!(replayed.len(), 4);
@@ -303,6 +326,118 @@ fn flush_pushes_to_the_os_without_a_barrier() {
 }
 
 #[test]
+fn a_started_barrier_has_already_written_the_bytes_before_it_returns() {
+    // The whole point of starting one without waiting: the order of writes is
+    // fixed the moment it returns, and only the disk's answer is outstanding.
+    // A reader that opens the file now sees the record whether or not the
+    // barrier has finished.
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    wal.append(&note("in flight")).unwrap();
+    let pending = wal.barrier_begin().unwrap();
+    assert_eq!(replay(&path).unwrap(), vec![(1, note("in flight"))]);
+    assert!(
+        pending.outstanding(),
+        "a real log ran this one off the writer"
+    );
+    pending.wait().unwrap();
+    drop(wal);
+}
+
+#[test]
+fn every_record_appended_before_a_started_barrier_survives_waiting_on_it() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    let written: Vec<_> = (0..64).map(|i| note(&format!("r{i}"))).collect();
+    for record in &written {
+        wal.append(record).unwrap();
+    }
+    wal.barrier_begin().unwrap().wait().unwrap();
+
+    let (_reopened, read_back) = WalWriter::open(&path).unwrap();
+    assert_eq!(
+        read_back.into_iter().map(|(_, r)| r).collect::<Vec<_>>(),
+        written
+    );
+    drop(wal);
+}
+
+#[test]
+fn a_started_barrier_can_be_waited_on_after_more_appends() {
+    // The handle is the answer for the bytes that were already out, not a
+    // lock on the log. Appending while one is outstanding is ordinary.
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    wal.append(&note("first")).unwrap();
+    let pending = wal.barrier_begin().unwrap();
+    wal.append(&note("second")).unwrap();
+    pending.wait().unwrap();
+    wal.flush().unwrap();
+    assert_eq!(
+        replay(&path).unwrap(),
+        vec![(1, note("first")), (2, note("second"))]
+    );
+    drop(wal);
+}
+
+#[test]
+fn a_barrier_after_a_rotation_covers_the_new_segment() {
+    // The thread that runs the barrier holds its own descriptor. A rotation
+    // replaces the file underneath it, and a thread left pointing at the
+    // archive would sync that instead — passing every barrier while saying
+    // nothing about the segment actually being written.
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    wal.append(&note("before rotation")).unwrap();
+    let base = WalRecord::SegmentBase {
+        wall_ts_ms: 1_770_000_000_000,
+        strategies: Vec::new(),
+        symbols: Vec::new(),
+        may_open: true,
+        control_anchors: Vec::new(),
+        attribution: Vec::new(),
+        logged_exposure: Vec::new(),
+        intended_stops: Vec::new(),
+        recent_execution_ids: Vec::new(),
+        open_orders: Vec::new(),
+    };
+    assert!(wal.rotate(&base).unwrap(), "the file-backed log rotates");
+
+    wal.append(&note("after rotation")).unwrap();
+    let pending = wal.barrier_begin().unwrap();
+    assert!(pending.outstanding(), "the rotation left no thread to ask");
+    pending.wait().unwrap();
+
+    let (_reopened, read_back) = engine_wal::open_current(&path).unwrap();
+    let records: Vec<_> = read_back.into_iter().map(|(_, r)| r).collect();
+    assert_eq!(records, vec![base, note("after rotation")]);
+    drop(wal);
+}
+
+#[test]
+fn a_settled_barrier_waits_for_nothing() {
+    let settled = engine_wal::PendingBarrier::settled();
+    assert!(!settled.outstanding());
+    settled.wait().unwrap();
+}
+
+#[test]
+fn a_durability_thread_that_dies_without_answering_is_a_failed_barrier() {
+    // Never "it must have worked". The thread that owed the answer is gone,
+    // so nothing can say the bytes reached the disk, and the order path has
+    // to hear that as a failure.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let pending = engine_wal::PendingBarrier::running(receiver);
+    assert!(pending.outstanding());
+    drop(sender);
+    assert!(pending.wait().is_err(), "a vanished answer read as success");
+}
+
+#[test]
 fn empty_file_opens_clean() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
@@ -343,7 +478,11 @@ fn bad_header_is_an_error_not_a_truncation() {
         Err(WalError::Corrupt { offset, .. }) => assert_eq!(offset, 0),
         other => panic!("expected a corrupt-header error, got {other:?}"),
     }
-    assert_eq!(fs::read(&path).unwrap(), before, "the file must be left alone");
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "the file must be left alone"
+    );
 }
 
 #[test]
@@ -351,7 +490,10 @@ fn header_shorter_than_the_magic_is_an_error() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
     fs::write(&path, b"EWA").unwrap();
-    assert!(matches!(WalWriter::open(&path), Err(WalError::Corrupt { offset: 0, .. })));
+    assert!(matches!(
+        WalWriter::open(&path),
+        Err(WalError::Corrupt { offset: 0, .. })
+    ));
 }
 
 #[test]
@@ -421,7 +563,10 @@ fn letting_go_of_a_log_lets_the_next_engine_have_it() {
     let path = log_path(&dir);
 
     drop(engine_wal::lock(&path).expect("the first claim"));
-    assert!(engine_wal::lock(&path).is_ok(), "the log was never handed back");
+    assert!(
+        engine_wal::lock(&path).is_ok(),
+        "the log was never handed back"
+    );
 }
 
 #[test]
@@ -436,7 +581,11 @@ fn claiming_a_log_does_not_disturb_a_byte_of_it() {
     let before = fs::read(&path).unwrap();
 
     let held = engine_wal::lock(&path).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), before, "the claim wrote into the log");
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "the claim wrote into the log"
+    );
     // And the writer that follows the claim reads back what was there.
     let (_, replayed) = WalWriter::open(&path).unwrap();
     assert_eq!(replayed.len(), 1);

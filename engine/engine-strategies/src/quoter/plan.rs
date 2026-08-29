@@ -56,12 +56,26 @@ pub struct Resting {
 #[derive(Clone, Debug, PartialEq)]
 pub enum QuoteStep {
     /// Nothing is resting on this side and one should be.
-    Place { side: Side, px: f64, qty: f64, stop_px: f64 },
+    Place {
+        side: Side,
+        px: f64,
+        qty: f64,
+        stop_px: f64,
+    },
     /// The resting quote is too far from where it belongs.
     Move { client_order_id: String, px: f64 },
     /// The quote should not be in the market at all: inventory is full on
     /// this side, or there is no usable price.
     Pull { client_order_id: String },
+}
+
+/// Extra distance or a complete withdrawal on the side current flow is
+/// attacking. The untouched side keeps the ordinary quote exactly.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct SideProtection {
+    pub bid_extra: f64,
+    pub ask_extra: f64,
+    pub pull: Option<Side>,
 }
 
 /// Where the quotes are centred, given what is already held.
@@ -112,12 +126,34 @@ pub fn plan_quotes_at(
     resting: &[Resting],
     rules: QuoteRules,
 ) -> Vec<QuoteStep> {
+    plan_quotes_protected(
+        bid_px,
+        ask_px,
+        fair_px,
+        position,
+        resting,
+        rules,
+        SideProtection::default(),
+    )
+}
+
+/// Quote around `fair_px`, with an optional one-sided response to public
+/// flow. Positive buy flow attacks the ask; sell flow attacks the bid. This
+/// shape avoids paying for protection on the side the evidence does not say
+/// is dangerous.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_quotes_protected(
+    bid_px: f64,
+    ask_px: f64,
+    fair_px: f64,
+    position: f64,
+    resting: &[Resting],
+    rules: QuoteRules,
+    protection: SideProtection,
+) -> Vec<QuoteStep> {
     let mut steps = Vec::new();
-    let usable = bid_px > 0.0
-        && ask_px > 0.0
-        && ask_px >= bid_px
-        && fair_px.is_finite()
-        && fair_px > 0.0;
+    let usable =
+        bid_px > 0.0 && ask_px > 0.0 && ask_px >= bid_px && fair_px.is_finite() && fair_px > 0.0;
     let mid = (bid_px + ask_px) / 2.0;
     let centre = centre(fair_px, position, rules);
 
@@ -130,7 +166,7 @@ pub fn plan_quotes_at(
             Side::Buy => position + rules.qty > rules.max_position,
             Side::Sell => position - rules.qty < -rules.max_position,
         };
-        if !usable || would_exceed {
+        if !usable || would_exceed || protection.pull == Some(side) {
             if let Some(order) = working {
                 steps.push(QuoteStep::Pull {
                     client_order_id: order.client_order_id.clone(),
@@ -140,8 +176,8 @@ pub fn plan_quotes_at(
         }
 
         let want_px = match side {
-            Side::Buy => centre * (1.0 - rules.half_spread),
-            Side::Sell => centre * (1.0 + rules.half_spread),
+            Side::Buy => centre * (1.0 - rules.half_spread - protection.bid_extra.max(0.0)),
+            Side::Sell => centre * (1.0 + rules.half_spread + protection.ask_extra.max(0.0)),
         };
         match working {
             None => steps.push(QuoteStep::Place {
@@ -188,10 +224,17 @@ mod tests {
 
     /// The same book, leaning against inventory: at the ceiling the centre
     /// moves a full half-spread, so one side of the quote lands on mid.
-    pub(super) const LEANING: QuoteRules = QuoteRules { skew: 0.001, ..RULES };
+    pub(super) const LEANING: QuoteRules = QuoteRules {
+        skew: 0.001,
+        ..RULES
+    };
 
     fn resting(id: &str, side: Side, px: f64) -> Resting {
-        Resting { client_order_id: id.into(), side, px }
+        Resting {
+            client_order_id: id.into(),
+            side,
+            px,
+        }
     }
 
     #[test]
@@ -200,8 +243,18 @@ mod tests {
         assert_eq!(
             steps,
             vec![
-                QuoteStep::Place { side: Side::Buy, px: 99.9, qty: 1.0, stop_px: 99.9 * 0.65 },
-                QuoteStep::Place { side: Side::Sell, px: 100.1, qty: 1.0, stop_px: 100.1 * 1.35 },
+                QuoteStep::Place {
+                    side: Side::Buy,
+                    px: 99.9,
+                    qty: 1.0,
+                    stop_px: 99.9 * 0.65
+                },
+                QuoteStep::Place {
+                    side: Side::Sell,
+                    px: 100.1,
+                    qty: 1.0,
+                    stop_px: 100.1 * 1.35
+                },
             ]
         );
     }
@@ -213,7 +266,10 @@ mod tests {
             99.0,
             101.0,
             0.0,
-            &[resting("b", Side::Buy, 99.91), resting("a", Side::Sell, 100.09)],
+            &[
+                resting("b", Side::Buy, 99.91),
+                resting("a", Side::Sell, 100.09),
+            ],
             RULES,
         );
         assert!(steps.is_empty());
@@ -222,7 +278,13 @@ mod tests {
     #[test]
     fn a_quote_that_has_drifted_too_far_is_moved() {
         let steps = plan_quotes(99.0, 101.0, 0.0, &[resting("b", Side::Buy, 99.0)], RULES);
-        assert_eq!(steps[0], QuoteStep::Move { client_order_id: "b".into(), px: 99.9 });
+        assert_eq!(
+            steps[0],
+            QuoteStep::Move {
+                client_order_id: "b".into(),
+                px: 99.9
+            }
+        );
     }
 
     #[test]
@@ -231,20 +293,34 @@ mod tests {
         // a position.
         let steps = plan_quotes(99.0, 101.0, 3.0, &[], RULES);
         assert_eq!(steps.len(), 1);
-        assert!(matches!(steps[0], QuoteStep::Place { side: Side::Sell, .. }));
+        assert!(matches!(
+            steps[0],
+            QuoteStep::Place {
+                side: Side::Sell,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn a_resting_quote_on_a_full_side_is_pulled() {
         let steps = plan_quotes(99.0, 101.0, 3.0, &[resting("b", Side::Buy, 99.9)], RULES);
-        assert!(steps.contains(&QuoteStep::Pull { client_order_id: "b".into() }));
+        assert!(steps.contains(&QuoteStep::Pull {
+            client_order_id: "b".into()
+        }));
     }
 
     #[test]
     fn the_short_side_has_its_own_ceiling() {
         let steps = plan_quotes(99.0, 101.0, -3.0, &[], RULES);
         assert_eq!(steps.len(), 1);
-        assert!(matches!(steps[0], QuoteStep::Place { side: Side::Buy, .. }));
+        assert!(matches!(
+            steps[0],
+            QuoteStep::Place {
+                side: Side::Buy,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -255,14 +331,21 @@ mod tests {
             0.0,
             0.0,
             0.0,
-            &[resting("b", Side::Buy, 99.9), resting("a", Side::Sell, 100.1)],
+            &[
+                resting("b", Side::Buy, 99.9),
+                resting("a", Side::Sell, 100.1),
+            ],
             RULES,
         );
         assert_eq!(
             steps,
             vec![
-                QuoteStep::Pull { client_order_id: "b".into() },
-                QuoteStep::Pull { client_order_id: "a".into() },
+                QuoteStep::Pull {
+                    client_order_id: "b".into()
+                },
+                QuoteStep::Pull {
+                    client_order_id: "a".into()
+                },
             ]
         );
     }
@@ -277,13 +360,65 @@ mod tests {
     fn every_quote_carries_a_stop_because_the_kernel_demands_one() {
         let steps = plan_quotes(99.0, 101.0, 0.0, &[], RULES);
         for step in &steps {
-            if let QuoteStep::Place { side, px, stop_px, .. } = step {
+            if let QuoteStep::Place {
+                side, px, stop_px, ..
+            } = step
+            {
                 match side {
                     Side::Buy => assert!(stop_px < px, "a long stop sits below"),
                     Side::Sell => assert!(stop_px > px, "a short stop sits above"),
                 }
             }
         }
+    }
+
+    #[test]
+    fn one_sided_protection_leaves_the_other_quote_exactly_alone() {
+        let ordinary = plan_quotes_at(99.0, 101.0, 100.0, 0.0, &[], RULES);
+        let protected = plan_quotes_protected(
+            99.0,
+            101.0,
+            100.0,
+            0.0,
+            &[],
+            RULES,
+            SideProtection {
+                ask_extra: 0.0004,
+                ..SideProtection::default()
+            },
+        );
+        let px = |steps: &[QuoteStep], side| {
+            steps.iter().find_map(|step| match step {
+                QuoteStep::Place { side: got, px, .. } if *got == side => Some(*px),
+                _ => None,
+            })
+        };
+        assert_eq!(px(&ordinary, Side::Buy), px(&protected, Side::Buy));
+        assert!(px(&protected, Side::Sell) > px(&ordinary, Side::Sell));
+    }
+
+    #[test]
+    fn a_pulled_side_is_removed_while_the_other_keeps_quoting() {
+        let steps = plan_quotes_protected(
+            99.0,
+            101.0,
+            100.0,
+            0.0,
+            &[],
+            RULES,
+            SideProtection {
+                pull: Some(Side::Sell),
+                ..SideProtection::default()
+            },
+        );
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            steps[0],
+            QuoteStep::Place {
+                side: Side::Buy,
+                ..
+            }
+        ));
     }
 }
 
@@ -314,8 +449,14 @@ mod skew_tests {
         // move, which is what makes it a lean rather than a one-sided pull.
         let flat = plan_quotes(99.0, 101.0, 0.0, &[], LEANING);
         let long = plan_quotes(99.0, 101.0, 1.5, &[], LEANING);
-        assert!(px_of(&long, Side::Buy) < px_of(&flat, Side::Buy), "bid backs off");
-        assert!(px_of(&long, Side::Sell) < px_of(&flat, Side::Sell), "ask comes in");
+        assert!(
+            px_of(&long, Side::Buy) < px_of(&flat, Side::Buy),
+            "bid backs off"
+        );
+        assert!(
+            px_of(&long, Side::Sell) < px_of(&flat, Side::Sell),
+            "ask comes in"
+        );
     }
 
     #[test]
@@ -354,12 +495,28 @@ mod skew_tests {
         // side that would add to the position stops being quoted at all.
         let steps = plan_quotes(99.0, 101.0, 3.0, &[], LEANING);
         assert_eq!(steps.len(), 1);
-        assert!(matches!(steps[0], QuoteStep::Place { side: Side::Sell, .. }));
+        assert!(matches!(
+            steps[0],
+            QuoteStep::Place {
+                side: Side::Sell,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn a_nonsense_position_leaves_the_centre_alone() {
         assert_eq!(centre(100.0, f64::NAN, LEANING), 100.0);
-        assert_eq!(centre(100.0, 1.0, QuoteRules { max_position: 0.0, ..LEANING }), 100.0);
+        assert_eq!(
+            centre(
+                100.0,
+                1.0,
+                QuoteRules {
+                    max_position: 0.0,
+                    ..LEANING
+                }
+            ),
+            100.0
+        );
     }
 }

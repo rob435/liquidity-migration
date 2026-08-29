@@ -55,6 +55,19 @@ impl Default for Depth {
     }
 }
 
+impl Quote {
+    /// Whether this touch should replace the one already held.
+    ///
+    /// The touch arrives on more than one topic, and each topic sequences
+    /// itself, so `seq` cannot order them against each other. The socket read
+    /// stamp can, and it is the only field that can. Equal stamps let the
+    /// later arrival win, which is what an unordered pair within the same
+    /// nanosecond amounts to.
+    pub fn supersedes(&self, held: &Quote) -> bool {
+        self.recv_ns >= held.recv_ns
+    }
+}
+
 impl Depth {
     pub fn best_bid(&self) -> Option<BookLevel> {
         (self.bid_len > 0).then(|| self.bids[0])
@@ -132,13 +145,27 @@ pub struct Ticker {
 #[allow(clippy::large_enum_variant)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MarketEvent {
-    Quote { symbol: SymbolId, quote: Quote },
-    Depth { symbol: SymbolId, depth: Depth },
-    Trades { symbol: SymbolId, trades: TradeFlow },
-    Ticker { symbol: SymbolId, ticker: Ticker },
+    Quote {
+        symbol: SymbolId,
+        quote: Quote,
+    },
+    Depth {
+        symbol: SymbolId,
+        depth: Depth,
+    },
+    Trades {
+        symbol: SymbolId,
+        trades: TradeFlow,
+    },
+    Ticker {
+        symbol: SymbolId,
+        ticker: Ticker,
+    },
     /// The feed reconnected; per-symbol sequences reset. Strategies holding
     /// assumptions keyed to continuity must re-arm.
-    FeedReset { recv_ns: u64 },
+    FeedReset {
+        recv_ns: u64,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -235,9 +262,25 @@ impl MarketState {
 
     pub fn apply(&mut self, event: &MarketEvent) {
         match *event {
-            MarketEvent::Quote { symbol, quote } => self.quotes[symbol.0 as usize] = quote,
+            // The touch reaches this slot from two streams. A venue that
+            // publishes the top of book on its own faster topic sends it
+            // there first, and the deeper book's copy of the same touch
+            // arrives later carrying an older price. Whichever was read off
+            // the socket last is the current one, whichever topic it came
+            // on; `recv_ns` is the only stamp comparable across topics,
+            // because each topic sequences itself.
+            MarketEvent::Quote { symbol, quote } => {
+                let slot = &mut self.quotes[symbol.0 as usize];
+                if quote.supersedes(slot) {
+                    *slot = quote;
+                }
+            }
             MarketEvent::Depth { symbol, depth } => {
-                self.quotes[symbol.0 as usize] = depth.quote();
+                let touch = depth.quote();
+                let slot = &mut self.quotes[symbol.0 as usize];
+                if touch.supersedes(slot) {
+                    *slot = touch;
+                }
                 self.depths[symbol.0 as usize] = depth;
             }
             MarketEvent::Trades { symbol, trades } => self.trades[symbol.0 as usize] = trades,
@@ -259,13 +302,105 @@ impl MarketState {
 mod tests {
     use super::*;
 
+    fn book(bid_px: f64, ask_px: f64, recv_ns: u64) -> Depth {
+        let mut depth = Depth::default();
+        depth.bids[0] = BookLevel {
+            px: bid_px,
+            qty: 1.0,
+        };
+        depth.asks[0] = BookLevel {
+            px: ask_px,
+            qty: 1.0,
+        };
+        depth.bid_len = 1;
+        depth.ask_len = 1;
+        depth.recv_ns = recv_ns;
+        depth
+    }
+
+    #[test]
+    fn the_deep_books_older_copy_of_the_touch_does_not_replace_a_fresher_one() {
+        // Both topics carry the top of book. Depth 1 publishes twice as
+        // often, so its price is regularly the newer one, and letting the
+        // deeper book overwrite it would age every price a strategy reads.
+        let mut market = MarketState::default();
+        let id = market.add_symbol("BTCUSDT");
+        market.apply(&MarketEvent::Depth {
+            symbol: id,
+            depth: book(99.0, 101.0, 100),
+        });
+        market.apply(&MarketEvent::Quote {
+            symbol: id,
+            quote: Quote {
+                bid_px: 99.5,
+                ask_px: 100.5,
+                recv_ns: 200,
+                ..Quote::default()
+            },
+        });
+        // The deeper book's next push was read off the socket before the
+        // fresh touch: same book state, older stamp.
+        market.apply(&MarketEvent::Depth {
+            symbol: id,
+            depth: book(99.0, 101.0, 150),
+        });
+        assert_eq!(market.quote(id).bid_px, 99.5, "the fresher touch was lost");
+        assert_eq!(market.quote(id).ask_px, 100.5);
+        assert_eq!(market.quote(id).recv_ns, 200);
+        // The deep book itself is still the newest one delivered: only the
+        // touch is arbitrated, never the depth a strategy sizes against.
+        assert_eq!(market.depth(id).recv_ns, 150);
+    }
+
+    #[test]
+    fn the_deep_book_still_carries_the_touch_when_it_is_the_only_stream() {
+        // The common case, and the one the arbitration must not break: with
+        // no separate top-of-book topic every touch arrives on the deep book
+        // and every one of them is the freshest thing there is.
+        let mut market = MarketState::default();
+        let id = market.add_symbol("BTCUSDT");
+        for (step, px) in [(10u64, 99.0), (20, 99.1), (30, 99.2)] {
+            market.apply(&MarketEvent::Depth {
+                symbol: id,
+                depth: book(px, px + 2.0, step),
+            });
+            assert_eq!(market.quote(id).bid_px, px);
+        }
+    }
+
+    #[test]
+    fn a_price_from_before_a_reset_cannot_come_back() {
+        // The reset zeroes the stamp as well as the price, so the freshness
+        // test cannot be what keeps a pre-gap price alive.
+        let mut market = MarketState::default();
+        let id = market.add_symbol("BTCUSDT");
+        market.apply(&MarketEvent::Quote {
+            symbol: id,
+            quote: Quote {
+                bid_px: 10.0,
+                recv_ns: 900,
+                ..Quote::default()
+            },
+        });
+        market.apply(&MarketEvent::FeedReset { recv_ns: 901 });
+        market.apply(&MarketEvent::Depth {
+            symbol: id,
+            depth: book(20.0, 21.0, 902),
+        });
+        assert_eq!(market.quote(id).bid_px, 20.0);
+    }
+
     #[test]
     fn a_feed_reset_clears_every_price() {
         let mut market = MarketState::default();
         let id = market.add_symbol("BTCUSDT");
         market.apply(&MarketEvent::Quote {
             symbol: id,
-            quote: Quote { bid_px: 10.0, ask_px: 10.5, ..Quote::default() },
+            quote: Quote {
+                bid_px: 10.0,
+                ask_px: 10.5,
+                ..Quote::default()
+            },
         });
         assert_eq!(market.quote(id).bid_px, 10.0);
         market.apply(&MarketEvent::FeedReset { recv_ns: 1 });

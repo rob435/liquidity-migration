@@ -93,6 +93,68 @@ impl Strategy for QuoteCoalescingProbe {
     }
 }
 
+/// Wait until both halves of the question have happened, or give up.
+async fn until_both(crossing: Arc<Mutex<Vec<&'static str>>>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if crossing.lock().unwrap().len() >= 3 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_order_leaves_while_the_disk_works_and_the_news_waits_for_it() {
+    // Both halves of the change, in one ordered list.
+    //
+    // The order goes out while the disk is still confirming — that is the
+    // millisecond this bought. But news that the order traded does not
+    // overtake the disk: acting on a fill whose order is not yet written down
+    // would leave a crash holding a position it has no record of asking for.
+    //
+    // The barrier here takes 30 ms and the venue answers at once, which is the
+    // race inverted — on a real venue the round trip is the longer of the two.
+    let tape = tape();
+    let (mut wal, _records) = MockWal::new(tape.clone());
+    let crossing = wal.defer_barriers();
+    let (mut venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    venue.watch_with(crossing.clone());
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let mut engine = Engine::boot(
+        &settings(),
+        "0",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &[],
+    )
+    .await
+    .unwrap();
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::wide_quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            until_both(crossing.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(sends.lock().unwrap().len(), 1, "the order never went out");
+    assert_eq!(
+        crossing.lock().unwrap().as_slice(),
+        [
+            "order on the wire",
+            "disk confirmed",
+            "order news written down"
+        ],
+        "the send waited for the disk, or the news did not"
+    );
+}
+
 #[tokio::test]
 async fn a_slow_venue_cannot_stop_the_market_loop() {
     let seen = Arc::new(AtomicUsize::new(0));
@@ -263,7 +325,10 @@ async fn the_verdict_record_names_the_order_it_approved() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(verdict, Some(h.sends.lock().unwrap()[0].client_order_id.clone()));
+    assert_eq!(
+        verdict,
+        Some(h.sends.lock().unwrap()[0].client_order_id.clone())
+    );
 }
 
 #[tokio::test]
@@ -285,7 +350,10 @@ async fn a_refusal_stops_before_the_order_is_written() {
 
     let kinds = appends(&h.tape);
     assert!(!kinds.contains(&"order_sent".to_string()), "{kinds:?}");
-    assert!(h.sends.lock().unwrap().is_empty(), "nothing reached the venue");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "nothing reached the venue"
+    );
     assert!(
         only_the_shutdown_barrier(&h.tape),
         "no fsync for an order that does not exist (the shutdown one aside)"
@@ -458,7 +526,8 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
     venue.working = vec![still_working(id, "BTCUSDT", 10.0)];
     venue
         .account_readings
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .push_back(vec![engine_types::PositionView {
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -1355,7 +1424,8 @@ async fn same_symbol_siblings_with_conflicting_leverage_are_refused_before_mutat
     assert!(sends[0].reduce_only);
     assert_eq!(
         h.records
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .iter()
             .filter(|record| matches!(record, WalRecord::Intent { .. }))
             .count(),
@@ -1364,7 +1434,8 @@ async fn same_symbol_siblings_with_conflicting_leverage_are_refused_before_mutat
     );
     assert_eq!(
         h.records
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .iter()
             .filter(
                 |record| matches!(record, WalRecord::Note { source, .. } if source == "leverage")
@@ -1501,7 +1572,10 @@ async fn an_intent_with_an_unreal_number_never_reaches_the_log() {
         !kinds.contains(&"intent".to_string()),
         "a NaN intent was written to the log: {kinds:?}"
     );
-    assert!(h.sends.lock().unwrap().is_empty(), "nothing reached the venue");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "nothing reached the venue"
+    );
     let note = note_saying(&h.records, "not a finite");
     assert!(
         note.contains("buy"),
@@ -1711,8 +1785,16 @@ async fn a_rejected_order_is_over() {
 
     assert!(engine.in_flight_ids().is_empty());
     assert_eq!(risk_saw.lock().unwrap().len(), 1);
-    assert_eq!(heard.lock().unwrap().len(), 1, "the strategy hears its rejection");
-    assert!(heard.lock().unwrap()[0].contains("110007"), "{:?}", heard.lock().unwrap());
+    assert_eq!(
+        heard.lock().unwrap().len(),
+        1,
+        "the strategy hears its rejection"
+    );
+    assert!(
+        heard.lock().unwrap()[0].contains("110007"),
+        "{:?}",
+        heard.lock().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1803,7 +1885,10 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
         .await
         .unwrap();
 
-    assert!(h.sends.lock().unwrap().is_empty(), "boot never re-sends anything");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "boot never re-sends anything"
+    );
     assert!(
         engine.in_flight_ids().is_empty(),
         "the late fill closes the recovered order"
@@ -1863,7 +1948,11 @@ async fn timers_fire_for_the_strategy_that_armed_them() {
         .await
         .unwrap();
 
-    assert_eq!(*fired_one.lock().unwrap(), vec![TimerId(11)], "each hears its own");
+    assert_eq!(
+        *fired_one.lock().unwrap(),
+        vec![TimerId(11)],
+        "each hears its own"
+    );
     assert_eq!(*fired_two.lock().unwrap(), vec![TimerId(22)]);
 }
 
@@ -1890,7 +1979,11 @@ async fn a_market_message_only_reaches_the_strategies_that_asked_for_it() {
 
     assert_eq!(h.sends.lock().unwrap().len(), 1, "one quote, one order");
     assert_eq!(h.sends.lock().unwrap()[0].strategy, StrategyId(0));
-    assert_eq!(btc_heard.lock().unwrap().len(), 1, "its owner hears the reply");
+    assert_eq!(
+        btc_heard.lock().unwrap().len(),
+        1,
+        "its owner hears the reply"
+    );
     assert!(
         eth_heard.lock().unwrap().is_empty(),
         "the other strategy hears nothing"
@@ -1927,7 +2020,12 @@ async fn the_group_flush_tick_pushes_the_log_out() {
         .await
         .unwrap();
 
-    let flushes = tape.lock().unwrap().iter().filter(|s| **s == Step::Flush).count();
+    let flushes = tape
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| **s == Step::Flush)
+        .count();
     assert!(flushes >= 3, "the tick keeps flushing, saw {flushes}");
 }
 
@@ -1955,7 +2053,8 @@ async fn the_account_reading_is_refreshed_before_it_goes_stale() {
         .unwrap();
 
     let reads = tape
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .filter(|s| **s == Step::ReadAccount)
         .count();
@@ -1988,6 +2087,7 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
         symbols: vec!["BTCUSDT".to_string()],
         wal_path: path.path().to_path_buf(),
         fills: false,
+        venue_delay: std::time::Duration::ZERO,
     };
     let result = bench::run(&options).await.expect("bench");
     assert_eq!(result.events, 300);

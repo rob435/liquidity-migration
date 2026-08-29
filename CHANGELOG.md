@@ -6,6 +6,119 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — The maker protects only the side aggressive flow is attacking.**
+  Public trade notional is divided by displayed same-side dollars within a
+  volatility-expanded near-touch band, then carried in 250 ms and 3 s decays.
+  Buying widens or pulls only the ask; selling does the same only to the bid.
+  Every attributed fill records both flow states, the combined score, nearby
+  depth, spread, movement, and estimated queue beside its execution id. The
+  34-name, two-day paired queue replay chose four basis points of widening per
+  score over the fee-corrected control: +0.076 bp per markable quote, paired t
+  11.75, with the improvement present on both dates. The selected arm still
+  loses -0.171 bp per quote after the full fee assumption. It is registered as
+  `lane2_toxic_flow_quoter_v1` for a minimum-size 30-fill-or-60-minute funded
+  trial, not promoted as profitable.
+
+- **2026-08-29 — Forward public market capture is an owned service.** A
+  no-credential unit records Bybit L50 snapshots/deltas, public trades,
+  mark/index price, the crowd fee (funding), open interest and liquidations
+  with both venue and local receive times. It rotates per-symbol raw segments,
+  atomically installs a `zstd` copy only after decompression verification,
+  writes its SHA-256 receipt, and only then removes the raw bytes. Recovery
+  keeps complete JSON lines after interruption. Retention removes completed
+  compressed segments after 30 days, above 60 GB, or to preserve 25 GB free;
+  disk pressure counts dropped frames without traceback spam. The live smoke
+  captured book, trade and ticker rows with no writer-queue drops.
+
+- **2026-08-29 — The disk barrier runs beside the send instead of in front of
+  it.** The order path waited out a full `fdatasync` — ~2.2 ms on the VPS,
+  3.95 ms measured here — before a single byte left, and the fsync was
+  comparable in size to the venue round trip it was blocking. It now starts at
+  the same moment the order is dispatched: the bytes are with the operating
+  system before the send, and the disk's confirmation is awaited by the first
+  news that the order traded, never by the send. On a venue milliseconds away
+  the barrier finishes during the flight, so that wait is nothing; `still
+  waiting on the disk` is the new ledger segment that measures the residue.
+  Measured with `engine bench --venue-delay-ms 4` — a new flag that holds the
+  pretend venue at a real venue's distance, which a localhost socket cannot
+  model — the same binary with one line changed goes from 9.59 ms to 6.01 ms
+  p50 message-to-submit-result, and 13.69 ms to 6.31 ms p99. The tail moves
+  further than the median because a slow barrier used to stack on top of the
+  round trip and now hides inside it.
+
+  What it gives up, stated rather than buried: a machine that dies inside the
+  barrier can leave an order at the venue the log does not name, which
+  reconciliation already reads as an order it cannot account for and answers by
+  latching opening off. Process death is unaffected — those bytes are with the
+  operating system either way. Nothing is acted on before its order is durable;
+  what moved is when the path stops waiting, not what it waits for. The
+  durability thread holds its own descriptor for the log and is replaced on
+  rotation, since a barrier syncs the file rather than the path and a stale one
+  would pass while proving nothing.
+
+- **2026-08-29 — An accepted amend now keeps its order instead of cancelling
+  it.** Bybit answers `order.amend` by saying it took the request and never by
+  saying what price it left the order at, so every accepted reprice was
+  cancelled rather than resolved to a price the engine could not name. The
+  venue does state that price — it republishes the order on the private stream
+  when it changes without trading — and the decoder was dropping the message as
+  a repeat acknowledgement. It now becomes `OrderUpdate::Amended`, carrying the
+  price and what is still working, and that is what narrows the conservative
+  old/new reservation an amend opens. Hyperliquid's repeated `open` carries
+  `limitPx` and does the same. An amend whose price is not stated within two
+  seconds is cancelled, which is the behaviour every amend used to get. Three
+  engine tests pin the three endings, each proved to fail with only its own
+  mechanism removed.
+
+- **2026-08-29 — The Bybit gateway paces to this account's real quota, and a
+  declined order no longer costs the next one a reconnect.** Every trade-socket
+  acknowledgement carries a `header` block stating the account's own per-second
+  limit for the endpoint that was called; the adapter was dropping it and
+  pacing forever to the documented default of ten. It now reads that figure and
+  uses it when it is the larger, so a market-maker tier stops being invisible.
+  A smaller figure is logged and not adopted: every batch is already capped at
+  the documented default, so pacing below it would leave an admitted batch
+  unable to reserve at all. Separately, the socket worker treated a business
+  rejection like a broken pipe and tore the connection down, making the next
+  order pay a reconnect and a re-authentication for a declined one. Only
+  transport and decode failures drop it now.
+
+- **2026-08-29 — The quoter takes its price from the top-of-book topic.**
+  Bybit publishes depth-1 about twice as often as depth-50. The quoter
+  subscribed only to the deep book, so the price it quoted around was up to one
+  publication interval old. It now subscribes to both: the touch topic sets the
+  microprice, and the book pressure, queue and variance terms stay on the deep
+  book, which is the only thing that carries them. Subscribing to both exposed
+  a latent fault in `MarketState::apply` — a depth event overwrote the quote
+  slot unconditionally, so the deeper book's older copy of the touch replaced a
+  fresher one. The touch is now arbitrated by socket read stamp, the only field
+  comparable across two topics that each sequence themselves. With one stream
+  the behaviour is unchanged, which is what the whole strategy suite passing
+  untouched shows.
+
+- **2026-08-29 — Cancel and amend timing marks reach the log.** The Bybit
+  adapter captured exact socket-write and acknowledgement stamps for both, and
+  the venue enum that the engine actually holds did not forward
+  `take_mutation_timing`. It inherited the trait's `None`, so every cancel and
+  amend wrote `null` and read back as "unknown" while placements were complete.
+  Fixed, and the class closed: a source-reading test now requires the enum to
+  write an arm for every method of `VenueGateway`, defaulted or not, with a
+  negative control proving the scan is not blind. A method with a default body
+  needs no arm to compile, which is what made this silent.
+
+- **2026-08-29 — The order path separates the quota hold from the venue's own
+  leg, and `engine latency` reads it back.** The 249.74 ms p99 venue task in
+  the funded canary above was mostly the client's own rate pacing, which had to
+  be inferred rather than read. Every place, cancel and amend now records how
+  long the adapter held it back to stay inside the request quota, as its own
+  mark in `VenueTiming`. The two ask for opposite fixes — a slow round trip is
+  the network or the matching engine, a long hold is a quota to raise — and one
+  span could not tell them apart. `engine latency --wal PATH` reports every
+  step at p50, p90, p99 and p99.9 per operation from those exact stamps, rather
+  than the live ledger's 60-second p50/p99 rollup. Checked against a real bench
+  log: its per-step medians reproduce the bench's own ledger table, and the
+  signing leg it splits out of the venue task measured 53.7 us.
+
 - **2026-08-29 — The funded trade WebSocket completed a minimum-size forward
   trial.** The AGI canary's quoting run sent 256 placements, 237 amendments and
   258 cancels through the authenticated socket. Disabling it cancelled the one

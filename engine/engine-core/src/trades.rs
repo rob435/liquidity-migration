@@ -34,7 +34,10 @@ pub struct Trades {
 
 impl Trades {
     pub fn new(path: PathBuf) -> Self {
-        Trades { path, last_complaint: None }
+        Trades {
+            path,
+            last_complaint: None,
+        }
     }
 
     /// Append a line per trade. An empty list touches no disk at all — the
@@ -74,7 +77,10 @@ impl Trades {
     }
 
     fn put(&self, body: &str) -> std::io::Result<()> {
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(body.as_bytes())?;
         file.flush()
     }

@@ -49,6 +49,9 @@ struct Amender {
     symbol: String,
     order: String,
     fired: bool,
+    /// Ask again on every quote, to reach the guard that refuses to move an
+    /// order whose working price is not known.
+    keeps_asking: bool,
 }
 
 impl Strategy for Amender {
@@ -65,7 +68,7 @@ impl Strategy for Amender {
 
     fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
         if let EngineEvent::Market(MarketEvent::Quote { symbol, quote }) = event {
-            if !self.fired {
+            if !self.fired || self.keeps_asking {
                 self.fired = true;
                 ctx.amend(
                     *symbol,
@@ -106,7 +109,8 @@ async fn a_cancel_is_written_down_and_reaches_the_venue_without_an_fsync() {
     );
     let record = h
         .records
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .find_map(|r| match r {
             WalRecord::CancelSent {
@@ -232,6 +236,7 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
         symbol: "BTCUSDT".into(),
         order: "eng-old-1".into(),
         fired: false,
+        keeps_asking: false,
     };
     let mut engine = Engine::boot(
         &settings(),
@@ -254,7 +259,10 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
         .await
         .unwrap();
 
-    assert!(amends.lock().unwrap().is_empty(), "nothing reached the venue");
+    assert!(
+        amends.lock().unwrap().is_empty(),
+        "nothing reached the venue"
+    );
     assert!(
         cancels.lock().unwrap().is_empty(),
         "and it was not quietly turned into a cancel"
@@ -268,12 +276,31 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
     assert!(note.contains("cancel-and-replace"), "{note}");
 }
 
-#[tokio::test]
-async fn an_async_amend_ack_keeps_its_range_and_queues_cancellation() {
+/// Wait for the amend's reservation to be settled, or give up. Polls rather
+/// than sleeps a fixed time, so a slow machine does not read as a failure.
+async fn until_amend_settled(records: Rc<RefCell<Vec<WalRecord>>>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if records
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r, WalRecord::AmendResolved { .. }))
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// The bench for the three amend endings: a resting order the log already
+/// knows, a strategy that moves it once, and the venue taking the move.
+async fn amended_once() -> (Engine<MockWal, MockRisk, MockVenue>, Harness, SymbolId) {
     let amender = Amender {
         symbol: "BTCUSDT".into(),
         order: "eng-old-1".into(),
         fired: false,
+        keeps_asking: false,
     };
     let old = OrderRequest {
         client_order_id: "eng-old-1".into(),
@@ -312,6 +339,27 @@ async fn an_async_amend_ack_keeps_its_range_and_queues_cancellation() {
         )
         .await
         .unwrap();
+    (engine, h, symbol)
+}
+
+fn resolved_price(h: &Harness) -> Option<f64> {
+    h.records
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|record| match record {
+            WalRecord::AmendResolved { effective_px, .. } => Some(*effective_px),
+            _ => None,
+        })
+}
+
+#[tokio::test]
+async fn an_accepted_amend_waits_for_its_price_instead_of_pulling_the_order() {
+    // The venue answers `order.amend` by saying it took the request, never by
+    // saying what price it left the order at. Pulling the order to end that
+    // ambiguity would throw away the queue position the amend existed to
+    // keep, and make every reprice a cancel and a replacement.
+    let (_engine, h, symbol) = amended_once().await;
 
     let amends = h.amends.lock().unwrap();
     assert_eq!(amends.len(), 1);
@@ -319,12 +367,16 @@ async fn an_async_amend_ack_keeps_its_range_and_queues_cancellation() {
     assert_eq!(amends[0].1, "eng-old-1");
     assert_eq!(amends[0].2.px, Some(30_000.0), "the new price, unchanged");
     assert_eq!(amends[0].2.qty, None, "and no size change was asked for");
-    assert_eq!(h.cancels.lock().unwrap().len(), 1, "ambiguous order is pulled");
-    assert!(!h
-        .records
-        .lock().unwrap()
-        .iter()
-        .any(|record| matches!(record, WalRecord::AmendResolved { .. })));
+    assert_eq!(
+        h.cancels.lock().unwrap().len(),
+        0,
+        "the order was pulled instead of being given its price"
+    );
+    assert_eq!(
+        resolved_price(&h),
+        None,
+        "nothing has said what price it is working at yet"
+    );
     let written = at(&h.tape, &Step::Append("amend_sent".into())).unwrap();
     let sent = at(&h.tape, &Step::Amend("eng-old-1".into())).unwrap();
     assert!(written < sent, "written down before it went out");
@@ -332,11 +384,154 @@ async fn an_async_amend_ack_keeps_its_range_and_queues_cancellation() {
     // replacement reservation is durable before the venue call.
     assert!(
         h.tape
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .iter()
             .any(|step| matches!(step, Step::Barrier)),
         "an opening reprice did not pay for its risk barrier"
     );
+}
+
+#[tokio::test]
+async fn the_venue_stating_the_price_settles_the_amend_and_keeps_the_order() {
+    // The private stream republishes a resting order whenever it changes
+    // without trading, and that republication carries the price. It is the
+    // answer the acknowledgement did not give.
+    let (mut engine, h, symbol) = amended_once().await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::Amended {
+                client_order_id: "eng-old-1".into(),
+                px: 30_000.0,
+                qty: 0.01,
+                recv_ns: clock::now_ns(),
+            }]),
+            until_amend_settled(h.records.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resolved_price(&h),
+        Some(30_000.0),
+        "the range stayed open at the price the venue stated"
+    );
+    assert_eq!(
+        h.cancels.lock().unwrap().len(),
+        0,
+        "an order whose price is known has no reason to be pulled"
+    );
+}
+
+#[tokio::test]
+async fn a_price_the_venue_never_states_pulls_the_order() {
+    // The fallback, and it is exactly what a venue that cannot amend at all
+    // gets: an order resting at a price the engine cannot name is one it
+    // cannot price its own book against, so it comes down.
+    let (mut engine, h, symbol) = amended_once().await;
+    assert_eq!(h.cancels.lock().unwrap().len(), 0, "not yet overdue");
+
+    // Past the confirmation bound, with market wakes and no word from the
+    // private stream about that order.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let cancels = h.cancels.lock().unwrap();
+    assert_eq!(cancels.len(), 1, "the unexplained amend left the order up");
+    assert_eq!(cancels[0].1, "eng-old-1");
+}
+
+#[tokio::test]
+async fn a_second_move_while_the_price_is_owed_waits_rather_than_pulling_the_order() {
+    // The guard that refuses to move an order whose working price is unknown
+    // is right — the next reservation would have to cover the range of a
+    // range. What it must not do is pull the order, because an answer is
+    // already owed and arrives in milliseconds. Pulling here would undo every
+    // amend the confirmation exists to keep.
+    let amender = Amender {
+        symbol: "BTCUSDT".into(),
+        order: "eng-old-1".into(),
+        fired: false,
+        keeps_asking: true,
+    };
+    let old = OrderRequest {
+        client_order_id: "eng-old-1".into(),
+        strategy: StrategyId(0),
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.01,
+        kind: OrderKind::Limit {
+            px: 29_000.0,
+            tif: engine_types::TimeInForce::Gtc,
+        },
+        stop: Some(StopSpec {
+            trigger_px: 28_000.0,
+        }),
+        reduce_only: false,
+    };
+    let replayed = [WalRecord::OrderSent {
+        request: old,
+        wire_ns: 1,
+        arrival_mid: 29_500.0,
+    }];
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
+        vec![Box::new(amender)],
+        &["BTCUSDT"],
+        &replayed,
+        vec![still_working("eng-old-1", "BTCUSDT", 0.01)],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            // Three quotes: one amends, the next two ask again while the
+            // price of the first is still owed. The run then keeps going long
+            // enough for a queued cancel to reach the venue, and stops short
+            // of the confirmation deadline, which pulls the order for its own
+            // reasons.
+            &mut ScriptFeed::quotes(symbol, 3, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(10)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(h.amends.lock().unwrap().len(), 1, "one move went out");
+    assert_eq!(
+        h.cancels.lock().unwrap().len(),
+        0,
+        "asking again pulled the order the venue was about to explain"
+    );
+}
+
+#[tokio::test]
+async fn an_unrelated_stated_price_leaves_an_open_amend_alone() {
+    // The venue republishes orders for reasons of its own. Only the order
+    // whose amend is outstanding may be settled by one.
+    let (mut engine, h, symbol) = amended_once().await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::Amended {
+                client_order_id: "eng-somebody-else".into(),
+                px: 12.0,
+                qty: 1.0,
+                recv_ns: clock::now_ns(),
+            }]),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved_price(&h), None, "settled by another order's news");
 }
 
 #[tokio::test]
@@ -345,6 +540,7 @@ async fn a_nonfinite_amend_approval_never_reaches_the_venue() {
         symbol: "BTCUSDT".into(),
         order: "eng-old-1".into(),
         fired: false,
+        keeps_asking: false,
     };
     let old = OrderRequest {
         client_order_id: "eng-old-1".into(),
@@ -454,7 +650,12 @@ async fn a_quantity_amend_is_refused_until_risk_and_ledger_can_resize_together()
         .unwrap();
 
     assert!(h.amends.lock().unwrap().is_empty());
-    assert!(h.records.lock().unwrap().iter().any(|record| matches!(record,
+    assert!(h
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|record| matches!(record,
         WalRecord::Note { text, .. } if text.contains("quantity changes are unsupported"))));
 }
 
@@ -490,7 +691,10 @@ async fn an_entry_carrying_a_stop_is_refused_where_the_venue_keeps_none() {
         .await
         .unwrap();
 
-    assert!(sends.lock().unwrap().is_empty(), "nothing reached the venue");
+    assert!(
+        sends.lock().unwrap().is_empty(),
+        "nothing reached the venue"
+    );
     assert!(
         !appends(&tape).contains(&"order_sent".to_string()),
         "and nothing was written down as sent"
@@ -546,7 +750,8 @@ impl Strategy for Watcher {
         let mut mine = Vec::new();
         ctx.resting(&mut mine);
         self.seen
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .push(mine.iter().map(|o| o.client_order_id.to_string()).collect());
 
         if let (EngineEvent::Market(MarketEvent::Quote { symbol, quote }), Some(qty), false) =
@@ -723,17 +928,28 @@ async fn an_order_the_log_has_ended_leaves_the_strategys_book() {
         .await
         .unwrap();
 
-    assert_eq!(sends.lock().unwrap().len(), 1, "one order really was placed");
+    assert_eq!(
+        sends.lock().unwrap().len(),
+        1,
+        "one order really was placed"
+    );
     assert!(
         engine.in_flight_ids().is_empty(),
         "and the venue refused it"
     );
     let seen = seen.lock().unwrap();
-    assert!(seen.first().unwrap().is_empty(), "nothing was placed before the first quote");
     assert!(
-        seen.iter().any(|snapshot| snapshot == &vec![sends.lock().unwrap()[0].client_order_id.clone()]),
+        seen.first().unwrap().is_empty(),
+        "nothing was placed before the first quote"
+    );
+    assert!(
+        seen.iter()
+            .any(|snapshot| snapshot == &vec![sends.lock().unwrap()[0].client_order_id.clone()]),
         "market processing stayed live while the venue answer was pending"
     );
-    assert!(seen.last().unwrap().is_empty(), "the rejection ended the order");
+    assert!(
+        seen.last().unwrap().is_empty(),
+        "the rejection ended the order"
+    );
     assert!(seen.len() >= 3, "it was woken after the rejection");
 }

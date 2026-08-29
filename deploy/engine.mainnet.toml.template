@@ -132,9 +132,9 @@ symbols = ["DOGEUSDT"]
 name = "quoter"
 sleeve = "maker_canary"
 # Append-only identity: the WAL owns this strategy id, so the block stays in
-# the config. `false` pulls its own quotes and closes only inventory attributed
-# to this sleeve.
-quote_enabled = false
+# the config. This is the registered minimum-size forward trial; disabling it
+# pulls its own quotes and closes only inventory attributed to this sleeve.
+quote_enabled = true
 symbols = ["AGIUSDT"]
 
 # One venue-minimum-sized quote on each side. One fill brings inventory near
@@ -150,13 +150,25 @@ stop_loss_fraction = 0.08
 # Conservative short-horizon price: L1 microprice, weighted L50 imbalance,
 # public aggressor flow, movement and queue value. These are execution inputs,
 # not a claim that the sleeve has forward profit evidence.
-maker_fee_bps = 2.0
+maker_fee_bps = 4.0
 min_edge_bps = 4.0
 volatility_multiplier = 2.0
-toxicity_bps = 4.0
 book_lean_bps = 1.5
-trade_lean_bps = 1.5
 signal_half_life_ms = 250.0
+
+# Aggressor notional is divided by displayed same-side dollars near the touch,
+# then held at two speeds. Buy aggression protects only the ask; sell
+# aggression protects only the bid. The seen-tape grid chose four basis points
+# per flow score and no hard pull. This is a forward trial, not a profit claim.
+flow_fast_half_life_ms = 250.0
+flow_slow_half_life_ms = 3000.0
+flow_fast_weight = 0.65
+flow_slow_weight = 0.35
+flow_response_bps = 4.0
+flow_max_widen_bps = 8.0
+flow_depth_bps = 10.0
+flow_volatility_depth_multiplier = 2.0
+flow_max_score = 4.0
 queue_reprice_edge_bps = 1.5
 
 # NOTE ON THE SYMBOL LISTS ABOVE. They are a seed, not a universe. The engine

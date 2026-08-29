@@ -264,7 +264,8 @@ impl Lots {
     /// exit price to report and inventing one would be worse than saying
     /// nothing.
     pub fn drop_symbols(&mut self, dropped: impl Fn(&str, &str) -> bool) {
-        self.open.retain(|(sleeve, symbol), _| !dropped(sleeve, symbol));
+        self.open
+            .retain(|(sleeve, symbol), _| !dropped(sleeve, symbol));
     }
 
     /// Every trip that has closed and not yet been taken.
@@ -312,9 +313,17 @@ mod tests {
     #[test]
     fn a_long_bought_low_and_sold_high_made_the_difference() {
         let mut lots = Lots::default();
-        lots.on_fill("carry", "ONGUSDT", &fill(Side::Buy, 0.30, 1_000.0, 0.10, 1_000));
+        lots.on_fill(
+            "carry",
+            "ONGUSDT",
+            &fill(Side::Buy, 0.30, 1_000.0, 0.10, 1_000),
+        );
         assert!(lots.take_closed().is_empty(), "still holding");
-        lots.on_fill("carry", "ONGUSDT", &fill(Side::Sell, 0.33, 1_000.0, 0.11, 8_000));
+        lots.on_fill(
+            "carry",
+            "ONGUSDT",
+            &fill(Side::Sell, 0.33, 1_000.0, 0.11, 8_000),
+        );
 
         let trade = one(&mut lots);
         assert_eq!(trade.side, "long");
@@ -335,8 +344,16 @@ mod tests {
     #[test]
     fn a_short_covered_lower_made_money() {
         let mut lots = Lots::default();
-        lots.on_fill("exodus", "MOVEUSDT", &fill(Side::Sell, 0.50, 200.0, 0.05, 0));
-        lots.on_fill("exodus", "MOVEUSDT", &fill(Side::Buy, 0.45, 200.0, 0.05, 60_000));
+        lots.on_fill(
+            "exodus",
+            "MOVEUSDT",
+            &fill(Side::Sell, 0.50, 200.0, 0.05, 0),
+        );
+        lots.on_fill(
+            "exodus",
+            "MOVEUSDT",
+            &fill(Side::Buy, 0.45, 200.0, 0.05, 60_000),
+        );
 
         let trade = one(&mut lots);
         assert_eq!(trade.side, "short");
@@ -384,7 +401,11 @@ mod tests {
     #[test]
     fn a_close_whose_entry_is_not_in_the_log_reports_no_money() {
         let mut lots = Lots::default();
-        lots.on_fill("long", "HYPEUSDT", &fill(Side::Sell, 40.0, 5.0, 0.02, 7_000));
+        lots.on_fill(
+            "long",
+            "HYPEUSDT",
+            &fill(Side::Sell, 40.0, 5.0, 0.02, 7_000),
+        );
 
         // The sell opened a short as far as this log can tell, so nothing
         // closed. What the notifier must never see is a trip claiming a
@@ -447,17 +468,31 @@ mod tests {
         assert_eq!(lots.open(), 1);
 
         // Carry sells out at 0.0886, and hours later buys back in at 0.068.
-        lots.on_fill("carry", "ONGUSDT", &fill(Side::Sell, 0.0886, 5_056.0, 0.24, 1_000));
+        lots.on_fill(
+            "carry",
+            "ONGUSDT",
+            &fill(Side::Sell, 0.0886, 5_056.0, 0.24, 1_000),
+        );
         let trade = one(&mut lots);
-        assert_eq!(trade.side, "long", "it was long, whatever the closing fill was");
+        assert_eq!(
+            trade.side, "long",
+            "it was long, whatever the closing fill was"
+        );
         assert!(
             trade.round_trip.is_none(),
             "the entry is in the segment before this one: {:?}",
             trade.round_trip
         );
 
-        lots.on_fill("carry", "ONGUSDT", &fill(Side::Buy, 0.068, 7_347.0, 0.27, 80_000));
-        assert!(lots.take_closed().is_empty(), "a fresh entry closes nothing");
+        lots.on_fill(
+            "carry",
+            "ONGUSDT",
+            &fill(Side::Buy, 0.068, 7_347.0, 0.27, 80_000),
+        );
+        assert!(
+            lots.take_closed().is_empty(),
+            "a fresh entry closes nothing"
+        );
         assert_eq!(lots.open(), 1);
     }
 
@@ -468,8 +503,16 @@ mod tests {
     fn adding_to_a_restated_position_still_reports_no_money() {
         let mut lots = Lots::default();
         lots.restate(&[("carry".into(), "ACEUSDT".into(), 500.0)]);
-        lots.on_fill("carry", "ACEUSDT", &fill(Side::Buy, 0.21, 443.0, 0.05, 1_000));
-        lots.on_fill("carry", "ACEUSDT", &fill(Side::Sell, 0.236, 943.0, 0.12, 9_000));
+        lots.on_fill(
+            "carry",
+            "ACEUSDT",
+            &fill(Side::Buy, 0.21, 443.0, 0.05, 1_000),
+        );
+        lots.on_fill(
+            "carry",
+            "ACEUSDT",
+            &fill(Side::Sell, 0.236, 943.0, 0.12, 9_000),
+        );
 
         let trade = one(&mut lots);
         assert!(

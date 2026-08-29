@@ -94,6 +94,21 @@ case "$UNIT:$ENTRYPOINT" in
             --ledger-dir /var/lib/liquidity-migration/llm-driver-ledger
         )
         ;;
+    liquidity-migration-forward-capture.service:main)
+        # Public market data only. Raw bytes rotate away only after a verified
+        # compressed replacement exists; retention is part of this exact argv.
+        COMMAND=(
+            /opt/liquidity-migration/.venv/bin/python
+            scripts/research/capture_bybit_forward.py
+            --root /var/lib/liquidity-migration/forward-market
+            --symbols-file deploy/forward-capture-symbols.txt
+            --depth 50
+            --segment-max-mb 64
+            --retention-days 30
+            --max-disk-gb 60
+            --min-free-disk-gb 25
+        )
+        ;;
     *)
         echo "unregistered authorized runtime entrypoint: $UNIT:$ENTRYPOINT" >&2
         exit 2

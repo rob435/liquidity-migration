@@ -183,6 +183,10 @@ impl StrategyCtx for Ctx<'_> {
                 }
                 Action::Place(intent)
             }
+            Action::RecordQuoteFill { mut features } => {
+                features.strategy = self.strategy;
+                Action::RecordQuoteFill { features }
+            }
             other => other,
         };
         self.out.push_back(action);
@@ -282,11 +286,11 @@ mod tests {
         strategy: StrategyId,
     ) -> Ctx<'a> {
         /// An empty attribution: no fill has been charged to anybody, which is
-    /// what every test that is not about attribution means.
-    static NOBODY: OnceLock<Attribution> = OnceLock::new();
-    static FLAT: OnceLock<AccountView> = OnceLock::new();
-    /// An empty cover book: nothing sent ahead of the reading.
-    static NO_COVERS: OnceLock<CoverBook> = OnceLock::new();
+        /// what every test that is not about attribution means.
+        static NOBODY: OnceLock<Attribution> = OnceLock::new();
+        static FLAT: OnceLock<AccountView> = OnceLock::new();
+        /// An empty cover book: nothing sent ahead of the reading.
+        static NO_COVERS: OnceLock<CoverBook> = OnceLock::new();
         Ctx {
             market,
             account: FLAT.get_or_init(flat_account),
@@ -429,7 +433,11 @@ mod tests {
         let mut seen = Vec::new();
         ctx.resting(&mut seen);
         let ids: Vec<&str> = seen.iter().map(|o| o.client_order_id).collect();
-        assert_eq!(ids, vec!["mine-open"], "own and still working, nothing else");
+        assert_eq!(
+            ids,
+            vec!["mine-open"],
+            "own and still working, nothing else"
+        );
         assert_eq!(seen[0].px(), Some(100.0));
         assert_eq!(seen[0].remaining_qty(), 1.0);
         assert!(!seen[0].acked, "no ack has arrived for it");
@@ -462,8 +470,9 @@ mod tests {
             side,
             qty,
             entry_px: 100.0,
-            stop_attached: true, stop_px: 0.0,
-            leverage: None
+            stop_attached: true,
+            stop_px: 0.0,
+            leverage: None,
         }
     }
 
@@ -495,19 +504,44 @@ mod tests {
             covers: &covers,
         };
 
-        assert_eq!(ctx.position(SymbolId(1)), Some(holding(SymbolId(1), Side::Sell, 3.0)));
-        assert_eq!(ctx.position(SymbolId(0)), None, "nothing is held in that one");
+        assert_eq!(
+            ctx.position(SymbolId(1)),
+            Some(holding(SymbolId(1), Side::Sell, 3.0))
+        );
+        assert_eq!(
+            ctx.position(SymbolId(0)),
+            None,
+            "nothing is held in that one"
+        );
         assert_eq!(ctx.instrument(SymbolId(1)), Some(RULE));
-        assert_eq!(ctx.instrument(SymbolId(0)), None, "the venue named no rule for it");
-        assert_eq!(ctx.instrument(SymbolId(7)), None, "past the end of the table");
+        assert_eq!(
+            ctx.instrument(SymbolId(0)),
+            None,
+            "the venue named no rule for it"
+        );
+        assert_eq!(
+            ctx.instrument(SymbolId(7)),
+            None,
+            "past the end of the table"
+        );
 
         // Wall time, not the monotonic stamp: a book's validity window can
         // only be judged against a clock of the same kind.
         let wall = ctx.wall_ms();
         let now = crate::clock::wall_ms();
-        assert!(wall > 1_600_000_000_000, "expected a unix millisecond stamp, got {wall}");
-        assert!((now - wall).abs() < 60_000, "the ctx clock is the engine's: {wall} vs {now}");
-        assert_ne!(wall as u64, ctx.now_ns(), "the two clocks are not the same clock");
+        assert!(
+            wall > 1_600_000_000_000,
+            "expected a unix millisecond stamp, got {wall}"
+        );
+        assert!(
+            (now - wall).abs() < 60_000,
+            "the ctx clock is the engine's: {wall} vs {now}"
+        );
+        assert_ne!(
+            wall as u64,
+            ctx.now_ns(),
+            "the two clocks are not the same clock"
+        );
     }
 
     #[test]

@@ -94,8 +94,20 @@ Geography is not ours to fix in software. What the engine owns is its side of
 the wire, and that is measured separately from socket-write-to-venue-ack time.
 The durable log records queue admission, venue-task start, socket write,
 acknowledgement, task completion and core resume for every accepted mainnet
-place, cancel and amend. A transport that cannot expose one of those marks
-writes `null`; it never substitutes a nearby timestamp.
+place, cancel and amend, and alongside them how long the adapter held that
+command back to stay inside the venue's request quota. A transport that cannot
+expose one of those marks writes `null`; it never substitutes a nearby
+timestamp.
+
+The quota hold is separated from the venue's own leg because the two ask for
+opposite fixes. A slow round trip is the network or the matching engine. A long
+hold is a quota that needs raising, or a strategy asking for more requests than
+it has. One "venue task" span cannot tell them apart.
+
+`engine latency --wal PATH` reads those marks back and reports each step at
+p50, p90, p99 and p99.9, per operation. The live ledger's 60-second p50/p99 is
+the glance; this is the reconstruction, and it is where a tail that costs a
+fill is visible.
 
 Measured 2026-08-13 by `engine bench` (the real loop, real HMAC signing,
 the real log with its fsync in the chain, a pretend venue on the same box;
@@ -107,7 +119,37 @@ release build, Apple silicon; 20,000 quotes in, 1,000 orders out):
 | decision → order durable in the log | 3.8 ms | 4.8 ms | 10.5 ms |
 | **message → durable → local submit result** | **3.9 ms** | **5.0 ms** | **10.8 ms** |
 
-The durable step is nearly the whole chain, and it is the platform's price:
+The durable step is the platform's price, and the order path no longer waits
+for it. The bytes reach the operating system before the order is sent; the disk
+barrier runs beside the flight to the venue rather than in front of it, and
+what waits for the barrier is the first news that the order traded. A venue is
+milliseconds away and a barrier is milliseconds long, so the barrier finishes
+during the flight and the wait is nothing — `still waiting on the disk`
+measures the residue, and a number there is the disk winning that race.
+
+**What this gives up, plainly.** A machine that dies inside the barrier can
+leave an order at the venue that the log does not name. Boot reconciliation
+reads the venue's working orders, finds one it cannot account for, and latches
+opening off — the same answer it gives for any order it cannot explain. Process
+death is unaffected: the bytes are already with the operating system, which is
+what `flush` has always meant here. Nothing is ever *acted on* before its order
+is durable; what moved is when the path stops waiting, not what it waits for.
+
+Measured on this box with `engine bench --venue-delay-ms 4`, which holds the
+pretend venue at a real venue's distance (three runs each, the same binary with
+one line changed):
+
+| Segment | barrier in front | barrier beside |
+| --- | --- | --- |
+| decision → order path stops waiting for the disk | 3.68 ms | 0.12 ms |
+| still waiting on the disk | 3.56 ms | 2.0 µs |
+| **message → durable → local submit result (p50)** | **9.59 ms** | **6.01 ms** |
+| the same, p99 | 13.69 ms | 6.31 ms |
+
+The tail moves further than the median because a slow barrier used to stack on
+top of the round trip and now hides inside it.
+
+What a barrier itself costs, which is what the overlap hides:
 on macOS, Rust's `sync_data` is a full drive-cache flush (~3.2 ms/barrier
 measured); the VPS's Linux `fdatasync` measures ~2.2 ms. The pretend venue is
 plain HTTP on localhost, so the venue-side cost is short by about one TLS
@@ -153,6 +195,15 @@ amend, or stop change flushes the placement group first. Create, cancel,
 batch-cancel, amend, trading-stop, leverage, and startup position reads each
 have their own completion-anchored rolling quota.
 
+Those quotas start at the venue's documented default and are corrected by the
+venue itself: Bybit states this account's own per-second limit for an endpoint
+in the header of every trade-socket acknowledgement, and a figure larger than
+the default is what the pacing then uses. An account on a market-maker tier is
+otherwise paced forever at the rate a default account gets. A smaller figure is
+logged and not adopted — every batch the adapter sends is already capped at the
+documented default, so pacing below it would leave an admitted batch unable to
+reserve at all.
+
 The bounded actor coalesces superseded work per symbol: a cancel replaces an
 unsent amend, the newest amend replaces an older one, and duplicate cancels do
 not consume venue quota. It does not retry a mutation after an ambiguous socket
@@ -161,11 +212,23 @@ failure; reconciliation decides what the venue actually holds.
 An opening reprice is assessed again before wire and gets the same durability
 barrier as a placement. Until the venue gives a definitive answer, replay
 retains the full old/requested price range: the high end charges notional and
-both ends charge stop loss. The current venue contract has no correlated
-private confirmation of an effective amend price, and Bybit's REST success is
-only asynchronous acceptance, so every accepted or transport-ambiguous
-opening reprice is canceled rather than falsely resolved; its range remains
-reserved until cancellation is confirmed.
+both ends charge stop loss.
+
+An amend acknowledgement says the venue took the request. It never says what
+price the order was left at, so acceptance alone does not close that range.
+The venue states the price separately, by republishing the order on the
+private stream when it changes without trading, and that republication is what
+narrows the range to a single price. Bybit repeats `New`; Hyperliquid repeats
+`open` with `limitPx`. Both carry what is still working, so a fill that landed
+while the amend was in flight is visible in the same message.
+
+An amend whose price is not stated within two seconds is cancelled, and so is
+one that failed on the wire with no answer. That is the fallback, and it is
+exactly what a venue that cannot amend at all gets: an order resting at a price
+the engine cannot name is one it cannot price its own book against. What the
+confirmation buys is the ordinary case — a reprice that keeps the order's venue
+identity and whatever queue position the venue left it, instead of turning
+every move into a cancel and a replacement at the back of the queue.
 
 The latency tables here measure the single-order path. A deterministic Linux
 integration test holds each of three distinct-symbol venue responses for
@@ -696,6 +759,13 @@ cannot open until its leverage transaction exists, MEXC has no practice realm, a
 Variational has no account or trading API. Do not treat a successful build as
 authority to arm any of these paths.
 
+Bybit publishes the top of book on its own topic, about twice as often as the
+depth-50 book. Both carry the touch, so the engine takes whichever was read off
+the socket last — the read stamp is the only thing comparable across two
+topics that each sequence themselves — and the deeper book's older copy of the
+touch never replaces a fresher one. The depth a strategy sizes and estimates
+queue position against is never arbitrated: that is the deep book's alone.
+
 MEXC still prices from the complete ticker touch. The quote's sequence field is
 the latest continuously observed depth version, not proof that the ticker and
 that depth update are the same causal snapshot. Its incremental depth is not a
@@ -843,14 +913,17 @@ Six steps, five in `engine-venue` and one next door:
 | Stating leverage at the venue | Done. The leverage a decision was sized at travels with it, and an order whose leverage cannot be set is not sent. Entries only |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
 | Non-blocking order management | Done. Durable mutations enter a bounded venue task; market data continues while acknowledgements are outstanding, and per-symbol coalescing removes superseded amend/cancel work before it reaches the wire |
-| Persistent Bybit order transport | Implemented on mainnet. Create/cancel/amend and their native batches use one authenticated trade WebSocket when its startup authentication succeeds. The official hostname is resolved normally and the trade dialer selects the fleet's allowlisted IPv4, avoiding the provider IPv6 route that Bybit rejects before authentication. A genuine warm-up failure still selects signed REST for the run. Demo keeps REST because Bybit does not offer the trade socket there |
-| L50 and aggressor-flow quoting | Done for Bybit. The public feed reconstructs 50 levels from snapshot/delta sequence, aggregates trade bursts by aggressor, and the quoter combines microprice, weighted book pressure, short movement, trade pressure, inventory and queue value. After a fill, the old opposite opening quote is cancelled before replacement; the inventory-reducing quote is reduce-only and cannot sell or buy through flat. `quote_enabled = false` pulls its book and drains only its attributed inventory |
+| Persistent Bybit order transport | Implemented on mainnet. Create/cancel/amend and their native batches use one authenticated trade WebSocket when its startup authentication succeeds. The official hostname is resolved normally and the trade dialer selects the fleet's allowlisted IPv4, avoiding the provider IPv6 route that Bybit rejects before authentication. A genuine warm-up failure still selects signed REST for the run. A venue rejection is an answer rather than a broken pipe and keeps the socket, so an order the venue declines does not cost the next one a reconnect and a re-authentication; a transport or decode failure still drops it. Demo keeps REST because Bybit does not offer the trade socket there |
+| L50 and aggressor-flow quoting | Done for Bybit. The public feed reconstructs 50 levels from snapshot/delta sequence, aggregates trade bursts by aggressor, and the quoter combines microprice, weighted book pressure, short movement, trade pressure, inventory and queue value. It takes the price it quotes around from the top-of-book topic, which publishes about twice as often as the deep book, and the book and queue terms from the deep book, which is the only thing that carries them. After a fill, the old opposite opening quote is cancelled before replacement; the inventory-reducing quote is reduce-only and cannot sell or buy through flat. `quote_enabled = false` pulls its book and drains only its attributed inventory |
+| Directional toxic-flow response | Done for the Bybit quoter. Public trades are scaled by the same-side displayed dollars within a volatility-expanded price band, then held in 250 ms and 3 s decays. Aggressive buyers widen or pull only the ask; aggressive sellers protect only the bid. Every maker fill records both flow states, their score, depth, spread, volatility and estimated queue beside the execution id for forward grading |
 | Fast fill reaction | Done for Bybit mainnet. `execution.fast` wakes the owning strategy early, including maker rows whose client id is blank after joining through venue order id; ordinary `execution` remains the fee-bearing accounting authority. Demo omits the topic because its private stream refuses it |
+| Replayable forward market capture | Done for Bybit public data. A separate no-credential service records L50 snapshots/deltas, public trades, mark/index price, crowd fee (funding), open interest and liquidations with local receive and venue times. Raw segments disappear only after an atomic `zstd` replacement passes decompression verification and receives a SHA-256 manifest entry. Retention removes only completed compressed files |
 | Venue reconciliation and restart recovery | Done. Boot reads the venue's working orders and compares them, and the account, against the log |
 | Stop verify, repair, and a durable breach latch | Done. A missing or looser stop returns to the directionally tighter level proved by position-growing fills; unfilled siblings cannot control it, fresh views supervise it, and an unrepairable breach latches opening off |
 | Single-writer lease | Done. The engine joins the fleet's own `flock`, refuses to start when another process holds the account, and claims its log the same way |
 | Notifications and a liveness watchdog | Done, by feeding the fleet's own watchdog rather than growing a second one. The engine writes a heartbeat file; `check_fleet_liveness.py` reads it and pages on stale, unreadable, or latched. Off unless a path is configured |
 | Reaching the funded account | Done, behind the owner's switch. `bybit_mainnet` refuses to build unless `REAL_MONEY` is armed in the host credential file — the only toggle there is. Current operational status lives in `STATE.md` and `scripts/ops.sh status` |
+| Saying where the time went | Done. Every place, cancel and amend writes its exact stamps, including the quota hold that is the engine's own pacing rather than the venue's latency. Each exact row also carries one Unix-time anchor beside its monotonic stamps so it can join to the forward tape without measuring duration from a wall clock. `engine latency --wal PATH` reports each step at p50, p90, p99 and p99.9 per operation |
 | Saying what the fills cost | Done. `is_maker` kept from the venue, `M0` written on every send, arrival shortfall / effective spread / fee / all-in derived, and the signed markout at 1s/15s/1m/5m written when its horizon comes due. `engine fills --wal PATH` is the read; five of the numbers are in the heartbeat |
 | Saying what its own ids mean | Done. Strategy and symbol ids are positions, so the log records both tables — at boot and again whenever a book names a new symbol |
 | A strategy reading its own position | Done. `my_position` is that strategy's own fills, moving the instant one arrives. The account reading beside it lags seconds and, on a two-sleeve account, is the sum of both |

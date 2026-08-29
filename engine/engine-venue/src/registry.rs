@@ -38,7 +38,7 @@ use engine_types::orders::{
     VenueExecution, VenueOrder,
 };
 use engine_types::risk::AccountView;
-use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
+use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway, VenueMutationTiming};
 
 use crate::venues::bybit::{BybitGateway, BybitInventoryProbe, BybitOrderFeed, VenueRealm};
 use crate::venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
@@ -520,6 +520,26 @@ impl VenueGateway for Venue {
             Venue::Lighter(gw) => gw.set_leverage(symbol, leverage).await,
             Venue::Mexc(gw) => gw.set_leverage(symbol, leverage).await,
             Venue::Variational(gw) => gw.set_leverage(symbol, leverage).await,
+        }
+    }
+
+    fn take_mutation_timing(&mut self) -> Option<VenueMutationTiming> {
+        match self {
+            Venue::Bybit(gw) => gw.take_mutation_timing(),
+            Venue::Hyperliquid(gw) => gw.take_mutation_timing(),
+            Venue::Lighter(gw) => gw.take_mutation_timing(),
+            Venue::Mexc(gw) => gw.take_mutation_timing(),
+            Venue::Variational(gw) => gw.take_mutation_timing(),
+        }
+    }
+
+    fn take_rate_wait_ns(&mut self) -> Option<u64> {
+        match self {
+            Venue::Bybit(gw) => gw.take_rate_wait_ns(),
+            Venue::Hyperliquid(gw) => gw.take_rate_wait_ns(),
+            Venue::Lighter(gw) => gw.take_rate_wait_ns(),
+            Venue::Mexc(gw) => gw.take_rate_wait_ns(),
+            Venue::Variational(gw) => gw.take_rate_wait_ns(),
         }
     }
 

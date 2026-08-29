@@ -240,10 +240,15 @@ mod tests {
                 .iter()
                 .map(|(symbol, signed)| PositionView {
                     symbol: *symbol,
-                    side: if *signed >= 0.0 { Side::Buy } else { Side::Sell },
+                    side: if *signed >= 0.0 {
+                        Side::Buy
+                    } else {
+                        Side::Sell
+                    },
                     qty: signed.abs(),
                     entry_px: 10.0,
-                    stop_attached: true, stop_px: 0.0,
+                    stop_attached: true,
+                    stop_px: 0.0,
                     leverage: None,
                 })
                 .collect(),
@@ -274,7 +279,11 @@ mod tests {
         book.absorb(&reading(&[(KAITO, 5.0)]));
         assert_eq!(book.in_flight(CARRY, KAITO), 5.0);
         book.absorb(&reading(&[(KAITO, 10.0)]));
-        assert_eq!(book.in_flight(CARRY, KAITO), 0.0, "fully shown, fully released");
+        assert_eq!(
+            book.in_flight(CARRY, KAITO),
+            0.0,
+            "fully shown, fully released"
+        );
     }
 
     #[test]
@@ -321,7 +330,11 @@ mod tests {
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
         book.register(CARRY, KAITO, Side::Buy, 5.0, &flat());
         book.release_newest(CARRY, KAITO, 5.0);
-        assert_eq!(book.in_flight(CARRY, KAITO), 10.0, "the older cover is intact");
+        assert_eq!(
+            book.in_flight(CARRY, KAITO),
+            10.0,
+            "the older cover is intact"
+        );
     }
 
     #[test]
@@ -332,7 +345,11 @@ mod tests {
         book.register(CARRY, COTI, Side::Buy, 3.0, &flat());
         book.intent_refused(CARRY, KAITO, true);
         assert_eq!(book.in_flight(CARRY, KAITO), 0.0, "the reading is the fact");
-        assert_eq!(book.in_flight(CARRY, COTI), 3.0, "the other symbol keeps its cover");
+        assert_eq!(
+            book.in_flight(CARRY, COTI),
+            3.0,
+            "the other symbol keeps its cover"
+        );
     }
 
     #[test]
@@ -344,7 +361,11 @@ mod tests {
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
         book.intent_refused(CARRY, KAITO, false);
-        assert_eq!(book.in_flight(CARRY, KAITO), 10.0, "the earlier send stays covered");
+        assert_eq!(
+            book.in_flight(CARRY, KAITO),
+            10.0,
+            "the earlier send stays covered"
+        );
     }
 
     #[test]
@@ -358,7 +379,11 @@ mod tests {
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
         book.register(CARRY, KAITO, Side::Buy, 5.0, &flat());
         book.absorb(&reading(&[(KAITO, 10.0)]));
-        assert_eq!(book.in_flight(CARRY, KAITO), 5.0, "the second send is still resting");
+        assert_eq!(
+            book.in_flight(CARRY, KAITO),
+            5.0,
+            "the second send is still resting"
+        );
 
         // And the next reading absorbs it, once.
         book.absorb(&reading(&[(KAITO, 15.0)]));
@@ -385,7 +410,11 @@ mod tests {
         book.register(LONG, COTI, Side::Buy, 8.0, &flat());
         book.absorb(&reading(&[(KAITO, 10.0)]));
         assert_eq!(book.in_flight(CARRY, KAITO), 0.0);
-        assert_eq!(book.in_flight(LONG, COTI), 8.0, "the other sleeve's cover is untouched");
+        assert_eq!(
+            book.in_flight(LONG, COTI),
+            8.0,
+            "the other sleeve's cover is untouched"
+        );
     }
 
     #[test]

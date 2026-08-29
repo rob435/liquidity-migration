@@ -5,14 +5,109 @@
 //! everything beside it, and a bare column of numbers invites exactly the
 //! wrong reading.
 
+use std::collections::BTreeMap;
+
 use engine_types::WalRecord;
 
 use super::{Costs, Fills, HORIZONS_MS};
+use crate::replay::LogNames;
 
 /// Read a log and say what its trading cost, and what its positions made.
 pub fn of_log(records: &[WalRecord]) -> String {
     let fills = Fills::from_records(records);
-    format!("{}\n{}", table(&fills), trips(&fills))
+    format!(
+        "{}\n{}\n{}",
+        table(&fills),
+        trips(&fills),
+        quote_features(records)
+    )
+}
+
+#[derive(Default)]
+struct Mean {
+    sum: f64,
+    n: u64,
+}
+
+impl Mean {
+    fn add(&mut self, value: Option<f64>) {
+        if let Some(value) = value.filter(|value| value.is_finite()) {
+            self.sum += value;
+            self.n += 1;
+        }
+    }
+
+    fn text(&self, width: usize) -> String {
+        if self.n == 0 {
+            return format!("{NOTHING:>width$}");
+        }
+        format!("{:>width$.2}", self.sum / self.n as f64)
+    }
+}
+
+#[derive(Default)]
+struct FeatureRow {
+    fills: u64,
+    makers: u64,
+    flow: Mean,
+    ratio: Mean,
+    depth: Mean,
+    spread: Mean,
+    volatility: Mean,
+    queue: Mean,
+}
+
+fn quote_features(records: &[WalRecord]) -> String {
+    let mut names = LogNames::default();
+    let mut rows: BTreeMap<(String, String), FeatureRow> = BTreeMap::new();
+    for record in records {
+        names.learn(record);
+        let WalRecord::QuoteFill { features } = record else {
+            continue;
+        };
+        let row = rows
+            .entry((
+                names.strategy(features.strategy),
+                names.symbol(features.symbol),
+            ))
+            .or_default();
+        row.fills += 1;
+        row.makers += u64::from(features.is_maker);
+        row.flow.add(features.flow_score);
+        row.ratio.add(features.last_depth_ratio);
+        row.depth.add(features.same_side_depth_usdt);
+        row.spread.add(features.spread_bps);
+        row.volatility.add(features.volatility_bps);
+        row.queue.add(features.queue_ahead_usdt);
+    }
+
+    let mut out = String::from("what surrounded the quoter fills\n\n");
+    out.push_str(
+        "  sleeve        symbol         fills maker   flow   ratio  depth USDT spread bp  vol bp queue USDT\n",
+    );
+    if rows.is_empty() {
+        out.push_str("\n  no quoter feature receipts yet.\n");
+        return out;
+    }
+    for ((sleeve, symbol), row) in rows {
+        out.push_str(&format!(
+            "  {:<14}{:<14}{:>6}{:>6}{:>7}{:>8}{:>12}{:>10}{:>8}{:>11}\n",
+            clipped(&sleeve, 13),
+            clipped(&symbol, 13),
+            row.fills,
+            format!("{:.0}%", 100.0 * row.makers as f64 / row.fills as f64),
+            row.flow.text(7),
+            row.ratio.text(8),
+            row.depth.text(12),
+            row.spread.text(10),
+            row.volatility.text(8),
+            row.queue.text(11),
+        ));
+    }
+    out.push_str(
+        "\n  flow is positive for buyer aggression and negative for seller aggression.\n  depth and queue are the same-side public book visible when the fill arrived.\n",
+    );
+    out
 }
 
 /// The em dash a number that was never measured is printed as. Not a zero:
@@ -25,18 +120,54 @@ struct Column {
 }
 
 const COLUMNS: &[Column] = &[
-    Column { head: "sleeve", width: 14 },
-    Column { head: "symbol", width: 14 },
-    Column { head: "fills", width: 6 },
-    Column { head: "maker", width: 6 },
-    Column { head: "traded USDT", width: 13 },
-    Column { head: "fee bp", width: 8 },
-    Column { head: "arrival bp", width: 11 },
-    Column { head: "all-in bp", width: 10 },
-    Column { head: "+1s", width: 8 },
-    Column { head: "+15s", width: 8 },
-    Column { head: "+1m", width: 8 },
-    Column { head: "+5m", width: 8 },
+    Column {
+        head: "sleeve",
+        width: 14,
+    },
+    Column {
+        head: "symbol",
+        width: 14,
+    },
+    Column {
+        head: "fills",
+        width: 6,
+    },
+    Column {
+        head: "maker",
+        width: 6,
+    },
+    Column {
+        head: "traded USDT",
+        width: 13,
+    },
+    Column {
+        head: "fee bp",
+        width: 8,
+    },
+    Column {
+        head: "arrival bp",
+        width: 11,
+    },
+    Column {
+        head: "all-in bp",
+        width: 10,
+    },
+    Column {
+        head: "+1s",
+        width: 8,
+    },
+    Column {
+        head: "+15s",
+        width: 8,
+    },
+    Column {
+        head: "+1m",
+        width: 8,
+    },
+    Column {
+        head: "+5m",
+        width: 8,
+    },
 ];
 
 pub fn table(fills: &Fills) -> String {
@@ -86,7 +217,11 @@ fn row(sleeve: &str, symbol: &str, costs: &Costs) -> String {
                 .unwrap_or_else(|| NOTHING.to_string()),
             width = COLUMNS[3].width
         ),
-        format!("{:>width$.2}", costs.notional_usdt, width = COLUMNS[4].width),
+        format!(
+            "{:>width$.2}",
+            costs.notional_usdt,
+            width = COLUMNS[4].width
+        ),
         bps(costs.fee.mean(), COLUMNS[5].width),
         bps(costs.arrival_shortfall.mean(), COLUMNS[6].width),
         bps(costs.all_in_arrival_bps(), COLUMNS[7].width),
@@ -117,9 +252,7 @@ fn clipped(text: &str, width: usize) -> String {
 /// trading paid away; this says whether the trading was worth doing.
 pub fn trips(fills: &Fills) -> String {
     let mut out = String::from("what the positions made\n\n");
-    out.push_str(
-        "  sleeve            trips     won      net USDT          best         worst\n",
-    );
+    out.push_str("  sleeve            trips     won      net USDT          best         worst\n");
     let mut sleeves: Vec<&str> = fills.closed().iter().map(|t| t.sleeve.as_str()).collect();
     sleeves.sort_unstable();
     sleeves.dedup();
@@ -168,10 +301,13 @@ fn trip_list(fills: &Fills) -> String {
             clipped(&trade.symbol, 14),
             trade.side,
             figure(trade.qty),
-            rt.map(|rt| figure(rt.entry_px)).unwrap_or_else(|| NOTHING.into()),
+            rt.map(|rt| figure(rt.entry_px))
+                .unwrap_or_else(|| NOTHING.into()),
             figure(trade.exit_px),
-            rt.map(|rt| held(rt.held_ms)).unwrap_or_else(|| NOTHING.into()),
-            rt.map(|rt| format!("{:+.2}", rt.net_usdt)).unwrap_or_else(|| NOTHING.into()),
+            rt.map(|rt| held(rt.held_ms))
+                .unwrap_or_else(|| NOTHING.into()),
+            rt.map(|rt| format!("{:+.2}", rt.net_usdt))
+                .unwrap_or_else(|| NOTHING.into()),
         ));
     }
     if skipped > 0 {
@@ -214,7 +350,11 @@ fn held(ms: i64) -> String {
     format!("{minutes}m")
 }
 
-fn trip_row(label: &str, fills: &Fills, keep: impl Fn(&super::roundtrip::ClosedTrade) -> bool) -> String {
+fn trip_row(
+    label: &str,
+    fills: &Fills,
+    keep: impl Fn(&super::roundtrip::ClosedTrade) -> bool,
+) -> String {
     let nets: Vec<f64> = fills
         .closed()
         .iter()
@@ -222,7 +362,15 @@ fn trip_row(label: &str, fills: &Fills, keep: impl Fn(&super::roundtrip::ClosedT
         .filter_map(|trade| trade.round_trip.as_ref().map(|rt| rt.net_usdt))
         .collect();
     if nets.is_empty() {
-        return format!("  {:<18}{:>5}{:>8}{:>14}{:>14}{:>14}\n", clipped(label, 17), 0, NOTHING, NOTHING, NOTHING, NOTHING);
+        return format!(
+            "  {:<18}{:>5}{:>8}{:>14}{:>14}{:>14}\n",
+            clipped(label, 17),
+            0,
+            NOTHING,
+            NOTHING,
+            NOTHING,
+            NOTHING
+        );
     }
     let won = nets.iter().filter(|net| **net > 0.0).count();
     let total: f64 = nets.iter().sum();
@@ -325,7 +473,9 @@ fn footer(total: &Costs, fills: &Fills) -> String {
 
 #[cfg(test)]
 mod tests {
-    use engine_types::{OrderKind, OrderRequest, OrderUpdate, Side, StrategyId, SymbolId};
+    use engine_types::{
+        OrderKind, OrderRequest, OrderUpdate, QuoteFillFeatures, Side, StrategyId, SymbolId,
+    };
 
     use super::*;
 
@@ -382,7 +532,10 @@ mod tests {
         let mut anonymous = log();
         anonymous.remove(0);
         let text = of_log(&anonymous);
-        assert!(text.contains("strategy 0"), "falls back to the number: {text}");
+        assert!(
+            text.contains("strategy 0"),
+            "falls back to the number: {text}"
+        );
         assert!(text.contains("symbol 0"), "{text}");
     }
 
@@ -445,7 +598,10 @@ mod tests {
         });
         let text = of_log(&records);
         assert!(text.contains("cover 50%"), "{text}");
-        assert!(text.contains("long"), "the second sleeve is named too: {text}");
+        assert!(
+            text.contains("long"),
+            "the second sleeve is named too: {text}"
+        );
     }
 
     #[test]
@@ -464,6 +620,38 @@ mod tests {
             "columns line up:\n{}\n{}",
             lines[0],
             lines[1]
+        );
+    }
+
+    #[test]
+    fn quoter_fill_features_are_named_and_missing_values_stay_missing() {
+        let mut records = log();
+        records.push(WalRecord::QuoteFill {
+            features: QuoteFillFeatures {
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                exec_id: "exec-1".into(),
+                client_order_id: "eng-1".into(),
+                side: Side::Buy,
+                is_maker: true,
+                recv_ns: 10,
+                flow_fast: Some(-0.4),
+                flow_slow: Some(-0.2),
+                flow_score: Some(-0.33),
+                last_depth_ratio: Some(-0.5),
+                same_side_depth_usdt: Some(123.0),
+                spread_bps: Some(6.0),
+                volatility_bps: None,
+                queue_ahead_usdt: Some(80.0),
+            },
+        });
+        let text = quote_features(&records);
+        assert!(text.contains("carry"), "{text}");
+        assert!(text.contains("BTCUSDT"), "{text}");
+        assert!(text.contains("-0.33"), "{text}");
+        assert!(
+            text.contains(NOTHING),
+            "missing volatility is not zero: {text}"
         );
     }
 }

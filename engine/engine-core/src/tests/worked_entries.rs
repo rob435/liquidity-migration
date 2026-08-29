@@ -161,6 +161,89 @@ async fn the_group_flush_tick_walks_a_resting_entry_after_the_market() {
     );
 }
 
+/// Stop as soon as the supervisor's move has reached the venue. A fixed sleep
+/// would have to outlast the move and stay inside the confirmation deadline at
+/// the same time, and one of those bounds would always be the flaky one.
+async fn until_moved(amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if !amends.lock().unwrap().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_stated_price_is_where_the_supervisor_believes_the_order_is() {
+    // The supervisor decides its next move from where it believes the order
+    // is. An amend acknowledgement cannot tell it, because it does not name a
+    // price; the venue's own statement of the resting price can. Without that,
+    // the supervisor keeps moving an order to the price it already reached
+    // and spends its whole amend budget standing still.
+    let quick = WorkPolicy {
+        reprice_ms: 1,
+        ..WorkPolicy::default()
+    };
+    let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, quick);
+    let tape = tape();
+    let (wal, _records) = MockWal::new(tape.clone());
+    let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let amends = venue.amends.clone();
+    let cancels = venue.cancels.clone();
+    let (risk, _seen) = MockRisk::with(allow_all());
+    let mut fast = settings();
+    fast.group_flush_ms = 5;
+    let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
+        .await
+        .unwrap();
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::wide_quotes(symbol, 2, false),
+            &mut ScriptOrderFeed::empty(),
+            until_moved(amends.clone()),
+        )
+        .await
+        .unwrap();
+
+    let id = sends.lock().unwrap()[0].client_order_id.clone();
+    let moved_to = {
+        let amends = amends.lock().unwrap();
+        assert_eq!(amends.len(), 1, "expected one move, got {amends:?}");
+        amends[0].2.px.expect("a price-only move")
+    };
+
+    // The venue says where it left the order — at exactly the price that was
+    // asked for — and the market has not moved since.
+    engine
+        .run(
+            &mut ScriptFeed::wide_quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::Amended {
+                client_order_id: id.clone(),
+                px: moved_to,
+                qty: 0.01,
+                recv_ns: clock::now_ns(),
+            }]),
+            // Several look ticks after the price lands, and the market has
+            // not moved: nothing here should want to move the order again.
+            tokio::time::sleep(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        cancels.lock().unwrap().is_empty(),
+        "the order came down before the venue could state its price"
+    );
+    let amends = amends.lock().unwrap();
+    assert_eq!(
+        amends.len(),
+        1,
+        "the order was moved again to the price it is already resting at: {amends:?}"
+    );
+}
+
 #[tokio::test]
 async fn repricing_a_resting_entry_reserves_its_price_range_before_the_wire() {
     // A price-only amend can still increase notional or stop distance. The

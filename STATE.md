@@ -54,11 +54,14 @@ file.
   `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit, or stop
   `llm-ledger.timer`. Detail: `docs/trading_logic.md` §LLM GATE.
 
-- **The fourth registered sleeve, `maker_canary`, is disabled.** Its AGIUSDT
-  block remains in the funded engine config because strategy ids in the log
-  are append-only. With `quote_enabled = false` it places no quotes, pulls any
-  of its working orders, and closes only inventory attributed to that sleeve.
-  The ordinary CARRY, LONG and Exodus books remain independent of it.
+- **The fourth registered sleeve, `maker_canary`, runs a bounded minimum-size
+  AGIUSDT forward trial.** It quotes 5.25 USDT per side with a 6 USDT inventory
+  ceiling. Recent aggressive trades are scaled by nearby displayed dollars and
+  held at 250 ms and 3 s; buying widens only the ask and selling widens only the
+  bid. The trial boundary is 30 attributed fills or 60 minutes of enabled
+  quoting, whichever comes first. Its exact rule and evidence boundary are
+  `configs/lane2_toxic_flow_quoter_v1.json`. The ordinary CARRY, LONG and
+  Exodus books remain independent of it.
 
 - **LONG runs at 6.0× and carry at 3.0×; Exodus copies carry's filled quantity
   (owner directive, both fleets).** Sizing dials are read directly by
@@ -293,7 +296,11 @@ file.
   the allowlisted `208.84.103.4`; TLS still verifies `stream.bybit.com`.
   Create, amend, cancel and their venue-native batches use that authenticated
   socket. A failed socket warm-up keeps the signed REST path available for the
-  run.
+  run; a venue rejection keeps the socket, since it is an answer rather than a
+  broken connection. The adapter paces to the per-second quota Bybit states in
+  each acknowledgement's header when that is larger than the documented
+  default, so an upgraded market-maker tier takes effect without a code
+  change.
 - **The engine says what its fills cost.** It keeps `is_maker` from the venue's
   execution row and writes the midpoint an order was decided against onto the
   order's own log record, so arrival shortfall, effective spread, fee and all-in
@@ -336,6 +343,24 @@ honest reconstructible total is **179 ms median decision→acknowledgment,
 sample, not an estimated p99). Historical records cannot split that total
 cleanly into disk, socket, leverage call, and venue legs.
 
+- **The order path does not wait for the disk.** The log's bytes reach the
+  operating system before an order is sent and the barrier runs beside the
+  flight to the venue; the first news that an order traded is what waits for
+  it. On a venue milliseconds away that wait is nothing, and `still waiting on
+  the disk` in the latency line is what says so. A machine that dies inside a
+  barrier can leave an order the log does not name, which boot reconciliation
+  answers by latching opening off.
+- **Every order, cancel and amend records where its time went.** The log keeps
+  queue admission, venue-task start, socket write, acknowledgement, task
+  completion, core resume, and the time the adapter held the command back to
+  stay inside the request quota. That last one is the engine's own pacing, not
+  venue latency, and it is what the funded canary's 249.74 ms p99 venue task
+  was mostly made of. `cd engine && cargo run --release -- latency --wal PATH`
+  reports each step per operation at p50, p90, p99 and p99.9.
+- **An accepted amend keeps its order.** The venue states a resting order's
+  price by republishing it on the private stream, and that is what settles the
+  reservation an amend opens. Only an amend whose price goes unstated for two
+  seconds is cancelled.
 - **The funded host's warm signed account read is 12.71 ms median / 23.80 ms
   p95.** Thirty successful `/v5/position/list` samples on one reused connection
   ranged from 10.96 to 27.70 ms. The declared backup host measured 172.14 ms
@@ -363,17 +388,21 @@ cleanly into disk, socket, leverage call, and venue legs.
 
 ## Topology
 
-Seven daemons run continuously: the demo Rust engine (LIVE), the
+Eight daemons run continuously: the demo Rust engine (LIVE), the
 mainnet engine, demo LONG and CARRY producers, mainnet LONG and CARRY
-producers, and the Telegram controls. Four timers drive four oneshots beside
-them — demo liveness, mainnet liveness, the LLM ledger, and the trade notifier.
+producers, the Telegram controls, and the public forward recorder. Four timers
+drive four oneshots beside them — demo liveness, mainnet liveness, the LLM
+ledger, and the trade notifier.
 The execution host at `208.84.103.4` carries exactly the unit files in
 `deploy/systemd/` and nothing else;
 [the inventory is that directory's README](deploy/systemd/README.md). Demo is
 the only practice book.
 
-Raw account-market persistence is off. Live L2 readiness and exact
-decision-book capture are on.
+Private account-market persistence is off. Public forward persistence is on:
+L50, trades, mark/index price, the crowd fee (funding), open interest and
+liquidations are written with local and venue times, verified into compressed
+segments, and retained for 30 days within a 60 GB / 25 GB-free disk boundary.
+Live L2 readiness and exact decision-book capture are also on.
 
 ## Risk envelope
 
@@ -549,7 +578,6 @@ ones is indistinguishable from them.
 | Item | State |
 | --- | --- |
 | 2026-08-04 withdrawals await owner confirmation | The venue's own transaction log shows the money leaving through the account login (the API key holds no transfer/withdraw permission — probed, refused), so this was by hand. **If these withdrawals are not the owner's, treat the venue login as compromised immediately** |
-| Quote-lab capture spams its own log when disk-blocked | The 6 GB min-free guard stops tape writes but not the process's nohup traceback spam, which can fill the disk to 0 bytes and kill a deploy. Both capture processes on the host are currently killed; the spam shape is still unfixed. (The in-repo quote-lab replay stays: it is the machinery behind the registered entry recipes — CHANGELOG 2026-08-08.) |
 | Nothing bounds convergence toward a stale accepted target while producers are down | Deliberately not built — a liveness-coupled trading halt needing owner design |
 | Kline bootstrap logs `failed=N` on restart with an intact store | It re-fetches a window it already holds and counts zero new inserts as failure; bounded ~40–50 s per restart. Tracked follow-up |
 | The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 90 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |

@@ -75,7 +75,13 @@ impl Attribution {
                 // way, through the order that produced it. One recovered
                 // without an order of ours — a hand trade, a venue stop with
                 // no id — is charged to nobody, exactly like a foreign fill.
-                WalRecord::RecoveredFill { client_order_id, symbol, side, qty, .. } => {
+                WalRecord::RecoveredFill {
+                    client_order_id,
+                    symbol,
+                    side,
+                    qty,
+                    ..
+                } => {
                     let strategy = sender.get(client_order_id.as_str()).copied();
                     let Some(strategy) = strategy else {
                         continue;
@@ -97,7 +103,9 @@ impl Attribution {
                 // reports flat is held by nobody, whatever the fills before
                 // it summed to — the claims on it die here, exactly as the
                 // exposure ledger's copy of this record is treated as "set".
-                WalRecord::LatchCleared { restated_exposure, .. } => {
+                WalRecord::LatchCleared {
+                    restated_exposure, ..
+                } => {
                     me.filled.retain(|(_, symbol), _| {
                         restated_exposure
                             .iter()
@@ -109,7 +117,11 @@ impl Attribution {
                 // before it summed to, and in a fresh segment they are all
                 // there is. Still-open orders arrive through the same record,
                 // so `sender` keeps resolving their later fills.
-                WalRecord::SegmentBase { attribution, open_orders, .. } => {
+                WalRecord::SegmentBase {
+                    attribution,
+                    open_orders,
+                    ..
+                } => {
                     me.filled = attribution
                         .iter()
                         .map(|row| ((row.strategy.0, row.symbol.0), row.signed_qty))
@@ -177,9 +189,11 @@ impl Attribution {
 
     /// Symbols this strategy still has a non-flat fill claim on.
     pub fn symbols(&self, strategy: StrategyId) -> impl Iterator<Item = SymbolId> + '_ {
-        self.filled.iter().filter_map(move |((owner, symbol), qty)| {
-            (*owner == strategy.0 && qty.abs() >= FLAT).then_some(SymbolId(*symbol))
-        })
+        self.filled
+            .iter()
+            .filter_map(move |((owner, symbol), qty)| {
+                (*owner == strategy.0 && qty.abs() >= FLAT).then_some(SymbolId(*symbol))
+            })
     }
 
     /// The only sleeve with a non-flat claim on this symbol.
@@ -375,10 +389,17 @@ mod tests {
         // leftover row keeps every other sleeve out of the name.
         let mut a =
             Attribution::from_records(&[sent("a", CARRY, BTC), fill("a", BTC, Side::Buy, 2.0)]);
-        assert!(a.held_by_another(LONG, BTC), "the residue blocks the other sleeve");
+        assert!(
+            a.held_by_another(LONG, BTC),
+            "the residue blocks the other sleeve"
+        );
 
         let dropped = a.drop_where_flat(|symbol| symbol == BTC);
-        assert_eq!(dropped, vec![(CARRY, BTC, 2.0)], "the receipt says what was dropped");
+        assert_eq!(
+            dropped,
+            vec![(CARRY, BTC, 2.0)],
+            "the receipt says what was dropped"
+        );
         assert!(!a.held_by_another(LONG, BTC), "flat cleared the claim");
         assert_eq!(a.signed(CARRY, BTC), 0.0);
     }
@@ -418,9 +439,20 @@ mod tests {
             fill("b", BTC, Side::Buy, 0.5),
         ];
         let a = Attribution::from_records(&log);
-        assert_eq!(a.signed(CARRY, BTC), 0.0, "the drop replays like everything else");
-        assert_eq!(a.signed(LONG, BTC), 0.5, "fills after the drop charge normally");
-        assert!(!a.held_by_another(LONG, BTC), "the residue must not lock the new owner out");
+        assert_eq!(
+            a.signed(CARRY, BTC),
+            0.0,
+            "the drop replays like everything else"
+        );
+        assert_eq!(
+            a.signed(LONG, BTC),
+            0.5,
+            "fills after the drop charge normally"
+        );
+        assert!(
+            !a.held_by_another(LONG, BTC),
+            "the residue must not lock the new owner out"
+        );
     }
 
     #[test]
@@ -445,7 +477,11 @@ mod tests {
             },
         ];
         let a = Attribution::from_records(&log);
-        assert_eq!(a.signed(CARRY, BTC), 0.0, "flat in the restatement clears the claim");
+        assert_eq!(
+            a.signed(CARRY, BTC),
+            0.0,
+            "flat in the restatement clears the claim"
+        );
         assert!(!a.held_by_another(LONG, BTC));
         assert_eq!(a.signed(LONG, ETH), 3.0, "held in the restatement keeps it");
         assert!(a.held_by_another(CARRY, ETH));

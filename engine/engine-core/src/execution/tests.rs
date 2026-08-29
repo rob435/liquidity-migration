@@ -126,7 +126,10 @@ fn an_anchor_we_never_read_measures_nothing_rather_than_zero() {
 
 #[test]
 fn a_book_that_is_not_a_book_has_no_midpoint() {
-    assert_eq!(healthy_mid(&market(99.0, 101.0), BTC).map(|(m, _)| m), Some(100.0));
+    assert_eq!(
+        healthy_mid(&market(99.0, 101.0), BTC).map(|(m, _)| m),
+        Some(100.0)
+    );
     assert_eq!(healthy_mid(&market(101.0, 99.0), BTC), None, "crossed");
     assert_eq!(healthy_mid(&market(0.0, 101.0), BTC), None, "one-sided");
     assert_eq!(healthy_mid(&MarketState::default(), BTC), None, "no symbol");
@@ -139,9 +142,21 @@ fn a_book_that_has_not_moved_since_the_fill_answers_nothing() {
     // not evidence that nothing moved, it is evidence that nobody told us.
     let mut market = market(99.0, 101.0);
     market.quotes[BTC.0 as usize].recv_ns = 500;
-    assert_eq!(mid_after(&market, BTC, 400), Some(100.0), "it arrived after");
-    assert_eq!(mid_after(&market, BTC, 500), None, "same instant is not after");
-    assert_eq!(mid_after(&market, BTC, 900), None, "the fill is newer than the book");
+    assert_eq!(
+        mid_after(&market, BTC, 400),
+        Some(100.0),
+        "it arrived after"
+    );
+    assert_eq!(
+        mid_after(&market, BTC, 500),
+        None,
+        "same instant is not after"
+    );
+    assert_eq!(
+        mid_after(&market, BTC, 900),
+        None,
+        "the fill is newer than the book"
+    );
 }
 
 #[test]
@@ -155,7 +170,10 @@ fn a_symbol_that_stopped_publishing_is_never_marked_against_its_last_price() {
     halted.quotes[BTC.0 as usize].recv_ns = 10;
     fills.on_fill(&fill(Side::Buy, 100.0, 10.0, 100.0), 1_000);
 
-    assert!(fills.due(1_000 + 1_100 * MS, &halted).is_empty(), "waiting for a price");
+    assert!(
+        fills.due(1_000 + 1_100 * MS, &halted).is_empty(),
+        "waiting for a price"
+    );
     let gave_up = fills.due(1_000 + (1_000 + LATENESS_BOUND_MS) * MS, &halted);
     assert_eq!(gave_up.len(), 1);
     assert_eq!(gave_up[0].mid, None, "never measured, and it says so");
@@ -172,10 +190,16 @@ fn a_mid_from_before_the_horizon_is_not_that_horizon() {
     quiet.quotes[BTC.0 as usize].recv_ns = 1_000 + 100 * MS;
     fills.on_fill(&fill(Side::Buy, 100.0, 10.0, 100.0), 1_000);
 
-    assert!(fills.due(1_000 + 1_100 * MS, &quiet).is_empty(), "waiting for a post-horizon book");
+    assert!(
+        fills.due(1_000 + 1_100 * MS, &quiet).is_empty(),
+        "waiting for a post-horizon book"
+    );
     let gave_up = fills.due(1_000 + (1_000 + LATENESS_BOUND_MS) * MS, &quiet);
     assert_eq!(gave_up.len(), 1);
-    assert_eq!(gave_up[0].mid, None, "a pre-horizon mid is not the 1s markout");
+    assert_eq!(
+        gave_up[0].mid, None,
+        "a pre-horizon mid is not the 1s markout"
+    );
 }
 
 #[test]
@@ -234,7 +258,11 @@ fn a_fill_with_no_anchor_still_counts_as_trading_but_not_as_measurement() {
     let total = fills.total();
     assert_eq!(total.fills, 1, "it happened");
     assert_eq!(total.notional_usdt, 1010.0);
-    assert_eq!(total.arrival_shortfall.mean(), None, "nothing to measure it against");
+    assert_eq!(
+        total.arrival_shortfall.mean(),
+        None,
+        "nothing to measure it against"
+    );
     assert_eq!(total.all_in_arrival_bps(), None, "half a number is not one");
     assert_eq!(total.arrival_coverage(), Some(0.0));
 }
@@ -257,8 +285,15 @@ fn the_maker_share_is_notional_that_rested_not_fills_that_rested() {
     assert_eq!(total.fills, 21);
     assert_eq!(total.maker_fills, 20, "by count it is twenty of twenty-one");
     let share = total.maker_share().expect("something traded");
-    assert!((share - 400.0 / 4400.0).abs() < 1e-12, "9% by money, got {share}");
-    assert_eq!(Costs::default().maker_share(), None, "nothing traded, no share");
+    assert!(
+        (share - 400.0 / 4400.0).abs() < 1e-12,
+        "9% by money, got {share}"
+    );
+    assert_eq!(
+        Costs::default().maker_share(),
+        None,
+        "nothing traded, no share"
+    );
 }
 
 #[test]
@@ -304,10 +339,16 @@ fn a_mark_that_arrives_long_after_its_horizon_is_not_that_horizon() {
     let total = fills.total();
     assert_eq!(total.markout[0].mean(), None, "not folded in");
     assert_eq!(total.marks_late, 1, "counted, not hidden");
-    assert_eq!(total.marks_unmeasurable, 0, "the book was read; it was read too late");
+    assert_eq!(
+        total.marks_unmeasurable, 0,
+        "the book was read; it was read too late"
+    );
 
     // A mark inside the bound is the horizon it says it is.
-    fills.fold_mark(&Mark { actual_horizon_ms: 1_250, ..late });
+    fills.fold_mark(&Mark {
+        actual_horizon_ms: 1_250,
+        ..late
+    });
     assert_eq!(fills.total().markout[0].mean(), Some(100.0));
 }
 
@@ -333,8 +374,14 @@ fn each_sleeves_costs_are_its_own() {
     fills.on_fill(&fill(Side::Buy, 100.5, 10.0, 100.0), 0);
     fills.on_fill(&theirs, 0);
 
-    assert_eq!(fills.for_strategy("carry").arrival_shortfall.mean(), Some(50.0));
-    assert_eq!(fills.for_strategy("long").arrival_shortfall.mean(), Some(100.0));
+    assert_eq!(
+        fills.for_strategy("carry").arrival_shortfall.mean(),
+        Some(50.0)
+    );
+    assert_eq!(
+        fills.for_strategy("long").arrival_shortfall.mean(),
+        Some(100.0)
+    );
     assert_eq!(fills.rows().count(), 2);
     // The rollup is notional-weighted, so the bigger trade pulls harder: 50 bp
     // over 1,005 USDT against 100 bp over 1,010, not the plain mean of 75.
@@ -360,8 +407,15 @@ fn a_markout_comes_due_at_its_horizon_and_not_before() {
     assert_eq!(marks.len(), 1, "only the 1s horizon is due");
     assert_eq!(marks[0].horizon_ms, 1_000);
     assert_eq!(marks[0].mid, Some(101.0));
-    assert_eq!(marks[0].signed_markout_bps, Some(100.0), "bought, and it rose");
-    assert_eq!(marks[0].actual_horizon_ms, 1_100, "one tick late, and it says so");
+    assert_eq!(
+        marks[0].signed_markout_bps,
+        Some(100.0),
+        "bought, and it rose"
+    );
+    assert_eq!(
+        marks[0].actual_horizon_ms, 1_100,
+        "one tick late, and it says so"
+    );
     assert_eq!(fills.total().markout[0].mean(), Some(100.0));
 
     // The later horizons are still owed.
@@ -381,7 +435,10 @@ fn a_horizon_waits_for_a_readable_book_but_not_forever() {
     fills.on_fill(&fill(Side::Buy, 100.0, 10.0, 100.0), 0);
     let crossed = market(101.0, 99.0);
 
-    assert!(fills.due(1_100 * MS, &crossed).is_empty(), "waiting for a book");
+    assert!(
+        fills.due(1_100 * MS, &crossed).is_empty(),
+        "waiting for a book"
+    );
     let marks = fills.due((1_000 + LATENESS_BOUND_MS) * MS, &crossed);
     assert_eq!(marks.len(), 1);
     assert_eq!(marks[0].mid, None, "terminally missing, never a zero");
@@ -401,7 +458,10 @@ fn a_book_that_comes_back_inside_the_bound_is_marked_against_it() {
     back.quotes[BTC.0 as usize].recv_ns = 3_000 * MS;
     let marks = fills.due(3_000 * MS, &back);
     assert_eq!(marks[0].mid, Some(101.0));
-    assert_eq!(marks[0].actual_horizon_ms, 3_000, "late, and honest about it");
+    assert_eq!(
+        marks[0].actual_horizon_ms, 3_000,
+        "late, and honest about it"
+    );
 }
 
 #[test]
@@ -502,8 +562,14 @@ fn the_log_alone_says_what_the_trading_cost() {
     }
     assert_eq!(off_the_log.total(), live.total());
     assert_eq!(off_the_log.total().maker_fills, 1);
-    assert_eq!(off_the_log.for_strategy("carry").arrival_shortfall.mean(), Some(100.0));
-    assert_eq!(off_the_log.for_strategy("long").arrival_shortfall.mean(), Some(50.0));
+    assert_eq!(
+        off_the_log.for_strategy("carry").arrival_shortfall.mean(),
+        Some(100.0)
+    );
+    assert_eq!(
+        off_the_log.for_strategy("long").arrival_shortfall.mean(),
+        Some(50.0)
+    );
 }
 
 #[test]
@@ -666,9 +732,14 @@ fn one_id_that_meant_two_coins_is_two_rows() {
     ];
     let fills = Fills::from_records(&log);
 
-    let rows: Vec<(&str, &str, u64)> =
-        fills.rows().map(|(sleeve, symbol, costs)| (sleeve, symbol, costs.fills)).collect();
-    assert_eq!(rows, vec![("carry", "BICOUSDT", 1), ("carry", "HYPEUSDT", 1)]);
+    let rows: Vec<(&str, &str, u64)> = fills
+        .rows()
+        .map(|(sleeve, symbol, costs)| (sleeve, symbol, costs.fills))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("carry", "BICOUSDT", 1), ("carry", "HYPEUSDT", 1)]
+    );
 }
 
 #[test]
@@ -686,7 +757,10 @@ fn a_retired_sleeve_keeps_the_name_it_traded_under() {
     ];
     let fills = Fills::from_records(&log);
 
-    let rows: Vec<(&str, &str)> = fills.rows().map(|(sleeve, symbol, _)| (sleeve, symbol)).collect();
+    let rows: Vec<(&str, &str)> = fills
+        .rows()
+        .map(|(sleeve, symbol, _)| (sleeve, symbol))
+        .collect();
     assert_eq!(rows, vec![("llm_gate", "BTCUSDT")]);
 }
 
@@ -694,9 +768,15 @@ fn a_retired_sleeve_keeps_the_name_it_traded_under() {
 fn an_id_no_table_ever_named_still_reads_as_a_number() {
     // A log written before the engine recorded its tables. The fills are
     // real and are counted; there is nothing to call them but their ids.
-    let log = vec![sent_for("eng-1", CARRY, BTC), filled_for("eng-1", BTC, 100.0)];
+    let log = vec![
+        sent_for("eng-1", CARRY, BTC),
+        filled_for("eng-1", BTC, 100.0),
+    ];
     let fills = Fills::from_records(&log);
-    let rows: Vec<(&str, &str)> = fills.rows().map(|(sleeve, symbol, _)| (sleeve, symbol)).collect();
+    let rows: Vec<(&str, &str)> = fills
+        .rows()
+        .map(|(sleeve, symbol, _)| (sleeve, symbol))
+        .collect();
     assert_eq!(rows, vec![("strategy 0", "symbol 0")]);
 }
 
@@ -736,10 +816,17 @@ fn a_fill_the_stream_missed_costs_the_same_as_one_it_delivered() {
     assert_eq!(total.fills, 1);
     assert_eq!(fills.recovered, 1, "and said so");
     assert_eq!(fills.stream_gaps, 1);
-    assert!((total.notional_usdt - 1010.0).abs() < 1e-9, "{}", total.notional_usdt);
+    assert!(
+        (total.notional_usdt - 1010.0).abs() < 1e-9,
+        "{}",
+        total.notional_usdt
+    );
     // Priced against the book its own order left at, like any other fill.
     assert_eq!(total.arrival_shortfall.mean(), Some(100.0));
-    let rows: Vec<(&str, &str)> = fills.rows().map(|(sleeve, symbol, _)| (sleeve, symbol)).collect();
+    let rows: Vec<(&str, &str)> = fills
+        .rows()
+        .map(|(sleeve, symbol, _)| (sleeve, symbol))
+        .collect();
     assert_eq!(rows, vec![("carry", "BTCUSDT")]);
 }
 
@@ -747,7 +834,10 @@ fn a_fill_the_stream_missed_costs_the_same_as_one_it_delivered() {
 fn a_fill_recovered_for_no_order_of_ours_is_priced_for_nobody() {
     // A venue-attached stop firing, or a hand trade: the same join as a
     // delivered fill, and the same answer when the join finds nothing.
-    let log = vec![names(), recovered("stranger", BTC, 101.0, 1_700_000_000_000)];
+    let log = vec![
+        names(),
+        recovered("stranger", BTC, 101.0, 1_700_000_000_000),
+    ];
     let fills = Fills::from_records(&log);
     assert_eq!(fills.total().fills, 0);
     assert_eq!(fills.recovered, 0);
@@ -765,7 +855,12 @@ fn a_fill_found_after_its_horizons_passed_is_not_marked_against_a_later_book() {
     // fill is five minutes old.
     market.apply(&MarketEvent::Quote {
         symbol: BTC,
-        quote: Quote { bid_px: 200.0, ask_px: 201.0, recv_ns: found_ns, ..Quote::default() },
+        quote: Quote {
+            bid_px: 200.0,
+            ask_px: 201.0,
+            recv_ns: found_ns,
+            ..Quote::default()
+        },
     });
 
     let mut fills = Fills::default();
@@ -774,11 +869,21 @@ fn a_fill_found_after_its_horizons_passed_is_not_marked_against_a_later_book() {
     fills.on_recovered_fill(&fill(Side::Buy, 100.5, 10.0, 100.0), Some(five_minutes_ago));
 
     let marks = fills.due(found_ns, &market);
-    assert_eq!(marks.len(), HORIZONS_MS.len(), "every horizon is answered, once");
-    assert!(marks.iter().all(|mark| mark.mid == Some(200.5)), "the book was readable");
+    assert_eq!(
+        marks.len(),
+        HORIZONS_MS.len(),
+        "every horizon is answered, once"
+    );
+    assert!(
+        marks.iter().all(|mark| mark.mid == Some(200.5)),
+        "the book was readable"
+    );
     let total = fills.total();
     assert_eq!(total.marks_late as usize, HORIZONS_MS.len());
-    assert_eq!(total.marks_unmeasurable, 0, "the book was there; it was the clock");
+    assert_eq!(
+        total.marks_unmeasurable, 0,
+        "the book was there; it was the clock"
+    );
     for horizon in &total.markout {
         assert_eq!(horizon.mean(), None, "a late read is not a markout");
     }
@@ -795,11 +900,21 @@ fn a_fill_older_than_the_engine_itself_is_owed_no_mark() {
     fills.on_recovered_fill(&fill(Side::Buy, 100.5, 10.0, 100.0), None);
 
     let total = fills.total();
-    assert_eq!(total.fills, 1, "it still traded, and it still cost something");
+    assert_eq!(
+        total.fills, 1,
+        "it still traded, and it still cost something"
+    );
     assert!((total.notional_usdt - 1005.0).abs() < 1e-9);
     assert_eq!(total.arrival_shortfall.mean(), Some(50.0));
-    assert_eq!(fills.pending(), 0, "nothing is waiting for a horizon that is gone");
-    assert_eq!(total.marks_late, 0, "no mark was attempted, so none was thrown away");
+    assert_eq!(
+        fills.pending(),
+        0,
+        "nothing is waiting for a horizon that is gone"
+    );
+    assert_eq!(
+        total.marks_late, 0,
+        "no mark was attempted, so none was thrown away"
+    );
 }
 
 /// A restart mid-position. The cost rows are this run's, but the position is
@@ -880,7 +995,10 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
     );
     let closed = fresh.take_closed();
     assert_eq!(closed.len(), 1);
-    let rt = closed[0].round_trip.as_ref().expect("the entry came off the log");
+    let rt = closed[0]
+        .round_trip
+        .as_ref()
+        .expect("the entry came off the log");
     assert_eq!(rt.entry_px, 100.0);
     assert!((rt.net_usdt - 20.0).abs() < 1e-9, "{}", rt.net_usdt);
 }

@@ -372,8 +372,14 @@ impl Decoder {
                 "open" => {
                     // One ack per order: the venue repeats the open status on
                     // a resubscribe, and a second ack would look like a second
-                    // order.
+                    // order. The repeat still says something — what price and
+                    // size the order is working at — and that is the answer a
+                    // modify never gets in its own reply.
                     if !self.remember_ack(&client_order_id) {
+                        if let Some(amended) = amended_from_order(order, &client_order_id, recv_ns)
+                        {
+                            self.pending.push_back(amended);
+                        }
                         continue;
                     }
                     let oid = int_field(order, "oid")
@@ -493,6 +499,25 @@ fn first_chars(text: &str) -> String {
 /// The venue ends every refusal in `Rejected` and every kill in `Canceled` —
 /// except `scheduledCancel`, the dead-man's switch, which ends in `Cancel`.
 /// Both endings are matched for that reason.
+/// A republished open order, read as what it is working at.
+///
+/// `None` for anything unreadable: this row is a repeat the engine would
+/// otherwise have dropped, so silence costs nothing, while a wrong price
+/// would settle a reservation at a number the venue never stated.
+fn amended_from_order(order: &Value, client_order_id: &str, recv_ns: u64) -> Option<OrderUpdate> {
+    let px: f64 = order.get("limitPx").and_then(Value::as_str)?.parse().ok()?;
+    let qty: f64 = order.get("sz").and_then(Value::as_str)?.parse().ok()?;
+    if !px.is_finite() || px <= 0.0 || !qty.is_finite() || qty <= 0.0 {
+        return None;
+    }
+    Some(OrderUpdate::Amended {
+        client_order_id: client_order_id.to_string(),
+        px,
+        qty,
+        recv_ns,
+    })
+}
+
 fn is_rejection(status: &str) -> bool {
     status == "rejected" || status.ends_with("Rejected")
 }
@@ -570,8 +595,22 @@ mod tests {
             other => panic!("expected an ack, got {other:?}"),
         }
         // The venue repeats `open` on a resubscribe; a second ack would read
-        // as a second order.
+        // as a second order. What the repeat is worth is the price, which is
+        // the only answer a modify ever gets.
         d.ingest(&frame).unwrap();
+        match d.pending.pop_front() {
+            Some(OrderUpdate::Amended {
+                client_order_id,
+                px,
+                qty,
+                ..
+            }) => {
+                assert_eq!(client_order_id, "eng-1700000000000-9");
+                assert_eq!(px, 95_000.0);
+                assert_eq!(qty, 0.01);
+            }
+            other => panic!("expected the working price, got {other:?}"),
+        }
         assert!(d.pending.is_empty(), "the same order acked twice");
     }
 

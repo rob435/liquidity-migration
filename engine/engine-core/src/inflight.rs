@@ -139,7 +139,8 @@ impl LedgerOfOrders {
                 qty,
                 ..
             } => {
-                let ended_indexes = if let Some(rec) = self.orders.get_mut(client_order_id.as_str()) {
+                let ended_indexes = if let Some(rec) = self.orders.get_mut(client_order_id.as_str())
+                {
                     let was_live = rec.in_flight();
                     let stop = was_live.then(|| opening_stop(&rec.request)).flatten();
                     let opening = was_live.then(|| opening_key(&rec.request)).flatten();
@@ -282,6 +283,11 @@ impl LedgerOfOrders {
                 OrderUpdate::FastFill { .. }
                 | OrderUpdate::StopAttached { .. }
                 | OrderUpdate::StreamReset { .. } => {}
+                // News, not bookkeeping. What an amend left the order at is
+                // written down by `AmendResolved`, which also narrows the
+                // reservation the amend widened; doing half of that here
+                // would leave a replay whose price and reservation disagree.
+                OrderUpdate::Amended { .. } => {}
             }
             (was_live && !rec.in_flight()).then_some((stop, opening))
         };
@@ -455,6 +461,9 @@ pub fn client_order_id(update: &OrderUpdate) -> Option<&str> {
             client_order_id, ..
         } => Some(client_order_id),
         OrderUpdate::Cancelled {
+            client_order_id, ..
+        } => Some(client_order_id),
+        OrderUpdate::Amended {
             client_order_id, ..
         } => Some(client_order_id),
         OrderUpdate::StopAttached { .. } | OrderUpdate::StreamReset { .. } => None,

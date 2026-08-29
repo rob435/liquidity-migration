@@ -29,8 +29,8 @@ pub use market::{
 };
 pub use orders::{
     AccountInventory, AccountOrder, AccountPosition, Action, AmendSpec, InstrumentRule, Intent,
-    OrderAck, OrderFacts, OrderKind, OrderRequest, OrderUpdate, RestingOrder, Side, StopSpec,
-    TimeInForce, VenueError, VenueExecution, VenueOrder, WorkPolicy,
+    OrderAck, OrderFacts, OrderKind, OrderRequest, OrderUpdate, QuoteFillFeatures, RestingOrder,
+    Side, StopSpec, TimeInForce, VenueError, VenueExecution, VenueOrder, WorkPolicy,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{EngineEvent, Strategy, StrategyCtx};
@@ -150,6 +150,19 @@ pub trait VenueGateway: Send + 'static {
     /// transport exposes them. Taking the value clears it so an older
     /// request can never be attributed to a later command.
     fn take_mutation_timing(&mut self) -> Option<VenueMutationTiming> {
+        None
+    }
+    /// How long the adapter held the most recent order command back to stay
+    /// inside the venue's request quota, in nanoseconds. `None` when the
+    /// adapter does not pace itself.
+    ///
+    /// This is delay we chose, not delay the venue imposed, and the two ask
+    /// for opposite fixes: a large venue leg is a network or matching-engine
+    /// problem, a large wait here is a quota that needs raising or a strategy
+    /// asking for more requests than it has. The venue task's own span cannot
+    /// tell them apart, so it is measured separately. Taking the value clears
+    /// it, so an older command's wait is never charged to a later one.
+    fn take_rate_wait_ns(&mut self) -> Option<u64> {
         None
     }
     /// Attach or move a position stop (stop-loss trigger price).

@@ -20,8 +20,12 @@ engine — the execution loop
       Run the engine. It sends orders; REAL_MONEY gates the funded venue.
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
-               [--wal PATH] [--fills]
+               [--wal PATH] [--fills] [--venue-delay-ms MS]
       Measure the real loop through a local submit response on this box.
+      --venue-delay-ms holds the pretend venue's reply for that long, which is
+      the one thing a localhost socket cannot model: whether work on this
+      side is hidden by the flight to the venue or added to it depends on
+      which of the two is longer. Set it to the venue's measured round trip.
       --fills has that venue fill what it accepts, so the log it writes can be
       read by `engine fills`. Off by default: the published latency table was
       measured without it.
@@ -35,6 +39,13 @@ engine — the execution loop
       afterwards. Per sleeve and symbol. Then what the positions made: every
       round trip that closed, with its P&L after fees. The crowd fee (funding)
       is in neither -- the venue never tells the engine about it.
+
+  engine latency --wal PATH
+      How long each step of the order path took, per operation, at p50, p90,
+      p99 and p99.9. Reads the exact stamps every order, cancel and amend
+      wrote, so the venue's round trip, the time this engine held the command
+      back to stay inside the request limit, and its own work are separate
+      numbers rather than one span.
 
   engine venue-key --config engine.toml
       What this host signs as at the config's venue, so it can be registered
@@ -120,6 +131,12 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
                 options.wal_path = PathBuf::from(v);
             }
             options.fills = args.iter().any(|a| a == "--fills");
+            if let Some(ms) = value(args, "--venue-delay-ms") {
+                options.venue_delay = std::time::Duration::from_millis(
+                    ms.parse()
+                        .map_err(|_| "--venue-delay-ms wants whole milliseconds")?,
+                );
+            }
             let result = runtime()?.block_on(bench::run(&options))?;
             println!(
                 "\nbench: {} quotes in, {} orders out, against a pretend venue on this box",
@@ -133,9 +150,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         "wal-cost" => {
-            let path = PathBuf::from(
-                value(args, "--wal").ok_or("wal-cost needs --wal PATH")?,
-            );
+            let path = PathBuf::from(value(args, "--wal").ok_or("wal-cost needs --wal PATH")?);
             let appends: usize = value(args, "--appends").unwrap_or("20000".into()).parse()?;
             let barriers: usize = value(args, "--barriers").unwrap_or("200".into()).parse()?;
             let costs = engine_wal::measure(&path, appends, barriers)?;
@@ -222,6 +237,25 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             print!("{}", execution::report::of_log(&records));
             // Naming a numbered segment reads that segment alone, and the
             // table looks exactly the same either way.
+            println!(
+                "\n  {} record(s), from {} log segment(s) under {path}.",
+                records.len(),
+                segments
+            );
+            if torn {
+                println!(
+                    "\n  the log ends part-way through a record; anything after that point is \
+                     not in these numbers."
+                );
+            }
+            Ok(())
+        }
+        "latency" => {
+            let path = value(args, "--wal").ok_or("latency needs --wal PATH")?;
+            let (replayed, torn) = engine_wal::replay_chain(Path::new(&path))?;
+            let segments = engine_wal::segments(Path::new(&path))?.len();
+            let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
+            print!("{}", engine_core::timing::of_log(&records));
             println!(
                 "\n  {} record(s), from {} log segment(s) under {path}.",
                 records.len(),

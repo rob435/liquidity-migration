@@ -9,7 +9,8 @@ async fn until_recovered(records: Rc<RefCell<Vec<WalRecord>>>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         if records
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .iter()
             .any(|r| matches!(r, WalRecord::RecoveredFill { .. }))
         {
@@ -86,13 +87,15 @@ async fn a_recovered_fill_reaches_the_risk_kernel() {
 
     assert!(
         records
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .iter()
             .any(|r| matches!(r, WalRecord::RecoveredFill { .. })),
         "the recovery itself has to have happened for this test to say anything"
     );
     let fills: Vec<f64> = risk_saw
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .filter_map(|u| match u {
             OrderUpdate::Fill { qty, .. } => Some(*qty),
@@ -216,7 +219,8 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
         .unwrap();
     let journaled = h
         .records
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .filter(|record| {
             matches!(
@@ -228,7 +232,8 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
     assert_eq!(journaled, 1);
     assert_eq!(
         h.risk_saw
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .iter()
             .filter(|u| matches!(u, OrderUpdate::Fill { .. }))
             .count(),
@@ -508,7 +513,8 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
 
     let recovered: Vec<String> = h
         .records
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .filter_map(|r| match r {
             WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.clone()),

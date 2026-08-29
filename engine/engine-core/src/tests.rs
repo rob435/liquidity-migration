@@ -63,6 +63,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::OrderSent { .. } => "order_sent",
         WalRecord::OrderUpdate { .. } => "order_update",
         WalRecord::Markout { .. } => "markout",
+        WalRecord::QuoteFill { .. } => "quote_fill",
         WalRecord::Names { .. } => "names",
         WalRecord::StopSet { .. } => "stop_set",
         WalRecord::CancelSent { .. } => "cancel_sent",
@@ -133,7 +134,8 @@ fn at(tape: &Tape, step: &Step) -> Option<usize> {
 /// fsyncs its own records, so a test about an order's barrier has to look
 /// past them.
 fn after(tape: &Tape, step: &Step, from: usize) -> Option<usize> {
-    tape.lock().unwrap()
+    tape.lock()
+        .unwrap()
         .iter()
         .skip(from)
         .position(|s| s == step)
@@ -144,7 +146,8 @@ fn after(tape: &Tape, step: &Step, from: usize) -> Option<usize> {
 /// own, so tests look for the one they mean.
 fn note_saying(records: &Rc<RefCell<Vec<WalRecord>>>, needle: &str) -> String {
     records
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .find_map(|r| match r {
             WalRecord::Note { text, .. } if text.contains(needle) => Some(text.clone()),
@@ -154,7 +157,8 @@ fn note_saying(records: &Rc<RefCell<Vec<WalRecord>>>, needle: &str) -> String {
 }
 
 fn appends(tape: &Tape) -> Vec<String> {
-    tape.lock().unwrap()
+    tape.lock()
+        .unwrap()
         .iter()
         .filter_map(|s| match s {
             Step::Append(kind) => Some(kind.clone()),
@@ -170,6 +174,14 @@ struct MockWal {
     records: Rc<RefCell<Vec<WalRecord>>>,
     seq: u64,
     fail_on: Option<String>,
+    /// A tape the barrier's own thread can also write to. The ordinary tape
+    /// is an `Rc` and cannot leave this thread, and the whole point of a
+    /// barrier that runs beside the send is that something else finishes it.
+    /// Set by `defer_barriers`; `None` keeps barriers synchronous.
+    crossing_tape: Option<Arc<Mutex<Vec<&'static str>>>>,
+    /// How long the deferred barrier takes. Long enough that a caller which
+    /// does not wait for it visibly does not.
+    barrier_takes: Duration,
 }
 
 impl MockWal {
@@ -181,9 +193,30 @@ impl MockWal {
                 records: records.clone(),
                 seq: 0,
                 fail_on: None,
+                crossing_tape: None,
+                barrier_takes: Duration::from_millis(30),
             },
             records,
         )
+    }
+}
+
+impl MockVenue {
+    /// Record this venue's sends onto the same tape the log's barrier writes
+    /// to, so their order is one readable sequence.
+    fn watch_with(&mut self, crossing: Arc<Mutex<Vec<&'static str>>>) {
+        self.crossing_tape = Some(crossing);
+    }
+}
+
+impl MockWal {
+    /// Run barriers on their own thread, the way a real log does, and record
+    /// on the shared tape both when a barrier finishes and when order news is
+    /// written down. The order of those two is the whole question.
+    fn defer_barriers(&mut self) -> Arc<Mutex<Vec<&'static str>>> {
+        let crossing = Arc::new(Mutex::new(Vec::new()));
+        self.crossing_tape = Some(crossing.clone());
+        crossing
     }
 }
 
@@ -192,6 +225,11 @@ impl Wal for MockWal {
         let kind = kind_of(record);
         if self.fail_on.as_deref() == Some(kind.as_str()) {
             return Err(WalError::Io(std::io::Error::other("test failure")));
+        }
+        if kind == "order_update" {
+            if let Some(crossing) = &self.crossing_tape {
+                crossing.lock().unwrap().push("order news written down");
+            }
         }
         self.seq += 1;
         self.tape.lock().unwrap().push(Step::Append(kind));
@@ -202,6 +240,22 @@ impl Wal for MockWal {
     fn barrier(&mut self) -> Result<(), WalError> {
         self.tape.lock().unwrap().push(Step::Barrier);
         Ok(())
+    }
+
+    fn barrier_begin(&mut self) -> Result<engine_types::wal::PendingBarrier, WalError> {
+        let Some(crossing) = self.crossing_tape.clone() else {
+            self.barrier()?;
+            return Ok(engine_types::wal::PendingBarrier::settled());
+        };
+        self.tape.lock().unwrap().push(Step::Barrier);
+        let (answer, done) = std::sync::mpsc::channel();
+        let takes = self.barrier_takes;
+        std::thread::spawn(move || {
+            std::thread::sleep(takes);
+            crossing.lock().unwrap().push("disk confirmed");
+            let _ = answer.send(Ok(()));
+        });
+        Ok(engine_types::wal::PendingBarrier::running(done))
     }
 
     fn flush(&mut self) -> Result<(), WalError> {
@@ -222,6 +276,10 @@ fn bybit_like_caps() -> VenueCaps {
 
 struct MockVenue {
     tape: Tape,
+    /// Shared with the log's deferred barrier, so one ordered list holds the
+    /// send, the disk's answer, and the news that follows. Set by
+    /// `watch_with`; `None` records nothing.
+    crossing_tape: Option<Arc<Mutex<Vec<&'static str>>>>,
     rules: Vec<(Symbol, InstrumentRule)>,
     sends: Rc<RefCell<Vec<OrderRequest>>>,
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
@@ -268,6 +326,7 @@ impl MockVenue {
         (
             MockVenue {
                 tape,
+                crossing_tape: None,
                 rules,
                 sends: sends.clone(),
                 cancels: Rc::new(RefCell::new(Vec::new())),
@@ -304,8 +363,12 @@ impl VenueGateway for MockVenue {
 
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
         self.tape
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .push(Step::Send(req.client_order_id.clone()));
+        if let Some(crossing) = &self.crossing_tape {
+            crossing.lock().unwrap().push("order on the wire");
+        }
         self.sends.lock().unwrap().push(req.clone());
         if !self.send_delay.is_zero() {
             tokio::time::sleep(self.send_delay).await;
@@ -354,7 +417,8 @@ impl VenueGateway for MockVenue {
     ) -> Result<(), VenueError> {
         self.tape.lock().unwrap().push(Step::Amend(id.to_string()));
         self.amends
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .push((symbol, id.to_string(), spec));
         Ok(())
     }
@@ -401,7 +465,8 @@ impl VenueGateway for MockVenue {
         }
         let positions = self
             .account_readings
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .pop_front()
             .unwrap_or_default();
         Ok(AccountView {
@@ -473,7 +538,8 @@ impl RiskKernel for MockRisk {
 
     fn register_order(&mut self, client_order_id: &str, _intent: &Intent, approved_qty: f64) {
         self.registered
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .push((client_order_id.to_string(), approved_qty));
     }
 }
@@ -549,7 +615,8 @@ impl MarketFeed for ScriptFeed {
     fn admit(&mut self, symbol: &str, _feed: engine_types::Feed) -> Option<SymbolId> {
         if let Some((_, id)) = self
             .admitted
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .iter()
             .find(|(known, _)| known == symbol)
         {

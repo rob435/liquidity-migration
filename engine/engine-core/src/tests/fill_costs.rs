@@ -15,7 +15,11 @@ async fn the_order_record_carries_the_midpoint_it_will_be_judged_against() {
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let mut feed = ScriptFeed::quotes(symbol, 1, true);
     engine
-        .run(&mut feed, &mut ScriptOrderFeed::empty(), std::future::pending::<()>())
+        .run(
+            &mut feed,
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
         .await
         .unwrap();
 
@@ -59,12 +63,7 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
     ];
 
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (mut engine, _h) = build(allow_all(),
-        vec![Box::new(buyer)],
-        &["BTCUSDT"],
-        &replayed,
-    )
-    .await;
+    let (mut engine, _h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &replayed).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
@@ -95,7 +94,10 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
     assert_eq!(costs.fills, 1);
     assert_eq!(costs.maker_fills, 1, "the venue said we rested");
     let shortfall = costs.arrival_shortfall.mean().expect("priced");
-    assert!((shortfall - 3.0).abs() < 0.01, "3 bp against the old anchor, got {shortfall}");
+    assert!(
+        (shortfall - 3.0).abs() < 0.01,
+        "3 bp against the old anchor, got {shortfall}"
+    );
 }
 
 #[tokio::test]
@@ -104,8 +106,7 @@ async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
     // same account. It is not ours to score, and guessing a price for it
     // would put another person's execution in our own numbers.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
-    let (mut engine, _h) =
-        build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, _h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
@@ -158,9 +159,13 @@ async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
     .await
     .expect("boot");
 
-    assert_eq!(engine.strategy_names(), &["carry".to_string(), "long".to_string()]);
+    assert_eq!(
+        engine.strategy_names(),
+        &["carry".to_string(), "long".to_string()]
+    );
     let said = records
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .find_map(|r| match r {
             WalRecord::Names { strategies, .. } => Some(strategies.clone()),
@@ -177,7 +182,8 @@ async fn a_sleeve_with_no_name_of_its_own_keeps_the_plugs() {
     let (_engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let said = h
         .records
-        .lock().unwrap()
+        .lock()
+        .unwrap()
         .iter()
         .find_map(|r| match r {
             WalRecord::Names { strategies, .. } => Some(strategies.clone()),
@@ -204,6 +210,7 @@ async fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
         symbols: vec!["BTCUSDT".to_string()],
         wal_path: path.path().to_path_buf(),
         fills: true,
+        venue_delay: std::time::Duration::ZERO,
     };
     let result = bench::run(&options).await.expect("the bench runs");
     assert!(result.orders > 0, "no orders, nothing to price");
@@ -227,13 +234,23 @@ async fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
     let fee = costs.fee.mean().expect("the fee was priced");
     assert!((fee - 2.0).abs() < 0.01, "expected 2 bp of fee, got {fee}");
     // Priced against the book each order left at, which the log carries.
-    let arrival = costs.arrival_shortfall.mean().expect("the arrival was priced");
-    assert!(arrival.abs() < 5.0, "half a tick on a 30,000 book, got {arrival}");
+    let arrival = costs
+        .arrival_shortfall
+        .mean()
+        .expect("the arrival was priced");
+    assert!(
+        arrival.abs() < 5.0,
+        "half a tick on a 30,000 book, got {arrival}"
+    );
     // Equal to the sum of the two means only because every fill here had both
     // halves; it is accumulated per fill, so the float arithmetic is not the
     // same order and the last bit differs.
     let all_in = costs.all_in_arrival_bps().expect("both halves, every fill");
-    assert!((all_in - (arrival + fee)).abs() < 1e-9, "{all_in} vs {}", arrival + fee);
+    assert!(
+        (all_in - (arrival + fee)).abs() < 1e-9,
+        "{all_in} vs {}",
+        arrival + fee
+    );
 
     // And the part nothing else exercises: a horizon came round, the tick read
     // the book, and the mark went into the log.
@@ -241,7 +258,11 @@ async fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
         .iter()
         .filter(|r| matches!(r, WalRecord::Markout { .. }))
         .count();
-    assert!(marks > 0, "no markout came due in {} records", records.len());
+    assert!(
+        marks > 0,
+        "no markout came due in {} records",
+        records.len()
+    );
     assert!(
         costs.markout[0].mean().is_some(),
         "the one-second bucket is empty despite {marks} mark(s)"
@@ -264,5 +285,10 @@ async fn the_bench_fills_nothing_unless_it_is_asked_to() {
     bench::run(&options).await.expect("the bench runs");
     let (replayed, _torn) = engine_wal::replay_scan(path.path()).expect("the log reads back");
     let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
-    assert_eq!(crate::execution::Fills::from_records(&records).total().fills, 0);
+    assert_eq!(
+        crate::execution::Fills::from_records(&records)
+            .total()
+            .fills,
+        0
+    );
 }

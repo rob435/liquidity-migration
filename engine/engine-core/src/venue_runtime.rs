@@ -4,8 +4,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use engine_types::{
     AccountIdentity, AccountInventory, AccountView, AmendSpec, InstrumentRule, OrderAck,
-    OrderRequest, Symbol, SymbolId, VenueCaps, VenueError, VenueExecution, VenueGateway, VenueOrder,
-    VenueMutationTiming,
+    OrderRequest, Symbol, SymbolId, VenueCaps, VenueError, VenueExecution, VenueGateway,
+    VenueMutationTiming, VenueOrder,
 };
 
 const COMMAND_CAPACITY: usize = 4096;
@@ -17,6 +17,7 @@ pub enum MutationCompletion {
         command_id: u64,
         started_ns: u64,
         completed_ns: u64,
+        rate_wait_ns: Option<u64>,
         replies: Vec<Result<OrderAck, VenueError>>,
     },
     Cancels {
@@ -24,6 +25,7 @@ pub enum MutationCompletion {
         started_ns: u64,
         completed_ns: u64,
         timing: Option<VenueMutationTiming>,
+        rate_wait_ns: Option<u64>,
         replies: Vec<Result<(), VenueError>>,
     },
     Amend {
@@ -31,6 +33,7 @@ pub enum MutationCompletion {
         started_ns: u64,
         completed_ns: u64,
         timing: Option<VenueMutationTiming>,
+        rate_wait_ns: Option<u64>,
         reply: Result<(), VenueError>,
     },
 }
@@ -165,9 +168,9 @@ impl VenueClient {
     }
 
     fn send(&self, command: Command) -> Result<(), VenueError> {
-        self.commands
-            .try_send(command)
-            .map_err(|error| VenueError::Transport(format!("venue task queue unavailable: {error}")))
+        self.commands.try_send(command).map_err(|error| {
+            VenueError::Transport(format!("venue task queue unavailable: {error}"))
+        })
     }
 }
 
@@ -199,7 +202,10 @@ impl VenueGateway for VenueClient {
             requests: requests.clone(),
             reply,
         }) {
-            return requests.into_iter().map(|_| Err(copy_error(&error))).collect();
+            return requests
+                .into_iter()
+                .map(|_| Err(copy_error(&error)))
+                .collect();
         }
         receive.await.unwrap_or_else(|_| {
             let stopped = VenueError::Transport("venue task stopped before replying".to_string());
@@ -235,7 +241,10 @@ impl VenueGateway for VenueClient {
             requests: requests.clone(),
             reply,
         }) {
-            return requests.into_iter().map(|_| Err(copy_error(&error))).collect();
+            return requests
+                .into_iter()
+                .map(|_| Err(copy_error(&error)))
+                .collect();
         }
         receive.await.unwrap_or_else(|_| {
             let stopped = VenueError::Transport("venue task stopped before replying".to_string());
@@ -334,13 +343,17 @@ async fn run<V: VenueGateway>(
             } => {
                 let started_ns = engine_types::clock::mono_ns();
                 let replies = venue.send_orders(&requests).await;
+                let rate_wait_ns = venue.take_rate_wait_ns();
                 let completed_ns = engine_types::clock::mono_ns();
-                let _ = completions.send(MutationCompletion::Orders {
-                    command_id,
-                    started_ns,
-                    completed_ns,
-                    replies,
-                }).await;
+                let _ = completions
+                    .send(MutationCompletion::Orders {
+                        command_id,
+                        started_ns,
+                        completed_ns,
+                        rate_wait_ns,
+                        replies,
+                    })
+                    .await;
             }
             Command::CancelOrders {
                 command_id,
@@ -349,14 +362,18 @@ async fn run<V: VenueGateway>(
                 let started_ns = engine_types::clock::mono_ns();
                 let replies = venue.cancel_orders(&requests).await;
                 let timing = venue.take_mutation_timing();
+                let rate_wait_ns = venue.take_rate_wait_ns();
                 let completed_ns = engine_types::clock::mono_ns();
-                let _ = completions.send(MutationCompletion::Cancels {
-                    command_id,
-                    started_ns,
-                    completed_ns,
-                    timing,
-                    replies,
-                }).await;
+                let _ = completions
+                    .send(MutationCompletion::Cancels {
+                        command_id,
+                        started_ns,
+                        completed_ns,
+                        timing,
+                        rate_wait_ns,
+                        replies,
+                    })
+                    .await;
             }
             Command::Amend {
                 command_id,
@@ -367,14 +384,18 @@ async fn run<V: VenueGateway>(
                 let started_ns = engine_types::clock::mono_ns();
                 let reply = venue.amend_order(symbol, &client_order_id, spec).await;
                 let timing = venue.take_mutation_timing();
+                let rate_wait_ns = venue.take_rate_wait_ns();
                 let completed_ns = engine_types::clock::mono_ns();
-                let _ = completions.send(MutationCompletion::Amend {
-                    command_id,
-                    started_ns,
-                    completed_ns,
-                    timing,
-                    reply,
-                }).await;
+                let _ = completions
+                    .send(MutationCompletion::Amend {
+                        command_id,
+                        started_ns,
+                        completed_ns,
+                        timing,
+                        rate_wait_ns,
+                        reply,
+                    })
+                    .await;
             }
             Command::SendOrdersWait { requests, reply } => {
                 let _ = reply.send(venue.send_orders(&requests).await);

@@ -17,7 +17,10 @@ struct Heard(Arc<Mutex<Vec<String>>>);
 
 impl Heard {
     fn lines(&self) -> Vec<String> {
-        self.0.lock().expect("nothing panicked while holding this").clone()
+        self.0
+            .lock()
+            .expect("nothing panicked while holding this")
+            .clone()
     }
 
     fn about_the_heartbeat(&self) -> Vec<String> {
@@ -130,7 +133,10 @@ fn blockers_are_deduplicated_per_configured_strategy_and_symbol() {
             rows: vec![("BTCUSDT".to_string(), "carry_skip".to_string())],
         }),
     ];
-    let configured = vec!["target_book_long".to_string(), "target_book_carry".to_string()];
+    let configured = vec![
+        "target_book_long".to_string(),
+        "target_book_carry".to_string(),
+    ];
 
     let rows = crate::engine::named_entry_blockers(&strategies, &configured);
 
@@ -196,9 +202,11 @@ async fn a_running_engine_leaves_a_heartbeat_saying_how_it_is() {
     // way the log's own Boot and Reconciled records spell it.
     let wall_ts_ms = fields["wall_ts_ms"].as_i64().expect("a wall-clock stamp");
     let age_ms = crate::clock::wall_ms() - wall_ts_ms;
-    assert!((0..60_000).contains(&age_ms), "the stamp is not a live wall clock: {age_ms}ms old");
+    assert!(
+        (0..60_000).contains(&age_ms),
+        "the stamp is not a live wall clock: {age_ms}ms old"
+    );
 }
-
 
 #[tokio::test]
 async fn an_engine_latched_out_of_opening_says_so_in_its_heartbeat() {
@@ -227,7 +235,10 @@ async fn an_engine_latched_out_of_opening_says_so_in_its_heartbeat() {
         .await
         .unwrap();
 
-    assert!(h.sends.lock().unwrap().is_empty(), "it is latched, so nothing went out");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "it is latched, so nothing went out"
+    );
     let fields = heartbeat_at(path.path());
     assert_eq!(fields["may_open"].as_bool(), Some(false));
     assert!(
@@ -268,13 +279,20 @@ async fn a_heartbeat_that_cannot_be_written_does_not_stop_the_engine() {
     drop(guard);
 
     assert_eq!(outcome.market_events, 1, "the loop kept running");
-    assert_eq!(h.sends.lock().unwrap().len(), 1, "and the order still went out");
+    assert_eq!(
+        h.sends.lock().unwrap().len(),
+        1,
+        "and the order still went out"
+    );
     assert!(!path.exists(), "nothing was written");
     // Said once, not on every one of the several ticks in that window: this
     // path is wrong every time it is tried.
     let complaints = heard.about_the_heartbeat();
     assert_eq!(complaints.len(), 1, "{complaints:?}");
-    assert!(complaints[0].contains("cannot write the heartbeat"), "{complaints:?}");
+    assert!(
+        complaints[0].contains("cannot write the heartbeat"),
+        "{complaints:?}"
+    );
 }
 
 #[tokio::test]
@@ -307,7 +325,10 @@ async fn no_heartbeat_configured_writes_nothing_and_says_nothing() {
     drop(guard);
 
     let said = heard.about_the_heartbeat();
-    assert!(said.is_empty(), "an engine with no heartbeat still talked about one: {said:?}");
+    assert!(
+        said.is_empty(),
+        "an engine with no heartbeat still talked about one: {said:?}"
+    );
 }
 
 #[test]
@@ -318,5 +339,8 @@ fn no_configured_path_means_no_heartbeat_writer_at_all() {
     assert!(crate::assembly::heartbeat(&named, None, None).is_none());
     named.heartbeat_path = Some("var/engine-heartbeat.json".into());
     let built = crate::assembly::heartbeat(&named, None, None).expect("a path means a heartbeat");
-    assert_eq!(built.path(), std::path::Path::new("var/engine-heartbeat.json"));
+    assert_eq!(
+        built.path(),
+        std::path::Path::new("var/engine-heartbeat.json")
+    );
 }

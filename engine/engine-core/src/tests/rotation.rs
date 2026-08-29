@@ -10,16 +10,27 @@ use engine_types::PositionView;
 const STOP_BTC: f64 = 90.0;
 const STOP_ETH: f64 = 80.0;
 
-struct StopMover { symbol: String, stops: VecDeque<f64> }
+struct StopMover {
+    symbol: String,
+    stops: VecDeque<f64>,
+}
 impl Strategy for StopMover {
-    fn name(&self) -> &str { "stop-mover" }
+    fn name(&self) -> &str {
+        "stop-mover"
+    }
     fn subscriptions(&self) -> Vec<Subscription> {
-        vec![Subscription { symbol: self.symbol.clone(), feed: Feed::Quote }]
+        vec![Subscription {
+            symbol: self.symbol.clone(),
+            feed: Feed::Quote,
+        }]
     }
     fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
         if let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event {
             if let Some(trigger_px) = self.stops.pop_front() {
-                ctx.emit(engine_types::Action::SetStop { symbol: *symbol, trigger_px });
+                ctx.emit(engine_types::Action::SetStop {
+                    symbol: *symbol,
+                    trigger_px,
+                });
             }
         }
     }
@@ -27,16 +38,41 @@ impl Strategy for StopMover {
 
 #[tokio::test]
 async fn a_live_stop_move_is_validated_and_survives_rotation() {
-    let mover = StopMover { symbol: "BTCUSDT".into(), stops: VecDeque::from(vec![70.0, f64::NAN, 90.0]) };
-    let held = vec![PositionView { symbol: SymbolId(0), side: Side::Buy, qty: 1.0,
-        entry_px: 100.0, stop_attached: true, stop_px: 80.0, leverage: None }];
-    let (mut engine, h) = build_with_venue_state(allow_all(), vec![Box::new(mover)],
-        &["BTCUSDT"], &[], Vec::new(), held).await;
+    let mover = StopMover {
+        symbol: "BTCUSDT".into(),
+        stops: VecDeque::from(vec![70.0, f64::NAN, 90.0]),
+    };
+    let held = vec![PositionView {
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 1.0,
+        entry_px: 100.0,
+        stop_attached: true,
+        stop_px: 80.0,
+        leverage: None,
+    }];
+    let (mut engine, h) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(mover)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+        held,
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine.run(&mut ScriptFeed::quotes(symbol, 3, true), &mut ScriptOrderFeed::empty(),
-        std::future::pending::<()>()).await.unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 3, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
     assert_eq!(*h.stops.lock().unwrap(), vec![(symbol, 90.0)]);
-    let WalRecord::SegmentBase { intended_stops, .. } = engine.rotation_base(7) else { panic!() };
+    let WalRecord::SegmentBase { intended_stops, .. } = engine.rotation_base(7) else {
+        panic!()
+    };
     assert_eq!(intended_stops[0].trigger_px, 90.0);
 }
 
@@ -84,7 +120,10 @@ fn previous_log() -> Vec<WalRecord> {
             strategies: vec!["buyer".to_string()],
             symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
         },
-        WalRecord::ControlAnchor { source: "risk".to_string(), state: "anchor-1".to_string() },
+        WalRecord::ControlAnchor {
+            source: "risk".to_string(),
+            state: "anchor-1".to_string(),
+        },
         sent("eng-a", 0, 2.0, STOP_BTC),
         fill("eng-a", 0, 2.0),
         sent("eng-b", 1, 1.0, STOP_ETH),
@@ -105,7 +144,8 @@ fn venue_holdings() -> Vec<PositionView> {
             side: Side::Buy,
             qty: 7.0,
             entry_px: 100.0,
-            stop_attached: true, stop_px: 0.0,
+            stop_attached: true,
+            stop_px: 0.0,
             leverage: None,
         },
         PositionView {
@@ -113,7 +153,8 @@ fn venue_holdings() -> Vec<PositionView> {
             side: Side::Buy,
             qty: 0.4,
             entry_px: 100.0,
-            stop_attached: true, stop_px: 0.0,
+            stop_attached: true,
+            stop_px: 0.0,
             leverage: None,
         },
     ]
@@ -160,12 +201,20 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
         .iter()
         .map(|row| (row.strategy.0, row.symbol.0, row.signed_qty))
         .collect();
-    assert_eq!(attributed, vec![(0, 0, 2.0), (0, 1, 0.4)], "strangers are owned by nobody");
+    assert_eq!(
+        attributed,
+        vec![(0, 0, 2.0), (0, 1, 0.4)],
+        "strangers are owned by nobody"
+    );
     let exposure: Vec<(u16, f64)> = logged_exposure
         .iter()
         .map(|row| (row.symbol.0, row.signed_qty))
         .collect();
-    assert_eq!(exposure, vec![(0, 2.0), (1, 0.4)], "the stranger's 5 BTC stay untrusted");
+    assert_eq!(
+        exposure,
+        vec![(0, 2.0), (1, 0.4)],
+        "the stranger's 5 BTC stay untrusted"
+    );
     let stops: Vec<(u16, f64)> = intended_stops
         .iter()
         .map(|row| (row.symbol.0, row.trigger_px))
@@ -173,7 +222,10 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     assert_eq!(stops, vec![(0, STOP_BTC), (1, STOP_ETH)]);
     assert_eq!(open_orders.len(), 1, "only eng-b is still out there");
     assert_eq!(open_orders[0].request.client_order_id, "eng-b");
-    assert_eq!(open_orders[0].filled_qty, 0.4, "the partial fill survives the restatement");
+    assert_eq!(
+        open_orders[0].filled_qty, 0.4,
+        "the partial fill survives the restatement"
+    );
 
     // The equivalence itself: an engine booted from the restatement alone is
     // the engine booted from the whole old log.
@@ -205,8 +257,9 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         side: Side::Buy,
         qty: 2.0,
         entry_px: 100.0,
-        stop_attached: true, stop_px: 0.0,
-        leverage: None
+        stop_attached: true,
+        stop_px: 0.0,
+        leverage: None,
     }];
     let log = vec![
         WalRecord::Names {
@@ -219,7 +272,8 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
 
     let reconciled_may_open = |records: &Rc<RefCell<Vec<WalRecord>>>| {
         records
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .iter()
             .find_map(|record| match record {
                 WalRecord::Reconciled { may_open, .. } => Some(*may_open),
@@ -233,7 +287,11 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         let tape = tape();
         let (wal, records) = MockWal::new(tape.clone());
         let (venue, _) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
-        venue.account_readings.lock().unwrap().push_back(held.clone());
+        venue
+            .account_readings
+            .lock()
+            .unwrap()
+            .push_back(held.clone());
         let (risk, _) = MockRisk::with(allow_all());
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
         let engine = Engine::boot(
@@ -247,7 +305,10 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         )
         .await
         .expect("boot");
-        assert!(reconciled_may_open(&records), "the full log accounts for the position");
+        assert!(
+            reconciled_may_open(&records),
+            "the full log accounts for the position"
+        );
         engine.rotation_base(recent_replay_ms())
     };
 
@@ -257,7 +318,11 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         let tape = tape();
         let (wal, records) = MockWal::new(tape.clone());
         let (venue, _) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
-        venue.account_readings.lock().unwrap().push_back(held.clone());
+        venue
+            .account_readings
+            .lock()
+            .unwrap()
+            .push_back(held.clone());
         let (risk, _) = MockRisk::with(allow_all());
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
         let _engine = Engine::boot(
@@ -297,7 +362,10 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         )
         .await
         .expect("boot");
-        assert!(!reconciled_may_open(&records), "an empty log cannot account for it");
+        assert!(
+            !reconciled_may_open(&records),
+            "an empty log cannot account for it"
+        );
     }
 }
 
@@ -322,7 +390,8 @@ async fn a_torn_rotation_on_disk_boots_from_the_old_segment() {
 
         // A real restatement, then the crash: the new segment loses its tail.
         let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
-        let (engine, _) = build_with_venue_orders(allow_all(),
+        let (engine, _) = build_with_venue_orders(
+            allow_all(),
             vec![Box::new(buyer)],
             &["BTCUSDT", "ETHUSDT"],
             &previous_log(),

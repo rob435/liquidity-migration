@@ -14,9 +14,7 @@ use engine_types::orders::{
     OrderKind, OrderRequest, Side, TimeInForce, VenueExecution, VenueOrder,
 };
 use engine_types::risk::AccountView;
-use engine_types::{
-    AccountIdentity, VenueCaps, VenueError, VenueGateway, VenueMutationTiming,
-};
+use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway, VenueMutationTiming};
 use serde_json::{Map, Value};
 
 use super::parse::{
@@ -99,14 +97,41 @@ pub struct BybitGateway {
     position_read_limiter: RollingRateLimiter,
     attestation_key: bool,
     last_mutation_timing: Option<VenueMutationTiming>,
+    last_rate_wait_ns: Option<u64>,
 }
 
 #[derive(Default)]
 struct RollingRateLimiter {
     admissions: VecDeque<Instant>,
+    /// This account's own per-second quota for the endpoint, as the venue
+    /// stated it on an acknowledgement. `None` until one has been read.
+    declared: Option<usize>,
 }
 
 impl RollingRateLimiter {
+    /// How many requests a second to pace to: the venue's own figure when it
+    /// is the larger, otherwise the documented default.
+    ///
+    /// Raise-only, on purpose. Every batch this adapter sends is already
+    /// capped at the documented default, so `count <= limit` holds by
+    /// construction and a reservation can always eventually be met. Obeying a
+    /// smaller declared limit would break that invariant for a batch already
+    /// admitted, so a smaller figure is logged and not adopted.
+    fn limit(&self, default: usize) -> usize {
+        self.declared.map_or(default, |seen| seen.max(default))
+    }
+
+    /// Record what the venue said its limit is. True when this is news.
+    fn declare(&mut self, seen: Option<usize>) -> bool {
+        match seen {
+            Some(seen) if self.declared != Some(seen) => {
+                self.declared = Some(seen);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Reserve a batch against Bybit's rolling one-second per-UID window.
     /// `Err(wait)` means no capacity was consumed and the caller must retry
     /// after the named delay. One millisecond of guard keeps local/venue clock
@@ -141,11 +166,19 @@ impl RollingRateLimiter {
     }
 }
 
-async fn reserve_rate_capacity(limiter: &mut RollingRateLimiter, count: usize, limit: usize) {
-    debug_assert!(count <= limit);
+/// Returns how long admission was held back. Nanoseconds of our own pacing,
+/// which the order path measures apart from the venue's own leg.
+async fn reserve_rate_capacity(
+    limiter: &mut RollingRateLimiter,
+    count: usize,
+    default: usize,
+) -> u64 {
+    debug_assert!(count <= default);
+    let limit = limiter.limit(default);
+    let began = Instant::now();
     loop {
         match limiter.try_reserve(Instant::now(), count, limit) {
-            Ok(()) => return,
+            Ok(()) => return began.elapsed().as_nanos() as u64,
             Err(wait) => tokio::time::sleep(wait).await,
         }
     }
@@ -307,6 +340,7 @@ impl BybitGateway {
             position_read_limiter: RollingRateLimiter::default(),
             attestation_key: false,
             last_mutation_timing: None,
+            last_rate_wait_ns: None,
         }
     }
 
@@ -466,6 +500,12 @@ impl BybitGateway {
         let body = self.order_body(req)?;
         if let Some(trade) = &mut self.trade {
             let reply = trade.request("order.create", vec![body]).await?;
+            Self::note_quota(
+                &mut self.create_limiter,
+                "order.create",
+                ORDER_CREATES_PER_SECOND,
+                reply.quota_per_second,
+            );
             let mut ack = parse_order_ack(&reply.data, &req.client_order_id, reply.ack_ns)?;
             ack.sent_ns = reply.sent_ns;
             return Ok(ack);
@@ -473,11 +513,7 @@ impl BybitGateway {
         self.send_one_rest(req, body).await
     }
 
-    async fn send_one_rest(
-        &self,
-        req: &OrderRequest,
-        body: Value,
-    ) -> Result<OrderAck, VenueError> {
+    async fn send_one_rest(&self, req: &OrderRequest, body: Value) -> Result<OrderAck, VenueError> {
         let envelope = self.rest.post_signed(PATH_ORDER_CREATE, &body).await?;
         let ack_ns = mono_ns();
         let result = venue_result(envelope)?;
@@ -493,12 +529,7 @@ impl BybitGateway {
             let mut body = match self.order_body(req) {
                 Ok(Value::Object(body)) => body,
                 Ok(_) => unreachable!("order body is an object"),
-                Err(error) => {
-                    return reqs
-                        .iter()
-                        .map(|_| Err(copy_venue_error(&error)))
-                        .collect()
-                }
+                Err(error) => return reqs.iter().map(|_| Err(copy_venue_error(&error))).collect(),
             };
             body.remove("category");
             items.push(Value::Object(body));
@@ -515,13 +546,16 @@ impl BybitGateway {
             .await
         {
             Ok(reply) => reply,
-            Err(error) => {
-                return reqs
-                    .iter()
-                    .map(|_| Err(copy_venue_error(&error)))
-                    .collect()
-            }
+            Err(error) => return reqs.iter().map(|_| Err(copy_venue_error(&error))).collect(),
         };
+        // The batch endpoint spends create quota by object, so its stated
+        // limit belongs to the same window the single creates draw on.
+        Self::note_quota(
+            &mut self.create_limiter,
+            "order.create-batch",
+            ORDER_CREATES_PER_SECOND,
+            reply.quota_per_second,
+        );
         let rows = reply
             .data
             .get("list")
@@ -541,10 +575,7 @@ impl BybitGateway {
                 statuses.len(),
                 reqs.len()
             ));
-            return reqs
-                .iter()
-                .map(|_| Err(copy_venue_error(&error)))
-                .collect();
+            return reqs.iter().map(|_| Err(copy_venue_error(&error))).collect();
         }
         reqs.iter()
             .zip(rows)
@@ -568,8 +599,29 @@ impl BybitGateway {
             .collect()
     }
 
+    /// Take the account's real quota from an acknowledgement's header.
+    fn note_quota(
+        limiter: &mut RollingRateLimiter,
+        endpoint: &'static str,
+        default: usize,
+        seen: Option<usize>,
+    ) {
+        if limiter.declare(seen) {
+            let paced = limiter.limit(default);
+            tracing::info!(
+                endpoint,
+                venue_says = seen,
+                pacing_to = paced,
+                documented_default = default,
+                "venue stated this account's request quota"
+            );
+        }
+    }
+
     async fn reserve_create_capacity(&mut self, count: usize) {
-        reserve_rate_capacity(&mut self.create_limiter, count, ORDER_CREATES_PER_SECOND).await;
+        let waited =
+            reserve_rate_capacity(&mut self.create_limiter, count, ORDER_CREATES_PER_SECOND).await;
+        self.last_rate_wait_ns = Some(waited);
     }
 
     async fn inventory_positions(
@@ -757,6 +809,7 @@ impl VenueGateway for BybitGateway {
     }
 
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
+        self.last_rate_wait_ns = None;
         self.require_one_way(req.symbol).await?;
         self.reserve_create_capacity(1).await;
         let reply = self.send_one(req).await;
@@ -765,6 +818,9 @@ impl VenueGateway for BybitGateway {
     }
 
     async fn send_orders(&mut self, reqs: &[OrderRequest]) -> Vec<Result<OrderAck, VenueError>> {
+        // Cleared before any path that can return without reserving, so a
+        // command refused here is never charged the previous one's wait.
+        self.last_rate_wait_ns = None;
         if reqs.len() > ORDER_CREATES_PER_SECOND {
             return reqs
                 .iter()
@@ -841,18 +897,27 @@ impl VenueGateway for BybitGateway {
         client_order_id: &str,
     ) -> Result<(), VenueError> {
         self.last_mutation_timing = None;
+        self.last_rate_wait_ns = None;
         let mut body = Map::new();
         body.insert("category".into(), CATEGORY.into());
         body.insert("symbol".into(), self.name_of(symbol)?.into());
         body.insert("orderLinkId".into(), client_order_id.into());
 
-        reserve_rate_capacity(&mut self.cancel_limiter, 1, ORDER_CANCELS_PER_SECOND).await;
+        self.last_rate_wait_ns = Some(
+            reserve_rate_capacity(&mut self.cancel_limiter, 1, ORDER_CANCELS_PER_SECOND).await,
+        );
         if let Some(trade) = &mut self.trade {
             let reply = trade
                 .request("order.cancel", vec![Value::Object(body)])
                 .await;
             self.cancel_limiter.anchor_completion(Instant::now(), 1);
             let reply = reply?;
+            Self::note_quota(
+                &mut self.cancel_limiter,
+                "order.cancel",
+                ORDER_CANCELS_PER_SECOND,
+                reply.quota_per_second,
+            );
             self.last_mutation_timing = Some(VenueMutationTiming {
                 sent_ns: reply.sent_ns,
                 ack_ns: reply.ack_ns,
@@ -874,6 +939,7 @@ impl VenueGateway for BybitGateway {
         requests: &[(SymbolId, String)],
     ) -> Vec<Result<(), VenueError>> {
         self.last_mutation_timing = None;
+        self.last_rate_wait_ns = None;
         if requests.is_empty() {
             return Vec::new();
         }
@@ -904,12 +970,14 @@ impl VenueGateway for BybitGateway {
         body.insert("category".into(), CATEGORY.into());
         body.insert("request".into(), Value::Array(items));
 
-        reserve_rate_capacity(
-            &mut self.cancel_batch_limiter,
-            requests.len(),
-            ORDER_CANCEL_BATCHES_PER_SECOND,
-        )
-        .await;
+        self.last_rate_wait_ns = Some(
+            reserve_rate_capacity(
+                &mut self.cancel_batch_limiter,
+                requests.len(),
+                ORDER_CANCEL_BATCHES_PER_SECOND,
+            )
+            .await,
+        );
         if let Some(trade) = &mut self.trade {
             let reply = trade
                 .request("order.cancel-batch", vec![Value::Object(body)])
@@ -920,6 +988,12 @@ impl VenueGateway for BybitGateway {
                 Ok(reply) => reply,
                 Err(error) => return cancel_batch_error(requests.len(), error),
             };
+            Self::note_quota(
+                &mut self.cancel_batch_limiter,
+                "order.cancel-batch",
+                ORDER_CANCEL_BATCHES_PER_SECOND,
+                reply.quota_per_second,
+            );
             self.last_mutation_timing = Some(VenueMutationTiming {
                 sent_ns: reply.sent_ns,
                 ack_ns: reply.ack_ns,
@@ -989,6 +1063,7 @@ impl VenueGateway for BybitGateway {
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
         self.last_mutation_timing = None;
+        self.last_rate_wait_ns = None;
         if spec.px.is_none() && spec.qty.is_none() {
             return Err(VenueError::BadRequest(
                 "an amend that changes neither price nor size".to_string(),
@@ -1008,13 +1083,20 @@ impl VenueGateway for BybitGateway {
             body.insert("qty".into(), venue_num(qty)?.into());
         }
 
-        reserve_rate_capacity(&mut self.amend_limiter, 1, ORDER_AMENDS_PER_SECOND).await;
+        self.last_rate_wait_ns =
+            Some(reserve_rate_capacity(&mut self.amend_limiter, 1, ORDER_AMENDS_PER_SECOND).await);
         if let Some(trade) = &mut self.trade {
             let reply = trade
                 .request("order.amend", vec![Value::Object(body)])
                 .await;
             self.amend_limiter.anchor_completion(Instant::now(), 1);
             let reply = reply?;
+            Self::note_quota(
+                &mut self.amend_limiter,
+                "order.amend",
+                ORDER_AMENDS_PER_SECOND,
+                reply.quota_per_second,
+            );
             self.last_mutation_timing = Some(VenueMutationTiming {
                 sent_ns: reply.sent_ns,
                 ack_ns: reply.ack_ns,
@@ -1033,6 +1115,10 @@ impl VenueGateway for BybitGateway {
 
     fn take_mutation_timing(&mut self) -> Option<VenueMutationTiming> {
         self.last_mutation_timing.take()
+    }
+
+    fn take_rate_wait_ns(&mut self) -> Option<u64> {
+        self.last_rate_wait_ns.take()
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
@@ -1591,6 +1677,106 @@ mod tests {
         assert_eq!(tif_str(TimeInForce::Gtc), "GTC");
         assert_eq!(tif_str(TimeInForce::Ioc), "IOC");
         assert_eq!(tif_str(TimeInForce::PostOnly), "PostOnly");
+    }
+
+    #[tokio::test]
+    async fn the_wait_reported_is_the_wait_that_was_actually_paid() {
+        // The mark separates pacing this engine chose from latency the venue
+        // imposed, so it has to be the real figure: zero when nothing was
+        // held back, and the window when something was.
+        let mut limiter = RollingRateLimiter::default();
+        let straight_through = reserve_rate_capacity(&mut limiter, 2, 2).await;
+        assert!(
+            straight_through < 1_000_000,
+            "an unblocked reservation reported {straight_through}ns of waiting"
+        );
+        let held = reserve_rate_capacity(&mut limiter, 2, 2).await;
+        assert!(
+            held >= RATE_LIMIT_WINDOW.as_nanos() as u64,
+            "a reservation that waited out the window reported {held}ns"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_that_never_reserved_carries_no_earlier_commands_wait() {
+        // Taking the mark clears it, and a send that is refused before it
+        // reserves clears it too. Otherwise a batch rejected on its size would
+        // be charged whatever the last real command was held back by.
+        let creds = VenueRealm::Demo.credentials_for_test("key", "secret");
+        let mut gateway = BybitGateway::for_test(
+            "http://127.0.0.1:1",
+            VenueRealm::Demo,
+            creds,
+            vec!["BTCUSDT".to_string()],
+        );
+        gateway.last_rate_wait_ns = Some(900_000_000);
+
+        let oversized: Vec<OrderRequest> = (0..ORDER_CREATES_PER_SECOND + 1)
+            .map(|i| stopped_order(&format!("eng-{i}"), 0))
+            .collect();
+        let replies = VenueGateway::send_orders(&mut gateway, &oversized).await;
+        assert_eq!(replies.len(), oversized.len());
+        assert!(
+            replies.iter().all(Result::is_err),
+            "an oversized batch was sent"
+        );
+        assert_eq!(
+            VenueGateway::take_rate_wait_ns(&mut gateway),
+            None,
+            "a refused batch was charged the previous command's wait"
+        );
+    }
+
+    #[test]
+    fn a_stated_quota_larger_than_the_default_is_what_the_pacing_uses() {
+        // The point of reading the header at all. An account granted a
+        // market-maker tier is paced at the documented default forever unless
+        // the venue's own figure is taken and used.
+        let mut limiter = RollingRateLimiter::default();
+        assert_eq!(limiter.limit(ORDER_CREATES_PER_SECOND), 10);
+        assert!(limiter.declare(Some(20)));
+        assert_eq!(limiter.limit(ORDER_CREATES_PER_SECOND), 20);
+
+        // Twenty admissions now fit in the window that used to hold ten.
+        let now = Instant::now();
+        for _ in 0..20 {
+            limiter
+                .try_reserve(now, 1, limiter.limit(ORDER_CREATES_PER_SECOND))
+                .expect("inside the stated quota");
+        }
+        assert!(limiter
+            .try_reserve(now, 1, limiter.limit(ORDER_CREATES_PER_SECOND))
+            .is_err());
+    }
+
+    #[test]
+    fn a_stated_quota_below_the_default_is_recorded_and_not_obeyed() {
+        // Raise-only. Every batch this adapter sends is capped at the
+        // documented default, so pacing below it would leave an already
+        // admitted batch unable to reserve at all — a wait with no end
+        // rather than a slower one.
+        let mut limiter = RollingRateLimiter::default();
+        assert!(limiter.declare(Some(3)));
+        assert_eq!(limiter.declared, Some(3));
+        assert_eq!(limiter.limit(ORDER_CREATES_PER_SECOND), 10);
+        assert_eq!(
+            limiter.limit(MAX_CANCEL_BATCH_ITEMS),
+            MAX_CANCEL_BATCH_ITEMS
+        );
+    }
+
+    #[test]
+    fn an_absent_or_repeated_quota_is_not_news() {
+        // The log line hangs off this, and a line per acknowledgement would
+        // be one per order.
+        let mut limiter = RollingRateLimiter::default();
+        assert!(!limiter.declare(None));
+        assert_eq!(limiter.declared, None);
+        assert!(limiter.declare(Some(20)));
+        assert!(!limiter.declare(Some(20)));
+        assert!(!limiter.declare(None), "silence does not retract a figure");
+        assert_eq!(limiter.declared, Some(20));
+        assert!(limiter.declare(Some(40)), "a raised tier is news");
     }
 
     fn stopped_order(id: &str, symbol: u16) -> OrderRequest {

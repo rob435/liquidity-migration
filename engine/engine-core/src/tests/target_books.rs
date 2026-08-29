@@ -40,7 +40,8 @@ impl Strategy for BookListener {
     fn on_event(&mut self, event: &EngineEvent, _ctx: &mut dyn StrategyCtx) {
         if let EngineEvent::Targets(book) = event {
             self.heard
-                .lock().unwrap()
+                .lock()
+                .unwrap()
                 .push(format!("{} x{}", book.source, book.targets.len()));
         }
     }
@@ -72,8 +73,7 @@ async fn an_entry_states_its_leverage_before_the_order_goes() {
     // Margin posted is notional divided by leverage. An order sized at one
     // and filled at another does not commit the capital the kernel priced.
     let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     engine
         .run(
             &mut ScriptFeed::quotes(SymbolId(0), 1, true),
@@ -99,8 +99,7 @@ async fn a_second_entry_on_the_same_symbol_does_not_pay_for_leverage_twice() {
     // order would buy a round trip per order, measured at ~190 ms on the
     // Python fleet, for no change at all.
     let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     engine
         .run(
             &mut ScriptFeed::quotes(SymbolId(0), 3, true),
@@ -126,8 +125,7 @@ async fn an_exit_does_not_wait_on_leverage() {
     let (mut seller, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     seller.leverage = Some(2.0);
     seller.reduce_only = true;
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(seller)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(seller)], &["BTCUSDT"], &[]).await;
     engine
         .run(
             &mut ScriptFeed::quotes(SymbolId(0), 1, true),
@@ -151,13 +149,9 @@ async fn an_order_whose_leverage_will_not_set_is_not_sent() {
     // symbol currently carries.
     let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
     let settings = settings();
-    let (mut engine, h) = build_with_refusing_leverage(
-        &settings,
-        allow_all(),
-        vec![Box::new(buyer)],
-        &["BTCUSDT"],
-    )
-    .await;
+    let (mut engine, h) =
+        build_with_refusing_leverage(&settings, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"])
+            .await;
     engine
         .run(
             &mut ScriptFeed::quotes(SymbolId(0), 1, true),
@@ -190,8 +184,9 @@ fn a_symbol_that_goes_flat_forgets_its_leverage() {
         side: Side::Buy,
         qty: 1.0,
         entry_px: 100.0,
-        stop_attached: true, stop_px: 0.0,
-        leverage: None
+        stop_attached: true,
+        stop_px: 0.0,
+        leverage: None,
     }];
     crate::engine::forget_leverage_where_flat(&mut at, &still_open);
 
@@ -204,8 +199,7 @@ async fn a_book_on_disk_reaches_the_strategies_through_the_loop() {
     let path = temp_path("book-seam");
     std::fs::write(&path, BOOK_JSON).expect("writes the book");
     let (listener, heard) = BookListener::new("BTCUSDT");
-    let (mut engine, _h) =
-        build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    let (mut engine, _h) = build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
     engine.watch_targets(crate::targets::TargetBooks::new(vec![(
         StrategyId(0),
         crate::targets::TargetBookWatcher::with_poll(
@@ -315,7 +309,8 @@ impl MarketFeed for QuoteAfterAdmission {
             let admitted = self
                 .inner
                 .admitted
-                .lock().unwrap()
+                .lock()
+                .unwrap()
                 .iter()
                 .find(|(name, _)| name == "ETHUSDT")
                 .map(|(_, id)| *id);
@@ -368,7 +363,8 @@ async fn each_sleeve_hears_only_its_own_book() {
 
     let (carry, carry_heard) = BookListener::new("BTCUSDT");
     let (long, long_heard) = BookListener::new("ETHUSDT");
-    let (mut engine, _h) = build(allow_all(),
+    let (mut engine, _h) = build(
+        allow_all(),
         vec![Box::new(carry), Box::new(long)],
         &["BTCUSDT", "ETHUSDT"],
         &[],
@@ -411,9 +407,11 @@ async fn a_symbol_a_book_names_late_is_taken_on() {
     std::fs::write(&path, LONG_BOOK_JSON).expect("writes a book naming ETHUSDT");
     let (listener, heard) = BookListener::new("BTCUSDT");
     // Boots knowing BTCUSDT only.
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
-    assert!(engine.market().table.get("ETHUSDT").is_none(), "it starts unknown");
+    let (mut engine, h) = build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    assert!(
+        engine.market().table.get("ETHUSDT").is_none(),
+        "it starts unknown"
+    );
 
     engine.watch_targets(crate::targets::TargetBooks::new(vec![(
         StrategyId(0),
@@ -436,8 +434,14 @@ async fn a_symbol_a_book_names_late_is_taken_on() {
         .expect("the engine now follows the symbol the book named");
     // All three of the other tables that map names to ids agree, which is the
     // only thing that makes the id safe to place an order against.
-    assert_eq!(admitted.lock().unwrap().as_slice(), [("ETHUSDT".to_string(), id)]);
-    assert_eq!(learned.lock().unwrap().as_slice(), [("ETHUSDT".to_string(), id)]);
+    assert_eq!(
+        admitted.lock().unwrap().as_slice(),
+        [("ETHUSDT".to_string(), id)]
+    );
+    assert_eq!(
+        learned.lock().unwrap().as_slice(),
+        [("ETHUSDT".to_string(), id)]
+    );
     assert!(
         h.sends.lock().unwrap().is_empty(),
         "taking on a symbol is not a reason to trade it"
@@ -506,8 +510,7 @@ async fn a_symbol_the_parts_disagree_about_is_not_traded() {
     let path = temp_path("book-late-symbol-clash");
     std::fs::write(&path, LONG_BOOK_JSON).expect("writes a book naming ETHUSDT");
     let (listener, heard) = BookListener::new("BTCUSDT");
-    let (mut engine, _h) =
-        build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    let (mut engine, _h) = build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
     engine.watch_targets(crate::targets::TargetBooks::new(vec![(
         StrategyId(0),
         book_watcher(&path),
@@ -539,8 +542,7 @@ async fn an_unreadable_book_wakes_nobody() {
     let path = temp_path("book-seam-torn");
     std::fs::write(&path, "{ not json at all").expect("writes the file");
     let (listener, heard) = BookListener::new("BTCUSDT");
-    let (mut engine, _h) =
-        build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    let (mut engine, _h) = build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
     engine.watch_targets(crate::targets::TargetBooks::new(vec![(
         StrategyId(0),
         crate::targets::TargetBookWatcher::with_poll(
@@ -566,8 +568,7 @@ async fn an_unreadable_book_wakes_nobody() {
 #[tokio::test]
 async fn with_no_watcher_the_loop_runs_as_it_always_did() {
     let (listener, heard) = BookListener::new("BTCUSDT");
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -585,9 +586,7 @@ async fn with_no_watcher_the_loop_runs_as_it_always_did() {
 
 /// Wait until the venue's scripted account reading has been consumed, so the
 /// next phase runs against the view the test just fed in.
-async fn until_reading_consumed(
-    readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
-) {
+async fn until_reading_consumed(readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !readings.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -599,9 +598,15 @@ async fn until_reading_consumed(
 /// cost 27 of 67 real orders a ~172 ms confirmation round trip.
 async fn flat_spell_leverage_calls(section: EngineSection) -> usize {
     let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
-    let (mut engine, h) =
-        build_with(&section, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[], Vec::new())
-            .await;
+    let (mut engine, h) = build_with(
+        &section,
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
 
     // First entry: pays the confirmation either way.
@@ -666,9 +671,15 @@ async fn a_venue_row_contradicting_the_cache_evicts_the_trust() {
     // and confirm inline again on the next entry.
     let section = settings_sole();
     let (buyer, _heard) = levered_buyer("BTCUSDT", 2.0);
-    let (mut engine, h) =
-        build_with(&section, allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[], Vec::new())
-            .await;
+    let (mut engine, h) = build_with(
+        &section,
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
 
     engine
@@ -682,17 +693,20 @@ async fn a_venue_row_contradicting_the_cache_evicts_the_trust() {
     assert_eq!(h.leverages.lock().unwrap().len(), 1);
 
     // The venue says the held position runs at 5x. This engine set 2x.
-    h.account_readings.lock().unwrap().push_back(vec![engine_types::PositionView {
-        symbol,
-        side: Side::Buy,
-        qty: 0.01,
-        entry_px: 30_000.0,
-        // Keep this fixture valid for the position-stop supervisor: this test
-        // is about leverage-authority eviction, not an unprotected holding.
-        stop_attached: true,
-        stop_px: 29_000.0,
-        leverage: Some(5.0),
-    }]);
+    h.account_readings
+        .lock()
+        .unwrap()
+        .push_back(vec![engine_types::PositionView {
+            symbol,
+            side: Side::Buy,
+            qty: 0.01,
+            entry_px: 30_000.0,
+            // Keep this fixture valid for the position-stop supervisor: this test
+            // is about leverage-authority eviction, not an unprotected holding.
+            stop_attached: true,
+            stop_px: 29_000.0,
+            leverage: Some(5.0),
+        }]);
     engine
         .run(
             &mut ScriptFeed::quotes(symbol, 0, false),
@@ -734,9 +748,15 @@ async fn a_book_arrival_pre_arms_leverage_before_any_entry() {
     std::fs::write(&path, BOOK_JSON).expect("writes the book");
     let (listener, heard) = BookListener::new("BTCUSDT");
     let section = settings_sole();
-    let (mut engine, h) =
-        build_with(&section, allow_all(), vec![Box::new(listener)], &["BTCUSDT"], &[], Vec::new())
-            .await;
+    let (mut engine, h) = build_with(
+        &section,
+        allow_all(),
+        vec![Box::new(listener)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+    )
+    .await;
     engine.watch_targets(crate::targets::TargetBooks::new(vec![(
         StrategyId(0),
         crate::targets::TargetBookWatcher::with_poll(
@@ -759,5 +779,8 @@ async fn a_book_arrival_pre_arms_leverage_before_any_entry() {
         [(SymbolId(0), 2.0)],
         "the book's leverage was armed at arrival, before any entry existed"
     );
-    assert!(h.sends.lock().unwrap().is_empty(), "no order went; only the arm");
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "no order went; only the arm"
+    );
 }

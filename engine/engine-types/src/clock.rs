@@ -26,6 +26,16 @@ pub fn wall_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Wall-clock nanoseconds since the unix epoch. This is the bridge between
+/// monotonic engine timings and externally captured venue data; it is not
+/// used to measure durations.
+pub fn wall_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35,5 +45,13 @@ mod tests {
         let a = mono_ns();
         let b = mono_ns();
         assert!(b >= a);
+    }
+
+    #[test]
+    fn wall_stamps_share_the_unix_epoch() {
+        let ms = wall_ms().max(0) as u64;
+        let ns = wall_ns();
+        assert!(ns / 1_000_000 >= ms.saturating_sub(1));
+        assert!(ns / 1_000_000 <= ms.saturating_add(1));
     }
 }

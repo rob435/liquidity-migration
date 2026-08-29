@@ -29,6 +29,11 @@ pub(crate) struct TradeReply {
     pub(crate) ret_ext_info: Value,
     pub(crate) sent_ns: u64,
     pub(crate) ack_ns: u64,
+    /// What the venue says this account's per-second quota for this endpoint
+    /// is, from the acknowledgement's own header. `None` when the header is
+    /// absent or unreadable, which is the only honest answer: the adapter
+    /// then keeps pacing to the documented default rather than to a guess.
+    pub(crate) quota_per_second: Option<usize>,
 }
 
 enum Command {
@@ -128,7 +133,10 @@ impl Worker {
                         continue;
                     }
                 }
-                if !self.handle(command, socket.as_mut().expect("connected")).await {
+                if !self
+                    .handle(command, socket.as_mut().expect("connected"))
+                    .await
+                {
                     socket = None;
                 }
                 continue;
@@ -174,8 +182,15 @@ impl Worker {
                     true
                 }
                 Err(error) => {
+                    // A rejection is an answer. The socket carried it, the
+                    // exchange of frames stayed in step, and the next request
+                    // can go down the same connection — so an order the venue
+                    // declined must not cost the one after it a reconnect and
+                    // a re-authentication. Only a transport or decode failure
+                    // leaves the stream in a state worth abandoning.
+                    let keep = matches!(error, VenueError::Rejected { .. });
                     let _ = reply.send(Err(error));
-                    false
+                    keep
                 }
             },
         }
@@ -254,9 +269,7 @@ async fn connect_ipv4(url: &str) -> Result<Socket, VenueError> {
     Ok(socket)
 }
 
-fn ipv4_only(
-    addresses: impl Iterator<Item = SocketAddr>,
-) -> impl Iterator<Item = SocketAddr> {
+fn ipv4_only(addresses: impl Iterator<Item = SocketAddr>) -> impl Iterator<Item = SocketAddr> {
     addresses.filter(SocketAddr::is_ipv4)
 }
 
@@ -292,6 +305,7 @@ async fn request(
                 ret_ext_info: reply.get("retExtInfo").cloned().unwrap_or(Value::Null),
                 sent_ns,
                 ack_ns,
+                quota_per_second: quota_in(&reply),
             });
         }
         return Err(reply_error(&reply, operation));
@@ -310,7 +324,10 @@ async fn next_json(socket: &mut Socket, timeout: Duration) -> Result<Value, Venu
                 Message::Text(text) => {
                     let value: Value = serde_json::from_str(text.as_str())
                         .map_err(|error| VenueError::BadReply(error.to_string()))?;
-                    if matches!(value.get("op").and_then(Value::as_str), Some("ping" | "pong")) {
+                    if matches!(
+                        value.get("op").and_then(Value::as_str),
+                        Some("ping" | "pong")
+                    ) {
                         continue;
                     }
                     return Ok(value);
@@ -344,6 +361,29 @@ async fn send(socket: &mut Socket, message: Message) -> Result<(), VenueError> {
         .await
         .map_err(|_| VenueError::Transport("trade socket write timed out".to_string()))?
         .map_err(|error| VenueError::Transport(error.to_string()))
+}
+
+/// The per-second request quota the venue attaches to an acknowledgement.
+///
+/// Bybit answers order entry with a `header` block carrying the account's own
+/// limit for the endpoint that was called. Reading it is how a market-maker
+/// tier stops being invisible: without it the adapter paces forever to the
+/// documented default, whatever the account was actually granted.
+///
+/// Deliberately forgiving about shape. The value is a string today and the
+/// header is the venue's to change; anything unreadable is `None`, which
+/// leaves the pacing exactly where it was.
+fn quota_in(reply: &Value) -> Option<usize> {
+    let header = reply.get("header")?;
+    let value = ["X-Bapi-Limit", "x-bapi-limit"]
+        .into_iter()
+        .find_map(|key| header.get(key))?;
+    let limit = match value {
+        Value::String(text) => text.trim().parse::<u64>().ok()?,
+        Value::Number(number) => number.as_u64()?,
+        _ => return None,
+    };
+    (limit > 0).then_some(limit as usize)
 }
 
 fn successful(reply: &Value) -> bool {
@@ -435,6 +475,111 @@ mod tests {
         assert_eq!(reply.data["orderId"], "venue-1");
         assert!(reply.sent_ns > 0);
         assert!(reply.ack_ns >= reply.sent_ns);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn the_acknowledgement_states_this_accounts_own_request_quota() {
+        // Bybit answers order entry with the account's limit for the endpoint
+        // it just called. An account on a market-maker tier says a bigger
+        // number here than the documented default, and reading it is the only
+        // way the adapter learns it may go faster.
+        assert_eq!(
+            quota_in(&json!({
+                "reqId": "eng-1",
+                "retCode": 0,
+                "header": {
+                    "X-Bapi-Limit": "20",
+                    "X-Bapi-Limit-Status": "19",
+                    "X-Bapi-Limit-Reset-Timestamp": "1672217748000"
+                }
+            })),
+            Some(20)
+        );
+        // The venue owns this header's shape. Anything unreadable is no
+        // information, never a guess, because a wrong number here paces the
+        // whole order path.
+        assert_eq!(quota_in(&json!({"retCode": 0})), None);
+        assert_eq!(quota_in(&json!({"header": {}})), None);
+        assert_eq!(quota_in(&json!({"header": {"X-Bapi-Limit": ""}})), None);
+        assert_eq!(quota_in(&json!({"header": {"X-Bapi-Limit": "0"}})), None);
+        assert_eq!(quota_in(&json!({"header": {"X-Bapi-Limit": "lots"}})), None);
+        assert_eq!(quota_in(&json!({"header": {"X-Bapi-Limit": -5}})), None);
+        // A number rather than a string reads the same, so a venue that stops
+        // quoting the value does not silently switch the pacing back to the
+        // documented default.
+        assert_eq!(
+            quota_in(&json!({"header": {"X-Bapi-Limit": 100}})),
+            Some(100)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_order_leaves_the_socket_up_for_the_next_one() {
+        // A declined order is an answer, not a broken pipe. Dropping the
+        // connection over one would make the next order pay a reconnect and a
+        // re-authentication for somebody else's mistake.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("connection");
+            let mut socket = accept_async(stream).await.expect("websocket");
+            // One auth, and then both orders down the same socket: a second
+            // connection would leave this accept loop waiting forever.
+            let auth = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            let auth: Value = serde_json::from_str(&auth).unwrap();
+            assert_eq!(auth["op"], "auth");
+            socket
+                .send(Message::text(r#"{"op":"auth","retCode":0}"#))
+                .await
+                .unwrap();
+
+            for (code, order_id) in [(110001, ""), (0, "venue-2")] {
+                let text = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                let sent: Value = serde_json::from_str(&text).unwrap();
+                let req_id = sent["reqId"].as_str().unwrap();
+                socket
+                    .send(Message::text(
+                        json!({
+                            "reqId": req_id,
+                            "op": "order.create",
+                            "retCode": code,
+                            "retMsg": "order does not exist",
+                            "data": {"orderId": order_id, "orderLinkId": "client-1"},
+                            "retExtInfo": {}
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let creds = VenueRealm::Mainnet.credentials_for_test("key", "secret");
+        let mut client = TradeClient::new(&format!("ws://{address}"), creds);
+        client.warm().await.expect("authenticated warm socket");
+        let refused = client
+            .request("order.create", vec![json!({"symbol": "BTCUSDT"})])
+            .await;
+        match refused {
+            Err(VenueError::Rejected { code, .. }) => assert_eq!(code, 110001),
+            Err(other) => panic!("expected a venue rejection, got {other}"),
+            Ok(_) => panic!("the venue declined this order"),
+        }
+        // Bounded, because the failure this pins is a reconnect: the test
+        // server accepts once, so a client that drops the socket waits for an
+        // accept that never comes. Without the bound that reads as a hung
+        // suite instead of a failed assertion.
+        let accepted = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request("order.create", vec![json!({"symbol": "BTCUSDT"})]),
+        )
+        .await
+        .expect("the rejection dropped the socket and the next order is waiting to reconnect")
+        .expect("the socket that carried the rejection carries the next order");
+        assert_eq!(accepted.data["orderId"], "venue-2");
         server.await.unwrap();
     }
 

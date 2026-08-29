@@ -783,6 +783,23 @@ fn micro_bench(extra: &str) -> Harness {
     h
 }
 
+fn toxic_bench(extra: &str) -> Harness {
+    micro_bench(&format!(
+        r#"
+        flow_fast_half_life_ms = 250.0
+        flow_slow_half_life_ms = 3000.0
+        flow_fast_weight = 0.65
+        flow_slow_weight = 0.35
+        flow_response_bps = 2.0
+        flow_max_widen_bps = 8.0
+        flow_depth_bps = 10.0
+        flow_volatility_depth_multiplier = 2.0
+        flow_max_score = 4.0
+        {extra}
+        "#
+    ))
+}
+
 fn placed_orders(actions: Vec<Action>) -> Vec<(Side, f64, f64)> {
     actions
         .into_iter()
@@ -805,13 +822,21 @@ fn side_px(orders: &[(Side, f64, f64)], side: Side) -> f64 {
 }
 
 #[test]
-fn the_live_quoter_asks_for_l50_and_aggressor_trades() {
+fn the_live_quoter_asks_for_the_touch_the_deep_book_and_aggressor_trades() {
+    // Three topics, each for a different job: the touch for the freshest bid
+    // and ask, the deep book for fair value and queue pressure, the trades
+    // for who is crossing. The venue publishes the touch about twice as
+    // often as the deep book, so taking the price from the deep book alone
+    // spends up to one publication interval quoting against an old touch.
     let h = micro_bench("maker_fee_bps = 2.0");
     let subscriptions = h.strategy.subscriptions();
-    assert_eq!(subscriptions.len(), 2);
-    assert!(subscriptions.iter().any(|sub| sub.feed == Feed::Depth));
-    assert!(subscriptions.iter().any(|sub| sub.feed == Feed::Trades));
-    assert!(!subscriptions.iter().any(|sub| sub.feed == Feed::Quote));
+    assert_eq!(subscriptions.len(), 3);
+    for feed in [Feed::Quote, Feed::Depth, Feed::Trades] {
+        assert!(
+            subscriptions.iter().any(|sub| sub.feed == feed),
+            "{feed:?} is missing from {subscriptions:?}"
+        );
+    }
 }
 
 #[test]
@@ -828,7 +853,11 @@ fn a_disabled_quoter_drains_once_instead_of_leaving_inventory_behind() {
             _ => None,
         })
         .collect();
-    assert_eq!(exits.len(), 1, "one outstanding drain, not one per book update");
+    assert_eq!(
+        exits.len(),
+        1,
+        "one outstanding drain, not one per book update"
+    );
     assert!(exits[0].reduce_only);
     assert_eq!(exits[0].side, Side::Sell);
     assert_eq!(exits[0].qty, 0.05);
@@ -839,14 +868,105 @@ fn a_disabled_quoter_drains_once_instead_of_leaving_inventory_behind() {
 #[test]
 fn buy_aggressors_move_both_quotes_up() {
     let mut h = micro_bench("trade_lean_bps = 8.0");
-    h.depth("BTCUSDT", &[(99.9, 1.0), (99.8, 1.0)], &[(100.1, 1.0), (100.2, 1.0)]);
+    h.depth(
+        "BTCUSDT",
+        &[(99.9, 1.0), (99.8, 1.0)],
+        &[(100.1, 1.0), (100.2, 1.0)],
+    );
     let before = placed_orders(h.drain_actions());
 
-    h.ctx.set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 250_000_000);
+    h.ctx
+        .set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 250_000_000);
     h.trades("BTCUSDT", 10.0, 0.0, 100.1);
     let after = placed_orders(h.drain_actions());
     assert!(side_px(&after, Side::Buy) > side_px(&before, Side::Buy));
     assert!(side_px(&after, Side::Sell) > side_px(&before, Side::Sell));
+}
+
+#[test]
+fn buy_flow_protects_only_the_ask_and_sell_flow_protects_only_the_bid() {
+    let initial = || {
+        let mut h = toxic_bench("");
+        h.depth(
+            "BTCUSDT",
+            &[(99.9, 1.0), (99.8, 1.0)],
+            &[(100.1, 1.0), (100.2, 1.0)],
+        );
+        let before = placed_orders(h.drain_actions());
+        (h, before)
+    };
+
+    let (mut buys, before_buy) = initial();
+    buys.ctx.set_now(250_000_000);
+    buys.trades("BTCUSDT", 2.0, 0.0, 100.1);
+    let after_buy = placed_orders(buys.drain_actions());
+    assert_eq!(
+        side_px(&after_buy, Side::Buy),
+        side_px(&before_buy, Side::Buy)
+    );
+    assert!(side_px(&after_buy, Side::Sell) > side_px(&before_buy, Side::Sell));
+
+    let (mut sells, before_sell) = initial();
+    sells.ctx.set_now(250_000_000);
+    sells.trades("BTCUSDT", 0.0, 2.0, 99.9);
+    let after_sell = placed_orders(sells.drain_actions());
+    assert!(side_px(&after_sell, Side::Buy) < side_px(&before_sell, Side::Buy));
+    assert_eq!(
+        side_px(&after_sell, Side::Sell),
+        side_px(&before_sell, Side::Sell)
+    );
+}
+
+#[test]
+fn flow_is_scaled_by_the_nearby_same_side_book() {
+    let ask_after = |buy_qty: f64| {
+        let mut h = toxic_bench("");
+        h.depth("BTCUSDT", &[(99.9, 10.0)], &[(100.1, 10.0)]);
+        let _ = h.drain_actions();
+        h.ctx.set_now(250_000_000);
+        h.trades("BTCUSDT", buy_qty, 0.0, 100.1);
+        side_px(&placed_orders(h.drain_actions()), Side::Sell)
+    };
+    assert!(ask_after(5.0) > ask_after(0.05));
+}
+
+#[test]
+fn a_large_buy_sweep_pulls_only_the_ask_when_the_config_asks() {
+    let mut h = toxic_bench("flow_pull_score = 0.5");
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let _ = h.drain_actions();
+    h.ctx.set_now(250_000_000);
+    h.trades("BTCUSDT", 2.0, 0.0, 100.1);
+    let after = placed_orders(h.drain_actions());
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].0, Side::Buy);
+}
+
+#[test]
+fn every_quoter_fill_records_the_flow_and_book_state() {
+    let mut h = toxic_bench("");
+    h.depth("BTCUSDT", &[(99.9, 2.0)], &[(100.1, 3.0)]);
+    let _ = h.drain_actions();
+    h.ctx.set_now(250_000_000);
+    h.trades("BTCUSDT", 1.0, 0.0, 100.1);
+    let _ = h.drain_actions();
+    h.maker_fill_with_exec("exec-flow", "eng-ask", "BTCUSDT", Side::Sell, 0.1, 100.1);
+    let actions = h.drain_actions();
+    let features = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::RecordQuoteFill { features } => Some(features),
+            _ => None,
+        })
+        .expect("the fill has a feature receipt");
+    assert_eq!(features.exec_id, "exec-flow");
+    assert_eq!(features.side, Side::Sell);
+    assert!(features.flow_score.is_some_and(|score| score > 0.0));
+    assert!(features
+        .same_side_depth_usdt
+        .is_some_and(|depth| depth > 0.0));
+    assert!(features.spread_bps.is_some_and(|spread| spread > 0.0));
+    assert!(features.queue_ahead_usdt.is_some());
 }
 
 #[test]
@@ -856,11 +976,15 @@ fn short_horizon_movement_widens_the_market() {
     let calm = placed_orders(h.drain_actions());
     let calm_width = side_px(&calm, Side::Sell) - side_px(&calm, Side::Buy);
 
-    h.ctx.set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 250_000_000);
+    h.ctx
+        .set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 250_000_000);
     h.depth("BTCUSDT", &[(100.9, 1.0)], &[(101.1, 1.0)]);
     let moving = placed_orders(h.drain_actions());
     let moving_width = side_px(&moving, Side::Sell) - side_px(&moving, Side::Buy);
-    assert!(moving_width > calm_width * 5.0, "{moving_width} vs {calm_width}");
+    assert!(
+        moving_width > calm_width * 5.0,
+        "{moving_width} vs {calm_width}"
+    );
 }
 
 #[test]
@@ -869,7 +993,10 @@ fn quote_and_position_size_can_be_constant_money_across_names() {
     h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
     let orders = placed_orders(h.drain_actions());
     for (_, _, qty) in orders {
-        assert!((qty - 0.1).abs() < 1e-12, "10 USDT at 100 should be 0.1 base");
+        assert!(
+            (qty - 0.1).abs() < 1e-12,
+            "10 USDT at 100 should be 0.1 base"
+        );
     }
 }
 
@@ -878,7 +1005,11 @@ fn a_good_queue_needs_more_edge_before_it_is_abandoned() {
     let mut h = micro_bench("queue_reprice_edge_bps = 4.0");
     seed_bid(&mut h, "eng-bid", "BTCUSDT", 99.93);
     h.depth("BTCUSDT", &[(99.93, 0.1)], &[(100.07, 0.1)]);
-    assert_eq!(amend_count(&mut h), 0, "two bps is not enough to discard this queue");
+    assert_eq!(
+        amend_count(&mut h),
+        0,
+        "two bps is not enough to discard this queue"
+    );
 }
 
 #[test]
@@ -892,4 +1023,39 @@ fn the_authoritative_fill_replaces_the_fast_inventory_instead_of_adding_to_it() 
     let orders = placed_orders(h.drain_actions());
     assert!(orders.iter().any(|order| order.0 == Side::Buy));
     assert!(orders.iter().any(|order| order.0 == Side::Sell));
+}
+
+#[test]
+fn the_touchs_own_topic_moves_the_quotes_without_a_new_deep_book() {
+    // The point of taking the touch from its own faster topic: between two
+    // deep-book pushes the market moves, the touch topic says so first, and
+    // the maker reprices on it instead of holding a quote priced off the
+    // older book.
+    let mut h = micro_bench("maker_fee_bps = 2.0");
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let first = placed_orders(h.drain_actions());
+    let first_bid = side_px(&first, Side::Buy);
+
+    // No new deep book — only the touch, a whole dollar higher, later.
+    h.ctx.set_now(2_000_000);
+    h.quote("BTCUSDT", 100.9, 101.1);
+    let after = h.drain_actions();
+    let moved: Vec<_> = after
+        .iter()
+        .filter_map(|action| match action {
+            Action::Amend { spec, .. } => spec.px,
+            _ => None,
+        })
+        .collect();
+    let replaced = placed_orders(after.clone());
+
+    let new_bid = moved
+        .first()
+        .copied()
+        .or_else(|| replaced.iter().find(|o| o.0 == Side::Buy).map(|o| o.1))
+        .unwrap_or_else(|| panic!("the touch moved a dollar and nothing repriced: {after:?}"));
+    assert!(
+        new_bid > first_bid + 0.5,
+        "repriced to {new_bid} from {first_bid}: the fresher touch did not reach the plan"
+    );
 }

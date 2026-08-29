@@ -201,8 +201,7 @@ pub fn worth_resting(touch: Touch, tick: f64) -> bool {
     if tick <= 0.0 || !touch.readable() {
         return false;
     }
-    touch.spread() >= MIN_SPREAD_TICKS * tick
-        && touch.spread() / touch.mid() >= MIN_SPREAD_FRACTION
+    touch.spread() >= MIN_SPREAD_TICKS * tick && touch.spread() / touch.mid() >= MIN_SPREAD_FRACTION
 }
 
 /// Read an intent and say how it should go out.
@@ -291,7 +290,10 @@ pub fn plan_work(
     // Already crossing. Nothing here is patient any more; the only questions
     // are whether to retry the cross and when to give up on it.
     if state.cross_started_ns != 0 {
-        let grace_over = now_ns >= state.cross_started_ns.saturating_add(ms_ns(policy.cross_grace_ms));
+        let grace_over = now_ns
+            >= state
+                .cross_started_ns
+                .saturating_add(ms_ns(policy.cross_grace_ms));
         if !state.crossed && !grace_over {
             // Paced, and that pacing is load-bearing. Each attempt is a
             // signed venue call at roughly 175 ms; retrying on every pass

@@ -116,7 +116,9 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
     let base_fields = ["symbol", "notional_usdt", "stop_loss_fraction", "leverage"];
     for (index, target) in targets.iter().enumerate() {
         let Some(fields) = target.as_object() else {
-            return Err(BookError::Malformed(format!("target {index} must be an object")));
+            return Err(BookError::Malformed(format!(
+                "target {index} must be an object"
+            )));
         };
         let extension_fields_match = match version {
             LEGACY_VERSION => {
@@ -175,7 +177,10 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
     let mut symbols = std::collections::HashSet::with_capacity(raw.targets.len());
     for target in &raw.targets {
         if target.symbol.is_empty()
-            || !target.symbol.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            || !target
+                .symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
             || target.symbol.bytes().any(|byte| byte.is_ascii_lowercase())
         {
             return Err(BookError::Malformed(format!(
@@ -210,7 +215,10 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
                 target.symbol
             )));
         }
-        if target.entry_valid_until_ms.is_some_and(|deadline| deadline <= 0) {
+        if target
+            .entry_valid_until_ms
+            .is_some_and(|deadline| deadline <= 0)
+        {
             return Err(BookError::Malformed(format!(
                 "{} entry_valid_until_ms must be positive",
                 target.symbol
@@ -223,9 +231,7 @@ pub fn parse_book(bytes: &[u8]) -> Result<TargetBook, BookError> {
                     target.symbol
                 )));
             }
-            if target.notional_usdt == 0.0
-                || ((qty > 0.0) != (target.notional_usdt > 0.0))
-            {
+            if target.notional_usdt == 0.0 || ((qty > 0.0) != (target.notional_usdt > 0.0)) {
                 return Err(BookError::Malformed(format!(
                     "{} target_qty and notional_usdt must have the same sign",
                     target.symbol
@@ -447,7 +453,9 @@ impl BookWorker {
             }
         };
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if self.last_digest == Some(digest) { return None; }
+        if self.last_digest == Some(digest) {
+            return None;
+        }
         match parse_book(&bytes) {
             Ok(book) => {
                 self.last_digest = Some(digest);
@@ -524,7 +532,10 @@ mod tests {
         assert_eq!(book.targets[0].notional_usdt, 120.0);
         assert_eq!(book.targets[0].stop_loss_fraction, 0.35);
         assert_eq!(book.targets[0].leverage, 2.0);
-        assert_eq!(book.targets[1].notional_usdt, -80.0, "a short keeps its sign");
+        assert_eq!(
+            book.targets[1].notional_usdt, -80.0,
+            "a short keeps its sign"
+        );
     }
 
     #[test]
@@ -540,7 +551,10 @@ mod tests {
                 "\"symbol\": \"COTIUSDT\", \"entry_valid_until_ms\": null, \"target_qty\": null",
             );
         let book = parse_book(text.as_bytes()).expect("the optional deadline parses");
-        assert_eq!(book.targets[0].entry_valid_until_ms, Some(1_700_000_300_000));
+        assert_eq!(
+            book.targets[0].entry_valid_until_ms,
+            Some(1_700_000_300_000)
+        );
         assert_eq!(book.targets[1].entry_valid_until_ms, None);
     }
 
@@ -560,7 +574,10 @@ mod tests {
         assert_eq!(book.targets[0].target_qty, Some(3.2));
 
         let wrong_sign = text.replace("\"target_qty\": 3.2", "\"target_qty\": -3.2");
-        assert!(matches!(parse_book(wrong_sign.as_bytes()), Err(BookError::Malformed(_))));
+        assert!(matches!(
+            parse_book(wrong_sign.as_bytes()),
+            Err(BookError::Malformed(_))
+        ));
     }
 
     #[test]
@@ -570,8 +587,14 @@ mod tests {
             "\"symbol\": \"KAITOUSDT\", \"entry_valid_until_ms\": 1700000300000",
         );
         let v2_without_deadline = GOOD.replace("\"version\": 1", "\"version\": 2");
-        assert!(matches!(parse_book(v1_with_deadline.as_bytes()), Err(BookError::Malformed(_))));
-        assert!(matches!(parse_book(v2_without_deadline.as_bytes()), Err(BookError::Malformed(_))));
+        assert!(matches!(
+            parse_book(v1_with_deadline.as_bytes()),
+            Err(BookError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse_book(v2_without_deadline.as_bytes()),
+            Err(BookError::Malformed(_))
+        ));
     }
 
     #[test]
@@ -631,7 +654,10 @@ mod tests {
             GOOD.replace("1700086400000", "1699999999999"),
             GOOD.replace("KAITOUSDT", "kaito-usdt"),
             GOOD.replace("\"COTIUSDT\"", "\"KAITOUSDT\""),
-            GOOD.replace("\"stop_loss_fraction\": 0.35", "\"stop_loss_fraction\": 1.0"),
+            GOOD.replace(
+                "\"stop_loss_fraction\": 0.35",
+                "\"stop_loss_fraction\": 1.0",
+            ),
             GOOD.replace("\"leverage\": 2.0", "\"leverage\": 0.0"),
         ];
         for text in bad {
@@ -655,7 +681,10 @@ mod tests {
     fn a_key_the_engine_does_not_read_is_tolerated() {
         // Version 1 may grow a field: the producer bumps the version only
         // when an old reader would misread the file, not when it gains one.
-        let text = GOOD.replace("\"source\": \"carry\",", "\"source\": \"carry\", \"note\": \"hi\",");
+        let text = GOOD.replace(
+            "\"source\": \"carry\",",
+            "\"source\": \"carry\", \"note\": \"hi\",",
+        );
         assert!(parse_book(text.as_bytes()).is_ok());
     }
 
@@ -735,8 +764,13 @@ mod tests {
         let path = temp_path("book-equal-length");
         write(&path, GOOD);
         let (books, _inbox) = mpsc::channel(1);
-        let mut worker = BookWorker { path: path.path().to_path_buf(), poll: Duration::from_secs(1),
-            books, last_digest: None, last_complaint: None };
+        let mut worker = BookWorker {
+            path: path.path().to_path_buf(),
+            poll: Duration::from_secs(1),
+            books,
+            last_digest: None,
+            last_complaint: None,
+        };
         assert_eq!(worker.look().await.unwrap().targets[0].notional_usdt, 120.0);
         let replacement = GOOD.replace("120.0", "121.0");
         assert_eq!(replacement.len(), GOOD.len());

@@ -24,9 +24,7 @@ pub mod plan;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
-use engine_types::{
-    Action, AmendSpec, InstrumentRule, MarketState, Quote, SymbolId, WorkPolicy,
-};
+use engine_types::{Action, AmendSpec, InstrumentRule, MarketState, Quote, SymbolId, WorkPolicy};
 
 use crate::inflight::LedgerOfOrders;
 use plan::{WorkDecision, WorkState, WorkStep};

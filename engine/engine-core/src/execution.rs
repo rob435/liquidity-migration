@@ -475,8 +475,9 @@ impl Fills {
                 // the horizon, not the fill. A book that spoke once just
                 // after the fill and then went quiet would otherwise hand
                 // that early mid to the 1m/5m columns.
-                let horizon_ns =
-                    owed.filled_ns.saturating_add((*horizon_ms).saturating_mul(1_000_000));
+                let horizon_ns = owed
+                    .filled_ns
+                    .saturating_add((*horizon_ms).saturating_mul(1_000_000));
                 let mid = mid_after(market, owed.symbol, horizon_ns);
                 let gave_up = age_ms >= horizon_ms.saturating_add(LATENESS_BOUND_MS);
                 if mid.is_none() && !gave_up {
@@ -687,9 +688,7 @@ impl Fills {
                 WalRecord::ClaimsDropped { rows, .. } => {
                     let gone: Vec<(String, String)> = rows
                         .iter()
-                        .map(|row| {
-                            (me.names.strategy(row.strategy), me.names.symbol(row.symbol))
-                        })
+                        .map(|row| (me.names.strategy(row.strategy), me.names.symbol(row.symbol)))
                         .collect();
                     me.lots.drop_symbols(|sleeve, symbol| {
                         gone.iter().any(|(s, y)| s == sleeve && y == symbol)
@@ -735,7 +734,11 @@ impl Fills {
                 // NOT restated: a report over one segment covers that
                 // segment's fills, and the whole history is a chain read
                 // away.
-                WalRecord::SegmentBase { open_orders, attribution, .. } => {
+                WalRecord::SegmentBase {
+                    open_orders,
+                    attribution,
+                    ..
+                } => {
                     for open in open_orders {
                         sent.insert(
                             open.request.client_order_id.as_str(),

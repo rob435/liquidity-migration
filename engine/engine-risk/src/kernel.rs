@@ -450,6 +450,10 @@ impl RiskKernel for Kernel {
             OrderUpdate::Ack(_)
             | OrderUpdate::FastFill { .. }
             | OrderUpdate::StopAttached { .. } => {}
+            // The reservation an amend widened is narrowed by the engine, in
+            // one call that names the price this news carried. Acting on the
+            // news here as well would register the order twice.
+            OrderUpdate::Amended { .. } => {}
             // A private-stream gap loses nothing here: registered orders may
             // still fill, and the engine refreshes the account view that
             // `assess` judges against.

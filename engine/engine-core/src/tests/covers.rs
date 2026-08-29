@@ -65,6 +65,7 @@ impl Strategy for CoverProbe {
             EngineEvent::Order(OrderUpdate::Fill { .. }) => "fill",
             EngineEvent::Order(OrderUpdate::FastFill { .. }) => "fast-fill",
             EngineEvent::Order(OrderUpdate::Cancelled { .. }) => "cancelled",
+            EngineEvent::Order(OrderUpdate::Amended { .. }) => "amended",
             EngineEvent::Order(OrderUpdate::Reject { .. }) => "reject",
             EngineEvent::Order(OrderUpdate::StopAttached { .. }) => "stop",
             EngineEvent::Order(OrderUpdate::StreamReset { .. }) => "reset",
@@ -74,7 +75,11 @@ impl Strategy for CoverProbe {
         self.seen.lock().unwrap().push((tag, ctx.in_flight(symbol)));
         if let EngineEvent::Market(MarketEvent::Quote { quote, .. }) = event {
             if let Some((signed_qty, reduce_only)) = self.plan.pop_front() {
-                let side = if signed_qty >= 0.0 { Side::Buy } else { Side::Sell };
+                let side = if signed_qty >= 0.0 {
+                    Side::Buy
+                } else {
+                    Side::Sell
+                };
                 ctx.place(Intent {
                     strategy: StrategyId(0),
                     symbol,
@@ -97,7 +102,8 @@ impl Strategy for CoverProbe {
 
 /// The newest in-flight reading recorded at a wake of this kind.
 fn read_at(seen: &Wakes, tag: &str) -> f64 {
-    seen.lock().unwrap()
+    seen.lock()
+        .unwrap()
         .iter()
         .rev()
         .find(|(t, _)| *t == tag)
@@ -127,8 +133,7 @@ async fn a_send_is_covered_at_its_quantized_size_until_the_reading_shows_it() {
     // Registering at the send is what makes that true without any ack-time
     // clamp: the engine knows the real size before the wire.
     let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.0105, false)]);
-    let (mut engine, _h) =
-        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+    let (mut engine, _h) = build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -157,8 +162,7 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
     // must come down to exactly the 0.006 the reading has not shown —
     // dropping the whole record here was the old double-entry window.
     let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.01, false)]);
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
 
     // First: the send happens (quote, place, inline ack), then the feed ends.
@@ -175,14 +179,18 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
     // Then: a stream reset forces a fresh reading, which reports 0.004. The
     // stop-attach news right behind it is just a wake the probe can sample
     // the post-reading number at.
-    h.account_readings.lock().unwrap().push_back(vec![PositionView {
-        symbol,
-        side: Side::Buy,
-        qty: 0.004,
-        entry_px: 30_000.0,
-        stop_attached: true, stop_px: 0.0,
-        leverage: None
-    }]);
+    h.account_readings
+        .lock()
+        .unwrap()
+        .push_back(vec![PositionView {
+            symbol,
+            side: Side::Buy,
+            qty: 0.004,
+            entry_px: 30_000.0,
+            stop_attached: true,
+            stop_px: 0.0,
+            leverage: None,
+        }]);
     engine
         .run(
             &mut ScriptFeed::quotes(symbol, 0, false),
@@ -212,12 +220,8 @@ async fn a_refused_entry_frees_the_symbol_and_leaves_older_covers_alone() {
     // no phantom cover (a follower is free to retry the entry at once), and
     // refusing it must not release the cover an EARLIER send is still
     // holding against a fill the reading has not shown.
-    let (probe, seen) = CoverProbe::new(
-        "BTCUSDT",
-        vec![(0.01, false), (f64::NAN, false)],
-    );
-    let (mut engine, _h) =
-        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+    let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.01, false), (f64::NAN, false)]);
+    let (mut engine, _h) = build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -241,12 +245,8 @@ async fn a_refused_exit_drops_every_cover_for_its_symbol() {
     // disagree about what is held, and the reading is the fact. Anything
     // short of dropping them all re-plans the same doomed exit on every
     // quote for as long as the disagreement lasts.
-    let (probe, seen) = CoverProbe::new(
-        "BTCUSDT",
-        vec![(0.01, false), (f64::NAN, true)],
-    );
-    let (mut engine, _h) =
-        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+    let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.01, false), (f64::NAN, true)]);
+    let (mut engine, _h) = build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -257,7 +257,10 @@ async fn a_refused_exit_drops_every_cover_for_its_symbol() {
         .await
         .unwrap();
 
-    assert!(close(read_at(&seen, "ack"), 0.010), "the entry was covered first");
+    assert!(
+        close(read_at(&seen, "ack"), 0.010),
+        "the entry was covered first"
+    );
     let at_refusal = read_at(&seen, "refused");
     assert!(
         close(at_refusal, 0.0),
@@ -271,8 +274,7 @@ async fn a_cancel_releases_only_the_unfilled_remainder() {
     // that never happened is freed, the filled 0.004 stays covered until the
     // account reading shows it.
     let (probe, seen) = CoverProbe::new("BTCUSDT", vec![(0.01, false)]);
-    let (mut engine, h) =
-        build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build(allow_all(), vec![Box::new(probe)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(

@@ -14,3 +14,9 @@ pub fn now_ns() -> u64 {
 pub fn wall_ms() -> i64 {
     engine_types::clock::wall_ms()
 }
+
+/// Wall-clock nanoseconds since the unix epoch, used only to align a
+/// monotonic timing record with an external capture.
+pub fn wall_ns() -> u64 {
+    engine_types::clock::wall_ns()
+}

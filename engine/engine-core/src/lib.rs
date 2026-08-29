@@ -27,6 +27,7 @@ pub mod replay;
 pub mod routing;
 pub mod runner;
 pub mod targets;
+pub mod timing;
 pub mod trades;
 mod venue_runtime;
 pub mod working;

@@ -34,9 +34,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Instant;
 
-pub use engine_types::wal::{Wal, WalError, WalRecord};
+pub use engine_types::wal::{PendingBarrier, Wal, WalError, WalRecord};
 
 /// Magic at offset 0. The trailing digits are the format version.
 const MAGIC: [u8; 8] = *b"EWAL0001";
@@ -48,8 +49,60 @@ const FRAME_HEADER_LEN: usize = 8;
 const BUFFER_HIGH_WATER: usize = 64 * 1024;
 
 /// The append-only log writer.
+/// The thread that waits on the disk, so the order path does not have to.
+///
+/// It holds its own descriptor for the same file — `try_clone` shares the open
+/// file description, so a barrier it runs covers every byte the writer has
+/// already handed to the operating system. Nothing else is shared: the writer
+/// keeps sole ownership of writing and of the buffer.
+///
+/// One thread for the life of a segment. A barrier is a few hundred a second
+/// at most, and spawning one thread each time would cost a meaningful part of
+/// what this exists to save.
+struct SyncThread {
+    /// Each request carries the channel its answer goes back on.
+    requests: mpsc::Sender<mpsc::Sender<Result<(), WalError>>>,
+    /// The file this thread's descriptor was opened on. A barrier syncs the
+    /// file, not the path, so a thread left over from before a rotation would
+    /// pass every barrier while saying nothing about the segment being
+    /// written — and nothing else about that is observable, because the bytes
+    /// are readable from the page cache either way. Read only by the test
+    /// that holds the invariant; it exists to make it checkable at all.
+    #[cfg_attr(not(test), allow(dead_code))]
+    inode: u64,
+}
+
+impl SyncThread {
+    fn spawn(file: &File) -> Result<Self, WalError> {
+        use std::os::unix::fs::MetadataExt;
+        let inode = file.metadata()?.ino();
+        let fd = file.try_clone()?;
+        let (requests, incoming) = mpsc::channel::<mpsc::Sender<Result<(), WalError>>>();
+        std::thread::Builder::new()
+            .name("wal-sync".to_string())
+            .spawn(move || {
+                for reply in incoming {
+                    // A receiver that has gone away is a caller that stopped
+                    // caring; the barrier still ran.
+                    let _ = reply.send(fd.sync_data().map_err(WalError::Io));
+                }
+            })?;
+        Ok(SyncThread { requests, inode })
+    }
+
+    /// Ask for a barrier. `None` when the thread is gone, which the caller
+    /// answers by running the barrier itself rather than by carrying on.
+    fn request(&self) -> Option<mpsc::Receiver<Result<(), WalError>>> {
+        let (reply, done) = mpsc::channel();
+        self.requests.send(reply).ok().map(|()| done)
+    }
+}
+
 pub struct WalWriter {
     file: File,
+    /// Absent only for a writer whose thread could not be started, which
+    /// falls back to synchronous barriers rather than to none.
+    sync: Option<SyncThread>,
     /// Frames waiting to go to the OS. Reused across appends: a record is
     /// serialized straight into it, so a warm writer allocates nothing.
     buf: Vec<u8>,
@@ -88,7 +141,10 @@ impl WalWriter {
             if let Some(dir) = path.parent() {
                 File::open(dir)?.sync_all()?;
             }
-            Scan { records: Vec::new(), good_end: HEADER_LEN }
+            Scan {
+                records: Vec::new(),
+                good_end: HEADER_LEN,
+            }
         } else {
             scan_file(&mut file, len)?
         };
@@ -99,8 +155,10 @@ impl WalWriter {
         file.seek(SeekFrom::Start(scan.good_end))?;
 
         let next_seq = scan.records.len() as u64 + 1;
+        let sync = SyncThread::spawn(&file).ok();
         let writer = WalWriter {
             file,
+            sync,
             buf: Vec::with_capacity(BUFFER_HIGH_WATER),
             next_seq,
             family: family.to_path_buf(),
@@ -112,6 +170,17 @@ impl WalWriter {
     /// The sequence the next append will get.
     pub fn next_seq(&self) -> u64 {
         self.next_seq
+    }
+
+    /// The file the durability thread would sync, and the file being written.
+    /// Equal, or a barrier proves nothing. See [`SyncThread::inode`].
+    #[cfg(test)]
+    fn sync_and_write_inodes(&self) -> (Option<u64>, u64) {
+        use std::os::unix::fs::MetadataExt;
+        (
+            self.sync.as_ref().map(|sync| sync.inode),
+            self.file.metadata().expect("the open segment").ino(),
+        )
     }
 
     fn push_to_os(&mut self) -> Result<(), WalError> {
@@ -183,6 +252,23 @@ impl Wal for WalWriter {
         self.push_to_os()?;
         self.file.sync_data()?;
         Ok(())
+    }
+
+    fn barrier_begin(&mut self) -> Result<PendingBarrier, WalError> {
+        // The write happens here, on the writer, before the request goes out.
+        // That is what makes the barrier cover these bytes: the sync thread
+        // shares the file, not the buffer, so anything still in the buffer
+        // when it runs would not be covered by it.
+        self.push_to_os()?;
+        match self.sync.as_ref().and_then(SyncThread::request) {
+            Some(done) => Ok(PendingBarrier::running(done)),
+            // No thread to ask. Do it here rather than hand back a promise
+            // nothing is keeping.
+            None => {
+                self.file.sync_data()?;
+                Ok(PendingBarrier::settled())
+            }
+        }
     }
 
     fn flush(&mut self) -> Result<(), WalError> {
@@ -258,7 +344,11 @@ impl Wal for WalWriter {
         }
 
         // 4. Switch. The old file handle closes when it drops; the file
-        //    itself stays where it is, an archive.
+        //    itself stays where it is, an archive. The sync thread holds a
+        //    descriptor for the file it was started on, so it is replaced
+        //    here too — otherwise every later barrier would faithfully sync
+        //    the archive and say nothing about the segment being written.
+        self.sync = SyncThread::spawn(&file).ok();
         self.file = file;
         self.file_bytes = HEADER_LEN + frame.len() as u64;
         self.next_seq = 2;
@@ -324,8 +414,13 @@ impl Drop for WalLock {
 #[derive(Debug)]
 pub enum WalLockError {
     /// Another process is writing this log right now.
-    AlreadyHeld { path: PathBuf },
-    Io { path: PathBuf, source: io::Error },
+    AlreadyHeld {
+        path: PathBuf,
+    },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl fmt::Display for WalLockError {
@@ -363,10 +458,17 @@ impl std::error::Error for WalLockError {
 /// it at another disk is a reasonable thing to do.
 pub fn lock(path: impl AsRef<Path>) -> Result<WalLock, WalLockError> {
     let path = path.as_ref();
-    let failed = |source: io::Error| WalLockError::Io { path: path.to_path_buf(), source };
+    let failed = |source: io::Error| WalLockError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
 
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| failed(io::Error::new(io::ErrorKind::InvalidInput, "path has a zero byte")))?;
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        failed(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path has a zero byte",
+        ))
+    })?;
     // O_CREAT so the claim can be made before the log exists; no truncation,
     // and nothing is ever written through this descriptor.
     let flags = libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC;
@@ -375,7 +477,10 @@ pub fn lock(path: impl AsRef<Path>) -> Result<WalLock, WalLockError> {
     if fd < 0 {
         return Err(failed(io::Error::last_os_error()));
     }
-    let held = WalLock { fd, path: path.to_path_buf() };
+    let held = WalLock {
+        fd,
+        path: path.to_path_buf(),
+    };
 
     if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } < 0 {
         let err = io::Error::last_os_error();
@@ -384,7 +489,9 @@ pub fn lock(path: impl AsRef<Path>) -> Result<WalLock, WalLockError> {
             Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
         );
         return if busy {
-            Err(WalLockError::AlreadyHeld { path: held.path.clone() })
+            Err(WalLockError::AlreadyHeld {
+                path: held.path.clone(),
+            })
         } else {
             Err(failed(err))
         };
@@ -434,7 +541,9 @@ pub fn segments(family: &Path) -> Result<Vec<(u64, PathBuf)>, WalError> {
         found.push((1, family.to_path_buf()));
     }
     let dir = family.parent().filter(|p| !p.as_os_str().is_empty());
-    let dir = dir.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let dir = dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     let Some(stem) = family.file_name().map(|n| n.to_string_lossy().into_owned()) else {
         return Ok(found);
     };
@@ -494,7 +603,9 @@ fn scan_candidate(index: u64, path: &Path) -> Result<(Vec<(u64, WalRecord)>, boo
 /// Take [`lock`] on the FAMILY path first, exactly as before — one flock
 /// covers every segment and the rotation between them, so there is no window
 /// where a second engine could claim the directory.
-pub fn open_current(family: impl AsRef<Path>) -> Result<(WalWriter, Vec<(u64, WalRecord)>), WalError> {
+pub fn open_current(
+    family: impl AsRef<Path>,
+) -> Result<(WalWriter, Vec<(u64, WalRecord)>), WalError> {
     let family = family.as_ref();
     let mut chain = segments(family)?;
     while let Some((index, path)) = chain.pop() {
@@ -531,9 +642,7 @@ pub fn replay_chain(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, 
         .find_map(|(index, path)| {
             let read = scan_candidate(*index, path);
             match read {
-                Ok((records, damaged)) if trusted(*index, &records) => {
-                    Some(Ok((*index, damaged)))
-                }
+                Ok((records, damaged)) if trusted(*index, &records) => Some(Ok((*index, damaged))),
                 Ok(_) => None,
                 Err(e) => Some(Err(e)),
             }
@@ -600,11 +709,18 @@ fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
         }
         let mut frame_header = [0u8; FRAME_HEADER_LEN];
         reader.read_exact(&mut frame_header)?;
-        let payload_len =
-            u32::from_le_bytes([frame_header[0], frame_header[1], frame_header[2], frame_header[3]])
-                as u64;
-        let want_crc =
-            u32::from_le_bytes([frame_header[4], frame_header[5], frame_header[6], frame_header[7]]);
+        let payload_len = u32::from_le_bytes([
+            frame_header[0],
+            frame_header[1],
+            frame_header[2],
+            frame_header[3],
+        ]) as u64;
+        let want_crc = u32::from_le_bytes([
+            frame_header[4],
+            frame_header[5],
+            frame_header[6],
+            frame_header[7],
+        ]);
 
         // We never write an empty record, and a torn write usually leaves a run
         // of zero bytes, whose checksum would otherwise look valid.
@@ -629,17 +745,21 @@ fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
 
         // Checksum good but the bytes are not a record we understand: the disk
         // is fine and the data is real, so refuse rather than delete it.
-        let record: WalRecord = serde_json::from_slice(&payload).map_err(|e| WalError::Corrupt {
-            offset,
-            detail: format!("frame passed its checksum but is not a readable record: {e}"),
-        })?;
+        let record: WalRecord =
+            serde_json::from_slice(&payload).map_err(|e| WalError::Corrupt {
+                offset,
+                detail: format!("frame passed its checksum but is not a readable record: {e}"),
+            })?;
 
         offset += FRAME_HEADER_LEN as u64 + payload_len;
         let seq = records.len() as u64 + 1;
         records.push((seq, record));
     }
 
-    Ok(Scan { records, good_end: offset })
+    Ok(Scan {
+        records,
+        good_end: offset,
+    })
 }
 
 /// What one buffered append and one durability barrier cost, in microseconds.
@@ -736,13 +856,57 @@ fn sample_record() -> WalRecord {
             symbol: SymbolId(7),
             side: Side::Buy,
             qty: 0.015,
-            kind: OrderKind::Limit { px: 64123.5, tif: TimeInForce::PostOnly },
-            stop: Some(StopSpec { trigger_px: 63500.0 }),
+            kind: OrderKind::Limit {
+                px: 64123.5,
+                tif: TimeInForce::PostOnly,
+            },
+            stop: Some(StopSpec {
+                trigger_px: 63500.0,
+            }),
             reduce_only: false,
         },
         wire_ns: 1_234_567_890,
         // Carried on the real record too, so the size this measures is the
         // size the hot path actually writes.
         arrival_mid: 64_120.25,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The invariant that has no other observable: the thread that runs a
+    /// barrier must hold a descriptor for the file being written. Rotation is
+    /// the only thing that breaks it, and it breaks it silently — the bytes
+    /// stay readable from the page cache whichever file was synced.
+    #[test]
+    fn the_durability_thread_follows_the_log_across_a_rotation() {
+        let dir = std::env::temp_dir().join(format!("wal-sync-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rotate.wal");
+        let _ = std::fs::remove_file(&path);
+        for stale in segments(&path).unwrap_or_default() {
+            let _ = std::fs::remove_file(stale.1);
+        }
+
+        let (mut wal, _) = WalWriter::open(&path).unwrap();
+        let (synced, written) = wal.sync_and_write_inodes();
+        assert_eq!(synced, Some(written), "a fresh log syncs what it writes");
+
+        let base = WalRecord::Note {
+            source: "test".to_string(),
+            text: "segment base stand-in".to_string(),
+        };
+        assert!(wal.rotate(&base).unwrap());
+
+        let (synced, written) = wal.sync_and_write_inodes();
+        assert_eq!(
+            synced,
+            Some(written),
+            "the barrier still syncs the archive, so it proves nothing about the live segment"
+        );
+        drop(wal);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

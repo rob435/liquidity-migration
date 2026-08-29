@@ -226,6 +226,8 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             decide_p50_ns,
             decide_p99_ns,
             durable_p50_ns,
+            barrier_wait_p50_ns,
+            barrier_wait_p99_ns,
             durable_p99_ns,
             wire_p50_ns,
             wire_p99_ns,
@@ -240,11 +242,13 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             end_to_end_p50_ns,
             end_to_end_p99_ns,
         } => format!(
-            "latency    {window_s}s, {events} messages; think {} / {}, durable {} / {}, dispatch {} / {}, venue {} / {}, API round trip {} / {}, core resume {} / {}, submit result {} / {}, end to end {} / {}",
+            "latency    {window_s}s, {events} messages; think {} / {}, durable {} / {}, still waiting on the disk {} / {}, dispatch {} / {}, venue {} / {}, API round trip {} / {}, core resume {} / {}, submit result {} / {}, end to end {} / {}",
             pretty(*decide_p50_ns),
             pretty(*decide_p99_ns),
             pretty(*durable_p50_ns),
             pretty(*durable_p99_ns),
+            pretty(*barrier_wait_p50_ns),
+            pretty(*barrier_wait_p99_ns),
             pretty(*dispatch_queue_p50_ns),
             pretty(*dispatch_queue_p99_ns),
             pretty(*venue_task_p50_ns),
@@ -265,13 +269,15 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             task_started_ns,
             socket_write_ns,
             ack_ns,
+            rate_wait_ns,
             task_completed_ns,
             core_handled_ns,
             ..
         } => format!(
-            "timing     {operation} {client_order_id}: queue {}, task {}, socket {}, ack {}, resume {}",
+            "timing     {operation} {client_order_id}: queue {}, task {}, paced {}, socket {}, ack {}, resume {}",
             pretty(task_started_ns.saturating_sub(*queued_ns)),
             pretty(task_completed_ns.saturating_sub(*task_started_ns)),
+            rate_wait_ns.map(pretty).unwrap_or_else(|| "unknown".to_string()),
             socket_write_ns.map(|at| pretty(at.saturating_sub(*task_started_ns))).unwrap_or_else(|| "unknown".to_string()),
             ack_ns.map(|at| pretty(at.saturating_sub(socket_write_ns.unwrap_or(*task_started_ns)))).unwrap_or_else(|| "unknown".to_string()),
             pretty(core_handled_ns.saturating_sub(*task_completed_ns)),
@@ -308,6 +314,19 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 0 => String::new(),
                 late => format!(" (read {late} ms late)"),
             }
+        ),
+        WalRecord::QuoteFill { features } => format!(
+            "flow fill  {} {:?} on {}: score {}, fast {}, slow {}, depth ratio {}, spread {} bp, vol {} bp, queue {} USDT",
+            features.client_order_id,
+            features.side,
+            names.symbol(features.symbol),
+            optional(features.flow_score, 3),
+            optional(features.flow_fast, 3),
+            optional(features.flow_slow, 3),
+            optional(features.last_depth_ratio, 3),
+            optional(features.spread_bps, 2),
+            optional(features.volatility_bps, 2),
+            optional(features.queue_ahead_usdt, 2),
         ),
         WalRecord::Names {
             strategies,
@@ -389,6 +408,12 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
     }
 }
 
+fn optional(value: Option<f64>, digits: usize) -> String {
+    value
+        .map(|number| format!("{number:+.*}", digits))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn kind_words(kind: &OrderKind) -> String {
     match kind {
         OrderKind::Market => "at market".to_string(),
@@ -421,6 +446,12 @@ fn update_words(update: &engine_types::OrderUpdate, names: &LogNames) -> String 
         U::Cancelled {
             client_order_id, ..
         } => format!("{client_order_id} cancelled"),
+        U::Amended {
+            client_order_id,
+            px,
+            qty,
+            ..
+        } => format!("{client_order_id} is working {qty} at {px}"),
         U::StopAttached {
             symbol, trigger_px, ..
         } => format!("stop on {} at {trigger_px}", names.symbol(*symbol)),

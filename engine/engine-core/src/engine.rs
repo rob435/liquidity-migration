@@ -22,10 +22,17 @@
 //! park partial reads in its own buffer, not in the future.
 //!
 //! The order of the intent pipeline is the part that a crash reads back:
-//! intent recorded, verdict recorded, order recorded **and forced to disk**,
-//! and only then the bytes leave. A crash between the barrier and the reply
-//! leaves an order the log knows about and no reply for it, which is exactly
-//! what `engine replay` shows as in flight.
+//! intent recorded, verdict recorded, order recorded **and handed to the
+//! operating system**, and only then the bytes leave. The disk barrier starts
+//! at the same moment and runs beside the flight to the venue; what waits for
+//! it is the first news that the order traded, never the send. A crash between
+//! the send and the reply leaves an order the log knows about and no reply for
+//! it, which is exactly what `engine replay` shows as in flight.
+//!
+//! What that trades: a machine that dies inside the barrier — not a process
+//! that dies, whose bytes are already with the operating system — can leave an
+//! order at the venue the log does not name. Reconciliation reads that as an
+//! order it cannot account for and latches opening off.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -77,6 +84,19 @@ pub const MAX_CANCELS_PER_BATCH: usize = 10;
 const HALT_CANCEL_CONFIRM_NS: u64 = 5_000_000_000;
 #[cfg(test)]
 const HALT_CANCEL_CONFIRM_NS: u64 = 25_000_000;
+
+/// How long an accepted amend may go unexplained before the order is pulled.
+///
+/// The venue answers `order.amend` by saying it took the request, never by
+/// saying what price it left the order at. It states the price separately,
+/// by republishing the order on the private stream, and that arrives in
+/// single-digit milliseconds. This is the outer bound: past it, an order
+/// resting at a price the engine cannot name is worth less than the queue
+/// position holding it saves.
+#[cfg(not(test))]
+const AMEND_CONFIRM_NS: u64 = 2_000_000_000;
+#[cfg(test)]
+const AMEND_CONFIRM_NS: u64 = 25_000_000;
 
 fn stop_key(symbol: SymbolId, side: Side) -> (u16, bool) {
     (symbol.0, side == Side::Sell)
@@ -229,6 +249,18 @@ enum HaltCancelState {
     AwaitingPrivate { deadline_ns: u64 },
 }
 
+/// An amend the venue took, held until the private stream says what price it
+/// left the order at. Everything needed to settle the reservation either way
+/// is here, because the completion that opened it is long gone by then.
+struct AwaitingAmend {
+    symbol: SymbolId,
+    existing: crate::inflight::OrderRec,
+    amended_intent: Box<Intent>,
+    remaining_qty: f64,
+    tif: TimeInForce,
+    deadline_ns: u64,
+}
+
 pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     pub wal: W,
     pub risk: R,
@@ -273,6 +305,13 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// remains in the ledger until the private stream ends it; this set keeps
     /// each refresh tick from submitting the same cancel again meanwhile.
     halt_cancels: std::collections::HashMap<String, HaltCancelState>,
+    amends_awaiting_price: HashMap<String, AwaitingAmend>,
+    /// A durability barrier the order path started and has not confirmed.
+    ///
+    /// The bytes are with the operating system; the disk has not said so yet.
+    /// Held here because the thing that must wait for it is not the send —
+    /// it is the first news that an order traded.
+    pending_barrier: Option<engine_types::wal::PendingBarrier>,
     /// Halt pulls bypass the ordinary per-wake action drain. One native-sized
     /// group is submitted per main-loop turn, with private order updates
     /// biased ahead of the next group.
@@ -766,6 +805,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // from a made-up deadline.
             working: WorkingOrders::default(),
             halt_cancels: std::collections::HashMap::new(),
+            amends_awaiting_price: HashMap::new(),
+            pending_barrier: None,
             halt_cancel_queue: VecDeque::new(),
             wanted_symbols: Vec::new(),
             leverage_at: std::collections::HashMap::new(),
@@ -1367,22 +1408,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         order_feed: &mut O,
     ) -> Result<(), EngineError> {
         while !self.pending_mutations.is_empty() {
-            let completion = tokio::time::timeout(
-                Duration::from_secs(10),
-                self.venue_completions.recv(),
-            )
-            .await
-            .map_err(|_| {
-                EngineError::State(format!(
-                    "market feed closed with {} venue mutations still outstanding",
-                    self.pending_mutations.len()
-                ))
-            })?
-            .ok_or_else(|| {
-                EngineError::State(
-                    "venue task stopped while the market-close tail was draining".to_string(),
-                )
-            })?;
+            let completion =
+                tokio::time::timeout(Duration::from_secs(10), self.venue_completions.recv())
+                    .await
+                    .map_err(|_| {
+                        EngineError::State(format!(
+                            "market feed closed with {} venue mutations still outstanding",
+                            self.pending_mutations.len()
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        EngineError::State(
+                            "venue task stopped while the market-close tail was draining"
+                                .to_string(),
+                        )
+                    })?;
             self.take_completion_turn(completion, order_feed).await?;
         }
         Ok(())
@@ -1393,22 +1433,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// tells the next boot's audit a lie.
     pub async fn finish(&mut self) -> Result<(), EngineError> {
         while !self.pending_mutations.is_empty() {
-            let completion = tokio::time::timeout(
-                Duration::from_secs(10),
-                self.venue_completions.recv(),
-            )
-            .await
-            .map_err(|_| {
-                EngineError::State(format!(
-                    "graceful stop timed out with {} venue mutations outstanding",
-                    self.pending_mutations.len()
-                ))
-            })?
-            .ok_or_else(|| {
-                EngineError::State(
-                    "venue task stopped during graceful mutation drain".to_string(),
-                )
-            })?;
+            let completion =
+                tokio::time::timeout(Duration::from_secs(10), self.venue_completions.recv())
+                    .await
+                    .map_err(|_| {
+                        EngineError::State(format!(
+                            "graceful stop timed out with {} venue mutations outstanding",
+                            self.pending_mutations.len()
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        EngineError::State(
+                            "venue task stopped during graceful mutation drain".to_string(),
+                        )
+                    })?;
             self.take_venue_completion(completion).await?;
             self.drain(clock::now_ns()).await?;
         }
@@ -1417,6 +1455,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 "graceful stop found deferred actions without a live venue mutation".to_string(),
             ));
         }
+        // The barrier below covers these bytes too, but an outstanding one
+        // carries an answer, and a stop that dropped it would be a failed
+        // barrier nobody heard about.
+        self.settle_barrier()?;
         let now = clock::now_ns();
         let record = self.ledger.record_for_wal(now);
         self.wal.append(&record)?;
@@ -2237,6 +2279,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
+        self.pull_unconfirmed_amends()?;
         let mut progress = self.drain_progress.take().unwrap_or(DrainProgress {
             origin_ns,
             handled: 0,
@@ -2250,6 +2293,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.load_ready_wake(&mut progress);
             }
             while let Some(action) = self.pending.pop_front() {
+                if let Action::RecordQuoteFill { features } = action {
+                    self.wal.append(&WalRecord::QuoteFill { features })?;
+                    continue;
+                }
                 progress.handled += 1;
                 // Past the cap, whatever adds risk is dropped but whatever sheds
                 // it still flows: an exit or a cancel queued behind a flood must
@@ -2350,12 +2397,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         spec,
                     } => {
                         let taken = self
-                            .process_amend(
-                                symbol,
-                                &client_order_id,
-                                spec,
-                                progress.origin_ns,
-                            )
+                            .process_amend(symbol, &client_order_id, spec, progress.origin_ns)
                             .await?;
                         self.working
                             .amended(&client_order_id, spec.px, taken, clock::now_ns());
@@ -2368,6 +2410,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         if !self.pending.is_empty() {
                             return self.pause_drain(progress);
                         }
+                    }
+                    Action::RecordQuoteFill { .. } => {
+                        unreachable!("quote-fill receipts are journaled before venue actions")
                     }
                 }
             }
@@ -2476,6 +2521,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 });
             }
             Action::Place(_) => {}
+            Action::RecordQuoteFill { .. } => {}
         }
         queue.push_back((action, origin_ns));
     }
@@ -2957,7 +3003,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(false);
         }
 
-        self.wal.barrier()?;
+        // The bytes go to the operating system here, and the disk barrier
+        // runs beside the send rather than in front of it. What waits for the
+        // disk is `settle_barrier`, called before any order news is acted on:
+        // a fill cannot reach us until the venue has had a round trip, which
+        // is longer than the barrier, and no fill is ever *processed* before
+        // the order that earned it is durable.
+        //
+        // What this gives up, stated plainly: a machine that dies inside the
+        // barrier can leave an order at the venue that the log does not name.
+        // Boot reconciliation sees that as a foreign order and latches
+        // opening off, which is the same answer it gives for any order it
+        // cannot account for.
+        self.settle_barrier()?;
+        self.pending_barrier = Some(self.wal.barrier_begin()?);
         let durable_ns = clock::now_ns();
         for order in &prepared {
             self.ledger.record(
@@ -3012,6 +3071,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 MutationCompletion::Orders {
                     started_ns,
                     completed_ns,
+                    rate_wait_ns,
                     replies,
                     ..
                 },
@@ -3038,14 +3098,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     let core_handled_ns = clock::now_ns();
                     self.ledger
                         .record(Segment::Wire, completed_ns.saturating_sub(decided_ns));
-                    self.ledger.record(
-                        Segment::DispatchQueue,
-                        started_ns.saturating_sub(queued_ns),
-                    );
-                    self.ledger.record(
-                        Segment::VenueTask,
-                        completed_ns.saturating_sub(started_ns),
-                    );
+                    self.ledger
+                        .record(Segment::DispatchQueue, started_ns.saturating_sub(queued_ns));
+                    self.ledger
+                        .record(Segment::VenueTask, completed_ns.saturating_sub(started_ns));
                     self.ledger.record(
                         Segment::CoreResume,
                         core_handled_ns.saturating_sub(completed_ns),
@@ -3074,8 +3130,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         task_started_ns: started_ns,
                         socket_write_ns,
                         ack_ns: ack_timing_ns,
+                        rate_wait_ns,
                         task_completed_ns: completed_ns,
                         core_handled_ns,
+                        core_handled_wall_ns: clock::wall_ns(),
                     })?;
                     let update = match reply {
                         Ok(ack) => {
@@ -3090,13 +3148,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             }
                             Some(OrderUpdate::Ack(ack))
                         }
-                        Err(VenueError::Rejected { code, message }) => {
-                            Some(OrderUpdate::Reject {
-                                client_order_id: request.client_order_id.clone(),
-                                code,
-                                reason: message,
-                            })
-                        }
+                        Err(VenueError::Rejected { code, message }) => Some(OrderUpdate::Reject {
+                            client_order_id: request.client_order_id.clone(),
+                            code,
+                            reason: message,
+                        }),
                         Err(VenueError::BadRequest(detail)) => Some(OrderUpdate::Reject {
                             client_order_id: request.client_order_id.clone(),
                             code: 0,
@@ -3114,10 +3170,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             None
                         }
                     };
-                    self.ledger.record(
-                        Segment::EndToEnd,
-                        clock::now_ns().saturating_sub(origin_ns),
-                    );
+                    self.ledger
+                        .record(Segment::EndToEnd, clock::now_ns().saturating_sub(origin_ns));
                     if let Some(update) = update {
                         self.take_update(update).await?;
                     }
@@ -3133,6 +3187,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     started_ns,
                     completed_ns,
                     timing,
+                    rate_wait_ns,
                     replies,
                     ..
                 },
@@ -3159,18 +3214,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
                 let mut replies = replies.into_iter();
                 let mut halt_failure = None;
-                let accepted_deadline =
-                    clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
+                let accepted_deadline = clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
                 for (_, client_order_id) in requests {
                     let core_handled_ns = clock::now_ns();
-                    self.ledger.record(
-                        Segment::DispatchQueue,
-                        started_ns.saturating_sub(queued_ns),
-                    );
-                    self.ledger.record(
-                        Segment::VenueTask,
-                        completed_ns.saturating_sub(started_ns),
-                    );
+                    self.ledger
+                        .record(Segment::DispatchQueue, started_ns.saturating_sub(queued_ns));
+                    self.ledger
+                        .record(Segment::VenueTask, completed_ns.saturating_sub(started_ns));
                     self.ledger.record(
                         Segment::CoreResume,
                         core_handled_ns.saturating_sub(completed_ns),
@@ -3183,8 +3233,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         task_started_ns: started_ns,
                         socket_write_ns: timing.map(|mark| mark.sent_ns),
                         ack_ns: timing.map(|mark| mark.ack_ns),
+                        rate_wait_ns,
                         task_completed_ns: completed_ns,
                         core_handled_ns,
+                        core_handled_wall_ns: clock::wall_ns(),
                     })?;
                     let reply = replies.next().unwrap_or_else(|| {
                         Err(VenueError::BadReply(
@@ -3264,19 +3316,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     started_ns,
                     completed_ns,
                     timing,
+                    rate_wait_ns,
                     reply,
                     ..
                 },
             ) => {
                 let core_handled_ns = clock::now_ns();
-                self.ledger.record(
-                    Segment::DispatchQueue,
-                    started_ns.saturating_sub(queued_ns),
-                );
-                self.ledger.record(
-                    Segment::VenueTask,
-                    completed_ns.saturating_sub(started_ns),
-                );
+                self.ledger
+                    .record(Segment::DispatchQueue, started_ns.saturating_sub(queued_ns));
+                self.ledger
+                    .record(Segment::VenueTask, completed_ns.saturating_sub(started_ns));
                 self.ledger.record(
                     Segment::CoreResume,
                     core_handled_ns.saturating_sub(completed_ns),
@@ -3293,8 +3342,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     task_started_ns: started_ns,
                     socket_write_ns: timing.map(|mark| mark.sent_ns),
                     ack_ns: timing.map(|mark| mark.ack_ns),
+                    rate_wait_ns,
                     task_completed_ns: completed_ns,
                     core_handled_ns,
+                    core_handled_wall_ns: clock::wall_ns(),
                 })?;
                 tracing::debug!(
                     command_id,
@@ -3303,20 +3354,33 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 );
                 match reply {
                     Ok(()) => {
+                        // The venue took it and did not say at what price.
+                        // It states that by republishing the order on the
+                        // private stream, so the ambiguity stays open for
+                        // that answer rather than being closed by pulling
+                        // the order — which is the whole point of amending
+                        // in place instead of replacing.
                         self.wal.append(&WalRecord::Note {
                             source: "engine".into(),
                             text: format!(
-                                "amend of {client_order_id} was accepted asynchronously; its price remains ambiguous and cancellation is queued"
+                                "amend of {client_order_id} was accepted; waiting for the private stream to say what price it is working at"
                             ),
                         })?;
-                        self.pending.push_front(Action::Cancel {
-                            symbol,
-                            client_order_id: client_order_id.clone(),
-                        });
+                        self.amends_awaiting_price.insert(
+                            client_order_id.clone(),
+                            AwaitingAmend {
+                                symbol,
+                                existing,
+                                amended_intent,
+                                remaining_qty,
+                                tif,
+                                deadline_ns: clock::now_ns().saturating_add(AMEND_CONFIRM_NS),
+                            },
+                        );
                     }
                     Err(VenueError::BadRequest(detail)) => {
                         tracing::error!(id = client_order_id, detail, "amend never sent");
-                        self.resolve_failed_amend(
+                        self.resolve_amend(
                             &client_order_id,
                             &existing,
                             &amended_intent,
@@ -3330,7 +3394,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         })?;
                     }
                     Err(VenueError::Rejected { code, message }) => {
-                        self.resolve_failed_amend(
+                        self.resolve_amend(
                             &client_order_id,
                             &existing,
                             &amended_intent,
@@ -3382,26 +3446,89 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    fn resolve_failed_amend(
+    /// Narrow an amend's conservative old/new reservation to the one price
+    /// the order is actually working at.
+    ///
+    /// Called with the old price when the amend never took, and with the
+    /// venue's own stated price when it did. Both are the same act: the
+    /// range was held open because the price was unknown, and this is where
+    /// it becomes known.
+    /// Wait for the outstanding durability barrier, if there is one.
+    ///
+    /// Almost always free: the barrier was started when the order was sent,
+    /// and the venue's round trip is longer than the disk's. What it costs
+    /// when it is not free is recorded, because that is the number that says
+    /// whether running the barrier beside the send is buying anything.
+    fn settle_barrier(&mut self) -> Result<(), EngineError> {
+        let Some(pending) = self.pending_barrier.take() else {
+            return Ok(());
+        };
+        let began_ns = clock::now_ns();
+        pending.wait()?;
+        self.ledger.record(
+            Segment::BarrierWait,
+            clock::now_ns().saturating_sub(began_ns),
+        );
+        Ok(())
+    }
+
+    fn resolve_amend(
         &mut self,
         client_order_id: &str,
         existing: &crate::inflight::OrderRec,
         amended_intent: &Intent,
         remaining_qty: f64,
-        old_px: f64,
+        effective_px: f64,
         tif: TimeInForce,
     ) -> Result<(), EngineError> {
         let resolved = WalRecord::AmendResolved {
             client_order_id: client_order_id.to_string(),
-            effective_px: old_px,
+            effective_px,
         };
         self.wal.append(&resolved)?;
         self.orders.apply(&resolved);
         if !existing.request.reduce_only {
-            let mut old = amended_intent.clone();
-            old.kind = OrderKind::Limit { px: old_px, tif };
+            let mut settled = amended_intent.clone();
+            settled.kind = OrderKind::Limit {
+                px: effective_px,
+                tif,
+            };
             self.risk
-                .register_order(client_order_id, &old, remaining_qty);
+                .register_order(client_order_id, &settled, remaining_qty);
+        }
+        Ok(())
+    }
+
+    /// Pull any order whose accepted amend the private stream never
+    /// explained. The fallback is exactly what an unamendable venue gets:
+    /// take the order down, because an order resting at a price the engine
+    /// cannot name is one it cannot price its own book against.
+    fn pull_unconfirmed_amends(&mut self) -> Result<(), EngineError> {
+        if self.amends_awaiting_price.is_empty() {
+            return Ok(());
+        }
+        let now_ns = clock::now_ns();
+        let overdue: Vec<String> = self
+            .amends_awaiting_price
+            .iter()
+            .filter(|(_, awaiting)| now_ns >= awaiting.deadline_ns)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for client_order_id in overdue {
+            let Some(awaiting) = self.amends_awaiting_price.remove(&client_order_id) else {
+                continue;
+            };
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!(
+                    "amend of {client_order_id} was accepted but its price was never stated within {} ms; cancellation is queued",
+                    AMEND_CONFIRM_NS / 1_000_000
+                ),
+            })?;
+            self.pending.push_front(Action::Cancel {
+                symbol: awaiting.symbol,
+                client_order_id,
+            });
         }
         Ok(())
     }
@@ -3541,8 +3668,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let queued_ns = clock::now_ns();
         let command_id = self.venue.dispatch_cancels(requests.clone())?;
         self.mark_symbols_busy(requests.iter().map(|(symbol, _)| *symbol));
-        self.pending_mutations
-            .insert(command_id, PendingMutation::Cancels { requests, queued_ns });
+        self.pending_mutations.insert(
+            command_id,
+            PendingMutation::Cancels {
+                requests,
+                queued_ns,
+            },
+        );
         Ok(true)
     }
 
@@ -3634,16 +3766,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(false);
         }
         if existing.reservation_low_px.to_bits() != existing.reservation_high_px.to_bits() {
+            // An order whose working price is unknown cannot be moved: the
+            // next reservation would have to cover the range of a range. If
+            // an answer is still owed the wait is measured in milliseconds
+            // and the asker can come back; the confirmation deadline is what
+            // pulls the order when no answer comes. Ambiguity with nothing
+            // owed — a range left open across a restart — has no answer
+            // coming, so that one is resolved the only way left.
+            let awaited = self.amends_awaiting_price.contains_key(client_order_id);
             self.wal.append(&WalRecord::Note {
                 source: "engine".into(),
-                text: format!(
-                    "{client_order_id} not amended: its prior amend outcome is still ambiguous; cancellation queued"
-                ),
+                text: if awaited {
+                    format!(
+                        "{client_order_id} not amended yet: the venue has not said what price its last amend left it at"
+                    )
+                } else {
+                    format!(
+                        "{client_order_id} not amended: its prior amend outcome is still ambiguous; cancellation queued"
+                    )
+                },
             })?;
-            self.pending.push_front(Action::Cancel {
-                symbol,
-                client_order_id: client_order_id.to_string(),
-            });
+            if !awaited {
+                self.pending.push_front(Action::Cancel {
+                    symbol,
+                    client_order_id: client_order_id.to_string(),
+                });
+            }
             return Ok(false);
         }
         let OrderKind::Limit { px: old_px, tif } = existing.request.kind else {
@@ -3973,6 +4121,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Every order update, wherever it came from, goes through here.
     async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
+        // Before anything is done with news about an order: the record of the
+        // order that earned it is on the disk. This is the wait the send no
+        // longer pays.
+        self.settle_barrier()?;
         if let OrderUpdate::FastFill {
             exec_id,
             client_order_id,
@@ -4049,6 +4201,37 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.risk.on_update(&update);
         self.orders.apply_update(&update);
+        // The venue naming the price a resting order is working at is the
+        // answer an accepted amend was waiting for. It ends the ambiguity
+        // the way a definitive rejection does, except that the order stays
+        // where it is — with whatever queue position the venue left it.
+        let stated_price = match &update {
+            OrderUpdate::Amended {
+                client_order_id,
+                px,
+                ..
+            } => Some((client_order_id.clone(), *px)),
+            _ => None,
+        };
+        if let Some((client_order_id, px)) = stated_price {
+            if let Some(awaiting) = self.amends_awaiting_price.remove(&client_order_id) {
+                self.resolve_amend(
+                    &client_order_id,
+                    &awaiting.existing,
+                    &awaiting.amended_intent,
+                    awaiting.remaining_qty,
+                    px,
+                    awaiting.tif,
+                )?;
+                // The supervisor working this entry prices its next move
+                // against where the order actually is, spends one of its
+                // amend budget, and starts its cross grace from the cross
+                // that really happened. Acceptance alone could tell it none
+                // of that, because acceptance does not name a price.
+                self.working
+                    .amended(&client_order_id, Some(px), true, clock::now_ns());
+            }
+        }
         if let Some(client_order_id) = inflight::client_order_id(&update) {
             let still_live = self
                 .orders
@@ -4057,6 +4240,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .is_some_and(|order| order.in_flight());
             if !still_live {
                 self.halt_cancels.remove(client_order_id);
+                // An order that has ended has no price left to state. Its
+                // reservation went with it: the ending is what released it.
+                self.amends_awaiting_price.remove(client_order_id);
             }
         }
         // Only fills joined to orders this log sent enter trusted exposure.

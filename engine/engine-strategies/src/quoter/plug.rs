@@ -33,11 +33,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use engine_types::{
-    Depth, EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, OrderUpdate, Side,
-    StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, SymbolId, TimeInForce, TradeFlow,
+    BookLevel, Depth, EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind,
+    OrderUpdate, QuoteFillFeatures, Side, StopSpec, Strategy, StrategyCtx, StrategyId,
+    Subscription, SymbolId, TimeInForce, TradeFlow,
 };
 
-use super::plan::{plan_quotes_at, QuoteRules, QuoteStep, Resting};
+use super::plan::{plan_quotes_protected, QuoteRules, QuoteStep, Resting, SideProtection};
 use crate::params::Params;
 use crate::BuildError;
 
@@ -70,6 +71,16 @@ struct MicroRules {
     book_lean: f64,
     trade_lean: f64,
     signal_half_life_ns: u64,
+    flow_fast_half_life_ns: u64,
+    flow_slow_half_life_ns: u64,
+    flow_fast_weight: f64,
+    flow_slow_weight: f64,
+    flow_response: f64,
+    flow_max_widen: f64,
+    flow_pull_score: Option<f64>,
+    flow_depth_bps: f64,
+    flow_volatility_depth_multiplier: f64,
+    flow_max_score: f64,
     queue_reprice_edge: f64,
     qty_usdt: Option<f64>,
     max_position_usdt: Option<f64>,
@@ -79,12 +90,24 @@ struct MicroRules {
 #[derive(Copy, Clone, Debug, Default)]
 struct MicroState {
     last_ns: u64,
-    mid: f64,
+    flow_last_ns: u64,
+    /// Read stamp of the newest touch taken, whichever topic carried it.
+    touch_ns: u64,
+    /// The mid at the last variance sample. Its own anchor, because the
+    /// touch now arrives more often than the deep book and measuring
+    /// variance against the newer, closer mid would shrink every step.
+    var_mid: f64,
     microprice: f64,
     book_imbalance: f64,
     variance: f64,
     trade_imbalance: f64,
     trade_qty: f64,
+    flow_fast: f64,
+    flow_slow: f64,
+    last_depth_ratio: f64,
+    bid_depth_usdt: f64,
+    ask_depth_usdt: f64,
+    has_flow: bool,
     has_depth: bool,
 }
 
@@ -150,6 +173,16 @@ impl Quoter {
             "book_lean_bps",
             "trade_lean_bps",
             "signal_half_life_ms",
+            "flow_fast_half_life_ms",
+            "flow_slow_half_life_ms",
+            "flow_fast_weight",
+            "flow_slow_weight",
+            "flow_response_bps",
+            "flow_max_widen_bps",
+            "flow_pull_score",
+            "flow_depth_bps",
+            "flow_volatility_depth_multiplier",
+            "flow_max_score",
             "queue_reprice_edge_bps",
             "qty_usdt",
             "max_position_usdt",
@@ -215,9 +248,7 @@ impl Quoter {
 
         let maker_fee = p.opt_nonnegative("maker_fee_bps")?.unwrap_or(0.0) / 10_000.0;
         let min_edge = p.opt_nonnegative("min_edge_bps")?.unwrap_or(0.0) / 10_000.0;
-        let volatility_multiplier = p
-            .opt_nonnegative("volatility_multiplier")?
-            .unwrap_or(0.0);
+        let volatility_multiplier = p.opt_nonnegative("volatility_multiplier")?.unwrap_or(0.0);
         let toxicity = p.opt_nonnegative("toxicity_bps")?.unwrap_or(0.0) / 10_000.0;
         let book_lean = p.opt_nonnegative("book_lean_bps")?.unwrap_or(0.0) / 10_000.0;
         let trade_lean = p.opt_nonnegative("trade_lean_bps")?.unwrap_or(0.0) / 10_000.0;
@@ -226,16 +257,48 @@ impl Quoter {
             .unwrap_or(250.0)
             .mul_add(1_000_000.0, 0.0)
             .round() as u64;
-        let queue_reprice_edge = p
-            .opt_nonnegative("queue_reprice_edge_bps")?
-            .unwrap_or(0.0)
-            / 10_000.0;
+        let flow_fast_half_life_ns = p
+            .opt_positive("flow_fast_half_life_ms")?
+            .unwrap_or(250.0)
+            .mul_add(1_000_000.0, 0.0)
+            .round() as u64;
+        let flow_slow_half_life_ns = p
+            .opt_positive("flow_slow_half_life_ms")?
+            .unwrap_or(3_000.0)
+            .mul_add(1_000_000.0, 0.0)
+            .round() as u64;
+        let flow_fast_weight = p.opt_nonnegative("flow_fast_weight")?.unwrap_or(0.65);
+        let flow_slow_weight = p.opt_nonnegative("flow_slow_weight")?.unwrap_or(0.35);
+        let flow_response = p.opt_nonnegative("flow_response_bps")?.unwrap_or(0.0) / 10_000.0;
+        let flow_max_widen = p.opt_nonnegative("flow_max_widen_bps")?.unwrap_or(8.0) / 10_000.0;
+        let flow_pull_score = p.opt_positive("flow_pull_score")?;
+        let flow_depth_bps = p.opt_positive("flow_depth_bps")?.unwrap_or(10.0);
+        let flow_volatility_depth_multiplier = p
+            .opt_nonnegative("flow_volatility_depth_multiplier")?
+            .unwrap_or(2.0);
+        let flow_max_score = p.opt_positive("flow_max_score")?.unwrap_or(4.0);
+        let flow_enabled = flow_response > 0.0 || flow_pull_score.is_some();
+        if flow_enabled && flow_slow_half_life_ns <= flow_fast_half_life_ns {
+            return Err(p.invalid(
+                "flow_slow_half_life_ms",
+                "expected longer than flow_fast_half_life_ms",
+            ));
+        }
+        if flow_enabled && flow_fast_weight + flow_slow_weight <= 0.0 {
+            return Err(p.invalid(
+                "flow_fast_weight",
+                "fast and slow flow weights cannot both be zero",
+            ));
+        }
+        let queue_reprice_edge =
+            p.opt_nonnegative("queue_reprice_edge_bps")?.unwrap_or(0.0) / 10_000.0;
         let adaptive = maker_fee > 0.0
             || min_edge > 0.0
             || volatility_multiplier > 0.0
             || toxicity > 0.0
             || book_lean > 0.0
             || trade_lean > 0.0
+            || flow_enabled
             || queue_reprice_edge > 0.0
             || qty_usdt.is_some()
             || max_position_usdt.is_some();
@@ -266,6 +329,16 @@ impl Quoter {
                 book_lean,
                 trade_lean,
                 signal_half_life_ns,
+                flow_fast_half_life_ns,
+                flow_slow_half_life_ns,
+                flow_fast_weight,
+                flow_slow_weight,
+                flow_response,
+                flow_max_widen,
+                flow_pull_score,
+                flow_depth_bps,
+                flow_volatility_depth_multiplier,
+                flow_max_score,
                 queue_reprice_edge,
                 qty_usdt,
                 max_position_usdt,
@@ -311,6 +384,64 @@ impl Quoter {
         decay
     }
 
+    fn decay_flow_state(state: &mut MicroState, now_ns: u64, fast_ns: u64, slow_ns: u64) {
+        if state.flow_last_ns == 0 {
+            state.flow_last_ns = now_ns;
+            return;
+        }
+        let now_ns = now_ns.max(state.flow_last_ns);
+        let elapsed = now_ns.saturating_sub(state.flow_last_ns) as f64;
+        state.flow_fast *= (-std::f64::consts::LN_2 * elapsed / fast_ns as f64).exp();
+        state.flow_slow *= (-std::f64::consts::LN_2 * elapsed / slow_ns as f64).exp();
+        state.flow_last_ns = now_ns;
+    }
+
+    /// Advance one symbol's decayed signals to `now_ns` and report the decay
+    /// applied. Called once per market message, whichever topic it came on:
+    /// the decay is a function of elapsed time, so splitting one interval
+    /// into two calls is the same number, but calling it twice for the same
+    /// message is not — the second sees no elapsed time and reports a decay
+    /// of one.
+    fn decay_to(&mut self, symbol: SymbolId, now_ns: u64) -> f64 {
+        let rules = self.micro_rules;
+        let state = self.micro.entry(symbol).or_default();
+        // The touch and the deep book are separate streams and can be read
+        // out of order. Time does not run backwards for the decay.
+        let now_ns = now_ns.max(state.last_ns);
+        let decay = Self::decay_state(state, now_ns, rules.signal_half_life_ns);
+        Self::decay_flow_state(
+            state,
+            now_ns,
+            rules.flow_fast_half_life_ns,
+            rules.flow_slow_half_life_ns,
+        );
+        decay
+    }
+
+    /// Take a top of book if it is not older than the one already held.
+    /// Prices only — the depth behind them is the deep book's to say.
+    fn take_touch(state: &mut MicroState, bid: BookLevel, ask: BookLevel, recv_ns: u64) {
+        if bid.px <= 0.0 || ask.px < bid.px || recv_ns < state.touch_ns {
+            return;
+        }
+        state.touch_ns = recv_ns;
+        let top_qty = bid.qty + ask.qty;
+        state.microprice = if top_qty > 0.0 {
+            (ask.px * bid.qty + bid.px * ask.qty) / top_qty
+        } else {
+            (bid.px + ask.px) / 2.0
+        };
+    }
+
+    /// The top of book on its own topic. The venue publishes it about twice
+    /// as often as the deep book, so this is where the quoted price gets its
+    /// freshness; the book and queue terms wait for the deep book.
+    fn note_touch(&mut self, symbol: SymbolId, bid: BookLevel, ask: BookLevel, recv_ns: u64) {
+        self.decay_to(symbol, recv_ns);
+        let state = self.micro.entry(symbol).or_default();
+        Self::take_touch(state, bid, ask, recv_ns);
+    }
+
     fn note_depth(&mut self, symbol: SymbolId, depth: &Depth) {
         let (Some(bid), Some(ask)) = (depth.best_bid(), depth.best_ask()) else {
             return;
@@ -318,13 +449,12 @@ impl Quoter {
         if bid.px <= 0.0 || ask.px < bid.px {
             return;
         }
-        let now_ns = depth.recv_ns;
-        let half_life = self.micro_rules.signal_half_life_ns;
+        let decay = self.decay_to(symbol, depth.recv_ns);
         let state = self.micro.entry(symbol).or_default();
-        let decay = Self::decay_state(state, now_ns, half_life);
+        Self::take_touch(state, bid, ask, depth.recv_ns);
         let mid = (bid.px + ask.px) / 2.0;
-        if state.mid > 0.0 {
-            let change = (mid / state.mid).ln();
+        if state.var_mid > 0.0 {
+            let change = (mid / state.var_mid).ln();
             let alpha = (1.0 - decay).max(0.01);
             state.variance += alpha * change * change;
         }
@@ -343,13 +473,24 @@ impl Quoter {
         } else {
             0.0
         };
-        let top_qty = bid.qty + ask.qty;
-        state.microprice = if top_qty > 0.0 {
-            (ask.px * bid.qty + bid.px * ask.qty) / top_qty
-        } else {
-            mid
-        };
-        state.mid = mid;
+        state.var_mid = mid;
+        let volatility_bps = state.variance.max(0.0).sqrt() * 10_000.0;
+        let band_bps = (self.micro_rules.flow_depth_bps
+            + self.micro_rules.flow_volatility_depth_multiplier * volatility_bps)
+            .clamp(self.micro_rules.flow_depth_bps, 100.0);
+        let band = band_bps / 10_000.0;
+        state.bid_depth_usdt = depth.bids[..depth.bid_len as usize]
+            .iter()
+            .enumerate()
+            .filter(|(index, level)| *index == 0 || level.px >= mid * (1.0 - band))
+            .map(|(_, level)| level.px * level.qty)
+            .sum();
+        state.ask_depth_usdt = depth.asks[..depth.ask_len as usize]
+            .iter()
+            .enumerate()
+            .filter(|(index, level)| *index == 0 || level.px <= mid * (1.0 + band))
+            .map(|(_, level)| level.px * level.qty)
+            .sum();
         state.has_depth = true;
     }
 
@@ -358,13 +499,41 @@ impl Quoter {
         if total <= 0.0 {
             return;
         }
-        let half_life = self.micro_rules.signal_half_life_ns;
+        let max_score = self.micro_rules.flow_max_score;
+        let decay = self.decay_to(symbol, trades.recv_ns);
         let state = self.micro.entry(symbol).or_default();
-        let decay = Self::decay_state(state, trades.recv_ns, half_life);
         let observed = (trades.buy_qty - trades.sell_qty) / total;
         let alpha = (1.0 - decay).max(0.05);
         state.trade_imbalance += alpha * (observed - state.trade_imbalance);
         state.trade_qty += total;
+        let px = if trades.last_px > 0.0 {
+            trades.last_px
+        } else {
+            state.microprice
+        };
+        if px > 0.0 && state.bid_depth_usdt > 0.0 && state.ask_depth_usdt > 0.0 {
+            let buy_ratio = trades.buy_qty * px / state.ask_depth_usdt;
+            let sell_ratio = trades.sell_qty * px / state.bid_depth_usdt;
+            let shock = (buy_ratio - sell_ratio).clamp(-max_score, max_score);
+            state.last_depth_ratio = shock;
+            state.flow_fast = (state.flow_fast + shock).clamp(-max_score, max_score);
+            state.flow_slow = (state.flow_slow + shock).clamp(-max_score, max_score);
+            state.has_flow = true;
+        }
+    }
+
+    fn flow_score(&self, state: &MicroState) -> f64 {
+        let weight = self.micro_rules.flow_fast_weight + self.micro_rules.flow_slow_weight;
+        if weight <= 0.0 {
+            return 0.0;
+        }
+        ((self.micro_rules.flow_fast_weight * state.flow_fast
+            + self.micro_rules.flow_slow_weight * state.flow_slow)
+            / weight)
+            .clamp(
+                -self.micro_rules.flow_max_score,
+                self.micro_rules.flow_max_score,
+            )
     }
 
     fn priced_rules(
@@ -372,11 +541,11 @@ impl Quoter {
         symbol: SymbolId,
         quote: engine_types::Quote,
         depth: &Depth,
-    ) -> (f64, QuoteRules) {
+    ) -> (f64, QuoteRules, SideProtection) {
         let mut rules = self.rules;
         let mid = (quote.bid_px + quote.ask_px) / 2.0;
         if mid <= 0.0 || !mid.is_finite() {
-            return (mid, rules);
+            return (mid, rules, SideProtection::default());
         }
         if let Some(notional) = self.micro_rules.qty_usdt {
             rules.qty = notional / mid;
@@ -385,10 +554,10 @@ impl Quoter {
             rules.max_position = notional / mid;
         }
         if !self.micro_rules.adaptive {
-            return (mid, rules);
+            return (mid, rules, SideProtection::default());
         }
         let Some(state) = self.micro.get(&symbol).filter(|state| state.has_depth) else {
-            return (mid, rules);
+            return (mid, rules, SideProtection::default());
         };
         let fair = state.microprice
             + mid
@@ -399,6 +568,23 @@ impl Quoter {
             + self.micro_rules.volatility_multiplier * state.variance.max(0.0).sqrt()
             + self.micro_rules.toxicity * state.trade_imbalance.abs();
         rules.half_spread = rules.half_spread.max(cost_floor);
+        let flow_score = self.flow_score(state);
+        let extra = (self.micro_rules.flow_response * flow_score.abs())
+            .min(self.micro_rules.flow_max_widen);
+        let pull = self.micro_rules.flow_pull_score.and_then(|threshold| {
+            if flow_score >= threshold {
+                Some(Side::Sell)
+            } else if flow_score <= -threshold {
+                Some(Side::Buy)
+            } else {
+                None
+            }
+        });
+        let protection = SideProtection {
+            bid_extra: if flow_score < 0.0 { extra } else { 0.0 },
+            ask_extra: if flow_score > 0.0 { extra } else { 0.0 },
+            pull,
+        };
         if self.micro_rules.queue_reprice_edge > 0.0 && !self.working.is_empty() {
             let mut best_queue = 0.0_f64;
             // A small amount traded relative to our own size means an order
@@ -414,7 +600,7 @@ impl Quoter {
                 .max(self.micro_rules.queue_reprice_edge * best_queue)
                 .min(rules.half_spread * 0.95);
         }
-        (fair, rules)
+        (fair, rules, protection)
     }
 
     fn queue_ahead(depth: &Depth, side: Side, px: f64) -> f64 {
@@ -574,7 +760,11 @@ impl Quoter {
                 ctx.place(Intent {
                     strategy: self.id,
                     symbol,
-                    side: if position > 0.0 { Side::Sell } else { Side::Buy },
+                    side: if position > 0.0 {
+                        Side::Sell
+                    } else {
+                        Side::Buy
+                    },
                     qty: position.abs(),
                     kind: OrderKind::Market,
                     stop: None,
@@ -606,23 +796,19 @@ impl Quoter {
         let quote = *ctx.quote(symbol);
         let depth = *ctx.depth(symbol);
         // This strategy's own fills, not the account's reading. See the header.
-        let (fair, priced) = self.priced_rules(symbol, quote, &depth);
-        let steps = plan_quotes_at(
+        let (fair, priced, protection) = self.priced_rules(symbol, quote, &depth);
+        let steps = plan_quotes_protected(
             quote.bid_px,
             quote.ask_px,
             fair,
             position,
             &self.working,
             priced,
+            protection,
         );
         for step in steps {
             match step {
-                QuoteStep::Place {
-                    side,
-                    px,
-                    qty,
-                    ..
-                } => {
+                QuoteStep::Place { side, px, qty, .. } => {
                     let px = maker_px(side, px, quote.bid_px, quote.ask_px, rule.tick_size);
                     let reduce_only = match side {
                         Side::Buy => position < -position_tolerance,
@@ -712,6 +898,61 @@ impl Quoter {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn record_fill_features(
+        &self,
+        exec_id: &str,
+        client_order_id: &str,
+        symbol: SymbolId,
+        side: Side,
+        px: f64,
+        is_maker: bool,
+        recv_ns: u64,
+        ctx: &mut dyn StrategyCtx,
+    ) {
+        let quote = *ctx.quote(symbol);
+        let depth = *ctx.depth(symbol);
+        let state = self.micro.get(&symbol).filter(|state| state.has_depth);
+        let spread_bps = (quote.bid_px > 0.0 && quote.ask_px >= quote.bid_px).then(|| {
+            let mid = (quote.bid_px + quote.ask_px) / 2.0;
+            (quote.ask_px - quote.bid_px) / mid * 10_000.0
+        });
+        let queue_ahead_usdt = state.and_then(|_| {
+            (px > 0.0 && depth.bid_len > 0 && depth.ask_len > 0)
+                .then(|| Self::queue_ahead(&depth, side, px) * px)
+        });
+        let has_flow = state.is_some_and(|state| state.has_flow);
+        ctx.emit(engine_types::Action::RecordQuoteFill {
+            features: QuoteFillFeatures {
+                strategy: self.id,
+                symbol,
+                exec_id: exec_id.to_string(),
+                client_order_id: client_order_id.to_string(),
+                side,
+                is_maker,
+                recv_ns,
+                flow_fast: state.filter(|_| has_flow).map(|state| state.flow_fast),
+                flow_slow: state.filter(|_| has_flow).map(|state| state.flow_slow),
+                flow_score: state
+                    .filter(|_| has_flow)
+                    .map(|state| self.flow_score(state)),
+                last_depth_ratio: state
+                    .filter(|_| has_flow)
+                    .map(|state| state.last_depth_ratio),
+                same_side_depth_usdt: state.and_then(|state| {
+                    let depth = match side {
+                        Side::Buy => state.bid_depth_usdt,
+                        Side::Sell => state.ask_depth_usdt,
+                    };
+                    (depth > 0.0).then_some(depth)
+                }),
+                spread_bps,
+                volatility_bps: state.map(|state| state.variance.max(0.0).sqrt() * 10_000.0),
+                queue_ahead_usdt,
+            },
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn place(
         &self,
         symbol: SymbolId,
@@ -764,7 +1005,7 @@ impl Strategy for Quoter {
         self.symbol_names
             .iter()
             .flat_map(|symbol| {
-                [Feed::Depth, Feed::Trades]
+                [Feed::Quote, Feed::Depth, Feed::Trades]
                     .into_iter()
                     .map(move |feed| Subscription {
                         symbol: symbol.clone(),
@@ -785,10 +1026,27 @@ impl Strategy for Quoter {
                 self.note_trades(*symbol, trades);
                 *symbol
             }
-            // Compatibility for deterministic old plug tests and feeds that
-            // have not yet grown depth. The live Bybit subscription above
-            // never asks for this path.
-            EngineEvent::Market(MarketEvent::Quote { symbol, .. }) => *symbol,
+            // The touch, on its own faster topic. The venue publishes it
+            // about twice as often as the deep book, and it is what the
+            // quoted price is built from, so taking it here is up to one
+            // publication interval of staleness removed from every quote.
+            // The book and queue terms stay on the deep book, which is the
+            // only thing that carries them.
+            EngineEvent::Market(MarketEvent::Quote { symbol, quote }) => {
+                self.note_touch(
+                    *symbol,
+                    BookLevel {
+                        px: quote.bid_px,
+                        qty: quote.bid_qty,
+                    },
+                    BookLevel {
+                        px: quote.ask_px,
+                        qty: quote.ask_qty,
+                    },
+                    quote.recv_ns,
+                );
+                *symbol
+            }
             EngineEvent::Market(MarketEvent::FeedReset { .. }) => {
                 self.pull_all_on_feed_reset(ctx);
                 return;
@@ -811,17 +1069,34 @@ impl Strategy for Quoter {
                 exec_id,
                 client_order_id,
                 symbol,
+                side,
+                px,
+                is_maker,
+                recv_ns,
                 ..
             }) => {
+                self.record_fill_features(
+                    exec_id,
+                    client_order_id,
+                    *symbol,
+                    *side,
+                    *px,
+                    *is_maker,
+                    *recv_ns,
+                    ctx,
+                );
                 self.settle_fast_fill(exec_id);
-                if ctx.order_facts(client_order_id).is_some_and(|order| {
-                    order.reduce_only && order.filled_qty + 1e-12 >= order.qty
-                }) {
+                if ctx
+                    .order_facts(client_order_id)
+                    .is_some_and(|order| order.reduce_only && order.filled_qty + 1e-12 >= order.qty)
+                {
                     self.flatten_pending.remove(symbol);
                 }
                 *symbol
             }
-            EngineEvent::Order(OrderUpdate::Reject { client_order_id, .. })
+            EngineEvent::Order(OrderUpdate::Reject {
+                client_order_id, ..
+            })
             | EngineEvent::Order(OrderUpdate::Cancelled {
                 client_order_id, ..
             }) => {

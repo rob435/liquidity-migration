@@ -134,7 +134,10 @@ impl MockCtx {
     }
 
     pub fn id_of(&self, name: &str) -> SymbolId {
-        *self.symbols.get(name).unwrap_or_else(|| panic!("symbol {name} was never interned"))
+        *self
+            .symbols
+            .get(name)
+            .unwrap_or_else(|| panic!("symbol {name} was never interned"))
     }
 
     pub fn set_now(&mut self, now_ns: u64) {
@@ -171,8 +174,9 @@ impl MockCtx {
                 side,
                 qty,
                 entry_px,
-                stop_attached: true, stop_px: 0.0,
-                leverage: None
+                stop_attached: true,
+                stop_px: 0.0,
+                leverage: None,
             },
         );
     }
@@ -300,7 +304,11 @@ impl StrategyCtx for MockCtx {
     }
 
     fn arm_timer(&mut self, id: TimerId, after_ns: u64) {
-        let armed = ArmedTimer { id, armed_ns: self.now_ns, due_ns: self.now_ns + after_ns };
+        let armed = ArmedTimer {
+            id,
+            armed_ns: self.now_ns,
+            due_ns: self.now_ns + after_ns,
+        };
         self.arm_calls.push(armed);
         // One shot per id: arming again replaces the pending one.
         self.timers.retain(|t| t.id != id);
@@ -361,8 +369,13 @@ impl Harness {
             recv_ns: self.ctx.now_ns,
             seq: self.ctx.quotes[id.0 as usize].seq + 1,
         };
-        self.ctx.quotes[id.0 as usize] = quote;
-        self.deliver(EngineEvent::Market(MarketEvent::Quote { symbol: id, quote }));
+        if quote.supersedes(&self.ctx.quotes[id.0 as usize]) {
+            self.ctx.quotes[id.0 as usize] = quote;
+        }
+        self.deliver(EngineEvent::Market(MarketEvent::Quote {
+            symbol: id,
+            quote,
+        }));
     }
 
     /// A reconstructed book update. Levels must already be in venue order:
@@ -384,8 +397,16 @@ impl Harness {
         depth.seq = self.ctx.depths[id.0 as usize].seq + 1;
         depth.update_id = depth.seq;
         self.ctx.depths[id.0 as usize] = depth;
-        self.ctx.quotes[id.0 as usize] = depth.quote();
-        self.deliver(EngineEvent::Market(MarketEvent::Depth { symbol: id, depth }));
+        // The same arbitration the engine's own `MarketState::apply` runs, so
+        // a strategy test sees the touch this strategy would really read.
+        let touch = depth.quote();
+        if touch.supersedes(&self.ctx.quotes[id.0 as usize]) {
+            self.ctx.quotes[id.0 as usize] = touch;
+        }
+        self.deliver(EngineEvent::Market(MarketEvent::Depth {
+            symbol: id,
+            depth,
+        }));
     }
 
     pub fn trades(&mut self, symbol: &str, buy_qty: f64, sell_qty: f64, last_px: f64) {
@@ -400,7 +421,10 @@ impl Harness {
             recv_ns: self.ctx.now_ns,
         };
         self.ctx.trades[id.0 as usize] = trades;
-        self.deliver(EngineEvent::Market(MarketEvent::Trades { symbol: id, trades }));
+        self.deliver(EngineEvent::Market(MarketEvent::Trades {
+            symbol: id,
+            trades,
+        }));
     }
 
     /// A target book reaching the strategies. Only ever delivered when a
@@ -560,7 +584,10 @@ impl Harness {
         };
         self.ctx.timers.retain(|t| t.id != next.id);
         self.ctx.set_now(next.due_ns);
-        self.deliver(EngineEvent::Timer { id: next.id, now_ns: next.due_ns });
+        self.deliver(EngineEvent::Timer {
+            id: next.id,
+            now_ns: next.due_ns,
+        });
         true
     }
 
@@ -598,14 +625,22 @@ impl Harness {
     /// which is what "emit exactly once" tests want to see.
     pub fn one_intent(&mut self) -> Intent {
         let mut drained = self.drain();
-        assert_eq!(drained.len(), 1, "expected exactly one intent, got {drained:?}");
+        assert_eq!(
+            drained.len(),
+            1,
+            "expected exactly one intent, got {drained:?}"
+        );
         drained.remove(0)
     }
 
     /// The single action emitted since the last call, whatever kind it is.
     pub fn one_action(&mut self) -> Action {
         let mut drained = self.drain_actions();
-        assert_eq!(drained.len(), 1, "expected exactly one action, got {drained:?}");
+        assert_eq!(
+            drained.len(),
+            1,
+            "expected exactly one action, got {drained:?}"
+        );
         drained.remove(0)
     }
 }
@@ -654,7 +689,10 @@ mod tests {
             client_order_id: "eng-4".to_string(),
             symbol,
             side: Side::Buy,
-            kind: OrderKind::Limit { px: 60_000.0, tif: engine_types::TimeInForce::Gtc },
+            kind: OrderKind::Limit {
+                px: 60_000.0,
+                tif: engine_types::TimeInForce::Gtc,
+            },
             qty: 0.01,
             filled_qty: 0.0,
             reduce_only: false,
@@ -663,7 +701,10 @@ mod tests {
         h.quote("BTCUSDT", 60_999.0, 61_000.0);
         assert_eq!(
             h.one_action(),
-            Action::Cancel { symbol, client_order_id: "eng-4".to_string() }
+            Action::Cancel {
+                symbol,
+                client_order_id: "eng-4".to_string()
+            }
         );
         assert!(h.drain().is_empty(), "a cancel is not a placement");
     }

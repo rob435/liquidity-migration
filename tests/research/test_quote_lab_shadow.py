@@ -118,6 +118,18 @@ class TestBookMirror:
         assert mirror.depth_at(SYMBOL, "Buy", 99.99) == 0.0
         assert mirror.last_receive_ts_ns(SYMBOL) == ts_ns(7.0)
 
+    def test_levels_are_bounded_and_keep_venue_order(self) -> None:
+        mirror = BookMirror()
+        mirror.apply(
+            snap(
+                1.0,
+                [[100.0, 1.0], [99.0, 2.0], [98.0, 3.0]],
+                [[101.0, 4.0], [102.0, 5.0], [103.0, 6.0]],
+            )
+        )
+        assert mirror.levels(SYMBOL, "Buy", limit=2) == [(100.0, 1.0), (99.0, 2.0)]
+        assert mirror.levels(SYMBOL, "Sell", limit=2) == [(101.0, 4.0), (102.0, 5.0)]
+
     def test_crossed_book_and_restart_snapshot_are_unhealthy(self) -> None:
         mirror = BookMirror()
         mirror.apply(snap(1.0, [[101.0, 1.0]], [[100.5, 1.0]]))

@@ -36,7 +36,12 @@ impl Drop for TempPath {
 pub fn temp_path(tag: &str) -> TempPath {
     let mut path = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    path.push(format!("engine-core-{}-{}-{}.wal", std::process::id(), tag, n));
+    path.push(format!(
+        "engine-core-{}-{}-{}.wal",
+        std::process::id(),
+        tag,
+        n
+    ));
     let _ = std::fs::remove_file(&path);
     TempPath(path)
 }

@@ -227,18 +227,32 @@ impl Heartbeat {
                 // `wall_ts_ms` beside it. Deliberately not the engine's own
                 // monotonic stamp: see `Facts::account_age_ns`.
                 "account_observed_wall_ts_ms",
-                or_null(facts.account_age_ns.map(|age_ns| {
-                    (wall_ts_ms - (age_ns / 1_000_000) as i64).to_string()
-                })),
+                or_null(
+                    facts
+                        .account_age_ns
+                        .map(|age_ns| (wall_ts_ms - (age_ns / 1_000_000) as i64).to_string()),
+                ),
             ),
             (
                 "account_user_id",
                 or_null(self.account.as_ref().map(|a| quoted(&a.user_id))),
             ),
-            ("decide_p50_ns", figure(facts.decide.count, facts.decide.p50_ns)),
-            ("decide_p99_ns", figure(facts.decide.count, facts.decide.p99_ns)),
-            ("durable_p50_ns", figure(facts.durable.count, facts.durable.p50_ns)),
-            ("durable_p99_ns", figure(facts.durable.count, facts.durable.p99_ns)),
+            (
+                "decide_p50_ns",
+                figure(facts.decide.count, facts.decide.p50_ns),
+            ),
+            (
+                "decide_p99_ns",
+                figure(facts.decide.count, facts.decide.p99_ns),
+            ),
+            (
+                "durable_p50_ns",
+                figure(facts.durable.count, facts.durable.p50_ns),
+            ),
+            (
+                "durable_p99_ns",
+                figure(facts.durable.count, facts.durable.p99_ns),
+            ),
             ("entry_blockers", blockers(facts.entry_blockers)),
             ("engine_version", quoted(ENGINE_VERSION)),
             ("fills", facts.costs.fills.to_string()),
@@ -266,15 +280,25 @@ impl Heartbeat {
             ),
             (
                 "lease_path",
-                or_null(self.lease_path.as_ref().map(|p| quoted(&p.display().to_string()))),
+                or_null(
+                    self.lease_path
+                        .as_ref()
+                        .map(|p| quoted(&p.display().to_string())),
+                ),
             ),
             ("market_events", facts.market_events.to_string()),
             ("may_open", facts.may_open.to_string()),
             ("mode", quoted("live")),
             ("orders_sent", facts.orders_sent.to_string()),
             ("pid", std::process::id().to_string()),
-            ("realm", or_null(self.account.as_ref().map(|a| quoted(&a.realm)))),
-            ("venue", or_null(self.account.as_ref().map(|a| quoted(&a.venue)))),
+            (
+                "realm",
+                or_null(self.account.as_ref().map(|a| quoted(&a.realm))),
+            ),
+            (
+                "venue",
+                or_null(self.account.as_ref().map(|a| quoted(&a.venue))),
+            ),
             ("positions", positions(facts.holdings)),
             ("strategies", list(facts.strategies)),
             ("wall_ts_ms", wall_ts_ms.to_string()),
@@ -525,7 +549,13 @@ mod tests {
     ];
 
     fn measured(count: u64, p50_ns: u64, p99_ns: u64) -> Quantiles {
-        Quantiles { count, p50_ns, p90_ns: p50_ns, p99_ns, max_ns: p99_ns }
+        Quantiles {
+            count,
+            p50_ns,
+            p90_ns: p50_ns,
+            p99_ns,
+            max_ns: p99_ns,
+        }
     }
 
     /// An engine that has traded a little: one fill, and it cost something.
@@ -558,8 +588,7 @@ mod tests {
         static NOTHING_YET: std::sync::OnceLock<Costs> = std::sync::OnceLock::new();
         static NO_BLOCKERS: std::sync::OnceLock<Vec<(String, String, String)>> =
             std::sync::OnceLock::new();
-        static NO_WORKING: std::sync::OnceLock<Vec<(String, String)>> =
-            std::sync::OnceLock::new();
+        static NO_WORKING: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
         Facts {
             costs: NOTHING_YET.get_or_init(Costs::default),
             may_open: true,
@@ -644,7 +673,10 @@ mod tests {
     #[test]
     fn an_unattributed_account_position_does_not_guess_a_strategy() {
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec!["target_book_long".to_string(), "target_book_carry".to_string()];
+        let names = vec![
+            "target_book_long".to_string(),
+            "target_book_carry".to_string(),
+        ];
         let held = vec![("HOMEUSDT".to_string(), Side::Buy, 14_110.0, 0.009_7, None)];
 
         let fields = parsed(&beat.render(&facts(&names, &held), 1_755_000_000_000));
@@ -703,7 +735,10 @@ mod tests {
         assert_eq!(rows[0]["reason"], "below_entry_floor");
         assert_eq!(rows[1]["symbol"], "SOMIUSDT");
         assert!(
-            rows[1]["reason"].as_str().unwrap_or("").contains("AvailableMargin"),
+            rows[1]["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("AvailableMargin"),
             "the kernel's own reason text crosses: {}",
             rows[1]["reason"]
         );
@@ -712,7 +747,10 @@ mod tests {
     #[test]
     fn same_symbol_blockers_keep_their_strategy_identity() {
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec!["target_book_long".to_string(), "target_book_carry".to_string()];
+        let names = vec![
+            "target_book_long".to_string(),
+            "target_book_carry".to_string(),
+        ];
         let held = one_holding();
         let blockers = vec![
             (
@@ -796,7 +834,10 @@ mod tests {
         let raw = on_the_demo_account("unused.json".into())
             .render(&facts(&names, &held), 1_755_000_000_000);
 
-        assert!(raw.ends_with('\n'), "a newline after it, like the lease note: {raw:?}");
+        assert!(
+            raw.ends_with('\n'),
+            "a newline after it, like the lease note: {raw:?}"
+        );
         assert_eq!(raw.lines().count(), 1, "one line: {raw:?}");
         let fields = parsed(&raw);
 
@@ -850,7 +891,10 @@ mod tests {
         let held = one_holding();
         let beat = on_the_demo_account("unused.json".into());
 
-        assert_eq!(parsed(&beat.render(&facts(&names, &held), 1))["mode"], "live");
+        assert_eq!(
+            parsed(&beat.render(&facts(&names, &held), 1))["mode"],
+            "live"
+        );
     }
 
     #[test]
@@ -873,8 +917,16 @@ mod tests {
         quiet.decide = measured(0, 0, 0);
         quiet.wire = measured(0, 0, 0);
         let fields = parsed(&on_the_demo_account("unused.json".into()).render(&quiet, 1));
-        for key in ["decide_p50_ns", "decide_p99_ns", "wire_p50_ns", "wire_p99_ns"] {
-            assert!(fields[key].is_null(), "{key} would read as instant: {fields:?}");
+        for key in [
+            "decide_p50_ns",
+            "decide_p99_ns",
+            "wire_p50_ns",
+            "wire_p99_ns",
+        ] {
+            assert!(
+                fields[key].is_null(),
+                "{key} would read as instant: {fields:?}"
+            );
         }
     }
 
@@ -884,7 +936,9 @@ mod tests {
         // never learns the account number.
         let names = vec!["touch_sniper".to_string()];
         let held = one_holding();
-        let fields = parsed(&Heartbeat::new("unused.json".into(), None, None).render(&facts(&names, &held), 1));
+        let fields = parsed(
+            &Heartbeat::new("unused.json".into(), None, None).render(&facts(&names, &held), 1),
+        );
         for key in ["account_user_id", "realm", "lease_path"] {
             assert!(fields[key].is_null(), "{key} was guessed at: {fields:?}");
         }
@@ -916,7 +970,11 @@ mod tests {
 
         let now = std::fs::read_to_string(path.path()).expect("the heartbeat is there");
         let then = std::fs::read_to_string(link.path()).expect("the old one is still there");
-        assert_eq!(parsed(&now)["market_events"], 22, "the newest heartbeat is at the path");
+        assert_eq!(
+            parsed(&now)["market_events"],
+            22,
+            "the newest heartbeat is at the path"
+        );
         assert_eq!(
             parsed(&then)["market_events"],
             11,
@@ -970,8 +1028,14 @@ mod tests {
         // Due straight away: the first tick of a run writes one.
         assert!(beat.due(0));
         beat.write(1_000, &facts(&names, &held));
-        assert!(!beat.due(1_000 + 4_999_999_999), "under five seconds is too soon");
-        assert!(beat.due(1_000 + 5_000_000_000), "five seconds on, it is due");
+        assert!(
+            !beat.due(1_000 + 4_999_999_999),
+            "under five seconds is too soon"
+        );
+        assert!(
+            beat.due(1_000 + 5_000_000_000),
+            "five seconds on, it is due"
+        );
     }
 
     #[test]
@@ -985,7 +1049,10 @@ mod tests {
         let held = one_holding();
         let mut beat = Heartbeat::with_every(path, None, None, Duration::from_secs(5));
         beat.write(1_000, &facts(&names, &held));
-        assert!(!beat.due(1_000 + 4_999_999_999), "a failed write reset the cadence");
+        assert!(
+            !beat.due(1_000 + 4_999_999_999),
+            "a failed write reset the cadence"
+        );
     }
 }
 
@@ -1028,7 +1095,10 @@ mod fill_cost_tests {
         assert_eq!(fields["fills"], 1);
         assert_eq!(fields["fills_maker_share"], 1.0, "the one fill rested");
         assert_eq!(fields["fill_arrival_shortfall_bps"], 100.0);
-        assert_eq!(fields["fill_all_in_arrival_bps"], 105.5, "plus 5.5 bp of fee");
+        assert_eq!(
+            fields["fill_all_in_arrival_bps"], 105.5,
+            "plus 5.5 bp of fee"
+        );
     }
 
     #[test]
@@ -1043,7 +1113,11 @@ mod fill_cost_tests {
             "fill_all_in_arrival_bps",
             "fill_markout_1m_our_way_bps",
         ] {
-            assert!(fields[key].is_null(), "{key} should be null: {}", fields[key]);
+            assert!(
+                fields[key].is_null(),
+                "{key} should be null: {}",
+                fields[key]
+            );
         }
     }
 

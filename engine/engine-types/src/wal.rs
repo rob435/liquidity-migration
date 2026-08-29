@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{StrategyId, SymbolId};
-use crate::orders::{AmendSpec, Intent, OrderRequest, OrderUpdate, Side};
+use crate::orders::{AmendSpec, Intent, OrderRequest, OrderUpdate, QuoteFillFeatures, Side};
 use crate::risk::RiskVerdict;
 
 /// One record in the append-only log. Serialized as tagged JSON inside a
@@ -127,6 +127,11 @@ pub enum WalRecord {
         /// What this mark speaks for, so a rollup can weight it.
         notional_usdt: f64,
     },
+    /// The public-flow and book state surrounding one quoter fill. Fee and
+    /// markout stay in their existing records and join through the ids here.
+    QuoteFill {
+        features: QuoteFillFeatures,
+    },
     /// Periodic latency ledger line: histogram quantiles in nanoseconds.
     LatencyLedger {
         window_s: u32,
@@ -137,6 +142,13 @@ pub enum WalRecord {
         durable_p50_ns: u64,
         #[serde(default)]
         durable_p99_ns: u64,
+        /// What the order path actually waited for the disk. The barrier runs
+        /// beside the send, so this is the residue: how often, and by how
+        /// much, the disk outlasted the flight to the venue.
+        #[serde(default)]
+        barrier_wait_p50_ns: u64,
+        #[serde(default)]
+        barrier_wait_p99_ns: u64,
         wire_p50_ns: u64,
         wire_p99_ns: u64,
         #[serde(default)]
@@ -173,8 +185,17 @@ pub enum WalRecord {
         socket_write_ns: Option<u64>,
         /// Parsed venue acknowledgement for placements.
         ack_ns: Option<u64>,
+        /// Of the task's own span, how much was the adapter holding this
+        /// command back to stay inside the venue's request quota. Delay we
+        /// chose; the rest of the span is the venue's.
+        #[serde(default)]
+        rate_wait_ns: Option<u64>,
         task_completed_ns: u64,
         core_handled_ns: u64,
+        /// Unix time beside `core_handled_ns`, so the record can be aligned
+        /// with forward market capture without using wall time for duration.
+        #[serde(default)]
+        core_handled_wall_ns: u64,
     },
     /// Early fill signal from Bybit's fee-less fast stream. The ordinary
     /// authoritative fill follows separately and owns position accounting.
@@ -391,6 +412,59 @@ pub enum WalError {
     Corrupt { offset: u64, detail: String },
 }
 
+/// A durability barrier that has been started and not yet confirmed.
+///
+/// The bytes are already with the operating system when this is handed back;
+/// what is outstanding is the disk saying so. Waiting is what turns it back
+/// into the guarantee — see [`Wal::barrier_begin`].
+pub struct PendingBarrier {
+    /// `None` for a barrier that was already complete when it was made: a log
+    /// with no disk behind it, or an implementation that stayed synchronous.
+    done: Option<std::sync::mpsc::Receiver<Result<(), WalError>>>,
+}
+
+impl PendingBarrier {
+    /// Nothing to wait for. Waiting on this succeeds immediately.
+    pub fn settled() -> Self {
+        PendingBarrier { done: None }
+    }
+
+    /// A barrier running elsewhere, which will send its result down this
+    /// channel exactly once.
+    pub fn running(done: std::sync::mpsc::Receiver<Result<(), WalError>>) -> Self {
+        PendingBarrier { done: Some(done) }
+    }
+
+    /// True when this barrier still owes an answer. Only for a caller
+    /// deciding whether waiting is worth reporting; waiting itself is safe
+    /// either way.
+    pub fn outstanding(&self) -> bool {
+        self.done.is_some()
+    }
+
+    /// Wait for the disk to confirm. A sender that vanished without answering
+    /// is a failed barrier, not a passed one: the thread that owed the answer
+    /// is gone, so nothing can say the bytes are down.
+    pub fn wait(self) -> Result<(), WalError> {
+        match self.done {
+            None => Ok(()),
+            Some(done) => done.recv().unwrap_or_else(|_| {
+                Err(WalError::Io(std::io::Error::other(
+                    "the log's durability thread stopped without answering",
+                )))
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for PendingBarrier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingBarrier")
+            .field("outstanding", &self.outstanding())
+            .finish()
+    }
+}
+
 /// The append-only log. One writer (the engine loop). Appends are buffered;
 /// `barrier` is the durability point used before order sends; `flush` is the
 /// cheap group commit for everything else.
@@ -399,6 +473,19 @@ pub trait Wal {
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError>;
     /// Make everything appended so far durable now (fdatasync).
     fn barrier(&mut self) -> Result<(), WalError>;
+    /// Start that barrier and return without waiting for the disk.
+    ///
+    /// The bytes reach the operating system before this returns, so the order
+    /// of writes is fixed here; only the disk's confirmation is outstanding.
+    /// The caller holds the handle and waits on it before doing anything that
+    /// the confirmation is a precondition for.
+    ///
+    /// The default is the synchronous barrier with a handle that is already
+    /// settled, which is the honest answer for a log with no disk behind it.
+    fn barrier_begin(&mut self) -> Result<PendingBarrier, WalError> {
+        self.barrier()?;
+        Ok(PendingBarrier::settled())
+    }
     /// Push buffered bytes to the OS without forcing disk durability.
     fn flush(&mut self) -> Result<(), WalError>;
     /// Bytes in the current segment, buffered ones included. Zero for a log

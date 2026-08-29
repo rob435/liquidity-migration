@@ -342,6 +342,8 @@ MAINNET_ENGINE_USER=liquidity-engine-mainnet
 OBSERVER_USER=liquidity-observer
 LLM_USER=liquidity-llm
 LLM_STATE_ROOT=/var/lib/liquidity-migration/llm-driver-ledger
+CAPTURE_USER=liquidity-capture
+CAPTURE_STATE_ROOT=/var/lib/liquidity-migration/forward-market
 LLM_GATE_CANDIDATES_PATH="$LLM_STATE_ROOT/llm-gate-candidates.json"
 LEGACY_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/targets/llm-gate-candidates.json
 PRODUCER_DEMO_ENV=/etc/liquidity-migration/producer-demo.env
@@ -574,7 +576,7 @@ ensure_runtime_identities() {
         && [ "$(id -nG "$CONTROLS_USER")" = "$CONTROLS_GROUP" ] \
         || fail "$CONTROLS_USER is not isolated in its dedicated primary group"
     local user
-    for user in "$PRODUCER_USER" "$DEMO_ENGINE_USER" "$MAINNET_ENGINE_USER" "$OBSERVER_USER" "$LLM_USER"; do
+    for user in "$PRODUCER_USER" "$DEMO_ENGINE_USER" "$MAINNET_ENGINE_USER" "$OBSERVER_USER" "$LLM_USER" "$CAPTURE_USER"; do
         if ! id -u "$user" >/dev/null 2>&1; then
             useradd --system --no-create-home --home-dir /nonexistent \
                 --shell /usr/sbin/nologin --gid "$RUNTIME_GROUP" "$user"
@@ -593,6 +595,8 @@ ensure_runtime_identities() {
         /var/lib/liquidity-migration/targets
     [ ! -L "$LLM_STATE_ROOT" ] || fail "LLM state root is linked"
     install -d -o "$LLM_USER" -g "$RUNTIME_GROUP" -m 0750 "$LLM_STATE_ROOT"
+    [ ! -L "$CAPTURE_STATE_ROOT" ] || fail "forward-capture state root is linked"
+    install -d -o "$CAPTURE_USER" -g "$RUNTIME_GROUP" -m 0750 "$CAPTURE_STATE_ROOT"
     migrate_legacy_llm_gate_candidates
     normalize_account_lease_access
     normalize_runtime_state_access
@@ -1454,6 +1458,9 @@ verify_topology() {
     if systemctl cat liquidity-migration-trade-notify.timer >/dev/null 2>&1; then
         verify_unit on liquidity-migration-trade-notify.timer "trade notify timer is not active"
     fi
+    if systemctl cat liquidity-migration-forward-capture.service >/dev/null 2>&1; then
+        verify_unit on liquidity-migration-forward-capture.service "forward market capture is not active"
+    fi
     verify_unit on "$ENGINE_UNIT" "required demo Rust engine is not active"
     if [ ! -x "$ENGINE_BINARY" ] || [ ! -r "${ENGINE_BINARY}.release" ]; then
         verify_note "required commit-bound Rust engine artifact is missing"
@@ -2028,10 +2035,11 @@ secure_venv_directory() {
 
 verify_python_runtime_environment() {
     local deployed="$REPO_DIR/.venv" runtime_user state_file
+    [ -x /usr/bin/zstd ] || fail "zstd is required for forward market capture"
     [ "$(stat -c %a "$deployed")" = 755 ] \
         || fail "deployed Python environment is not traversable by runtime identities"
     for runtime_user in \
-        "$PRODUCER_USER" "$CONTROLS_USER" "$OBSERVER_USER" "$LLM_USER"; do
+        "$PRODUCER_USER" "$CONTROLS_USER" "$OBSERVER_USER" "$LLM_USER" "$CAPTURE_USER"; do
         /usr/bin/sudo -u "$runtime_user" -- \
             /usr/bin/env PYTHONDONTWRITEBYTECODE=1 \
             "$deployed/bin/python" - "$deployed" <<'PY'
@@ -2045,6 +2053,7 @@ if Path(sys.prefix).resolve() != expected:
     )
 
 import polars  # noqa: F401, E402
+import websocket  # noqa: F401, E402
 from liquidity_migration.cli.commands import main  # noqa: F401, E402
 PY
         [ "$?" -eq 0 ] \
@@ -3026,6 +3035,8 @@ activate_mode() {
         || fail "cannot start the LLM ledger timer"
     systemctl enable --now liquidity-migration-trade-notify.timer \
         || fail "cannot start the trade notification timer"
+    systemctl enable --now liquidity-migration-forward-capture.service \
+        || fail "cannot start forward market capture"
     if mainnet_armed; then
         start_mainnet_fleet
     fi
@@ -3355,6 +3366,7 @@ stop_mainnet_mode() {
 }
 
 ROLLOUT_DOWNSTREAM_UNITS=(
+    liquidity-migration-forward-capture.service
     liquidity-migration-demo-liveness.timer
     liquidity-migration-mainnet-liveness.timer
     liquidity-migration-llm-ledger.timer

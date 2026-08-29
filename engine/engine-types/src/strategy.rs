@@ -1,6 +1,8 @@
 use crate::ids::{SymbolId, TimerId};
 use crate::market::{Depth, MarketEvent, Quote, Subscription, Ticker, TradeFlow};
-use crate::orders::{Action, AmendSpec, InstrumentRule, Intent, OrderFacts, OrderUpdate, RestingOrder};
+use crate::orders::{
+    Action, AmendSpec, InstrumentRule, Intent, OrderFacts, OrderUpdate, RestingOrder,
+};
 use crate::risk::PositionView;
 use crate::targets::TargetBook;
 
@@ -10,7 +12,10 @@ use crate::targets::TargetBook;
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     Market(MarketEvent),
-    Timer { id: TimerId, now_ns: u64 },
+    Timer {
+        id: TimerId,
+        now_ns: u64,
+    },
     Order(OrderUpdate),
     /// A new target book from the research system.
     ///
@@ -29,7 +34,11 @@ pub enum EngineEvent {
     /// a refused entry was never booked, and a refused exit has dropped
     /// every cover on the symbol. (An order the VENUE ends arrives as
     /// [`EngineEvent::Order`] news instead, with its id.)
-    IntentRefused { symbol: SymbolId, reduce_only: bool, reason: String },
+    IntentRefused {
+        symbol: SymbolId,
+        reduce_only: bool,
+        reason: String,
+    },
 }
 
 /// The strategy's window into the engine. Read market state, the account

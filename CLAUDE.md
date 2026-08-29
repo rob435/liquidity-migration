@@ -49,6 +49,7 @@ never copy sleeve status or thresholds here.
 | `cd engine && cargo test` | engine tests |
 | `cd engine && cargo run --release -- bench` | engine benchmark: re-measures the latency table in [docs/engine.md](docs/engine.md) |
 | `cd engine && cargo run --release -- wal-cost --wal PATH` | what one append and one durability barrier cost on the filesystem holding PATH: the storage's share of the order path |
+| `cd engine && cargo run --release -- latency --wal PATH` | how long each step of the order path took, per operation, at p50/p90/p99/p99.9: the venue's round trip, the engine's own work, and the time it held a command back to stay inside the request quota, as separate numbers |
 | `cd engine && cargo run --release -- fills --wal PATH` | what the trading cost and what the positions made: maker share, fee, arrival shortfall, markouts, and closed round trips with their P&L |
 | `scripts/ops.sh help` | operator router: status, equity, reset, deploy, and the rest |
 | `python -m liquidity_migration --help` | research and data CLI |

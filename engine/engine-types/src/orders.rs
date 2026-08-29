@@ -197,6 +197,12 @@ pub enum Action {
         symbol: SymbolId,
         trigger_px: f64,
     },
+    /// Persist the market state around one quoter fill. This changes no venue
+    /// state; it joins to the ordinary fee and markout records by execution
+    /// and client-order id.
+    RecordQuoteFill {
+        features: QuoteFillFeatures,
+    },
 }
 
 impl Action {
@@ -210,6 +216,7 @@ impl Action {
             Action::Amend { .. } => false,
             // Only ever accepted when it tightens, so it can only cut risk.
             Action::SetStop { .. } => true,
+            Action::RecordQuoteFill { .. } => true,
         }
     }
 
@@ -219,6 +226,7 @@ impl Action {
             Action::Cancel { symbol, .. }
             | Action::Amend { symbol, .. }
             | Action::SetStop { symbol, .. } => *symbol,
+            Action::RecordQuoteFill { features } => features.symbol,
         }
     }
 }
@@ -371,6 +379,31 @@ pub struct OrderFacts {
     pub reduce_only: bool,
 }
 
+/// The market state surrounding one quoter fill.
+///
+/// Fee and later markouts already live on the fill ledger. This is the
+/// decision state they need to be judged against: how one-sided the public
+/// flow was, how much nearby book stood behind it, and how valuable the queue
+/// looked when the fill became visible.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuoteFillFeatures {
+    pub strategy: StrategyId,
+    pub symbol: SymbolId,
+    pub exec_id: String,
+    pub client_order_id: String,
+    pub side: Side,
+    pub is_maker: bool,
+    pub recv_ns: u64,
+    pub flow_fast: Option<f64>,
+    pub flow_slow: Option<f64>,
+    pub flow_score: Option<f64>,
+    pub last_depth_ratio: Option<f64>,
+    pub same_side_depth_usdt: Option<f64>,
+    pub spread_bps: Option<f64>,
+    pub volatility_bps: Option<f64>,
+    pub queue_ahead_usdt: Option<f64>,
+}
+
 /// Order lifecycle news, from the venue reply or the private stream.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum OrderUpdate {
@@ -421,6 +454,22 @@ pub enum OrderUpdate {
         px: f64,
         is_maker: bool,
         venue_ts_ms: i64,
+        recv_ns: u64,
+    },
+    /// What price a resting order is working at, in the venue's own words.
+    ///
+    /// The venue republishes an order whenever it changes without trading,
+    /// which is what an applied amend looks like from outside. An amend
+    /// acknowledgement says only that the request was taken — never what
+    /// price it left the order at — so this is the one place the venue
+    /// states it, and the only thing that can end an amend's ambiguity
+    /// without pulling the order.
+    Amended {
+        client_order_id: String,
+        px: f64,
+        /// What is still working. A fill that landed while the amend was in
+        /// flight shows here as a smaller number.
+        qty: f64,
         recv_ns: u64,
     },
     Cancelled {

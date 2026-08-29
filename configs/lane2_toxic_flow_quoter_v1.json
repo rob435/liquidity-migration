@@ -1,0 +1,94 @@
+{
+  "config_id": "lane2_toxic_flow_quoter_v1",
+  "registered": "2026-08-29",
+  "lane": 2,
+  "surface": "minimum-size funded Bybit maker canary",
+  "authorizes": "strategy parameters only; funded venue permission remains the owner's separately armed REAL_MONEY switch",
+  "claim": "Recent aggressive buying raises the chance that a resting ask is picked off, and recent aggressive selling does the same to a bid. Scale each trade burst by nearby displayed same-side dollars, remember it at fast and slow horizons, and widen only the attacked side.",
+  "rule": {
+    "symbol": "AGIUSDT",
+    "quote_notional_usdt": 5.25,
+    "max_position_usdt": 6.0,
+    "half_spread_bps": 6.5,
+    "requote_bps": 2.5,
+    "skew_bps": 4.0,
+    "stop_loss_fraction": 0.08,
+    "maker_fee_bps": 4.0,
+    "min_edge_bps": 4.0,
+    "volatility_multiplier": 2.0,
+    "book_lean_bps": 1.5,
+    "signal_half_life_ms": 250.0,
+    "queue_reprice_edge_bps": 1.5,
+    "flow": {
+      "fast_half_life_ms": 250.0,
+      "slow_half_life_ms": 3000.0,
+      "fast_weight": 0.65,
+      "slow_weight": 0.35,
+      "response_bps": 4.0,
+      "max_widen_bps": 8.0,
+      "pull_score": null,
+      "near_depth_bps": 10.0,
+      "volatility_depth_multiplier": 2.0,
+      "max_score": 4.0
+    }
+  },
+  "scoring_recipe": {
+    "forward_start": "the git commit containing this file",
+    "unit": "one attributed maker fill and its 1s, 15s, 1m and 5m signed markouts",
+    "primary": "15-second signed markout after fees, reported with fill count and maker share",
+    "secondary": [
+      "1-second signed markout",
+      "1-minute signed markout",
+      "5-minute signed markout",
+      "round-trip net PnL after venue fees",
+      "fill rate by flow-score band and protected side",
+      "place, amend and cancel socket-write-to-ack latency"
+    ],
+    "bounded_trial": "minimum venue notional; review after 30 attributed fills or 60 minutes of enabled quoting, whichever occurs first",
+    "comparator": "the fee-corrected no-flow arm, plus the funded canary's earlier fills as descriptive pre-change evidence",
+    "cadence": "at the trial boundary, then daily if the owner keeps the rule enabled"
+  },
+  "measured_at_registration": {
+    "evidence_class": "Lane-1 seen-tape selection only; it is not forward evidence",
+    "reproduce_with": "scripts/research/compare_toxic_quoter.py",
+    "artifact": "reports/toxic-quoter-forward-20260829.json (gitignored)",
+    "artifact_sha256": "9c27d5f64ce23e5da095d2e922501f26792d1b6de37be9a4db3ed561bc75c1d1",
+    "scope": {
+      "venue": "Bybit linear public tape",
+      "dates": ["2026-08-03", "2026-08-04"],
+      "symbols": 34,
+      "quote_opportunities": 57364,
+      "markout_seconds": 15,
+      "markout_coverage": 0.9966878181437836
+    },
+    "selected_directional_w4": {
+      "fill_rate": 0.026044208911512448,
+      "mean_net_bp_per_markable_quote": -0.1710117635046789,
+      "paired_improvement_bp_per_quote": 0.07599129779755073,
+      "paired_t": 11.74743170989085
+    },
+    "fee_corrected_control": {
+      "fill_rate": 0.036590893243149014,
+      "mean_net_bp_per_markable_quote": -0.24752095408473354
+    },
+    "era_split": {
+      "2026-08-03": {
+        "selected_net_bp_per_quote": -0.09093589445364358,
+        "paired_improvement_bp_per_quote": 0.057826729215663175,
+        "paired_t": 6.092524984287542
+      },
+      "2026-08-04": {
+        "selected_net_bp_per_quote": -0.22701132132610288,
+        "paired_improvement_bp_per_quote": 0.08868768474111027,
+        "paired_t": 10.12252277969799
+      }
+    }
+  },
+  "known_weaknesses": [
+    "Every grid arm was shaped and graded on the same two seen dates.",
+    "Every tested arm loses after the full fee assumption; the selected rule is protection evidence, not a profitable market-making result.",
+    "The replay treats quote opportunities independently and does not model inventory, stops or another sleeve holding the symbol.",
+    "Displayed L50 and public trades give a conservative queue bound, not the venue's private matching priority.",
+    "Two dates cannot establish regime stability; forward capture exists to replace this narrow tape with causal unseen data."
+  ]
+}

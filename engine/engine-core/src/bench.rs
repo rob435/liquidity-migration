@@ -24,10 +24,10 @@ use std::time::Duration;
 
 use engine_types::{
     AccountIdentity, AccountView, AmendSpec, EngineEvent, Feed, FeedError, InstrumentRule, Intent,
-    MarketEvent,
-    MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote, RiskKernel,
-    RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, Symbol, SymbolId,
-    VenueCaps, VenueError, VenueGateway, Wal, WalRecord, VenueOrder,};
+    MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote,
+    RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription,
+    Symbol, SymbolId, VenueCaps, VenueError, VenueGateway, VenueOrder, Wal, WalRecord,
+};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -55,6 +55,16 @@ pub struct BenchOptions {
     /// pricing a fill against the book its order left at, and the markout
     /// queue that the group-flush tick drains.
     pub fills: bool,
+    /// How long the pretend venue holds each reply.
+    ///
+    /// Zero — a localhost socket answering at once — is the default and is
+    /// what the published table was measured with. It is also the one thing
+    /// this box cannot model on its own: a real venue is milliseconds away,
+    /// and whether work on the engine's side is hidden by that flight or
+    /// added to it depends entirely on which of the two is longer. Set this
+    /// to the venue's measured round trip to see the order path in the shape
+    /// it actually runs in.
+    pub venue_delay: Duration,
 }
 
 impl Default for BenchOptions {
@@ -66,6 +76,7 @@ impl Default for BenchOptions {
             symbols: vec!["BTCUSDT".to_string()],
             wal_path: PathBuf::from("engine-bench.wal"),
             fills: false,
+            venue_delay: Duration::ZERO,
         }
     }
 }
@@ -122,7 +133,7 @@ impl BenchResult {
 
 /// Build everything, run the real loop, read the histograms.
 pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
-    let venue_addr = start_mock_venue()?;
+    let venue_addr = start_mock_venue_with(options.venue_delay)?;
     let settings = EngineSection {
         wal_path: options.wal_path.clone(),
         // Named but unused: the bench builds its own pretend venue below.
@@ -187,7 +198,11 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
             .await?
     } else {
         engine
-            .run(&mut feed, &mut SilentOrderFeed, std::future::pending::<()>())
+            .run(
+                &mut feed,
+                &mut SilentOrderFeed,
+                std::future::pending::<()>(),
+            )
             .await?
     };
 
@@ -204,6 +219,7 @@ fn summarise(ledger: &LatencyLedger, events: u64, orders: u64) -> BenchResult {
     let segments = [
         Segment::Decide,
         Segment::Durable,
+        Segment::BarrierWait,
         Segment::Wire,
         Segment::Ack,
         Segment::DispatchQueue,
@@ -273,7 +289,11 @@ impl MarketFeed for ScriptedFeed {
         self.remaining -= 1;
         self.sent += 1;
         // A small saw-tooth so the price is not constant.
-        self.px += if self.sent.is_multiple_of(2) { 0.5 } else { -0.5 };
+        self.px += if self.sent.is_multiple_of(2) {
+            0.5
+        } else {
+            -0.5
+        };
         let symbol = self.symbols[(self.sent as usize) % self.symbols.len()];
         self.touch.set((self.px, self.px + 0.5));
         Ok(MarketEvent::Quote {
@@ -418,8 +438,8 @@ impl Strategy for BenchStrategy {
             // a resting entry would put a reprice in the middle of the
             // numbers the latency table is read off.
             work: None,
-                    leverage: None,
-});
+            leverage: None,
+        });
     }
 }
 
@@ -588,8 +608,14 @@ impl VenueGateway for HttpVenue {
         id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
-        let px = spec.px.map(|px| format!(",\"price\":\"{px}\"")).unwrap_or_default();
-        let qty = spec.qty.map(|qty| format!(",\"qty\":\"{qty}\"")).unwrap_or_default();
+        let px = spec
+            .px
+            .map(|px| format!(",\"price\":\"{px}\""))
+            .unwrap_or_default();
+        let qty = spec
+            .qty
+            .map(|qty| format!(",\"qty\":\"{qty}\""))
+            .unwrap_or_default();
         self.call(
             "/v5/order/amend",
             &format!("{{\"orderLinkId\":\"{id}\"{px}{qty}}}"),
@@ -601,7 +627,10 @@ impl VenueGateway for HttpVenue {
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
         self.call(
             "/v5/position/trading-stop",
-            &format!("{{\"symbol\":\"{}\",\"stopLoss\":\"{trigger_px}\"}}", symbol.0),
+            &format!(
+                "{{\"symbol\":\"{}\",\"stopLoss\":\"{trigger_px}\"}}",
+                symbol.0
+            ),
         )
         .await
         .map(|_| ())
@@ -654,6 +683,10 @@ impl VenueGateway for HttpVenue {
 /// a real venue is somewhere else, and the engine's thread does only its own
 /// work.
 pub fn start_mock_venue() -> Result<SocketAddr, EngineError> {
+    start_mock_venue_with(Duration::ZERO)
+}
+
+pub fn start_mock_venue_with(delay: Duration) -> Result<SocketAddr, EngineError> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| EngineError::Boot(format!("cannot open the bench venue socket: {e}")))?;
     let addr = listener
@@ -674,7 +707,7 @@ pub fn start_mock_venue() -> Result<SocketAddr, EngineError> {
                 loop {
                     match listener.accept().await {
                         Ok((socket, _)) => {
-                            tokio::spawn(serve(socket));
+                            tokio::spawn(serve(socket, delay));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "bench venue accept failed");
@@ -688,7 +721,7 @@ pub fn start_mock_venue() -> Result<SocketAddr, EngineError> {
     Ok(addr)
 }
 
-async fn serve(mut socket: tokio::net::TcpStream) {
+async fn serve(mut socket: tokio::net::TcpStream, delay: Duration) {
     let _ = socket.set_nodelay(true);
     let mut buf = Vec::with_capacity(8 * 1024);
     let mut orders = 0u64;
@@ -715,6 +748,11 @@ async fn serve(mut socket: tokio::net::TcpStream) {
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
+        // Held before the reply is written, which is where a venue's distance
+        // actually sits: after it has the request, before the answer starts back.
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         if socket.write_all(reply.as_bytes()).await.is_err() {
             return;
         }

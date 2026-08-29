@@ -11,7 +11,7 @@ unit shapes.
 
 ## Services
 
-Fifteen unit files: eleven services and four timers (two liveness, the LLM ledger, the trade notifier).
+Sixteen unit files: twelve services and four timers (two liveness, the LLM ledger, the trade notifier).
 
 | Unit | Role |
 | --- | --- |
@@ -25,10 +25,20 @@ Fifteen unit files: eleven services and four timers (two liveness, the LLM ledge
 | `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume — there is no close button) — the sole `getUpdates` consumer |
 | `liquidity-migration-llm-ledger.service` | LLM driver judgments on movers and trigger events, and the judged candidates file the demo LONG sleeve enters through — run by its hourly timer |
 | `liquidity-migration-trade-notify.service` | Sends every sleeve's entries and its exits with what they made to the owner's DM — run by its 5-minute timer |
+| `liquidity-migration-forward-capture.service` | Records public Bybit L50 books, trades, derivative tickers and liquidations into verified compressed segments; no account credentials or order path |
 
 The liveness services are invoked by their matching timers, and the engines own
 the accounts. Target producers and auxiliary services have private API, mainnet,
 `REAL_MONEY`, and unnecessary Telegram variables explicitly removed.
+
+The forward recorder writes under
+`/var/lib/liquidity-migration/forward-market`. It keeps the local receive time
+beside the exchange times, preserves depth sequence and flags regression,
+rotates at 64 MB, verifies
+each `zstd` file and its checksum before deleting the raw segment, then retains
+at most 30 days or 60 GB while leaving at least 25 GB free. Its manifest records
+both compression and deletion. A queue overrun rebuilds the socket so the next
+book epoch begins with a fresh snapshot.
 
 ## Dependency edges
 

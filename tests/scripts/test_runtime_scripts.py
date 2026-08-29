@@ -71,7 +71,7 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
 
 def test_manifest_contains_only_the_current_rust_owned_fleet() -> None:
     units = _units()
-    assert len(units) == 15
+    assert len(units) == 16
     assert "liquidity-migration-engine.service" in units
     assert "liquidity-migration-engine-mainnet.service" in units
     assert not any("account-execution" in name for name in units)
@@ -165,6 +165,11 @@ def test_execution_engines_and_producers_run_as_distinct_unprivileged_users() ->
         if "bybit-" in name:
             assert "User=liquidity-producer" in body
             assert "User=root" not in body
+    capture = units["liquidity-migration-forward-capture.service"]
+    assert "User=liquidity-capture" in capture
+    assert "StateDirectory=liquidity-migration/forward-market" in capture
+    assert "IOSchedulingClass=idle" in capture
+    assert "BYBIT_REAL_API_SECRET" in capture
 
 
 def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> None:
@@ -379,10 +384,20 @@ def test_funded_exodus_and_maker_canary_are_wired_to_the_engine() -> None:
     }
     maker = strategies[3]
     assert maker["name"] == "quoter"
-    assert maker["quote_enabled"] is False
+    assert maker["quote_enabled"] is True
     assert maker["symbols"] == ["AGIUSDT"]
     assert maker["qty_usdt"] == 5.25
     assert maker["max_position_usdt"] == 6.0
+    assert maker["maker_fee_bps"] == 4.0
+    assert maker["flow_fast_half_life_ms"] == 250.0
+    assert maker["flow_slow_half_life_ms"] == 3000.0
+    assert maker["flow_fast_weight"] == 0.65
+    assert maker["flow_slow_weight"] == 0.35
+    assert maker["flow_response_bps"] == 4.0
+    assert maker["flow_max_widen_bps"] == 8.0
+    assert "flow_pull_score" not in maker
+    assert "toxicity_bps" not in maker
+    assert "trade_lean_bps" not in maker
 
     carry_unit = _read(
         "deploy/systemd/liquidity-migration-bybit-carry-mainnet.service"
