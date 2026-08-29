@@ -54,11 +54,11 @@ file.
   `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit, or stop
   `llm-ledger.timer`. Detail: `docs/trading_logic.md` §LLM GATE.
 
-- **The fourth registered sleeve, `maker_canary`, runs the minimum-size funded
-  WebSocket trial.** Its AGIUSDT block remains last in the funded engine config
-  because strategy ids in the log are append-only. It quotes about 5.25 USDT
-  on each side with a 6 USDT inventory ceiling; the ordinary CARRY, LONG and
-  Exodus books remain independent of it.
+- **The fourth registered sleeve, `maker_canary`, is disabled.** Its AGIUSDT
+  block remains in the funded engine config because strategy ids in the log
+  are append-only. With `quote_enabled = false` it places no quotes, pulls any
+  of its working orders, and closes only inventory attributed to that sleeve.
+  The ordinary CARRY, LONG and Exodus books remain independent of it.
 
 - **LONG runs at 6.0× and carry at 3.0×; Exodus copies carry's filled quantity
   (owner directive, both fleets).** Sizing dials are read directly by

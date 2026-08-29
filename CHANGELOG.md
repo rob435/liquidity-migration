@@ -6,6 +6,18 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — The funded trade WebSocket completed a minimum-size forward
+  trial.** The AGI canary sent 111 placements, 102 amendments and 108 cancels
+  through the authenticated socket before returning to `quote_enabled =
+  false`. Placement socket-write-to-ack measured 4.14 ms median, 24.83 ms p90
+  and 66.11 ms p99. The whole venue task measured 5.61 ms median; its 443.48 ms
+  p99 includes the client's deliberate rate pacing before the socket write and
+  is not network latency. The earlier signed-REST sample on the same host had
+  only three placements, with a 45.62 ms median whole-task time and no socket
+  write mark, so the measured median task improvement is 8.1x while its tail is
+  too small to compare honestly. One minimum-size maker buy filled; the
+  disabled sleeve cancels its quote and closes only its own inventory.
+
 - **2026-08-29 — Funded Bybit order entry stays on the allowlisted IPv4.**
   The dual-stack resolver chose the VPS's Malaysian IPv6 address for
   `wss://stream.bybit.com/v5/trade`, whose CloudFront distribution rejected
