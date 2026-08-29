@@ -237,8 +237,9 @@ CRITICAL alerts **and** every Telegram send this run delivered. A dead notificat
 externally instead of reading as all-quiet. An on-box watchdog cannot report that the box died, so
 without a URL a total host loss is silent.
 
-Both liveness units read `/etc/liquidity-migration/liveness.env` if it exists, so provisioning the
-switch is one root-owned mode-`0640` line and a restart:
+Both liveness units read `/etc/liquidity-migration/liveness.env` if it exists. PID 1 reads it before
+dropping privileges, so it stays root-only mode `0600` like the other private environments, and
+provisioning the switch is one line:
 
 ```
 LIVENESS_HEARTBEAT_URL=https://hc-ping.com/<uuid>
