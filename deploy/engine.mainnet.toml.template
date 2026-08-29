@@ -132,9 +132,9 @@ symbols = ["DOGEUSDT"]
 name = "quoter"
 sleeve = "maker_canary"
 # Append-only identity: the WAL owns this strategy id, so the block stays in
-# the config. `false` pulls its own quotes and closes only inventory attributed
-# to this sleeve.
-quote_enabled = false
+# the config. This minimum-size funded trial exercises the live order transport
+# and keeps any inventory inside this sleeve.
+quote_enabled = true
 symbols = ["AGIUSDT"]
 
 # One venue-minimum-sized quote on each side. One fill brings inventory near
