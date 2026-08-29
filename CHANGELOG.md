@@ -7,16 +7,18 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 - **2026-08-29 — The funded trade WebSocket completed a minimum-size forward
-  trial.** The AGI canary sent 111 placements, 102 amendments and 108 cancels
-  through the authenticated socket before returning to `quote_enabled =
-  false`. Placement socket-write-to-ack measured 4.14 ms median, 24.83 ms p90
-  and 66.11 ms p99. The whole venue task measured 5.61 ms median; its 443.48 ms
-  p99 includes the client's deliberate rate pacing before the socket write and
-  is not network latency. The earlier signed-REST sample on the same host had
-  only three placements, with a 45.62 ms median whole-task time and no socket
-  write mark, so the measured median task improvement is 8.1x while its tail is
-  too small to compare honestly. One minimum-size maker buy filled; the
-  disabled sleeve cancels its quote and closes only its own inventory.
+  trial.** The AGI canary's quoting run sent 256 placements, 237 amendments and
+  258 cancels through the authenticated socket. Disabling it cancelled the one
+  remaining quote and sent one market close through the same socket, leaving
+  the account flat with no open order. Across the 256 quote placements,
+  socket-write-to-ack measured 3.60 ms median, 20.41 ms p90 and 54.90 ms p99.
+  The whole venue task measured 3.73 ms median; its 249.74 ms p99 includes the
+  client's deliberate rate pacing before the socket write and is not network
+  latency. The earlier signed-REST sample on the same host had only three
+  placements, with a 45.62 ms median whole-task time and no socket-write mark,
+  so the measured median task improvement is 12.2x while its tail is too small
+  to compare honestly. Seventeen maker fills and the taker close completed
+  eight round trips for -0.0779 USDT net after fees.
 
 - **2026-08-29 — Funded Bybit order entry stays on the allowlisted IPv4.**
   The dual-stack resolver chose the VPS's Malaysian IPv6 address for

@@ -170,7 +170,7 @@ file.
 
 ### The funded account
 
-- **It holds 150.96 USDT equity and no position or open order.** This is a
+- **It holds 150.85 USDT equity and no position or open order.** This is a
   signed venue read, and the mainnet producers size their books from the same
   account. Money in the account changes what they publish and, through the
   tracked reference, every cap with it.
