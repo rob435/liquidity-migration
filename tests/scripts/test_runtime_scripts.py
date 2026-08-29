@@ -274,6 +274,8 @@ def test_producers_never_receive_venue_credentials_or_the_arming_switch() -> Non
             "BYBIT_DEMO_API_SECRET",
             "BYBIT_REAL_API_KEY",
             "BYBIT_REAL_API_SECRET",
+            "BYBIT_REAL_API_KEY_IP",
+            "BYBIT_REAL_API_KEY_BACKUP_IP",
             "BYBIT_ATTEST_API_KEY",
             "BYBIT_ATTEST_API_SECRET",
             "BYBIT_ATTEST_API_KEY_IP",

@@ -29,7 +29,7 @@ WorkingDirectory=/var/lib/liquidity-migration-engine
 # messages, and a process that cannot reach the owner's chat cannot post to it
 # by accident.
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
-UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 # Config path and heartbeat path. deploy/engine.env.template is the copy to
 # fill in.
 EnvironmentFile=/etc/liquidity-migration/engine.env

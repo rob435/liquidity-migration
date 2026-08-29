@@ -112,6 +112,17 @@ def test_preflight_accepts_exact_profile_and_neutral_producer_inputs(tmp_path: P
     assert all("test-secret" not in row.render() for row in rows)
 
 
+def test_preflight_accepts_a_distinct_backup_execution_ip(tmp_path: Path) -> None:
+    credential = _credential(tmp_path, BYBIT_REAL_API_KEY_BACKUP_IP="198.51.100.2")
+    rendered, _profile = render_real_money_profile()
+    profile = _private_file(tmp_path / "profile.json", rendered)
+    producer = _producer_source(tmp_path, profile)
+
+    rows = preflight(credential_env=credential, producer_env=producer)
+
+    assert all(row.ok for row in rows), [row.render() for row in rows]
+
+
 def test_preflight_rejects_wrong_realm_missing_input_and_profile_drift(tmp_path: Path) -> None:
     credential = _credential(tmp_path)
     profile = _private_file(tmp_path / "profile.json", "{}\n")
@@ -136,6 +147,33 @@ def test_preflight_rejects_missing_wildcard_or_non_host_ip(
     rows = preflight(credential_env=credential, producer_env=producer)
 
     assert not next(row for row in rows if row.name == "BYBIT_REAL_API_KEY_IP").ok
+
+
+@pytest.mark.parametrize("bad_ip", ("*", "0.0.0.0", "127.0.0.1", "203.0.113.0/24"))
+def test_preflight_rejects_unsafe_backup_ip(tmp_path: Path, bad_ip: str) -> None:
+    credential = _credential(tmp_path, BYBIT_REAL_API_KEY_BACKUP_IP=bad_ip)
+    rendered, _profile = render_real_money_profile()
+    profile = _private_file(tmp_path / "profile.json", rendered)
+    producer = _producer_source(tmp_path, profile)
+
+    rows = preflight(credential_env=credential, producer_env=producer)
+
+    assert not next(
+        row for row in rows if row.name == "BYBIT_REAL_API_KEY_BACKUP_IP"
+    ).ok
+
+
+def test_preflight_rejects_backup_ip_that_duplicates_primary(tmp_path: Path) -> None:
+    credential = _credential(tmp_path, BYBIT_REAL_API_KEY_BACKUP_IP="203.0.113.7")
+    rendered, _profile = render_real_money_profile()
+    profile = _private_file(tmp_path / "profile.json", rendered)
+    producer = _producer_source(tmp_path, profile)
+
+    rows = preflight(credential_env=credential, producer_env=producer)
+
+    assert not next(
+        row for row in rows if row.name == "BYBIT_REAL_API_KEY_BACKUP_IP"
+    ).ok
 
 
 def test_preflight_json_is_machine_readable(

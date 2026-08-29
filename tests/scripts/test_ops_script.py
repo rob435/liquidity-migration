@@ -166,7 +166,13 @@ def test_flatness_control_uses_the_installed_rust_engine(tmp_path: Path) -> None
         'EnvironmentFile=$credential_file'
     )
     assert 'UnsetEnvironment=$unset_environment' in payload
-    for key in ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET", "REAL_MONEY"):
+    for key in (
+        "BYBIT_REAL_API_KEY",
+        "BYBIT_REAL_API_SECRET",
+        "BYBIT_REAL_API_KEY_IP",
+        "BYBIT_REAL_API_KEY_BACKUP_IP",
+        "REAL_MONEY",
+    ):
         assert key in payload
     assert "/etc/liquidity-migration/bybit-mainnet-attestor.env" in payload
     assert "/etc/liquidity-migration/bybit-mainnet.env" not in payload

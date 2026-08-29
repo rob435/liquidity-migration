@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SSH_TARGET="${SSH_TARGET:-root@116.202.15.128}"
+SSH_TARGET="${SSH_TARGET:-root@208.84.103.4}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 
 if [[ -n "${PYTHON:-}" ]]; then
@@ -55,7 +55,7 @@ A UNIT that does not already start with `liquidity-migration-` gets the prefix:
 `liquidity-migration-bybit-carry-demo.service`.
 
 Environment overrides:
-  SSH_TARGET   VPS SSH destination (default: root@116.202.15.128)
+  SSH_TARGET   VPS SSH destination (default: root@208.84.103.4)
   REPO_DIR     repository path on the VPS (default: /opt/liquidity-migration)
   PYTHON       Python executable/path for local tools and tests
 
@@ -140,14 +140,14 @@ case "$realm" in
     credential_file=/etc/liquidity-migration/bybit-demo.env
     runtime_user=liquidity-engine-demo
     state_dir=/var/lib/liquidity-migration-engine
-    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     ;;
   mainnet)
     env_file=/etc/liquidity-migration/engine-mainnet.env
     credential_file=/etc/liquidity-migration/bybit-mainnet-attestor.env
     runtime_user=liquidity-engine-mainnet
     state_dir=/var/lib/liquidity-migration-engine-mainnet
-    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     ;;
   *) echo "invalid engine-control realm: $realm" >&2; exit 2 ;;
 esac

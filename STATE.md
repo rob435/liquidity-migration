@@ -230,11 +230,12 @@ file.
   readable in plaintext on the Desktop from 2026-08-05 to 2026-08-08, so
   **rotation is still owed and is the owner's act, but key age does not block
   startup.** Funded Bybit identity refuses a key that is not UTA, is read-only,
-  is not allowlisted only to the exact host IP declared by
-  `BYBIT_REAL_API_KEY_IP`, lacks ContractTrade Order and Position permissions,
-  or carries Wallet Withdraw permission. Missing, wildcard, all-network, and
-  additional IP entries fail. The current key can pass startup once the exact
-  host IP and dedicated account ID are present in its environment. The owner
+  is not allowlisted only to the exact host-IP set declared by
+  `BYBIT_REAL_API_KEY_IP` and optional `BYBIT_REAL_API_KEY_BACKUP_IP`, lacks
+  ContractTrade Order and Position permissions, or carries Wallet Withdraw
+  permission. Missing, wildcard, all-network, and undeclared IP entries fail.
+  The current key can pass startup once the exact host-IP set and dedicated
+  account ID are present in its environment. The owner
   must still rotate it at Bybit and revoke the old key. Optional operator
   inventory controls use a physically separate, globally read-only query key
   from the operator-owned root:root mode-0600

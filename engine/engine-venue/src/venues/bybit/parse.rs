@@ -45,18 +45,21 @@ pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
 }
 
 /// Enforce the funded key's required identity and permission shape.
-pub(crate) fn verify_funded_key(result: &Value, expected_ip: &str) -> Result<(), VenueError> {
+pub(crate) fn verify_funded_key(
+    result: &Value,
+    expected_ip: &str,
+    backup_ip: Option<&str>,
+) -> Result<(), VenueError> {
     if int_field(result, "readOnly")? != 0 {
         return Err(VenueError::Credentials(
             "the funded API key is read-only and cannot run the execution engine".to_string(),
         ));
     }
-    verify_key_identity(
-        result,
-        expected_ip,
-        "BYBIT_REAL_API_KEY_IP",
-        "funded API key",
-    )?;
+    let mut expected_ips = vec![("BYBIT_REAL_API_KEY_IP", expected_ip)];
+    if let Some(backup_ip) = backup_ip.filter(|value| !value.trim().is_empty()) {
+        expected_ips.push(("BYBIT_REAL_API_KEY_BACKUP_IP", backup_ip));
+    }
+    verify_key_identity(result, &expected_ips, "funded API key")?;
     let contract = key_permissions(result, "ContractTrade")?;
     if !contract.contains(&"Order") || !contract.contains(&"Position") {
         return Err(VenueError::Credentials(
@@ -80,8 +83,7 @@ pub(crate) fn verify_attestation_key(result: &Value, expected_ip: &str) -> Resul
     }
     verify_key_identity(
         result,
-        expected_ip,
-        "BYBIT_ATTEST_API_KEY_IP",
+        &[("BYBIT_ATTEST_API_KEY_IP", expected_ip)],
         "attestation API key",
     )?;
     let contract = key_permissions(result, "ContractTrade")?;
@@ -106,8 +108,7 @@ pub(crate) fn verify_attestation_key(result: &Value, expected_ip: &str) -> Resul
 
 fn verify_key_identity(
     result: &Value,
-    expected_ip: &str,
-    ip_variable: &str,
+    expected_ips: &[(&str, &str)],
     label: &str,
 ) -> Result<(), VenueError> {
     if int_field(result, "uta")? != 1 {
@@ -119,39 +120,56 @@ fn verify_key_identity(
         .get("ips")
         .and_then(Value::as_array)
         .ok_or_else(|| VenueError::BadReply("API-key info has no ips array".to_string()))?;
-    let expected_ip = expected_ip.trim();
-    let expected_address = expected_ip.parse::<std::net::IpAddr>().map_err(|_| {
-        VenueError::Credentials(format!(
-            "{ip_variable} must be one literal production host IP"
-        ))
-    })?;
-    if expected_address.is_unspecified()
-        || expected_address.is_loopback()
-        || expected_address.is_multicast()
-    {
-        return Err(VenueError::Credentials(format!(
-            "{ip_variable} must name the one production host IP"
-        )));
+    let mut expected_addresses = Vec::with_capacity(expected_ips.len());
+    for (variable, raw_ip) in expected_ips {
+        let address = raw_ip
+            .trim()
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| {
+                VenueError::Credentials(format!(
+                    "{variable} must be one literal production host IP"
+                ))
+            })?;
+        if address.is_unspecified() || address.is_loopback() || address.is_multicast() {
+            return Err(VenueError::Credentials(format!(
+                "{variable} must name one production host IP"
+            )));
+        }
+        if expected_addresses.contains(&address) {
+            return Err(VenueError::Credentials(
+                "the funded API key primary and backup IPs must be different".to_string(),
+            ));
+        }
+        expected_addresses.push(address);
     }
     let listed: Vec<&str> = ips
         .iter()
         .map(|ip| ip.as_str().map(str::trim).unwrap_or_default())
         .collect();
     let exact = |ip: &str| {
-        if ip.parse::<std::net::IpAddr>().ok() == Some(expected_address) {
-            return true;
+        if let Ok(address) = ip.parse::<std::net::IpAddr>() {
+            return Some(address);
         }
         let (host, prefix) = ip.rsplit_once('/').unwrap_or((ip, ""));
         let host = host.parse::<std::net::IpAddr>().ok();
-        match (host, prefix, expected_address) {
-            (Some(std::net::IpAddr::V4(got)), "32", std::net::IpAddr::V4(want)) => got == want,
-            (Some(std::net::IpAddr::V6(got)), "128", std::net::IpAddr::V6(want)) => got == want,
-            _ => false,
+        match (host, prefix) {
+            (Some(std::net::IpAddr::V4(got)), "32") => Some(got.into()),
+            (Some(std::net::IpAddr::V6(got)), "128") => Some(got.into()),
+            _ => None,
         }
     };
-    if listed.len() != 1 || !exact(listed[0]) {
+    let listed_addresses = listed.iter().filter_map(|ip| exact(ip)).collect::<Vec<_>>();
+    let exact_set = listed.len() == expected_addresses.len()
+        && listed_addresses.len() == listed.len()
+        && listed_addresses
+            .iter()
+            .all(|address| expected_addresses.contains(address))
+        && expected_addresses
+            .iter()
+            .all(|address| listed_addresses.contains(address));
+    if !exact_set {
         return Err(VenueError::Credentials(format!(
-            "the {label} must be allowlisted only to {expected_ip}; venue reports {listed:?}"
+            "the {label} allowlist must exactly match {expected_addresses:?}; venue reports {listed:?}"
         )));
     }
     Ok(())
@@ -1147,7 +1165,7 @@ mod tests {
 
     #[test]
     fn funded_key_gate_requires_ip_scope_and_safe_permissions() {
-        verify_funded_key(&funded_key(), "203.0.113.7").unwrap();
+        verify_funded_key(&funded_key(), "203.0.113.7", None).unwrap();
 
         let mut no_ips = funded_key();
         no_ips["ips"] = json!([]);
@@ -1161,15 +1179,20 @@ mod tests {
         insufficient["permissions"]["ContractTrade"] = json!(["Order"]);
         for refused in [no_ips, withdrawal, read_only, classic, insufficient] {
             assert!(
-                verify_funded_key(&refused, "203.0.113.7").is_err(),
+                verify_funded_key(&refused, "203.0.113.7", None).is_err(),
                 "accepted {refused}"
             );
         }
         let mut extra_ip = funded_key();
         extra_ip["ips"] = json!(["203.0.113.7", "198.51.100.2"]);
-        assert!(verify_funded_key(&extra_ip, "203.0.113.7").is_err());
-        assert!(verify_funded_key(&funded_key(), "0.0.0.0/0").is_err());
-        assert!(verify_funded_key(&funded_key(), "not-an-ip").is_err());
+        assert!(verify_funded_key(&extra_ip, "203.0.113.7", None).is_err());
+        verify_funded_key(&extra_ip, "203.0.113.7", Some("198.51.100.2")).unwrap();
+        extra_ip["ips"] = json!(["198.51.100.2/32", "203.0.113.7/32"]);
+        verify_funded_key(&extra_ip, "203.0.113.7", Some("198.51.100.2")).unwrap();
+        assert!(verify_funded_key(&extra_ip, "203.0.113.7", Some("198.51.100.3")).is_err());
+        assert!(verify_funded_key(&extra_ip, "203.0.113.7", Some("203.0.113.7")).is_err());
+        assert!(verify_funded_key(&funded_key(), "0.0.0.0/0", None).is_err());
+        assert!(verify_funded_key(&funded_key(), "not-an-ip", None).is_err());
     }
 
     #[test]

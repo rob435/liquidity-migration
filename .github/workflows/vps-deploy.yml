@@ -119,9 +119,9 @@ jobs:
     timeout-minutes: 15
     environment: production
     env:
-      VPS_HOST: ${{ vars.VPS_HOST || '116.202.15.128' }}
+      VPS_HOST: ${{ vars.VPS_HOST || '208.84.103.4' }}
       VPS_USER: ${{ vars.VPS_USER || 'root' }}
-      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4' }}
+      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:WkfDoTe+g+IfcsH/tzXkd5BiasYJliBm0n1x9raLAfs' }}
       GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -139,7 +139,7 @@ jobs:
           ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 |
             grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT"
           printf '%s\n' \
-            '116.202.15.128 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICf7380psA4UujIrKaLuxWINmEl7vmBAKLMa7CpL7Dvq' \
+            '208.84.103.4 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0+iEeefQNvZJvzYDOgmNf0VKmEjPhHncNpSuopu9TZ' \
             > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           ssh-keygen -lf ~/.ssh/known_hosts | grep -F "$VPS_ED25519_FINGERPRINT"
@@ -165,9 +165,9 @@ jobs:
     # and both post-activation verification passes on a loaded host.
     timeout-minutes: 120
     env:
-      VPS_HOST: ${{ vars.VPS_HOST || '116.202.15.128' }}
+      VPS_HOST: ${{ vars.VPS_HOST || '208.84.103.4' }}
       VPS_USER: ${{ vars.VPS_USER || 'root' }}
-      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4' }}
+      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:WkfDoTe+g+IfcsH/tzXkd5BiasYJliBm0n1x9raLAfs' }}
       GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -185,7 +185,7 @@ jobs:
           ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 |
             grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT"
           printf '%s\n' \
-            '116.202.15.128 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICf7380psA4UujIrKaLuxWINmEl7vmBAKLMa7CpL7Dvq' \
+            '208.84.103.4 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0+iEeefQNvZJvzYDOgmNf0VKmEjPhHncNpSuopu9TZ' \
             > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           ssh-keygen -lf ~/.ssh/known_hosts | grep -F "$VPS_ED25519_FINGERPRINT"

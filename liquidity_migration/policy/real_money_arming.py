@@ -114,18 +114,40 @@ def _credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 "" if absent else f"remove {key}",
             )
         )
+    def host_ip(raw: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            return None
+        if address.is_unspecified or address.is_loopback or address.is_multicast:
+            return None
+        return address
+
     raw_ip = values.get("BYBIT_REAL_API_KEY_IP", "").strip()
-    try:
-        address = ipaddress.ip_address(raw_ip)
-        safe_ip = not (address.is_unspecified or address.is_loopback or address.is_multicast)
-    except ValueError:
-        safe_ip = False
+    primary_ip = host_ip(raw_ip)
     results.append(
         CheckResult(
             "BYBIT_REAL_API_KEY_IP",
-            safe_ip,
-            "one literal host IP is set" if safe_ip else "missing, wildcard, or not a host IP",
-            "set the one public host IP in both this file and the Bybit key allowlist",
+            primary_ip is not None,
+            "one literal primary host IP is set"
+            if primary_ip is not None
+            else "missing, wildcard, or not a host IP",
+            "set the primary public host IP in both this file and the Bybit key allowlist",
+        )
+    )
+    raw_backup_ip = values.get("BYBIT_REAL_API_KEY_BACKUP_IP", "").strip()
+    backup_ip = host_ip(raw_backup_ip) if raw_backup_ip else None
+    backup_ok = not raw_backup_ip or (backup_ip is not None and backup_ip != primary_ip)
+    results.append(
+        CheckResult(
+            "BYBIT_REAL_API_KEY_BACKUP_IP",
+            backup_ok,
+            "not configured"
+            if not raw_backup_ip
+            else "one distinct literal backup host IP is set"
+            if backup_ok
+            else "wildcard, not a host IP, or duplicates the primary",
+            "set one distinct backup public host IP, or leave it empty",
         )
     )
     exclusive_uid = values.get("BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID", "").strip()

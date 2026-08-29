@@ -898,7 +898,10 @@ impl VenueGateway for BybitGateway {
                             .to_string(),
                     )
                 })?;
-                verify_funded_key(&result, &expected_ip)?;
+                let backup_ip = std::env::var("BYBIT_REAL_API_KEY_BACKUP_IP")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty());
+                verify_funded_key(&result, &expected_ip, backup_ip.as_deref())?;
             }
         }
 

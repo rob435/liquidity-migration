@@ -6,6 +6,15 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — The funded key may declare one deliberate backup host.**
+  `BYBIT_REAL_API_KEY_IP` remains the required primary address and the optional
+  `BYBIT_REAL_API_KEY_BACKUP_IP` names one distinct backup. Startup compares
+  the whole declared set with Bybit's signed key-identity reply, so an
+  undeclared third address, a missing declared address, a duplicate, wildcard,
+  or non-host network still refuses funded execution. Demo, producer,
+  notification, and read-only attestation processes remove the backup setting
+  from their environments.
+
 - **2026-08-29 — The funded fleet can be resumed from the phone that paused
   it.** `resume-mainnet` joins the control helper's fixed action list and the
   sudo policy, which is now an exact five-command boundary. The funded resume

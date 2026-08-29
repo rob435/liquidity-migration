@@ -247,11 +247,12 @@ prevent a later manual mode switch, so the operator check remains required.
 Funded Bybit account identity also enforces the key shape reported by the venue.
 It requires UTA membership, a write-capable key, ContractTrade Order and
 Position permissions, and no Wallet
-Withdraw permission. `BYBIT_REAL_API_KEY_IP` must name the one production host
-IP, and the venue must report exactly that IP alone; the exact host `/32` or
-`/128` form is also accepted. Missing, wildcard, all-network, additional, or
-mismatched entries abort before account identity is accepted. Key creation time
-does not affect admission.
+Withdraw permission. `BYBIT_REAL_API_KEY_IP` must name the primary production
+host. `BYBIT_REAL_API_KEY_BACKUP_IP` may name one distinct backup host. The
+venue must report exactly the declared one- or two-host set; exact host `/32`
+and `/128` forms are also accepted. Missing, wildcard, all-network, undeclared,
+duplicate, or mismatched entries abort before account identity is accepted.
+Key creation time does not affect admission.
 
 Funded identity separately requires
 `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` to equal the authenticated account ID.
@@ -315,11 +316,13 @@ it cannot create the replacement or revoke the prior key.
    arming switch and stops and disables funded units; it does not flatten.
 2. In the venue account, create a UTA key. It must be write-capable, grant
    ContractTrade Order and Position, omit Wallet
-   Withdraw, and allowlist only the production host IP. Remove or revoke every
-   other trading key and venue bot for this UID, and stop hand and copy trading
-   on it.
+   Withdraw, and allowlist only the declared production host IPs. Remove or
+   revoke every other trading key and venue bot for this UID, and stop hand and
+   copy trading on it.
 3. Replace the key and secret in the root-owned funded credential file on the
-   host, and set `BYBIT_REAL_API_KEY_IP` to that one IP. Keep the file a regular
+   host. Set `BYBIT_REAL_API_KEY_IP` to the primary host. Set the optional
+   `BYBIT_REAL_API_KEY_BACKUP_IP` only when a second host is deliberately kept
+   on the venue allowlist. Keep the file a regular
    `root:root` file with mode `0600`; never put the key or secret in git, shell
    history, logs, or chat. Set
    `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` to the dedicated funded UID only

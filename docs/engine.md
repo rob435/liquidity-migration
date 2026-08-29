@@ -291,10 +291,12 @@ parallel and integrate by type-check.
   mode after a successful check.
 - **Funded Bybit identity enforces the execution-key shape.** The venue must report
   a UTA, write-capable key with
-  ContractTrade Order and Position, no Wallet Withdraw, and exactly the one host
-  IP declared by `BYBIT_REAL_API_KEY_IP`. A mismatch stops identity before the
-  account is accepted. `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` must also equal
-  the authenticated UID. That value is an operator acknowledgement that the
+  ContractTrade Order and Position, no Wallet Withdraw, and exactly the host-IP
+  set declared by `BYBIT_REAL_API_KEY_IP` plus the optional
+  `BYBIT_REAL_API_KEY_BACKUP_IP`. A missing, extra, or mismatched address stops
+  identity before the account is accepted.
+  `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` must also equal the authenticated
+  UID. That value is an operator acknowledgement that the
   funded UID has no hand trading, venue bots, copy trading, or other trading API
   keys; it is required because Bybit exposes no account-wide list for every bot
   family and is not itself a machine proof of exclusivity. The owner rotation
