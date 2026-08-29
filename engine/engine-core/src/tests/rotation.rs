@@ -87,6 +87,7 @@ fn sent(id: &str, symbol: u16, qty: f64, stop: f64) -> WalRecord {
             kind: OrderKind::Market,
             stop: Some(StopSpec { trigger_px: stop }),
             reduce_only: false,
+            close_position: false,
         },
         wire_ns: 5,
         arrival_mid: 100.25,

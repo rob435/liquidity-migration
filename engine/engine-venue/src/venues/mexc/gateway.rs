@@ -233,6 +233,7 @@ impl VenueGateway for MexcGateway {
             amend_in_place: false,
             // POST /api/v1/private/position/change_leverage.
             set_leverage: true,
+            close_position_below_minimum: false,
         }
     }
 

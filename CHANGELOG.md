@@ -6,6 +6,29 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The first toxic-flow canary stopped early, and whole-position
+  dust can now close.** The registered run produced 10 new attributed fills,
+  all maker: 8.81 bp all-in arrival cost and -14.52 bp signed one-minute
+  markout. That is adverse but far too small to grade the rule. The run was
+  stopped before its 30-fill-or-60-minute boundary when it left 10 AGI that
+  the normal quantity/value checks would not submit. The quoter is disabled.
+  For a venue that states this capability, the engine now recognizes only an
+  exact, reduce-only, market exit for the whole fresh position as a below-minimum
+  close. Bybit renders that request as `qty=0`, `reduceOnly=true`, and
+  `closeOnTrigger=true`; the durable request keeps the actual quantity for
+  accounting. Partial dust exits and malformed full-close requests remain
+  refused.
+
+- **2026-08-30 — Execution-health telemetry reaches the live heartbeat.** It
+  now states p99 disk-wait residue, p99 request-quota hold, accepted amends
+  confirmed versus pulled after the venue stayed silent, private-stream resets
+  including the initial subscription, and venue clock minus host clock. The
+  clock sign is pinned by a direct test so a positive number means the venue
+  is ahead, matching the field's words. Each Telegram-enabled scope sends one
+  plain digest per UTC day from these fields and retries until delivery; its
+  day marker is reserved watchdog state, not an alert cooldown. Optional host
+  clock and off-box-backup-stamp checks remain off until configured.
+
 - **2026-08-29 — The maker protects only the side aggressive flow is attacking.**
   Public trade notional is divided by displayed same-side dollars within a
   volatility-expanded near-touch band, then carried in 250 ms and 3 s decays.

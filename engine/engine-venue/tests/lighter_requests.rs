@@ -42,6 +42,7 @@ fn entry(kind: OrderKind, stop: Option<StopSpec>) -> OrderRequest {
         kind,
         stop,
         reduce_only: false,
+        close_position: false,
     }
 }
 

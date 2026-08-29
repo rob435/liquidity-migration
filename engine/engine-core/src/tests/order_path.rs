@@ -455,6 +455,7 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            close_position: false,
         },
         wire_ns: 3,
         arrival_mid: 0.0,
@@ -500,6 +501,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 90.0 }),
                 reduce_only: false,
+                close_position: false,
             },
             wire_ns: 3,
             arrival_mid: 100.0,
@@ -600,6 +602,7 @@ async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            close_position: false,
         },
         wire_ns: 3,
         arrival_mid: 0.0,
@@ -1044,6 +1047,7 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 95.0 }),
                 reduce_only: false,
+                close_position: false,
             },
             wire_ns: 1,
             arrival_mid: 100.0,
@@ -1480,6 +1484,7 @@ async fn a_flooded_wake_drops_entries_but_never_exits() {
 struct SloppyExiter {
     symbol: String,
     sent: bool,
+    qty: f64,
 }
 
 impl Strategy for SloppyExiter {
@@ -1502,7 +1507,7 @@ impl Strategy for SloppyExiter {
                     strategy: StrategyId(0),
                     symbol: *symbol,
                     side: Side::Sell,
-                    qty: 0.01,
+                    qty: self.qty,
                     kind: OrderKind::Market,
                     stop: Some(StopSpec {
                         trigger_px: quote.bid_px * 0.99,
@@ -1526,6 +1531,7 @@ async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
     let exiter = SloppyExiter {
         symbol: "BTCUSDT".into(),
         sent: false,
+        qty: 0.01,
     };
     let (mut engine, h) = build(allow_all(), vec![Box::new(exiter)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
@@ -1547,6 +1553,93 @@ async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
             assert!(request.stop.is_none(), "the log saw a stop on an exit");
         }
     }
+}
+
+fn held_long(qty: f64) -> engine_types::PositionView {
+    engine_types::PositionView {
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty,
+        entry_px: 30_000.0,
+        stop_attached: true,
+        stop_px: 27_000.0,
+        leverage: None,
+    }
+}
+
+fn raised_minimum_rule() -> InstrumentRule {
+    InstrumentRule {
+        tick_size: 0.5,
+        qty_step: 0.001,
+        min_qty: 0.01,
+        min_notional: 5.0,
+    }
+}
+
+#[tokio::test]
+async fn a_whole_position_below_the_minimum_uses_the_venue_close_path() {
+    let exiter = SloppyExiter {
+        symbol: "BTCUSDT".into(),
+        sent: false,
+        qty: 0.001,
+    };
+    let (mut engine, h) = build_with_venue_state_and_rule(
+        allow_all(),
+        vec![Box::new(exiter)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+        vec![held_long(0.001)],
+        Some(raised_minimum_rule()),
+    )
+    .await;
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].qty, 0.001, "the log keeps the accounting size");
+    assert!(sends[0].reduce_only);
+    assert!(sends[0].close_position);
+}
+
+#[tokio::test]
+async fn a_partial_position_below_the_minimum_is_still_refused() {
+    let exiter = SloppyExiter {
+        symbol: "BTCUSDT".into(),
+        sent: false,
+        qty: 0.001,
+    };
+    let (mut engine, h) = build_with_venue_state_and_rule(
+        allow_all(),
+        vec![Box::new(exiter)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+        vec![held_long(0.002)],
+        Some(raised_minimum_rule()),
+    )
+    .await;
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert!(h.sends.lock().unwrap().is_empty());
+    let note = note_saying(&h.records, "not sent");
+    assert!(note.contains("smallest tradable size"), "{note}");
 }
 
 #[tokio::test]
@@ -1808,6 +1901,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
         kind: OrderKind::Market,
         stop: None,
         reduce_only: false,
+        close_position: false,
     };
     let finished = OrderRequest {
         client_order_id: "eng-1700000000000-3".into(),

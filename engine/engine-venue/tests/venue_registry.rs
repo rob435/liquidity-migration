@@ -32,6 +32,7 @@ fn market_order() -> OrderRequest {
         kind: OrderKind::Market,
         stop: Some(StopSpec { trigger_px: 93000.5 }),
         reduce_only: false,
+        close_position: false,
     }
 }
 

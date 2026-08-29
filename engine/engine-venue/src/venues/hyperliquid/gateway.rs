@@ -346,6 +346,7 @@ impl VenueGateway for HyperliquidGateway {
             amend_in_place: true,
             // The `updateLeverage` action.
             set_leverage: true,
+            close_position_below_minimum: false,
         }
     }
 
@@ -767,6 +768,7 @@ mod tests {
             kind,
             stop: None,
             reduce_only: false,
+            close_position: false,
         }
     }
 

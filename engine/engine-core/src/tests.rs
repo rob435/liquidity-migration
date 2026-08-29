@@ -271,6 +271,7 @@ fn bybit_like_caps() -> VenueCaps {
         native_position_stop: true,
         amend_in_place: true,
         set_leverage: true,
+        close_position_below_minimum: true,
     }
 }
 
@@ -961,9 +962,27 @@ async fn build_with_venue_state(
     working: Vec<VenueOrder>,
     held: Vec<engine_types::PositionView>,
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    build_with_venue_state_and_rule(
+        verdict, strategies, symbols, replayed, working, held, None,
+    )
+    .await
+}
+
+async fn build_with_venue_state_and_rule(
+    verdict: RiskVerdict,
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+    replayed: &[WalRecord],
+    working: Vec<VenueOrder>,
+    held: Vec<engine_types::PositionView>,
+    rule: Option<InstrumentRule>,
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
     let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
+    if let Some(rule) = rule {
+        venue.rules[0].1 = rule;
+    }
     venue.working = working;
     venue.account_readings.lock().unwrap().push_back(held);
     let cancels = venue.cancels.clone();
@@ -1091,6 +1110,14 @@ fn someone_elses_order(symbol: &str) -> VenueOrder {
 
 fn allow_all() -> RiskVerdict {
     RiskVerdict::Allow { qty: f64::NAN }
+}
+
+#[test]
+fn venue_clock_offset_is_venue_minus_the_local_receive_clock() {
+    assert_eq!(
+        crate::engine::venue_minus_local_ms(10_050, 1_000_000_000, 1_005_000_000, 10_030),
+        25
+    );
 }
 
 mod boot_rules;

@@ -5,6 +5,25 @@ Evidence grading and promotion: [docs/research/governance.md](governance.md). Ev
 [AGENTS.md](../../AGENTS.md). Failure taxonomy: [docs/research/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
 Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
+## 2026-08-30 — Directional toxic-flow protection: first forward sample
+
+**Forward evidence.** The first funded run after registration produced 10
+feature-bearing `maker_canary` fills on AGIUSDT. All 10 were maker fills. At
+the stop point their notional-weighted all-in arrival cost was +8.81 bp and
+their signed one-minute markout was -14.52 bp: the price moved against the
+fill. The surrounding-state receipts averaged flow score 0.43, same-side
+depth ratio 0.09, 92.34 USDT nearby same-side depth, 11.73 bp spread, 1.26 bp
+short movement and 30.11 USDT estimated queue ahead.
+
+**Boundary and decision.** This sample did not reach the registered 30-fill or
+60-minute boundary. It stopped at 10 fills because the final 10 AGI of
+inventory was below the ordinary close minimum, exposing an execution fault.
+The rule stays registered but quoting is disabled. Ten fills cannot establish
+economics, and the operational stop makes this a diagnostic rather than a
+completed grade. The full historical quoter log is descriptive only: 31 fills,
+92% maker share, 11 closed trips, no winning trips and -0.16 USDT net; it mixes
+earlier rules with the registered one and therefore cannot grade this config.
+
 ## 2026-08-29 — Directional toxic-flow protection: Lane-1 selection
 
 **Question.** Does scaling public aggressive trades by the displayed dollars
@@ -86,4 +105,3 @@ not reverse the `funding_spread_v1` deletion reasoning (that config deleted
 The one live question it leaves: whether "*both* venues negative" (a
 convergence signal) predicts anything *in addition* to Bybit being negative
 — the n=1861 vs n=96 split above suggests it mostly does not.
-

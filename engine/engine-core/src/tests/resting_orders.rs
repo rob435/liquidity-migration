@@ -316,6 +316,7 @@ async fn amended_once() -> (Engine<MockWal, MockRisk, MockVenue>, Harness, Symbo
             trigger_px: 28_000.0,
         }),
         reduce_only: false,
+        close_position: false,
     };
     let replayed = [WalRecord::OrderSent {
         request: old,
@@ -476,6 +477,7 @@ async fn a_second_move_while_the_price_is_owed_waits_rather_than_pulling_the_ord
             trigger_px: 28_000.0,
         }),
         reduce_only: false,
+        close_position: false,
     };
     let replayed = [WalRecord::OrderSent {
         request: old,
@@ -556,6 +558,7 @@ async fn a_nonfinite_amend_approval_never_reaches_the_venue() {
             trigger_px: 28_000.0,
         }),
         reduce_only: false,
+        close_position: false,
     };
     let replayed = [WalRecord::OrderSent {
         request: old,
@@ -793,6 +796,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
         },
         stop: None,
         reduce_only: false,
+        close_position: false,
     };
     let theirs = OrderRequest {
         client_order_id: "eng-1700000000000-2".into(),

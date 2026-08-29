@@ -864,6 +864,7 @@ fn sample_record() -> WalRecord {
                 trigger_px: 63500.0,
             }),
             reduce_only: false,
+            close_position: false,
         },
         wire_ns: 1_234_567_890,
         // Carried on the real record too, so the size this measures is the

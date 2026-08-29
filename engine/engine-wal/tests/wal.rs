@@ -64,6 +64,7 @@ fn every_variant() -> Vec<WalRecord> {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: true,
+                close_position: false,
             },
             wire_ns: 99_000_555_000,
             arrival_mid: 0.0,
@@ -176,6 +177,21 @@ fn roundtrip_every_variant() {
     assert_eq!(seqs, (1..=written.len() as u64).collect::<Vec<_>>());
     assert_eq!(records, written);
     assert_eq!(wal.next_seq(), written.len() as u64 + 1);
+}
+
+#[test]
+fn an_old_order_record_defaults_to_an_ordinary_order() {
+    let mut old = serde_json::to_value(&every_variant()[4]).unwrap();
+    old["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("close_position");
+
+    let decoded: WalRecord = serde_json::from_value(old).unwrap();
+    let WalRecord::OrderSent { request, .. } = decoded else {
+        panic!("the fixture is an order record");
+    };
+    assert!(!request.close_position);
 }
 
 #[test]

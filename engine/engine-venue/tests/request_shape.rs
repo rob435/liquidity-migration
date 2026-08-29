@@ -53,6 +53,7 @@ fn market_order() -> OrderRequest {
             trigger_px: 93000.5,
         }),
         reduce_only: false,
+        close_position: false,
     }
 }
 
@@ -253,6 +254,7 @@ async fn a_limit_order_carries_price_and_time_in_force() {
         },
         stop: None,
         reduce_only: true,
+        close_position: false,
     };
     gw.send_order(&request).await.unwrap();
 
@@ -286,6 +288,7 @@ async fn a_reduce_only_order_never_renders_a_stop_even_when_handed_one() {
         kind: OrderKind::Market,
         stop: Some(engine_types::StopSpec { trigger_px: 2900.0 }),
         reduce_only: true,
+        close_position: false,
     };
     gw.send_order(&request).await.unwrap();
 
@@ -299,6 +302,39 @@ async fn a_reduce_only_order_never_renders_a_stop_even_when_handed_one() {
         body.get("tpslMode").is_none(),
         "tpslMode on a reduce-only order"
     );
+}
+
+#[tokio::test]
+async fn a_full_position_close_uses_bybits_zero_quantity_form() {
+    let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-close"}"#)).await;
+    let mut gw = gateway(&server);
+    let mut request = market_order();
+    request.side = Side::Sell;
+    request.qty = 10.0;
+    request.stop = None;
+    request.reduce_only = true;
+    request.close_position = true;
+
+    gw.send_order(&request).await.unwrap();
+
+    let body = server.only("/v5/order/create").json();
+    assert_eq!(body["orderType"], "Market");
+    assert_eq!(body["qty"], "0");
+    assert_eq!(body["reduceOnly"], true);
+    assert_eq!(body["closeOnTrigger"], true);
+}
+
+#[tokio::test]
+async fn a_full_position_close_cannot_be_an_opening_order() {
+    let server = TestServer::start(|_, _| ok(r#"{"orderId":"never"}"#)).await;
+    let mut gw = gateway(&server);
+    let mut request = market_order();
+    request.close_position = true;
+
+    let error = gw.send_order(&request).await.unwrap_err();
+
+    assert!(matches!(error, VenueError::BadRequest(_)));
+    assert!(server.requests().is_empty());
 }
 
 #[tokio::test]

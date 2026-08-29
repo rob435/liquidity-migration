@@ -54,14 +54,16 @@ file.
   `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit, or stop
   `llm-ledger.timer`. Detail: `docs/trading_logic.md` §LLM GATE.
 
-- **The fourth registered sleeve, `maker_canary`, runs a bounded minimum-size
-  AGIUSDT forward trial.** It quotes 5.25 USDT per side with a 6 USDT inventory
-  ceiling. Recent aggressive trades are scaled by nearby displayed dollars and
-  held at 250 ms and 3 s; buying widens only the ask and selling widens only the
-  bid. The trial boundary is 30 attributed fills or 60 minutes of enabled
-  quoting, whichever comes first. Its exact rule and evidence boundary are
-  `configs/lane2_toxic_flow_quoter_v1.json`. The ordinary CARRY, LONG and
-  Exodus books remain independent of it.
+- **The fourth registered sleeve, `maker_canary`, is installed but quoting is
+  off.** Its first minimum-size AGIUSDT forward sample stopped after 10 new
+  fills when a 10-AGI remainder fell below the ordinary close minimum. The
+  engine keeps the sleeve block for append-only log identity and drains only
+  inventory attributed to it. An exact whole-position market exit below the
+  ordinary venue minimum uses Bybit's explicit full-close form; partial dust
+  orders remain refused. Its registered rule and evidence boundary are
+  `configs/lane2_toxic_flow_quoter_v1.json`; the result is in
+  `docs/research/research_findings.md`. The ordinary CARRY, LONG and Exodus
+  books remain independent of it.
 
 - **LONG runs at 6.0× and carry at 3.0×; Exodus copies carry's filled quantity
   (owner directive, both fleets).** Sizing dials are read directly by
@@ -357,6 +359,11 @@ cleanly into disk, socket, leverage call, and venue legs.
   venue latency, and it is what the funded canary's 249.74 ms p99 venue task
   was mostly made of. `cd engine && cargo run --release -- latency --wal PATH`
   reports each step per operation at p50, p90, p99 and p99.9.
+- **The live heartbeat exposes execution health, not only a headline
+  latency.** It carries p99 disk-wait residue and request-quota hold, accepted
+  amends confirmed versus pulled after silence, private-stream resets, and the
+  venue clock minus the host clock. These separate a slow venue from our own
+  pacing, a missing private update, or a drifting machine clock.
 - **An accepted amend keeps its order.** The venue states a resting order's
   price by republishing it on the private stream, and that is what settles the
   reservation an amend opens. Only an amend whose price goes unstated for two

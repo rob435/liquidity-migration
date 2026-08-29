@@ -48,6 +48,7 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
         kind: OrderKind::Market,
         stop: None,
         reduce_only: false,
+        close_position: false,
     };
     let replayed = vec![
         WalRecord::Boot {

@@ -269,6 +269,7 @@ mod tests {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: false,
+                close_position: false,
             },
             wire_ns: 1,
             arrival_mid: 0.0,

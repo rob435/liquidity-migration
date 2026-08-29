@@ -541,6 +541,7 @@ impl VenueGateway for HttpVenue {
             native_position_stop: true,
             amend_in_place: true,
             set_leverage: false,
+            close_position_below_minimum: false,
         }
     }
 

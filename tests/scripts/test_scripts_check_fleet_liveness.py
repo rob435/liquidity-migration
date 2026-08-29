@@ -2100,3 +2100,250 @@ def test_mainnet_liveness_refuses_an_unbound_engine(monkeypatch) -> None:
     monkeypatch.setattr("sys.argv", ["check_fleet_liveness.py", "--account-scope", "mainnet"])
     with pytest.raises(SystemExit, match="mainnet liveness requires an explicit engine binding"):
         M.main()
+
+
+# ---------------------------------------------------------------- daily digest
+
+
+def _health_payload() -> dict:
+    return {
+        "may_open": True,
+        "account_equity_usdt": 10250.5,
+        "positions": [{"symbol": "AGIUSDT"}, {"symbol": "ETHUSDT"}],
+        "orders_sent": 41,
+        "fills": 17,
+        "fills_maker_share": 0.7647,
+        "fill_arrival_shortfall_bps": 0.83,
+        "fill_markout_1m_our_way_bps": -0.31,
+        "wire_p50_ns": 4_100_000,
+        "wire_p99_ns": 6_200_000,
+        "ack_p50_ns": 3_600_000,
+        "barrier_wait_p99_ns": 2_100,
+        "quota_hold_p99_ns": 0,
+        "amends_confirmed": 37,
+        "amends_pulled_unconfirmed": 2,
+        "stream_resets": 1,
+        "venue_clock_offset_ms": -12,
+    }
+
+
+def test_daily_digest_reads_as_the_engines_own_numbers() -> None:
+    text = M.build_daily_digest(_health_payload(), scope_name="mainnet", ts="2026-08-30 00:02 UTC")
+    assert text.startswith("MAINNET engine daily health · 2026-08-30")
+    assert "may open" in text
+    assert "equity $10,250" in text
+    assert "2 position(s)" in text
+    assert "fills 17 · maker 76%" in text
+    # The engine's sign convention, translated to a verb the phone can read:
+    # positive arrival means the fills landed worse than the screen.
+    assert "slip 0.8 bp paid" in text
+    assert "1m markout -0.3 bp our way" in text
+    assert "submit p50 4.10ms · p99 6.20ms" in text
+    assert "disk wait p99 2.1us" in text
+    assert "quota hold p99 0ns" in text
+    assert "amends priced by venue 37 · pulled unanswered 2" in text
+    assert "stream resets 1" in text
+    assert "venue clock offset -12 ms" in text
+
+
+def test_daily_digest_prints_a_dash_for_what_an_older_engine_never_wrote() -> None:
+    # A heartbeat from before these fields existed must degrade to dashes,
+    # never crash and never print a confident zero: zero reads as "measured,
+    # and it was nothing", which is the opposite of absent.
+    text = M.build_daily_digest({"may_open": False}, scope_name="demo", ts="x")
+    assert "NOT OPENING" in text
+    assert "equity —" in text
+    assert "maker —" in text
+    assert "disk wait p99 —" in text
+    assert "quota hold p99 —" in text
+    assert "venue clock offset —" in text
+    # Absent must never print as a confident zero: zero reads as "measured,
+    # and it was nothing", which is the opposite of the truth.
+    for confident_zero in ("equity $0", "maker 0%", "0 position", "offset +0 ms", "p99 0ns"):
+        assert confident_zero not in text, text
+
+
+def test_negative_arrival_reads_as_saved() -> None:
+    payload = _health_payload() | {"fill_arrival_shortfall_bps": -0.5}
+    assert "slip 0.5 bp saved" in M.build_daily_digest(payload, scope_name="demo", ts="x")
+
+
+def test_the_digest_day_gate_sends_once_per_utc_day(tmp_path, monkeypatch) -> None:
+    # The whole cadence rests on this comparison; a broken gate is either an
+    # hourly spammer (the thing the owner deleted once already) or a digest
+    # that never sends again after the first day.
+    day_one_ms = 1_787_000_000_000  # some UTC instant
+    day_one = M._digest_day(day_one_ms)
+    assert M._digest_day(day_one_ms + 3_600_000) == day_one, "an hour later is the same day"
+    assert M._digest_day(day_one_ms + 86_400_000) == day_one + 1 or M._digest_day(
+        day_one_ms + 2 * 86_400_000
+    ) > day_one, "a later day compares greater"
+    # The state key survives a round trip through the state file.
+    state_file = tmp_path / "state.json"
+    M._save_state(state_file, {M._DIGEST_DAY_KEY: day_one})
+    assert M._load_state(state_file)[M._DIGEST_DAY_KEY] == day_one
+
+
+def test_digest_day_is_bookkeeping_not_a_resolved_alert() -> None:
+    day = 20260830
+    to_send, resolved, new_state = M.select_alerts_to_send(
+        active=[], state={M._DIGEST_DAY_KEY: day}, now_ms=1_000, cooldown_minutes=60
+    )
+    assert to_send == []
+    assert resolved == []
+    assert new_state[M._DIGEST_DAY_KEY] == day
+
+
+# ------------------------------------------------------------------ host clock
+
+
+def _clock_result(stdout: str, returncode: int = 0):
+    return SimpleNamespace(stdout=stdout, returncode=returncode)
+
+
+def test_host_clock_pages_only_on_an_explicit_no() -> None:
+    assert M.evaluate_host_clock(runner=lambda *a, **k: _clock_result("yes\n")) == []
+    unsynced = M.evaluate_host_clock(runner=lambda *a, **k: _clock_result("no\n"))
+    assert [a.key for a in unsynced] == ["host_clock_unsynced"]
+    assert unsynced[0].severity == M.WARNING
+
+
+def test_host_clock_stays_quiet_where_it_cannot_be_measured() -> None:
+    # A dev box without timedatectl, a command error, gibberish output: not a
+    # clock fault, and an alert here could never clear.
+    def missing(*_a, **_k):
+        raise FileNotFoundError("timedatectl")
+
+    assert M.evaluate_host_clock(runner=missing) == []
+    assert M.evaluate_host_clock(runner=lambda *a, **k: _clock_result("", returncode=1)) == []
+    assert M.evaluate_host_clock(runner=lambda *a, **k: _clock_result("banana\n")) == []
+
+
+# ---------------------------------------------------------------- backup stamp
+
+
+def test_backup_stamp_ages_into_an_alert(tmp_path) -> None:
+    stamp = tmp_path / "backup.stamp"
+    stamp.write_text("")
+    now_ms = int(stamp.stat().st_mtime * 1000)
+    fresh = M.evaluate_backup_stamp(stamp_path=stamp, now_ms=now_ms + 3_600_000, max_age_hours=26)
+    assert fresh == []
+    stale = M.evaluate_backup_stamp(stamp_path=stamp, now_ms=now_ms + 27 * 3_600_000, max_age_hours=26)
+    assert [a.key for a in stale] == ["backup_stale"]
+    missing = M.evaluate_backup_stamp(
+        stamp_path=tmp_path / "never-written.stamp", now_ms=now_ms, max_age_hours=26
+    )
+    assert [a.key for a in missing] == ["backup_stale"]
+    assert "ever completed" in missing[0].message
+
+
+def test_the_digest_goes_out_once_a_day_and_a_failed_send_retries(tmp_path, monkeypatch) -> None:
+    # The gate this pins is the difference between one health line a day and
+    # the hourly spammer the owner already deleted once — and, the other way,
+    # a digest whose failed send burns its one shot for the day.
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setenv("LONG_SLEEVE", "off")
+    monkeypatch.setenv("CARRY_SLEEVE", "off")
+    monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
+    monkeypatch.setattr(M, "_unit_enabled_states", lambda units: {})
+    monkeypatch.setattr(M, "evaluate_disk_space", lambda path: None)
+    monkeypatch.setattr(M, "gather_engine_heartbeat_alerts", lambda **_kw: [])
+
+    beat = tmp_path / "heartbeat.json"
+    beat.write_text(json.dumps(_health_payload()))
+    sent: list[str] = []
+    deliver = {"ok": True}
+    monkeypatch.setattr(
+        M, "send_telegram_message", lambda text, **_kw: sent.append(text) or deliver["ok"]
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_fleet_liveness.py",
+            "--account-scope",
+            "demo",
+            "--long-root",
+            "",
+            "--carry-root",
+            "",
+            "--engine-heartbeat-file",
+            str(beat),
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--telegram",
+        ],
+    )
+
+    assert M.main() == 0
+    digests = [m for m in sent if "engine daily health" in m]
+    assert len(digests) == 1, f"first run of the day sends exactly one digest: {sent}"
+    assert "fills 17" in digests[0]
+
+    # Second run, same day: nothing more.
+    sent.clear()
+    assert M.main() == 0
+    assert [m for m in sent if "engine daily health" in m] == []
+
+    # A day where the send fails does not advance: the next run retries.
+    fresh_state = tmp_path / "state2.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_fleet_liveness.py",
+            "--account-scope",
+            "demo",
+            "--long-root",
+            "",
+            "--carry-root",
+            "",
+            "--engine-heartbeat-file",
+            str(beat),
+            "--state-file",
+            str(fresh_state),
+            "--telegram",
+        ],
+    )
+    deliver["ok"] = False
+    sent.clear()
+    assert M.main() == 0
+    assert len([m for m in sent if "engine daily health" in m]) == 1, "it tried"
+    deliver["ok"] = True
+    sent.clear()
+    assert M.main() == 0
+    assert len([m for m in sent if "engine daily health" in m]) == 1, (
+        "the undelivered digest was retried once the channel came back"
+    )
+
+
+def test_no_daily_digest_flag_turns_it_off(tmp_path, monkeypatch) -> None:
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setenv("LONG_SLEEVE", "off")
+    monkeypatch.setenv("CARRY_SLEEVE", "off")
+    monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
+    monkeypatch.setattr(M, "_unit_enabled_states", lambda units: {})
+    monkeypatch.setattr(M, "evaluate_disk_space", lambda path: None)
+    monkeypatch.setattr(M, "gather_engine_heartbeat_alerts", lambda **_kw: [])
+    beat = tmp_path / "heartbeat.json"
+    beat.write_text(json.dumps(_health_payload()))
+    sent: list[str] = []
+    monkeypatch.setattr(M, "send_telegram_message", lambda text, **_kw: sent.append(text) or True)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_fleet_liveness.py",
+            "--account-scope",
+            "demo",
+            "--long-root",
+            "",
+            "--carry-root",
+            "",
+            "--engine-heartbeat-file",
+            str(beat),
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--telegram",
+            "--no-daily-digest",
+        ],
+    )
+    assert M.main() == 0
+    assert sent == []

@@ -384,7 +384,7 @@ def test_funded_exodus_and_maker_canary_are_wired_to_the_engine() -> None:
     }
     maker = strategies[3]
     assert maker["name"] == "quoter"
-    assert maker["quote_enabled"] is True
+    assert maker["quote_enabled"] is False
     assert maker["symbols"] == ["AGIUSDT"]
     assert maker["qty_usdt"] == 5.25
     assert maker["max_position_usdt"] == 6.0

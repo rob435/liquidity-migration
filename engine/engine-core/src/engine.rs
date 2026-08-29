@@ -306,6 +306,16 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// each refresh tick from submitting the same cancel again meanwhile.
     halt_cancels: std::collections::HashMap<String, HaltCancelState>,
     amends_awaiting_price: HashMap<String, AwaitingAmend>,
+    /// Since boot: amends whose price the venue stated, and amends pulled
+    /// because it never did. The pair is the health of the confirmation —
+    /// pulls climbing against confirmations is the venue not republishing,
+    /// and every such pull pays the queue-position cost the confirmation
+    /// exists to avoid.
+    amends_confirmed: u64,
+    amends_pulled_unconfirmed: u64,
+    /// Since boot: private-stream resets, including the initial subscription.
+    /// Each one is a gap the engine had to recover across.
+    stream_resets: u64,
     /// A durability barrier the order path started and has not confirmed.
     ///
     /// The bytes are with the operating system; the disk has not said so yet.
@@ -403,6 +413,16 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Counted for the whole run. The ledger's own count clears every minute.
     events_seen: u64,
     subscriptions: Vec<Subscription>,
+}
+
+pub(crate) fn venue_minus_local_ms(
+    venue_ts_ms: i64,
+    recv_ns: u64,
+    now_ns: u64,
+    wall_ts_ms: i64,
+) -> i64 {
+    let age_ms = (now_ns.saturating_sub(recv_ns) / 1_000_000) as i64;
+    venue_ts_ms - (wall_ts_ms - age_ms)
 }
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
@@ -806,6 +826,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             working: WorkingOrders::default(),
             halt_cancels: std::collections::HashMap::new(),
             amends_awaiting_price: HashMap::new(),
+            amends_confirmed: 0,
+            amends_pulled_unconfirmed: 0,
+            stream_resets: 0,
             pending_barrier: None,
             halt_cancel_queue: VecDeque::new(),
             wanted_symbols: Vec::new(),
@@ -2189,6 +2212,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             attribution,
             orders,
             covers,
+            amends_confirmed,
+            amends_pulled_unconfirmed,
+            stream_resets,
             ..
         } = self;
         let Some(heartbeat) = heartbeat.as_mut() else {
@@ -2249,6 +2275,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // cheaper than keeping a second copy correct.
         let costs = fills.total();
         let effective_may_open = *may_open && *private_stream_ready;
+        // How far the venue's clock sits from this box's, read off the
+        // freshest quote: its venue stamp against the wall clock, minus the
+        // time it has spent here since the socket read. Both clocks are
+        // sampled together, here, where the number is made. A drifting box
+        // makes every venue-stamp comparison quietly wrong, and nothing else
+        // measures that.
+        let wall_ts_ms = clock::wall_ms();
+        let venue_clock_offset_ms = market
+            .quotes
+            .iter()
+            .filter(|quote| quote.venue_ts_ms > 0 && quote.recv_ns > 0)
+            .max_by_key(|quote| quote.recv_ns)
+            .map(|quote| {
+                venue_minus_local_ms(quote.venue_ts_ms, quote.recv_ns, now_ns, wall_ts_ms)
+            });
         heartbeat.write(
             now_ns,
             &heartbeat::Facts {
@@ -2264,6 +2305,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 venue_task: ledger.quantiles(Segment::VenueTask),
                 core_resume: ledger.quantiles(Segment::CoreResume),
                 end_to_end: ledger.quantiles(Segment::EndToEnd),
+                barrier_wait: ledger.quantiles(Segment::BarrierWait),
+                quota_hold: ledger.quantiles(Segment::QuotaHold),
+                amends_confirmed: *amends_confirmed,
+                amends_pulled_unconfirmed: *amends_pulled_unconfirmed,
+                stream_resets: *stream_resets,
+                venue_clock_offset_ms,
                 equity_usdt: account.equity_usdt,
                 available_usdt: account.available_usdt,
                 // The age, not the stamp: this engine's clock is monotonic
@@ -2753,7 +2800,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             )?;
             return Ok(None);
         };
-        let Some(qty) = quantize::quantize_qty(allowed_qty, &rule) else {
+        let mut held = self
+            .account
+            .positions
+            .iter()
+            .filter(|position| position.symbol == intent.symbol && position.qty > 0.0);
+        let held_position = held.next();
+        let one_position = held.next().is_none();
+        let close_position_candidate = intent.reduce_only
+            && matches!(intent.kind, OrderKind::Market)
+            && self.venue.caps().close_position_below_minimum
+            && one_position
+            && held_position.is_some_and(|position| {
+                let tolerance = rule.qty_step.max(1e-12) * 1e-9;
+                position.side == intent.side.flipped()
+                    && (allowed_qty - position.qty).abs() <= tolerance
+            });
+        let close_rule = InstrumentRule {
+            min_qty: 0.0,
+            ..rule
+        };
+        let quantize_rule = if close_position_candidate {
+            &close_rule
+        } else {
+            &rule
+        };
+        let Some(qty) = quantize::quantize_qty(allowed_qty, quantize_rule) else {
             self.refuse(
                 &client_order_id,
                 &intent,
@@ -2771,9 +2843,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tif,
             },
         };
+        let below_minimum_qty = qty + 1e-12 < rule.min_qty;
+        let mut below_minimum_value = false;
         if let Some(reference_px) = self.reference_px(intent.symbol, &kind) {
             let notional = qty * reference_px;
-            if notional + 1e-9 < rule.min_notional {
+            below_minimum_value = notional + 1e-9 < rule.min_notional;
+            if below_minimum_value && !close_position_candidate {
                 self.refuse(
                     &client_order_id,
                     &intent,
@@ -2785,6 +2860,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 return Ok(None);
             }
         }
+        let close_position = close_position_candidate && (below_minimum_qty || below_minimum_value);
 
         let request = OrderRequest {
             client_order_id: client_order_id.clone(),
@@ -2805,6 +2881,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })
             },
             reduce_only: intent.reduce_only,
+            close_position,
         };
 
         // Before the durable record, because a leverage that could not be set
@@ -3076,6 +3153,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     ..
                 },
             ) => {
+                if let Some(held) = rate_wait_ns {
+                    self.ledger.record(Segment::QuotaHold, held);
+                }
                 if replies.len() != requests.len() {
                     self.wal.append(&WalRecord::Note {
                         source: "engine".into(),
@@ -3192,6 +3272,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     ..
                 },
             ) => {
+                if let Some(held) = rate_wait_ns {
+                    self.ledger.record(Segment::QuotaHold, held);
+                }
                 if replies.len() != requests.len() {
                     self.wal.append(&WalRecord::Note {
                         source: "engine".into(),
@@ -3321,6 +3404,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     ..
                 },
             ) => {
+                if let Some(held) = rate_wait_ns {
+                    self.ledger.record(Segment::QuotaHold, held);
+                }
                 let core_handled_ns = clock::now_ns();
                 self.ledger
                     .record(Segment::DispatchQueue, started_ns.saturating_sub(queued_ns));
@@ -3525,6 +3611,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     AMEND_CONFIRM_NS / 1_000_000
                 ),
             })?;
+            self.amends_pulled_unconfirmed += 1;
             self.pending.push_front(Action::Cancel {
                 symbol: awaiting.symbol,
                 client_order_id,
@@ -4155,6 +4242,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let stream_reset = matches!(&update, OrderUpdate::StreamReset { .. });
         if stream_reset {
+            self.stream_resets += 1;
             // No other event is processed while this handler awaits the two
             // recovery reads, so clearing first is an immediate admission
             // barrier without unnecessarily cancelling healthy orders when
@@ -4215,6 +4303,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         if let Some((client_order_id, px)) = stated_price {
             if let Some(awaiting) = self.amends_awaiting_price.remove(&client_order_id) {
+                self.amends_confirmed += 1;
                 self.resolve_amend(
                     &client_order_id,
                     &awaiting.existing,

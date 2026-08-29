@@ -467,12 +467,27 @@ impl BybitGateway {
     }
 
     fn order_body(&self, req: &OrderRequest) -> Result<Value, VenueError> {
+        if req.close_position && (!req.reduce_only || !matches!(req.kind, OrderKind::Market)) {
+            return Err(VenueError::BadRequest(
+                "a full-position close must be a reduce-only market order".into(),
+            ));
+        }
         let mut body = Map::new();
         body.insert("category".into(), CATEGORY.into());
         body.insert("symbol".into(), self.name_of(req.symbol)?.into());
         body.insert("side".into(), side_str(req.side).into());
-        body.insert("qty".into(), venue_num(req.qty)?.into());
+        body.insert(
+            "qty".into(),
+            if req.close_position {
+                "0".into()
+            } else {
+                venue_num(req.qty)?.into()
+            },
+        );
         body.insert("reduceOnly".into(), req.reduce_only.into());
+        if req.close_position {
+            body.insert("closeOnTrigger".into(), true.into());
+        }
         body.insert("orderLinkId".into(), req.client_order_id.as_str().into());
         match req.kind {
             OrderKind::Market => {
@@ -805,6 +820,9 @@ impl VenueGateway for BybitGateway {
             amend_in_place: true,
             // POST /v5/position/set-leverage; see set_leverage below.
             set_leverage: true,
+            // qty=0 + reduceOnly + closeOnTrigger closes the whole linear
+            // position even when its dust is below ordinary order minimums.
+            close_position_below_minimum: true,
         }
     }
 
@@ -1792,6 +1810,7 @@ mod tests {
             },
             stop: Some(engine_types::StopSpec { trigger_px: 8.0 }),
             reduce_only: false,
+            close_position: false,
         }
     }
 

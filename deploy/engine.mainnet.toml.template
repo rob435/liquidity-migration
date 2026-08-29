@@ -132,9 +132,9 @@ symbols = ["DOGEUSDT"]
 name = "quoter"
 sleeve = "maker_canary"
 # Append-only identity: the WAL owns this strategy id, so the block stays in
-# the config. This is the registered minimum-size forward trial; disabling it
+# the config. Quoting is disabled after the first forward sample; the block
 # pulls its own quotes and closes only inventory attributed to this sleeve.
-quote_enabled = true
+quote_enabled = false
 symbols = ["AGIUSDT"]
 
 # One venue-minimum-sized quote on each side. One fill brings inventory near

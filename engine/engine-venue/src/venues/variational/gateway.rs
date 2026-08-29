@@ -111,6 +111,7 @@ impl VenueGateway for VariationalGateway {
             native_position_stop: false,
             amend_in_place: false,
             set_leverage: false,
+            close_position_below_minimum: false,
         }
     }
 
@@ -214,6 +215,7 @@ mod tests {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            close_position: false,
         }
     }
 

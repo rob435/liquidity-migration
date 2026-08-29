@@ -354,6 +354,11 @@ pub struct OrderRequest {
     pub kind: OrderKind,
     pub stop: Option<StopSpec>,
     pub reduce_only: bool,
+    /// Close the complete venue position. The requested quantity remains the
+    /// accounting quantity even when an adapter uses a venue-specific wire
+    /// sentinel such as Bybit's zero-quantity close.
+    #[serde(default)]
+    pub close_position: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -377,6 +377,7 @@ impl VenueGateway for LighterGateway {
             // be pinned against the venue's reference the way the other two
             // are.
             set_leverage: false,
+            close_position_below_minimum: false,
         }
     }
 

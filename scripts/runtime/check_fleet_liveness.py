@@ -696,6 +696,189 @@ def gather_engine_heartbeat_alerts(
     )
 
 
+def _pretty_ns(value: Any) -> str:
+    """Nanoseconds in units a phone reads at a glance; a dash for anything absent."""
+    if not isinstance(value, int | float) or isinstance(value, bool) or value < 0:
+        return "—"
+    ns = float(value)
+    if ns < 1_000:
+        return f"{ns:.0f}ns"
+    if ns < 1_000_000:
+        return f"{ns / 1_000:.1f}us"
+    if ns < 1_000_000_000:
+        return f"{ns / 1_000_000:.2f}ms"
+    return f"{ns / 1_000_000_000:.2f}s"
+
+
+def _digest_day(now_ms: int) -> int:
+    """The UTC day as one comparable integer, e.g. 20260830."""
+    return int(datetime.fromtimestamp(now_ms / 1000.0, UTC).strftime("%Y%m%d"))
+
+
+_DIGEST_DAY_KEY = "digest_sent_day"
+
+
+def build_daily_digest(payload: dict[str, Any], *, scope_name: str, ts: str) -> str:
+    """One plain-text execution-health message a day, built from the raw
+    heartbeat JSON rather than the parsed reading — the parsed one keeps only
+    what the alert checks need, and a field an older engine does not write
+    must degrade to a dash here, never to a crash or a guess.
+
+    The engine's own sign conventions are kept (this is the debugging line,
+    not the trading story): arrival is positive when it cost us, the markout
+    positive when the price went our way.
+    """
+
+    def num(key: str) -> Any:
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        return value
+
+    def count(key: str) -> str:
+        value = num(key)
+        return "—" if value is None else f"{int(value)}"
+
+    equity = num("account_equity_usdt")
+    positions = payload.get("positions")
+    held = len(positions) if isinstance(positions, list) else None
+    may_open = payload.get("may_open")
+    if may_open is True:
+        standing = "may open"
+    elif may_open is False:
+        standing = "NOT OPENING — latched or stream-down"
+    else:
+        standing = "may-open unknown"
+
+    maker = num("fills_maker_share")
+    arrival = num("fill_arrival_shortfall_bps")
+    markout = num("fill_markout_1m_our_way_bps")
+    offset = num("venue_clock_offset_ms")
+
+    lines = [
+        f"{scope_name.upper()} engine daily health · {ts}",
+        " · ".join(
+            [
+                standing,
+                "equity —" if equity is None else f"equity ${equity:,.0f}",
+                "positions —" if held is None else f"{held} position(s)",
+                f"orders sent {count('orders_sent')}",
+            ]
+        ),
+        " · ".join(
+            [
+                f"fills {count('fills')}",
+                "maker —" if maker is None else f"maker {maker * 100:.0f}%",
+                "slip —"
+                if arrival is None
+                else f"slip {abs(arrival):.1f} bp {'paid' if arrival >= 0 else 'saved'}",
+                "1m markout —"
+                if markout is None
+                else f"1m markout {markout:+.1f} bp our way",
+            ]
+        ),
+        " · ".join(
+            [
+                f"submit p50 {_pretty_ns(num('wire_p50_ns'))}",
+                f"p99 {_pretty_ns(num('wire_p99_ns'))}",
+                f"API round trip p50 {_pretty_ns(num('ack_p50_ns'))}",
+            ]
+        ),
+        " · ".join(
+            [
+                f"disk wait p99 {_pretty_ns(num('barrier_wait_p99_ns'))}",
+                f"quota hold p99 {_pretty_ns(num('quota_hold_p99_ns'))}",
+            ]
+        ),
+        " · ".join(
+            [
+                f"amends priced by venue {count('amends_confirmed')}",
+                f"pulled unanswered {count('amends_pulled_unconfirmed')}",
+                f"stream resets {count('stream_resets')}",
+            ]
+        ),
+        "venue clock offset —" if offset is None else f"venue clock offset {offset:+.0f} ms",
+    ]
+    return "\n".join(lines)
+
+
+def evaluate_host_clock(*, runner: Any = subprocess.run) -> list[Alert]:
+    """Page when the box's clock has stopped being disciplined.
+
+    Every venue-stamp comparison — feed freshness, the heartbeat's own venue
+    clock offset, signed request windows — quietly degrades on a drifting
+    clock, and nothing else notices. `timedatectl` absent or failing is not a
+    fault: a development box is not the fleet, and the check must not invent
+    an alert no host state can clear.
+    """
+    try:
+        result = runner(
+            ["timedatectl", "show", "--property=NTPSynchronized", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:  # noqa: BLE001 — absent binary, timeout: not a clock fault
+        return []
+    if result.returncode != 0:
+        return []
+    answer = (result.stdout or "").strip()
+    if answer == "yes":
+        return []
+    if answer != "no":
+        return []
+    return [
+        Alert(
+            key="host_clock_unsynced",
+            severity=WARNING,
+            message=(
+                "timedatectl reports NTPSynchronized=no: the box's clock is running "
+                "undisciplined. Venue-stamp comparisons, feed freshness, and signed "
+                "request windows all degrade quietly while this holds."
+            ),
+            headline="This box's clock is not being kept in sync.",
+        )
+    ]
+
+
+def evaluate_backup_stamp(*, stamp_path: Path, now_ms: int, max_age_hours: float) -> list[Alert]:
+    """Page when the configured off-box backup has stopped landing.
+
+    Only ever called with a configured stamp path: an owner who has not set
+    backups up must not be paged about them. The stamp is written by the
+    backup script after a successful copy, so its age is the age of the last
+    backup that actually completed.
+    """
+    try:
+        age_hours = (now_ms / 1000.0 - stamp_path.stat().st_mtime) / 3600.0
+    except FileNotFoundError:
+        return [
+            Alert(
+                key="backup_stale",
+                severity=WARNING,
+                message=(
+                    f"the backup stamp at {stamp_path} does not exist, so no off-box backup "
+                    "has ever completed on this host. The WAL and journals exist in one place."
+                ),
+                headline="Off-box backup has never completed on this host.",
+            )
+        ]
+    if age_hours <= max_age_hours:
+        return []
+    return [
+        Alert(
+            key="backup_stale",
+            severity=WARNING,
+            message=(
+                f"the last completed off-box backup was {age_hours:.1f}h ago "
+                f"(bound {max_age_hours:.0f}h). The WAL and journals are one disk "
+                "failure from gone."
+            ),
+            headline="Off-box backup has stopped landing.",
+        )
+    ]
+
+
 # Pending resolved-note retries must not share alert cooldown keys.
 _RESOLVED_PREFIX = "resolved:"
 # Records inactive timers for the one-interval escalation debounce.
@@ -704,7 +887,13 @@ _PENDING_TIMER_PREFIX = "pending_timer:"
 _PENDING_SERVICE_PREFIX = "pending_service:"
 # Records last-sent severity so escalation bypasses the cooldown.
 _SEV_PREFIX = "sev:"
-_RESERVED_PREFIXES = (_RESOLVED_PREFIX, _PENDING_TIMER_PREFIX, _PENDING_SERVICE_PREFIX, _SEV_PREFIX)
+_RESERVED_PREFIXES = (
+    _RESOLVED_PREFIX,
+    _PENDING_TIMER_PREFIX,
+    _PENDING_SERVICE_PREFIX,
+    _SEV_PREFIX,
+    _DIGEST_DAY_KEY,
+)
 _SEVERITY_RANK = {WARNING: 1, CRITICAL: 2}
 
 
@@ -1290,6 +1479,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")
     p.add_argument(
+        "--no-daily-digest",
+        action="store_true",
+        help=(
+            "skip the once-a-day engine execution-health message. On by default whenever "
+            "--telegram and an engine heartbeat file are both set"
+        ),
+    )
+    p.add_argument(
+        "--host-clock-check",
+        action="store_true",
+        help=(
+            "alert when timedatectl reports the box's clock unsynchronised. Off by default; "
+            "turn it on in exactly one scope per box, or one cause pages twice"
+        ),
+    )
+    p.add_argument(
+        "--backup-stamp-file",
+        default=os.environ.get("LIVENESS_BACKUP_STAMP_FILE") or "",
+        help=(
+            "stamp file the off-box backup script touches after a completed copy; alerts when it "
+            "goes stale ('' skips — an owner who has not set backups up is not paged about them). "
+            "Defaults to the LIVENESS_BACKUP_STAMP_FILE env var"
+        ),
+    )
+    p.add_argument(
+        "--max-backup-age-hours",
+        type=float,
+        default=26.0,
+        help="alert when the last completed backup is older than this (default 26, one daily run plus slack)",
+    )
+    p.add_argument(
         "--state-file",
         type=Path,
         default=Path(os.environ["LIVENESS_STATE_FILE"]) if os.environ.get("LIVENESS_STATE_FILE") else None,
@@ -1421,6 +1641,16 @@ def main() -> int:
     disk_alert = evaluate_disk_space(path=str(_REPO_ROOT))
     if disk_alert is not None:
         alerts.append(disk_alert)
+    if args.host_clock_check:
+        alerts.extend(evaluate_host_clock())
+    if str(args.backup_stamp_file).strip():
+        alerts.extend(
+            evaluate_backup_stamp(
+                stamp_path=Path(args.backup_stamp_file),
+                now_ms=now_ms,
+                max_age_hours=args.max_backup_age_hours,
+            )
+        )
     if str(args.engine_heartbeat_file).strip():
         alerts.extend(
             gather_engine_heartbeat_alerts(
@@ -1495,6 +1725,39 @@ def main() -> int:
     else:
         for key in resolved:
             new_state.pop(f"{_RESOLVED_PREFIX}{key}", None)
+    # Once a day, on the same line the alerts use: the engine's execution
+    # health, from its own heartbeat. Sent only after the run's alerts, only
+    # when the channel is working, and the day advances only on a delivered
+    # message — an undelivered digest retries on the next run, like an alert.
+    # An unreadable heartbeat sends nothing and advances nothing: the
+    # unreadable-heartbeat alert above is already paging, and a digest of
+    # dashes would add noise to it.
+    digest_wanted = (
+        args.telegram
+        and not args.no_daily_digest
+        and not telegram_send_failed
+        and str(args.engine_heartbeat_file).strip()
+        and _digest_day(now_ms) > int(state.get(_DIGEST_DAY_KEY, 0))
+    )
+    if digest_wanted:
+        try:
+            payload = json.loads(Path(args.engine_heartbeat_file).read_bytes())
+        except Exception:  # noqa: BLE001 — absent/torn file: the alert path owns saying so
+            payload = None
+        if isinstance(payload, dict):
+            digest = build_daily_digest(payload, scope_name=scope_name, ts=ts)
+            print(digest)
+            delivered = False
+            try:
+                delivered = send_telegram_message(digest, channel="alerts")
+            except Exception as exc:  # noqa: BLE001 — a digest must never take the watchdog down
+                print(f"(telegram digest send failed: {exc})")
+            if delivered:
+                new_state[_DIGEST_DAY_KEY] = _digest_day(now_ms)
+            else:
+                telegram_send_failed = True
+                print("(telegram digest send returned False; will retry next run)")
+
     # Saved after the sends so an undelivered alert's cooldown stays unset.
     _save_state(state_file, new_state)
 

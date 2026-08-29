@@ -48,6 +48,10 @@ pub enum Segment {
     /// was moved alongside the send. Usually zero: the venue's round trip
     /// outlasts the disk's. A number here is the disk winning that race.
     BarrierWait,
+    /// How long the venue adapter held a command back to stay inside the
+    /// venue's request quota. Pacing this engine chose, not latency the venue
+    /// imposed — the two ask for opposite fixes.
+    QuotaHold,
     Wire,
     Ack,
     DispatchQueue,
@@ -62,6 +66,7 @@ impl Segment {
             Segment::Decide => "think",
             Segment::Durable => "write it down",
             Segment::BarrierWait => "still waiting on the disk",
+            Segment::QuotaHold => "held back for quota",
             Segment::Wire => "submit result",
             Segment::Ack => "API round trip",
             Segment::DispatchQueue => "dispatch queue",
@@ -76,6 +81,7 @@ pub struct LatencyLedger {
     decide: Histogram<u64>,
     durable: Histogram<u64>,
     barrier_wait: Histogram<u64>,
+    quota_hold: Histogram<u64>,
     wire: Histogram<u64>,
     ack: Histogram<u64>,
     dispatch_queue: Histogram<u64>,
@@ -93,6 +99,7 @@ impl LatencyLedger {
             decide: make(),
             durable: make(),
             barrier_wait: make(),
+            quota_hold: make(),
             wire: make(),
             ack: make(),
             dispatch_queue: make(),
@@ -118,6 +125,7 @@ impl LatencyLedger {
             Segment::Decide => &self.decide,
             Segment::Durable => &self.durable,
             Segment::BarrierWait => &self.barrier_wait,
+            Segment::QuotaHold => &self.quota_hold,
             Segment::Wire => &self.wire,
             Segment::Ack => &self.ack,
             Segment::DispatchQueue => &self.dispatch_queue,
@@ -207,6 +215,7 @@ impl LatencyLedger {
             Segment::Decide,
             Segment::Durable,
             Segment::BarrierWait,
+            Segment::QuotaHold,
             Segment::Wire,
             Segment::Ack,
             Segment::DispatchQueue,
@@ -233,6 +242,7 @@ impl LatencyLedger {
             Segment::Decide => &mut self.decide,
             Segment::Durable => &mut self.durable,
             Segment::BarrierWait => &mut self.barrier_wait,
+            Segment::QuotaHold => &mut self.quota_hold,
             Segment::Wire => &mut self.wire,
             Segment::Ack => &mut self.ack,
             Segment::DispatchQueue => &mut self.dispatch_queue,

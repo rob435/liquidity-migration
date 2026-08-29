@@ -613,6 +613,7 @@ mod tests {
             kind: OrderKind::Market,
             stop: stop.map(|trigger_px| StopSpec { trigger_px }),
             reduce_only: false,
+            close_position: false,
         }
     }
 

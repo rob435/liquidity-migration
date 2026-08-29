@@ -412,6 +412,7 @@ fn prior_state(history_rows: usize, now_ms: i64) -> (Vec<WalRecord>, AccountView
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 99.0 }),
                 reduce_only: false,
+                close_position: false,
             },
             wire_ns: 1,
             arrival_mid: 100.0,
@@ -536,6 +537,7 @@ impl VenueGateway for HistoryVenue {
             native_position_stop: true,
             amend_in_place: true,
             set_leverage: false,
+            close_position_below_minimum: false,
         }
     }
 

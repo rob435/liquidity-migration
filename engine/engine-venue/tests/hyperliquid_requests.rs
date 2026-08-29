@@ -42,6 +42,7 @@ fn entry(kind: OrderKind, stop: Option<StopSpec>) -> OrderRequest {
         kind,
         stop,
         reduce_only: false,
+        close_position: false,
     }
 }
 
@@ -280,6 +281,7 @@ async fn an_asset_the_venue_spells_in_lower_case_can_be_stopped_and_priced() {
         kind: OrderKind::Market,
         stop: None,
         reduce_only: false,
+        close_position: false,
     })
     .await
     .expect("a market order priced off allMids");

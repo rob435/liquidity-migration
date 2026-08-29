@@ -85,6 +85,10 @@ pub struct VenueCaps {
     /// False means whatever leverage the symbol already carries is what an
     /// order will post margin at, and the engine has no say in it.
     pub set_leverage: bool,
+    /// The venue accepts an explicit close-entire-position order below its
+    /// ordinary quantity or value minimum. The engine uses this only for a
+    /// market exit that matches the whole position in a fresh account view.
+    pub close_position_below_minimum: bool,
 }
 
 /// A venue gateway: signs and sends orders, attaches stops, reads account

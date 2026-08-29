@@ -161,7 +161,8 @@ timer so a hung run goes `failed` rather than silently never re-firing.
 What it checks: systemd unit states — including a service that is enabled but not active (debounced one
 interval, then CRITICAL); readiness and live-L2 capture freshness; per-sleeve producer cycle age; free
 disk; and the engine's own heartbeat file, including how old the engine's reading of the account is. It
-reads no execution WAL — see
+can also check host clock discipline and the age of an off-box-backup completion stamp when those are
+explicitly configured. It reads no execution WAL — see
 [§What is not watched](#what-is-not-watched).
 
 | Threshold | Default | Meaning |
@@ -171,6 +172,9 @@ reads no execution WAL — see
 | `--max-account-capture-age-min` | 3 | canonical live L2 is older than this |
 | `--max-ws-lag-hours` | 6 | WS kline feed lag warning |
 | `--max-engine-heartbeat-age-sec` | 60 | the engine's heartbeat is older than this (only read when one is configured) |
+| `--host-clock-check` | off | page only when `timedatectl` explicitly reports that NTP is not synchronized; enable in one scope per host |
+| `--backup-stamp-file` | unset | completion stamp written by an off-box backup; unset means backups are not claimed or watched |
+| `--max-backup-age-hours` | 26 | configured backup stamp is older than one daily run plus slack |
 | `--cooldown-min` | 30 | re-alert interval; **deployed as 60 for both demo and mainnet** |
 
 ### The engine's heartbeat
@@ -198,6 +202,15 @@ the engine's own arithmetic and this box's clock never enters it.
 An absent account reading is not a fault: the engine has not asked yet in its first moments, and paging
 on that would make every boot an alert. It is reported as absent rather than filled in with a default, so
 it can never read as fresh.
+
+With Telegram and an engine heartbeat configured, each scope also sends one
+plain execution-health digest per UTC day. It reports account standing, fills,
+maker share, arrival cost, one-minute markout, submit and API timing, disk-wait
+residue, request-quota hold, amend confirmations versus forced pulls,
+private-stream resets, and venue clock offset. A field an older engine lacks is
+shown as a dash, never a guessed zero. `--no-daily-digest` disables it. The day
+advances only after Telegram confirms delivery, so a failed send retries on the
+next watchdog run.
 
 Every message names the mode, which the engine always writes as `live`. The checker still accepts the
 older `shadow` too, because a beat written before a restart can outlive the run that wrote it, and an
@@ -251,9 +264,10 @@ unprovisioned and silence stays ambiguous.
 
 ## Operating it
 
-- Silence is not health, and there is no periodic "still alive" message at all. The positive signal is
-  the dead-man's switch above. Until a URL is in `liveness.env`, silence means either a healthy fleet
-  or a dead one and nothing in the chat tells you which — and a deploy that stops the fleet stops the
+- A daily engine digest is not a dead-man's switch: a host can die just after
+  sending it. The positive continuous signal is the external switch above.
+  Until a URL is in `liveness.env`, silence between daily digests means either
+  a healthy fleet or a dead one — and a deploy that stops the fleet stops the
   watchdog with it, so that is exactly when the ambiguity bites.
 - Noise is not health either, and it is the more dangerous of the two. A channel that is entirely false
   positives is worse than a quiet one, because the real alert arrives into a habit of ignoring it. If a

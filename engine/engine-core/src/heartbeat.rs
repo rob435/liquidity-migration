@@ -74,6 +74,24 @@ pub struct Facts<'a> {
     pub venue_task: Quantiles,
     pub core_resume: Quantiles,
     pub end_to_end: Quantiles,
+    /// What the order path actually waited for the disk (the barrier runs
+    /// beside the send), and how long commands were held to stay inside the
+    /// venue's request quota. Both are pacing stories, not venue latency.
+    pub barrier_wait: Quantiles,
+    pub quota_hold: Quantiles,
+    /// Since boot: amends whose working price the venue stated, against
+    /// amends pulled because it never did. Pulls climbing is the private
+    /// stream not republishing, and each pull costs the queue position the
+    /// confirmation exists to keep.
+    pub amends_confirmed: u64,
+    pub amends_pulled_unconfirmed: u64,
+    /// Private-stream resets since boot, including the initial subscription;
+    /// each one is a recovered gap.
+    pub stream_resets: u64,
+    /// Venue clock minus this box's clock, in milliseconds, off the freshest
+    /// quote. Null before the first quote. A box that drifts makes every
+    /// venue-stamp comparison quietly wrong.
+    pub venue_clock_offset_ms: Option<i64>,
     /// The account as the venue last described it, and how old that reading
     /// is. This is not telemetry like the rest of this struct: the target
     /// producers size their entries from the equity here. All three are
@@ -339,6 +357,24 @@ impl Heartbeat {
                 "end_to_end_p99_ns",
                 figure(facts.end_to_end.count, facts.end_to_end.p99_ns),
             ),
+            (
+                "barrier_wait_p99_ns",
+                figure(facts.barrier_wait.count, facts.barrier_wait.p99_ns),
+            ),
+            (
+                "quota_hold_p99_ns",
+                figure(facts.quota_hold.count, facts.quota_hold.p99_ns),
+            ),
+            ("amends_confirmed", facts.amends_confirmed.to_string()),
+            (
+                "amends_pulled_unconfirmed",
+                facts.amends_pulled_unconfirmed.to_string(),
+            ),
+            ("stream_resets", facts.stream_resets.to_string()),
+            (
+                "venue_clock_offset_ms",
+                or_null(facts.venue_clock_offset_ms.map(|ms| ms.to_string())),
+            ),
         ];
         fields.sort_by_key(|(key, _)| *key);
         let body: Vec<String> = fields
@@ -506,13 +542,16 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 39] = [
+    const KEYS: [&str; 45] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
         "account_user_id",
         "ack_p50_ns",
         "ack_p99_ns",
+        "amends_confirmed",
+        "amends_pulled_unconfirmed",
+        "barrier_wait_p99_ns",
         "core_resume_p50_ns",
         "core_resume_p99_ns",
         "decide_p50_ns",
@@ -537,9 +576,12 @@ mod tests {
         "orders_sent",
         "pid",
         "positions",
+        "quota_hold_p99_ns",
         "realm",
         "strategies",
+        "stream_resets",
         "venue",
+        "venue_clock_offset_ms",
         "venue_task_p50_ns",
         "venue_task_p99_ns",
         "wall_ts_ms",
@@ -603,6 +645,12 @@ mod tests {
             venue_task: measured(7, 2_550_000, 4_050_000),
             core_resume: measured(7, 2_000, 3_000),
             end_to_end: measured(7, 2_700_000, 4_200_000),
+            barrier_wait: measured(7, 1_000, 1_600_000),
+            quota_hold: measured(7, 1, 90_000_000),
+            amends_confirmed: 4,
+            amends_pulled_unconfirmed: 1,
+            stream_resets: 2,
+            venue_clock_offset_ms: Some(-12),
             equity_usdt: 10_250.5,
             available_usdt: 4_100.25,
             // Two seconds old, on the engine's own monotonic clock.
@@ -611,6 +659,24 @@ mod tests {
             entry_blockers: NO_BLOCKERS.get_or_init(Vec::new),
             working_entries: NO_WORKING.get_or_init(Vec::new),
         }
+    }
+
+    #[test]
+    fn the_execution_health_numbers_reach_the_beat() {
+        // The watchdog's daily digest is built from these exact keys. A
+        // missing one degrades silently there — the digest prints a dash —
+        // so their presence is pinned here, where they are written.
+        let strategies = vec!["maker_canary".to_string()];
+        let held = Vec::new();
+        let beat = Heartbeat::new(std::env::temp_dir().join("beat-health.json"), None, None)
+            .render(&facts(&strategies, &held), 1_756_500_000_000);
+        let parsed: serde_json::Value = serde_json::from_str(&beat).expect("one line of JSON");
+        assert_eq!(parsed["amends_confirmed"], 4);
+        assert_eq!(parsed["amends_pulled_unconfirmed"], 1);
+        assert_eq!(parsed["stream_resets"], 2);
+        assert_eq!(parsed["venue_clock_offset_ms"], -12);
+        assert_eq!(parsed["quota_hold_p99_ns"], 90_000_000);
+        assert_eq!(parsed["barrier_wait_p99_ns"], 1_600_000);
     }
 
     /// One position, so the shape of the array is exercised rather than only
@@ -1075,6 +1141,12 @@ mod fill_cost_tests {
             venue_task: Quantiles::default(),
             core_resume: Quantiles::default(),
             end_to_end: Quantiles::default(),
+            barrier_wait: Quantiles::default(),
+            quota_hold: Quantiles::default(),
+            amends_confirmed: 0,
+            amends_pulled_unconfirmed: 0,
+            stream_resets: 0,
+            venue_clock_offset_ms: None,
             equity_usdt: 100.0,
             available_usdt: 100.0,
             account_age_ns: Some(1),
