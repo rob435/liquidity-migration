@@ -354,7 +354,11 @@ impl FeedWorker {
     /// until it succeeds; a market feed that gives up is worse than a slow one.
     async fn connect(&mut self) -> Result<Socket, FeedError> {
         loop {
-            if self.epochs > 0 {
+            // The first dial is immediate. A failed first dial still has to
+            // earn the same backoff as every reconnect; `epochs` remains zero
+            // until a socket succeeds, so checking it alone turns an outage
+            // into a tight connection storm.
+            if self.epochs > 0 || self.backoff > BACKOFF_START {
                 tokio::time::sleep(self.backoff).await;
             }
             match self.dial().await {
@@ -950,6 +954,51 @@ mod tests {
         assert!(
             second_epoch,
             "the second epoch's quote never arrived; the feed produced {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_first_dials_are_backed_off() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let port = listener.local_addr().expect("has an address").port();
+        let (tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.expect("accepts");
+                tx.send(Instant::now()).expect("test is listening");
+                drop(stream);
+            }
+        });
+
+        let mut feed = BybitPublicFeed::with_url(
+            format!("ws://127.0.0.1:{port}"),
+            &[Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            }],
+        );
+        let waiting = tokio::spawn(async move { feed.next_event().await });
+        let stamps = tokio::time::timeout(Duration::from_secs(4), async {
+            let mut stamps = Vec::new();
+            for _ in 0..3 {
+                stamps.push(attempts.recv().await.expect("worker keeps retrying"));
+            }
+            stamps
+        })
+        .await
+        .expect("three paced attempts before the deadline");
+        waiting.abort();
+
+        assert!(
+            stamps[1].duration_since(stamps[0]) >= BACKOFF_START * 2,
+            "the second initial dial was not backed off: {stamps:?}"
+        );
+        assert!(
+            stamps[2].duration_since(stamps[1]) >= BACKOFF_START * 4,
+            "the third initial dial did not increase its backoff: {stamps:?}"
         );
     }
 

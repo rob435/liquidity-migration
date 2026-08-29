@@ -6,6 +6,13 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — A failed first Bybit market-data dial now waits before it
+  retries.** The feed increased its backoff counter but slept only after a
+  socket had connected once. An unavailable first socket therefore redialled
+  in a tight loop, hit Bybit's WebSocket connection limit, and kept both
+  engines blind. The first attempt remains immediate; every failure after it
+  waits on the increasing capped backoff.
+
 - **2026-08-29 — The funded key may declare one deliberate backup host.**
   `BYBIT_REAL_API_KEY_IP` remains the required primary address and the optional
   `BYBIT_REAL_API_KEY_BACKUP_IP` names one distinct backup. Startup compares
