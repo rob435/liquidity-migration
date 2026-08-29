@@ -46,7 +46,7 @@ if [ "${1:-}" != --worker ]; then
     [ "$#" -eq 1 ] || refuse "expected one fixed action"
     ACTION="$1"
     case "$ACTION" in
-        pause-demo|resume-demo|pause-mainnet|status-demo) ;;
+        pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-demo) ;;
         *) refuse "unsupported action" ;;
     esac
     [ "${SUDO_USER:-}" = "$CALLER" ] \
@@ -77,7 +77,7 @@ fi
     || refuse "invalid privileged worker invocation"
 ACTION="$2"
 case "$ACTION" in
-    pause-demo|resume-demo|pause-mainnet|status-demo) ;;
+    pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-demo) ;;
     *) refuse "unsupported privileged worker action" ;;
 esac
 [ -z "${SUDO_USER:-}" ] && [ -z "${BASH_ENV:-}" ] && [ -z "${ENV:-}" ] \
@@ -372,6 +372,38 @@ pause_mainnet() {
     echo "paused=mainnet"
 }
 
+# Undo pause_mainnet, and nothing wider. REAL_MONEY lives in a root-owned file
+# this helper never opens, so a resume cannot arm a disarmed account: with the
+# switch off the funded owner is not running and the check below refuses.
+resume_mainnet() {
+    local unit start_status=0
+    activation_complete \
+        || refuse "funded resume requires this generation's completed activation receipt"
+    /usr/bin/systemctl is-active --quiet liquidity-migration-engine-mainnet.service \
+        || refuse "funded resume requires the funded account owner to be active"
+    /usr/bin/systemctl --quiet enable --now \
+        liquidity-migration-bybit-carry-mainnet.service || start_status=$?
+    if [ "$start_status" -eq 0 ]; then
+        /usr/bin/systemctl --quiet enable --now \
+            liquidity-migration-bybit-long-mainnet.service || start_status=$?
+    fi
+    for unit in liquidity-migration-bybit-carry-mainnet.service \
+        liquidity-migration-bybit-long-mainnet.service; do
+        if [ "$start_status" -eq 0 ] \
+            && ! /usr/bin/systemctl is-active --quiet "$unit"; then
+            start_status=1
+        fi
+    done
+    if [ "$start_status" -ne 0 ]; then
+        quarantine_pair \
+            liquidity-migration-bybit-long-mainnet.service \
+            liquidity-migration-bybit-carry-mainnet.service 2>/dev/null || true
+        refuse "funded resume failed; both funded producers were re-quarantined"
+    fi
+    sync
+    printf 'resumed=mainnet\n'
+}
+
 status_demo() {
     lm_load_sleeve_toggles || refuse "cannot resolve demo sleeve state"
     if [ -e "$SAVED_SLEEVES" ]; then
@@ -388,5 +420,6 @@ case "$ACTION" in
     pause-demo) pause_demo ;;
     resume-demo) resume_demo ;;
     pause-mainnet) pause_mainnet ;;
+    resume-mainnet) resume_mainnet ;;
     status-demo) status_demo ;;
 esac

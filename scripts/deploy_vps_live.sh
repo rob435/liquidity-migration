@@ -2223,12 +2223,13 @@ verify_controls_sudo_policy() {
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper pause-demo' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper pause-mainnet' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper resume-demo' \
+            '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper resume-mainnet' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper status-demo' \
             | LC_ALL=C sed 's/[[:space:]]//g' \
             | LC_ALL=C sort
     )"
     [ "$actual" = "$expected" ] \
-        || fail "effective Telegram controls sudo policy is not the exact four-command boundary"
+        || fail "effective Telegram controls sudo policy is not the exact five-command boundary"
 }
 
 # Atomically install the exact candidate compiled during prefetch. The stopped

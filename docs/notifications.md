@@ -134,7 +134,11 @@ nothing else may poll `getUpdates` on this token. Send `/controls` in the main c
   a sleeve is the kind of thing somebody presses to see what it does.
 
 Real-money rows appear only while the mainnet engine unit is active — i.e. after your own arming act.
-Pausing mainnet stops its two producer units directly (mainnet has no sleeve toggles).
+Pausing mainnet stops its two producer units directly (mainnet has no sleeve toggles), and resuming
+starts them again. The funded resume carries the same two proofs the demo one does — this generation's
+completed activation receipt, and the funded account owner already running — and puts both producers
+back in quarantine if either fails to come up. It never opens the credential file, so it cannot arm a
+disarmed account: with `REAL_MONEY` off the funded owner is not running and the resume refuses.
 
 Who may press: only the configured main chat is read at all, and a press must come from the chat's own
 private-chat owner. If the main chat is a group, set `TELEGRAM_CONTROL_USER_IDS` (comma-separated

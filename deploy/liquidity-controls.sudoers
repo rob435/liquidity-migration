@@ -2,4 +2,5 @@ Defaults:liquidity-controls env_reset,!setenv,secure_path=/usr/sbin:/usr/bin:/sb
 liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper pause-demo
 liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper resume-demo
 liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper pause-mainnet
+liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper resume-mainnet
 liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper status-demo

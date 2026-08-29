@@ -182,9 +182,8 @@ def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> N
     assert "User=root" not in unit
 
     helper = _read("deploy/telegram_control_helper.sh")
-    for action in ("pause-demo", "resume-demo", "pause-mainnet", "status-demo"):
+    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-demo"):
         assert action in helper
-    assert "resume-mainnet" not in helper
     assert 'case "$ACTION" in' in helper
     assert "/usr/bin/systemd-run --quiet --wait --pipe --collect" in helper
     assert '"$HELPER" --worker "$ACTION"' in helper
@@ -199,6 +198,11 @@ def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> N
     assert "demo pause could not quarantine both producers" in helper
     assert "mainnet pause could not quarantine both funded producers" in helper
     assert "demo resume requires the account owner to be active" in helper
+    # The funded resume carries the same two proofs as the demo one, and a
+    # failure to bring either producer up puts both back in quarantine.
+    assert "funded resume requires this generation's completed activation receipt" in helper
+    assert "funded resume requires the funded account owner to be active" in helper
+    assert "funded resume failed; both funded producers were re-quarantined" in helper
 
     sudoers = _read("deploy/liquidity-controls.sudoers")
     allowed = {
@@ -208,7 +212,7 @@ def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> N
     }
     assert allowed == {
         f"/opt/liquidity-migration-engine/bin/telegram-control-helper {action}"
-        for action in ("pause-demo", "resume-demo", "pause-mainnet", "status-demo")
+        for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-demo")
     }
     assert "!setenv" in sudoers
     policy = _function(
@@ -226,7 +230,7 @@ def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> N
         block.index("LC_ALL=C sed") < block.index("LC_ALL=C sort")
         for block in (actual_block, expected_block)
     )
-    assert "exact four-command boundary" in policy
+    assert "exact five-command boundary" in policy
 
     bot = _read("liquidity_migration/ops/telegram_controls.py")
     fleet = bot[bot.index("class VpsFleet:") : bot.index("# The panel")]

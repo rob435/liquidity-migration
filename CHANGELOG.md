@@ -6,6 +6,16 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — The funded fleet can be resumed from the phone that paused
+  it.** `resume-mainnet` joins the control helper's fixed action list and the
+  sudo policy, which is now an exact five-command boundary. The funded resume
+  proves this generation's completed activation receipt and that the funded
+  account owner is running before it starts either producer, verifies both came
+  up, and re-quarantines the pair if either did not. It never opens the
+  credential file, so it cannot arm a disarmed account. Pausing real-money
+  trading from a phone was previously a one-way door that needed a full rollout
+  to undo.
+
 - **2026-08-29 — Both liveness units can carry the dead-man's switch.** The
   watchdog already pinged `LIVENESS_HEARTBEAT_URL` on a healthy run, but no
   unit loaded a file that could carry it, so the switch could not be

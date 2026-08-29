@@ -74,7 +74,7 @@ DEMO_OWNER_UNIT = "liquidity-migration-engine.service"
 CONTROL_HELPER = "/opt/liquidity-migration-engine/bin/telegram-control-helper"
 CONTROL_COMMANDS: dict[str, tuple[str, ...]] = {
     action: ("/usr/bin/sudo", "-n", CONTROL_HELPER, action)
-    for action in ("pause-demo", "resume-demo", "pause-mainnet", "status-demo")
+    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-demo")
 }
 CONTROLS_STATE_DIR = Path("/var/lib/liquidity-migration-telegram-controls")
 
@@ -314,9 +314,12 @@ class VpsFleet:
 
     def resume(self, environment: str) -> str:
         if environment == "mainnet":
+            self._control("resume-mainnet")
             return (
-                "🚫 Real-money resume is rollout-only. Use the reviewed funded rollout "
-                "path so flatness, generation, and activation receipts are reverified."
+                "▶️ Real-money trading resumed: both funded producers are running.\n"
+                "The helper proved this generation's activation receipt and that the funded "
+                "account owner is live before starting them, and re-quarantines both if "
+                "either fails to come up. Arming is unchanged — REAL_MONEY is not touched."
             )
         if environment != "demo":
             raise ValueError(f"unsupported environment: {environment}")

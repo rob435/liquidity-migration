@@ -292,12 +292,18 @@ def test_helper_status_is_exactly_parsed_and_rejects_extra_fields(fleet_env, mon
         fleet.resolved_sleeves()
 
 
-def test_mainnet_pause_is_exact_and_mainnet_resume_is_never_privileged(fleet_env) -> None:
+def test_mainnet_pause_and_resume_each_reach_exactly_their_own_action(fleet_env) -> None:
+    """Pausing funded trading from a phone is only useful if it can be undone
+    from the same phone; the helper, not the bot, holds the guards.
+    """
     _config, fleet, commands = fleet_env
     fleet.pause("mainnet")
-    refusal = fleet.resume("mainnet")
-    assert commands == [list(tc.CONTROL_COMMANDS["pause-mainnet"])]
-    assert "rollout-only" in refusal
+    message = fleet.resume("mainnet")
+    assert commands == [
+        list(tc.CONTROL_COMMANDS["pause-mainnet"]),
+        list(tc.CONTROL_COMMANDS["resume-mainnet"]),
+    ]
+    assert "REAL_MONEY is not touched" in message
 
 
 def test_control_action_allowlist_cannot_forward_paths_units_or_environment(fleet_env) -> None:
@@ -309,6 +315,7 @@ def test_control_action_allowlist_cannot_forward_paths_units_or_environment(flee
         "pause-demo",
         "resume-demo",
         "pause-mainnet",
+        "resume-mainnet",
         "status-demo",
     }
     for action, command in tc.CONTROL_COMMANDS.items():
