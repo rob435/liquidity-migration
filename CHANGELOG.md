@@ -12,8 +12,8 @@ edit STATE.md to match.
   ONT carry exit sold 790 at 0.05743 in four fills and left the account flat
   with no open order. Thirty warm signed position reads measured 12.71 ms
   median / 23.80 ms p95 on the fleet host and 172.14 ms / 486.59 ms on the
-  declared `116.202.15.128` backup. The funded environment is staged only on
-  the fleet host; both addresses remain deliberately allowlisted.
+  declared `116.202.15.128` backup. The complete funded environment is staged
+  on the fleet host; both addresses remain deliberately allowlisted.
 
 - **2026-08-29 — An empty first book closes every position the log assigns to
   its sleeve.** A follower now seeds its candidate names from durable fill
