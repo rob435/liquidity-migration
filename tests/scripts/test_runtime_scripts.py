@@ -900,6 +900,14 @@ def test_engine_prefetch_scrubs_only_its_disposable_build_clone() -> None:
     assert "safe_git clean" not in compile_commit
 
 
+def test_early_arming_read_uses_the_system_python_bootstrap() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    armed = _function(text, "mainnet_armed", "verify_note")
+
+    assert '"${PYTHON:-/usr/bin/python3}" -c' in armed
+    assert ".venv/bin/python" not in armed
+
+
 def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     install = _function(text, "install_python_environment", "verify_controls_sudo_policy")

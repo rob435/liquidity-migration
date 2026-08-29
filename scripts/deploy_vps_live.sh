@@ -1341,7 +1341,7 @@ mainnet_armed() {
             # entirely on its own: the checkout's interpreter and the strict
             # parser module, nothing else.
             MAINNET_ARMED_STATE="$(
-                "${PYTHON:-${REPO_DIR:-/opt/liquidity-migration}/.venv/bin/python}" -c '
+                "${PYTHON:-/usr/bin/python3}" -c '
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[2])
