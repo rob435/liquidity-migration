@@ -257,21 +257,29 @@ impl TargetBookFollower {
             })
             .collect();
 
-        // Everything this plug could be holding: its own universe, plus
-        // anything the book names. A symbol the book has stopped naming
-        // is only exited if we go looking for it.
+        // Everything this plug could be holding: its own universe, anything
+        // the book names, and every open claim recovered from the log. A
+        // symbol the book has stopped naming is only exited if we look for it;
+        // the recovered claims are what makes that true on the first book
+        // after a restart too.
         let mut candidates: Vec<&str> = self.symbols.iter().map(String::as_str).collect();
         for target in &book.targets {
             if !candidates.contains(&target.symbol.as_str()) {
                 candidates.push(target.symbol.as_str());
             }
         }
+        let mut recovered = Vec::new();
+        ctx.my_position_names(&mut recovered);
+        for symbol in recovered {
+            if !candidates.contains(&symbol) {
+                candidates.push(symbol);
+            }
+        }
         // And whatever we were holding last time round. Without this an EMPTY
         // book -- the decision to hold nothing -- only ever closed the seed
         // list from the config, because a book with no targets adds no names
-        // and the seed is tiny. Every position in a name the book itself
-        // introduced would have been left standing by the one instruction
-        // whose whole meaning is "hold nothing".
+        // and the seed is tiny. It remains useful inside one process before a
+        // fill is in the durable log; recovered claims cover the next boot.
         for symbol in &self.was_held {
             if !candidates.contains(&symbol.as_str()) {
                 candidates.push(symbol.as_str());

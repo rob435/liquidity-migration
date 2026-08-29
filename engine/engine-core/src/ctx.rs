@@ -139,6 +139,16 @@ impl StrategyCtx for Ctx<'_> {
         self.attribution.signed(self.strategy, symbol)
     }
 
+    fn my_position_names<'a>(&'a self, out: &mut Vec<&'a str>) {
+        let start = out.len();
+        out.extend(
+            self.attribution
+                .symbols(self.strategy)
+                .map(|symbol| self.market.table.name(symbol)),
+        );
+        out[start..].sort_unstable();
+    }
+
     fn in_flight(&self, symbol: SymbolId) -> f64 {
         self.covers.in_flight(self.strategy, symbol)
     }

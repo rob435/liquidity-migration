@@ -1042,3 +1042,16 @@ fn an_empty_book_closes_a_name_the_book_itself_introduced() {
     assert_eq!(intent.symbol, h.ctx.id_of("KAITOUSDT"));
     assert!(intent.reduce_only, "hold nothing means close it");
 }
+
+#[test]
+fn an_empty_first_book_closes_an_attributed_nonseed_position_after_restart() {
+    let mut h = bench(&["BTCUSDT"], 10.0);
+    h.ctx.set_wall_ms(NOW_MS);
+    h.ctx.set_position("ONTUSDT", Side::Buy, 790.0, 0.0586);
+
+    h.targets(book(vec![]));
+
+    let intent = h.one_intent();
+    assert_eq!(intent.symbol, h.ctx.id_of("ONTUSDT"));
+    assert!(intent.reduce_only, "the recovered carry position must close");
+}

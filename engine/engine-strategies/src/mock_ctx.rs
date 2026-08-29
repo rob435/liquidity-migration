@@ -258,6 +258,17 @@ impl StrategyCtx for MockCtx {
         self.mine.get(&symbol).copied().unwrap_or(0.0)
     }
 
+    fn my_position_names<'a>(&'a self, out: &mut Vec<&'a str>) {
+        let start = out.len();
+        out.extend(self.symbols.iter().filter_map(|(name, symbol)| {
+            self.mine
+                .get(symbol)
+                .is_some_and(|qty| qty.abs() >= 1e-9)
+                .then_some(name.as_str())
+        }));
+        out[start..].sort_unstable();
+    }
+
     fn in_flight(&self, symbol: SymbolId) -> f64 {
         self.in_flight.get(&symbol).copied().unwrap_or(0.0)
     }

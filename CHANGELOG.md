@@ -6,6 +6,13 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — An empty first book closes every position the log assigns to
+  its sleeve.** A follower now seeds its candidate names from durable fill
+  attribution as well as its config, current book, and in-process memory. An
+  empty book therefore closes an owned non-seed position immediately after an
+  engine restart, while positions attributed to another sleeve or no engine
+  order remain untouched.
+
 - **2026-08-29 — Bybit prices received before a subscription acknowledgement
   are preserved.** The public stream can send valid price frames before its
   acknowledgement. The feed now buffers those frames through the subscription

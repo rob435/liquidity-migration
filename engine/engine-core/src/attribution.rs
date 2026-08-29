@@ -175,6 +175,13 @@ impl Attribution {
             .unwrap_or(0.0)
     }
 
+    /// Symbols this strategy still has a non-flat fill claim on.
+    pub fn symbols(&self, strategy: StrategyId) -> impl Iterator<Item = SymbolId> + '_ {
+        self.filled.iter().filter_map(move |((owner, symbol), qty)| {
+            (*owner == strategy.0 && qty.abs() >= FLAT).then_some(SymbolId(*symbol))
+        })
+    }
+
     /// The only sleeve with a non-flat claim on this symbol.
     pub fn sole_owner(&self, symbol: SymbolId) -> Option<StrategyId> {
         let mut owners = self.filled.iter().filter_map(|((strategy, held), qty)| {
@@ -345,6 +352,8 @@ mod tests {
         let after_restart = Attribution::from_records(&log);
         assert_eq!(after_restart.signed(CARRY, BTC), 2.0);
         assert_eq!(after_restart.signed(LONG, ETH), 3.0);
+        assert_eq!(after_restart.symbols(CARRY).collect::<Vec<_>>(), [BTC]);
+        assert_eq!(after_restart.symbols(LONG).collect::<Vec<_>>(), [ETH]);
         assert!(after_restart.held_by_another(LONG, BTC));
         assert!(after_restart.held_by_another(CARRY, ETH));
     }

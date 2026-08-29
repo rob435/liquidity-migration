@@ -79,6 +79,16 @@ pub trait StrategyCtx {
     /// belongs to nobody here and reads as zero, and where this and the
     /// account reading disagree the account reading is the fact.
     fn my_position(&self, symbol: SymbolId) -> f64;
+    /// Names this strategy's fills still claim as open, appended to `out`.
+    ///
+    /// This is the restart-safe complement to [`StrategyCtx::my_position`]:
+    /// a strategy can ask about one known name above, while this lets it find
+    /// names recovered from the log that are absent from its current decision
+    /// and boot subscription seed. The venue reading remains the fact about
+    /// whether any returned name is actually held.
+    fn my_position_names<'a>(&'a self, out: &mut Vec<&'a str>) {
+        let _ = out;
+    }
     /// Signed quantity this strategy has sent that the engine's account
     /// reading has not yet absorbed. Positive is long.
     ///
