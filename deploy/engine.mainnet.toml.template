@@ -46,12 +46,18 @@ account_view_max_age_ms = 5000
 # way). Exits always flow, whatever the age.
 max_quote_age_ms = 30000
 
-# Keep leverage authority SHARED as a conservative venue-truth check: the
-# engine forgets what it set when a symbol goes flat and re-confirms with the
-# venue before the next entry. This does not authorize another writer. The
-# funded UID contract forbids hand trading, venue bots, copy trading, and other
-# trading API keys. (This is also the default when the key is absent.)
-leverage_authority = "shared"
+# Who else writes leverage on this account. The funded UID contract forbids
+# hand trading, venue bots, copy trading, and other trading API keys, so what
+# the engine set stays trusted across flat spells: leverage is armed when the
+# target book arrives, where no order is waiting, and entries skip a ~172 ms
+# confirmation round trip (measured live 2026-08-18, 844 ms worst). Every held
+# position's leverage is verified against the venue's own position rows
+# instead; a mismatch alarms, is written to the log, and turns the inline
+# confirmation back on for that symbol. A failed pre-arm is a warning, not a
+# refusal — the order path still confirms inline before anything is sent.
+# If a hand ever starts trading this account, set "shared". An absent key also
+# means "shared".
+leverage_authority = "sole"
 
 # ---------------------------------------------------------------------------
 # Capital limits: the fleet's own document, not a copy of its numbers

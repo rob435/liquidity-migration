@@ -6,6 +6,19 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — The funded engine takes sole leverage authority.**
+  The owner has stopped hand-trading the funded account, and the funded UID
+  contract already forbids venue bots, copy trading, and other trading API
+  keys. The funded engine therefore arms leverage when a target book arrives
+  rather than inline before an order, and an entry from flat no longer pays a
+  `set_leverage` round trip — measured live at ~172 ms, 844 ms worst, which
+  was most of the order path's p99. Every held position's leverage is checked
+  against the venue's own position row on each account reading; a contradiction
+  alarms, is written to the log, and turns inline confirmation back on for that
+  symbol, and a failed pre-arm is a warning rather than a refusal. A unit test
+  requires both realms to state the value, because an absent key means
+  `shared`.
+
 - **2026-08-29 — A healthy funded watchdog no longer fails the rollout.**
   `start_mainnet_fleet` ended with `systemctl is-failed --quiet ... && fail`.
   A well funded liveness pass makes `is-failed` return non-zero, so that

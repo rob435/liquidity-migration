@@ -332,6 +332,15 @@ def test_engine_environment_is_bound_to_account_venue_realm_config_and_heartbeat
     assert "book_path is" in block
 
 
+def test_both_realms_state_sole_leverage_authority() -> None:
+    """An absent key means "shared", which silently costs an entry from flat a
+    ~172 ms set_leverage round trip. Both realms state the value they want.
+    """
+    for template in ("deploy/engine.demo.toml.template", "deploy/engine.mainnet.toml.template"):
+        config = tomllib.loads(_read(template))
+        assert config["engine"]["leverage_authority"] == "sole", template
+
+
 def test_funded_exodus_is_wired_from_producer_to_engine_and_activation() -> None:
     config = tomllib.loads(_read("deploy/engine.mainnet.toml.template"))
     strategies = config["strategy"]

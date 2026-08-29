@@ -188,12 +188,15 @@ file.
   Any breach of the dedicated-account contract requires investigation and an
   explicit `reconcile-clear` before entries resume; clearing the latch does not
   authorize sharing the account again.
-- **The funded engine runs `leverage_authority = "shared"`**, so a symbol that
-  goes flat forgets its cached leverage and its next entry pays one
-  `set_leverage` round trip — the cost of not sizing against a leverage the
-  venue changed outside the process. A venue value that contradicts the cache
-  drops it under either setting. This conservative setting does not authorize a
-  second writer.
+- **Both engines run `leverage_authority = "sole"`**, so leverage is armed when
+  a target book arrives rather than inline before an order, and an entry from
+  flat no longer pays a `set_leverage` round trip (~172 ms, 844 ms worst). The
+  funded UID contract forbids hand trading, venue bots, copy trading, and other
+  trading API keys, which is what makes the cache trustworthy across flat
+  spells. Every held position's leverage is checked against the venue's own
+  position row on each account reading; a value that contradicts the cache
+  alarms, is written to the log, and turns inline confirmation back on for that
+  symbol. This setting does not authorize a second writer.
 - **The last recorded `-21 USDT` available margin came from owner trading by
   hand and is read correctly.** It is also evidence that the existing account
   arrangement is not yet the dedicated-UID contract the audited generation
