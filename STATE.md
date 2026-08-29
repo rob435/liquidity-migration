@@ -20,9 +20,13 @@ file.
   whole fleet up. That host file is how a sleeve is held down — it can only
   turn one off, never on — and the Telegram pause button writes it.
 
-  The funded account is funded (~$160 equity on 2026-08-24) and the funded
-  engine trades it — the demo account carries the larger practice book. Exact
-  live truth is `scripts/ops.sh status`, never this prose.
+  The funded account has 150.96 USDT equity and is flat; the funded engine
+  trades it when a book asks for exposure. The demo account carries the larger
+  practice book. Exact live truth is `scripts/ops.sh status`, never this prose.
+
+  The fleet runs on `208.84.103.4` at the repository's current `main`. The funded key
+  declares that address as primary and `116.202.15.128` as its deliberate
+  backup; the backup host runs no fleet units.
 
 - **A third sleeve, the EXODUS SHORT, runs on demo and the funded topology.**
   When carry's v7 pre-settle exit fires, the carry producer publishes the
@@ -68,8 +72,8 @@ file.
   a ratio of tracked equity. Both funded producers and the Rust engine read
   that identical artifact. The sizing is
   a forward-record change point for all fill receipts.
-- **The engine owns the demo account, and the sleeves feed it.** It runs
-  `9d2c646e`, with carry_hold **v7** on both CARRY producers: the v7 execution
+- **The engine owns the demo account, and the sleeves feed it.** It runs the
+  current `main` release, with carry_hold **v7** on both CARRY producers: the v7 execution
   clock, `strategy_profile=v7 early_exit=1` — the early exit fires on the
   venue's running rate up to 15 minutes before a dying print pays; settled-print
   fallback kept. The drop exit is part of the producers' exit clock (no dial):
@@ -92,11 +96,10 @@ file.
   `reconcile-clear` restatement clears claims on the symbols it reports flat —
   so a close the log never got to charge cannot lock other sleeves out of a
   name.
-  The demo engine runs `leverage_authority = "sole"` (set in the host's
-  `/etc/liquidity-migration/engine.toml`, which staged deploys deliberately
-  never rewrite; backup beside it). Mainnet stays `"shared"` so an unexpected
-  venue-side leverage change is never trusted; the funded dedicated-UID
-  contract still forbids a second trading authority.
+  Both engines run `leverage_authority = "sole"`. A held position's venue
+  leverage is still checked on every account reading, and a mismatch turns
+  inline confirmation back on for that symbol. The funded dedicated-UID
+  contract forbids a second trading authority.
 
   The chain runs end to end:
 
@@ -124,10 +127,11 @@ file.
 
   What is not done, plainly:
 
-  - **The funded engine trades.** It holds LONG positions on the funded
-    account (552445993) under the mainnet profile — reference tracking equity,
-    gross at five times it. What it has not yet had is a graded stretch: the
-    forward record on real fills is days old, not weeks.
+  - **The funded engine trades.** The funded account (552445993) is flat under
+    the current empty books; a later valid book can open under the mainnet
+    profile, with reference tracking equity and gross at five times it. What it
+    has not yet had is a graded stretch: the forward record on real fills is
+    days old, not weeks.
 
   - **There is no hourly Telegram digest of what is held.** Every position that
     closes is reported as it closes, with its P&L after fees, and a daily
@@ -160,11 +164,10 @@ file.
 
 ### The funded account
 
-- **It holds money: the owner-health read shows equity 541.26 USDT** (read
-  2026-08-19 19:24 UTC), and the mainnet CARRY producer sizes its book off it.
-  The funding arrived by hand, outside the bot — not independently confirmed
-  beyond the health read. Money in the account changes what the producers
-  publish and, through the tracked reference, every cap with it.
+- **It holds 150.96 USDT equity and no position or open order.** This is a
+  signed venue read, and the mainnet producers size their books from the same
+  account. Money in the account changes what they publish and, through the
+  tracked reference, every cap with it.
 - **There is no account daily-loss circuit breaker.** Operational-profile
   schema v2 removed the field and the engine no longer restores, evaluates, or
   writes daily-loss anchors. Historical WAL anchor and verdict shapes remain
@@ -197,10 +200,6 @@ file.
   position row on each account reading; a value that contradicts the cache
   alarms, is written to the log, and turns inline confirmation back on for that
   symbol. This setting does not authorize a second writer.
-- **The last recorded `-21 USDT` available margin came from owner trading by
-  hand and is read correctly.** It is also evidence that the existing account
-  arrangement is not yet the dedicated-UID contract the audited generation
-  requires.
 - **The safety stop covers unexpected outside size.** The manager only
   creates Bybit **Full-position** stops (`tpsl_mode="Full"`), which close the
   entire venue position at trigger. This keeps reductions safe if the dedicated
@@ -316,7 +315,7 @@ file.
 
 The live order path is the Rust engine's; the honest latency contract and the
 measured table are [docs/engine.md](docs/engine.md). Three native runs of the
-current release candidate on the fleet host put the decision at **80 ns** and
+release engine put the decision at **80 ns** and
 market input through durability to a parsed localhost submit response at
 **1.26 ms median / 3.16 ms p99**. The benchmark has no socket-write timestamp.
 Live against the venue (n=67), the
@@ -325,10 +324,11 @@ honest reconstructible total is **179 ms median decision→acknowledgment,
 sample, not an estimated p99). Historical records cannot split that total
 cleanly into disk, socket, leverage call, and venue legs.
 
-- **The ~172 ms venue round trip is geography** — `api.bybit.com`,
-  `api.bytick.com` and `api.byhkbit.com` are the same Frankfurt CloudFront edge
-  proxying to an Asian origin. No code change reaches it; a host near the origin
-  is the only lever and the largest single win left. Owner decision.
+- **The funded host's warm signed account read is 12.71 ms median / 23.80 ms
+  p95.** Thirty successful `/v5/position/list` samples on one reused connection
+  ranged from 10.96 to 27.70 ms. The declared backup host measured 172.14 ms
+  median / 486.59 ms p95 over the same 30-sample run. These are REST account
+  reads, not order acknowledgements.
 - **Sibling placements share one durable batch.** The engine validates and
   reserves them in deterministic order, appends every accepted order, crosses
   one WAL barrier, then asks the venue adapter to send the group. Bybit overlaps
@@ -355,7 +355,8 @@ Seven daemons run continuously: the demo Rust engine (LIVE), the
 mainnet engine, demo LONG and CARRY producers, mainnet LONG and CARRY
 producers, and the Telegram controls. Four timers drive four oneshots beside
 them — demo liveness, mainnet liveness, the LLM ledger, and the trade notifier.
-The host carries exactly the unit files in `deploy/systemd/` and nothing else;
+The execution host at `208.84.103.4` carries exactly the unit files in
+`deploy/systemd/` and nothing else;
 [the inventory is that directory's README](deploy/systemd/README.md). Demo is
 the only practice book.
 
