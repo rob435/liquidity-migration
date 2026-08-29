@@ -288,6 +288,12 @@ file.
   account read either, so an engine cannot boot on it — its market feed is
   usable on its own.
   [docs/engine.md](docs/engine.md) §The venues.
+- **Funded order mutations use Bybit's persistent trade WebSocket.** The
+  dual-stack host resolves the official endpoint normally but dials it through
+  the allowlisted `208.84.103.4`; TLS still verifies `stream.bybit.com`.
+  Create, amend, cancel and their venue-native batches use that authenticated
+  socket. A failed socket warm-up keeps the signed REST path available for the
+  run.
 - **The engine says what its fills cost.** It keeps `is_maker` from the venue's
   execution row and writes the midpoint an order was decided against onto the
   order's own log record, so arrival shortfall, effective spread, fee and all-in

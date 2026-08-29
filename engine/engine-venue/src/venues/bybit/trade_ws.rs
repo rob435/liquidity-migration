@@ -1,14 +1,15 @@
 //! Persistent Bybit WebSocket order entry.
 
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use engine_types::VenueError;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::net::TcpStream;
+use tokio::net::{lookup_host, TcpStream};
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+use tokio_tungstenite::{client_async_tls_with_config, MaybeTlsStream, WebSocketStream};
 
 use super::sign::{ws_signature, RECV_WINDOW_MS};
 use crate::creds::Credentials;
@@ -182,13 +183,9 @@ impl Worker {
 
     async fn connect(&self) -> Result<Socket, VenueError> {
         crate::tls::install_crypto_provider();
-        let connected = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            connect_async_with_config(self.url.as_str(), None, true),
-        )
-        .await
-        .map_err(|_| VenueError::Transport("trade socket dial timed out".to_string()))?;
-        let (mut socket, _) = connected.map_err(|error| VenueError::Transport(error.to_string()))?;
+        let mut socket = tokio::time::timeout(CONNECT_TIMEOUT, connect_ipv4(&self.url))
+            .await
+            .map_err(|_| VenueError::Transport("trade socket dial timed out".to_string()))??;
         let expires = wall_ms() + AUTH_WINDOW_MS;
         let auth = json!({
             "op": "auth",
@@ -203,6 +200,64 @@ impl Worker {
             Err(reply_error(&reply, "trade socket auth refused"))
         }
     }
+}
+
+async fn connect_ipv4(url: &str) -> Result<Socket, VenueError> {
+    let request = url
+        .into_client_request()
+        .map_err(|error| VenueError::Transport(error.to_string()))?;
+    let host = request
+        .uri()
+        .host()
+        .ok_or_else(|| VenueError::Transport("trade socket URL has no host".to_string()))?
+        .to_string();
+    let port = request
+        .uri()
+        .port_u16()
+        .or_else(|| match request.uri().scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or_else(|| VenueError::Transport("trade socket URL has no port".to_string()))?;
+
+    let addresses = lookup_host((host.as_str(), port))
+        .await
+        .map_err(|error| VenueError::Transport(error.to_string()))?;
+    let mut last_error = None;
+    let mut stream = None;
+    for address in ipv4_only(addresses) {
+        match TcpStream::connect(address).await {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let stream = stream.ok_or_else(|| {
+        let detail = last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "DNS returned no IPv4 address".to_string());
+        VenueError::Transport(format!(
+            "trade socket IPv4 dial failed for {host}: {detail}"
+        ))
+    })?;
+    stream
+        .set_nodelay(true)
+        .map_err(|error| VenueError::Transport(error.to_string()))?;
+    let peer = stream.peer_addr().ok();
+    let (socket, _) = client_async_tls_with_config(request, stream, None, None)
+        .await
+        .map_err(|error| VenueError::Transport(error.to_string()))?;
+    tracing::info!(peer = ?peer, "Bybit trade socket connected over IPv4");
+    Ok(socket)
+}
+
+fn ipv4_only(
+    addresses: impl Iterator<Item = SocketAddr>,
+) -> impl Iterator<Item = SocketAddr> {
+    addresses.filter(SocketAddr::is_ipv4)
 }
 
 async fn request(
@@ -394,5 +449,17 @@ mod tests {
             VenueError::Rejected { code: 110001, ref message }
                 if message == "order does not exist"
         ));
+    }
+
+    #[test]
+    fn the_trade_dialer_discards_every_ipv6_address() {
+        let addresses = [
+            "[2600:9000::1]:443".parse().unwrap(),
+            "192.0.2.1:443".parse().unwrap(),
+        ];
+        assert_eq!(
+            ipv4_only(addresses.into_iter()).collect::<Vec<_>>(),
+            addresses[1..]
+        );
     }
 }

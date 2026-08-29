@@ -6,6 +6,16 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — Funded Bybit order entry stays on the allowlisted IPv4.**
+  The dual-stack resolver chose the VPS's Malaysian IPv6 address for
+  `wss://stream.bybit.com/v5/trade`, whose CloudFront distribution rejected
+  that country before authentication. The same official hostname reached a
+  `101 Switching Protocols` response over `208.84.103.4` and authenticated the
+  funded key with `retCode 0`, without sending an order. The persistent trade
+  socket now resolves the official hostname but dials only IPv4, retaining TLS
+  hostname verification, TCP no-delay and the signed REST fallback if a real
+  WebSocket warm-up fails.
+
 - **2026-08-29 — The minimum-size funded maker trial found and closed an
   inventory-ordering fault.** The AGI canary sent two orders and its first
   venue fill was a 750-unit maker buy at 0.006919, about 5.19 USDT. The next

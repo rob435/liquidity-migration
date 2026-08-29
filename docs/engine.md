@@ -84,8 +84,9 @@ reserved in order, and durable mutations are queued without waiting for venue
 I/O. Bybit mainnet prefers one warm authenticated trade WebSocket for create,
 batch-create, cancel, batch-cancel and amend. A boot whose edge refuses that
 socket records the failure and uses the already-warmed signed REST path for
-that run. Same-symbol opening siblings keep wire order because one-way
-positions share one Full stop.
+that run. The dual-stack fleet dials that trade socket over its declared IPv4;
+the hostname still controls TLS and the HTTP upgrade. Same-symbol opening
+siblings keep wire order because one-way positions share one Full stop.
 
 ## Honest latency contract
 
@@ -842,7 +843,7 @@ Six steps, five in `engine-venue` and one next door:
 | Stating leverage at the venue | Done. The leverage a decision was sized at travels with it, and an order whose leverage cannot be set is not sent. Entries only |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
 | Non-blocking order management | Done. Durable mutations enter a bounded venue task; market data continues while acknowledgements are outstanding, and per-symbol coalescing removes superseded amend/cancel work before it reaches the wire |
-| Persistent Bybit order transport | Implemented on mainnet. Create/cancel/amend and their native batches use one authenticated trade WebSocket when its startup authentication succeeds. The official edge currently returns HTTP 403 to `208.84.103.4`, so that host records the refusal and uses its warm signed REST fallback for the run. Demo keeps REST because Bybit does not offer the trade socket there |
+| Persistent Bybit order transport | Implemented on mainnet. Create/cancel/amend and their native batches use one authenticated trade WebSocket when its startup authentication succeeds. The official hostname is resolved normally and the trade dialer selects the fleet's allowlisted IPv4, avoiding the provider IPv6 route that Bybit rejects before authentication. A genuine warm-up failure still selects signed REST for the run. Demo keeps REST because Bybit does not offer the trade socket there |
 | L50 and aggressor-flow quoting | Done for Bybit. The public feed reconstructs 50 levels from snapshot/delta sequence, aggregates trade bursts by aggressor, and the quoter combines microprice, weighted book pressure, short movement, trade pressure, inventory and queue value. After a fill, the old opposite opening quote is cancelled before replacement; the inventory-reducing quote is reduce-only and cannot sell or buy through flat. `quote_enabled = false` pulls its book and drains only its attributed inventory |
 | Fast fill reaction | Done for Bybit mainnet. `execution.fast` wakes the owning strategy early, including maker rows whose client id is blank after joining through venue order id; ordinary `execution` remains the fee-bearing accounting authority. Demo omits the topic because its private stream refuses it |
 | Venue reconciliation and restart recovery | Done. Boot reads the venue's working orders and compares them, and the account, against the log |
