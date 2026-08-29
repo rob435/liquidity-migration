@@ -23,6 +23,11 @@ EnvironmentFile=/etc/liquidity-migration/telegram-mainnet.env
 # Required exact funded-account binding and heartbeat path. A missing file
 # stops the observer instead of silently skipping funded engine health.
 EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
+# The dead-man's switch URL, and nothing else. An on-box watchdog cannot
+# report that the box died, so without this a total host loss is silent.
+# Optional: absent means the switch is not provisioned and silence stays
+# ambiguous. One line, LIVENESS_HEARTBEAT_URL=...
+EnvironmentFile=-/etc/liquidity-migration/liveness.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1

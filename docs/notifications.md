@@ -231,13 +231,25 @@ intact. Cooldown state is saved after the send for exactly this reason.
 `--heartbeat-url` (or `LIVENESS_HEARTBEAT_URL`) is pinged on a healthy run — and only when there are no
 CRITICAL alerts **and** every Telegram send this run delivered. A dead notification channel pages
 externally instead of reading as all-quiet. An on-box watchdog cannot report that the box died, so
-without a URL a total host loss is silent. **No URL is provisioned by default.**
+without a URL a total host loss is silent.
+
+Both liveness units read `/etc/liquidity-migration/liveness.env` if it exists, so provisioning the
+switch is one root-owned mode-`0640` line and a restart:
+
+```
+LIVENESS_HEARTBEAT_URL=https://hc-ping.com/<uuid>
+```
+
+The external monitor's own period is what pages: set it slightly longer than the timer's interval, so
+a single missed run is tolerated and a stopped box is not. Until the file carries a URL the switch is
+unprovisioned and silence stays ambiguous.
 
 ## Operating it
 
 - Silence is not health, and there is no periodic "still alive" message at all. The positive signal is
-  the dead-man's switch above, which is **not provisioned** — so today silence means either a healthy
-  fleet or a dead one, and nothing in the chat tells you which.
+  the dead-man's switch above. Until a URL is in `liveness.env`, silence means either a healthy fleet
+  or a dead one and nothing in the chat tells you which — and a deploy that stops the fleet stops the
+  watchdog with it, so that is exactly when the ambiguity bites.
 - Noise is not health either, and it is the more dangerous of the two. A channel that is entirely false
   positives is worse than a quiet one, because the real alert arrives into a habit of ignoring it. If a
   check cannot clear, it is broken — fix or retire it, do not let it run.

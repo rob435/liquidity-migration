@@ -332,6 +332,19 @@ def test_engine_environment_is_bound_to_account_venue_realm_config_and_heartbeat
     assert "book_path is" in block
 
 
+def test_both_liveness_units_can_receive_the_dead_mans_switch() -> None:
+    """The watchdog code already pings LIVENESS_HEARTBEAT_URL on a healthy run.
+    A dial only works where its unit loads it, so both units read the optional
+    operator file that carries it; absent, the switch is simply unprovisioned.
+    """
+    for name in ("demo", "mainnet"):
+        body = _units()[f"liquidity-migration-{name}-liveness.service"]
+        assert "EnvironmentFile=-/etc/liquidity-migration/liveness.env" in body, name
+        assert "LIVENESS_HEARTBEAT_URL" not in body.split("EnvironmentFile")[0], name
+    source = _read("scripts/runtime/check_fleet_liveness.py")
+    assert 'os.environ.get("LIVENESS_HEARTBEAT_URL")' in source
+
+
 def test_both_realms_state_sole_leverage_authority() -> None:
     """An absent key means "shared", which silently costs an entry from flat a
     ~172 ms set_leverage round trip. Both realms state the value they want.

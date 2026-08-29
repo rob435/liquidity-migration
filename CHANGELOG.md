@@ -6,6 +6,15 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — Both liveness units can carry the dead-man's switch.** The
+  watchdog already pinged `LIVENESS_HEARTBEAT_URL` on a healthy run, but no
+  unit loaded a file that could carry it, so the switch could not be
+  provisioned without editing a unit. Both units now read the optional
+  root-owned `/etc/liquidity-migration/liveness.env`. Until that file names a
+  URL the switch stays unprovisioned and a total host loss is still silent —
+  which is what a rollout produces, because stopping the fleet stops the
+  watchdog too.
+
 - **2026-08-29 — `engine wal-cost` measures the storage's share of the order
   path.** The WAL crate already timed one buffered append against one
   durability barrier — the fsync a send waits for — but only a test could reach
