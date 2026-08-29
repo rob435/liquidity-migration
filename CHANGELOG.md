@@ -6,6 +6,14 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-29 — Bybit prices received before a subscription acknowledgement
+  are preserved.** The public stream can send valid price frames before its
+  acknowledgement. The feed now buffers those frames through the subscription
+  phase and applies them in arrival order, after the reconnect boundary when
+  there is one. Active strategy target books are also published group-readable
+  (`0640`), so the isolated engine users can read decisions written by the
+  producer; an unchanged book with an old private mode is republished.
+
 - **2026-08-29 — A failed first Bybit market-data dial now waits before it
   retries.** The feed increased its backoff counter but slept only after a
   socket had connected once. An unavailable first socket therefore redialled

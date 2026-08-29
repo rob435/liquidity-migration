@@ -309,8 +309,8 @@ impl FeedWorker {
     async fn run(mut self) {
         loop {
             let reconnected = self.epochs > 0;
-            let mut socket = match self.connect().await {
-                Ok(socket) => socket,
+            let (mut socket, pending) = match self.connect().await {
+                Ok(connected) => connected,
                 Err(error) => {
                     let _ = self.emit(Err(error));
                     return;
@@ -322,6 +322,29 @@ impl FeedWorker {
                 if !self.emit(Ok(MarketEvent::FeedReset { recv_ns })) {
                     return;
                 }
+            }
+            let mut reconnect = false;
+            for (recv_ns, message) in pending {
+                match self.on_message(message, recv_ns) {
+                    Ok(Step::Event(event)) => {
+                        if !self.emit(Ok(event)) {
+                            return;
+                        }
+                    }
+                    Ok(Step::Idle) => {}
+                    Ok(Step::Reconnect) => {
+                        self.bump_backoff();
+                        reconnect = true;
+                        break;
+                    }
+                    Err(error) => {
+                        let _ = self.emit(Err(error));
+                        return;
+                    }
+                }
+            }
+            if reconnect {
+                continue;
             }
             loop {
                 match self.step(&mut socket).await {
@@ -352,7 +375,7 @@ impl FeedWorker {
 
     /// Dial, subscribe, and start a fresh epoch. Retries with capped backoff
     /// until it succeeds; a market feed that gives up is worse than a slow one.
-    async fn connect(&mut self) -> Result<Socket, FeedError> {
+    async fn connect(&mut self) -> Result<(Socket, Vec<(u64, Message)>), FeedError> {
         loop {
             // The first dial is immediate. A failed first dial still has to
             // earn the same backoff as every reconnect; `epochs` remains zero
@@ -362,7 +385,7 @@ impl FeedWorker {
                 tokio::time::sleep(self.backoff).await;
             }
             match self.dial().await {
-                Ok(socket) => {
+                Ok(connected) => {
                     // The new socket knows nothing of the old book. Merging
                     // across the seam would invent prices.
                     self.state.reset();
@@ -376,7 +399,7 @@ impl FeedWorker {
                         epoch = self.epochs,
                         "market feed connected"
                     );
-                    return Ok(socket);
+                    return Ok(connected);
                 }
                 Err(e) => {
                     if matches!(&e, FeedError::Transport(text) if text.starts_with("subscribe refused:")) {
@@ -389,7 +412,7 @@ impl FeedWorker {
         }
     }
 
-    async fn dial(&self) -> Result<Socket, FeedError> {
+    async fn dial(&self) -> Result<(Socket, Vec<(u64, Message)>), FeedError> {
         install_crypto_provider();
         let connected = tokio::time::timeout(
             CONNECT_TIMEOUT,
@@ -398,11 +421,12 @@ impl FeedWorker {
         .await
         .map_err(|_| FeedError::Transport("market feed dial timed out".to_string()))?;
         let (mut socket, _) = connected.map_err(|e| FeedError::Transport(e.to_string()))?;
+        let mut pending = Vec::new();
         for chunk in self.topics.chunks(TOPICS_PER_MESSAGE) {
             let payload = subscribe_payload(chunk);
-            send_subscription(&mut socket, payload).await?;
+            send_subscription(&mut socket, payload, self.clock, &mut pending).await?;
         }
-        Ok(socket)
+        Ok((socket, pending))
     }
 
     /// Take on symbols the engine has just started following.
@@ -641,7 +665,12 @@ fn subscribe_payload(topics: &[String]) -> String {
     serde_json::json!({ "op": "subscribe", "args": topics }).to_string()
 }
 
-async fn send_subscription(socket: &mut Socket, payload: String) -> Result<(), FeedError> {
+async fn send_subscription(
+    socket: &mut Socket,
+    payload: String,
+    clock: MonoClock,
+    pending: &mut Vec<(u64, Message)>,
+) -> Result<(), FeedError> {
     tokio::time::timeout(SUBSCRIBE_REPLY_TIMEOUT, async {
         socket
             .send(Message::text(payload))
@@ -665,22 +694,7 @@ async fn send_subscription(socket: &mut Socket, payload: String) -> Result<(), F
                 Some((false, ret_msg)) => {
                     return Err(FeedError::Transport(format!("subscribe refused: {ret_msg}")))
                 }
-                None => {
-                    let is_market_data = matches!(
-                        &message,
-                        Message::Text(text)
-                            if matches!(parse_frame(text.as_str()), Ok(ParsedFrame::Book(_) | ParsedFrame::Ticker(_)))
-                    ) || matches!(
-                        &message,
-                        Message::Binary(bytes)
-                            if matches!(parse_frame_bytes(bytes), Ok(ParsedFrame::Book(_) | ParsedFrame::Ticker(_)))
-                    );
-                    if is_market_data {
-                        return Err(FeedError::Transport(
-                            "market data arrived before the subscription was acknowledged".to_string(),
-                        ));
-                    }
-                }
+                None => pending.push((clock.now_ns(), message)),
             }
         }
     })
@@ -872,6 +886,40 @@ mod tests {
         for _ in 0..2 {
             let sent = subscribes.recv().await.expect("a subscribe per connection");
             assert!(sent.contains("orderbook.1.BTCUSDT"), "subscribe was {sent}");
+        }
+    }
+
+    #[tokio::test]
+    async fn market_data_before_the_subscribe_ack_is_delivered() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let port = listener.local_addr().expect("has an address").port();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accepts");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("handshakes");
+            let _ = ws.next().await;
+            ws.send(Message::text(snapshot(100, 10.0, 10.1)))
+                .await
+                .expect("sends the early quote");
+            ws.send(Message::text(ACK)).await.expect("sends ack");
+            while ws.next().await.is_some() {}
+        });
+
+        let mut feed = BybitPublicFeed::with_url(
+            format!("ws://127.0.0.1:{port}"),
+            &[Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            }],
+        );
+
+        match next(&mut feed).await {
+            MarketEvent::Quote { quote, .. } => assert_eq!(quote.bid_px, 10.0),
+            other => panic!("expected the quote that preceded the ack, got {other:?}"),
         }
     }
 

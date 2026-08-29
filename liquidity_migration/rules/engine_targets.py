@@ -29,6 +29,7 @@ from liquidity_migration.core.durable_file import durable_atomic_replace, durabl
 #: engine refuses a version it does not know rather than guessing.
 TARGET_BOOK_VERSION = 1
 TARGET_BOOK_EXTENDED_VERSION = 2
+TARGET_BOOK_MODE = 0o640
 
 
 @dataclass(frozen=True)
@@ -245,7 +246,12 @@ def read_target_book(path: str | Path) -> ParsedTargetBook:
 def write_target_book(path: Path, text: str) -> None:
     """Durably publish a rendered book without exposing partial contents."""
 
-    durable_atomic_replace(path, text.encode("utf-8"), label="engine target book")
+    durable_atomic_replace(
+        path,
+        text.encode("utf-8"),
+        mode=TARGET_BOOK_MODE,
+        label="engine target book",
+    )
 
 
 def publish_target_book(path: Path, text: str) -> PublishedTargetBook:
@@ -276,13 +282,18 @@ def publish_target_book(path: Path, text: str) -> PublishedTargetBook:
         )
     except (OSError, RuntimeError, ValueError):
         active = None
-    if active is not None and active.data == data:
+    if active is not None and active.data == data and active.mode == TARGET_BOOK_MODE:
         return PublishedTargetBook(
             engine_path=active.path,
             object_path=object_path.absolute(),
             sha256=digest,
         )
-    durable_atomic_replace(path, data, label="engine target book")
+    durable_atomic_replace(
+        path,
+        data,
+        mode=TARGET_BOOK_MODE,
+        label="engine target book",
+    )
     active = read_stable_file(
         path,
         label="active engine target book",

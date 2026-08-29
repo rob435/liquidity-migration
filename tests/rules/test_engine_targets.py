@@ -1,6 +1,7 @@
 """The research→engine target book renders exact, parseable, atomic JSON."""
 
 import json
+import stat
 
 import pytest
 
@@ -145,6 +146,7 @@ def test_writing_is_atomic_and_leaves_no_temp_file(tmp_path) -> None:
     path = tmp_path / "book" / "carry.json"
     write_target_book(path, _book())
     assert json.loads(path.read_text(encoding="utf-8"))["source"] == "carry_hold_v4_live_v1"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
     assert list(path.parent.iterdir()) == [path], "the temp file must not survive"
 
 
@@ -169,3 +171,15 @@ def test_publication_archives_exact_content_before_activation(tmp_path) -> None:
     assert first.object_path != second.object_path
     assert first.object_path.read_bytes() == first_bytes
     assert second.object_path.read_bytes() == path.read_bytes()
+
+
+def test_publication_repairs_an_unreadable_unchanged_active_book(tmp_path) -> None:
+    path = tmp_path / "carry.json"
+    text = _book()
+    published = publish_target_book(path, text)
+    path.chmod(0o600)
+
+    repeated = publish_target_book(path, text)
+
+    assert repeated.object_path == published.object_path
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
