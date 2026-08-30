@@ -123,6 +123,45 @@ impl HttpClient {
         self.send(req).await
     }
 
+    /// PUT with a query string and no body. Binance's keepalive and amend
+    /// endpoints take every parameter in the query, which the caller has
+    /// already signed there.
+    pub(crate) async fn put(
+        &self,
+        path: &str,
+        query: &str,
+        headers: &[(&str, String)],
+    ) -> Result<Value, VenueError> {
+        self.bodyless("PUT", path, query, headers).await
+    }
+
+    /// DELETE with a query string, like [`HttpClient::get`].
+    pub(crate) async fn delete(
+        &self,
+        path: &str,
+        query: &str,
+        headers: &[(&str, String)],
+    ) -> Result<Value, VenueError> {
+        self.bodyless("DELETE", path, query, headers).await
+    }
+
+    async fn bodyless(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &[(&str, String)],
+    ) -> Result<Value, VenueError> {
+        let mut req = Request::builder().method(method).uri(self.url(path, query));
+        for (name, value) in headers {
+            req = req.header(*name, value);
+        }
+        let req = req
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
+        self.send(req).await
+    }
+
     async fn send(&self, req: Request<Full<Bytes>>) -> Result<Value, VenueError> {
         let exchange = async {
             let resp = self

@@ -320,8 +320,8 @@ parallel and integrate by type-check.
 | --- | --- |
 | `engine-types` | every shared type and trait: events, intents, orders, log records, the `Strategy` trait, and the capability traits (`Wal`, `VenueGateway`, `RiskKernel`) |
 | `engine-wal` | the append-only log: CRC-framed records, buffered appends, one explicit durability barrier per sibling placement group, group flush for everything else, replay with torn-tail truncation, size-triggered rotation into archived segments |
-| `engine-marketdata` | every venue's public feed: subscribe or poll, parse once into flat per-symbol state, stamp arrival time. Bybit and MEXC enforce their numbered depth chains and resync on gaps; Lighter enforces its nonce chain; Hyperliquid rejects timestamp regression but its protocol cannot prove forward continuity. One enum is built from the same venue name as the gateway |
-| `engine-venue` | five venue adapters, one directory each: realm selection, signing, live instrument rules, pre-warmed keep-alive TLS, and the account, order, and stream capabilities that venue supports. Unsupported capabilities fail explicitly |
+| `engine-marketdata` | every venue's public feed: subscribe or poll, parse once into flat per-symbol state, stamp arrival time. Bybit and MEXC enforce their numbered depth chains and resync on gaps; Binance rejects a partial-snapshot sequence regression; Lighter enforces its nonce chain; Hyperliquid rejects timestamp regression but its protocol cannot prove forward continuity. One enum is built from the same venue name as the gateway |
+| `engine-venue` | six venue adapters, one directory each: realm selection, signing, live instrument rules, pre-warmed keep-alive TLS, and the account, order, and stream capabilities that venue supports. Unsupported capabilities fail explicitly |
 | `engine-risk` | the capital controls: equity-anchored envelope, account-wide caps, stop-attach discipline. Unknown inputs refuse the order |
 | `engine-core` | the loop: wires the above together, runs strategies, keeps the latency ledger, hosts the mock venue used for measurement |
 | `engine-strategies` | the plugs: a registry from name + TOML to a boxed `Strategy` |
@@ -351,8 +351,8 @@ parallel and integrate by type-check.
   realm tables instead of writing its own.
 
   Bybit is the only adapter with live-order evidence. Compile and request-shape
-  tests are the evidence boundary for the other adapters; they are not
-  production validation.
+  tests are the evidence boundary for the other adapters, including Binance;
+  they are not production validation.
 - **Bybit proves one-way mode before startup completes.** During account
   identity, the adapter makes one signed read-only position query per configured
   symbol at the venue's 200-row maximum and requires exactly one matching
@@ -729,7 +729,8 @@ back.
 
 ## The venues
 
-Five are compiled in, and one name in `engine.toml` picks between them:
+Six venue families and ten exact realms are compiled in. One name in
+`engine.toml` picks an exact realm:
 
 | `venue =` | What it is | Readiness |
 | --- | --- | --- |
@@ -740,6 +741,8 @@ Five are compiled in, and one name in `engine.toml` picks between them:
 | `lighter_testnet` | Lighter's testnet rollup | `testnet-canary` |
 | `lighter_mainnet` | Lighter's funded account | `production-blocked` |
 | `mexc_mainnet` | MEXC funded futures — its only realm | `production-blocked` |
+| `binance_testnet` | Binance USD-M futures testnet | `production-blocked` |
+| `binance_mainnet` | Binance funded USD-M futures | `production-blocked` |
 | `variational_mainnet` | Variational public data | `read-only` |
 
 `engine venues` prints this table from the binary's exhaustive registry.
@@ -749,15 +752,17 @@ the WAL, reads credentials, or opens a socket. Moving an exact realm to
 another realm's result does not qualify it. Testnet-canary status permits the
 Hyperliquid and Lighter practice realms only so they can gather that evidence.
 
-Only Bybit has live-order evidence. Hyperliquid, Lighter, and MEXC compile and
-pass offline adapter tests only. Feed continuity is
+Only Bybit has live-order evidence. Hyperliquid, Lighter, MEXC, and Binance
+compile and pass offline adapter tests only. Feed continuity is
 protocol-specific: MEXC requires consecutive unmerged-depth versions and emits
-no ticker-derived quote before a depth epoch exists; Lighter requires each
-update range to begin at the prior nonce and advance; Hyperliquid rejects a
-same-symbol BBO timestamp regression but cannot detect a forward gap. Lighter
-cannot open until its leverage transaction exists, MEXC has no practice realm, and
-Variational has no account or trading API. Do not treat a successful build as
-authority to arm any of these paths.
+no ticker-derived quote before a depth epoch exists; Binance ignores duplicate
+top-20 snapshots and redials on a regressing final update id, but its complete
+partial snapshots do not prove diff-stream continuity or supply levels 21–50;
+Lighter requires each update range to begin at the prior nonce and advance;
+Hyperliquid rejects a same-symbol BBO timestamp regression but cannot detect a
+forward gap. Lighter cannot open until its leverage transaction exists, MEXC
+has no practice realm, and Variational has no account or trading API. Do not
+treat a successful build as authority to arm any of these paths.
 
 Bybit publishes the top of book on its own topic, about twice as often as the
 depth-50 book. Both carry the touch, so the engine takes whichever was read off
@@ -770,6 +775,13 @@ MEXC still prices from the complete ticker touch. The quote's sequence field is
 the latest continuously observed depth version, not proof that the ticker and
 that depth update are the same causal snapshot. Its incremental depth is not a
 complete ladder without a separate snapshot bootstrap.
+
+Binance routes the touch and top-20 partial snapshots through its public socket,
+and trades, ticker, mark, index, and funding through its market socket. One
+worker owns both and resets both if either drops. The top-20 book is a named
+pre-live adapter limit: every consumer honors its actual populated length, but
+it is not the engine's full L50 evidence and does not qualify Binance for
+production quoting.
 
 **One name decides three things**: the gateway that sends orders, the private
 stream that reports what happened to them, and the public feed the strategies
@@ -830,6 +842,41 @@ it had been given something else.
   all, so `mexc_mainnet` is the only spelling and every MEXC order is real
   money. It has no live-order evidence and `engine run` keeps it
   `production-blocked`.
+- **Binance has a practice realm, but neither realm has a live lifecycle
+  receipt here.** Both `binance_testnet` and `binance_mainnet` stay
+  `production-blocked`. No authenticated testnet run proves the flat-entry,
+  close-position stop, fill, cancel, and restart sequence. Offline request
+  shapes cannot settle that venue behavior.
+- **Binance account identity is the authenticated account alias.** Startup
+  requires every `/fapi/v3/balance` row to carry the same non-empty
+  `accountAlias`, separately proves one-way position mode, and refuses
+  multi-assets mode. The engine's account contract is literal USDT, not the
+  venue's USD-equivalent value across eligible collateral.
+- **Binance checks an opening request against both limit and market size
+  grids.** It refuses a submitted size outside either grid or above the smaller
+  maximum. This does not prove the resulting position can close in one market
+  order: public ALLUSDT trades include partial fills below the venue's current
+  market-order minimum. An authenticated dust-close result or a separate close
+  design is required before either realm can run.
+- **Binance stops live in the Algo Service.** A position stop is a mark-price
+  `STOP_MARKET` algo with `closePosition=true`. Replacement is placed before
+  the older stop is cancelled. The private socket asks for both
+  `ORDER_TRADE_UPDATE` and `ALGO_UPDATE`; fills are linked to a stop even when
+  those event types arrive in the opposite order. The adapter does not resolve
+  an HTTP 503 whose response says execution is unknown: an entry may have been
+  accepted before its paired stop is sent, or an accepted stop may survive the
+  attempted entry cancellation. Both realms remain blocked until those outcomes
+  are reconciled from the private stream and signed order queries.
+- **Binance execution recovery refuses instead of returning an incomplete
+  account history.** Account-wide `allOrders` drops an order 90 days after its
+  creation, while `userTrades` is symbol-scoped and retains by trade time. A
+  long-lived order created outside that horizon can therefore fill now without
+  giving this adapter a complete account-wide symbol source. The gateway's
+  `executions` method fails explicitly, which is another reason both realms are
+  blocked. Parsed trade ids are still prefixed by symbol before reaching the
+  engine's global duplicate set. A fee is carried as account-currency P&L only
+  when Binance says its asset is USDT; a BNB or unknown fee stays unknown
+  instead of being mislabeled as USDT.
 - **MEXC counts contracts, not coins.** One contract is `contractSize` of the
   base coin — 0.0001 BTC, 1 XRP, 100 TUT — and fewer than a quarter of its
   contracts have that equal to 1. Sizes cross that boundary through the venue's
@@ -842,14 +889,15 @@ it had been given something else.
   domain in January 2026 and left the websocket behind. The retired REST host
   still answers, byte-identically and with no deprecation header, so nothing at
   runtime would notice a fallback to it.
-- **Only Bybit keeps a stop on the position.** Hyperliquid and Lighter keep it
-  as a separate reduce-only trigger order, so "is this position protected" is
+- **Only Bybit keeps a stop on the position.** Hyperliquid, Lighter, and Binance
+  keep it as a separate reduce-only or close-position trigger order, so "is
+  this position protected" is
   answered by reading the open orders, and a position with no such order comes
   back unprotected — which is what makes the risk kernel's every-entry-carries-
-  a-stop rule mean the same thing on all three.
-- **Only Bybit has a market order.** Hyperliquid takes an immediate-or-cancel
-  limit priced through the book; Lighter takes a market order type whose price
-  field bounds the fill.
+  a-stop rule mean the same thing on all four.
+- **Bybit and Binance have direct market orders.** Hyperliquid takes an
+  immediate-or-cancel limit priced through the book; Lighter takes a market
+  order type whose price field bounds the fill.
 - **Hyperliquid signs with a wallet key, Lighter with a curve key.** Neither is
   an HMAC secret. Hyperliquid's is an API wallet the account approved, which
   cannot withdraw; Lighter's is a private key registered against one of the
@@ -932,10 +980,10 @@ Six steps, five in `engine-venue` and one next door:
 
 ### Evidence boundary
 
-Bybit is the only venue with live-order evidence. Hyperliquid, Lighter, and
-MEXC have compile and offline adapter evidence only. Variational has no account
-or order API. A capability that has not been exercised against its venue is a
-claim, not production proof.
+Bybit is the only venue with live-order evidence. Binance, Hyperliquid, Lighter,
+and MEXC have compile and offline adapter evidence only. Variational has no
+account or order API. A capability that has not been exercised against its
+venue is a claim, not production proof.
 
 **The engine is the account owner, in the repository and on the host.** It
 reads the venue, writes `account_equity_usdt` into its heartbeat, both

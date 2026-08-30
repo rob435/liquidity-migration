@@ -6,6 +6,28 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — Binance gains a fenced adapter, and the LONG evidence program
+  stops overstating what it saw.** The Rust engine now compiles six venue
+  families and ten exact realms. Binance USD-M has
+  account-alias and one-way-mode checks, current routed public/private sockets,
+  Algo stops, an explicit refusal of incomplete account-wide execution
+  recovery, symbol-scoped execution IDs, and complete top-20 snapshots; both
+  its testnet and mainnet remain production-blocked because no signed
+  protective-stop lifecycle ran, ambiguous entry and stop HTTP 503 outcomes
+  are not reconciled, and partial fills can fall below the market-exit minimum.
+  The drawdown-week
+  checker now reconciles explicit venue settlements, keeps a prior live
+  PUMPFUN position apart from a missed execution, and reports ENA as
+  ungradeable while AAVE is -922.79 bp all-in. The tape grader declares each
+  input as a registered trade, tape proxy, or artificial exercise; this sample
+  contains zero registered model rows. The durable findings restore the
+  Binance carry replication at +10.1 bp/day over 1,756 seen days. Forward
+  capture starts with 81 symbols: the existing maker/saved-L50 set plus LONG's
+  top 50 by 90-day median daily turnover and a ten-rank buffer. Private
+  research inputs stay outside Git in a mode-0600 local evidence archive. The
+  operational rollout installs the commit carrying this entry and restarts the
+  widened recorder with the rest of the managed fleet.
+
 - **2026-08-30 — The gate grows a wide band, labeled apart (owner
   directive: "wire it in for demo and add its own label").** The trigger
   scan now reads turnover ranks 1–30: ranks 11–30 are judged and published

@@ -1,13 +1,13 @@
 //! Public market data for every venue the engine can trade, parsed once into
 //! the engine's contract types.
 //!
-//! One module per venue — [`bybit`], [`hyperliquid`], [`lighter`], [`mexc`],
-//! [`variational`] — the same five the order crate is laid out by, so an
+//! One module per venue — [`binance`], [`bybit`], [`hyperliquid`], [`lighter`],
+//! [`mexc`], [`variational`] — the same six the order crate is laid out by, so an
 //! exchange is one folder in each.
 //!
 //! The Bybit stream is public — no credentials — and it is the same price feed
-//! the demo account trades against. [`hyperliquid`], [`lighter`], [`mexc`] and
-//! [`variational`] are the other four venues' feeds, and [`feeds`] is the one
+//! the demo account trades against. [`binance`], [`hyperliquid`], [`lighter`],
+//! [`mexc`] and [`variational`] are the other five venues' feeds, and [`feeds`] is the one
 //! type the engine holds:
 //! built from the same venue name that built the gateway, so orders and prices
 //! cannot come from two different venues.
@@ -16,6 +16,7 @@
 //! venue's own realm table in `engine-venue`, which has a fence that reads its
 //! source back — a host spelled out here would be one that fence never sees.
 
+pub mod binance;
 pub mod bybit;
 pub mod feeds;
 pub mod hyperliquid;
@@ -25,6 +26,7 @@ pub mod variational;
 
 mod symbols;
 
+pub use binance::BinancePublicFeed;
 pub use bybit::BybitPublicFeed;
 pub use feeds::MarketFeeds;
 pub use hyperliquid::HyperliquidPublicFeed;

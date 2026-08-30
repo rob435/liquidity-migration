@@ -1,9 +1,9 @@
 //! The venue adapters, and the one switch that picks between them.
 //!
-//! Five venues live under [`venues`], one module each: Bybit, Hyperliquid,
-//! Lighter, MEXC, Variational. The engine names one in `engine.toml` and gets its
-//! gateway, its private order stream, and its public market feed — all three
-//! from the same name, so a config cannot half-switch.
+//! Six venues live under [`venues`], one module each: Bybit, Hyperliquid,
+//! Lighter, MEXC, Binance, Variational. The engine names one in `engine.toml`
+//! and gets its gateway, its private order stream, and its public market
+//! feed — all three from the same name, so a config cannot half-switch.
 //!
 //! Every venue has realms, and the difference between two realms is real
 //! money. A venue's own `realm` module is the only place that turns one of its
@@ -62,10 +62,11 @@ pub(crate) use clock::{account_scan, mono_ns, wall_ms};
 pub use arming::{check_arming, check_arming_with, env_flag, real_money_armed, REAL_MONEY_ENV};
 pub use creds::Credentials;
 pub use registry::{
-    known_venues, InventoryProbe, OrderFeeds, Venue, VenueName, VenueReadiness, BYBIT_DEMO,
-    BYBIT_MAINNET, HYPERLIQUID_MAINNET, HYPERLIQUID_TESTNET, LIGHTER_MAINNET, LIGHTER_TESTNET,
-    VARIATIONAL_MAINNET,
+    known_venues, InventoryProbe, OrderFeeds, Venue, VenueName, VenueReadiness, BINANCE_MAINNET,
+    BINANCE_TESTNET, BYBIT_DEMO, BYBIT_MAINNET, HYPERLIQUID_MAINNET, HYPERLIQUID_TESTNET,
+    LIGHTER_MAINNET, LIGHTER_TESTNET, VARIATIONAL_MAINNET,
 };
+pub use venues::binance::{BinanceGateway, BinanceOrderFeed, BinanceRealm};
 pub use venues::bybit::{
     BybitGateway, BybitInventoryProbe, BybitOrderFeed, BybitOrderReceipt, VenueRealm, API_KEY_ENV,
     API_SECRET_ENV,

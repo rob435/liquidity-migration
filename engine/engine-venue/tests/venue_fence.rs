@@ -80,6 +80,16 @@ fn venue_hosts() -> Vec<VenueHosts> {
             ],
         },
         VenueHosts {
+            venue: "binance",
+            domains: vec![[".binance", ".com"].concat()],
+            allowed: vec![
+                ["demo-fapi", ".binance", ".com"].concat(),
+                ["demo-fstream", ".binance", ".com"].concat(),
+                ["fapi", ".binance", ".com"].concat(),
+                ["fstream", ".binance", ".com"].concat(),
+            ],
+        },
+        VenueHosts {
             venue: "variational",
             domains: vec![[".variational", ".io"].concat()],
             allowed: vec![["omni-client-api.prod.ap-northeast-1", ".variational", ".io"].concat()],
@@ -227,6 +237,10 @@ fn testnet_and_every_alternate_domain_are_absent() {
         // no support commitment at all — and it is easy to find empirically
         // and reach for.
         ["futures", ".mexc", ".com"].concat(),
+        // Earlier USD-M testnet hosts are outside the current documented
+        // demo-fapi/demo-fstream pair.
+        ["testnet", ".binancefuture", ".com"].concat(),
+        ["stream", ".binancefuture", ".com"].concat(),
     ];
     for file in scanned_sources() {
         let text = std::fs::read_to_string(&file).unwrap();
@@ -242,7 +256,9 @@ fn testnet_and_every_alternate_domain_are_absent() {
 
 #[test]
 fn the_realm_tables_are_the_shipped_ones() {
-    use engine_venue::{HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueRealm};
+    use engine_venue::{
+        BinanceRealm, HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueRealm,
+    };
 
     let demo_rest = ["https://", &["api-demo", ".bybit", ".com"].concat()].concat();
     let demo_ws = [
@@ -325,6 +341,15 @@ fn the_realm_tables_are_the_shipped_ones() {
         MexcRealm::Mainnet.is_real_money(),
         "MEXC has no practice realm"
     );
+
+    let binance_test_rest = ["https://", &["demo-fapi", ".binance", ".com"].concat()].concat();
+    let binance_test_ws = ["wss://", &["demo-fstream", ".binance", ".com"].concat()].concat();
+    let binance_main_rest = ["https://", &["fapi", ".binance", ".com"].concat()].concat();
+    let binance_main_ws = ["wss://", &["fstream", ".binance", ".com"].concat()].concat();
+    assert_eq!(BinanceRealm::Testnet.rest_base(), binance_test_rest);
+    assert_eq!(BinanceRealm::Testnet.websocket(), binance_test_ws);
+    assert_eq!(BinanceRealm::Mainnet.rest_base(), binance_main_rest);
+    assert_eq!(BinanceRealm::Mainnet.websocket(), binance_main_ws);
 
     assert_eq!(
         VariationalRealm::Mainnet.rest_base(),

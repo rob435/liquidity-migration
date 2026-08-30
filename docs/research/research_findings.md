@@ -282,8 +282,8 @@ separately capturable cross-venue alpha:
 **Interpretation.** The deep-gap cohort is the book's best subset, and the
 edge concentrates where the venues *diverge* — that is consistent with
 "route to the venue that pays most." But the caveat that killed
-`lane2_funding_spread_v1` still stands: Binance funding alone is near-noise
-(t 0.4 / Sharpe 0.18 on its own), so the gap's predictive content is
+`lane2_funding_spread_v1` still stands: the corrected v2-era Binance transfer
+is near-noise (t 0.4 / Sharpe 0.18 on its own), so the gap's predictive content is
 **Bybit-depth carrying the load, not a second venue you could trade into**.
 The deep-gap era split is thin and one-sided: 2022 is sharply negative
 (−96.6 bp/name-day, n=14) and 2024-26 carry it — so this is a regime
@@ -296,3 +296,110 @@ not reverse the `funding_spread_v1` deletion reasoning (that config deleted
 The one live question it leaves: whether "*both* venues negative" (a
 convergence signal) predicts anything *in addition* to Bybit being negative
 — the n=1861 vs n=96 split above suggests it mostly does not.
+
+## 2026-08-24 — Carry-hold on Binance: positive seen-data replication
+
+**Question.** Does the registered v6 carry rule transfer when only the venue
+view changes from Bybit to Binance? The run uses the panel's `BINANCE_VIEW`
+over 1,756 days, limits the universe to names present on both venues, and
+charges Bybit's conservative 7.78 bp per side. The Bybit control in the same
+run reproduces its registered +21.82 bp/day.
+
+**Result.** Binance earns **+10.1 bp/day with raw Sharpe 0.97** over the
+4.80-year panel. Binance / Bybit-control net by era is 2021 −0.9 / −0.8 bp/day
+(62 thin days), 2022 +4.4 / +4.9, 2023 +6.2 / +9.6, 2024 +2.1 / +4.8,
+2025 +17.5 / +48.3, and 2026 +29.2 / +62.0. Every full year is positive,
+the pooled Binance result is 46% of the Bybit control, and the positive
+calendar-year ratios range from 36% to 90%. Both concentrate their largest
+returns in 2025–26. This improves on the corrected v2-era Binance read of +2.7
+bp/day and Sharpe 0.18 because v4–v6's sizing rules also help the Binance view.
+
+**Boundary.** The rule and sizing were shaped on Bybit, so this is Lane-1
+replication on seen data, not a registered Binance result. The symbols are the
+same across both views, so adding Binance diversifies venue exposure rather
+than the underlying coin book. The adapter has no live lifecycle evidence;
+offline code and a practice realm do not authorize funded trading. The result
+supports collecting a Binance forward record, not a production claim.
+
+## 2026-08-30 — v12 mechanics on the forward tape: one reconstructed proxy does not fire
+
+**Question.** Can the recorded public tape exercise the LONG kernel's entry
+and stop assumptions? The diagnostic pins the kernel to commit
+`9e100d8e7de4ac586526d605dd983e2d36f1533d` and reads 1,862,470 receive-ordered
+rows from 17 completed BTCUSDT segments. Both observation windows are
+bracketed; there are no sequence gaps, skipped segments, invalid timestamps,
+or timestamp regressions. One still-open segment is excluded.
+
+**Result.** Zero registered model trade rows are graded. One signal reconstructed
+from the tape closes at 78,137.5, which puts its 1% resting entry at 77,356.125.
+Neither the conservative trade-through bound nor the optimistic touch bound
+reaches it inside six hours, and the 74,713 stop does not fire. The kernel's
+next-hour-open price is 78,253.1, or 115.95 bp worse than the unfilled limit,
+but that difference is not execution slippage: there is no tape fill to compare
+with it. PENDLEUSDT has completed tape rows but no diagnostic input row, so it
+grades nothing.
+
+An explicitly artificial exercise at a 78,000 entry and 77,950 stop checks the
+grader itself. That row fills 5.73 hours before the kernel, puts the kernel open
+32.45 bp above the limit, and walks 1,000 USDT through displayed bids at 0.975
+bp below the stop. Those three numbers belong only to the exercise; they do not
+validate v12's actual levels.
+
+**Boundary.** This is a Lane-1 mechanics diagnostic, not an alpha or live-fill
+result. The proxy's signal close comes from the tape rather than a registered
+kernel trade, and a displayed book omits latency, cancellations, hidden size,
+impact, and replenishment. The local report is
+`reports/v12-mechanics-tape-20260830-audit/`; summary / per-trade / provenance
+SHA-256 are `89d2153710ca4cf29131a7a69c7e60903c1e8707724208fec71587413a16b7f4`,
+`a542bca3294f1bd244a24713753ba477f14f64374557fb7754eaba73dd7b7b8d`, and
+`881cb64931f82236b492d555c3624e127c3491b531910b7e6a807b5799e177e0`.
+The explicit evidence-kind comparison is
+`973ef7964aa05407b0e9b5cbfd09760c1701e2b94097a00d970c0423fc27fa76`.
+The private tape input is retained under
+`SHARED_DATA/research_evidence/2026-08-30-parity-tape/` as a mode-0600 archive
+with SHA-256
+`c7c868057f3a5d80554d5c4b64f322b17f6c59e6ed42fb68ed2e43a72f0419ab`;
+it is deliberately not in Git.
+
+## 2026-08-30 — LONG live versus model: the drawdown week is not net-gradeable
+
+**Question.** Why did the demo LONG path differ from the registered v12 model
+over `[2026-08-23, 2026-08-30)`? The supplied model ledger is labeled with
+source commit `9e100d8e7de4ac586526d605dd983e2d36f1533d`; the checker hashes the ledger but
+cannot independently prove that origin. It then joins producer transitions,
+8,997 retained cycle payloads, the engine's long-sleeve journal, 936 Bybit
+closed-PnL rows, and 2,301 unique transaction rows. Seven exact duplicate
+transaction IDs are removed before accounting.
+
+**Result.** One ENAUSDT model/live pair is structural, not a net observation:
+the signals are one day apart, the model exits at its take-profit while live
+waits for a time stop, and the engine entry journal has rotated away. The
+nearest venue close belongs to a distinct 1,587-unit position opened after the
+prior position went flat. Its one −0.00496098 USDT settlement exactly explains
+the venue-position closed-PnL residual, but no engine or producer order links
+that position to the paired sleeve trade. The earlier −2,786.5 bp comparison is
+withdrawn; the paired price-and-fee gap is **not gradeable**.
+
+The unmatched cohorts stay visible. PUMPFUNUSDT is a state/path divergence,
+not a missed live execution: the live book entered on the prior day's signal,
+remained open through the model's signal and entry, and closed 89.481 seconds
+after the model entry. The hypothetical model path loses 1,361.0 bp. The
+gate-only AAVEUSDT trade loses 918.52 bp from price and fees; its engine round
+trip exactly matches the flat-to-flat venue position, so six explicit
+settlements add −4.27 bp and put its all-in result at **−922.79 bp**. There
+are no unexplained live-only trades in the window.
+
+**Boundary.** This is a post-seen Lane-1 reconciliation, not a forward grade.
+The model replay is tainted: its full point-in-time membership check falls back
+to the current universe with 274 required date-symbol rows missing. ENA lacks
+the order/accounting links needed for a live net, and one structural pair cannot
+establish parity. The report is
+`reports/long_live_vs_model_2026-08-23_2026-08-30/`; its final hashes live in
+`long_live_vs_model_provenance.json`. The private live inputs are retained
+under `SHARED_DATA/research_evidence/2026-08-30-parity-tape/` as a mode-0600
+archive with SHA-256
+`4088e1f9b018578cbf37a9893758e1acbc0f73b82bbd8b8df5091b0a2e69bd97`;
+they are deliberately not in Git, so reconstruction also needs that local
+archive. The ignored parity and tape report directories are preserved together
+in `generated-reports.tar.zst` with SHA-256
+`9e5c3feb893eb4c6ed638a0e79095d906ff942a3c21b9e7163c1647b03de299c`.

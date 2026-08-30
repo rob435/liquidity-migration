@@ -25,7 +25,7 @@ Twenty-two unit files: fifteen services and seven timers (two liveness, the LLM 
 | `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume — there is no close button) — the sole `getUpdates` consumer |
 | `liquidity-migration-llm-ledger.service` | LLM driver judgments on movers and trigger events, and the judged candidates file the demo LONG sleeve enters through — run by its hourly timer |
 | `liquidity-migration-trade-notify.service` | Sends every sleeve's entries and its exits with what they made to the owner's DM — run by its 5-minute timer |
-| `liquidity-migration-forward-capture.service` | Records public Bybit L50 books, trades, derivative tickers and liquidations into verified compressed segments; no account credentials or order path |
+| `liquidity-migration-forward-capture.service` | Records the public Bybit fast touch (L1), L50 books, trades, derivative tickers and liquidations into verified compressed segments; no account credentials or order path |
 | `liquidity-migration-forward-upload.service` | Copies only completed compressed segments to Google Drive, checks each new batch, and writes a Drive-side checksum list — run by its hourly timer |
 | `liquidity-migration-backup.service` | Nightly off-box copy of the WALs and trade files (the state git cannot rebuild) — run by its daily timer; a note and a clean exit until `/etc/liquidity-migration/backup.env` names a destination |
 | `liquidity-migration-chaos-drill.service` | Weekly crash-recovery rehearsal: kills the **demo** engine and reports on the alerts line whether it came back clean, latched, or not at all — run by its Sunday timer; never touches mainnet |

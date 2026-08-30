@@ -26,6 +26,11 @@ wal_path = "engine.wal"
 #   mexc_mainnet         MEXC's funded futures account. REAL MONEY, and the
 #                        ONLY MEXC name — the venue publishes no testnet host,
 #                        so there is no practice spelling of this one.
+#   binance_testnet      Binance USD-M futures testnet. PRODUCTION BLOCKED:
+#                        public protocol and offline adapter checks pass, but
+#                        the private stop lifecycle still needs a signed run.
+#   binance_mainnet      Binance USD-M funded account. PRODUCTION BLOCKED
+#                        until exact-venue live evidence exists.
 #   variational_mainnet  Variational. READ-ONLY, and not runnable: the venue
 #                        publishes no trading API and no account read, so the
 #                        engine stops at boot. Its market feed works on its
@@ -40,8 +45,8 @@ wal_path = "engine.wal"
 # WHAT DIFFERS BETWEEN THEM, where it changes a decision:
 #   - Bybit quotes funding for its next eight-hourly settlement. Hyperliquid
 #     pays HOURLY and quotes the hourly rate. A carry number carried between
-#     the two without scaling is out by a factor of eight. MEXC settles every
-#     eight hours like Bybit.
+#     the two without scaling is out by a factor of eight. MEXC and Binance
+#     settle every eight hours like Bybit.
 #   - MEXC counts CONTRACTS, not coins. One contract is `contractSize` of the
 #     base coin and fewer than a quarter of its contracts have that equal to 1,
 #     so its sizes only mean anything through its own contract table.

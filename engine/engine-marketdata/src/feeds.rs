@@ -11,8 +11,11 @@
 //! gateway, which is called once per order.
 
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId};
-use engine_venue::{HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueName};
+use engine_venue::{
+    BinanceRealm, HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueName,
+};
 
+use crate::binance::BinancePublicFeed;
 use crate::bybit::feed::BybitPublicFeed;
 use crate::hyperliquid::HyperliquidPublicFeed;
 use crate::lighter::LighterPublicFeed;
@@ -24,6 +27,7 @@ pub enum MarketFeeds {
     Hyperliquid(HyperliquidPublicFeed),
     Lighter(LighterPublicFeed),
     Mexc(MexcPublicFeed),
+    Binance(BinancePublicFeed),
     Variational(VariationalPublicFeed),
 }
 
@@ -53,6 +57,12 @@ impl MarketFeeds {
             VenueName::MexcMainnet => {
                 MarketFeeds::Mexc(MexcPublicFeed::new(MexcRealm::Mainnet, subs))
             }
+            VenueName::BinanceTestnet => {
+                MarketFeeds::Binance(BinancePublicFeed::new(BinanceRealm::Testnet, subs))
+            }
+            VenueName::BinanceMainnet => {
+                MarketFeeds::Binance(BinancePublicFeed::new(BinanceRealm::Mainnet, subs))
+            }
             VenueName::VariationalMainnet => MarketFeeds::Variational(VariationalPublicFeed::new(
                 VariationalRealm::Mainnet,
                 subs,
@@ -72,6 +82,7 @@ impl MarketFeeds {
             MarketFeeds::Hyperliquid(feed) => feed.id_of(symbol),
             MarketFeeds::Lighter(feed) => feed.id_of(symbol),
             MarketFeeds::Mexc(feed) => feed.id_of(symbol),
+            MarketFeeds::Binance(feed) => feed.id_of(symbol),
             MarketFeeds::Variational(feed) => feed.id_of(symbol),
         }
     }
@@ -84,6 +95,7 @@ impl MarketFeed for MarketFeeds {
             MarketFeeds::Hyperliquid(feed) => feed.next_event().await,
             MarketFeeds::Lighter(feed) => feed.next_event().await,
             MarketFeeds::Mexc(feed) => feed.next_event().await,
+            MarketFeeds::Binance(feed) => feed.next_event().await,
             MarketFeeds::Variational(feed) => feed.next_event().await,
         }
     }
@@ -94,6 +106,7 @@ impl MarketFeed for MarketFeeds {
             MarketFeeds::Hyperliquid(inner) => MarketFeed::admit(inner, symbol, feed),
             MarketFeeds::Lighter(inner) => MarketFeed::admit(inner, symbol, feed),
             MarketFeeds::Mexc(inner) => MarketFeed::admit(inner, symbol, feed),
+            MarketFeeds::Binance(inner) => MarketFeed::admit(inner, symbol, feed),
             MarketFeeds::Variational(inner) => MarketFeed::admit(inner, symbol, feed),
         }
     }
@@ -127,6 +140,8 @@ mod tests {
             (VenueName::LighterTestnet, "lighter"),
             (VenueName::LighterMainnet, "lighter"),
             (VenueName::MexcMainnet, "mexc"),
+            (VenueName::BinanceTestnet, "binance"),
+            (VenueName::BinanceMainnet, "binance"),
             (VenueName::VariationalMainnet, "variational"),
         ] {
             let built = match MarketFeeds::build(name, &subs()) {
@@ -134,6 +149,7 @@ mod tests {
                 MarketFeeds::Hyperliquid(_) => "hyperliquid",
                 MarketFeeds::Lighter(_) => "lighter",
                 MarketFeeds::Mexc(_) => "mexc",
+                MarketFeeds::Binance(_) => "binance",
                 MarketFeeds::Variational(_) => "variational",
             };
             assert_eq!(built, expected, "{name} built the wrong venue's feed");
@@ -146,6 +162,7 @@ mod tests {
             VenueName::BybitDemo,
             VenueName::HyperliquidTestnet,
             VenueName::LighterTestnet,
+            VenueName::BinanceTestnet,
             VenueName::VariationalMainnet,
         ] {
             let mut feed = MarketFeeds::build(name, &subs());

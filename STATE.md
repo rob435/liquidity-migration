@@ -265,17 +265,30 @@ file.
 
 ### Execution and market data
 
-- **The engine registry contains five venue families, and one realm name in
+- **The engine registry contains six venue families and ten exact realms, and one realm name in
   `engine.toml` picks the path.** `engine venues` lists every compiled realm and
   its evidence gate. Bybit demo and mainnet are `live-proven`;
   `hyperliquid_testnet` and `lighter_testnet` are runnable `testnet-canary`
-  paths. Hyperliquid, Lighter, and MEXC mainnet are `production-blocked`, and
-  Variational is `read-only`. `engine run` enforces this before opening a WAL,
-  reading credentials, or opening a socket. MEXC has no testnet, so changing
-  its status needs reviewed real-money lifecycle evidence. The selected name
-  decides the gateway, the private order stream and the public market feed
-  together, so a config cannot send orders to one venue and price them off
-  another's book. **Only Bybit has live-order evidence.** MEXC
+  paths. Hyperliquid, Lighter, and MEXC mainnet plus both Binance realms are
+  `production-blocked`, and Variational is `read-only`. `engine run` enforces
+  this before opening a WAL, reading credentials, or opening a socket. MEXC
+  has no testnet; Binance has one, but its unresolved ambiguous-503 outcomes
+  and the missing signed protective-stop lifecycle do not support calling it
+  runnable. The
+  selected name decides the gateway, the private order stream
+  and the public market feed together, so a config cannot send orders to one
+  venue and price them off another's book. **Only Bybit has live-order
+  evidence.** Binance's public sockets and offline request shapes are checked,
+  but no signed account, order, Algo stop, fill, cancel, private-stream, or
+  restart lifecycle has run. Account-wide execution recovery also refuses:
+  Binance retains orders by creation time but trades by trade time and exposes
+  no complete symbol source for a fill from an older order. A valid limit
+  opening can also fill partially below the market-order minimum, and no dust
+  close is proven. An entry response can also be unknown before the paired stop
+  is sent, and an unknown stop response can leave an accepted stop behind; the
+  adapter does not yet reconcile either case. Its feed
+  deliberately carries complete top-20 snapshots rather than the engine's full
+  L50 evidence. MEXC
   enforces consecutive depth versions and redials on
   gaps; Lighter enforces its nonce chain; Hyperliquid rejects a same-symbol BBO
   timestamp regression but its protocol cannot expose forward gaps. Lighter
@@ -415,7 +428,9 @@ the 10 ms L1 touch, L50, trades, mark/index price, the crowd fee (funding),
 open interest and liquidations are written with local and venue times, verified
 into compressed segments, and retained for 30 days within a 60 GB / 25 GB-free
 disk boundary. L1 and L50 rows name their depth and keep separate sequence
-state while retaining the venue cross-sequence that orders them.
+state while retaining the venue cross-sequence that orders them. The recorder
+starts from an 81-symbol list: every existing maker/saved-L50 name plus the
+LONG sleeve's top 50 by 90-day median daily turnover and a ten-rank buffer.
 Completed compressed segments are copied hourly to Google Drive. Each new batch
 is checked against the local files before its upload ledger advances and leaves
 a SHA-256 list beside the remote tape; partial segments and private account

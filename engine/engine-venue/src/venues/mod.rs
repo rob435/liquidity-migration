@@ -1,4 +1,4 @@
-//! One module per venue. Five peers, not one venue and four exceptions.
+//! One module per venue. Six peers, not one venue and five exceptions.
 //!
 //! Each holds everything that is true of that venue and nothing that is true
 //! of another: its realm table (the only place its hosts are written down),
@@ -19,6 +19,7 @@
 //! written in exactly one file, and fails outright on a venue directory it
 //! does not know.
 
+pub mod binance;
 pub mod bybit;
 pub mod hyperliquid;
 pub mod lighter;
