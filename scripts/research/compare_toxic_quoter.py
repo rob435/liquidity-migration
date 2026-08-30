@@ -36,17 +36,23 @@ except ImportError:
         return json.loads(raw)
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ENGINE_MANIFEST = REPO_ROOT / "engine" / "Cargo.toml"
+REGISTERED_CONFIG = REPO_ROOT / "configs" / "lane2_toxic_flow_quoter_v1.json"
+REGISTERED_RULE = json.loads(REGISTERED_CONFIG.read_text())["rule"]
+REGISTERED_FLOW = REGISTERED_RULE["flow"]
+
 NS = 1_000_000_000
-HALF_SPREAD_BP = 6.5
-REQUOTE_BP = 2.5
-SIGNAL_HALF_LIFE_NS = 250_000_000
-FLOW_FAST_HALF_LIFE_NS = 250_000_000
-FLOW_SLOW_HALF_LIFE_NS = 3_000_000_000
-FLOW_FAST_WEIGHT = 0.65
-FLOW_SLOW_WEIGHT = 0.35
-FLOW_DEPTH_BP = 10.0
-FLOW_VOL_DEPTH_MULTIPLIER = 2.0
-FLOW_MAX_SCORE = 4.0
+HALF_SPREAD_BP = float(REGISTERED_RULE["half_spread_bps"])
+REQUOTE_BP = float(REGISTERED_RULE["requote_bps"])
+SIGNAL_HALF_LIFE_NS = int(float(REGISTERED_RULE["signal_half_life_ms"]) * 1_000_000)
+FLOW_FAST_HALF_LIFE_NS = int(float(REGISTERED_FLOW["fast_half_life_ms"]) * 1_000_000)
+FLOW_SLOW_HALF_LIFE_NS = int(float(REGISTERED_FLOW["slow_half_life_ms"]) * 1_000_000)
+FLOW_FAST_WEIGHT = float(REGISTERED_FLOW["fast_weight"])
+FLOW_SLOW_WEIGHT = float(REGISTERED_FLOW["slow_weight"])
+FLOW_DEPTH_BP = float(REGISTERED_FLOW["near_depth_bps"])
+FLOW_VOL_DEPTH_MULTIPLIER = float(REGISTERED_FLOW["volatility_depth_multiplier"])
+FLOW_MAX_SCORE = float(REGISTERED_FLOW["max_score"])
 MAX_MARK_DELAY_NS = 2 * NS
 
 
@@ -62,6 +68,7 @@ class Arm:
     flow_response_bp: float = 0.0
     flow_max_widen_bp: float = 8.0
     flow_pull_score: float | None = None
+    queue_reprice_edge_bp: float = 0.0
 
 
 ARMS = (
@@ -74,7 +81,17 @@ ARMS = (
     Arm("fee_corrected", maker_fee_bp=4.0),
     Arm("directional_w1", maker_fee_bp=4.0, flow_response_bp=1.0),
     Arm("directional_w2", maker_fee_bp=4.0, flow_response_bp=2.0),
-    Arm("directional_w4", maker_fee_bp=4.0, flow_response_bp=4.0),
+    Arm(
+        "directional_w4",
+        maker_fee_bp=float(REGISTERED_RULE["maker_fee_bps"]),
+        min_edge_bp=float(REGISTERED_RULE["min_edge_bps"]),
+        volatility_multiplier=float(REGISTERED_RULE["volatility_multiplier"]),
+        book_lean_bp=float(REGISTERED_RULE["book_lean_bps"]),
+        flow_response_bp=float(REGISTERED_FLOW["response_bps"]),
+        flow_max_widen_bp=float(REGISTERED_FLOW["max_widen_bps"]),
+        flow_pull_score=REGISTERED_FLOW["pull_score"],
+        queue_reprice_edge_bp=float(REGISTERED_RULE["queue_reprice_edge_bps"]),
+    ),
     Arm(
         "directional_w2_pull1",
         maker_fee_bp=4.0,
@@ -90,158 +107,92 @@ ARMS = (
 )
 
 
-def decay(value: float, elapsed_ns: int, half_life_ns: int) -> float:
-    return value * math.exp(-math.log(2.0) * elapsed_ns / half_life_ns)
+class RustQuoterContract:
+    """Persistent adapter to the compiled Rust reducer and quote planner."""
 
-
-@dataclass(slots=True)
-class FlowState:
-    last_ns: int = 0
-    flow_last_ns: int = 0
-    var_mid: float = 0.0
-    microprice: float = 0.0
-    variance: float = 0.0
-    book_imbalance: float = 0.0
-    trade_imbalance: float = 0.0
-    flow_fast: float = 0.0
-    flow_slow: float = 0.0
-    bid_depth_usdt: float = 0.0
-    ask_depth_usdt: float = 0.0
-
-    def advance(self, now_ns: int) -> float:
-        if self.last_ns == 0:
-            self.last_ns = now_ns
-            legacy_decay = 0.0
-        else:
-            now_ns = max(now_ns, self.last_ns)
-            elapsed = now_ns - self.last_ns
-            legacy_decay = decay(1.0, elapsed, SIGNAL_HALF_LIFE_NS)
-            self.variance *= legacy_decay
-            self.trade_imbalance *= legacy_decay
-            self.last_ns = now_ns
-        if self.flow_last_ns == 0:
-            self.flow_last_ns = now_ns
-        else:
-            flow_now = max(now_ns, self.flow_last_ns)
-            elapsed = flow_now - self.flow_last_ns
-            self.flow_fast = decay(self.flow_fast, elapsed, FLOW_FAST_HALF_LIFE_NS)
-            self.flow_slow = decay(self.flow_slow, elapsed, FLOW_SLOW_HALF_LIFE_NS)
-            self.flow_last_ns = flow_now
-        return legacy_decay
-
-    def on_book(self, mirror: BookMirror, symbol: str, now_ns: int) -> None:
-        if not mirror.healthy(symbol):
-            return
-        bid = mirror.best_bid(symbol)
-        ask = mirror.best_ask(symbol)
-        if bid is None or ask is None or bid <= 0.0 or ask < bid:
-            return
-        weight = self.advance(now_ns)
-        mid = 0.5 * (bid + ask)
-        if self.var_mid > 0.0:
-            change = math.log(mid / self.var_mid)
-            self.variance += max(1.0 - weight, 0.01) * change * change
-        bids = mirror.levels(symbol, "Buy")
-        asks = mirror.levels(symbol, "Sell")
-        bid_weight = sum(qty / (index + 1) for index, (_, qty) in enumerate(bids))
-        ask_weight = sum(qty / (index + 1) for index, (_, qty) in enumerate(asks))
-        total_weight = bid_weight + ask_weight
-        self.book_imbalance = (
-            (bid_weight - ask_weight) / total_weight if total_weight > 0.0 else 0.0
+    def __init__(self) -> None:
+        self.process = subprocess.Popen(
+            [
+                "cargo",
+                "run",
+                "--quiet",
+                "--manifest-path",
+                str(ENGINE_MANIFEST),
+                "-p",
+                "engine-strategies",
+                "--bin",
+                "quoter_contract",
+            ],
+            cwd=REPO_ROOT,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-        top_qty = bids[0][1] + asks[0][1]
-        self.microprice = (
-            (ask * bids[0][1] + bid * asks[0][1]) / top_qty if top_qty > 0.0 else mid
+        assert self.process.stdin is not None
+        self.process.stdin.write(json.dumps(self._init()) + "\n")
+        self.process.stdin.flush()
+
+    @staticmethod
+    def _init() -> dict[str, Any]:
+        return {
+            "half_spread_bps": HALF_SPREAD_BP,
+            "requote_bps": REQUOTE_BP,
+            "signal_half_life_ms": SIGNAL_HALF_LIFE_NS / 1_000_000,
+            "flow_fast_half_life_ms": FLOW_FAST_HALF_LIFE_NS / 1_000_000,
+            "flow_slow_half_life_ms": FLOW_SLOW_HALF_LIFE_NS / 1_000_000,
+            "flow_fast_weight": FLOW_FAST_WEIGHT,
+            "flow_slow_weight": FLOW_SLOW_WEIGHT,
+            "flow_depth_bps": FLOW_DEPTH_BP,
+            "flow_volatility_depth_multiplier": FLOW_VOL_DEPTH_MULTIPLIER,
+            "flow_max_score": FLOW_MAX_SCORE,
+            "arms": [
+                {
+                    "name": arm.name,
+                    "maker_fee_bps": arm.maker_fee_bp,
+                    "min_edge_bps": arm.min_edge_bp,
+                    "volatility_multiplier": arm.volatility_multiplier,
+                    "toxicity_bps": arm.toxicity_bp,
+                    "book_lean_bps": arm.book_lean_bp,
+                    "trade_lean_bps": arm.trade_lean_bp,
+                    "flow_response_bps": arm.flow_response_bp,
+                    "flow_max_widen_bps": arm.flow_max_widen_bp,
+                    "flow_pull_score": arm.flow_pull_score,
+                    "queue_reprice_edge_bps": arm.queue_reprice_edge_bp,
+                }
+                for arm in ARMS
+            ],
+        }
+
+    def decide(
+        self,
+        event: dict[str, Any],
+        tick_size: float,
+        working: dict[str, dict[str, float | None]],
+    ) -> dict[str, dict[str, float | None]]:
+        assert self.process.stdin is not None
+        assert self.process.stdout is not None
+        self.process.stdin.write(
+            json.dumps({"tick_size": tick_size, "event": event, "working": working})
+            + "\n"
         )
-        self.var_mid = mid
-        volatility_bp = math.sqrt(max(self.variance, 0.0)) * 10_000.0
-        band_bp = min(100.0, FLOW_DEPTH_BP + FLOW_VOL_DEPTH_MULTIPLIER * volatility_bp)
-        band = band_bp / 10_000.0
-        self.bid_depth_usdt = sum(
-            px * qty
-            for index, (px, qty) in enumerate(bids)
-            if index == 0 or px >= mid * (1.0 - band)
-        )
-        self.ask_depth_usdt = sum(
-            px * qty
-            for index, (px, qty) in enumerate(asks)
-            if index == 0 or px <= mid * (1.0 + band)
-        )
+        self.process.stdin.flush()
+        response = self.process.stdout.readline()
+        if not response:
+            assert self.process.stderr is not None
+            detail = self.process.stderr.read().strip()
+            raise RuntimeError(f"Rust quoter contract stopped: {detail}")
+        return json.loads(response)["prices"]
 
-    def on_trade(self, price: float, qty: float, side: str, now_ns: int) -> None:
-        weight = self.advance(now_ns)
-        observed = 1.0 if side == "Buy" else -1.0
-        self.trade_imbalance += max(1.0 - weight, 0.05) * (
-            observed - self.trade_imbalance
-        )
-        if price <= 0.0 or qty <= 0.0:
-            return
-        if side == "Buy" and self.ask_depth_usdt > 0.0:
-            shock = price * qty / self.ask_depth_usdt
-        elif side == "Sell" and self.bid_depth_usdt > 0.0:
-            shock = -price * qty / self.bid_depth_usdt
-        else:
-            return
-        shock = max(-FLOW_MAX_SCORE, min(FLOW_MAX_SCORE, shock))
-        self.flow_fast = max(-FLOW_MAX_SCORE, min(FLOW_MAX_SCORE, self.flow_fast + shock))
-        self.flow_slow = max(-FLOW_MAX_SCORE, min(FLOW_MAX_SCORE, self.flow_slow + shock))
-
-    @property
-    def score(self) -> float:
-        score = (
-            FLOW_FAST_WEIGHT * self.flow_fast + FLOW_SLOW_WEIGHT * self.flow_slow
-        ) / (FLOW_FAST_WEIGHT + FLOW_SLOW_WEIGHT)
-        return max(-FLOW_MAX_SCORE, min(FLOW_MAX_SCORE, score))
-
-    @property
-    def volatility_bp(self) -> float:
-        return math.sqrt(max(self.variance, 0.0)) * 10_000.0
-
-
-def snap_price(price: float, tick: float, side: str) -> float:
-    steps = price / tick
-    snapped = math.floor(steps + 1e-10) * tick if side == "Buy" else math.ceil(steps - 1e-10) * tick
-    return round(snapped, 12)
-
-
-def desired_price(
-    arm: Arm,
-    state: FlowState,
-    bid: float,
-    ask: float,
-    tick: float,
-    side: str,
-) -> float | None:
-    score = state.score
-    if arm.flow_pull_score is not None:
-        attacked = (side == "Sell" and score >= arm.flow_pull_score) or (
-            side == "Buy" and score <= -arm.flow_pull_score
-        )
-        if attacked:
-            return None
-    mid = 0.5 * (bid + ask)
-    fair = state.microprice or mid
-    fair += mid * (
-        arm.book_lean_bp * state.book_imbalance
-        + arm.trade_lean_bp * state.trade_imbalance
-    ) / 10_000.0
-    half_spread_bp = max(
-        HALF_SPREAD_BP,
-        arm.maker_fee_bp
-        + arm.min_edge_bp
-        + arm.volatility_multiplier * state.volatility_bp
-        + arm.toxicity_bp * abs(state.trade_imbalance),
-    )
-    extra_bp = min(arm.flow_max_widen_bp, arm.flow_response_bp * abs(score))
-    if side == "Buy" and score < 0.0:
-        half_spread_bp += extra_bp
-    if side == "Sell" and score > 0.0:
-        half_spread_bp += extra_bp
-    wanted = fair * (1.0 - half_spread_bp / 10_000.0) if side == "Buy" else fair * (
-        1.0 + half_spread_bp / 10_000.0
-    )
-    wanted = min(wanted, ask - tick) if side == "Buy" else max(wanted, bid + tick)
-    return snap_price(wanted, tick, side)
+    def close(self) -> None:
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+        code = self.process.wait()
+        if code != 0:
+            assert self.process.stderr is not None
+            raise RuntimeError(
+                f"Rust quoter contract exited {code}: {self.process.stderr.read().strip()}"
+            )
 
 
 @dataclass(slots=True)
@@ -251,12 +202,14 @@ class VirtualQuote:
     queue: float = 0.0
     filled: bool = False
 
-    def reprice(self, wanted: float | None, mirror: BookMirror, symbol: str, mid: float) -> None:
+    def apply_decision(
+        self, wanted: float | None, mirror: BookMirror, symbol: str
+    ) -> None:
         if wanted is None:
             self.px = None
             self.queue = 0.0
             return
-        if self.px is not None and abs(self.px - wanted) / mid * 10_000.0 <= REQUOTE_BP:
+        if self.px == wanted:
             return
         self.px = wanted
         self.queue = mirror.depth_at(symbol, self.side, wanted)
@@ -335,7 +288,7 @@ def simulate(
     markout_ns: int,
 ) -> Simulation:
     mirror = BookMirror()
-    state = FlowState()
+    contract = RustQuoterContract()
     result = Simulation()
     opportunity: Opportunity | None = None
     next_start_ns = 0
@@ -391,11 +344,34 @@ def simulate(
                         )
                     )
 
+        working = {
+            arm.name: {
+                side.lower(): (
+                    opportunity.quotes[(arm.name, side)].px
+                    if opportunity is not None
+                    and not opportunity.quotes[(arm.name, side)].filled
+                    else None
+                )
+                for side in ("Buy", "Sell")
+            }
+            for arm in ARMS
+        }
         if kind == "public_trade":
-            if valid_trade:
-                state.on_trade(price, qty, aggressor, ts)
+            event = {
+                "kind": "trades",
+                "recv_ns": ts,
+                "buy_qty": qty if valid_trade and aggressor == "Buy" else 0.0,
+                "sell_qty": qty if valid_trade and aggressor == "Sell" else 0.0,
+                "last_px": price if valid_trade else 0.0,
+            }
         else:
-            state.on_book(mirror, symbol, ts)
+            event = {
+                "kind": "depth",
+                "recv_ns": ts,
+                "bids": mirror.levels(symbol, "Buy"),
+                "asks": mirror.levels(symbol, "Sell"),
+            }
+        decisions = contract.decide(event, tick, working)
 
         if mirror.healthy(symbol):
             bid = mirror.best_bid(symbol)
@@ -422,19 +398,20 @@ def simulate(
                 for arm in ARMS:
                     for side in ("Buy", "Sell"):
                         quote = VirtualQuote(side=side)
-                        quote.reprice(desired_price(arm, state, bid, ask, tick, side), mirror, symbol, mid)
                         opportunity.quotes[(arm.name, side)] = quote
 
-            if opportunity is not None:
-                for arm in ARMS:
-                    for side in ("Buy", "Sell"):
-                        quote = opportunity.quotes[(arm.name, side)]
-                        if quote.filled:
-                            continue
-                        quote.reprice(desired_price(arm, state, bid, ask, tick, side), mirror, symbol, mid)
+        if opportunity is not None:
+            for arm in ARMS:
+                prices = decisions[arm.name]
+                for side in ("Buy", "Sell"):
+                    quote = opportunity.quotes[(arm.name, side)]
+                    if quote.filled:
+                        continue
+                    quote.apply_decision(prices[side.lower()], mirror, symbol)
 
     finish_opportunity(opportunity, result)
     result.unmarked.update(pending.key for pending in result.pending)
+    contract.close()
     return result
 
 

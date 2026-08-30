@@ -23,8 +23,8 @@ use std::collections::{HashMap, HashSet};
 
 use engine_types::{
     Action, Depth, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderAck, OrderKind,
-    OrderUpdate, PositionView, Quote, RestingOrder, Side, Strategy, StrategyCtx, SymbolId,
-    TargetBook, Ticker, TimerId, TradeFlow,
+    OrderUpdate, PositionView, Quote, RestingOrder, Side, Strategy, StrategyCheckpoint,
+    StrategyCtx, SymbolId, TargetBook, Ticker, TimerId, TradeFlow,
 };
 
 /// A timer the strategy asked for, and when it comes due.
@@ -78,6 +78,7 @@ pub struct MockCtx {
     /// and an unseeded symbol reads the way an unknown one does: nothing can
     /// be quantized for it.
     rules: HashMap<SymbolId, InstrumentRule>,
+    checkpoints: HashMap<SymbolId, StrategyCheckpoint>,
     now_ns: u64,
     /// The wall clock, separate from `now_ns` on purpose: a target book's
     /// validity window is wall time, and a test has to be able to move it
@@ -107,6 +108,7 @@ impl MockCtx {
             mine: HashMap::new(),
             in_flight: HashMap::new(),
             rules: HashMap::new(),
+            checkpoints: HashMap::new(),
             now_ns: 1_000,
             // An ordinary unix millisecond stamp, so anything that reads like
             // a real clock reads like a real clock in tests too.
@@ -236,6 +238,12 @@ impl MockCtx {
         let id = self.add_symbol(symbol);
         self.rules.insert(id, rule);
     }
+
+    /// Seed the newest durable state this strategy wrote for one symbol.
+    pub fn set_strategy_checkpoint(&mut self, symbol: &str, checkpoint: StrategyCheckpoint) {
+        let id = self.add_symbol(symbol);
+        self.checkpoints.insert(id, checkpoint);
+    }
 }
 
 impl StrategyCtx for MockCtx {
@@ -297,6 +305,10 @@ impl StrategyCtx for MockCtx {
 
     fn wall_ms(&self) -> i64 {
         self.wall_ms
+    }
+
+    fn strategy_checkpoint(&self, symbol: SymbolId) -> Option<&StrategyCheckpoint> {
+        self.checkpoints.get(&symbol)
     }
 
     fn emit(&mut self, action: Action) {
