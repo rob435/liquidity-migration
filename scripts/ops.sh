@@ -325,7 +325,10 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
           liquidity-migration-llm-ledger.service|\
           liquidity-migration-llm-ledger.timer|\
           liquidity-migration-trade-notify.service|\
-          liquidity-migration-trade-notify.timer)
+          liquidity-migration-trade-notify.timer|\
+          liquidity-migration-forward-capture.service|\
+          liquidity-migration-forward-upload.service|\
+          liquidity-migration-forward-upload.timer)
             ;;
           liquidity-migration-*mainnet*)
             die_usage "$command of funded units is forbidden; use deploy rollout --profile operational"

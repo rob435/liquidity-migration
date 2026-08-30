@@ -269,6 +269,24 @@ def test_funded_units_can_still_be_stopped_fail_safe(tmp_path: Path) -> None:
     assert "REMOTE_ARGS=( liquidity-migration-engine-mainnet.service )" in payload
 
 
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "forward-capture.service",
+        "forward-upload.service",
+        "forward-upload.timer",
+    ],
+)
+def test_public_tape_units_are_reviewed_observer_controls(
+    tmp_path: Path, unit: str
+) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("start", unit, env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert f"REMOTE_ARGS=( liquidity-migration-{unit} )" in payload
+
+
 @pytest.mark.parametrize("verb", ["start", "restart"])
 def test_unit_activation_refuses_unreviewed_aliases(verb: str) -> None:
     result = _run(verb, "engine-live-alias.service")
