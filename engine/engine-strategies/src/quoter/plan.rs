@@ -357,13 +357,17 @@ pub fn queue_ahead(depth: &Depth, side: Side, px: f64) -> f64 {
     }
 }
 
-/// Apply the maker cap and the venue tick in the same pure contract research
-/// calls. The engine quantizes once more at its boundary to the same value.
-pub fn executable_quote_px(side: Side, wanted: f64, bid: f64, ask: f64, tick: f64) -> f64 {
-    let passive = match side {
+/// Keep a planned price on the passive side of the touch.
+pub fn maker_quote_px(side: Side, wanted: f64, bid: f64, ask: f64, tick: f64) -> f64 {
+    match side {
         Side::Buy => wanted.min(ask - tick),
         Side::Sell => wanted.max(bid + tick),
-    };
+    }
+}
+
+/// Apply the maker cap and venue tick exactly as the engine boundary does.
+pub fn executable_quote_px(side: Side, wanted: f64, bid: f64, ask: f64, tick: f64) -> f64 {
+    let passive = maker_quote_px(side, wanted, bid, ask, tick);
     if !passive.is_finite() || !tick.is_finite() || tick <= 0.0 {
         return passive;
     }

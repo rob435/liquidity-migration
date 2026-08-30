@@ -33,13 +33,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use engine_types::{
-    BookLevel, EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind,
-    OrderUpdate, QuoteFillFeatures, Side, StopSpec, Strategy, StrategyCtx, StrategyId,
-    Subscription, SymbolId, TimeInForce,
+    BookLevel, EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, OrderUpdate,
+    QuoteFillFeatures, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, SymbolId,
+    TimeInForce,
 };
 
 use super::plan::{
-    executable_quote_px, flow_score, plan_quotes_protected, price_rule, queue_ahead, quote_stop_px,
+    flow_score, maker_quote_px, plan_quotes_protected, price_rule, queue_ahead, quote_stop_px,
     reduce_micro, MicroRules, MicroState, QuoteRules, QuoteStep, Resting, SignalInput,
 };
 use crate::params::Params;
@@ -528,8 +528,7 @@ impl Quoter {
         for step in steps {
             match step {
                 QuoteStep::Place { side, px, qty, .. } => {
-                    let px =
-                        executable_quote_px(side, px, quote.bid_px, quote.ask_px, rule.tick_size);
+                    let px = maker_quote_px(side, px, quote.bid_px, quote.ask_px, rule.tick_size);
                     let reduce_only = match side {
                         Side::Buy => position < -position_tolerance,
                         Side::Sell => position > position_tolerance,
@@ -554,8 +553,7 @@ impl Quoter {
                         .find(|order| order.client_order_id == client_order_id)
                         .map(|order| order.side)
                         .unwrap_or(Side::Buy);
-                    let px =
-                        executable_quote_px(side, px, quote.bid_px, quote.ask_px, rule.tick_size);
+                    let px = maker_quote_px(side, px, quote.bid_px, quote.ask_px, rule.tick_size);
                     self.move_to(symbol, &client_order_id, px, rule.tick_size, now_ns, ctx)
                 }
                 QuoteStep::Pull { client_order_id } => {

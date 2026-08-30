@@ -175,10 +175,10 @@ fn restore(input: RestoreInput, config: &SniperConfig) -> DecisionOutput {
     };
     if exiting.is_some() {
         state.phase = Phase::ExitSent;
-    } else if opening.is_some() {
-        state.phase = Phase::EntrySent;
     } else if has_position {
         state.phase = Phase::Holding;
+    } else if opening.is_some() {
+        state.phase = Phase::EntrySent;
     }
 
     let mut effects = Vec::new();
@@ -511,6 +511,39 @@ mod tests {
             &SniperState::armed(config.side),
             &config,
         );
+        assert_eq!(
+            out.effects,
+            vec![Effect::ArmTtl {
+                after_ns: 10_000_000_000
+            }]
+        );
+    }
+
+    #[test]
+    fn a_fill_and_its_still_resting_entry_restore_as_holding() {
+        let config = config();
+        let out = decide(
+            DecisionInput::Restore(RestoreInput {
+                checkpoint: Some(SniperCheckpoint {
+                    consumed: true,
+                    ttl_due_wall_ms: Some(90_000),
+                }),
+                attributed_position: 0.75,
+                resting: vec![RestoredOrder {
+                    client_order_id: "part-filled-entry".into(),
+                    side: Side::Buy,
+                    qty: 2.0,
+                    filled_qty: 0.75,
+                    reduce_only: false,
+                }],
+                wall_ms: 80_000,
+            }),
+            &SniperState::armed(config.side),
+            &config,
+        );
+        assert_eq!(out.state.phase, Phase::Holding);
+        assert_eq!(out.state.entry_order.as_deref(), Some("part-filled-entry"));
+        assert_eq!(out.state.open_qty, 0.75);
         assert_eq!(
             out.effects,
             vec![Effect::ArmTtl {

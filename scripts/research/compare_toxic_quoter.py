@@ -184,11 +184,14 @@ class RustQuoterContract:
             raise RuntimeError(f"Rust quoter contract stopped: {detail}")
         return json.loads(response)["prices"]
 
-    def close(self) -> None:
+    def close(self, *, check: bool = True) -> None:
         if self.process.stdin is not None:
-            self.process.stdin.close()
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass
         code = self.process.wait()
-        if code != 0:
+        if check and code != 0:
             assert self.process.stderr is not None
             raise RuntimeError(
                 f"Rust quoter contract exited {code}: {self.process.stderr.read().strip()}"
@@ -287,8 +290,28 @@ def simulate(
     attempt_ns: int,
     markout_ns: int,
 ) -> Simulation:
-    mirror = BookMirror()
     contract = RustQuoterContract()
+    failure: BaseException | None = None
+    try:
+        return _simulate_with_contract(
+            records, symbol, tick, attempt_ns, markout_ns, contract
+        )
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        contract.close(check=failure is None)
+
+
+def _simulate_with_contract(
+    records: Iterator[dict[str, Any]],
+    symbol: str,
+    tick: float,
+    attempt_ns: int,
+    markout_ns: int,
+    contract: RustQuoterContract,
+) -> Simulation:
+    mirror = BookMirror()
     result = Simulation()
     opportunity: Opportunity | None = None
     next_start_ns = 0
@@ -346,7 +369,7 @@ def simulate(
 
         working = {
             arm.name: {
-                side.lower(): (
+                ("bid" if side == "Buy" else "ask"): (
                     opportunity.quotes[(arm.name, side)].px
                     if opportunity is not None
                     and not opportunity.quotes[(arm.name, side)].filled
@@ -407,11 +430,11 @@ def simulate(
                     quote = opportunity.quotes[(arm.name, side)]
                     if quote.filled:
                         continue
-                    quote.apply_decision(prices[side.lower()], mirror, symbol)
+                    key = "bid" if side == "Buy" else "ask"
+                    quote.apply_decision(prices[key], mirror, symbol)
 
     finish_opportunity(opportunity, result)
     result.unmarked.update(pending.key for pending in result.pending)
-    contract.close()
     return result
 
 

@@ -1,8 +1,8 @@
-use engine_types::{OrderKind, Side, StrategyId, TimerId};
+use engine_types::{Action, OrderKind, Side, StrategyCheckpoint, StrategyId, TimerId};
 
 use super::NAME;
 use crate::build_strategy;
-use crate::mock_ctx::Harness;
+use crate::mock_ctx::{Harness, RestingSeed};
 
 const SYM: &str = "BTCUSDT";
 const ID: StrategyId = StrategyId(7);
@@ -41,6 +41,117 @@ fn entered(side: &str, extra: &str) -> Harness {
         "a fill alone should not emit anything"
     );
     h
+}
+
+fn consumed_checkpoint(extra: &str) -> StrategyCheckpoint {
+    let mut h = build("buy", extra);
+    h.quote(SYM, 99.9, 100.0);
+    match h.drain_actions().remove(0) {
+        Action::SetStrategyCheckpoint { checkpoint, .. } => checkpoint,
+        other => panic!("checkpoint must precede entry, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_consumed_arm_is_queued_before_the_entry() {
+    let mut h = build("buy", "");
+    h.quote(SYM, 99.9, 100.0);
+    let actions = h.drain_actions();
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::SetStrategyCheckpoint { .. }, Action::Place(_)]
+    ));
+}
+
+#[test]
+fn a_consumed_checkpoint_cannot_rearm_after_restart() {
+    let checkpoint = consumed_checkpoint("");
+    let mut restarted = build("buy", "");
+    restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+    restarted.quote(SYM, 99.9, 100.0);
+    assert!(
+        restarted.drain_actions().is_empty(),
+        "a durable consumed arm is done even when no order or position survived"
+    );
+}
+
+#[test]
+fn an_attributed_position_blocks_reentry_without_a_checkpoint() {
+    let mut restarted = build("buy", "");
+    restarted.ctx.set_my_position(SYM, 2.0);
+    restarted.quote(SYM, 99.9, 100.0);
+    let actions = restarted.drain_actions();
+    assert!(actions
+        .iter()
+        .any(|action| matches!(action, Action::SetStrategyCheckpoint { .. })));
+    assert!(!actions
+        .iter()
+        .any(|action| { matches!(action, Action::Place(intent) if !intent.reduce_only) }));
+}
+
+#[test]
+fn a_resting_entry_blocks_reentry_without_a_checkpoint() {
+    let mut restarted = build("buy", "");
+    let symbol = restarted.ctx.id_of(SYM);
+    restarted.ctx.resting.push(RestingSeed {
+        client_order_id: "surviving-entry".into(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Market,
+        qty: 2.0,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+    restarted.quote(SYM, 99.9, 100.0);
+    assert!(!restarted
+        .drain_actions()
+        .iter()
+        .any(|action| { matches!(action, Action::Place(intent) if !intent.reduce_only) }));
+}
+
+#[test]
+fn a_fingerprint_change_rearms_only_when_flat_and_orderless() {
+    let mut old = consumed_checkpoint("");
+    old.decision_fingerprint = "different-config".into();
+    let mut restarted = build("buy", "");
+    restarted.ctx.set_strategy_checkpoint(SYM, old);
+    restarted.quote(SYM, 99.9, 100.0);
+    assert!(matches!(
+        restarted.drain_actions().as_slice(),
+        [Action::SetStrategyCheckpoint { .. }, Action::Place(_)]
+    ));
+
+    let mut old_with_position = consumed_checkpoint("");
+    old_with_position.decision_fingerprint = "different-config".into();
+    let mut holding = build("buy", "");
+    holding.ctx.set_strategy_checkpoint(SYM, old_with_position);
+    holding.ctx.set_my_position(SYM, 2.0);
+    holding.quote(SYM, 99.9, 100.0);
+    assert!(!holding
+        .drain_actions()
+        .iter()
+        .any(|action| { matches!(action, Action::Place(intent) if !intent.reduce_only) }));
+}
+
+#[test]
+fn a_restored_ttl_position_without_a_durable_deadline_exits_now() {
+    let checkpoint = consumed_checkpoint("ttl_s = 60");
+    let mut restarted = build("buy", "ttl_s = 60");
+    restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+    restarted.ctx.set_my_position(SYM, 2.0);
+    restarted.quote(SYM, 99.9, 100.0);
+    let actions = restarted.drain_actions();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, Action::Place(_)))
+            .count(),
+        1
+    );
+    assert!(actions.iter().any(|action| {
+        matches!(action, Action::Place(intent) if intent.reduce_only && intent.side == Side::Sell)
+    }));
 }
 
 #[test]
