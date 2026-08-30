@@ -1,0 +1,131 @@
+{
+  "cycles": [
+    {
+      "decision_input": {
+        "events": [
+          {
+            "carry_qty": 3.25,
+            "carry_side": "long",
+            "decision_ts_ms": 1799971200000,
+            "environment": "demo",
+            "event_id": "carry-presettlement-6a3b536fb0ff144fd2d452e5875c6383e771ba2c9d2894fc4633549c765a1309",
+            "fired_ts_ms": 1800000000000,
+            "mark_px": 10.0,
+            "settlement_ts_ms": 1800000600000,
+            "source_config_id": "lane2_carry_hold_v7",
+            "source_profile": "carry_hold_v7_live_v1",
+            "symbol": "AUSDT"
+          }
+        ],
+        "held_positions": {},
+        "held_symbols": [],
+        "now_ms": 1800000000000,
+        "working_entry_symbols": []
+      },
+      "name": "open_from_complete_handoff"
+    },
+    {
+      "decision_input": {
+        "events": [
+          {
+            "carry_qty": 3.25,
+            "carry_side": "long",
+            "decision_ts_ms": 1799971200000,
+            "environment": "demo",
+            "event_id": "carry-presettlement-6a3b536fb0ff144fd2d452e5875c6383e771ba2c9d2894fc4633549c765a1309",
+            "fired_ts_ms": 1800000000000,
+            "mark_px": 10.0,
+            "settlement_ts_ms": 1800000600000,
+            "source_config_id": "lane2_carry_hold_v7",
+            "source_profile": "carry_hold_v7_live_v1",
+            "symbol": "AUSDT"
+          }
+        ],
+        "held_positions": {
+          "AUSDT": [
+            "short",
+            3.25,
+            10.0
+          ]
+        },
+        "held_symbols": [
+          "AUSDT"
+        ],
+        "now_ms": 1800000060000,
+        "working_entry_symbols": []
+      },
+      "name": "filled_entry_closes_reentry_window"
+    },
+    {
+      "decision_input": {
+        "events": [
+          {
+            "carry_qty": 3.25,
+            "carry_side": "long",
+            "decision_ts_ms": 1799971200000,
+            "environment": "demo",
+            "event_id": "carry-presettlement-6a3b536fb0ff144fd2d452e5875c6383e771ba2c9d2894fc4633549c765a1309",
+            "fired_ts_ms": 1800000000000,
+            "mark_px": 10.0,
+            "settlement_ts_ms": 1800000600000,
+            "source_config_id": "lane2_carry_hold_v7",
+            "source_profile": "carry_hold_v7_live_v1",
+            "symbol": "AUSDT"
+          }
+        ],
+        "held_positions": {
+          "AUSDT": [
+            "short",
+            3.25,
+            10.0
+          ]
+        },
+        "held_symbols": [
+          "AUSDT"
+        ],
+        "now_ms": 1800004200000,
+        "working_entry_symbols": []
+      },
+      "name": "due_cover_stays_durable_while_held"
+    },
+    {
+      "decision_input": {
+        "events": [
+          {
+            "carry_qty": 3.25,
+            "carry_side": "long",
+            "decision_ts_ms": 1799971200000,
+            "environment": "demo",
+            "event_id": "carry-presettlement-6a3b536fb0ff144fd2d452e5875c6383e771ba2c9d2894fc4633549c765a1309",
+            "fired_ts_ms": 1800000000000,
+            "mark_px": 10.0,
+            "settlement_ts_ms": 1800000600000,
+            "source_config_id": "lane2_carry_hold_v7",
+            "source_profile": "carry_hold_v7_live_v1",
+            "symbol": "AUSDT"
+          }
+        ],
+        "held_positions": {},
+        "held_symbols": [],
+        "now_ms": 1800004260000,
+        "working_entry_symbols": []
+      },
+      "name": "due_cover_retires_after_flat"
+    }
+  ],
+  "effective_config": {
+    "entry_leverage": 5.0,
+    "environment": "demo",
+    "profile_name": "v1",
+    "registered_rule_path": "configs/lane2_exodus_short_v1.json",
+    "registered_rule_sha256": "b65a7101f8153a468f8cc0d6c7b08de8dc510b47d6cf8b0d08ee1a5e859c97ef"
+  },
+  "initial_state": {
+    "consumed_event_ids": [],
+    "entry_closed_ts_ms_by_symbol": {},
+    "open": [],
+    "schema_version": 4
+  },
+  "name": "exodus_live_contract_replay_v1",
+  "schema_version": 1
+}

@@ -18,18 +18,19 @@
   "rule": {
     "trigger": {
       "basis": "carry_presettle_exit_fire",
+      "source_profile": "carry_hold_v7_live_v1",
+      "source_config_id": "lane2_carry_hold_v7",
       "note": "the carry producer's v7 pre-settle exit fire on a name the carry book holds. No independent detection: if carry does not fire, this sleeve does nothing. The carry kill switch (CARRY_EARLY_EXIT) therefore also silences new exodus entries; covers of open records never depend on it."
     },
     "entry": {
       "side": "short",
       "at": "the fire, immediately; the engine crosses",
       "valid_minutes_after_settlement": 20,
-      "leverage": 2.0,
-      "note": "validity 20 min past the settlement means the engine's 15-min entry cutoff closes entries at S+5. rest_entries is OFF for this sleeve: the entry is urgent and the measured economics already pay the taker fee."
+      "note": "validity 20 min past the settlement means the engine's 15-min entry cutoff closes entries at S+5. The typed effective runtime config supplies leverage from the operational profile. rest_entries is OFF for this sleeve: the entry is urgent and the measured economics already pay the taker fee."
     },
     "cover": {
       "minutes_after_settlement": 60,
-      "note": "time-boxed, never price-boxed. The name simply leaves the book; the engine reads absence as the exit and crosses. Covers ride the producer's 60s idle-floor contract with the deadline slot as an accelerator."
+      "note": "time-boxed, never price-boxed. The producer publishes an explicit zero target and the engine crosses the exit. Covers ride the producer's 60s idle-floor contract with the deadline slot as an accelerator."
     },
     "sizing": {
       "basis": "carry_position_at_fire",
@@ -51,7 +52,7 @@
     "grid": "none; single committed configuration",
     "eligibility": "only fires strictly after the registration commit count as forward evidence; the sleeve's demo fills are execution evidence, not alpha evidence, until the fill-vs-kline gap is measured",
     "cadence": "per fire, reviewed weekly for the first month",
-    "reproduce_with": "scratch exodus_short_backtest.py + exodus_stop_sweep.py (session 2026-08-20); the event set is every fire of the registered presettle rule on the panel"
+    "reproduce_with": "python scripts/research/replay_exodus_contract.py --input tests/fixtures/exodus_live_contract_replay_v1.json reproduces the typed reducer, restart state, cover ordering, and exact target bytes. It does not reconstruct the registration economics: the historical fire population and stop-sweep scratch programs were not retained in the repository."
   },
   "measured_at_registration": {
     "events": 1112,
