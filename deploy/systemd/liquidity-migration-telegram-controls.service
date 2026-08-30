@@ -15,6 +15,11 @@ UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYB
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=TELEGRAM_CONTROLS_STATE_DIR=/var/lib/liquidity-migration-telegram-controls
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-telegram-controls.service main
+# The trusted supervisor answers a stop by passing SIGTERM to its child,
+# waiting for it, and exiting 143 — the number that says "terminated on
+# request". Without this, systemd files every clean stop as a failure and
+# the watchdog pages the alerts line on every deploy.
+SuccessExitStatus=143
 Restart=always
 RestartPreventExitStatus=78
 RestartSec=15

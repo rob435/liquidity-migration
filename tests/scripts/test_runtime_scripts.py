@@ -2628,3 +2628,25 @@ def test_dispatched_scripts_can_import_the_package_when_run_as_a_file() -> None:
         bootstrap = source.find("sys.path.insert")
         assert bootstrap != -1, f"{relative} imports the package but never puts the root on the path"
         assert bootstrap < min(imports), f"{relative} imports the package before the path is set"
+
+
+def test_a_long_running_unit_counts_a_commanded_stop_as_success() -> None:
+    # The trusted supervisor traps TERM, passes it to its child, waits, and
+    # exits 143. systemd's default success set is {0}, so without this every
+    # `systemctl stop` — every deploy — is filed as `Failed with result
+    # 'exit-code'`, and the watchdog pages the alerts line for it.
+    wrapper = _read("deploy/run_authorized_runtime_trusted.sh")
+    assert "exit 143' TERM" in wrapper, "the supervisor no longer exits 143 on TERM"
+
+    for name, text in _units().items():
+        if not name.endswith(".service") or "Type=simple" not in text:
+            continue
+        allowed = [
+            line.split("=", 1)[1].split()
+            for line in text.splitlines()
+            if line.startswith("SuccessExitStatus=")
+        ]
+        assert allowed, f"{name} never says a commanded stop is a clean one"
+        assert any("143" in codes for codes in allowed), (
+            f"{name} does not count 143 as success, so every stop of it pages"
+        )

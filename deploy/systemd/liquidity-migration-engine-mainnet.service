@@ -39,6 +39,11 @@ UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY B
 EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
 
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-engine-mainnet.service main
+# The trusted supervisor answers a stop by passing SIGTERM to its child,
+# waiting for it, and exiting 143 — the number that says "terminated on
+# request". Without this, systemd files every clean stop as a failure and
+# the watchdog pages the alerts line on every deploy.
+SuccessExitStatus=143
 Restart=always
 RestartPreventExitStatus=78
 RestartSec=5

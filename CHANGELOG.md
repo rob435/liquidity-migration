@@ -31,6 +31,17 @@ edit STATE.md to match.
   environment files never enter this path. The first live object matched the
   VPS copy in both size and MD5; the Drive account reported roughly 5 TB free.
 
+- **2026-08-30 — A commanded stop is now filed as one.** Teaching the engine
+  to answer SIGTERM was only half of it, and the deployed binary proved it:
+  every unit runs under the trusted supervisor, which forks its workload
+  rather than replacing itself with it, so bash is systemd's main process. It
+  answers a stop correctly — SIGTERM to the child, wait, escalate — and then
+  exits 143. systemd's default success set is `{0}`, so every `systemctl stop`
+  was filed as `Failed with result 'exit-code'` and paged the alerts line on
+  every deploy. The eight long-running units now carry
+  `SuccessExitStatus=143`, and a posture test holds every `Type=simple` unit
+  to it and to the supervisor still exiting 143.
+
 - **2026-08-30 — Every Telegram message is one monospace block, and the
   canary is off the phone.** Builders write plain text; `as_block` escapes it
   and wraps it once at the send, so trade updates, the daily summary, watchdog
