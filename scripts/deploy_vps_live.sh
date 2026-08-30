@@ -3383,6 +3383,10 @@ stop_mainnet_mode() {
 ROLLOUT_DOWNSTREAM_UNITS=(
     liquidity-migration-forward-upload.timer
     liquidity-migration-forward-upload.service
+    liquidity-migration-backup.timer
+    liquidity-migration-backup.service
+    liquidity-migration-chaos-drill.timer
+    liquidity-migration-chaos-drill.service
     liquidity-migration-forward-capture.service
     liquidity-migration-demo-liveness.timer
     liquidity-migration-mainnet-liveness.timer

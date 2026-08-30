@@ -833,6 +833,24 @@ def test_engine_candidate_is_built_before_rollout_stops_and_reused_exactly() -> 
     assert "cargo build" not in build
 
 
+def test_rollout_stop_list_covers_every_current_non_owner_unit() -> None:
+    units = set(_units())
+    owners = {
+        "liquidity-migration-engine.service",
+        "liquidity-migration-engine-mainnet.service",
+    }
+    text = DEPLOY.read_text(encoding="utf-8")
+    block = text[
+        text.index("ROLLOUT_DOWNSTREAM_UNITS=(") : text.index("ROLLOUT_OWNER_UNITS=(")
+    ]
+    listed = set(
+        re.findall(
+            r"liquidity-migration-[A-Za-z0-9@_.-]+\.(?:service|timer)", block
+        )
+    )
+    assert units - owners <= listed
+
+
 def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     stop = _function(
