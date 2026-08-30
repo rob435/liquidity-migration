@@ -377,8 +377,23 @@ impl TargetBookFollower {
         // The latch lifts when the producer stops asking for the name, not
         // when the next book lands. See the module note: a producer writing
         // the same decision every minute would clear it every minute.
+        let cleared_latches: Vec<String> = self
+            .closed_under_us
+            .iter()
+            .filter(|symbol| !wants(&targets, symbol))
+            .cloned()
+            .collect();
         self.closed_under_us
             .retain(|symbol| wants(&targets, symbol));
+        for name in cleared_latches {
+            if let Some(symbol) = ctx.symbol_id(&name) {
+                ctx.emit(Action::SetTargetBookLatch {
+                    strategy: self.id,
+                    symbol,
+                    latched: false,
+                });
+            }
+        }
         for symbol in &self.was_held {
             if held.contains(symbol) {
                 continue;
@@ -398,6 +413,13 @@ impl TargetBookFollower {
                  closed it; leaving it alone until the book stops asking"
             );
             self.closed_under_us.push(symbol.clone());
+            if let Some(symbol) = ctx.symbol_id(symbol) {
+                ctx.emit(Action::SetTargetBookLatch {
+                    strategy: self.id,
+                    symbol,
+                    latched: true,
+                });
+            }
         }
         self.was_held.clear();
         self.was_held.extend(held.iter().cloned());
@@ -648,6 +670,15 @@ impl Strategy for TargetBookFollower {
             .chain(self.skipped_entries.iter())
             .cloned()
             .collect()
+    }
+
+    fn restore_target_book_latches(&mut self, symbols: &[String]) {
+        self.closed_under_us.clear();
+        for symbol in symbols {
+            if !self.closed_under_us.contains(symbol) {
+                self.closed_under_us.push(symbol.clone());
+            }
+        }
     }
 
     fn on_targets(&mut self, book: &TargetBook, ctx: &mut dyn StrategyCtx) {

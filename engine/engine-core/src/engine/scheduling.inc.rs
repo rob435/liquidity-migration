@@ -453,6 +453,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.wal.append(&WalRecord::QuoteFill { features })?;
                     continue;
                 }
+                if let Action::SetTargetBookLatch {
+                    strategy,
+                    symbol,
+                    latched,
+                } = action
+                {
+                    let key = (strategy.0, symbol.0);
+                    let changed = if latched {
+                        self.target_book_latches.insert(key)
+                    } else {
+                        self.target_book_latches.remove(&key)
+                    };
+                    if changed {
+                        self.wal.append(&WalRecord::TargetBookLatch {
+                            wall_ts_ms: clock::wall_ms(),
+                            strategy,
+                            symbol,
+                            latched,
+                        })?;
+                        self.wal.barrier()?;
+                    }
+                    continue;
+                }
                 progress.handled += 1;
                 // Past the cap, whatever adds risk is dropped but whatever sheds
                 // it still flows: an exit or a cancel queued behind a flood must
@@ -570,6 +593,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     Action::RecordQuoteFill { .. } => {
                         unreachable!("quote-fill receipts are journaled before venue actions")
                     }
+                    Action::SetTargetBookLatch { .. } => {
+                        unreachable!("target-book latches are journaled before venue actions")
+                    }
                 }
             }
             let sent = self
@@ -678,6 +704,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             Action::Place(_) => {}
             Action::RecordQuoteFill { .. } => {}
+            Action::SetTargetBookLatch { .. } => {}
         }
         queue.push_back((action, origin_ns));
     }

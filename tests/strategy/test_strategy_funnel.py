@@ -10,6 +10,7 @@ import pytest
 
 from liquidity_migration.core._common import MS_PER_HOUR
 from liquidity_migration.rules.long_native import long_v11a_profile
+from liquidity_migration.rules.long_contract import resolve_strategy_config
 from liquidity_migration.strategy.long_native_event_demo import (
     _select_long_entry_candidates,
 )
@@ -73,7 +74,8 @@ def test_long_writer_on_off_preserves_candidates_order_and_numbers() -> None:
         "now_ms": now_ms,
         "strategy": strategy,
         "price_by_symbol": {"ABCUSDT": 98.5},
-        "max_new_entries": 5,
+        "effective_config": resolve_strategy_config("v11a"),
+        "equity_usdt": 1.0,
     }
 
     candidates_off, skips_off = _select_long_entry_candidates(**kwargs)
@@ -85,9 +87,7 @@ def test_long_writer_on_off_preserves_candidates_order_and_numbers() -> None:
 
     assert candidates_on == candidates_off
     assert skips_on == skips_off
-    assert [row["source_key"] for row in collector.rows] == [
-        f"long:bybit:ABCUSDT:{signal_ts_ms}"
-    ]
+    assert [row["source_key"] for row in collector.rows] == [f"long:bybit:ABCUSDT:{signal_ts_ms}"]
     assert collector.rows[0]["gate_pump_trigger"] == "pass"
     assert collector.rows[0]["gate_entry_anchor"] == "pass"
 
@@ -102,7 +102,8 @@ def test_long_writer_failure_cannot_suppress_or_mutate_target_candidate() -> Non
         "now_ms": now_ms,
         "strategy": strategy,
         "price_by_symbol": {"ABCUSDT": 98.5},
-        "max_new_entries": 5,
+        "effective_config": resolve_strategy_config("v11a"),
+        "equity_usdt": 1.0,
     }
 
     expected = _select_long_entry_candidates(**kwargs)

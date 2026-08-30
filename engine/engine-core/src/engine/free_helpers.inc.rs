@@ -56,6 +56,67 @@ fn legacy_boot_ms(replayed: &[WalRecord]) -> Option<i64> {
     newest
 }
 
+/// Active target-book latches after replaying the WAL in order.
+/// A segment base is a restatement; edge records after it amend that state.
+fn replay_target_book_latches(replayed: &[WalRecord]) -> std::collections::BTreeSet<(u16, u16)> {
+    let mut active = std::collections::BTreeSet::new();
+    for record in replayed {
+        match record {
+            WalRecord::TargetBookLatch {
+                strategy,
+                symbol,
+                latched,
+                ..
+            } => {
+                let key = (strategy.0, symbol.0);
+                if *latched {
+                    active.insert(key);
+                } else {
+                    active.remove(&key);
+                }
+            }
+            WalRecord::SegmentBase {
+                target_book_latches,
+                ..
+            } => {
+                active = target_book_latches
+                    .iter()
+                    .map(|row| (row.strategy.0, row.symbol.0))
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    active
+}
+
+/// The target-book sleeve whose venue-native position stop just traded.
+///
+/// A blank client id is the typed `OrderUpdate` contract for a native
+/// position stop. The fill stays foreign to attribution, but an opposite-side
+/// execution against one sleeve's claim means that sleeve must not refill the
+/// target while the whole-position stop is completing.
+fn target_book_stop_owner(
+    attribution: &Attribution,
+    target_book_strategies: &std::collections::HashSet<u16>,
+    client_order_id: &str,
+    symbol: SymbolId,
+    side: Side,
+) -> Option<StrategyId> {
+    if !client_order_id.is_empty() {
+        return None;
+    }
+    let owner = attribution.sole_owner(symbol)?;
+    if !target_book_strategies.contains(&owner.0) {
+        return None;
+    }
+    let claimed = attribution.signed(owner, symbol);
+    match (claimed > 0.0, claimed < 0.0, side) {
+        (true, false, Side::Sell) | (false, true, Side::Buy) => Some(owner),
+        _ => None,
+    }
+}
+
 pub(crate) fn venue_minus_local_ms(
     venue_ts_ms: i64,
     recv_ns: u64,

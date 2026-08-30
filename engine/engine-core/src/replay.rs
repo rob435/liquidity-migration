@@ -369,6 +369,17 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        WalRecord::TargetBookLatch {
+            strategy,
+            symbol,
+            latched,
+            ..
+        } => format!(
+            "book latch {} leaves {} {}",
+            names.strategy(*strategy),
+            names.symbol(*symbol),
+            if *latched { "alone" } else { "eligible" }
+        ),
         WalRecord::LatchCleared {
             note,
             restated_exposure,

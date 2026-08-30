@@ -1061,6 +1061,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
         intended_stops: vec![],
         recent_execution_ids: vec![],
         execution_history_through_ms: Some(1),
+        target_book_latches: vec![],
         open_orders: vec![],
     };
     fn order(id: &str) -> WalRecord {

@@ -31,7 +31,6 @@ class LongNativeConfig:
     """
 
     execution_strategy_id: str = LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-    execution_leverage: float = 10.0
     start_date: str = ""
     end_date: str = ""
 
@@ -48,7 +47,6 @@ class LongNativeConfig:
     fc_max_hold_days: int = 3
     fc_max_atr_pct: float = 0.12
     fc_atr_stop_mult: float = 1.5
-    fc_atr_tp_mult: float = 4.0
     fc_sigma_mult: float = 2.5
     fc_sniper_retrace_pct: float = 0.01
     fc_sniper_deadline_hours: int = 6
@@ -68,7 +66,6 @@ class LongNativeConfig:
     cooldown_days: int = 7
     entry_delay_hours: int = 1
     gross_exposure: float = 1.0
-    notional_multiplier: float = 1.0
     vol_estimate_window_days: int = 30
     vol_floor_annual: float = 0.30
     max_position_weight: float = 0.30
@@ -89,7 +86,7 @@ def long_v12_profile() -> LongNativeConfig:
 
     Every other v11a rule was ablated on the real engine and kept: the volume
     rank, the BTC-and-ETH regime gate, the 2.5 sigma trigger family, the 7-day
-    cooldown, the 3-day hold, the 4xATR target, the 1%/6h retrace entry and the
+    cooldown, the 3-day hold, the 1%/6h retrace entry and the
     top-50 universe all lose Sharpe when loosened. The stop was the one number
     that was wrong.
 
@@ -358,18 +355,19 @@ def long_pump_family(row: dict[str, Any], cfg: LongNativeConfig) -> dict[str, An
     }
 
 
-def _fc_exit_params(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[float, float]:
+def _fc_stop_fraction(row: dict[str, Any], cfg: LongNativeConfig) -> float:
     atr_pct = _safe_float(row.get("atr_14d_pct"))
     if atr_pct is None or atr_pct <= 0.0:
         raise ValueError("active FC-v11a entry requires positive atr_14d_pct")
-    return atr_pct * cfg.fc_atr_stop_mult, atr_pct * cfg.fc_atr_tp_mult
+    return atr_pct * cfg.fc_atr_stop_mult
 
 
-def _classify_entry(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[str | None, float, float, int]:
+def _classify_entry(
+    row: dict[str, Any], cfg: LongNativeConfig
+) -> tuple[str | None, float, int]:
     if not detect_pattern_fomo_chase(row, cfg):
-        return None, 0.0, 0.0, 0
-    stop_pct, take_profit_pct = _fc_exit_params(row, cfg)
-    return "fomo_chase", stop_pct, take_profit_pct, cfg.fc_max_hold_days
+        return None, 0.0, 0
+    return "fomo_chase", _fc_stop_fraction(row, cfg), cfg.fc_max_hold_days
 
 
 def _cal_roll(

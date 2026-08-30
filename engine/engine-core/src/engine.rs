@@ -275,6 +275,10 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// carries no strategy on it, so this is summed from the fills of the
     /// orders each strategy placed, and rebuilt from the log at boot.
     attribution: Attribution,
+    /// Names a target-book follower must leave alone after they went flat
+    /// without one of its own reductions. The follower owns the decision;
+    /// this copy owns replay and log rotation.
+    target_book_latches: std::collections::BTreeSet<(u16, u16)>,
     /// What each strategy has sent that the account reading has not yet
     /// absorbed, per (strategy, symbol). Booked at the send, released by
     /// rejects, cancels, refused exits, and the reading catching up; read by
@@ -1078,6 +1082,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .collect(),
             recent_execution_ids: self.recovered_exec_ids.rows(wall_ts_ms),
             execution_history_through_ms: Some(self.recovered_until_ms),
+            target_book_latches: self
+                .target_book_latches
+                .iter()
+                .map(|(strategy, symbol)| engine_types::StrategySymbol {
+                    strategy: StrategyId(*strategy),
+                    symbol: SymbolId(*symbol),
+                })
+                .collect(),
             open_orders: self
                 .orders
                 .in_flight()

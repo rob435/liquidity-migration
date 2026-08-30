@@ -298,6 +298,15 @@ pub enum WalRecord {
         /// Exactly the rows as they stood when dropped, as the receipt.
         rows: Vec<FilledTotal>,
     },
+    /// A target-book follower must leave this symbol alone until its producer
+    /// stops asking for it. Written at both edges so a restart cannot either
+    /// undo a venue stop or keep an old latch after the producer moved on.
+    TargetBookLatch {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        latched: bool,
+    },
     /// The first record of every log segment after the first: everything boot
     /// replay needs from the segments before this one, restated, so replaying
     /// this one segment recovers the same engine as replaying them all.
@@ -351,6 +360,10 @@ pub enum WalRecord {
         /// rotation. Older segment bases have no such proof.
         #[serde(default)]
         execution_history_through_ms: Option<i64>,
+        /// Active target-book latches, restated so rotating the WAL cannot
+        /// make a stopped-out name eligible again.
+        #[serde(default)]
+        target_book_latches: Vec<StrategySymbol>,
         /// Every order still in flight, with the fields its own records
         /// carried.
         open_orders: Vec<OpenOrderState>,
@@ -377,6 +390,13 @@ pub struct FilledTotal {
 pub struct SymbolTotal {
     pub symbol: SymbolId,
     pub signed_qty: f64,
+}
+
+/// One strategy/symbol state key inside [`WalRecord::SegmentBase`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrategySymbol {
+    pub strategy: StrategyId,
+    pub symbol: SymbolId,
 }
 
 /// One intended-stop row inside [`WalRecord::SegmentBase`].
@@ -655,6 +675,7 @@ mod tests {
             intended_stops: Vec::new(),
             recent_execution_ids: Vec::new(),
             execution_history_through_ms: Some(123),
+            target_book_latches: Vec::new(),
             open_orders: Vec::new(),
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");

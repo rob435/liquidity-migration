@@ -23,7 +23,6 @@ def test_active_profile_has_no_legacy_strategy_switches() -> None:
     field_names = {field.name for field in dataclasses.fields(LongNativeConfig)}
     assert field_names == {
         "execution_strategy_id",
-        "execution_leverage",
         "start_date",
         "end_date",
         "universe_size",
@@ -38,7 +37,6 @@ def test_active_profile_has_no_legacy_strategy_switches() -> None:
         "fc_max_hold_days",
         "fc_max_atr_pct",
         "fc_atr_stop_mult",
-        "fc_atr_tp_mult",
         "fc_sigma_mult",
         "fc_sniper_retrace_pct",
         "fc_sniper_deadline_hours",
@@ -51,7 +49,6 @@ def test_active_profile_has_no_legacy_strategy_switches() -> None:
         "cooldown_days",
         "entry_delay_hours",
         "gross_exposure",
-        "notional_multiplier",
         "vol_estimate_window_days",
         "vol_floor_annual",
         "max_position_weight",

@@ -187,6 +187,13 @@ impl StrategyCtx for Ctx<'_> {
                 features.strategy = self.strategy;
                 Action::RecordQuoteFill { features }
             }
+            Action::SetTargetBookLatch {
+                symbol, latched, ..
+            } => Action::SetTargetBookLatch {
+                strategy: self.strategy,
+                symbol,
+                latched,
+            },
             other => other,
         };
         self.out.push_back(action);

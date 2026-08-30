@@ -288,7 +288,7 @@ def _build_long_funnel(
         turnover_median = _finite(source.get("turnover_median_90d"))
         history_days = int(source.get("symbol_age_days") or 0)
         atr_pct = _finite(source.get("atr_14d_pct"))
-        pattern, _stop, _target, _hold = _classify_entry(source, config)
+        pattern, _stop, _hold = _classify_entry(source, config)
         row = finalize_funnel_row(
             {
                 "sleeve": "long",

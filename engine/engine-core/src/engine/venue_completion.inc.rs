@@ -883,6 +883,58 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(false)
     }
 
+    /// Remember a native position stop before the follower can see another
+    /// copy of its still-nonzero target.
+    fn latch_target_book_stop(
+        &mut self,
+        client_order_id: &str,
+        symbol: SymbolId,
+        side: Side,
+        wall_ts_ms: i64,
+    ) -> Result<(), EngineError> {
+        let target_book_strategies: std::collections::HashSet<u16> = self
+            .strategies
+            .iter()
+            .enumerate()
+            .filter_map(|(index, strategy)| {
+                strategy
+                    .follows_a_target_book()
+                    .then(|| u16::try_from(index).ok())
+                    .flatten()
+            })
+            .collect();
+        let Some(owner) = target_book_stop_owner(
+            &self.attribution,
+            &target_book_strategies,
+            client_order_id,
+            symbol,
+            side,
+        ) else {
+            return Ok(());
+        };
+        if self.target_book_latches.contains(&(owner.0, symbol.0)) {
+            return Ok(());
+        }
+        self.wal.append(&WalRecord::TargetBookLatch {
+            wall_ts_ms,
+            strategy: owner,
+            symbol,
+            latched: true,
+        })?;
+        self.target_book_latches.insert((owner.0, symbol.0));
+
+        let symbols: Vec<String> = self
+            .target_book_latches
+            .iter()
+            .filter(|(strategy, _)| *strategy == owner.0)
+            .map(|(_, symbol)| self.market.table.name(SymbolId(*symbol)).to_string())
+            .collect();
+        if let Some(strategy) = self.strategies.get_mut(owner.0 as usize) {
+            strategy.restore_target_book_latches(&symbols);
+        }
+        Ok(())
+    }
+
     /// Every order update, wherever it came from, goes through here.
     async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
         // Before anything is done with news about an order: the record of the
@@ -1085,10 +1137,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if let OrderUpdate::Fill {
             client_order_id,
             symbol,
+            side,
             ..
         } = &update
         {
             if fill_owner.is_none() {
+                self.latch_target_book_stop(client_order_id, *symbol, *side, dedup_seen_ms)?;
                 self.may_open = false;
                 self.wal.append(&WalRecord::Reconciled {
                     wall_ts_ms: dedup_seen_ms,

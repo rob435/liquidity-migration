@@ -7,7 +7,48 @@ import polars as pl
 import liquidity_migration.research.backtest.long_native as long_backtest
 from liquidity_migration.core._common import MS_PER_HOUR
 from liquidity_migration.core.config import CostConfig
+from liquidity_migration.rules.long_contract import ConfigLayer, resolve_strategy_config
 from liquidity_migration.rules.long_native import long_v11a_profile
+
+
+def _effective(rule):
+    costs = CostConfig()
+    return resolve_strategy_config(
+        "v11a",
+        rule=rule,
+        layers=(
+            ConfigLayer(
+                source="test",
+                values={
+                    "round_trip_cost_bps": (
+                        costs.base_entry_exit_cost_bps * rule.cost_multiplier
+                    )
+                },
+            ),
+        ),
+    )
+
+
+def _signal_feature(symbol: str, *, score: float) -> dict[str, object]:
+    return {
+        "ts_ms": MS_PER_HOUR,
+        "symbol": symbol,
+        "close": 100.0,
+        "in_universe": True,
+        "regime_on": True,
+        "eth_regime_on": True,
+        "today_volume_rank": 1,
+        "log_return": score,
+        "pump_3d_log": 0.10,
+        "pump_7d_log": 0.20,
+        "sigma_daily_30d": 0.05,
+        "close_location": 0.85,
+        "close_loc_3d": 0.70,
+        "close_loc_7d": 0.70,
+        "atr_14d_pct": 0.05,
+        "realized_vol": 0.60,
+        "btc_rv_30": 0.60,
+    }
 
 
 def _symbol_bars(symbol: str, *, next_open: float = 103.0) -> list[dict[str, object]]:
@@ -39,31 +80,24 @@ def _symbol_bars(symbol: str, *, next_open: float = 103.0) -> list[dict[str, obj
     ]
 
 
-def test_historical_touch_uses_closed_low_then_next_open_and_keeps_score_priority(
-    monkeypatch,
-) -> None:
+def test_historical_touch_uses_closed_low_then_next_open_and_keeps_score_priority() -> None:
     features = pl.DataFrame(
         [
-            {"ts_ms": MS_PER_HOUR, "symbol": "AAAUSDT", "log_return": 0.20},
-            {"ts_ms": MS_PER_HOUR, "symbol": "ZZZUSDT", "log_return": 0.40},
+            _signal_feature("AAAUSDT", score=0.20),
+            _signal_feature("ZZZUSDT", score=0.40),
         ]
     )
     klines = pl.DataFrame(
         _symbol_bars("AAAUSDT", next_open=102.0)
         + _symbol_bars("ZZZUSDT", next_open=103.0)
     )
-    monkeypatch.setattr(
-        long_backtest,
-        "_classify_entry",
-        lambda _row, _config: ("fomo_chase", 0.20, 0.50, 3),
-    )
-
+    rule = replace(long_v11a_profile(), max_concurrent_positions=1)
     trades, stats, _events = long_backtest._run_long_pipeline(
         features=features,
         bars_by_symbol=long_backtest._bars_by_symbol(klines),
         funding_lookup=None,
-        config=replace(long_v11a_profile(), max_concurrent_positions=1),
-        costs=CostConfig(),
+        config=rule,
+        effective_config=_effective(rule),
     )
 
     assert trades.height == 1
@@ -100,25 +134,36 @@ def test_historical_entry_requires_a_contiguous_next_hour() -> None:
     )
 
 
-def test_historical_deadline_fallthrough_also_enters_at_the_next_open(monkeypatch) -> None:
-    features = pl.DataFrame(
-        [{"ts_ms": MS_PER_HOUR, "symbol": "AAAUSDT", "log_return": 0.20}]
-    )
+def test_historical_deadline_fallthrough_also_enters_at_the_next_open() -> None:
+    features = pl.DataFrame([_signal_feature("AAAUSDT", score=0.20)])
     rows = _symbol_bars("AAAUSDT", next_open=107.0)
     rows[1]["low"] = 100.0
-    monkeypatch.setattr(
-        long_backtest,
-        "_classify_entry",
-        lambda _row, _config: ("fomo_chase", 0.20, 0.50, 3),
-    )
-
+    rule = replace(long_v11a_profile(), fc_sniper_deadline_hours=1)
     trades, _stats, _events = long_backtest._run_long_pipeline(
         features=features,
         bars_by_symbol=long_backtest._bars_by_symbol(pl.DataFrame(rows)),
         funding_lookup=None,
-        config=replace(long_v11a_profile(), fc_sniper_deadline_hours=1),
-        costs=CostConfig(),
+        config=rule,
+        effective_config=_effective(rule),
     )
 
     assert trades["entry_ts_ms"].to_list() == [2 * MS_PER_HOUR]
     assert trades["entry_price"].to_list() == [107.0]
+
+
+def test_historical_high_does_not_reintroduce_the_removed_take_profit() -> None:
+    features = pl.DataFrame([_signal_feature("AAAUSDT", score=0.20)])
+    rows = _symbol_bars("AAAUSDT", next_open=100.0)
+    rows[2]["high"] = 150.0
+    rule = long_v11a_profile()
+    trades, stats, _events = long_backtest._run_long_pipeline(
+        features=features,
+        bars_by_symbol=long_backtest._bars_by_symbol(pl.DataFrame(rows)),
+        funding_lookup=None,
+        config=rule,
+        effective_config=_effective(rule),
+    )
+
+    assert trades["exit_reason"].to_list() == ["data_end"]
+    assert "take_profit_price" not in trades.columns
+    assert "exits_take_profit" not in stats

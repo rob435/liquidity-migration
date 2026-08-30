@@ -4,6 +4,7 @@
 //! [`super`].
 
 use super::*;
+use engine_strategies::TargetBookFollower;
 use engine_types::TargetBook;
 
 /// Writes down every book the loop hands it, and places nothing.
@@ -782,5 +783,226 @@ async fn a_book_arrival_pre_arms_leverage_before_any_entry() {
     assert!(
         h.sends.lock().unwrap().is_empty(),
         "no order went; only the arm"
+    );
+}
+
+fn exodus_follower() -> TargetBookFollower {
+    let params: toml::Value =
+        toml::from_str("symbols = [\"BTCUSDT\"]\n").expect("target-book follower parameters parse");
+    TargetBookFollower::from_params(StrategyId(0), &params).expect("target-book follower builds")
+}
+
+fn write_exodus_target(path: &crate::testpath::TempPath, now_ms: i64, wanted: bool) {
+    let targets = if wanted {
+        r#"[{"symbol":"BTCUSDT","notional_usdt":-300.0,
+"stop_loss_fraction":0.35,"leverage":5.0}]"#
+    } else {
+        "[]"
+    };
+    let json = format!(
+        r#"{{"version":1,"source":"exodus_short_v1","decision_ts_ms":{now_ms},
+"valid_until_ms":{},"targets":{targets}}}"#,
+        now_ms + 1_200_000
+    );
+    std::fs::write(path, json).expect("writes the Exodus target")
+}
+
+fn watch_exodus_target(
+    engine: &mut Engine<MockWal, MockRisk, MockVenue>,
+    path: &crate::testpath::TempPath,
+) {
+    engine.watch_targets(crate::targets::TargetBooks::new(vec![(
+        StrategyId(0),
+        book_watcher(path),
+    )]));
+}
+
+async fn run_exodus_for(
+    engine: &mut Engine<MockWal, MockRisk, MockVenue>,
+    quotes: usize,
+    millis: u64,
+) {
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), quotes, false),
+            &mut ScriptOrderFeed::empty(),
+            async move { tokio::time::sleep(Duration::from_millis(millis)).await },
+        )
+        .await
+        .expect("runs the Exodus target follower");
+}
+
+async fn until_target_latch(records: Rc<RefCell<Vec<WalRecord>>>, latched: bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if records.lock().unwrap().iter().any(|record| {
+            matches!(
+                record,
+                WalRecord::TargetBookLatch {
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    latched: seen,
+                    ..
+                } if *seen == latched
+            )
+        }) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "target-book latch {latched} was not recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_stopped_exodus_target_stays_latched_across_restarts() {
+    let now_ms = clock::wall_ms();
+    let path = temp_path("exodus-stopped-restart");
+    write_exodus_target(&path, now_ms, true);
+
+    let (mut first, first_harness) = build(
+        allow_all(),
+        vec![Box::new(exodus_follower())],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    watch_exodus_target(&mut first, &path);
+    run_exodus_for(&mut first, 1, 100).await;
+    let entry = first_harness
+        .sends
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the live target produced its entry");
+    assert_eq!(entry.side, Side::Sell);
+    assert!(!entry.reduce_only);
+
+    // Both fills arrive in one private-feed burst. No quote, target poll or
+    // follower callback can sample the short between entry and native stop.
+    let entry_fill = OrderUpdate::Fill {
+        exec_id: "exodus-entry-fill".to_string(),
+        client_order_id: entry.client_order_id.clone(),
+        symbol: entry.symbol,
+        side: entry.side,
+        qty: entry.qty,
+        px: 30_000.0,
+        fee: Some(0.01),
+        is_maker: false,
+        venue_ts_ms: now_ms + 1,
+        recv_ns: clock::now_ns(),
+    };
+    let stop_fill = OrderUpdate::Fill {
+        exec_id: "exodus-native-stop-fill".to_string(),
+        client_order_id: String::new(),
+        symbol: entry.symbol,
+        side: Side::Buy,
+        qty: entry.qty,
+        px: 40_500.0,
+        fee: Some(0.01),
+        is_maker: false,
+        venue_ts_ms: now_ms + 2,
+        recv_ns: clock::now_ns(),
+    };
+    first
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::playing(vec![entry_fill, stop_fill]),
+            until_target_latch(first_harness.records.clone(), true),
+        )
+        .await
+        .expect("processes entry fill and native stop fill");
+
+    let latch_at = at(
+        &first_harness.tape,
+        &Step::Append("target_book_latch".to_string()),
+    )
+    .expect("the latch was appended");
+    let foreign_at = after(
+        &first_harness.tape,
+        &Step::Append("reconciled".to_string()),
+        latch_at + 1,
+    )
+    .expect("the foreign fill was recorded");
+    assert!(
+        after(&first_harness.tape, &Step::Barrier, foreign_at + 1).is_some(),
+        "the stop latch and foreign-fill finding were not durable together"
+    );
+    let WalRecord::SegmentBase {
+        target_book_latches,
+        ..
+    } = first.rotation_base(now_ms + 2)
+    else {
+        panic!("rotation did not produce a segment base");
+    };
+    assert_eq!(
+        target_book_latches,
+        [engine_types::StrategySymbol {
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+        }],
+        "WAL rotation forgot the active stop latch"
+    );
+
+    run_exodus_for(&mut first, 1, 50).await;
+    assert!(
+        first_harness.sends.lock().unwrap().len() == 1,
+        "the running engine refilled a target whose native stop fired"
+    );
+
+    let mut replayed = first_harness.records.lock().unwrap().clone();
+    // `reconcile-clear` is deliberately independent of the target latch. It
+    // accepts the now-flat venue account so the restart is free to open other
+    // names, while the stopped Exodus name stays fenced by its own record.
+    replayed.push(WalRecord::LatchCleared {
+        wall_ts_ms: now_ms + 3,
+        note: "accepted the flat venue account".to_string(),
+        restated_exposure: Vec::new(),
+        findings: vec!["the venue account is flat".to_string()],
+    });
+    drop(first);
+    let (mut second, second_harness) = build(
+        allow_all(),
+        vec![Box::new(exodus_follower())],
+        &["BTCUSDT"],
+        &replayed,
+    )
+    .await;
+    assert!(
+        second_harness
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|record| matches!(record, WalRecord::Reconciled { may_open: true, .. })),
+        "the global opening latch must not be what blocks the restart"
+    );
+
+    watch_exodus_target(&mut second, &path);
+    run_exodus_for(&mut second, 1, 100).await;
+    assert!(
+        second_harness.sends.lock().unwrap().is_empty(),
+        "replaying the WAL forgot the stopped-out latch"
+    );
+
+    write_exodus_target(&path, now_ms + 4, false);
+    second
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            until_target_latch(second_harness.records.clone(), false),
+        )
+        .await
+        .expect("the producer's explicit zero clears the latch");
+
+    write_exodus_target(&path, now_ms + 5, true);
+    run_exodus_for(&mut second, 1, 100).await;
+    assert_eq!(
+        second_harness.sends.lock().unwrap().len(),
+        1,
+        "a later nonzero target could not enter after the explicit zero"
     );
 }

@@ -1,4 +1,4 @@
-"""Long-running strategy/target producer for the v11a sleeve.
+"""Long-running strategy/target producer for the LONG sleeve.
 
 The LONG plug on :class:`StrategyHostDaemon`: the host owns the market
 planes, wake machinery, evidence tapes, and health receipts; this module
@@ -10,83 +10,105 @@ current cycle and exits cleanly.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.strategy.event_demo_data import top_turnover_kline_universe
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
-from liquidity_migration.rules.long_identity import (
-    LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME,
-    long_profile_display_name,
-)
-from liquidity_migration.rules.long_native import LongNativeConfig
+from liquidity_migration.rules.long_identity import long_profile_display_name
 from liquidity_migration.strategy.long_native_event_demo import (
+    LongEffectiveConfig,
     LongNativeDemoCycleConfig,
     _validate_long_demo_config,
     format_long_demo_cycle_summary,
     run_long_native_demo_cycle,
 )
-from liquidity_migration.strategy.strategy_host import StrategyHostDaemon, default_engine_change_wake_dir
+from liquidity_migration.strategy.strategy_host import StrategyHostDaemon
 from liquidity_migration.strategy.target_book_evidence import PublishedTargetCyclePayload
 
 
 def _validate_long_daemon_startup(
     config: LongNativeDemoCycleConfig,
-    strategy_config: LongNativeConfig | None = None,
+    effective_config: LongEffectiveConfig,
 ) -> None:
     """Fail before resources unless LONG has a complete Rust target route."""
 
-    _validate_long_demo_config(config, strategy_config)
+    if effective_config.cycle != config:
+        raise ValueError("effective LONG config disagrees with cycle config")
+    _validate_long_demo_config(config, effective_config.strategy.rule)
 
 
 class LongNativeDemoDaemon(StrategyHostDaemon):
-    """Long-running cycle loop for the v11a long sleeve."""
+    """Long-running cycle loop for the selected LONG profile."""
 
     _sleeve_label = "long"
     _flat_cycle_payload = False
     # Class-level defaults keep skeleton instances built without __init__ safe.
     _long_target_producer = False
-    _strategy_config: LongNativeConfig | None = None
+    _effective_config: LongEffectiveConfig | None = None
 
     def _strategy_profile_name(self) -> str:
-        if self._strategy_config is not None:
-            return long_profile_display_name(self._strategy_config.execution_strategy_id)
-        return LONG_V11A_DIV_WEEKEND_VOL_PROFILE_NAME
+        if self._effective_config is None:
+            raise RuntimeError("LONG daemon has no effective configuration")
+        return long_profile_display_name(self._effective_config.strategy.rule.execution_strategy_id)
+
+    def _sizing_summary(self) -> tuple[float, float]:
+        if self._effective_config is None:
+            raise RuntimeError("LONG daemon has no effective configuration")
+        return (
+            self._effective_config.strategy.notional_multiplier,
+            self._effective_config.strategy.entry_leverage,
+        )
 
     def __init__(
         self,
-        data_root: str | Any,
         *,
-        config: ResearchConfig,
+        effective_config: LongEffectiveConfig,
         demo_config: LongNativeDemoCycleConfig | None = None,
-        strategy_config: LongNativeConfig | None = None,
-        interval_seconds: float = 60.0,
         cycle_runner: Callable[..., PublishedTargetCyclePayload] = run_long_native_demo_cycle,
         **kwargs: Any,
     ) -> None:
-        resolved_demo_config = demo_config or LongNativeDemoCycleConfig()
+        if demo_config is not None and effective_config.cycle != demo_config:
+            raise ValueError("effective LONG config disagrees with demo_config")
+        resolved_demo_config = effective_config.cycle
         long_target_producer = isinstance(resolved_demo_config, LongNativeDemoCycleConfig)
-        # None means the cycle runner's own default (the v11a profile). Only
-        # the LONG producer consumes it; sleeve subclasses leave it unset.
-        self._strategy_config = strategy_config if long_target_producer else None
+        self._effective_config = effective_config if long_target_producer else None
         self._long_target_producer = long_target_producer
         if long_target_producer:
             # This must precede every cache, manager, or thread construction.
             # The cycle runner also validates, but it catches cycle exceptions;
             # startup-boundary failures must instead terminate the process.
-            _validate_long_daemon_startup(resolved_demo_config, self._strategy_config)
+            _validate_long_daemon_startup(resolved_demo_config, effective_config)
         # `get(...) is None` rather than setdefault: an explicit None keeps
         # meaning "use the LONG default".
         if kwargs.get("kline_stream_manager_factory") is None:
             kwargs["kline_stream_manager_factory"] = _default_long_kline_stream_manager_factory
-        default_engine_change_wake_dir(kwargs, resolved_demo_config)
+        kwargs.setdefault("engine_change_wake_dir", effective_config.engine_heartbeat_path.parent)
+        if effective_config.invocation_id:
+            kwargs.setdefault("strategy_invocation_id", effective_config.invocation_id)
+
+        def hosted_cycle_runner(host_data_root: str | Any, **cycle_kwargs: Any) -> PublishedTargetCyclePayload:
+            if Path(host_data_root).expanduser().resolve() != effective_config.runtime.data_root:
+                raise ValueError("LONG host data root disagrees with effective config")
+            return cycle_runner(**cycle_kwargs)
+
+        runtime = effective_config.runtime
         super().__init__(
-            data_root,
-            config=config,
+            runtime.data_root,
+            config=ResearchConfig(
+                exchange=effective_config.exchange,
+                data_root=runtime.data_root,
+            ),
             demo_config=resolved_demo_config,
-            interval_seconds=interval_seconds,
-            cycle_runner=cycle_runner,
+            interval_seconds=runtime.interval_seconds,
+            cycle_runner=hosted_cycle_runner,
+            ticker_reconcile_interval_seconds=runtime.ticker_reconcile_interval_seconds,
+            state_cache_stale_seconds=runtime.state_cache_stale_seconds,
+            event_driven_cycle=runtime.event_driven_cycle,
+            min_cycle_interval_seconds=runtime.min_cycle_interval_seconds,
+            strategy_target_capture_path=runtime.strategy_target_capture_path,
             **kwargs,
         )
 
@@ -97,16 +119,24 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
             # logging, streams, cache seeders, managers, or worker threads.
             if not isinstance(self.demo_config, LongNativeDemoCycleConfig):
                 raise TypeError("LONG daemon config changed to an incompatible type")
-            _validate_long_daemon_startup(self.demo_config, self._strategy_config)
+            if self._effective_config is None:
+                raise RuntimeError("LONG daemon lost its effective configuration")
+            _validate_long_daemon_startup(self.demo_config, self._effective_config)
         return super().run()
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
-        # Only the LONG runner accepts its registered strategy config.
+        # Only the LONG runner accepts the resolved LONG effective config.
         extra = super()._extra_cycle_kwargs()
         if self._long_target_producer:
-            if self._strategy_config is not None:
-                extra["strategy_config"] = self._strategy_config
+            if self._effective_config is None:
+                raise RuntimeError("LONG daemon lost its effective configuration")
+            extra["effective_config"] = self._effective_config
         return extra
+
+    def _cycle_call_kwargs(self, shared: dict[str, Any]) -> dict[str, Any]:
+        """LONG's runner accepts only its one effective configuration."""
+
+        return {**shared, **self._extra_cycle_kwargs()}
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
         return format_long_demo_cycle_summary(payload)

@@ -80,6 +80,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::ExecutionHistoryCheckpoint { .. } => "execution_history_checkpoint",
         WalRecord::LatchCleared { .. } => "latch_cleared",
         WalRecord::ClaimsDropped { .. } => "claims_dropped",
+        WalRecord::TargetBookLatch { .. } => "target_book_latch",
     }
     .to_string()
 }
@@ -1154,6 +1155,7 @@ fn venue_clock_offset_is_venue_minus_the_local_receive_clock() {
 
 mod boot_rules;
 mod covers;
+mod cross_language_replay;
 mod fill_costs;
 mod gap_recovery;
 mod heartbeat;

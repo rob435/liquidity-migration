@@ -806,6 +806,7 @@ def test_engine_round_trip_links_exact_venue_position_to_long_sleeve() -> None:
         venue_position_trade_rows=5,
         venue_terminal_entry_value_usdt=218.9375,
         venue_terminal_price_fee_pnl_usdt=-20.1,
+        venue_closed_pnl_unexplained_usdt=0.0,
         engine_attached=True,
         engine_side="long",
         engine_qty=1.55,
@@ -817,7 +818,15 @@ def test_engine_round_trip_links_exact_venue_position_to_long_sleeve() -> None:
     assert parity._engine_position_link(trade, terminal) == "exact_long_sleeve"
 
     trade.engine_fills = 4
-    assert parity._engine_position_link(trade, terminal) == "unlinked: engine and venue position facts differ"
+    assert parity._engine_position_link(trade, terminal) == (
+        "unlinked: engine and venue position or accounting facts differ"
+    )
+
+    trade.engine_fills = 5
+    trade.venue_closed_pnl_unexplained_usdt = 0.02
+    assert parity._engine_position_link(trade, terminal) == (
+        "unlinked: engine and venue position or accounting facts differ"
+    )
 
 
 def test_live_window_filter_keeps_signal_inside_and_reports_outside(tmp_path: Path) -> None:

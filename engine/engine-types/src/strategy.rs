@@ -257,6 +257,13 @@ pub trait Strategy {
         Vec::new()
     }
 
+    /// Restore names this target-book follower must leave alone after boot.
+    /// The engine owns persistence and hands names back only after it has
+    /// rebuilt the strategy/symbol tables from the log.
+    fn restore_target_book_latches(&mut self, symbols: &[String]) {
+        let _ = symbols;
+    }
+
     /// Whether this strategy acts on [`EngineEvent::Targets`].
     ///
     /// Books are routed, not broadcast: each one goes to the single strategy

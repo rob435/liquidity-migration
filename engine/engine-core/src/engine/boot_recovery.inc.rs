@@ -43,7 +43,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         mut wal: W,
         mut risk: R,
         mut venue: V,
-        strategies: Vec<Box<dyn Strategy>>,
+        mut strategies: Vec<Box<dyn Strategy>>,
         sleeves: &[String],
         replayed: &[WalRecord],
     ) -> Result<Self, EngineError> {
@@ -157,11 +157,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // the log rather than a finding against it.
         let mut recovered_exec_ids = ExecutionIds::from_records(replayed, boot_ms)
             .map_err(|e| EngineError::State(e.to_string()))?;
+        let target_book_strategies: std::collections::HashSet<u16> = strategies
+            .iter()
+            .enumerate()
+            .filter_map(|(index, strategy)| {
+                strategy
+                    .follows_a_target_book()
+                    .then(|| u16::try_from(index).ok())
+                    .flatten()
+            })
+            .collect();
         let recovery = Self::recover_missed_fills(
             &mut wal,
             &mut venue,
             replayed,
             &market.table,
+            &target_book_strategies,
             &mut recovered_exec_ids,
             boot_ms,
         )
@@ -185,6 +196,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // record and must say exactly what a replay would have said.
         let logged_exposure = crate::reconcile::logged_exposure(effective);
         let intended_stops = crate::reconcile::intended_stops(effective);
+        let mut target_book_latches = replay_target_book_latches(effective);
+        target_book_latches.retain(|(strategy, symbol)| {
+            strategies
+                .get(*strategy as usize)
+                .is_some_and(|owner| owner.follows_a_target_book())
+                && (*symbol as usize) < market.table.len()
+        });
         // A gap-recovery pass reaches back past this boot, and the venue hands
         // back everything in that window — the last run's ordinary fills
         // included. A delivered fill carries no venue execution id, so only
@@ -312,6 +330,33 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     })
                     .collect(),
             })?;
+            for (strategy, symbol, _) in &stale_claims {
+                if !strategies
+                    .get(strategy.0 as usize)
+                    .is_some_and(|owner| owner.follows_a_target_book())
+                    || !target_book_latches.insert((strategy.0, symbol.0))
+                {
+                    continue;
+                }
+                wal.append(&WalRecord::TargetBookLatch {
+                    wall_ts_ms: clock::wall_ms(),
+                    strategy: *strategy,
+                    symbol: *symbol,
+                    latched: true,
+                })?;
+            }
+            // The claim drop and any latch it creates are one boot-time fact.
+            // Neither may disappear under a restart that follows this one.
+            wal.barrier()?;
+        }
+
+        for (index, strategy) in strategies.iter_mut().enumerate() {
+            let symbols: Vec<String> = target_book_latches
+                .iter()
+                .filter(|(owner, _)| *owner as usize == index)
+                .map(|(_, symbol)| market.table.name(SymbolId(*symbol)).to_string())
+                .collect();
+            strategy.restore_target_book_latches(&symbols);
         }
 
         // Nothing is lost by the rounding `boot_prefix` does: the stamp only
@@ -389,6 +434,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             registry,
             orders,
             attribution,
+            target_book_latches,
             // Empty on purpose, like the follower's own records were across a
             // restart: boot compares the log against the venue directly,
             // which is a better answer than a memory of what was in flight.
@@ -455,6 +501,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         venue: &mut V,
         replayed: &[WalRecord],
         table: &SymbolTable,
+        target_book_strategies: &std::collections::HashSet<u16>,
         execution_ids: &mut ExecutionIds,
         fresh_start_ms: i64,
     ) -> Result<RecoveryOutcome, EngineError> {
@@ -513,6 +560,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut recovered = 0usize;
         let mut unknown_findings = Vec::new();
         let mut recovered_orders = LedgerOfOrders::from_records(replayed);
+        let mut recovered_attribution = Attribution::from_records(replayed);
+        let mut target_book_latches = replay_target_book_latches(replayed);
         for exec in execs {
             if execution_ids.contains(&exec.exec_id, now_ms) {
                 continue;
@@ -577,6 +626,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 recovered += 1;
                 continue;
             }
+            let client_order_id = exec.client_order_id.clone();
             let record = WalRecord::RecoveredFill {
                 exec_id: exec.exec_id,
                 client_order_id: exec.client_order_id,
@@ -590,9 +640,30 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 recovered_wall_ts_ms: now_ms,
             };
             wal.append(&record)?;
+            out.push(record.clone());
             execution_ids.insert(dedup_id, now_ms);
+            let owner = recovered_orders.owner_of(&client_order_id);
             recovered_orders.apply(&record);
-            out.push(record);
+            if let Some(owner) = owner {
+                recovered_attribution.note(owner, symbol, exec.side, exec.qty);
+            } else if let Some(owner) = target_book_stop_owner(
+                &recovered_attribution,
+                target_book_strategies,
+                &client_order_id,
+                symbol,
+                exec.side,
+            ) {
+                if target_book_latches.insert((owner.0, symbol.0)) {
+                    let latch = WalRecord::TargetBookLatch {
+                        wall_ts_ms: now_ms,
+                        strategy: owner,
+                        symbol,
+                        latched: true,
+                    };
+                    wal.append(&latch)?;
+                    out.push(latch);
+                }
+            }
             recovered += 1;
         }
         if !unknown_findings.is_empty() {
@@ -919,6 +990,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     clock::now_ns().checked_sub(late_ns),
                 );
             } else {
+                self.latch_target_book_stop(&exec.client_order_id, symbol, exec.side, now_ms)?;
                 foreign.push(Self::foreign_fill_line(&exec.client_order_id, symbol));
             }
             // The kernel reserved this order's size when it approved it, and

@@ -73,7 +73,6 @@ class BookStateError(RuntimeError):
     """The record exists but cannot be read back as this producer's asking."""
 
 
-
 @dataclass(frozen=True, slots=True)
 class LongBookEntry:
     """One name this producer is asking the engine to hold."""
@@ -181,9 +180,7 @@ class LongBookState:
                     "status": "open" if entry.seen_held else "pending",
                     # The exit planner reads this as a string and only asks
                     # whether it is above zero: it is the engine that sizes.
-                    "qty": f"{entry.notional_usdt / entry.entry_price:.10f}"
-                    if entry.entry_price > 0.0
-                    else "0",
+                    "qty": f"{entry.notional_usdt / entry.entry_price:.10f}" if entry.entry_price > 0.0 else "0",
                     "notional_usdt": float(entry.notional_usdt),
                     "raw_target_notional_usdt": float(entry.notional_usdt),
                     "stop_loss_pct": float(entry.stop_loss_fraction),
@@ -279,9 +276,7 @@ def read_book_state(path: str | Path) -> LongBookState:
         raise BookStateError(f"{resolved}: payload is {type(payload).__name__}, not an object")
     version = payload.get("version")
     if type(version) is not int or version != BOOK_STATE_VERSION:
-        raise BookStateError(
-            f"{resolved}: version {version!r}, and this reader only knows {BOOK_STATE_VERSION}"
-        )
+        raise BookStateError(f"{resolved}: version {version!r}, and this reader only knows {BOOK_STATE_VERSION}")
     expected_fields = {"version", "held", "left_at_ms", "attempted_signals_ms"}
     if set(payload) != expected_fields:
         raise BookStateError(f"{resolved}: state has unexpected or missing fields")
@@ -307,16 +302,12 @@ def read_book_state(path: str | Path) -> LongBookState:
             if any(not isinstance(row[name], str) for name in _ENTRY_TEXT_FIELDS):
                 raise TypeError("text field is not a string")
             if any(
-                isinstance(row[name], bool) or not isinstance(row[name], (int, float))
-                for name in _ENTRY_NUMBER_FIELDS
+                isinstance(row[name], bool) or not isinstance(row[name], (int, float)) for name in _ENTRY_NUMBER_FIELDS
             ):
                 raise TypeError("numeric field is not a JSON number")
             if any(not math.isfinite(float(row[name])) for name in _ENTRY_NUMBER_FIELDS):
                 raise ValueError("numeric field is not finite")
-            if any(
-                isinstance(row[name], bool) or not isinstance(row[name], int)
-                for name in _ENTRY_INTEGER_FIELDS
-            ):
+            if any(isinstance(row[name], bool) or not isinstance(row[name], int) for name in _ENTRY_INTEGER_FIELDS):
                 raise TypeError("timestamp or duration field is not a JSON integer")
             if not isinstance(row["seen_held"], bool):
                 raise TypeError("seen_held is not a JSON boolean")
@@ -348,9 +339,7 @@ def read_book_state(path: str | Path) -> LongBookState:
             # One row this producer cannot parse means it cannot say whether
             # it holds that name -- and the engine reads "not named" as
             # "hold none". Failing the cycle is the only honest answer.
-            raise BookStateError(
-                f"{resolved}: held row {index} ({row.get('symbol')!r}) unreadable: {exc}"
-            ) from exc
+            raise BookStateError(f"{resolved}: held row {index} ({row.get('symbol')!r}) unreadable: {exc}") from exc
         if (
             not entry.trade_id
             or not entry.symbol
@@ -380,13 +369,9 @@ def read_book_state(path: str | Path) -> LongBookState:
             raise BookStateError(f"{resolved}: held row {index} violates the LONG book invariants")
         if entry.seen_held:
             if entry.entered_ts_ms <= 0 or entry.max_hold_deadline_ts_ms <= entry.entered_ts_ms:
-                raise BookStateError(
-                    f"{resolved}: held row {index} has no valid fill-anchored hold window"
-                )
+                raise BookStateError(f"{resolved}: held row {index} has no valid fill-anchored hold window")
         elif entry.entered_ts_ms != 0 or entry.max_hold_deadline_ts_ms != 0:
-            raise BookStateError(
-                f"{resolved}: pending row {index} starts a clock before a confirmed fill"
-            )
+            raise BookStateError(f"{resolved}: pending row {index} starts a clock before a confirmed fill")
         if entry.symbol in held:
             raise BookStateError(f"{resolved}: held row {index} repeats {entry.symbol}")
         held[entry.symbol] = entry
@@ -415,9 +400,7 @@ def read_book_state(path: str | Path) -> LongBookState:
             or not isinstance(signal_ts_ms, int)
             or signal_ts_ms <= 0
         ):
-            raise BookStateError(
-                f"{resolved}: invalid attempted signal {symbol!r}={signal_ts_ms!r}"
-            )
+            raise BookStateError(f"{resolved}: invalid attempted signal {symbol!r}={signal_ts_ms!r}")
         attempted_signals_ms[symbol] = signal_ts_ms
     return LongBookState(
         held=held,
@@ -459,12 +442,10 @@ def append_book_transitions(
 ) -> int:
     """Append one JSON line per name entering or leaving the book.
 
-    This is the durable per-trade attribution the state file cannot give: a
-    held row's ``pattern`` ("llm_gate" for judged entries, "fomo_chase" for
-    native ones) dies with the row when the position closes, while the close
-    itself is recorded pattern-blind by the engine and the venue. An
-    append-only enter/leave log keyed by symbol and time is what lets a close
-    be attributed to its entry source afterwards. Returns the rows written.
+    The held row's native signal metadata dies when the position closes, while
+    the close itself is recorded pattern-blind by the engine and venue. This
+    append-only enter/leave log keeps that metadata attached to both lifecycle
+    edges. Returns the rows written.
     """
 
     rows: list[dict[str, Any]] = []
@@ -548,9 +529,7 @@ def migrate_empty_v1_book_state(path: str | Path) -> bool:
     if not isinstance(held, list):
         raise BookStateError(f"{resolved}: v1 held is not an array")
     if held:
-        raise BookStateError(
-            f"{resolved}: cannot infer v2 request clocks for {len(held)} v1 holding(s)"
-        )
+        raise BookStateError(f"{resolved}: cannot infer v2 request clocks for {len(held)} v1 holding(s)")
     raw_left = payload["left_at_ms"]
     if not isinstance(raw_left, dict):
         raise BookStateError(f"{resolved}: v1 left_at_ms is not an object")

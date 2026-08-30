@@ -538,9 +538,24 @@ def _engine_position_link(trade: LiveTrade, terminal_leg: dict) -> str:
         trade.venue_position_close_qty,
         trade.venue_terminal_entry_value_usdt,
         trade.venue_terminal_price_fee_pnl_usdt,
+        trade.venue_closed_pnl_unexplained_usdt,
     )
     if any(value is None for value in required):
         return "unlinked: engine or venue position fields are incomplete"
+    assert trade.entry_ts_ms is not None
+    assert trade.exit_ts_ms is not None
+    assert trade.engine_qty is not None
+    assert trade.engine_fills is not None
+    assert trade.engine_entry_notional_usdt is not None
+    assert trade.engine_price_fee_pnl_usdt is not None
+    assert trade.entry_px is not None
+    assert trade.exit_px is not None
+    assert trade.venue_position_open_ts_ms is not None
+    assert trade.venue_position_close_ts_ms is not None
+    assert trade.venue_position_close_qty is not None
+    assert trade.venue_terminal_entry_value_usdt is not None
+    assert trade.venue_terminal_price_fee_pnl_usdt is not None
+    assert trade.venue_closed_pnl_unexplained_usdt is not None
     venue_entry_px = _f(terminal_leg.get("avgEntryPrice"))
     venue_exit_px = _f(terminal_leg.get("avgExitPrice"))
     if venue_entry_px is None or venue_exit_px is None:
@@ -554,8 +569,9 @@ def _engine_position_link(trade: LiveTrade, terminal_leg: dict) -> str:
         and math.isclose(trade.exit_px, venue_exit_px, rel_tol=1e-9, abs_tol=1e-12)
         and abs(trade.engine_entry_notional_usdt - trade.venue_terminal_entry_value_usdt) <= MONEY_TOLERANCE_USDT
         and abs(trade.engine_price_fee_pnl_usdt - trade.venue_terminal_price_fee_pnl_usdt) <= MONEY_TOLERANCE_USDT
+        and abs(trade.venue_closed_pnl_unexplained_usdt) <= MONEY_TOLERANCE_USDT
     )
-    return "exact_long_sleeve" if exact else "unlinked: engine and venue position facts differ"
+    return "exact_long_sleeve" if exact else "unlinked: engine and venue position or accounting facts differ"
 
 
 def load_cycle_evidence(reports_dir: Path) -> CycleEvidence:

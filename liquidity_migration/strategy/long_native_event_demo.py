@@ -1,31 +1,28 @@
 """LONG strategy target-book producer for the Rust execution engine.
 
-Runs the v11a long sleeve (uni50 FC sniper retrace 1%/6h fall-through),
+Runs the registered native profiles through one uni50 FC sniper-retrace contract,
 publishing an absolute desired book. This module owns strategy decisions; the
 Rust engine owns sizing enforcement, execution, venue state, and accounting.
 
 Operating model
 ---------------
-- 60s cycle reads the most-recent fully-closed UTC daily bar for each top-50
-  universe symbol; runs `detect_pattern_fomo_chase` from long_native against it.
+- The host reads the most-recent fully-closed UTC daily bar for each top-50
+  universe symbol. Ticker and engine changes wake it subject to the configured
+  debounce; the periodic interval bounds idle time and reconciliation.
 - Each FC candidate carries a signal_close and a 6h sniper-retrace window. The
   cycle enters at the current market price as soon as current_price reaches
   signal_close * (1 - 0.01), OR at the first cycle after the deadline expires
   (fc_sniper_skip_on_no_retrace=false, fall-through). Signals older than 24h
   are dropped as stale.
-- Each entry target carries ATR-derived stop/TP intent (fc_atr_stop_mult and
-  fc_atr_tp_mult of ATR_14d, per the selected profile); the account owner owns
-  executable quantity, venue protection, orders, fills, and P&L.
-- v12 (LongV12WideStop) additionally publishes a per-trade stop-decay contract
-  in the entry metadata: after fc_stop_time_decay_hours the producer plans a
-  zero-target exit whenever the live price breaches the decayed level
-  entry_price*(1 - fc_stop_time_decay_atr_mult*atr_14d_pct). The published
-  stop_loss_pct (the wide venue-native stop) is never revised; the decay is a
-  producer-planned exit checked at cycle cadence, one grid-convention step from
-  the research engine's intrabar low.
-- Per-position notional defaults to the 1x research sizing. Levered demo sizing
-  is explicit opt-in through the operational profile's multiplier dials; the
-  multiplier scales the strategy's own weights and nothing else.
+- Each entry target carries the profile's ATR-derived stop intent; the account
+  owner owns executable quantity, venue protection, orders, fills, and P&L.
+- v12 freezes a per-trade stop-decay contract at entry. After its decay age the
+  producer declares the narrower fraction and the engine tightens the
+  venue-native stop. The shared reducer also publishes a zero target when an
+  observed mark breaches that level.
+- Per-position notional and leverage come only from the resolved operational
+  profile. The installed profile applies its multiplier to the strategy's own
+  weights; no downstream sizing fallback exists.
 - At 3 days the cycle publishes a zero component target for the time-stop.
 - Planning reads only the canonical account projection.
 """
@@ -34,19 +31,16 @@ from __future__ import annotations
 
 import json
 import logging
-import math
-import os
 import time
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
-from liquidity_migration.core._common import MS_PER_DAY, exact_duration_ms, is_weekend_ms
-from liquidity_migration.core.env_flags import env_flag
+from liquidity_migration.core._common import MS_PER_DAY, exact_duration_ms
 from liquidity_migration.strategy.account_candidate_universe import (
     enforce_frozen_candidate_frames,
     load_candidate_universe,
@@ -55,7 +49,12 @@ from liquidity_migration.strategy.account_candidate_universe import (
     scheduled_retirement_exposure,
 )
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
-from liquidity_migration.core.config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
+from liquidity_migration.core.config import (
+    DEFAULT_EXCLUDED_SYMBOLS,
+    ExchangeConfig,
+    ResearchConfig,
+    UniverseConfig,
+)
 from liquidity_migration.data.downloaders import _normalize_tickers
 from liquidity_migration.strategy.event_demo_data import (
     _column_values,
@@ -80,10 +79,19 @@ from liquidity_migration.rules.long_native import (
     LongNativeConfig,
     _classify_entry,
     _safe_float,
-    _vol_target_scale,
     build_long_features,
     long_pump_family,
-    long_v11a_profile,
+)
+from liquidity_migration.rules.long_contract import (
+    LONG_SIGNAL_FRESHNESS_MS,
+    DecisionAction,
+    DecisionInput,
+    FieldProvenance,
+    PriorState,
+    StrategyConfig,
+    current_stop_loss_fraction,
+    decide,
+    scaled_base_target_fraction,
 )
 from liquidity_migration.data.storage import exclusive_file_lock, write_dataset
 from liquidity_migration.rules.long_identity import (
@@ -108,11 +116,9 @@ from liquidity_migration.rules.engine_targets import (
     render_target_book,
 )
 from liquidity_migration.strategy.long_book_state import (
-    LONG_BOOK_TRANSITIONS_PATH_ENV,
     LongBookEntry,
     LongBookState,
     append_book_transitions,
-    long_book_state_path,
     read_book_state,
     write_book_state,
 )
@@ -122,7 +128,7 @@ from liquidity_migration.data.universe import build_current_universe_table
 
 # Signals older than this aren't acted on. Without this bound a missed-cycle
 # event would later trigger a stale fill long after the retrace window closed.
-SIGNAL_FRESHNESS_MS = exact_duration_ms(hours=24)
+SIGNAL_FRESHNESS_MS = LONG_SIGNAL_FRESHNESS_MS
 
 #: Where this producer writes the mandatory book the engine follows.
 ENGINE_TARGET_BOOK_PATH_ENV = "LONG_ENGINE_TARGET_BOOK_PATH"
@@ -132,8 +138,6 @@ ENGINE_LONG_SLEEVE = "long"
 #: fifteen-minute entry cutoff by enough to be useful, and it is the answer to
 #: "how long should a dead producer go on opening positions" -- an hour, not
 #: the twenty-four hours a LONG signal stays actionable for.
-LONG_BOOK_VALIDITY_MS = exact_duration_ms(hours=1)
-
 #: Kept past the cooldown before a departed name is forgotten, so a clock skew
 #: or a slow cycle cannot let a name back in early.
 _COOLDOWN_KEEP_MS = exact_duration_ms(days=1)
@@ -145,22 +149,6 @@ _COOLDOWN_KEEP_MS = exact_duration_ms(days=1)
 #: the freeze still decides what may be traded.
 ETH_REGIME_SYMBOL = "ETHUSDT"
 
-#: The LLM gate's judged entry candidates, written hourly by
-#: liquidity-migration-llm-ledger.service. Set both vars on a producer unit to
-#: turn judged score>=6 pump events into LONG entries through this sleeve's own
-#: sizing, exits, and stops; unset (mainnet default) means the gate is inert.
-LLM_GATE_CANDIDATES_PATH_ENV = "LONG_ENGINE_LLM_GATE_CANDIDATES_PATH"
-LLM_GATE_ENABLED_ENV = "LONG_ENGINE_LLM_GATE_ENABLED"
-
-#: A gate signal is dead an hour after the bar that made it. Three clocks can
-#: disagree -- when the file was written, what it says its own validity is, and
-#: when the trigger bar closed -- so all three are held to the same hour and the
-#: trigger clock is the one that decides. The ledger rewrites the file every
-#: hour, so a live signal is minutes old; anything approaching an hour means a
-#: run was missed, and a missed run is not a signal.
-_LLM_GATE_MAX_AGE_MS = exact_duration_ms(hours=1)
-_LLM_GATE_SIGNAL_MAX_AGE_MS = exact_duration_ms(hours=1)
-
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -169,19 +157,6 @@ class LongNativeDemoCycleConfig:
     universe_superset_size: int = 120  # ranked by 90-day median turnover
     lookback_days: int = 100  # retain at least 90 daily bars after trimming
     workers: int = 8
-    # Per-position notional scaling. The default is the 1x research-profile
-    # sizing; levered demo sizing must be passed explicitly and pass the
-    # projected full-book initial-margin guard below.
-    notional_multiplier: float = 1.0
-    entry_leverage: float = 10.0
-    #: SETS each entry's equity fraction outright (it is not a cap on the
-    #: derived value); 0 keeps the strategy's own sizing chain.
-    order_notional_pct_equity: float = 0.0
-    wallet_balance_fraction: float = 1.0
-    max_new_entries_per_cycle: int = 5
-    # SHA-256 of the shared operational profile when runtime sizing came from
-    # that profile. Empty is retained for isolated diagnostics/tests.
-    operational_profile_sha256: str = ""
     # No default is intentional: runtime callers must select one venue realm.
     execution_environment: str = ""
     # Optional frozen-population contract: post-freeze listings never enter, and
@@ -200,6 +175,238 @@ class LongNativeDemoCycleConfig:
     ws_klines_stale_reconnect_seconds: float = 180.0
 
 
+@dataclass(frozen=True, slots=True)
+class LongRuntimeConfig:
+    """Producer scheduling, input freshness, and durable output locations."""
+
+    data_root: Path
+    daemon: bool = False
+    interval_seconds: float = 60.0
+    event_driven_cycle: bool = True
+    min_cycle_interval_seconds: float = 2.0
+    ticker_reconcile_interval_seconds: float = 60.0
+    state_cache_stale_seconds: float = 120.0
+    engine_account_max_age_ns: int = TARGET_PRODUCER_HEALTH_MAX_AGE_NS
+    strategy_target_capture_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LongEffectiveConfig:
+    """The one resolved LONG producer configuration used for every cycle."""
+
+    cycle: LongNativeDemoCycleConfig
+    runtime: LongRuntimeConfig
+    strategy: StrategyConfig
+    exchange: ExchangeConfig
+    operational_profile_sha256: str
+    target_book_path: Path
+    book_state_path: Path
+    book_transitions_path: Path | None
+    engine_heartbeat_path: Path
+    expected_account_user_id: str
+    invocation_id: str
+    provenance: tuple[FieldProvenance, ...]
+
+    def provenance_by_field(self) -> dict[str, dict[str, str]]:
+        rows = {f"strategy.{field}": value for field, value in self.strategy.provenance_by_field().items()}
+        rows.update({item.field: {"source": item.source, "detail": item.detail} for item in self.provenance})
+        return rows
+
+    def as_json_dict(self) -> dict[str, object]:
+        runtime = asdict(self.runtime)
+        runtime["data_root"] = str(self.runtime.data_root)
+        runtime["strategy_target_capture_path"] = str(self.runtime.strategy_target_capture_path or "")
+        return {
+            "cycle": asdict(self.cycle),
+            "runtime": runtime,
+            "strategy": self.strategy.as_json_dict(),
+            "exchange": asdict(self.exchange),
+            "operational_profile_sha256": self.operational_profile_sha256,
+            "target_book_path": str(self.target_book_path),
+            "book_state_path": str(self.book_state_path),
+            "book_transitions_path": str(self.book_transitions_path or ""),
+            "engine_heartbeat_path": str(self.engine_heartbeat_path),
+            "expected_account_user_id": self.expected_account_user_id,
+            "invocation_id": self.invocation_id,
+            "provenance": self.provenance_by_field(),
+        }
+
+
+def _absolute_runtime_path(value: str | Path, *, label: str) -> Path:
+    raw = Path(value).expanduser()
+    if not str(value).strip() or not raw.is_absolute():
+        raise ValueError(f"LONG {label} must be an absolute path")
+    return raw.resolve()
+
+
+def _optional_runtime_path(value: str | Path | None, *, label: str) -> Path | None:
+    if value is None or not str(value).strip():
+        return None
+    return _absolute_runtime_path(value, label=label)
+
+
+def resolve_long_effective_config(
+    cycle: LongNativeDemoCycleConfig,
+    *,
+    runtime: LongRuntimeConfig,
+    strategy: StrategyConfig,
+    exchange: ExchangeConfig,
+    exchange_source: str,
+    operational_profile_source: str,
+    operational_profile_sha256: str,
+    target_book_path: str | Path,
+    book_state_path: str | Path,
+    book_transitions_path: str | Path | None,
+    engine_heartbeat_path: str | Path,
+    expected_account_user_id: str,
+    invocation_id: str = "",
+    strategy_profile_source: FieldProvenance | None = None,
+    cycle_provenance: Mapping[str, FieldProvenance] | None = None,
+    runtime_provenance: Mapping[str, FieldProvenance] | None = None,
+) -> LongEffectiveConfig:
+    """Resolve runtime wiring once and retain the winning source of each field."""
+
+    _validate_long_demo_config(cycle, strategy.rule)
+    runtime_root = _absolute_runtime_path(runtime.data_root, label="data root")
+    if runtime.interval_seconds < 0.0:
+        raise ValueError("LONG interval_seconds cannot be negative")
+    if runtime.min_cycle_interval_seconds < 0.0:
+        raise ValueError("LONG min_cycle_interval_seconds cannot be negative")
+    if runtime.ticker_reconcile_interval_seconds <= 0.0:
+        raise ValueError("LONG ticker_reconcile_interval_seconds must be positive")
+    if runtime.state_cache_stale_seconds <= 0.0:
+        raise ValueError("LONG state_cache_stale_seconds must be positive")
+    if runtime.engine_account_max_age_ns <= 0:
+        raise ValueError("LONG engine_account_max_age_ns must be positive")
+    capture_path = runtime.strategy_target_capture_path
+    if capture_path is None:
+        capture_path = runtime_root / "strategy_target_book_capture.jsonl"
+    else:
+        capture_path = _absolute_runtime_path(capture_path, label="strategy target capture path")
+    resolved_runtime = LongRuntimeConfig(
+        data_root=runtime_root,
+        daemon=bool(runtime.daemon),
+        interval_seconds=float(runtime.interval_seconds),
+        event_driven_cycle=bool(runtime.event_driven_cycle),
+        min_cycle_interval_seconds=float(runtime.min_cycle_interval_seconds),
+        ticker_reconcile_interval_seconds=float(runtime.ticker_reconcile_interval_seconds),
+        state_cache_stale_seconds=float(runtime.state_cache_stale_seconds),
+        engine_account_max_age_ns=int(runtime.engine_account_max_age_ns),
+        strategy_target_capture_path=capture_path,
+    )
+    if not exchange_source.strip():
+        raise ValueError("LONG exchange provenance source is required")
+    if not operational_profile_source.strip():
+        raise ValueError("LONG operational-profile provenance source is required")
+    if len(operational_profile_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in operational_profile_sha256):
+        raise ValueError("LONG operational_profile_sha256 must be 64 lowercase hex characters")
+    target_path = _absolute_runtime_path(target_book_path, label="target book path")
+    state_path = _absolute_runtime_path(book_state_path, label="book state path")
+    transitions_path = _optional_runtime_path(book_transitions_path, label="book transitions path")
+    heartbeat_path = _absolute_runtime_path(engine_heartbeat_path, label="engine heartbeat path")
+    expected_user_id = str(expected_account_user_id).strip()
+    if not expected_user_id:
+        raise ValueError("LONG expected engine account user id is required")
+    exchange_detail = json.dumps(asdict(exchange), sort_keys=True, separators=(",", ":"))
+    cycle_sources = dict(cycle_provenance or {})
+    runtime_sources = dict(runtime_provenance or {})
+    unknown_cycle_sources = sorted(set(cycle_sources) - {item.name for item in fields(LongNativeDemoCycleConfig)})
+    unknown_runtime_sources = sorted(set(runtime_sources) - {item.name for item in fields(LongRuntimeConfig)})
+    if unknown_cycle_sources or unknown_runtime_sources:
+        raise ValueError(
+            f"unknown LONG provenance fields: cycle={unknown_cycle_sources} runtime={unknown_runtime_sources}"
+        )
+
+    def resolved_source(
+        prefix: str,
+        field_name: str,
+        supplied: Mapping[str, FieldProvenance],
+        default_type: str,
+    ) -> FieldProvenance:
+        source = supplied.get(field_name)
+        if source is None:
+            return FieldProvenance(
+                f"{prefix}.{field_name}",
+                "resolver_argument",
+                f"{default_type}.{field_name}",
+            )
+        if not source.source.strip():
+            raise ValueError(f"LONG {prefix}.{field_name} provenance source is empty")
+        return FieldProvenance(f"{prefix}.{field_name}", source.source, source.detail)
+
+    provenance = (
+        FieldProvenance(
+            "strategy.profile_name",
+            (strategy_profile_source.source if strategy_profile_source is not None else "resolver_argument"),
+            (strategy_profile_source.detail if strategy_profile_source is not None else strategy.profile_name),
+        ),
+        *(
+            resolved_source(
+                "cycle",
+                item.name,
+                cycle_sources,
+                "LongNativeDemoCycleConfig",
+            )
+            for item in fields(LongNativeDemoCycleConfig)
+        ),
+        *(
+            resolved_source(
+                "runtime",
+                item.name,
+                runtime_sources,
+                "LongRuntimeConfig",
+            )
+            for item in fields(LongRuntimeConfig)
+        ),
+        FieldProvenance("exchange", exchange_source, exchange_detail),
+        FieldProvenance(
+            "operational_profile_sha256",
+            operational_profile_source,
+            operational_profile_sha256,
+        ),
+        FieldProvenance("target_book_path", "runtime_environment", str(target_path)),
+        FieldProvenance("book_state_path", "runtime_environment", str(state_path)),
+        FieldProvenance(
+            "book_transitions_path",
+            "runtime_environment",
+            str(transitions_path or ""),
+        ),
+        FieldProvenance("engine_heartbeat_path", "runtime_environment", str(heartbeat_path)),
+        FieldProvenance("expected_account_user_id", "runtime_environment", expected_user_id),
+        FieldProvenance("invocation_id", "service_manager", str(invocation_id)),
+    )
+    expected = {
+        *(f"cycle.{item.name}" for item in fields(LongNativeDemoCycleConfig)),
+        *(f"runtime.{item.name}" for item in fields(LongRuntimeConfig)),
+        "strategy.profile_name",
+        "exchange",
+        "operational_profile_sha256",
+        "target_book_path",
+        "book_state_path",
+        "book_transitions_path",
+        "engine_heartbeat_path",
+        "expected_account_user_id",
+        "invocation_id",
+    }
+    actual = [item.field for item in provenance]
+    if len(actual) != len(expected) or set(actual) != expected:
+        raise ValueError("LONG effective config provenance is incomplete")
+    return LongEffectiveConfig(
+        cycle=cycle,
+        runtime=resolved_runtime,
+        strategy=strategy,
+        exchange=exchange,
+        operational_profile_sha256=operational_profile_sha256,
+        target_book_path=target_path,
+        book_state_path=state_path,
+        book_transitions_path=transitions_path,
+        engine_heartbeat_path=heartbeat_path,
+        expected_account_user_id=expected_user_id,
+        invocation_id=str(invocation_id),
+        provenance=provenance,
+    )
+
+
 def _long_cycle_dataset(config: "LongNativeDemoCycleConfig") -> str:
     # Named per environment so a later reader cannot mistake one environment's
     # cycles for another's.
@@ -210,14 +417,11 @@ def _long_cycle_dataset(config: "LongNativeDemoCycleConfig") -> str:
 
 def _validate_long_demo_config(
     config: LongNativeDemoCycleConfig,
-    strategy_config: LongNativeConfig | None = None,
+    strategy: LongNativeConfig,
 ) -> None:
-    strategy = strategy_config or long_v11a_profile()
     if strategy.execution_strategy_id not in SUPPORTED_LONG_STRATEGY_IDS:
         # The id is persisted in the target book and producer state.
-        raise ValueError(
-            f"unsupported LONG execution_strategy_id: {strategy.execution_strategy_id!r}"
-        )
+        raise ValueError(f"unsupported LONG execution_strategy_id: {strategy.execution_strategy_id!r}")
     if config.lookback_days < 95:
         raise ValueError(
             "lookback_days must be at least 95 so turnover_median_90d "
@@ -225,54 +429,32 @@ def _validate_long_demo_config(
         )
     if config.universe_superset_size < strategy.universe_size:
         raise ValueError("universe_superset_size must cover the strategy universe")
-    if config.notional_multiplier <= 0.0:
-        raise ValueError("notional_multiplier must be positive")
-    if not 0.0 <= config.order_notional_pct_equity <= 10.0:
-        # The long sleeve may legitimately exceed 100% per-position notional via leverage.
-        raise ValueError("order_notional_pct_equity must be in [0, 10]")
-    if not 0.0 < config.wallet_balance_fraction <= 1.0:
-        raise ValueError("wallet_balance_fraction must be in (0, 1]")
-    if config.entry_leverage <= 0.0:
-        raise ValueError("entry_leverage must be positive")
-    if config.max_new_entries_per_cycle <= 0:
-        raise ValueError("max_new_entries_per_cycle must be positive")
     execution_environment(config.execution_environment)
-    if not os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip():
-        raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust engine target book")
-    if long_book_state_path() is None:
-        raise ValueError("LONG_ENGINE_BOOK_STATE_PATH must name the producer's durable state")
 
 
 def target_long_order_notional_pct_equity(
-    demo_config: LongNativeDemoCycleConfig,
-    strategy_config: LongNativeConfig,
+    config: StrategyConfig,
 ) -> float:
-    """Per-position notional fraction of equity, scaled by notional_multiplier.
+    """The resolved pre-volatility per-position fraction of equity."""
 
-    Mirror of event_demo.target_order_notional_pct_equity but with the long
-    sleeve's configured notional_multiplier.
-    """
-    if demo_config.order_notional_pct_equity > 0.0:
-        return demo_config.order_notional_pct_equity
-    base = strategy_config.gross_exposure / max(strategy_config.max_concurrent_positions, 1)
-    return base * demo_config.notional_multiplier
+    if config.order_notional_pct_equity > 0.0:
+        return config.order_notional_pct_equity
+    base = config.rule.gross_exposure / max(config.rule.max_concurrent_positions, 1)
+    return base * config.notional_multiplier
 
 
 def _compute_long_order_sizing(
     *,
-    demo: LongNativeDemoCycleConfig,
-    strategy: LongNativeConfig,
+    config: StrategyConfig,
     features: pl.DataFrame,
     now_ms: int | None = None,
 ) -> tuple[float, float]:
-    """Per-position notional fraction after the de-risk-only volatility scalar.
+    """Per-position notional fraction after the bounded BTC-volatility scalar.
 
-    Applies the SAME de-risk-only vol-target scalar the backtest uses, so the live book
-    sizes DOWN in high-BTC-vol regimes (never up). ``btc_rv_30`` is a trailing feature
-    broadcast across symbols; take the latest non-null closed row when ``now_ms`` is
-    provided. Shared helper => no drift.
+    Applies the same clipped scalar as the shared decision contract. ``btc_rv_30``
+    is a trailing feature broadcast across symbols; take the latest non-null closed
+    row when ``now_ms`` is provided.
     Returns ``(order_notional_pct_equity_after_scale, vol_target_scale)``."""
-    order_notional_pct_equity = target_long_order_notional_pct_equity(demo, strategy)
     latest_btc_rv: float | None = None
     if "btc_rv_30" in features.columns and not features.is_empty():
         rv_features = features
@@ -282,34 +464,32 @@ def _compute_long_order_sizing(
         _rv = rv_features.sort("ts_ms")["btc_rv_30"].drop_nulls()
         if len(_rv) > 0:
             latest_btc_rv = float(_rv[-1])
-    vol_target_scale = _vol_target_scale(strategy, latest_btc_rv)
-    return order_notional_pct_equity * vol_target_scale, vol_target_scale
+    return scaled_base_target_fraction(
+        config,
+        btc_realized_vol=latest_btc_rv,
+    )
 
 
 def run_long_native_demo_cycle(
-    data_root: str | Path,
     *,
-    config: ResearchConfig,
-    demo_config: LongNativeDemoCycleConfig | None = None,
-    strategy_config: LongNativeConfig | None = None,
+    effective_config: LongEffectiveConfig,
     market_client: Any | None = None,
     now_ms: int | None = None,
     kline_store: Any | None = None,
     ticker_cache: Any | None = None,
-    state_cache_stale_seconds: float = 120.0,
     funnel_observer: DecisionFunnelObserver | None = None,
 ) -> PublishedTargetCyclePayload:
-    demo = demo_config or LongNativeDemoCycleConfig()
-    strategy = strategy_config or long_v11a_profile()
+    demo = effective_config.cycle
+    effective = effective_config.strategy
+    strategy = effective.rule
     strategy_id = strategy.execution_strategy_id
     _validate_long_demo_config(demo, strategy)
     owner_environment = execution_environment(demo.execution_environment).value
-    engine_book_path = Path(os.environ[ENGINE_TARGET_BOOK_PATH_ENV]).expanduser()
-    book_state_path = long_book_state_path()
-    assert book_state_path is not None
+    engine_book_path = effective_config.target_book_path
+    book_state_path = effective_config.book_state_path
     cycles_dataset = _long_cycle_dataset(demo)
 
-    root = Path(data_root).expanduser()
+    root = effective_config.runtime.data_root
     root.mkdir(parents=True, exist_ok=True)
     report_dir = root / "reports" / demo.data_name
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -332,8 +512,10 @@ def run_long_native_demo_cycle(
         try:
             engine_reading = require_recent_engine_account(
                 owner_environment,
-                max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
+                max_age_ns=effective_config.runtime.engine_account_max_age_ns,
                 now_ns=cycle_now_ms * 1_000_000,
+                path=effective_config.engine_heartbeat_path,
+                expected_account_user_id=effective_config.expected_account_user_id,
             )
             equity_usdt = float(engine_reading.equity_usdt)
             engine_account_health_error = ""
@@ -343,12 +525,15 @@ def run_long_native_demo_cycle(
             _LOGGER.warning("LONG engine account reading unavailable; new entries blocked: %s", exc)
         account_state_source = f"rust_engine_heartbeat:{owner_environment}"
         mark_stage("account_health")
-        public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+        public = market_client or BybitMarketData(
+            category=effective_config.exchange.category,
+            testnet=effective_config.exchange.testnet,
+        )
         instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
         raw_tickers, ticker_source = _resolve_ticker_snapshot(
             public,
             ticker_cache=ticker_cache,
-            state_cache_stale_seconds=state_cache_stale_seconds,
+            state_cache_stale_seconds=effective_config.runtime.state_cache_stale_seconds,
         )
         tickers = _normalize_tickers(raw_tickers)
         universe = _build_long_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
@@ -373,30 +558,21 @@ def run_long_native_demo_cycle(
                 snapshot_ts_ms=cycle_now_ms,
                 context="LONG cycle",
                 retirement_registry_path=(
-                    root
-                    / "candidate_retirements"
-                    / f"{candidate_universe.artifact_sha256}.json"
+                    root / "candidate_retirements" / f"{candidate_universe.artifact_sha256}.json"
                 ),
             )
             retirement_exposure = scheduled_retirement_exposure(
                 candidate_reconciliation,
-                held_symbols=(
-                    engine_reading.held_symbols if engine_reading is not None else None
-                ),
+                held_symbols=(engine_reading.held_symbols if engine_reading is not None else None),
             )
             if retirement_exposure:
                 _LOGGER.warning(
                     "LONG cycle: scheduled-retirement symbols still hold "
                     "account exposure; entries stay suppressed and exits keep "
                     "publishing until flat: %s",
-                    "; ".join(
-                        f"{symbol}={','.join(labels)}"
-                        for symbol, labels in sorted(retirement_exposure.items())
-                    ),
+                    "; ".join(f"{symbol}={','.join(labels)}" for symbol, labels in sorted(retirement_exposure.items())),
                 )
-            universe = universe.filter(
-                pl.col("symbol").is_in(list(candidate_reconciliation.active_symbols))
-            )
+            universe = universe.filter(pl.col("symbol").is_in(list(candidate_reconciliation.active_symbols)))
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
             raise RuntimeError("long-native demo cycle found no current tradable symbols after universe filters")
@@ -412,12 +588,16 @@ def run_long_native_demo_cycle(
         mark_stage("universe")
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
+        market_projection = ResearchConfig(
+            exchange=effective_config.exchange,
+            data_root=root,
+        )
         klines, kline_cache_stats = _download_recent_1h_klines(
             kline_symbols,
             start_ms=start_ms,
             end_ms=end_ms,
             launch_time_ms_by_symbol=_launch_time_ms_by_symbol(universe),
-            config=config,
+            config=market_projection,
             workers=demo.workers,
             market_client=public if market_client is not None else None,
             cache_root=root,
@@ -445,9 +625,7 @@ def run_long_native_demo_cycle(
         missing_regime_anchors: list[str] = []
         if not features.is_empty():
             for anchor in regime_anchors:
-                rows = features.filter(
-                    (pl.col("symbol") == anchor) & (pl.col("ts_ms") <= cycle_now_ms)
-                )
+                rows = features.filter((pl.col("symbol") == anchor) & (pl.col("ts_ms") <= cycle_now_ms))
                 if rows.is_empty():
                     missing_regime_anchors.append(anchor)
                     continue
@@ -477,18 +655,84 @@ def run_long_native_demo_cycle(
 
         book_state = read_book_state(book_state_path)
         held_at_cycle_start = dict(book_state.held)
-        all_trades = book_state.as_trade_rows()
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
-            demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
+            config=effective,
+            features=features,
+            now_ms=cycle_now_ms,
         )
 
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
+
+        # Risk authority is sampled at the commit boundary, before the shared
+        # reducer makes any entry decision. A cold feature build may outlive
+        # the cycle-start heartbeat freshness budget, and reducer sizing must
+        # use the equity that will back the book being committed.
+        engine_reading = require_recent_engine_account(
+            owner_environment,
+            max_age_ns=effective_config.runtime.engine_account_max_age_ns,
+            now_ns=time.time_ns(),
+            path=effective_config.engine_heartbeat_path,
+            expected_account_user_id=effective_config.expected_account_user_id,
+        )
+        equity_usdt = float(engine_reading.equity_usdt)
+        engine_account_health_error = ""
+        mark_stage("commit_account_health")
+
+        engine_blocked_asks = 0
+        long_entry_blockers = {
+            str(symbol).upper(): reason
+            for symbol, reason in engine_reading.entry_blockers_for_strategy(ENGINE_LONG_SLEEVE).items()
+        }
+        if long_entry_blockers:
+            blocked_asks = {
+                symbol: reason
+                for symbol, reason in sorted(long_entry_blockers.items())
+                if symbol in book_state.held and not book_state.held[symbol].seen_held
+            }
+            for symbol, reason in blocked_asks.items():
+                _LOGGER.warning(
+                    "long book: %s was asked for but the engine will not open it (%s); the ask leaves the book",
+                    symbol,
+                    reason,
+                )
+            if blocked_asks:
+                engine_blocked_asks = len(blocked_asks)
+                book_state = LongBookState(
+                    held={symbol: entry for symbol, entry in book_state.held.items() if symbol not in blocked_asks},
+                    left_at_ms=book_state.left_at_ms,
+                    attempted_signals_ms=book_state.attempted_signals_ms,
+                )
+
+        all_trades = book_state.as_trade_rows()
         exit_plans = _plan_time_stop_exits(
             all_trades,
             now_ms=cycle_now_ms,
             price_by_symbol=price_by_symbol,
+            effective_config=effective,
+            venue_holdings=engine_reading.holdings_for_strategy(ENGINE_LONG_SLEEVE),
         )
         mark_stage("exit_targets")
+
+        exiting_symbols = {
+            str(plan.get("symbol") or "").upper() for plan in exit_plans if str(plan.get("symbol") or "")
+        }
+        active_after_exits = {
+            symbol
+            for symbol, entry in book_state.held.items()
+            if symbol not in exiting_symbols
+            and not (
+                entry.seen_held
+                and engine_reading.held_symbols is not None
+                and symbol not in engine_reading.held_symbols
+            )
+            and not (
+                not entry.seen_held
+                and entry.entry_valid_until_ms > 0
+                and cycle_now_ms >= entry.entry_valid_until_ms
+                and engine_reading.held_symbols is not None
+                and symbol not in engine_reading.held_symbols
+            )
+        }
 
         # Derive FC candidates from the latest closed daily bar per symbol, then
         # check the sniper retrace condition against live 1h bars.
@@ -499,32 +743,14 @@ def run_long_native_demo_cycle(
             now_ms=cycle_now_ms,
             strategy=strategy,
             price_by_symbol=price_by_symbol,
-            max_new_entries=None,
             funnel_observer=funnel_observer,
             retrace_watch=retrace_watch,
+            effective_config=effective,
+            equity_usdt=equity_usdt,
+            attempted_signals_ms=book_state.attempted_signals_ms,
+            blocked_symbols=frozenset(long_entry_blockers),
+            active_positions=len(active_after_exits),
         )
-        gate_events = _read_llm_gate_events(now_ms=cycle_now_ms)
-        llm_gate_event_count = len(gate_events)
-        if gate_events and env_flag(LLM_GATE_ENABLED_ENV):
-            # The judged gate is an entry source inside this sleeve, not a
-            # second strategy: its events become candidates in the native
-            # shape and share every cut below. Native candidates keep their
-            # score order and stay ahead of the judged-gate source.
-            gate_candidates, gate_skips = _llm_gate_candidates(
-                gate_events,
-                strategy=strategy,
-                price_by_symbol=price_by_symbol,
-                open_symbols=set(_column_values(_long_target_reservations(all_trades), "symbol")),
-                cooldown_until=_cooldown_until_long(all_trades, cooldown_days=strategy.cooldown_days),
-                now_ms=cycle_now_ms,
-            )
-            skip_counts.update(gate_skips)
-            gate_symbols = {candidate["symbol"] for candidate in gate_candidates}
-            candidates = [
-                candidate
-                for candidate in candidates
-                if candidate["symbol"] not in gate_symbols
-            ] + gate_candidates
         repeated_attempts = [
             candidate
             for candidate in candidates
@@ -535,7 +761,7 @@ def run_long_native_demo_cycle(
             )
         ]
         if repeated_attempts:
-            skip_counts["already_attempted"] = len(repeated_attempts)
+            skip_counts["already_attempted"] = skip_counts.get("already_attempted", 0) + len(repeated_attempts)
             repeated_ids = {
                 (
                     str(candidate.get("symbol") or "").upper(),
@@ -552,60 +778,20 @@ def run_long_native_demo_cycle(
                 )
                 not in repeated_ids
             ]
-        # Risk authority is sampled again at the commit boundary. A cold
-        # feature build may take longer than the account freshness budget;
-        # sizing or ownership inference from the cycle-start sample would then
-        # be stale even though it was fresh when computation began.
-        engine_reading = require_recent_engine_account(
-            owner_environment,
-            max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
-            now_ns=time.time_ns(),
-        )
-        equity_usdt = float(engine_reading.equity_usdt)
-        engine_account_health_error = ""
-        mark_stage("commit_account_health")
-
-        engine_blocked_asks = 0
-        long_entry_blockers = engine_reading.entry_blockers_for_strategy(ENGINE_LONG_SLEEVE)
         if long_entry_blockers:
-            blocked_asks = {
-                symbol: reason
-                for symbol, reason in sorted(long_entry_blockers.items())
-                if symbol in book_state.held and not book_state.held[symbol].seen_held
-            }
-            for symbol, reason in blocked_asks.items():
-                _LOGGER.warning(
-                    "long book: %s was asked for but the engine will not open it (%s); "
-                    "the ask leaves the book",
-                    symbol,
-                    reason,
-                )
-            if blocked_asks:
-                engine_blocked_asks = len(blocked_asks)
-                book_state = LongBookState(
-                    held={
-                        symbol: entry
-                        for symbol, entry in book_state.held.items()
-                        if symbol not in blocked_asks
-                    },
-                    left_at_ms=book_state.left_at_ms,
-                    attempted_signals_ms=book_state.attempted_signals_ms,
-                )
             blocked_symbols = set(long_entry_blockers)
             blocked_candidates = [
-                candidate
-                for candidate in candidates
-                if str(candidate.get("symbol") or "").upper() in blocked_symbols
+                candidate for candidate in candidates if str(candidate.get("symbol") or "").upper() in blocked_symbols
             ]
             if blocked_candidates:
-                skip_counts["engine_blocked"] = len(blocked_candidates)
+                skip_counts["engine_blocked"] = skip_counts.get("engine_blocked", 0) + len(blocked_candidates)
                 candidates = [
                     candidate
                     for candidate in candidates
                     if str(candidate.get("symbol") or "").upper() not in blocked_symbols
                 ]
 
-        entry_limit = max(demo.max_new_entries_per_cycle, 0)
+        entry_limit = effective.max_new_entries_per_cycle
         skipped_engine_account_health = 0
 
         asked_before = set(book_state.held)
@@ -613,37 +799,29 @@ def run_long_native_demo_cycle(
             book_state,
             exit_plans=exit_plans,
             candidates=candidates,
-            demo=demo,
-            equity_usdt=equity_usdt,
-            order_notional_pct_equity=order_notional_pct_equity,
             price_by_symbol=price_by_symbol,
             strategy_id=strategy_id,
             now_ms=cycle_now_ms,
             cooldown_days=int(strategy.cooldown_days),
             held_symbols=(engine_reading.held_symbols if engine_reading is not None else None),
             venue_holdings=(
-                engine_reading.holdings_for_strategy(ENGINE_LONG_SLEEVE)
-                if engine_reading is not None
-                else {}
+                engine_reading.holdings_for_strategy(ENGINE_LONG_SLEEVE) if engine_reading is not None else {}
             ),
             max_new_entries=entry_limit,
             max_total_positions=strategy.max_concurrent_positions,
         )
         admitted_symbols = set(book_state.held) - asked_before
         candidates = [
-            candidate
-            for candidate in candidates
-            if str(candidate.get("symbol") or "").upper() in admitted_symbols
+            candidate for candidate in candidates if str(candidate.get("symbol") or "").upper() in admitted_symbols
         ]
         entry_candidates = len(candidates)
         # State lands before its matching book. If the process dies between the
         # two writes, the old book is conservative and the next cycle repairs it.
         write_book_state(book_state_path, book_state)
-        transitions_path = os.environ.get(LONG_BOOK_TRANSITIONS_PATH_ENV, "").strip()
-        if transitions_path:
+        if effective_config.book_transitions_path is not None:
             try:
                 append_book_transitions(
-                    transitions_path,
+                    effective_config.book_transitions_path,
                     now_ms=cycle_now_ms,
                     before=held_at_cycle_start,
                     after=book_state.held,
@@ -658,6 +836,7 @@ def run_long_native_demo_cycle(
                 book_state,
                 decision_ts_ms=cycle_now_ms,
                 strategy_profile=str(strategy_id),
+                effective_config=effective,
             ),
         )
         published_exit_intents = len(asked_before - set(book_state.held))
@@ -673,23 +852,19 @@ def run_long_native_demo_cycle(
             "strategy_profile": long_profile_display_name(strategy_id),
             "candidate_universe_artifact_sha256": (candidate_universe.artifact_sha256 if candidate_universe else ""),
             "temporarily_ineligible_candidates_json": json.dumps(
-                candidate_reconciliation.temporarily_ineligible_rows()
-                if candidate_reconciliation is not None
-                else [],
+                candidate_reconciliation.temporarily_ineligible_rows() if candidate_reconciliation is not None else [],
                 sort_keys=True,
                 separators=(",", ":"),
             ),
             "scheduled_candidate_retirements_json": json.dumps(
-                candidate_reconciliation.retirement_rows()
-                if candidate_reconciliation is not None
-                else [],
+                candidate_reconciliation.retirement_rows() if candidate_reconciliation is not None else [],
                 sort_keys=True,
                 separators=(",", ":"),
             ),
-            "operational_profile_sha256": demo.operational_profile_sha256,
+            "operational_profile_sha256": effective_config.operational_profile_sha256,
             "symbols": len(symbols),
             "universe_fallback_24h": universe_fallback_24h,  # ls-4: cold-start 24h backfill count (0 = warm)
-            "vol_target_scale": vol_target_scale,  # div: de-risk-only book scalar applied to live sizing
+            "vol_target_scale": vol_target_scale,
             "kline_rows": klines.height,
             "kline_cache_rows": kline_cache_stats["cache_rows"],
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
@@ -729,9 +904,8 @@ def run_long_native_demo_cycle(
             # reads as a -100% equity spike in every cycles-derived curve.
             "equity_usdt": equity_usdt if not engine_account_health_error else None,
             "order_notional_pct_equity": order_notional_pct_equity,
-            "llm_gate_events": llm_gate_event_count,
-            "entry_leverage": demo.entry_leverage,
-            "notional_multiplier": demo.notional_multiplier,
+            "entry_leverage": effective.entry_leverage,
+            "notional_multiplier": effective.notional_multiplier,
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
             "skipped_engine_account_health": skipped_engine_account_health,
             **stage_timings_ms,
@@ -740,21 +914,20 @@ def run_long_native_demo_cycle(
 
         payload = {
             "cycle": cycle_row,
-            "config": asdict(demo),
-            "strategy_config": asdict(strategy),
+            "config": effective_config.as_json_dict(),
             "candidates": candidates,
             "planned_exits": exit_plans,
             # The daemon bounds its next wait at this instant, so a time
             # stop fires on its deadline instead of on the polling grid.
-            "next_time_deadline_ts_ms": _next_time_deadline_ts_ms(
-                all_trades, now_ms=cycle_now_ms
-            ),
+            "next_time_deadline_ts_ms": _next_time_deadline_ts_ms(book_state.as_trade_rows(), now_ms=cycle_now_ms),
             # The daemon watches these prices on the ticker stream, so a
             # retrace coming into reach or an armed decayed stop being
             # touched starts a cycle in seconds rather than whenever the
             # next cycle happens to run.
             "price_wake_levels": _long_price_wake_levels(
-                all_trades, retrace_watch=retrace_watch, now_ms=cycle_now_ms
+                book_state.as_trade_rows(),
+                retrace_watch=retrace_watch,
+                now_ms=cycle_now_ms,
             ),
             "data_sources": {
                 "ticker_source": ticker_source,
@@ -918,173 +1091,6 @@ def _cooldown_until_long(trades: pl.DataFrame, *, cooldown_days: int) -> dict[st
     return {str(row["symbol"]): int(row["cooldown_until_ms"]) for row in grouped.to_dicts()}
 
 
-def _read_llm_gate_events(*, now_ms: int) -> list[dict[str, Any]]:
-    """Fresh judged events from the LLM gate's candidates file, or [].
-
-    Absent file (the ledger has not run yet), stale file, or malformed row all
-    read as "no signal this cycle" — the same fail-closed-to-no-entry every
-    other input here takes. A missing file is the steady state before the
-    hourly writer's first run, so it stays quiet.
-    """
-
-    path = os.environ.get(LLM_GATE_CANDIDATES_PATH_ENV, "").strip()
-    if not path:
-        return []
-    try:
-        with open(path) as fh:
-            payload = json.load(fh)
-    except FileNotFoundError:
-        return []
-    except Exception:
-        _LOGGER.warning("llm gate: unreadable candidates file %s; ignoring it this cycle", path)
-        return []
-    if not isinstance(payload, dict):
-        _LOGGER.warning("llm gate: candidates file %s is not an object; ignoring it", path)
-        return []
-    decision_ts = _float(payload.get("decision_ts_ms"))
-    valid_until = _float(payload.get("valid_until_ms"))
-    if decision_ts <= 0.0 or now_ms - decision_ts > _LLM_GATE_MAX_AGE_MS:
-        return []
-    if 0.0 < valid_until < now_ms:
-        return []
-    events = payload.get("events")
-    if not isinstance(events, list):
-        return []
-    return [row for row in events if isinstance(row, dict)]
-
-
-def _llm_gate_candidates(
-    events: list[dict[str, Any]],
-    *,
-    strategy: LongNativeConfig,
-    price_by_symbol: dict[str, float],
-    open_symbols: set[Any],
-    cooldown_until: dict[str, int],
-    now_ms: int,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Turn judged score>=6 pump events into candidates in the native shape.
-
-    The judgment is the entry trigger and nothing else: stop, take-profit,
-    hold clock, decay contract, and the vol-parity position weight all come
-    from the same strategy constants the FC path uses, so a gate entry is
-    indistinguishable from any other LONG entry downstream of selection.
-    """
-
-    skips = {
-        "llm_gate_stale": 0,
-        "llm_gate_already_open": 0,
-        "llm_gate_cooldown": 0,
-        "llm_gate_no_live_price": 0,
-        "llm_gate_bad_event": 0,
-        "llm_gate_duplicate": 0,
-        "llm_gate_no_vol": 0,
-    }
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for event in sorted(
-        events,
-        key=lambda item: (
-            -int(_float(item.get("trigger_ts_ms"))),
-            -_float(item.get("score")),
-            _float(item.get("turnover_rank")) or 1e9,
-            str(item.get("symbol") or "").upper(),
-        ),
-    ):
-        symbol = str(event.get("symbol") or "").upper()
-        score = _float(event.get("score"))
-        trigger_ts_ms = int(_float(event.get("trigger_ts_ms")))
-        atr_pct = _float(event.get("atr_pct"))
-        if not symbol or trigger_ts_ms <= 0 or not 0.0 < atr_pct < 1.0 or score <= 0.0:
-            skips["llm_gate_bad_event"] += 1
-            continue
-        if now_ms - trigger_ts_ms > _LLM_GATE_SIGNAL_MAX_AGE_MS:
-            skips["llm_gate_stale"] += 1
-            continue
-        if symbol in open_symbols:
-            skips["llm_gate_already_open"] += 1
-            continue
-        if cooldown_until.get(symbol, 0) > now_ms:
-            skips["llm_gate_cooldown"] += 1
-            continue
-        live_price = price_by_symbol.get(symbol, 0.0)
-        if live_price <= 0.0:
-            skips["llm_gate_no_live_price"] += 1
-            continue
-        if symbol in seen:
-            skips["llm_gate_duplicate"] += 1
-            continue
-        sigma_daily = _float(event.get("sigma_daily_30d"))
-        if sigma_daily <= 0.0:
-            # No measured volatility, no entry. The vol-parity rule reads an
-            # absent reading as the floor, which is its CEILING weight, so a
-            # name we know least about would take the largest position in the
-            # book. The gate's own scan ranks on 24h turnover with no age
-            # filter, and the ledger needs 31 daily bars for sigma against 15
-            # for the ATR, so this is the ordinary state of a young listing —
-            # not a rare defensive case.
-            skips["llm_gate_no_vol"] += 1
-            continue
-        seen.add(symbol)
-        # The wide band (turnover ranks 11-30, owner-directed forward A/B,
-        # 2026-08-30) enters through the same machinery but keeps its own
-        # pattern, so its fills grade apart from the core gate's.
-        band = str(event.get("band") or "core")
-        pattern = "llm_gate_wide" if band == "wide" else "llm_gate"
-        realized_vol = sigma_daily * math.sqrt(365.0)
-        notional_weight = strategy.gross_exposure / max(strategy.max_concurrent_positions, 1)
-        position_weight = _vol_parity_weight(
-            realized_vol=realized_vol,
-            vol_floor=strategy.vol_floor_annual,
-            max_position_weight=strategy.max_position_weight,
-            notional_weight=notional_weight,
-        )
-        if strategy.weekend_size_mult != 1.0 and is_weekend_ms(now_ms):
-            position_weight = position_weight * strategy.weekend_size_mult
-        candidate = {
-            "trade_id": long_trade_id(symbol=symbol, signal_ts_ms=trigger_ts_ms),
-            "symbol": symbol,
-            "side": "long",
-            "pattern": pattern,
-            "signal_ts_ms": trigger_ts_ms,
-            "signal_close": _float(event.get("trigger_price")),
-            "live_price": live_price,
-            "retrace_threshold": _float(event.get("trigger_price")),
-            "first_entry_check_ts_ms": trigger_ts_ms,
-            "sniper_deadline_ms": now_ms,
-            "entry_reason": "llm_gate_score",
-            "entry_ready_ts_ms": now_ms,
-            "stop_loss_pct": atr_pct * strategy.fc_atr_stop_mult,
-            "take_profit_pct": atr_pct * strategy.fc_atr_tp_mult,
-            "max_hold_days": int(strategy.fc_max_hold_days),
-            "atr_14d_pct": atr_pct,
-            **(
-                {
-                    "stop_decay_after_ms": exact_duration_ms(
-                        hours=strategy.fc_stop_time_decay_hours
-                    ),
-                    "decayed_stop_loss_pct": (
-                        strategy.fc_stop_time_decay_atr_mult * atr_pct
-                    ),
-                }
-                if strategy.fc_stop_time_decay_hours > 0
-                and strategy.fc_stop_time_decay_atr_mult > 0.0
-                else {}
-            ),
-            "realized_vol": realized_vol,
-            "position_weight": position_weight,
-            "candidate_score": score,
-            "today_volume_rank": _float(event.get("turnover_rank")) or 1e9,
-            "entry_policy": "llm_gate_judged",
-            "entry_quality_tier": f"score_{score:g}",
-            "entry_rule": (
-                f"LLM gate pump_quality_score >= 6 "
-                f"(score {score:g}, {event.get('trigger_window_h') or '?'}h window, {band} band)"
-            ),
-        }
-        candidates.append(candidate)
-    return candidates, skips
-
-
 def _select_long_entry_candidates(
     *,
     features: pl.DataFrame,
@@ -1092,12 +1098,16 @@ def _select_long_entry_candidates(
     now_ms: int,
     strategy: LongNativeConfig,
     price_by_symbol: dict[str, float],
-    max_new_entries: int | None,
     funnel_observer: DecisionFunnelObserver | None = None,
     funnel_venue: str = "bybit",
     retrace_watch: list[dict[str, Any]] | None = None,
+    effective_config: StrategyConfig,
+    equity_usdt: float,
+    attempted_signals_ms: Mapping[str, int] | None = None,
+    blocked_symbols: frozenset[str] = frozenset(),
+    active_positions: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Detect FC v11a candidates from the latest closed daily bar.
+    """Detect native FC candidates from the latest closed daily bar.
 
     For each symbol with a signal on the most recent closed daily bar (or
     yesterday if today's bar hasn't closed yet), check the sniper-retrace
@@ -1118,6 +1128,9 @@ def _select_long_entry_candidates(
         "entry_delay": 0,
         "no_retrace_yet": 0,
         "no_live_price": 0,
+        "already_attempted": 0,
+        "capacity": 0,
+        "engine_blocked": 0,
         # A pump that fired but the regime gate refused. Without these,
         # regime-off and a quiet day land in the same no_signal count and a
         # gate stuck off looks exactly like no signals anywhere.
@@ -1127,6 +1140,10 @@ def _select_long_entry_candidates(
     if features.is_empty():
         skips["no_features"] = 1
         return [], skips
+
+    if effective_config.rule != strategy:
+        raise ValueError("LONG strategy argument disagrees with effective config")
+    contract_config = effective_config
 
     # An accepted target that is still converging reserves its symbol just like
     # a confirmed position for admission purposes.  It is deliberately not fed
@@ -1160,7 +1177,7 @@ def _select_long_entry_candidates(
     for ts in recent_closed_ts:
         fc_signal_count = 0
         for row in rows_by_ts.get(ts, []):
-            pattern, _stop_pct, _tp_pct, _hold_days = _classify_entry(row, strategy)
+            pattern, _stop_pct, _hold_days = _classify_entry(row, strategy)
             if pattern == "fomo_chase":
                 fc_signal_count += 1
                 continue
@@ -1179,7 +1196,7 @@ def _select_long_entry_candidates(
                 skips["regime_eth_off"] += 1
         if fc_signal_count == 0:
             continue
-        if (now_ms - ts) > SIGNAL_FRESHNESS_MS:
+        if (now_ms - ts) >= contract_config.signal_freshness_ms:
             skips["stale_signal"] += fc_signal_count
         else:
             eligible_ts.append(ts)
@@ -1190,130 +1207,156 @@ def _select_long_entry_candidates(
             skips["no_signal"] = 1
         return [], skips
 
-    candidates: list[dict[str, Any]] = []
+    blocked = frozenset(str(symbol).upper() for symbol in blocked_symbols)
+    candidate_inputs: list[dict[str, Any]] = []
     for ts in eligible_ts:
         rows_today = rows_by_ts.get(ts, [])
         for row in rows_today:
-            pattern, stop_pct, tp_pct, hold_days = _classify_entry(row, strategy)
-            if pattern != "fomo_chase":
-                # v11a is FC-only — defensive, in case strategy config drifts
-                continue
-            symbol = str(row["symbol"])
+            symbol = str(row["symbol"]).upper()
             if symbol in open_symbols:
                 skips["already_open"] += 1
                 continue
-            if cooldown_until.get(symbol, 0) > now_ms:
-                skips["cooldown"] += 1
-                continue
-            first_entry_check_ms = int(ts) + exact_duration_ms(hours=max(1, strategy.entry_delay_hours))
-            if now_ms < first_entry_check_ms:
-                skips["entry_delay"] += 1
+            if symbol in blocked:
+                skips["engine_blocked"] += 1
                 continue
             live_price = price_by_symbol.get(symbol, 0.0)
-            if live_price <= 0.0:
-                skips["no_live_price"] += 1
-                continue
             signal_close = float(row["close"])
             if signal_close <= 0.0:
                 continue
             retrace_threshold = signal_close * (1.0 - strategy.fc_sniper_retrace_pct)
+            first_entry_check_ms = int(ts) + exact_duration_ms(hours=max(1, strategy.entry_delay_hours))
             deadline_ms = int(ts) + exact_duration_ms(hours=strategy.fc_sniper_deadline_hours)
-            # Live retrace condition: enter NOW if current price <= threshold,
-            # OR enter at deadline fall-through if we're past the deadline AND
-            # signal is still fresh.
-            if live_price <= retrace_threshold:
-                entry_reason = "sniper_retrace"
-            elif now_ms >= deadline_ms:
-                entry_reason = "sniper_deadline_fallthru"
-            else:
-                skips["no_retrace_yet"] += 1
-                if retrace_watch is not None:
-                    retrace_watch.append({"symbol": symbol, "at_or_below": retrace_threshold})
-                continue
-            atr_pct = float(row.get("atr_14d_pct") or 0.0)
-            realized_vol = float(row.get("realized_vol") or strategy.vol_floor_annual)
-            notional_weight = strategy.gross_exposure / max(strategy.max_concurrent_positions, 1)
-            position_weight = _vol_parity_weight(
-                realized_vol=realized_vol,
-                vol_floor=strategy.vol_floor_annual,
-                max_position_weight=strategy.max_position_weight,
-                notional_weight=notional_weight,
+            candidate_inputs.append(
+                {
+                    "row": row,
+                    "symbol": symbol,
+                    "signal_ts_ms": int(ts),
+                    "signal_close": signal_close,
+                    "live_price": live_price,
+                    "retrace_threshold": retrace_threshold,
+                    "first_entry_check_ts_ms": first_entry_check_ms,
+                    "sniper_deadline_ms": deadline_ms,
+                    "candidate_score": _float(row.get("log_return")),
+                    "today_volume_rank": _float(row.get("today_volume_rank")) or 1e9,
+                }
             )
-            # Apply the profile's weekend tilt at the actual entry time using the
-            # same calendar helper as the research path.
-            if strategy.weekend_size_mult != 1.0 and is_weekend_ms(now_ms):
-                position_weight = position_weight * strategy.weekend_size_mult
-            candidate_score = _float(row.get("log_return"))
-            volume_rank = _float(row.get("today_volume_rank")) or 1e9
-            candidate = {
-                "trade_id": long_trade_id(symbol=symbol, signal_ts_ms=int(ts)),
-                "symbol": symbol,
-                "side": "long",
-                "pattern": pattern,
-                "signal_ts_ms": int(ts),
-                "signal_close": signal_close,
-                "live_price": live_price,
-                "retrace_threshold": retrace_threshold,
-                "first_entry_check_ts_ms": first_entry_check_ms,
-                "sniper_deadline_ms": deadline_ms,
-                "entry_reason": entry_reason,
-                "entry_ready_ts_ms": now_ms,
-                "stop_loss_pct": float(stop_pct),
-                "take_profit_pct": float(tp_pct),
-                "max_hold_days": int(hold_days),
-                "atr_14d_pct": atr_pct,
-                # v12 stop-decay contract, resolved from the signal-day ATR at
-                # entry time and frozen on the trade: the published wide stop is
-                # never revised, so a later profile change cannot rewrite the
-                # decay of a standing position. Absent for profiles without
-                # decay (v11a), and the exit planner then never applies it.
-                **(
-                    {
-                        "stop_decay_after_ms": exact_duration_ms(
-                            hours=strategy.fc_stop_time_decay_hours
-                        ),
-                        "decayed_stop_loss_pct": (
-                            strategy.fc_stop_time_decay_atr_mult * atr_pct
-                        ),
-                    }
-                    if strategy.fc_stop_time_decay_hours > 0
-                    and strategy.fc_stop_time_decay_atr_mult > 0.0
-                    and atr_pct > 0.0
-                    else {}
-                ),
-                "realized_vol": realized_vol,
-                "position_weight": position_weight,
-                "candidate_score": candidate_score,
-                "today_volume_rank": volume_rank,
-                "entry_policy": "v11a_sniper_retrace_fallthru",
-                "entry_quality_tier": entry_reason,
-                "entry_rule": (
-                    f"sniper retrace ≤ {strategy.fc_sniper_retrace_pct:.2%} below signal close "
-                    f"within {strategy.fc_sniper_deadline_hours}h"
-                ),
-            }
-            candidates.append(candidate)
 
-    # Dedupe by symbol — if a symbol fired on both ts (yesterday + 2d-ago),
-    # keep the most-recent (highest signal_ts_ms).
+    # Dedupe before capacity is counted. If a name fired on both retained
+    # signal bars, only its newest generation can spend a batch or position
+    # slot.
     by_symbol: dict[str, dict[str, Any]] = {}
-    for cand in candidates:
-        sym = cand["symbol"]
-        existing = by_symbol.get(sym)
-        if existing is None or cand["signal_ts_ms"] > existing["signal_ts_ms"]:
-            by_symbol[sym] = cand
-    deduped = list(by_symbol.values())
-    deduped.sort(
-        key=lambda c: (
-            -int(c["signal_ts_ms"]),
-            -float(c.get("candidate_score") or 0.0),
-            float(c.get("today_volume_rank") or 1e9),
-            str(c["symbol"]),
+    for item in candidate_inputs:
+        symbol = str(item["symbol"])
+        existing = by_symbol.get(symbol)
+        if existing is None or int(item["signal_ts_ms"]) > int(existing["signal_ts_ms"]):
+            by_symbol[symbol] = item
+    ranked_inputs = list(by_symbol.values())
+    ranked_inputs.sort(
+        key=lambda item: (
+            -int(item["signal_ts_ms"]),
+            -float(item["candidate_score"]),
+            float(item["today_volume_rank"]),
+            str(item["symbol"]),
         )
     )
-    if max_new_entries is None:
-        return deduped, skips
-    return deduped[: max(max_new_entries, 0)], skips
+
+    attempts = {str(symbol).upper(): int(stamp) for symbol, stamp in (attempted_signals_ms or {}).items()}
+    occupied = len(open_symbols) if active_positions is None else max(active_positions, 0)
+    candidates: list[dict[str, Any]] = []
+    for item in ranked_inputs:
+        if len(candidates) >= effective_config.max_new_entries_per_cycle:
+            break
+        row = item["row"]
+        symbol = str(item["symbol"])
+        ts = int(item["signal_ts_ms"])
+        live_price = float(item["live_price"])
+        signal_close = float(item["signal_close"])
+        decision = decide(
+            DecisionInput(
+                decision_ts_ms=now_ms,
+                symbol=symbol,
+                signal_ts_ms=int(ts),
+                signal_close=signal_close,
+                market_price=live_price,
+                equity_usdt=equity_usdt,
+                feature_row=row,
+            ),
+            PriorState(
+                cooldown_until_ms=cooldown_until.get(symbol, 0),
+                attempted_signal_ts_ms=int(attempts.get(symbol, 0)),
+                active_positions=occupied,
+            ),
+            contract_config,
+        )
+        if decision.action is not DecisionAction.ENTER:
+            reason_to_skip = {
+                "entry_delay": "entry_delay",
+                "no_market_price": "no_live_price",
+                "awaiting_retrace": "no_retrace_yet",
+                "cooldown": "cooldown",
+                "signal_already_attempted": "already_attempted",
+                "capacity": "capacity",
+            }
+            skip = reason_to_skip.get(decision.reason)
+            if skip is not None:
+                skips[skip] += 1
+            if (
+                decision.reason == "awaiting_retrace"
+                and decision.wake_at_or_below is not None
+                and retrace_watch is not None
+            ):
+                retrace_watch.append({"symbol": symbol, "at_or_below": decision.wake_at_or_below})
+            continue
+        entry_reason = decision.entry_reason
+        if decision.target_fraction_of_equity <= 0.0:
+            skips["no_retrace_yet"] += 1
+            continue
+        atr_pct = float(row.get("atr_14d_pct") or 0.0)
+        realized_vol = float(row.get("realized_vol") or strategy.vol_floor_annual)
+        candidate = {
+            "trade_id": long_trade_id(symbol=symbol, signal_ts_ms=int(ts)),
+            "symbol": symbol,
+            "side": "long",
+            "pattern": "fomo_chase",
+            "signal_ts_ms": int(ts),
+            "signal_close": signal_close,
+            "live_price": live_price,
+            "retrace_threshold": item["retrace_threshold"],
+            "first_entry_check_ts_ms": item["first_entry_check_ts_ms"],
+            "sniper_deadline_ms": item["sniper_deadline_ms"],
+            "entry_reason": entry_reason,
+            "entry_ready_ts_ms": now_ms,
+            "entry_valid_until_ms": decision.entry_valid_until_ms,
+            "stop_loss_pct": decision.stop_loss_fraction,
+            "max_hold_days": int(decision.max_hold_duration_ms // MS_PER_DAY),
+            "max_hold_duration_ms": decision.max_hold_duration_ms,
+            "atr_14d_pct": atr_pct,
+            **(
+                {
+                    "stop_decay_after_ms": decision.stop_decay_after_ms,
+                    "decayed_stop_loss_pct": decision.decayed_stop_loss_fraction,
+                }
+                if decision.stop_decay_after_ms > 0
+                else {}
+            ),
+            "realized_vol": realized_vol,
+            "position_weight": decision.position_weight,
+            "target_fraction_of_equity": decision.target_fraction_of_equity,
+            "target_notional_usdt": decision.target_notional_usdt,
+            "entry_leverage": decision.entry_leverage,
+            "candidate_score": item["candidate_score"],
+            "today_volume_rank": item["today_volume_rank"],
+            "entry_policy": "v11a_sniper_retrace_fallthru",
+            "entry_quality_tier": entry_reason,
+            "entry_rule": (
+                f"sniper retrace ≤ {strategy.fc_sniper_retrace_pct:.2%} below signal close "
+                f"within {strategy.fc_sniper_deadline_hours}h"
+            ),
+        }
+        candidates.append(candidate)
+        occupied += 1
+
+    return candidates, skips
 
 
 def _long_pre_gate_funnel_rows(
@@ -1345,12 +1388,8 @@ def _long_pre_gate_funnel_rows(
             symbol = str(row["symbol"]).upper()
             signal_close = _safe_float(row.get("close"))
             live_price = _safe_float(price_by_symbol.get(symbol))
-            first_check_ts_ms = signal_ts_ms + exact_duration_ms(
-                hours=max(1, strategy.entry_delay_hours)
-            )
-            deadline_ts_ms = signal_ts_ms + exact_duration_ms(
-                hours=strategy.fc_sniper_deadline_hours
-            )
+            first_check_ts_ms = signal_ts_ms + exact_duration_ms(hours=max(1, strategy.entry_delay_hours))
+            deadline_ts_ms = signal_ts_ms + exact_duration_ms(hours=strategy.fc_sniper_deadline_hours)
             anchor_ready: bool | None
             entry_ts_ms: int | None = None
             if live_price is None or live_price <= 0.0 or signal_close is None or signal_close <= 0.0:
@@ -1366,12 +1405,24 @@ def _long_pre_gate_funnel_rows(
             close_loc_3d = _safe_float(row.get("close_loc_3d"))
             close_loc_7d = _safe_float(row.get("close_loc_7d"))
             active_close_location = (
-                (bool(pump["trigger_1d"]) and close_location is not None and close_location >= strategy.fc_min_close_location)
-                or (bool(pump["trigger_3d"]) and close_loc_3d is not None and close_loc_3d >= strategy.fc_close_loc_multi_day)
-                or (bool(pump["trigger_7d"]) and close_loc_7d is not None and close_loc_7d >= strategy.fc_close_loc_multi_day)
+                (
+                    bool(pump["trigger_1d"])
+                    and close_location is not None
+                    and close_location >= strategy.fc_min_close_location
+                )
+                or (
+                    bool(pump["trigger_3d"])
+                    and close_loc_3d is not None
+                    and close_loc_3d >= strategy.fc_close_loc_multi_day
+                )
+                or (
+                    bool(pump["trigger_7d"])
+                    and close_loc_7d is not None
+                    and close_loc_7d >= strategy.fc_close_loc_multi_day
+                )
             )
             atr_pct = _safe_float(row.get("atr_14d_pct"))
-            active_pattern, _stop, _target, _hold = _classify_entry(row, strategy)
+            active_pattern, _stop, _hold = _classify_entry(row, strategy)
             history_days = int(row.get("symbol_age_days") or 0)
             turnover_median = row.get("turnover_median_90d")
             turnover_value = _safe_float(turnover_median)
@@ -1395,9 +1446,7 @@ def _long_pre_gate_funnel_rows(
                 "active_reference_accepted": active_pattern == "fomo_chase",
                 "gate_pit_tradable": "not_applicable",
                 "gate_history_floor": gate_state(history_days >= 90 and turnover_value is not None),
-                "gate_liquidity_floor": gate_state(
-                    None if turnover_value is None else turnover_value >= 500_000.0
-                ),
+                "gate_liquidity_floor": gate_state(None if turnover_value is None else turnover_value >= 500_000.0),
                 "gate_pump_trigger": "pass",
                 "gate_entry_anchor": gate_state(anchor_ready),
                 "gate_signal_freshness": gate_state((now_ms - signal_ts_ms) <= SIGNAL_FRESHNESS_MS),
@@ -1410,9 +1459,7 @@ def _long_pre_gate_funnel_rows(
                     else 0.0 < float(row["today_volume_rank"]) <= strategy.fc_top_volume_rank_max
                 ),
                 "gate_active_close_location": gate_state(active_close_location),
-                "gate_active_atr": gate_state(
-                    None if atr_pct is None else 0.0 < atr_pct <= strategy.fc_max_atr_pct
-                ),
+                "gate_active_atr": gate_state(None if atr_pct is None else 0.0 < atr_pct <= strategy.fc_max_atr_pct),
                 "gate_existing_exposure": gate_state(symbol not in open_symbols),
                 "gate_cooldown": gate_state(cooldown_until.get(symbol, 0) <= now_ms),
                 "gate_capacity": "not_applicable",
@@ -1443,23 +1490,22 @@ def _plan_time_stop_exits(
     *,
     now_ms: int,
     price_by_symbol: dict[str, float] | None = None,
+    effective_config: StrategyConfig,
+    venue_holdings: Mapping[str, tuple[str, float, float]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return filled LONG components whose time-stop or decayed-stop is due.
 
     The producer publishes a zero component target. Working-order suppression,
     retries, and venue mutation belong to the account owner.
 
-    The decayed stop is the v12 contract each entry target froze in its own
-    metadata (``stop_decay_after_ms`` + ``decayed_stop_loss_pct``): once the
-    fill is that old, plan an exit whenever the live price is at or below
-    ``entry_price * (1 - decayed_stop_loss_pct)``. Trades without the contract
-    (v11a) are never decay-checked, and the published venue-native stop stays
-    armed either way — a missing live price or fill anchor just defers the
-    check to a later cycle with that wider stop still in place.
+    The shared reducer can report the opening stop or the narrower v12 stop.
+    Both use the current venue average when it is available. The v12 deadline
+    and decayed distance appear only on an actual decayed-stop plan.
     """
     open_long = _open_long_trades(all_trades)
     if open_long.is_empty():
         return []
+    contract_config = effective_config
     prices = price_by_symbol or {}
     plans: list[dict[str, Any]] = []
     for trade in open_long.to_dicts():
@@ -1470,7 +1516,41 @@ def _plan_time_stop_exits(
         if _float(qty) <= 0.0:
             continue
         deadline = int(trade.get("max_hold_deadline_ts_ms") or 0)
-        if deadline > 0 and now_ms >= deadline:
+        decay_after_ms = int(_float(trade.get("stop_decay_after_ms")))
+        decayed_stop_loss_pct = _float(trade.get("decayed_stop_loss_pct"))
+        entry_ts_ms = int(_float(trade.get("entry_ts_ms")))
+        entry_price = _float(trade.get("entry_price"))
+        venue_position = None if venue_holdings is None else venue_holdings.get(symbol)
+        if (
+            venue_position is not None
+            and venue_position[0] == "long"
+            and venue_position[1] > 0.0
+            and venue_position[2] > 0.0
+        ):
+            entry_price = venue_position[2]
+        decision = decide(
+            DecisionInput(
+                decision_ts_ms=now_ms,
+                symbol=symbol,
+                signal_ts_ms=int(_float(trade.get("signal_ts_ms"))),
+                market_price=prices.get(symbol),
+            ),
+            PriorState(
+                requested=True,
+                filled=True,
+                entry_ts_ms=entry_ts_ms,
+                entry_price=entry_price,
+                target_notional_usdt=_float(trade.get("notional_usdt")),
+                stop_loss_fraction=_float(trade.get("stop_loss_pct")),
+                stop_decay_after_ms=decay_after_ms,
+                decayed_stop_loss_fraction=decayed_stop_loss_pct,
+                max_hold_deadline_ts_ms=deadline,
+            ),
+            contract_config,
+        )
+        if decision.action is not DecisionAction.EXIT:
+            continue
+        if decision.reason == "time_stop":
             plans.append(
                 {
                     "trade_id": str(trade["trade_id"]),
@@ -1482,37 +1562,27 @@ def _plan_time_stop_exits(
                 }
             )
             continue
-        decay_after_ms = int(_float(trade.get("stop_decay_after_ms")))
-        decayed_stop_loss_pct = _float(trade.get("decayed_stop_loss_pct"))
-        if decay_after_ms <= 0 or not 0.0 < decayed_stop_loss_pct < 1.0:
-            continue
-        entry_ts_ms = int(_float(trade.get("entry_ts_ms")))
-        entry_price = _float(trade.get("entry_price"))
-        if entry_ts_ms <= 0 or entry_price <= 0.0:
-            # No attributable entry fill yet: the decay clock has not started.
-            continue
-        decay_deadline_ts_ms = entry_ts_ms + decay_after_ms
-        if now_ms < decay_deadline_ts_ms:
-            continue
         live_price = _float(prices.get(symbol))
-        if live_price <= 0.0:
-            continue
-        decayed_stop_price = entry_price * (1.0 - decayed_stop_loss_pct)
-        if live_price > decayed_stop_price:
-            continue
-        plans.append(
-            {
-                "trade_id": str(trade["trade_id"]),
-                "symbol": symbol,
-                "side": "long",
-                "qty": qty,
-                "exit_reason": "decayed_stop_loss",
-                "decayed_stop_price": decayed_stop_price,
-                "decayed_stop_loss_pct": decayed_stop_loss_pct,
-                "stop_decay_deadline_ts_ms": decay_deadline_ts_ms,
-                "decision_reference_price": live_price,
-            }
-        )
+        stop_plan: dict[str, Any] = {
+            "trade_id": str(trade["trade_id"]),
+            "symbol": symbol,
+            "side": "long",
+            "qty": qty,
+            "exit_reason": decision.reason,
+            "stop_anchor_price": entry_price,
+            "stop_price": entry_price * (1.0 - decision.stop_loss_fraction),
+            "stop_loss_pct": decision.stop_loss_fraction,
+            "decision_reference_price": live_price,
+        }
+        if decision.reason == "decayed_stop_loss":
+            stop_plan.update(
+                {
+                    "decayed_stop_price": stop_plan["stop_price"],
+                    "decayed_stop_loss_pct": decision.stop_loss_fraction,
+                    "stop_decay_deadline_ts_ms": entry_ts_ms + decay_after_ms,
+                }
+            )
+        plans.append(stop_plan)
     return plans
 
 
@@ -1541,12 +1611,7 @@ def _next_time_deadline_ts_ms(all_trades: pl.DataFrame, *, now_ms: int) -> int |
         decayed_stop_loss_pct = _float(trade.get("decayed_stop_loss_pct"))
         entry_ts_ms = int(_float(trade.get("entry_ts_ms")))
         entry_price = _float(trade.get("entry_price"))
-        if (
-            decay_after_ms > 0
-            and 0.0 < decayed_stop_loss_pct < 1.0
-            and entry_ts_ms > 0
-            and entry_price > 0.0
-        ):
+        if decay_after_ms > 0 and 0.0 < decayed_stop_loss_pct < 1.0 and entry_ts_ms > 0 and entry_price > 0.0:
             decay_deadline_ts_ms = entry_ts_ms + decay_after_ms
             if decay_deadline_ts_ms > now_ms:
                 deadlines.append(decay_deadline_ts_ms)
@@ -1594,9 +1659,7 @@ def _long_price_wake_levels(
             or now_ms < entry_ts_ms + decay_after_ms
         ):
             continue
-        levels.append(
-            {"symbol": symbol, "at_or_below": entry_price * (1.0 - decayed_stop_loss_pct)}
-        )
+        levels.append({"symbol": symbol, "at_or_below": entry_price * (1.0 - decayed_stop_loss_pct)})
     return levels
 
 
@@ -1605,9 +1668,6 @@ def _advance_long_book_state(
     *,
     exit_plans: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
-    demo: LongNativeDemoCycleConfig,
-    equity_usdt: float,
-    order_notional_pct_equity: float,
     price_by_symbol: dict[str, float],
     strategy_id: str,
     now_ms: int,
@@ -1633,11 +1693,7 @@ def _advance_long_book_state(
     something nothing in Python knows about.
     """
 
-    exited = {
-        str(plan.get("symbol") or "").upper()
-        for plan in exit_plans
-        if str(plan.get("symbol") or "")
-    }
+    exited = {str(plan.get("symbol") or "").upper() for plan in exit_plans if str(plan.get("symbol") or "")}
     # A name the engine confirmed as held and then stopped reporting was closed
     # by something this producer did not ask for: a venue stop firing, a
     # liquidation, a hand close. It leaves the record and starts its cooldown,
@@ -1649,9 +1705,7 @@ def _advance_long_book_state(
     closed_elsewhere: set[str] = set()
     if held_symbols is not None:
         closed_elsewhere = {
-            symbol
-            for symbol, entry in state.held.items()
-            if entry.seen_held and symbol not in held_symbols
+            symbol for symbol, entry in state.held.items() if entry.seen_held and symbol not in held_symbols
         }
         for symbol in sorted(closed_elsewhere):
             _LOGGER.warning(
@@ -1682,8 +1736,7 @@ def _advance_long_book_state(
             venue = None if venue_holdings is None else venue_holdings.get(symbol)
             if venue is None or venue[0] != "long" or venue[1] <= 0.0:
                 _LOGGER.warning(
-                    "long book: %s appeared held without an attributable long position; "
-                    "the fill clock stays stopped",
+                    "long book: %s appeared held without an attributable long position; the fill clock stays stopped",
                     symbol,
                 )
             else:
@@ -1739,21 +1792,15 @@ def _advance_long_book_state(
                 candidate.get("stop_loss_pct"),
             )
             continue
-        notional = (
-            equity_usdt
-            * demo.wallet_balance_fraction
-            * order_notional_pct_equity
-            * _float(candidate.get("position_weight") or 1.0)
-        )
-        if notional <= 0.0:
-            continue
-        max_hold_days = _float(candidate.get("max_hold_days") or 3.0)
-        max_hold_duration_ms = exact_duration_ms(days=max_hold_days)
-        entry_valid_until_ms = min(
-            now_ms + LONG_BOOK_VALIDITY_MS,
-            signal_ts_ms + SIGNAL_FRESHNESS_MS,
-        )
-        if max_hold_duration_ms <= 0 or entry_valid_until_ms <= now_ms:
+        notional = _float(candidate.get("target_notional_usdt"))
+        leverage = _float(candidate.get("entry_leverage"))
+        max_hold_duration_ms = int(_float(candidate.get("max_hold_duration_ms")))
+        entry_valid_until_ms = int(_float(candidate.get("entry_valid_until_ms")))
+        if notional <= 0.0 or leverage <= 0.0 or max_hold_duration_ms <= 0 or entry_valid_until_ms <= now_ms:
+            _LOGGER.warning(
+                "long book: %s has an incomplete reducer entry plan; it is not entered",
+                symbol,
+            )
             attempted_signals_ms[symbol] = signal_ts_ms
             continue
         held[symbol] = LongBookEntry(
@@ -1762,7 +1809,7 @@ def _advance_long_book_state(
             strategy_id=strategy_id,
             notional_usdt=notional,
             stop_loss_fraction=stop_loss_fraction,
-            leverage=float(demo.entry_leverage),
+            leverage=leverage,
             entered_ts_ms=0,
             entry_price=price,
             max_hold_deadline_ts_ms=0,
@@ -1783,14 +1830,10 @@ def _advance_long_book_state(
     # A name out of cooldown no longer changes any decision, and keeping every
     # symbol ever traded would grow this file without end.
     horizon_ms = now_ms - exact_duration_ms(days=max(cooldown_days, 0)) - _COOLDOWN_KEEP_MS
-    left_at_ms = {
-        symbol: when for symbol, when in left_at_ms.items() if when >= horizon_ms
-    }
+    left_at_ms = {symbol: when for symbol, when in left_at_ms.items() if when >= horizon_ms}
     attempt_horizon_ms = now_ms - 2 * SIGNAL_FRESHNESS_MS
     attempted_signals_ms = {
-        symbol: stamp
-        for symbol, stamp in attempted_signals_ms.items()
-        if stamp >= attempt_horizon_ms
+        symbol: stamp for symbol, stamp in attempted_signals_ms.items() if stamp >= attempt_horizon_ms
     }
     return LongBookState(
         held=held,
@@ -1832,6 +1875,7 @@ def _reconcile_entry_with_venue(
     previous_entry_px = entry.venue_avg_entry_px
     updated = replace(
         entry,
+        entry_price=(venue_entry_px if side == "long" and venue_entry_px > 0.0 else entry.entry_price),
         venue_qty=qty,
         venue_avg_entry_px=venue_entry_px,
         venue_ts_ms=now_ms,
@@ -1839,11 +1883,7 @@ def _reconcile_entry_with_venue(
     if previous_qty <= 0.0:
         # First sighting: record it, say nothing unless the stop has already
         # walked away from the price the ask was decided against.
-        if (
-            venue_entry_px > 0.0
-            and entry.entry_price > 0.0
-            and venue_entry_px < entry.entry_price * 0.99
-        ):
+        if venue_entry_px > 0.0 and entry.entry_price > 0.0 and venue_entry_px < entry.entry_price * 0.99:
             _LOGGER.warning(
                 "long book: %s holds %.10g at an average entry of %.10g against a "
                 "decision price of %.10g; the venue stop sits below that average",
@@ -1873,8 +1913,7 @@ def _reconcile_entry_with_venue(
         and abs(venue_entry_px - previous_entry_px) > 0.01 * previous_entry_px
     ):
         _LOGGER.warning(
-            "long book: %s average entry moved %.10g -> %.10g; the venue stop "
-            "re-anchored with it",
+            "long book: %s average entry moved %.10g -> %.10g; the venue stop re-anchored with it",
             entry.symbol,
             previous_entry_px,
             venue_entry_px,
@@ -1893,13 +1932,18 @@ def _long_stop_fraction_now(entry: LongBookEntry, *, now_ms: int) -> float:
     process polls and takes to the grave with it.
     """
 
-    if entry.stop_decay_after_ms <= 0 or not 0.0 < entry.decayed_stop_loss_pct < 1.0:
-        return entry.stop_loss_fraction
-    if entry.entered_ts_ms <= 0 or now_ms < entry.entered_ts_ms + entry.stop_decay_after_ms:
-        return entry.stop_loss_fraction
-    # Never wider than what it opened behind: the decay contract only tightens,
-    # and the engine refuses a loosening stop anyway.
-    return min(entry.stop_loss_fraction, entry.decayed_stop_loss_pct)
+    return current_stop_loss_fraction(
+        PriorState(
+            requested=True,
+            filled=entry.seen_held or entry.entered_ts_ms > 0,
+            entry_ts_ms=entry.entered_ts_ms,
+            entry_price=entry.entry_price,
+            stop_loss_fraction=entry.stop_loss_fraction,
+            stop_decay_after_ms=entry.stop_decay_after_ms,
+            decayed_stop_loss_fraction=entry.decayed_stop_loss_pct,
+        ),
+        now_ms=now_ms,
+    )
 
 
 def _long_engine_target_book(
@@ -1907,29 +1951,34 @@ def _long_engine_target_book(
     *,
     decision_ts_ms: int,
     strategy_profile: str,
+    effective_config: StrategyConfig,
 ) -> str:
     """Render what this producer is asking the engine to hold.
 
     Absolute, so a name that has left the record is simply absent, and the
     engine reads that as "hold none of it" without a special case.
 
-    The validity window is an hour. It has to clear the engine's own
-    fifteen-minute entry cutoff or the book would open nothing at all, and the
-    rest of it is how long a producer that has died should go on opening
-    positions -- an hour, not LONG's twenty-four-hour signal life. Exits keep
-    working past expiry either way.
+    The effective contract supplies the validity window. Its standard hour
+    clears the engine's fifteen-minute entry cutoff while limiting how long a
+    dead producer can keep opening positions. Exits keep working past expiry.
     """
 
     return render_target_book(
         source=strategy_profile,
         decision_ts_ms=decision_ts_ms,
-        valid_until_ms=decision_ts_ms + LONG_BOOK_VALIDITY_MS,
+        valid_until_ms=decision_ts_ms + effective_config.book_validity_ms,
         targets=[
             EngineTarget(
                 symbol=entry.symbol,
                 notional_usdt=entry.notional_usdt,
                 stop_loss_fraction=_long_stop_fraction_now(entry, now_ms=decision_ts_ms),
                 leverage=entry.leverage,
+                # A refreshed absolute book must not silently grant an
+                # unfilled signal another entry window.  Once filled, growth
+                # resizes return to the book-wide cutoff.
+                entry_valid_until_ms=(
+                    None if entry.seen_held or entry.entered_ts_ms > 0 else entry.entry_valid_until_ms
+                ),
             )
             for entry in sorted(state.held.values(), key=lambda e: e.symbol)
         ],

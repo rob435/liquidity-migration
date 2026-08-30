@@ -203,6 +203,14 @@ pub enum Action {
     RecordQuoteFill {
         features: QuoteFillFeatures,
     },
+    /// Make a target-book follower's "went flat under us" latch durable.
+    /// This changes no venue state. The strategy id is overwritten by the
+    /// engine context, just like an intent's owner.
+    SetTargetBookLatch {
+        strategy: StrategyId,
+        symbol: SymbolId,
+        latched: bool,
+    },
 }
 
 impl Action {
@@ -217,6 +225,7 @@ impl Action {
             // Only ever accepted when it tightens, so it can only cut risk.
             Action::SetStop { .. } => true,
             Action::RecordQuoteFill { .. } => true,
+            Action::SetTargetBookLatch { .. } => true,
         }
     }
 
@@ -225,7 +234,8 @@ impl Action {
             Action::Place(intent) => intent.symbol,
             Action::Cancel { symbol, .. }
             | Action::Amend { symbol, .. }
-            | Action::SetStop { symbol, .. } => *symbol,
+            | Action::SetStop { symbol, .. }
+            | Action::SetTargetBookLatch { symbol, .. } => *symbol,
             Action::RecordQuoteFill { features } => features.symbol,
         }
     }

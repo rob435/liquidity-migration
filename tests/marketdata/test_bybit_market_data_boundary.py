@@ -23,9 +23,7 @@ PUBLIC_PROCESS_MODULES = (
     "liquidity_migration.strategy.long_native_event_demo",
     "liquidity_migration.strategy.long_native_event_demo_daemon",
 )
-NEUTRAL_POLICY_MODULES = (
-    "liquidity_migration.policy.operational_profile",
-)
+NEUTRAL_CONFIG_MODULES = ("liquidity_migration.core.operational_profile",)
 
 
 def _tree(path: Path) -> ast.Module:
@@ -100,7 +98,7 @@ def test_public_and_target_modules_do_not_transitively_load_private_execution(mo
     assert proc.returncode == 0, f"{module}: {proc.stderr or proc.stdout}"
 
 
-@pytest.mark.parametrize("module", NEUTRAL_POLICY_MODULES)
+@pytest.mark.parametrize("module", NEUTRAL_CONFIG_MODULES)
 def test_shared_policy_does_not_load_private_execution(module: str) -> None:
     forbidden = (
         "liquidity_migration.venue.bybit",
@@ -153,5 +151,3 @@ def test_python_private_account_rest_surface_is_absent() -> None:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
         }
         assert forbidden.isdisjoint(defined_names | called_attributes), path.relative_to(REPO)
-
-

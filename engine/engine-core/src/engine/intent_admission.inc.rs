@@ -314,8 +314,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
 
-        // Appended before reservation. The caller forces every accepted
-        // sibling to disk together before any request leaves the process.
+        // Appended before reservation and venue dispatch. The caller starts
+        // one disk barrier covering every accepted sibling, then lets that
+        // barrier race the group send.
         let sent_record = WalRecord::OrderSent {
             request: request.clone(),
             wire_ns: clock::now_ns(),
@@ -463,12 +464,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(false);
         }
 
-        // The bytes go to the operating system here, and the disk barrier
-        // runs beside the send rather than in front of it. What waits for the
-        // disk is `settle_barrier`, called before any order news is acted on:
-        // a fill cannot reach us until the venue has had a round trip, which
-        // is longer than the barrier, and no fill is ever *processed* before
-        // the order that earned it is durable.
+        // Settle the preceding placement group before opening this one. The
+        // current records are already in the operating system's cache; their
+        // disk barrier starts below and races the venue dispatch. Private
+        // order updates settle it before they advance engine state.
         //
         // What this gives up, stated plainly: a machine that dies inside the
         // barrier can leave an order at the venue that the log does not name.

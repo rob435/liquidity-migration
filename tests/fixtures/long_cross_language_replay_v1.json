@@ -1,0 +1,486 @@
+{
+  "expected_decision_output": {
+    "action": "enter",
+    "decayed_stop_loss_fraction": 0.07500000000000001,
+    "decision_ts_ms": 4070908800000,
+    "entry_leverage": 5.0,
+    "entry_reason": "sniper_retrace",
+    "entry_valid_until_ms": 4070912400000,
+    "max_hold_duration_ms": 259200000,
+    "position_weight": 0.3,
+    "reason": "sniper_retrace",
+    "schema_version": 1,
+    "signal_ts_ms": 4070905200000,
+    "stop_decay_after_ms": 172800000,
+    "stop_loss_fraction": 0.15000000000000002,
+    "symbol": "BTCUSDT",
+    "target_fraction_of_equity": 0.18000000000000002,
+    "target_notional_usdt": 1800.0000000000002,
+    "wake_at_or_below": null
+  },
+  "expected_live_state": {
+    "attempted_signals_ms": {
+      "BTCUSDT": 4070905200000
+    },
+    "held": [
+      {
+        "atr_14d_pct": 0.05,
+        "decayed_stop_loss_pct": 0.07500000000000001,
+        "entered_ts_ms": 0,
+        "entry_price": 30000.0,
+        "entry_reason": "sniper_retrace",
+        "entry_valid_until_ms": 4070912400000,
+        "leverage": 5.0,
+        "max_hold_deadline_ts_ms": 0,
+        "max_hold_duration_ms": 259200000,
+        "notional_usdt": 1800.0000000000002,
+        "pattern": "fomo_chase",
+        "requested_ts_ms": 4070908800000,
+        "seen_held": false,
+        "signal_ts_ms": 4070905200000,
+        "stop_decay_after_ms": 172800000,
+        "stop_loss_fraction": 0.15000000000000002,
+        "strategy_id": "long_native_v12_wide_stop",
+        "symbol": "BTCUSDT",
+        "trade_id": "long-BTCUSDT-4070905200000",
+        "venue_avg_entry_px": 0.0,
+        "venue_qty": 0.0,
+        "venue_ts_ms": 0
+      }
+    ],
+    "left_at_ms": {},
+    "version": 2
+  },
+  "name": "long_mainnet_recorded_replay_v1",
+  "python_decision_cases": [
+    {
+      "expected_decision_output": {
+        "action": "hold",
+        "decayed_stop_loss_fraction": 0.07500000000000001,
+        "decision_ts_ms": 4070910000000,
+        "entry_leverage": 5.0,
+        "entry_reason": "",
+        "entry_valid_until_ms": 4070912400000,
+        "max_hold_duration_ms": 0,
+        "position_weight": 0.0,
+        "reason": "entry_pending",
+        "schema_version": 1,
+        "signal_ts_ms": 4070905200000,
+        "stop_decay_after_ms": 172800000,
+        "stop_loss_fraction": 0.15000000000000002,
+        "symbol": "BTCUSDT",
+        "target_fraction_of_equity": 0.0,
+        "target_notional_usdt": 1800.0000000000002,
+        "wake_at_or_below": null
+      },
+      "name": "pending_entry_holds_original_target"
+    },
+    {
+      "expected_decision_output": {
+        "action": "exit",
+        "decayed_stop_loss_fraction": 0.0,
+        "decision_ts_ms": 4070995200000,
+        "entry_leverage": 0.0,
+        "entry_reason": "",
+        "entry_valid_until_ms": 0,
+        "max_hold_duration_ms": 0,
+        "position_weight": 0.0,
+        "reason": "stop_loss",
+        "schema_version": 1,
+        "signal_ts_ms": 4070905200000,
+        "stop_decay_after_ms": 0,
+        "stop_loss_fraction": 0.15000000000000002,
+        "symbol": "BTCUSDT",
+        "target_fraction_of_equity": 0.0,
+        "target_notional_usdt": 0.0,
+        "wake_at_or_below": null
+      },
+      "name": "base_stop_exits_before_decay"
+    },
+    {
+      "expected_decision_output": {
+        "action": "exit",
+        "decayed_stop_loss_fraction": 0.0,
+        "decision_ts_ms": 4071081600000,
+        "entry_leverage": 0.0,
+        "entry_reason": "",
+        "entry_valid_until_ms": 0,
+        "max_hold_duration_ms": 0,
+        "position_weight": 0.0,
+        "reason": "decayed_stop_loss",
+        "schema_version": 1,
+        "signal_ts_ms": 4070905200000,
+        "stop_decay_after_ms": 0,
+        "stop_loss_fraction": 0.07500000000000001,
+        "symbol": "BTCUSDT",
+        "target_fraction_of_equity": 0.0,
+        "target_notional_usdt": 0.0,
+        "wake_at_or_below": null
+      },
+      "name": "decayed_stop_exits_after_fill_clock"
+    },
+    {
+      "expected_decision_output": {
+        "action": "exit",
+        "decayed_stop_loss_fraction": 0.0,
+        "decision_ts_ms": 4071168000000,
+        "entry_leverage": 0.0,
+        "entry_reason": "",
+        "entry_valid_until_ms": 0,
+        "max_hold_duration_ms": 0,
+        "position_weight": 0.0,
+        "reason": "time_stop",
+        "schema_version": 1,
+        "signal_ts_ms": 4070905200000,
+        "stop_decay_after_ms": 0,
+        "stop_loss_fraction": 0.0,
+        "symbol": "BTCUSDT",
+        "target_fraction_of_equity": 0.0,
+        "target_notional_usdt": 0.0,
+        "wake_at_or_below": null
+      },
+      "name": "time_exit_wins_at_fill_deadline"
+    }
+  ],
+  "rust_replay": {
+    "expected_planner_events": [
+      {
+        "kind": "enter",
+        "qty": 0.06,
+        "side": "buy",
+        "stop_px": 25500.0,
+        "symbol": "BTCUSDT"
+      }
+    ],
+    "expected_risk_events": [
+      {
+        "intent": {
+          "leverage": 5.0,
+          "order_kind": {
+            "kind": "market"
+          },
+          "qty": 0.06,
+          "reduce_only": false,
+          "side": "buy",
+          "stop_px": 25500.0,
+          "strategy_id": 0,
+          "symbol_id": 0,
+          "tag": "book-enter",
+          "work": null
+        },
+        "kind": "assess"
+      },
+      {
+        "client_order_id": "$order_1",
+        "kind": "result",
+        "verdict": {
+          "kind": "allow",
+          "qty": 0.06
+        }
+      }
+    ],
+    "expected_wal_events": [
+      {
+        "intent": {
+          "leverage": 5.0,
+          "order_kind": {
+            "kind": "market"
+          },
+          "qty": 0.06,
+          "reduce_only": false,
+          "side": "buy",
+          "stop_px": 25500.0,
+          "strategy_id": 0,
+          "symbol_id": 0,
+          "tag": "book-enter",
+          "work": null
+        },
+        "kind": "intent"
+      },
+      {
+        "client_order_id": "$order_1",
+        "kind": "verdict",
+        "verdict": {
+          "kind": "allow",
+          "qty": 0.06
+        }
+      },
+      {
+        "arrival_mid": 30000.0,
+        "client_order_id": "$order_1",
+        "close_position": false,
+        "kind": "order_sent",
+        "order_kind": {
+          "kind": "market"
+        },
+        "qty": 0.06,
+        "reduce_only": false,
+        "side": "buy",
+        "stop_px": 25500.0,
+        "strategy_id": 0,
+        "symbol_id": 0
+      }
+    ]
+  },
+  "schema_version": 1,
+  "strategy_config": {
+    "execution": {
+      "book_validity_ms": 3600000,
+      "engine_entry_cutoff_ms": 900000,
+      "entry_floor_usdt": 6.0,
+      "entry_leverage": 5.0,
+      "max_new_entries_per_cycle": 5,
+      "notional_multiplier": 6.0,
+      "order_notional_pct_equity": 0.0,
+      "resize_floor_fraction": 0.05,
+      "resize_floor_usdt": 1.0,
+      "round_trip_cost_bps": 0.0,
+      "signal_freshness_ms": 86400000,
+      "wallet_balance_fraction": 1.0
+    },
+    "profile_name": "v12",
+    "provenance": {
+      "book_validity_ms": {
+        "detail": "",
+        "source": "long_contract_default"
+      },
+      "engine_entry_cutoff_ms": {
+        "detail": "",
+        "source": "engine_plan_rules_fleet"
+      },
+      "entry_floor_usdt": {
+        "detail": "",
+        "source": "engine_plan_rules_fleet"
+      },
+      "entry_leverage": {
+        "detail": "configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81",
+        "source": "operational_profile"
+      },
+      "max_new_entries_per_cycle": {
+        "detail": "configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81",
+        "source": "operational_profile"
+      },
+      "notional_multiplier": {
+        "detail": "configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81",
+        "source": "operational_profile"
+      },
+      "order_notional_pct_equity": {
+        "detail": "configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81",
+        "source": "operational_profile"
+      },
+      "resize_floor_fraction": {
+        "detail": "",
+        "source": "engine_plan_rules_fleet"
+      },
+      "resize_floor_usdt": {
+        "detail": "",
+        "source": "engine_plan_rules_fleet"
+      },
+      "round_trip_cost_bps": {
+        "detail": "",
+        "source": "long_contract_default"
+      },
+      "rule.cooldown_days": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.cost_multiplier": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.end_date": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.entry_delay_hours": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.exclude_symbols": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.execution_strategy_id": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_atr_stop_mult": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_close_loc_multi_day": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_max_atr_pct": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_max_hold_days": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_min_close_location": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_min_day_return": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_sigma_mult": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_sniper_deadline_hours": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_sniper_retrace_pct": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_stop_time_decay_atr_mult": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_stop_time_decay_hours": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.fc_top_volume_rank_max": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.gross_exposure": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.max_concurrent_positions": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.max_position_weight": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.min_listing_history_days": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.regime_sma_days": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.regime_symbol": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.start_date": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.universe_size": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.universe_volume_window_days": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.vol_estimate_window_days": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.vol_floor_annual": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.vol_target_annual": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.vol_target_max_scale": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.vol_target_min_scale": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "rule.weekend_size_mult": {
+        "detail": "",
+        "source": "registered_profile:v12"
+      },
+      "signal_freshness_ms": {
+        "detail": "",
+        "source": "long_contract_default"
+      },
+      "wallet_balance_fraction": {
+        "detail": "",
+        "source": "long_contract_default"
+      }
+    },
+    "rule": {
+      "cooldown_days": 7,
+      "cost_multiplier": 3.0,
+      "end_date": "",
+      "entry_delay_hours": 1,
+      "exclude_symbols": [
+        "BUSDUSDT",
+        "DAIUSDT",
+        "FDUSDUSDT",
+        "FRAXUSDT",
+        "GUSDUSDT",
+        "LUSDUSDT",
+        "PYUSDUSDT",
+        "SUSDUSDT",
+        "TUSDUSDT",
+        "USD1USDT",
+        "USDCUSDT",
+        "USDDUSDT",
+        "USDEUSDT",
+        "USDPUSDT",
+        "USTCUSDT",
+        "USDYUSDT"
+      ],
+      "execution_strategy_id": "long_native_v12_wide_stop",
+      "fc_atr_stop_mult": 3.0,
+      "fc_close_loc_multi_day": 0.6,
+      "fc_max_atr_pct": 0.12,
+      "fc_max_hold_days": 3,
+      "fc_min_close_location": 0.7,
+      "fc_min_day_return": 0.15,
+      "fc_sigma_mult": 2.5,
+      "fc_sniper_deadline_hours": 6,
+      "fc_sniper_retrace_pct": 0.01,
+      "fc_stop_time_decay_atr_mult": 1.5,
+      "fc_stop_time_decay_hours": 48,
+      "fc_top_volume_rank_max": 10,
+      "gross_exposure": 1.0,
+      "max_concurrent_positions": 10,
+      "max_position_weight": 0.3,
+      "min_listing_history_days": 30,
+      "regime_sma_days": 30,
+      "regime_symbol": "BTCUSDT",
+      "start_date": "",
+      "universe_size": 50,
+      "universe_volume_window_days": 90,
+      "vol_estimate_window_days": 30,
+      "vol_floor_annual": 0.3,
+      "vol_target_annual": 0.6,
+      "vol_target_max_scale": 1.25,
+      "vol_target_min_scale": 0.3,
+      "weekend_size_mult": 1.5
+    },
+    "schema_version": 1
+  },
+  "strategy_event_tape": {
+    "event_count": 5,
+    "final_tape_hash": "03100460c7461afd07873f73d2f68d22c86c753ceef33b268fc6f67b21268541",
+    "sha256": "a26dc69ecb48a31f0bc55baee9c087e43e895cd02e263cd354aed48380193125",
+    "utf8": "{\"event\":{\"event_id\":\"strategy-event-0b679562a176382a93de61f8235c610ace035837ffce0284a2fda39c9f53a11b\",\"event_ts_ns\":4070908800000000000,\"ingest_ts_ns\":4070908800020000000,\"kind\":\"confirmed_bar\",\"payload\":{\"execution_environment\":\"mainnet\",\"replay_envelope\":{\"account\":{\"available_usdt\":9000.0,\"equity_usdt\":10000.0,\"observed_ts_ns\":4070908800000000000,\"positions\":[]},\"case_name\":\"flat_entry\",\"decision_input\":{\"decision_ts_ms\":4070908800000,\"equity_usdt\":10000.0,\"feature_row\":{\"atr_14d_pct\":0.05,\"btc_rv_30\":0.6,\"close\":30400.0,\"close_loc_3d\":0.7,\"close_loc_7d\":0.7,\"close_location\":0.85,\"eth_regime_on\":true,\"in_universe\":true,\"log_return\":0.1823215567939546,\"pump_3d_log\":0.1,\"pump_7d_log\":0.2,\"realized_vol\":1.0,\"regime_on\":true,\"sigma_daily_30d\":0.05,\"symbol\":\"BTCUSDT\",\"today_volume_rank\":1,\"ts_ms\":4070905200000},\"market_price\":30000.0,\"observed_low\":null,\"schema_version\":1,\"signal_close\":30400.0,\"signal_ts_ms\":4070905200000,\"symbol\":\"BTCUSDT\"},\"effective_config\":{\"layers\":[{\"detail\":\"configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\",\"source\":\"operational_profile\",\"values\":{\"entry_leverage\":5.0,\"max_new_entries_per_cycle\":5,\"notional_multiplier\":6.0,\"order_notional_pct_equity\":0.0}}],\"operational_profile\":{\"path\":\"configs/operational.mainnet.json\",\"sha256\":\"986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\"},\"profile_name\":\"v12\",\"resolved_config_sha256\":\"0ba6868545cb9fea2d43f1346102fa5aab59806fce8cec65a77bc45c8e6c2d42\"},\"instrument_rule\":{\"min_notional\":5.0,\"min_qty\":0.001,\"qty_step\":0.001,\"tick_size\":0.5},\"prior_state\":{\"active_positions\":0,\"attempted_signal_ts_ms\":0,\"cooldown_until_ms\":0,\"decayed_stop_loss_fraction\":0.0,\"entry_price\":0.0,\"entry_ts_ms\":0,\"entry_valid_until_ms\":0,\"filled\":false,\"max_hold_deadline_ts_ms\":0,\"requested\":false,\"stop_decay_after_ms\":0,\"stop_loss_fraction\":0.0,\"target_notional_usdt\":0.0},\"quote\":{\"ask_px\":30000.5,\"ask_qty\":1.0,\"bid_px\":29999.5,\"bid_qty\":1.0,\"seq\":1,\"symbol\":\"BTCUSDT\",\"venue_ts_ms\":4070908800000},\"schema_version\":1},\"strategy_profile\":\"long_native_v12_wide_stop\"},\"source\":\"long-native-mainnet\",\"source_sequence\":1},\"prior_tape_hash\":\"903aeb9284ba1c47632a147fff36c83d36e3dbfaf1ce7d1b07df6ff093c43f0d\",\"schema_version\":1,\"tape_hash\":\"6cb1baad50ca29f62a9f469999cae71ac61cec435d2c739981930cf854996345\"}\n{\"event\":{\"event_id\":\"strategy-event-d44411afcfe9e4dde64c64265c21445c584c3e4eb5ff7d75d0aa2f06780c98b0\",\"event_ts_ns\":4070910000000000000,\"ingest_ts_ns\":4070910000020000000,\"kind\":\"timer\",\"payload\":{\"execution_environment\":\"mainnet\",\"replay_envelope\":{\"account\":{\"available_usdt\":0.9,\"equity_usdt\":1.0,\"observed_ts_ns\":4070910000000000000,\"positions\":[]},\"case_name\":\"pending_entry_holds_original_target\",\"decision_input\":{\"decision_ts_ms\":4070910000000,\"equity_usdt\":1.0,\"feature_row\":{},\"market_price\":30000.0,\"observed_low\":null,\"schema_version\":1,\"signal_close\":0.0,\"signal_ts_ms\":4070905200000,\"symbol\":\"BTCUSDT\"},\"effective_config\":{\"layers\":[{\"detail\":\"configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\",\"source\":\"operational_profile\",\"values\":{\"entry_leverage\":5.0,\"max_new_entries_per_cycle\":5,\"notional_multiplier\":6.0,\"order_notional_pct_equity\":0.0}}],\"operational_profile\":{\"path\":\"configs/operational.mainnet.json\",\"sha256\":\"986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\"},\"profile_name\":\"v12\",\"resolved_config_sha256\":\"0ba6868545cb9fea2d43f1346102fa5aab59806fce8cec65a77bc45c8e6c2d42\"},\"instrument_rule\":{\"min_notional\":5.0,\"min_qty\":0.001,\"qty_step\":0.001,\"tick_size\":0.5},\"prior_state\":{\"active_positions\":0,\"attempted_signal_ts_ms\":4070905200000,\"cooldown_until_ms\":0,\"decayed_stop_loss_fraction\":0.07500000000000001,\"entry_price\":0.0,\"entry_ts_ms\":0,\"entry_valid_until_ms\":4070912400000,\"filled\":false,\"max_hold_deadline_ts_ms\":0,\"requested\":true,\"stop_decay_after_ms\":172800000,\"stop_loss_fraction\":0.15000000000000002,\"target_notional_usdt\":1800.0000000000002},\"quote\":{\"ask_px\":30000.5,\"ask_qty\":1.0,\"bid_px\":29999.5,\"bid_qty\":1.0,\"seq\":2,\"symbol\":\"BTCUSDT\",\"venue_ts_ms\":4070910000000},\"schema_version\":1},\"strategy_profile\":\"long_native_v12_wide_stop\"},\"source\":\"long-native-mainnet\",\"source_sequence\":2},\"prior_tape_hash\":\"6cb1baad50ca29f62a9f469999cae71ac61cec435d2c739981930cf854996345\",\"schema_version\":1,\"tape_hash\":\"c8615a70c5a96ae3ffaafe7328eb516b953d734c37868eb29bb8c892206ddc48\"}\n{\"event\":{\"event_id\":\"strategy-event-8439ce1cd27a2d04512e51426550c8dbeebb464001ba20716718adae548969a6\",\"event_ts_ns\":4070995200000000000,\"ingest_ts_ns\":4070995200020000000,\"kind\":\"timer\",\"payload\":{\"execution_environment\":\"mainnet\",\"replay_envelope\":{\"account\":{\"available_usdt\":0.9,\"equity_usdt\":1.0,\"observed_ts_ns\":4070995200000000000,\"positions\":[{\"entry_px\":30000.0,\"leverage\":5.0,\"px\":25470.0,\"qty\":0.06,\"side\":\"buy\",\"stop_attached\":true,\"stop_px\":25500.0,\"symbol\":\"BTCUSDT\"}]},\"case_name\":\"base_stop_exits_before_decay\",\"decision_input\":{\"decision_ts_ms\":4070995200000,\"equity_usdt\":1.0,\"feature_row\":{},\"market_price\":25470.0,\"observed_low\":null,\"schema_version\":1,\"signal_close\":0.0,\"signal_ts_ms\":4070905200000,\"symbol\":\"BTCUSDT\"},\"effective_config\":{\"layers\":[{\"detail\":\"configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\",\"source\":\"operational_profile\",\"values\":{\"entry_leverage\":5.0,\"max_new_entries_per_cycle\":5,\"notional_multiplier\":6.0,\"order_notional_pct_equity\":0.0}}],\"operational_profile\":{\"path\":\"configs/operational.mainnet.json\",\"sha256\":\"986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\"},\"profile_name\":\"v12\",\"resolved_config_sha256\":\"0ba6868545cb9fea2d43f1346102fa5aab59806fce8cec65a77bc45c8e6c2d42\"},\"instrument_rule\":{\"min_notional\":5.0,\"min_qty\":0.001,\"qty_step\":0.001,\"tick_size\":0.5},\"prior_state\":{\"active_positions\":0,\"attempted_signal_ts_ms\":4070905200000,\"cooldown_until_ms\":0,\"decayed_stop_loss_fraction\":0.07500000000000001,\"entry_price\":30000.0,\"entry_ts_ms\":4070908800000,\"entry_valid_until_ms\":4070912400000,\"filled\":true,\"max_hold_deadline_ts_ms\":4071168000000,\"requested\":true,\"stop_decay_after_ms\":172800000,\"stop_loss_fraction\":0.15000000000000002,\"target_notional_usdt\":1800.0000000000002},\"quote\":{\"ask_px\":25470.5,\"ask_qty\":1.0,\"bid_px\":25469.5,\"bid_qty\":1.0,\"seq\":3,\"symbol\":\"BTCUSDT\",\"venue_ts_ms\":4070995200000},\"schema_version\":1},\"strategy_profile\":\"long_native_v12_wide_stop\"},\"source\":\"long-native-mainnet\",\"source_sequence\":3},\"prior_tape_hash\":\"c8615a70c5a96ae3ffaafe7328eb516b953d734c37868eb29bb8c892206ddc48\",\"schema_version\":1,\"tape_hash\":\"0f051bc32fb5e11630fceadaa80375322c24edc00908125427d7465d5a568b6f\"}\n{\"event\":{\"event_id\":\"strategy-event-c7f695f6ae8de64902e3738229b302338ca1bdf779d59408d634b97bbc2843ea\",\"event_ts_ns\":4071081600000000000,\"ingest_ts_ns\":4071081600020000000,\"kind\":\"timer\",\"payload\":{\"execution_environment\":\"mainnet\",\"replay_envelope\":{\"account\":{\"available_usdt\":0.9,\"equity_usdt\":1.0,\"observed_ts_ns\":4071081600000000000,\"positions\":[{\"entry_px\":30000.0,\"leverage\":5.0,\"px\":27720.0,\"qty\":0.06,\"side\":\"buy\",\"stop_attached\":true,\"stop_px\":27750.0,\"symbol\":\"BTCUSDT\"}]},\"case_name\":\"decayed_stop_exits_after_fill_clock\",\"decision_input\":{\"decision_ts_ms\":4071081600000,\"equity_usdt\":1.0,\"feature_row\":{},\"market_price\":27720.0,\"observed_low\":null,\"schema_version\":1,\"signal_close\":0.0,\"signal_ts_ms\":4070905200000,\"symbol\":\"BTCUSDT\"},\"effective_config\":{\"layers\":[{\"detail\":\"configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\",\"source\":\"operational_profile\",\"values\":{\"entry_leverage\":5.0,\"max_new_entries_per_cycle\":5,\"notional_multiplier\":6.0,\"order_notional_pct_equity\":0.0}}],\"operational_profile\":{\"path\":\"configs/operational.mainnet.json\",\"sha256\":\"986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\"},\"profile_name\":\"v12\",\"resolved_config_sha256\":\"0ba6868545cb9fea2d43f1346102fa5aab59806fce8cec65a77bc45c8e6c2d42\"},\"instrument_rule\":{\"min_notional\":5.0,\"min_qty\":0.001,\"qty_step\":0.001,\"tick_size\":0.5},\"prior_state\":{\"active_positions\":0,\"attempted_signal_ts_ms\":4070905200000,\"cooldown_until_ms\":0,\"decayed_stop_loss_fraction\":0.07500000000000001,\"entry_price\":30000.0,\"entry_ts_ms\":4070908800000,\"entry_valid_until_ms\":4070912400000,\"filled\":true,\"max_hold_deadline_ts_ms\":4071168000000,\"requested\":true,\"stop_decay_after_ms\":172800000,\"stop_loss_fraction\":0.15000000000000002,\"target_notional_usdt\":1800.0000000000002},\"quote\":{\"ask_px\":27720.5,\"ask_qty\":1.0,\"bid_px\":27719.5,\"bid_qty\":1.0,\"seq\":4,\"symbol\":\"BTCUSDT\",\"venue_ts_ms\":4071081600000},\"schema_version\":1},\"strategy_profile\":\"long_native_v12_wide_stop\"},\"source\":\"long-native-mainnet\",\"source_sequence\":4},\"prior_tape_hash\":\"0f051bc32fb5e11630fceadaa80375322c24edc00908125427d7465d5a568b6f\",\"schema_version\":1,\"tape_hash\":\"c133997ce152ebb9ab09f3db36bc92f8bbcc68db53d8c242fd0b470c615f0f80\"}\n{\"event\":{\"event_id\":\"strategy-event-b88a2e4504cb7ef112a41a5f5bfb5d494599cfdb8fa10028702707cd80e006b4\",\"event_ts_ns\":4071168000000000000,\"ingest_ts_ns\":4071168000020000000,\"kind\":\"timer\",\"payload\":{\"execution_environment\":\"mainnet\",\"replay_envelope\":{\"account\":{\"available_usdt\":0.9,\"equity_usdt\":1.0,\"observed_ts_ns\":4071168000000000000,\"positions\":[{\"entry_px\":30000.0,\"leverage\":5.0,\"px\":30000.0,\"qty\":0.06,\"side\":\"buy\",\"stop_attached\":true,\"stop_px\":27750.0,\"symbol\":\"BTCUSDT\"}]},\"case_name\":\"time_exit_wins_at_fill_deadline\",\"decision_input\":{\"decision_ts_ms\":4071168000000,\"equity_usdt\":1.0,\"feature_row\":{},\"market_price\":30000.0,\"observed_low\":null,\"schema_version\":1,\"signal_close\":0.0,\"signal_ts_ms\":4070905200000,\"symbol\":\"BTCUSDT\"},\"effective_config\":{\"layers\":[{\"detail\":\"configs/operational.mainnet.json#986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\",\"source\":\"operational_profile\",\"values\":{\"entry_leverage\":5.0,\"max_new_entries_per_cycle\":5,\"notional_multiplier\":6.0,\"order_notional_pct_equity\":0.0}}],\"operational_profile\":{\"path\":\"configs/operational.mainnet.json\",\"sha256\":\"986bdc5f1f59c4a24378ea1634d275da5af0cdfdc6b7a4767b3532dd06aeef81\"},\"profile_name\":\"v12\",\"resolved_config_sha256\":\"0ba6868545cb9fea2d43f1346102fa5aab59806fce8cec65a77bc45c8e6c2d42\"},\"instrument_rule\":{\"min_notional\":5.0,\"min_qty\":0.001,\"qty_step\":0.001,\"tick_size\":0.5},\"prior_state\":{\"active_positions\":0,\"attempted_signal_ts_ms\":4070905200000,\"cooldown_until_ms\":0,\"decayed_stop_loss_fraction\":0.07500000000000001,\"entry_price\":30000.0,\"entry_ts_ms\":4070908800000,\"entry_valid_until_ms\":4070912400000,\"filled\":true,\"max_hold_deadline_ts_ms\":4071168000000,\"requested\":true,\"stop_decay_after_ms\":172800000,\"stop_loss_fraction\":0.15000000000000002,\"target_notional_usdt\":1800.0000000000002},\"quote\":{\"ask_px\":30000.5,\"ask_qty\":1.0,\"bid_px\":29999.5,\"bid_qty\":1.0,\"seq\":5,\"symbol\":\"BTCUSDT\",\"venue_ts_ms\":4071168000000},\"schema_version\":1},\"strategy_profile\":\"long_native_v12_wide_stop\"},\"source\":\"long-native-mainnet\",\"source_sequence\":5},\"prior_tape_hash\":\"c133997ce152ebb9ab09f3db36bc92f8bbcc68db53d8c242fd0b470c615f0f80\",\"schema_version\":1,\"tape_hash\":\"03100460c7461afd07873f73d2f68d22c86c753ceef33b268fc6f67b21268541\"}\n"
+  },
+  "target_book_sha256": "962bbee19a48a93f993c062a8d421af141a4a98a04c2b16a2fb090ac47244d1f",
+  "target_book_utf8": "{\n  \"decision_ts_ms\": 4070908800000,\n  \"source\": \"long_native_v12_wide_stop\",\n  \"targets\": [\n    {\n      \"entry_valid_until_ms\": 4070912400000,\n      \"leverage\": 5.0,\n      \"notional_usdt\": 1800.0000000000002,\n      \"stop_loss_fraction\": 0.15000000000000002,\n      \"symbol\": \"BTCUSDT\",\n      \"target_qty\": null\n    }\n  ],\n  \"valid_until_ms\": 4070912400000,\n  \"version\": 2\n}\n"
+}

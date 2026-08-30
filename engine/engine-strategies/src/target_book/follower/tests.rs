@@ -801,6 +801,32 @@ fn a_stop_that_fired_is_not_undone_by_the_next_quote() {
 }
 
 #[test]
+fn latch_edges_are_emitted_for_the_engine_to_make_durable() {
+    let mut h = bench(&["KAITOUSDT"], 10.0);
+    stopped_out(&mut h);
+
+    h.quote("KAITOUSDT", 9.5, 10.5);
+    assert_eq!(
+        h.drain_actions(),
+        [Action::SetTargetBookLatch {
+            strategy: StrategyId(2),
+            symbol: h.ctx.id_of("KAITOUSDT"),
+            latched: true,
+        }]
+    );
+
+    h.targets(book(vec![]));
+    assert_eq!(
+        h.drain_actions(),
+        [Action::SetTargetBookLatch {
+            strategy: StrategyId(2),
+            symbol: h.ctx.id_of("KAITOUSDT"),
+            latched: false,
+        }]
+    );
+}
+
+#[test]
 fn the_same_book_written_again_does_not_clear_the_latch() {
     // The case that matters for a producer on a one-minute clock: if a new
     // book lifted the latch, the loop would just run a minute slower.

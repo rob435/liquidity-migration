@@ -29,18 +29,73 @@ from liquidity_migration.rules.long_identity import (
     LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
     LONG_V12_WIDE_STOP_STRATEGY_ID,
 )
+from liquidity_migration.rules.long_contract import ConfigLayer, resolve_strategy_config
 from liquidity_migration.rules.long_native import long_v11a_profile, long_v12_profile
 from liquidity_migration.strategy.long_native_event_demo import (
     LongNativeDemoCycleConfig,
     _count_long_target_reservations,
     _open_long_trades,
-    _plan_time_stop_exits,
-    _select_long_entry_candidates,
+    _plan_time_stop_exits as _plan_time_stop_exits_contract,
+    _select_long_entry_candidates as _select_long_entry_candidates_contract,
     _vol_parity_weight,
     format_long_demo_cycle_summary,
-    run_long_native_demo_cycle,
     target_long_order_notional_pct_equity,
 )
+
+
+def _effective_long_config(
+    *,
+    notional_multiplier: float = 1.0,
+    entry_leverage: float = 10.0,
+    order_notional_pct_equity: float = 0.0,
+):
+    return resolve_strategy_config(
+        "v11a",
+        layers=(
+            ConfigLayer(
+                source="test",
+                values={
+                    "notional_multiplier": notional_multiplier,
+                    "entry_leverage": entry_leverage,
+                    "order_notional_pct_equity": order_notional_pct_equity,
+                },
+            ),
+        ),
+    )
+
+
+def _select_long_entry_candidates(**kwargs: Any):
+    """Test adapter that makes every legacy fixture name its typed contract."""
+
+    strategy = kwargs["strategy"]
+    maximum = kwargs.pop("max_new_entries", None)
+    effective = kwargs.get("effective_config")
+    if effective is None:
+        layers = ()
+        if maximum is not None:
+            layers = (
+                ConfigLayer(
+                    source="test_fixture",
+                    values={"max_new_entries_per_cycle": maximum},
+                ),
+            )
+        profile = "v12" if strategy.execution_strategy_id == LONG_V12_WIDE_STOP_STRATEGY_ID else "v11a"
+        effective = resolve_strategy_config(
+            profile,
+            rule=strategy,
+            layers=layers,
+            rule_source="test_fixture",
+        )
+        kwargs["effective_config"] = effective
+    elif maximum is not None:
+        assert maximum == effective.max_new_entries_per_cycle
+    kwargs.setdefault("equity_usdt", 1.0)
+    return _select_long_entry_candidates_contract(**kwargs)
+
+
+def _plan_time_stop_exits(*args: Any, **kwargs: Any):
+    kwargs.setdefault("effective_config", resolve_strategy_config("v12"))
+    return _plan_time_stop_exits_contract(*args, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +114,6 @@ def test_v11a_config_matches_research_run() -> None:
     assert cfg.fc_sniper_retrace_pct == pytest.approx(0.01)
     assert cfg.fc_sniper_deadline_hours == 6
     assert cfg.fc_atr_stop_mult == pytest.approx(1.5)
-    assert cfg.fc_atr_tp_mult == pytest.approx(4.0)
     assert cfg.fc_max_atr_pct == pytest.approx(0.12)
     assert cfg.fc_max_hold_days == 3
     assert cfg.fc_sigma_mult == pytest.approx(2.5)
@@ -73,16 +127,11 @@ def test_v11a_config_matches_research_run() -> None:
 
 
 def test_demo_default_notional_multiplier_is_research_1x() -> None:
-    demo = LongNativeDemoCycleConfig()
-    strategy = long_v11a_profile()
-    assert demo.notional_multiplier == pytest.approx(1.0)
-    assert target_long_order_notional_pct_equity(demo, strategy) == pytest.approx(
-        strategy.gross_exposure / strategy.max_concurrent_positions
+    effective = _effective_long_config()
+    assert effective.notional_multiplier == pytest.approx(1.0)
+    assert target_long_order_notional_pct_equity(effective) == pytest.approx(
+        effective.rule.gross_exposure / effective.rule.max_concurrent_positions
     )
-
-
-
-
 
 
 def test_long_config_has_no_direct_execution_or_telegram_fields() -> None:
@@ -109,10 +158,19 @@ def test_long_config_has_no_direct_execution_or_telegram_fields() -> None:
 
 def test_long_cycle_refuses_local_dry_run(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="execution_environment"):
-        run_long_native_demo_cycle(
-            tmp_path,
-            config=ResearchConfig(data_root=tmp_path),
-            demo_config=LongNativeDemoCycleConfig(),
+        lnd.resolve_long_effective_config(
+            LongNativeDemoCycleConfig(),
+            runtime=lnd.LongRuntimeConfig(data_root=tmp_path),
+            strategy=_effective_long_config(),
+            exchange=ResearchConfig().exchange,
+            exchange_source="test",
+            operational_profile_source="test",
+            operational_profile_sha256="11" * 32,
+            target_book_path=tmp_path / "long.json",
+            book_state_path=tmp_path / "state.json",
+            book_transitions_path=None,
+            engine_heartbeat_path=tmp_path / "heartbeat.json",
+            expected_account_user_id="account-1",
         )
 
 
@@ -130,16 +188,16 @@ def test_vol_target_scale_volup125() -> None:
 
 def test_per_position_notional_scales_by_multiplier() -> None:
     strategy = long_v11a_profile()
-    # Owner pick: 10x multiplier
-    demo_10x = LongNativeDemoCycleConfig(notional_multiplier=10.0)
     base_per_position = strategy.gross_exposure / strategy.max_concurrent_positions
-    assert target_long_order_notional_pct_equity(demo_10x, strategy) == pytest.approx(base_per_position * 10.0)
-    # 5x = research peak
-    demo_5x = LongNativeDemoCycleConfig(notional_multiplier=5.0)
-    assert target_long_order_notional_pct_equity(demo_5x, strategy) == pytest.approx(base_per_position * 5.0)
-    # Explicit override wins
-    demo_override = LongNativeDemoCycleConfig(order_notional_pct_equity=0.5)
-    assert target_long_order_notional_pct_equity(demo_override, strategy) == pytest.approx(0.5)
+    assert target_long_order_notional_pct_equity(_effective_long_config(notional_multiplier=10.0)) == pytest.approx(
+        base_per_position * 10.0
+    )
+    assert target_long_order_notional_pct_equity(_effective_long_config(notional_multiplier=5.0)) == pytest.approx(
+        base_per_position * 5.0
+    )
+    assert target_long_order_notional_pct_equity(
+        _effective_long_config(order_notional_pct_equity=0.5)
+    ) == pytest.approx(0.5)
 
 
 def test_vol_parity_weight_floors_and_clamps() -> None:
@@ -342,6 +400,88 @@ def test_long_candidates_rank_before_max_new_entries_truncation() -> None:
     )
     assert skips["no_retrace_yet"] == 0
     assert [c["symbol"] for c in candidates] == ["HIGHUSDT"]
+
+
+def test_long_candidate_carries_the_reducers_exact_dollar_target() -> None:
+    strategy = long_v11a_profile()
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + 2 * MS_PER_HOUR
+    equity = 12_345.67
+    effective = resolve_strategy_config(
+        "v11a",
+        rule=strategy,
+        layers=(
+            ConfigLayer(
+                source="test",
+                values={"notional_multiplier": 2.0, "round_trip_cost_bps": 11.0},
+            ),
+        ),
+    )
+    candidates, _ = _select_long_entry_candidates(
+        features=_build_features_with_fc_signal(
+            symbol="BTCUSDT",
+            signal_ts_ms=signal_ts,
+            signal_close=100.0,
+        ),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"BTCUSDT": 98.5},
+        max_new_entries=effective.max_new_entries_per_cycle,
+        effective_config=effective,
+        equity_usdt=equity,
+    )
+
+    (candidate,) = candidates
+    assert candidate["target_notional_usdt"] == pytest.approx(equity * candidate["target_fraction_of_equity"])
+
+    state, _ = lnd._advance_long_book_state(
+        lnd.LongBookState(),
+        exit_plans=[],
+        candidates=candidates,
+        price_by_symbol={"BTCUSDT": 98.5},
+        strategy_id=strategy.execution_strategy_id,
+        now_ms=now,
+        cooldown_days=int(strategy.cooldown_days),
+        held_symbols=frozenset(),
+    )
+    assert state.held["BTCUSDT"].notional_usdt == pytest.approx(candidate["target_notional_usdt"])
+
+
+def test_blocked_and_attempted_names_do_not_spend_batch_or_capacity() -> None:
+    strategy = long_v11a_profile()
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + 2 * MS_PER_HOUR
+    frames = []
+    for symbol, score in (
+        ("BLOCKEDUSDT", 0.30),
+        ("ATTEMPTEDUSDT", 0.25),
+        ("READYUSDT", 0.20),
+    ):
+        frames.append(
+            _build_features_with_fc_signal(
+                symbol=symbol,
+                signal_ts_ms=signal_ts,
+                signal_close=100.0,
+            ).with_columns(pl.lit(math.log1p(score)).alias("log_return"))
+        )
+
+    candidates, skips = _select_long_entry_candidates(
+        features=pl.concat(frames, how="vertical_relaxed"),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={symbol: 98.5 for symbol in ("BLOCKEDUSDT", "ATTEMPTEDUSDT", "READYUSDT")},
+        max_new_entries=1,
+        attempted_signals_ms={"ATTEMPTEDUSDT": signal_ts},
+        blocked_symbols=frozenset({"BLOCKEDUSDT"}),
+        active_positions=strategy.max_concurrent_positions - 1,
+    )
+
+    assert [candidate["symbol"] for candidate in candidates] == ["READYUSDT"]
+    assert skips["engine_blocked"] == 1
+    assert skips["already_attempted"] == 1
+    assert skips["capacity"] == 0
 
 
 def test_sniper_waits_when_within_window_and_no_retrace() -> None:
@@ -548,7 +688,6 @@ def test_long_entry_excludes_incomplete_today_bar() -> None:
     closed-bar signal.
     """
     from liquidity_migration.rules.long_native import LongNativeConfig
-    from liquidity_migration.strategy.long_native_event_demo import _select_long_entry_candidates
 
     now = 1_700_000_000_000
     # ONLY a future-ts (today, still forming) bar -> its day-END ts is in the future -> not eligible.
@@ -647,6 +786,41 @@ def test_long_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
     assert _build_long_kline_universe(_FailingMarket()) == []
 
 
+def test_long_daemon_cycle_call_uses_only_the_effective_config() -> None:
+    from liquidity_migration.strategy.long_native_event_demo_daemon import (
+        LongNativeDemoDaemon,
+    )
+
+    daemon = object.__new__(LongNativeDemoDaemon)
+    effective = object()
+    daemon._long_target_producer = True
+    daemon._effective_config = effective  # type: ignore[assignment]
+    shared = {"now_ms": 1, "kline_store": None, "ticker_cache": None}
+
+    kwargs = daemon._cycle_call_kwargs(shared)
+
+    assert kwargs == {**shared, "effective_config": effective}
+    assert "config" not in kwargs
+    assert "demo_config" not in kwargs
+
+
+def test_long_daemon_refuses_a_missing_effective_config() -> None:
+    from liquidity_migration.strategy.long_native_event_demo_daemon import (
+        LongNativeDemoDaemon,
+    )
+
+    daemon = object.__new__(LongNativeDemoDaemon)
+    daemon._long_target_producer = True
+    daemon._effective_config = None
+
+    with pytest.raises(RuntimeError, match="effective configuration"):
+        daemon._cycle_call_kwargs({})
+    with pytest.raises(RuntimeError, match="effective configuration"):
+        daemon._strategy_profile_name()
+    with pytest.raises(RuntimeError, match="effective configuration"):
+        daemon._sizing_summary()
+
+
 def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
     """``_compute_long_order_sizing`` reproduces the prior inline block byte-for-byte:
     base per-position notional * the de-risk-only vol-target scalar keyed on the
@@ -658,20 +832,20 @@ def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
         target_long_order_notional_pct_equity,
     )
 
-    demo = LongNativeDemoCycleConfig()
-    strategy = long_v11a_profile()
+    effective = _effective_long_config()
+    strategy = effective.rule
     # ts_ms out of order with an interleaved null — the helper must sort then take the last non-null.
     features = pl.DataFrame({"ts_ms": [3, 1, 2], "btc_rv_30": [0.9, None, 0.4]})
-    notional, scale = _compute_long_order_sizing(demo=demo, strategy=strategy, features=features)
+    notional, scale = _compute_long_order_sizing(config=effective, features=features)
     expected_scale = _vol_target_scale(strategy, 0.9)  # latest by ts_ms (ts=3)
     assert scale == expected_scale
-    assert notional == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * expected_scale)
+    assert notional == pytest.approx(target_long_order_notional_pct_equity(effective) * expected_scale)
 
     # No btc_rv_30 column -> latest_btc_rv is None -> the None vol-target path (no de-risk-up).
     bare = pl.DataFrame({"ts_ms": [1, 2]})
-    n0, s0 = _compute_long_order_sizing(demo=demo, strategy=strategy, features=bare)
+    n0, s0 = _compute_long_order_sizing(config=effective, features=bare)
     assert s0 == _vol_target_scale(strategy, None)
-    assert n0 == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * s0)
+    assert n0 == pytest.approx(target_long_order_notional_pct_equity(effective) * s0)
 
 
 def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> None:
@@ -681,8 +855,8 @@ def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> N
         target_long_order_notional_pct_equity,
     )
 
-    demo = LongNativeDemoCycleConfig()
-    strategy = long_v11a_profile()
+    effective = _effective_long_config()
+    strategy = effective.rule
     now = 1_700_000_000_000
     current_day_start = now - (now % MS_PER_DAY)
     closed_day_end = current_day_start
@@ -695,8 +869,7 @@ def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> N
     )
 
     notional, scale = _compute_long_order_sizing(
-        demo=demo,
-        strategy=strategy,
+        config=effective,
         features=features,
         now_ms=now,
     )
@@ -704,7 +877,7 @@ def test_compute_long_order_sizing_uses_latest_closed_btc_rv_when_clocked() -> N
     expected_scale = _vol_target_scale(strategy, 1.20)
     assert scale == pytest.approx(expected_scale)
     assert scale != pytest.approx(_vol_target_scale(strategy, 0.10))
-    assert notional == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * expected_scale)
+    assert notional == pytest.approx(target_long_order_notional_pct_equity(effective) * expected_scale)
 
 
 def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists() -> None:
@@ -714,8 +887,8 @@ def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists()
         target_long_order_notional_pct_equity,
     )
 
-    demo = LongNativeDemoCycleConfig()
-    strategy = long_v11a_profile()
+    effective = _effective_long_config()
+    strategy = effective.rule
     now = 1_700_000_000_000
     current_day_start = now - (now % MS_PER_DAY)
     features = pl.DataFrame(
@@ -726,23 +899,20 @@ def test_compute_long_order_sizing_falls_back_when_only_unclosed_btc_rv_exists()
     )
 
     notional, scale = _compute_long_order_sizing(
-        demo=demo,
-        strategy=strategy,
+        config=effective,
         features=features,
         now_ms=now,
     )
 
     expected_scale = _vol_target_scale(strategy, None)
     assert scale == pytest.approx(expected_scale)
-    assert notional == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * expected_scale)
-
-
+    assert notional == pytest.approx(target_long_order_notional_pct_equity(effective) * expected_scale)
 
 
 def test_registered_long_profile_carries_live_kernel_identity_and_leverage() -> None:
     strategy = long_v11a_profile()
     assert strategy.execution_strategy_id == LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-    assert strategy.execution_leverage == 10.0
+    assert _effective_long_config().entry_leverage == 10.0
 
 
 def test_median_universe_selection_steady_state_is_byte_match_noop() -> None:
@@ -816,283 +986,6 @@ def test_median_universe_selection_noop_without_median_column() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# The LLM gate's judged events enter as candidates in the native shape         #
-# --------------------------------------------------------------------------- #
-def _gate_event(
-    symbol: str = "PUMPUSDT",
-    *,
-    trigger_ts_ms: int = 1_700_000_000_000,
-    atr: float = 0.05,
-    sigma: float = 0.03,
-    score: float = 7,
-) -> dict[str, Any]:
-    return {
-        "symbol": symbol,
-        "score": score,
-        "trigger_ts_ms": trigger_ts_ms,
-        "trigger_price": 10.0,
-        "atr_pct": atr,
-        "sigma_daily_30d": sigma,
-        "turnover_rank": 4,
-        "trigger_window_h": 4,
-    }
-
-
-class TestLlmGateCandidates:
-    def test_a_judged_event_becomes_a_candidate_with_the_v12_risk_contract(self) -> None:
-        strategy = long_v12_profile()
-        now_ms = 1_700_000_100_000
-        candidates, skips = _llm_gate_candidates_for_test(
-            [_gate_event()], strategy=strategy, now_ms=now_ms
-        )
-        assert skips == {k: 0 for k in skips}
-        (cand,) = candidates
-        assert cand["symbol"] == "PUMPUSDT"
-        assert cand["pattern"] == "llm_gate"
-        # Stop, take-profit, hold clock, and decay contract are the strategy's
-        # own constants applied to the event's ATR — identical to an FC entry.
-        assert cand["stop_loss_pct"] == pytest.approx(0.05 * strategy.fc_atr_stop_mult)
-        assert cand["take_profit_pct"] == pytest.approx(0.05 * strategy.fc_atr_tp_mult)
-        assert cand["max_hold_days"] == strategy.fc_max_hold_days
-        assert cand["stop_decay_after_ms"] == exact_duration_ms(
-            hours=strategy.fc_stop_time_decay_hours
-        )
-        assert cand["decayed_stop_loss_pct"] == pytest.approx(
-            strategy.fc_stop_time_decay_atr_mult * 0.05
-        )
-
-    def test_the_position_weight_is_the_strategy_vol_parity_weight(self) -> None:
-        strategy = long_v12_profile()
-        now_ms = 1_700_000_100_000
-        candidates, _skips = _llm_gate_candidates_for_test(
-            [_gate_event()], strategy=strategy, now_ms=now_ms
-        )
-        (cand,) = candidates
-        expected = _vol_parity_weight(
-            realized_vol=0.03 * math.sqrt(365.0),
-            vol_floor=strategy.vol_floor_annual,
-            max_position_weight=strategy.max_position_weight,
-            notional_weight=strategy.gross_exposure / strategy.max_concurrent_positions,
-        )
-        assert cand["position_weight"] == pytest.approx(expected)
-
-    def test_an_event_with_no_measured_volatility_is_not_entered(self) -> None:
-        # The vol-parity rule reads an absent sigma as the floor, which is its
-        # CEILING weight -- so entering would put the largest position in the
-        # book on the name we know least about. The ledger needs 31 daily bars
-        # for sigma against 15 for the ATR, so a young listing publishes with
-        # one and not the other as a matter of course.
-        strategy = long_v12_profile()
-        now_ms = 1_700_000_100_000
-        candidates, skips = _llm_gate_candidates_for_test(
-            [_gate_event("YOUNGUSDT", sigma=0.0)], strategy=strategy, now_ms=now_ms
-        )
-        assert candidates == []
-        assert skips["llm_gate_no_vol"] == 1
-
-    def test_a_signal_older_than_an_hour_is_not_entered(self) -> None:
-        # The gate republishes every hour, so a live signal is minutes old. An
-        # hour-plus means a run was missed, and the pump it named has had an
-        # hour to resolve without us. Ninety minutes used to enter.
-        strategy = long_v12_profile()
-        now_ms = 1_700_000_100_000
-        fresh, fresh_skips = _llm_gate_candidates_for_test(
-            [_gate_event("AAAUSDT", trigger_ts_ms=now_ms - exact_duration_ms(minutes=59))],
-            strategy=strategy,
-            now_ms=now_ms,
-        )
-        assert [c["symbol"] for c in fresh] == ["AAAUSDT"]
-        assert fresh_skips["llm_gate_stale"] == 0
-
-        stale, stale_skips = _llm_gate_candidates_for_test(
-            [_gate_event("AAAUSDT", trigger_ts_ms=now_ms - exact_duration_ms(minutes=90))],
-            strategy=strategy,
-            now_ms=now_ms,
-        )
-        assert stale == []
-        assert stale_skips["llm_gate_stale"] == 1
-
-    def test_a_file_written_more_than_an_hour_ago_reads_as_no_signal(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import json as _json
-
-        from liquidity_migration.strategy.long_native_event_demo import (
-            LLM_GATE_CANDIDATES_PATH_ENV,
-            _read_llm_gate_events,
-        )
-
-        # No valid_until_ms at all: the file's own age is the only bound left,
-        # and it is an hour. Two hours used to read.
-        path = tmp_path / "candidates.json"
-        now_ms = 1_700_000_000_000
-        path.write_text(
-            _json.dumps(
-                {
-                    "decision_ts_ms": now_ms - exact_duration_ms(minutes=90),
-                    "events": [_gate_event()],
-                }
-            )
-        )
-        monkeypatch.setenv(LLM_GATE_CANDIDATES_PATH_ENV, str(path))
-        assert _read_llm_gate_events(now_ms=now_ms) == []
-
-    def test_stale_open_cooled_and_unpriced_events_are_counted_not_entered(self) -> None:
-        from liquidity_migration.strategy.long_native_event_demo import _llm_gate_candidates
-
-        strategy = long_v12_profile()
-        now_ms = 1_700_000_100_000
-        stale_ts = now_ms - exact_duration_ms(hours=25)
-        events = [
-            _gate_event("STALEUSDT", trigger_ts_ms=stale_ts),
-            _gate_event("OPENUSDT"),
-            _gate_event("COOLEDUSDT"),
-            _gate_event("NOPRICEUSDT"),
-            _gate_event("BADUSDT", atr=0.0),
-        ]
-        price_by_symbol = {
-            "OPENUSDT": 9.0,
-            "COOLEDUSDT": 9.0,
-            "NOPRICEUSDT": 0.0,
-        }
-        candidates, skips = _llm_gate_candidates(
-            events,
-            strategy=strategy,
-            price_by_symbol=price_by_symbol,
-            open_symbols={"OPENUSDT"},
-            cooldown_until={"COOLEDUSDT": now_ms + exact_duration_ms(days=1)},
-            now_ms=now_ms,
-        )
-        assert candidates == []
-        assert skips == {
-            "llm_gate_stale": 1,
-            "llm_gate_already_open": 1,
-            "llm_gate_cooldown": 1,
-            "llm_gate_no_live_price": 1,
-            "llm_gate_bad_event": 1,
-            "llm_gate_duplicate": 0,
-            "llm_gate_no_vol": 0,
-        }
-
-    def test_a_duplicate_symbol_is_collapsed_to_one_candidate(self) -> None:
-        from liquidity_migration.strategy.long_native_event_demo import _llm_gate_candidates
-
-        strategy = long_v12_profile()
-        now_ms = 1_700_000_100_000
-        candidates, skips = _llm_gate_candidates(
-            [_gate_event(), _gate_event()],
-            strategy=strategy,
-            price_by_symbol={"PUMPUSDT": 9.0},
-            open_symbols=set(),
-            cooldown_until={},
-            now_ms=now_ms,
-        )
-        assert len(candidates) == 1
-        assert skips["llm_gate_duplicate"] == 1
-
-
-def _llm_gate_candidates_for_test(events, *, strategy, now_ms):
-    from liquidity_migration.strategy.long_native_event_demo import _llm_gate_candidates
-
-    return _llm_gate_candidates(
-        events,
-        strategy=strategy,
-        price_by_symbol={e["symbol"]: 9.0 for e in events},
-        open_symbols=set(),
-        cooldown_until={},
-        now_ms=now_ms,
-    )
-
-
-class TestWideBandLabel:
-    """A band="wide" event (turnover rank 11-30) keeps its own pattern, so its
-    fills grade apart from the core gate's; anything else stays llm_gate."""
-
-    def test_a_wide_event_is_labeled_llm_gate_wide(self) -> None:
-        event = _gate_event("WIDEUSDT")
-        event["band"] = "wide"
-        candidates, _ = _llm_gate_candidates_for_test(
-            [event], strategy=long_v12_profile(), now_ms=1_700_000_100_000
-        )
-        (cand,) = candidates
-        assert cand["pattern"] == "llm_gate_wide"
-        assert "wide band" in cand["entry_rule"]
-
-    def test_a_core_or_bandless_event_stays_llm_gate(self) -> None:
-        core = _gate_event("COREUSDT")
-        core["band"] = "core"
-        bandless = _gate_event("OLDUSDT", trigger_ts_ms=1_700_000_000_001)
-        candidates, _ = _llm_gate_candidates_for_test(
-            [core, bandless], strategy=long_v12_profile(), now_ms=1_700_000_100_000
-        )
-        assert [c["pattern"] for c in candidates] == ["llm_gate", "llm_gate"]
-
-
-class TestReadLlmGateEvents:
-    def test_no_path_configured_reads_as_no_signal(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from liquidity_migration.strategy.long_native_event_demo import _read_llm_gate_events
-
-        monkeypatch.delenv("LONG_ENGINE_LLM_GATE_CANDIDATES_PATH", raising=False)
-        assert _read_llm_gate_events(now_ms=1) == []
-
-    def test_missing_file_reads_as_no_signal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from liquidity_migration.strategy.long_native_event_demo import _read_llm_gate_events
-
-        monkeypatch.setenv(
-            "LONG_ENGINE_LLM_GATE_CANDIDATES_PATH", str(tmp_path / "absent.json")
-        )
-        assert _read_llm_gate_events(now_ms=1) == []
-
-    def test_a_fresh_file_yields_its_events(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import json as _json
-
-        from liquidity_migration.strategy.long_native_event_demo import (
-            LLM_GATE_CANDIDATES_PATH_ENV,
-            _read_llm_gate_events,
-        )
-
-        path = tmp_path / "candidates.json"
-        now_ms = 1_700_000_000_000
-        payload = {
-            "decision_ts_ms": now_ms - 60_000,
-            "valid_until_ms": now_ms + 3_600_000,
-            "events": [_gate_event()],
-        }
-        path.write_text(_json.dumps(payload))
-        monkeypatch.setenv(LLM_GATE_CANDIDATES_PATH_ENV, str(path))
-        assert _read_llm_gate_events(now_ms=now_ms) == [_gate_event()]
-
-    def test_a_stale_or_expired_file_reads_as_no_signal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import json as _json
-
-        from liquidity_migration.strategy.long_native_event_demo import (
-            LLM_GATE_CANDIDATES_PATH_ENV,
-            _read_llm_gate_events,
-        )
-
-        path = tmp_path / "candidates.json"
-        payload = {
-            "decision_ts_ms": 1_690_000_000_000,
-            "valid_until_ms": 1_690_000_000_000 + 3_600_000,
-            "events": [_gate_event()],
-        }
-        path.write_text(_json.dumps(payload))
-        monkeypatch.setenv(LLM_GATE_CANDIDATES_PATH_ENV, str(path))
-        assert _read_llm_gate_events(now_ms=1_700_000_000_000) == []
-
-    def test_a_malformed_file_reads_as_no_signal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from liquidity_migration.strategy.long_native_event_demo import (
-            LLM_GATE_CANDIDATES_PATH_ENV,
-            _read_llm_gate_events,
-        )
-
-        path = tmp_path / "candidates.json"
-        path.write_text("{not json")
-        monkeypatch.setenv(LLM_GATE_CANDIDATES_PATH_ENV, str(path))
-        assert _read_llm_gate_events(now_ms=1_700_000_000_000) == []
-
-
-# --------------------------------------------------------------------------- #
 # Account-target cycle fixtures                                                #
 # --------------------------------------------------------------------------- #
 def _candidate(symbol: str, signal_ts_ms: int = 1_700_000_000_000) -> dict[str, Any]:
@@ -1122,21 +1015,9 @@ def _candidate(symbol: str, signal_ts_ms: int = 1_700_000_000_000) -> dict[str, 
     }
 
 
-
-
-
-
-
-
-
-
-
-
 # --------------------------------------------------------------------------- #
 # The cycle context a fast wake needs                                           #
 # --------------------------------------------------------------------------- #
-
-
 
 
 # --------------------------------------------------------------------------- #
@@ -1148,9 +1029,7 @@ def test_a_candidate_still_waiting_for_its_retrace_reports_the_price() -> None:
     strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 2 * MS_PER_HOUR
-    features = _build_features_with_fc_signal(
-        symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0
-    )
+    features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     watch: list[dict[str, Any]] = []
 
     candidates, skips = _select_long_entry_candidates(
@@ -1172,9 +1051,7 @@ def test_a_candidate_still_waiting_for_its_retrace_reports_the_price() -> None:
 def test_a_candidate_that_already_entered_asks_for_no_price_wake() -> None:
     strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
-    features = _build_features_with_fc_signal(
-        symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0
-    )
+    features = _build_features_with_fc_signal(symbol="BTCUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
     watch: list[dict[str, Any]] = []
 
     candidates, _skips = _select_long_entry_candidates(
@@ -1283,20 +1160,6 @@ def test_trades_a_decay_exit_could_not_act_on_are_not_watched() -> None:
 
     assert lnd._long_price_wake_levels(trades, retrace_watch=[], now_ms=now) == []
     assert lnd._long_price_wake_levels(pl.DataFrame(), retrace_watch=[], now_ms=now) == []
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _fc_signal_features(*, symbol: str, signal_ts_ms: int, signal_close: float = 100.0) -> pl.DataFrame:
@@ -1426,6 +1289,7 @@ def _open_trade_row(
         "qty": "10",
         "entry_ts_ms": entry_ts_ms,
         "entry_price": entry_price,
+        "stop_loss_pct": 0.15,
         "max_hold_deadline_ts_ms": max_hold_deadline_ts_ms,
     }
     if with_decay_contract:
@@ -1454,7 +1318,7 @@ def test_v12_candidates_carry_stop_decay_contract() -> None:
     assert candidate["stop_loss_pct"] == pytest.approx(0.15)
     assert candidate["decayed_stop_loss_pct"] == pytest.approx(0.075)
     assert candidate["stop_decay_after_ms"] == 48 * MS_PER_HOUR
-    assert candidate["take_profit_pct"] == pytest.approx(0.20)
+    assert "take_profit_pct" not in candidate
 
 
 def test_v11a_candidates_do_not_carry_stop_decay_contract() -> None:
@@ -1475,10 +1339,6 @@ def test_v11a_candidates_do_not_carry_stop_decay_contract() -> None:
     assert "decayed_stop_loss_pct" not in candidates[0]
 
 
-
-
-
-
 def test_plan_decayed_stop_fires_only_after_decay_age_and_breach() -> None:
     now = 2_000_000_000_000
     entry_price = 100.0
@@ -1486,39 +1346,85 @@ def test_plan_decayed_stop_fires_only_after_decay_age_and_breach() -> None:
     young_entry = now - 47 * MS_PER_HOUR
     decayed_level = entry_price * (1.0 - 0.075)  # 92.5
 
-    aged_and_breached = pl.DataFrame(
-        [_open_trade_row(entry_ts_ms=aged_entry, entry_price=entry_price)]
-    )
-    plans = _plan_time_stop_exits(
-        aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": 92.0}
-    )
+    aged_and_breached = pl.DataFrame([_open_trade_row(entry_ts_ms=aged_entry, entry_price=entry_price)])
+    plans = _plan_time_stop_exits(aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": 92.0})
     assert [p["exit_reason"] for p in plans] == ["decayed_stop_loss"]
     assert plans[0]["decayed_stop_price"] == pytest.approx(decayed_level)
     assert plans[0]["stop_decay_deadline_ts_ms"] == aged_entry + 48 * MS_PER_HOUR
     assert plans[0]["decision_reference_price"] == pytest.approx(92.0)
 
     # At the level exactly: breach (research convention is <=).
-    at_level = _plan_time_stop_exits(
-        aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": decayed_level}
-    )
+    at_level = _plan_time_stop_exits(aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": decayed_level})
     assert [p["exit_reason"] for p in at_level] == ["decayed_stop_loss"]
 
     # Above the decayed level: no exit.
+    assert _plan_time_stop_exits(aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": 93.0}) == []
+
+    # Breached but younger than the decay age: no exit.
+    young = pl.DataFrame([_open_trade_row(entry_ts_ms=young_entry, entry_price=entry_price)])
+    assert _plan_time_stop_exits(young, now_ms=now, price_by_symbol={"ABCUSDT": 92.0}) == []
+
+
+def test_plan_decayed_stop_uses_the_current_venue_average_after_resize() -> None:
+    now = 2_000_000_000_000
+    trade = pl.DataFrame(
+        [
+            _open_trade_row(
+                entry_ts_ms=now - 50 * MS_PER_HOUR,
+                entry_price=100.0,
+            )
+        ]
+    )
+    holdings = {"ABCUSDT": ("long", 10.0, 90.0)}
+
     assert (
         _plan_time_stop_exits(
-            aged_and_breached, now_ms=now, price_by_symbol={"ABCUSDT": 93.0}
+            trade,
+            now_ms=now,
+            price_by_symbol={"ABCUSDT": 84.0},
+            venue_holdings=holdings,
         )
         == []
     )
+    plans = _plan_time_stop_exits(
+        trade,
+        now_ms=now,
+        price_by_symbol={"ABCUSDT": 83.0},
+        venue_holdings=holdings,
+    )
+    assert [plan["exit_reason"] for plan in plans] == ["decayed_stop_loss"]
+    assert plans[0]["decayed_stop_price"] == pytest.approx(90.0 * (1.0 - 0.075))
+    assert plans[0]["stop_price"] == pytest.approx(90.0 * (1.0 - 0.075))
+    assert plans[0]["stop_anchor_price"] == pytest.approx(90.0)
 
-    # Breached but younger than the decay age: no exit.
-    young = pl.DataFrame(
-        [_open_trade_row(entry_ts_ms=young_entry, entry_price=entry_price)]
+
+def test_plan_base_stop_has_base_fields_and_uses_current_venue_average() -> None:
+    now = 2_000_000_000_000
+    trade = pl.DataFrame(
+        [
+            _open_trade_row(
+                strategy_id=LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
+                entry_ts_ms=now - 2 * MS_PER_HOUR,
+                entry_price=100.0,
+                with_decay_contract=False,
+            )
+        ]
     )
-    assert (
-        _plan_time_stop_exits(young, now_ms=now, price_by_symbol={"ABCUSDT": 92.0})
-        == []
+
+    plans = _plan_time_stop_exits(
+        trade,
+        now_ms=now,
+        price_by_symbol={"ABCUSDT": 76.0},
+        venue_holdings={"ABCUSDT": ("long", 10.0, 90.0)},
     )
+
+    assert [plan["exit_reason"] for plan in plans] == ["stop_loss"]
+    assert plans[0]["stop_anchor_price"] == pytest.approx(90.0)
+    assert plans[0]["stop_loss_pct"] == pytest.approx(0.15)
+    assert plans[0]["stop_price"] == pytest.approx(76.5)
+    assert "decayed_stop_price" not in plans[0]
+    assert "decayed_stop_loss_pct" not in plans[0]
+    assert "stop_decay_deadline_ts_ms" not in plans[0]
 
 
 def test_plan_decayed_stop_ignores_trades_without_contract() -> None:
@@ -1534,24 +1440,14 @@ def test_plan_decayed_stop_ignores_trades_without_contract() -> None:
             )
         ]
     )
-    assert (
-        _plan_time_stop_exits(v11a, now_ms=now, price_by_symbol={"ABCUSDT": 50.0})
-        == []
-    )
+    assert _plan_time_stop_exits(v11a, now_ms=now, price_by_symbol={"ABCUSDT": 90.0}) == []
 
 
 def test_plan_decayed_stop_requires_fill_anchor_and_live_price() -> None:
     now = 2_000_000_000_000
-    no_anchor = pl.DataFrame(
-        [_open_trade_row(entry_ts_ms=None, entry_price=None)]
-    )
-    assert (
-        _plan_time_stop_exits(no_anchor, now_ms=now, price_by_symbol={"ABCUSDT": 1.0})
-        == []
-    )
-    anchored = pl.DataFrame(
-        [_open_trade_row(entry_ts_ms=now - 50 * MS_PER_HOUR, entry_price=100.0)]
-    )
+    no_anchor = pl.DataFrame([_open_trade_row(entry_ts_ms=None, entry_price=None)])
+    assert _plan_time_stop_exits(no_anchor, now_ms=now, price_by_symbol={"ABCUSDT": 1.0}) == []
+    anchored = pl.DataFrame([_open_trade_row(entry_ts_ms=now - 50 * MS_PER_HOUR, entry_price=100.0)])
     # No live price this cycle: defer, the venue-native stop stays armed.
     assert _plan_time_stop_exits(anchored, now_ms=now, price_by_symbol={}) == []
     assert _plan_time_stop_exits(anchored, now_ms=now) == []
@@ -1572,14 +1468,6 @@ def test_time_stop_wins_over_decayed_stop() -> None:
     assert [p["exit_reason"] for p in plans] == ["time_stop"]
 
 
-
-
-
-
-
-
-
-
 # --------------------------------------------------------------------------- #
 # What the engine says back: refusals, venue truth, and the regime anchors     #
 # --------------------------------------------------------------------------- #
@@ -1592,9 +1480,7 @@ def test_regime_blocked_pumps_count_separately_from_no_signal() -> None:
     strategy = long_v11a_profile()
     signal_ts = 1_700_000_000_000
     now = signal_ts + 2 * MS_PER_HOUR
-    features = _build_features_with_fc_signal(
-        symbol="AAAUSDT", signal_ts_ms=signal_ts
-    ).with_columns(
+    features = _build_features_with_fc_signal(symbol="AAAUSDT", signal_ts_ms=signal_ts).with_columns(
         [
             pl.lit(False).alias("regime_on"),
             pl.lit(False).alias("eth_regime_on"),
@@ -1614,22 +1500,6 @@ def test_regime_blocked_pumps_count_separately_from_no_signal() -> None:
     assert skips["no_signal"] == 1
     assert skips["regime_btc_off"] == 1
     assert skips["regime_eth_off"] == 1
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 class TestBookDeclaresTheDecayedStop:
@@ -1696,7 +1566,38 @@ class TestBookDeclaresTheDecayedStop:
         state = LongBookState(held={entry.symbol: entry})
         at = entry.entered_ts_ms + exact_duration_ms(hours=49)
         book = _json.loads(
-            _long_engine_target_book(state, decision_ts_ms=at, strategy_profile="long_v12")
+            _long_engine_target_book(
+                state,
+                decision_ts_ms=at,
+                strategy_profile="long_v12",
+                effective_config=resolve_strategy_config("v12"),
+            )
         )
         (target,) = book["targets"]
         assert target["stop_loss_fraction"] == 0.15
+
+    def test_pending_book_refresh_keeps_the_original_entry_deadline(self) -> None:
+        import json as _json
+
+        from liquidity_migration.strategy.long_book_state import LongBookState
+        from liquidity_migration.strategy.long_native_event_demo import _long_engine_target_book
+
+        deadline = 1_700_000_000_000 + exact_duration_ms(hours=1)
+        entry = self._entry(
+            entered_ts_ms=0,
+            seen_held=False,
+            requested_ts_ms=1_700_000_000_000,
+            entry_valid_until_ms=deadline,
+        )
+        refreshed_at = deadline - exact_duration_ms(minutes=20)
+        book = _json.loads(
+            _long_engine_target_book(
+                LongBookState(held={entry.symbol: entry}),
+                decision_ts_ms=refreshed_at,
+                strategy_profile="long_v12",
+                effective_config=resolve_strategy_config("v12"),
+            )
+        )
+
+        assert book["version"] == 2
+        assert book["targets"][0]["entry_valid_until_ms"] == deadline

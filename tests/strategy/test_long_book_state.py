@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from liquidity_migration.core._common import exact_duration_ms
+from liquidity_migration.rules.long_contract import ConfigLayer, resolve_strategy_config
 from liquidity_migration.strategy import long_native_event_demo as long_demo
 from liquidity_migration.strategy.long_book_state import (
     BookStateError,
@@ -122,9 +123,7 @@ def test_an_empty_v1_record_migrates_without_losing_cooldowns(tmp_path: Path) ->
     )
 
     assert migrate_empty_v1_book_state(path) is True
-    assert read_book_state(path) == LongBookState(
-        left_at_ms={"COTIUSDT": NOW_MS - 1_000}
-    )
+    assert read_book_state(path) == LongBookState(left_at_ms={"COTIUSDT": NOW_MS - 1_000})
     assert json.loads(path.read_text())["attempted_signals_ms"] == {}
     assert migrate_empty_v1_book_state(path) is False
 
@@ -217,9 +216,7 @@ def test_a_missing_held_collection_cannot_be_read_as_flat(tmp_path: Path) -> Non
         ("entered_ts_ms", 1.5),
     ],
 )
-def test_a_held_row_does_not_coerce_schema_types(
-    tmp_path: Path, field: str, value: object
-) -> None:
+def test_a_held_row_does_not_coerce_schema_types(tmp_path: Path, field: str, value: object) -> None:
     path = tmp_path / "coerced.json"
     row = asdict(_entry("KAITOUSDT"))
     row[field] = value
@@ -279,7 +276,12 @@ def test_the_record_reads_back_as_the_table_the_exit_planner_expects() -> None:
     early = _entry("COTIUSDT", max_hold_deadline_ts_ms=NOW_MS + 60_000)
     rows = LongBookState(held={"KAITOUSDT": due, "COTIUSDT": early}).as_trade_rows()
 
-    plans = long_demo._plan_time_stop_exits(rows, now_ms=NOW_MS, price_by_symbol={})
+    plans = long_demo._plan_time_stop_exits(
+        rows,
+        now_ms=NOW_MS,
+        price_by_symbol={},
+        effective_config=_effective_config(),
+    )
 
     assert [plan["symbol"] for plan in plans] == ["KAITOUSDT"]
     assert plans[0]["exit_reason"] == "time_stop"
@@ -293,18 +295,22 @@ def test_a_departed_name_reads_back_as_a_cooldown() -> None:
     assert cooldown["KAITOUSDT"] == NOW_MS - 1_000 + exact_duration_ms(days=7)
 
 
-class _Demo:
-    wallet_balance_fraction = 1.0
-    entry_leverage = 2.0
+def _effective_config():
+    return resolve_strategy_config(
+        "v12",
+        layers=(
+            ConfigLayer(
+                source="test",
+                values={"entry_leverage": 2.0, "order_notional_pct_equity": 0.05},
+            ),
+        ),
+    )
 
 
 def _advance(state: LongBookState, **overrides: object) -> LongBookState:
     kwargs: dict[str, object] = {
         "exit_plans": [],
         "candidates": [],
-        "demo": _Demo(),
-        "equity_usdt": 10_000.0,
-        "order_notional_pct_equity": 0.05,
         "price_by_symbol": {"KAITOUSDT": 10.0},
         "strategy_id": "long_v12",
         "now_ms": NOW_MS,
@@ -320,9 +326,6 @@ def _advance_full(state: LongBookState, **overrides: object) -> tuple[LongBookSt
     kwargs: dict[str, object] = {
         "exit_plans": [],
         "candidates": [],
-        "demo": _Demo(),
-        "equity_usdt": 10_000.0,
-        "order_notional_pct_equity": 0.05,
         "price_by_symbol": {"KAITOUSDT": 10.0},
         "strategy_id": "long_v12",
         "now_ms": NOW_MS,
@@ -340,7 +343,10 @@ def _candidate(symbol: str, **overrides: object) -> dict[str, object]:
         "live_price": 10.0,
         "stop_loss_pct": 0.18,
         "position_weight": 1.0,
-        "max_hold_days": 3.0,
+        "target_notional_usdt": 500.0,
+        "entry_leverage": 2.0,
+        "max_hold_duration_ms": exact_duration_ms(days=3),
+        "entry_valid_until_ms": NOW_MS + exact_duration_ms(hours=1),
         "signal_ts_ms": NOW_MS - 60_000,
     }
     row.update(overrides)
@@ -385,7 +391,7 @@ def test_a_name_already_in_the_record_keeps_the_size_it_entered_with() -> None:
 
     before = LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT", notional_usdt=120.0)})
 
-    after = _advance(before, candidates=[_candidate("KAITOUSDT")], equity_usdt=50_000.0)
+    after = _advance(before, candidates=[_candidate("KAITOUSDT", target_notional_usdt=2_500.0)])
 
     assert after.held["KAITOUSDT"].notional_usdt == 120.0
 
@@ -409,7 +415,10 @@ def test_the_book_written_from_the_record_is_absolute_and_names_every_holding() 
 
     book = json.loads(
         long_demo._long_engine_target_book(
-            state, decision_ts_ms=NOW_MS, strategy_profile="long_v12"
+            state,
+            decision_ts_ms=NOW_MS,
+            strategy_profile="long_v12",
+            effective_config=_effective_config(),
         )
     )
 
@@ -432,12 +441,37 @@ def test_the_books_window_clears_the_engines_entry_cutoff() -> None:
             LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT")}),
             decision_ts_ms=NOW_MS,
             strategy_profile="long_v12",
+            effective_config=_effective_config(),
         )
     )
 
     window_ms = book["valid_until_ms"] - book["decision_ts_ms"]
     assert window_ms > 15 * 60 * 1_000, "shorter than the cutoff means no entries"
     assert window_ms == exact_duration_ms(hours=1)
+
+
+def test_the_book_uses_the_effective_contract_validity() -> None:
+    from liquidity_migration.rules.long_contract import ConfigLayer, resolve_strategy_config
+
+    effective = resolve_strategy_config(
+        "v12",
+        layers=(
+            ConfigLayer(
+                source="test",
+                values={"book_validity_ms": exact_duration_ms(hours=2)},
+            ),
+        ),
+    )
+    book = json.loads(
+        long_demo._long_engine_target_book(
+            LongBookState(held={"KAITOUSDT": _entry("KAITOUSDT")}),
+            decision_ts_ms=NOW_MS,
+            strategy_profile="long_v12",
+            effective_config=effective,
+        )
+    )
+
+    assert book["valid_until_ms"] - book["decision_ts_ms"] == exact_duration_ms(hours=2)
 
 
 def test_an_empty_record_writes_an_empty_book_not_no_book() -> None:
@@ -447,7 +481,10 @@ def test_an_empty_record_writes_an_empty_book_not_no_book() -> None:
 
     book = json.loads(
         long_demo._long_engine_target_book(
-            LongBookState(), decision_ts_ms=NOW_MS, strategy_profile="long_v12"
+            LongBookState(),
+            decision_ts_ms=NOW_MS,
+            strategy_profile="long_v12",
+            effective_config=_effective_config(),
         )
     )
 
@@ -664,6 +701,7 @@ def test_an_average_entry_that_walked_down_is_recorded() -> None:
 
     assert resized == [], "same size, different average: an add-and-trim, not a resize"
     assert after.held["KAITOUSDT"].venue_avg_entry_px == 9.4
+    assert after.held["KAITOUSDT"].entry_price == 9.4
 
 
 def test_an_unconfirmed_entry_is_not_reconciled_against_the_venue() -> None:
