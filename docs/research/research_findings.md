@@ -5,6 +5,49 @@ Evidence grading and promotion: [docs/research/governance.md](governance.md). Ev
 [AGENTS.md](../../AGENTS.md). Failure taxonomy: [docs/research/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
 Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
+## 2026-08-30 — The gate's 4/12/24h triggers, unjudged: paid per trade, capped by the book
+
+**Question (owner).** How does the LLM gate's mechanical trigger family
+perform with no judgment at all — and doesn't its hourly clock give the
+sleeve far more than the daily system's ~306 trades?
+
+**Method.** The gate's own filter set rebuilt on hourly bars 2021→2026-08-28
+(`mechanical_gate_study.py`, session a7ea30ba): top-10 trailing-24h
+turnover, 4/12/24h log return ≥ 2.5 σ_daily × √(h/24), window range
+location ≥ 0.70, BTC-and-ETH regime on, ATR-14d ≤ 12%, 31 daily bars of
+history, one event per symbol-day, 24h re-trigger suppression, the live
+path's 7-day per-symbol cooldown after each taken trade. Entry at the next
+hourly open; v12's exact exit geometry; 45 bp round trip. Per-trade
+economics only — no slots, no vol-parity sizing, no retrace execution.
+
+**Result.** 894 trades (≈3× the daily system's count), **+159 bp/trade net,
+t +3.6, 50% win**. The graded cuts reconfirm: rank 1–5 +161, 6–10 +123,
+11–30 +48 bp/trade; the 12h window is the richest (+335), the 4h the
+thinnest (+102). Per year: positive 2021–2024 and 2026, **negative 2025
+(−71 bp/trade)** — a junk year the daily filter did not have.
+
+**Why this does not mean "run it unjudged."** Per-trade parity with the
+daily system (~+160 both) plus 3× the count is not additive at book level:
+the two streams catch the same pumps (the hourly one ~12h earlier — the
++16 bp/trade shared-pump edge, t 3.76, from the v13 decomposition), so the
+*incremental* hourly trades are the non-confirming residue, and the v13
+kernel measured the full swap at **−0.37 to −1.44 bp/day vs v12** with real
+capacity and sizing. Ten slots mean extra events displace better trades
+rather than add. The discriminator between early-confirming and junk is
+not in the panel (depth/hour gates reached 62–89% confirm rates and still
+failed book-level) — which is the gate's whole reason to exist, and why its
+LLM leg is graded forward-only in its ledger rather than backtested.
+
+**The freshness veto, mechanical proxy.** Events whose name already
+triggered on ≥2 distinct earlier days within 4: +95 bp/trade (t 1.3, n
+414) against +160 (t 4.5, n 1,138) for fresh — the veto refuses the weaker
+cohort, agreeing in four of six years; 2024 inverts (stale +245 beat fresh
++166). Right-sized as the ledger's forward A/B rather than a conviction.
+
+**Boundary.** Lane-1 on seen data; next-open entries, flat costs, no book
+interaction; the turnover rank is rebuilt from kline turnover rather than
+venue tickers. Trade counts are events, not fills.
+
 ## 2026-08-30 — v13 exit hunt, round two: three new data sources, nothing binds
 
 **Question (owner).** After the give-back program below closed the
