@@ -228,7 +228,11 @@ def fetch_source(
                 row["_kind"] = source.row_kind
                 row["_server_time_ms"] = server_time
                 rows.append(row)
-            next_cursor = result.get("nextPageCursor")
+            if "nextPageCursor" not in result:
+                raise CaptureError(f"{source.name}: nextPageCursor is missing")
+            next_cursor = result["nextPageCursor"]
+            if next_cursor is None:
+                next_cursor = ""
             if not isinstance(next_cursor, str):
                 raise CaptureError(f"{source.name}: nextPageCursor is not a string")
             pages += 1

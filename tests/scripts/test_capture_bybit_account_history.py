@@ -13,8 +13,10 @@ from scripts.research.capture_bybit_account_history import (
     RECV_WINDOW_MS,
     BybitReadClient,
     CaptureError,
+    SOURCES,
     capture,
     credential_variables,
+    fetch_source,
     parse_time,
     write_capture,
 )
@@ -88,6 +90,63 @@ class EmptyHistoryClient:
             "result": {"list": [], "nextPageCursor": ""},
             "time": 2,
         }
+
+
+def test_terminal_null_cursor_ends_pagination() -> None:
+    class NullCursorClient:
+        def get(self, _path: str, _params: dict[str, str]) -> dict:
+            return {
+                "retCode": 0,
+                "result": {"list": [], "nextPageCursor": None},
+                "time": 2_000,
+            }
+
+    rows, receipt = fetch_source(
+        NullCursorClient(),  # type: ignore[arg-type]
+        SOURCES[0],
+        1_000,
+        2_000,
+    )
+
+    assert rows == []
+    assert receipt["pages"] == 1
+    assert receipt["complete"] is True
+
+
+def test_non_string_non_null_cursor_is_rejected() -> None:
+    class InvalidCursorClient:
+        def get(self, _path: str, _params: dict[str, str]) -> dict:
+            return {
+                "retCode": 0,
+                "result": {"list": [], "nextPageCursor": 7},
+                "time": 2_000,
+            }
+
+    with pytest.raises(CaptureError, match="nextPageCursor"):
+        fetch_source(
+            InvalidCursorClient(),  # type: ignore[arg-type]
+            SOURCES[0],
+            1_000,
+            2_000,
+        )
+
+
+def test_missing_cursor_is_rejected() -> None:
+    class MissingCursorClient:
+        def get(self, _path: str, _params: dict[str, str]) -> dict:
+            return {
+                "retCode": 0,
+                "result": {"list": []},
+                "time": 2_000,
+            }
+
+    with pytest.raises(CaptureError, match="nextPageCursor is missing"):
+        fetch_source(
+            MissingCursorClient(),  # type: ignore[arg-type]
+            SOURCES[0],
+            1_000,
+            2_000,
+        )
 
 
 def test_capture_receipts_bind_all_three_complete_sources_and_the_account(monkeypatch) -> None:

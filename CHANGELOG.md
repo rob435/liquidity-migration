@@ -6,6 +6,18 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The signed venue-history capture accepts Bybit's terminal
+  null cursor.** The real read-only mainnet capture returned JSON `null` after
+  the final transaction page. Capture now treats that explicit value as the
+  end of pagination while still rejecting a missing or malformed cursor.
+  Venue/WAL accounting now applies each durable dropped-claim record before it
+  groups later fills, and the parity reader accepts the capture's canonical
+  transaction rows and derives demo or mainnet scope from its manifest. The
+  completed execution, closed-PnL, and transaction receipts reconcile the
+  historical PUMPFUN and ETH LONG closes through fees and the crowd fee
+  (funding), but those old WAL fills have blank execution IDs, so the strict
+  venue/WAL view correctly withholds venue-confirmed P&L.
+
 - **2026-08-30 — The first canonical-fleet rollout stops at LONG health.**
   Prefetch and the complete managed stop succeeded, but the new demo LONG
   producer passed the host's cache-staleness setting to a cycle function that

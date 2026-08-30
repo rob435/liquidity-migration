@@ -71,6 +71,7 @@ GIT_LOCAL_ENV_VARS = {
 DEFAULT_DATA_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_HOLD_DAYS = 3
 MONEY_TOLERANCE_USDT = 1e-8
+VENUE_TRANSACTION_KINDS = frozenset({"transaction", "txn"})
 
 #: Live entries the LLM gate produced. The gate does not exist in the kernel,
 #: so these can never pair with a model trade and are reported apart.
@@ -339,8 +340,20 @@ def load_venue_closed_pnl(path: Path) -> list[dict]:
 
 
 def load_venue_transactions(path: Path) -> list[dict]:
-    rows, _ = _dedupe_venue_transactions([row for row in _read_jsonl(path) if row.get("_kind") == "txn"])
+    rows, _ = _dedupe_venue_transactions(_venue_transaction_rows(_read_jsonl(path)))
     return rows
+
+
+def _venue_transaction_rows(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if row.get("_kind") in VENUE_TRANSACTION_KINDS]
+
+
+def _venue_realm(rows: list[dict]) -> str | None:
+    manifests = [row for row in rows if row.get("_kind") == "capture"]
+    if len(manifests) != 1:
+        return None
+    realm = str(manifests[0].get("realm") or "").strip()
+    return realm if realm in {"demo", "mainnet"} else None
 
 
 def _dedupe_venue_transactions(rows: list[dict]) -> tuple[list[dict], int]:
@@ -386,15 +399,25 @@ def _position_settlements(terminal_leg: dict, venue_transactions: list[dict]) ->
 
     symbol = str(terminal_leg.get("symbol") or "").upper()
     terminal_order_id = str(terminal_leg.get("orderId") or "")
-    terminal_ts = _i(terminal_leg.get("updatedTime"))
+    terminal_updated_ts = _i(terminal_leg.get("updatedTime"))
+    terminal_created_ts = _i(terminal_leg.get("createdTime"))
     closing_side = str(terminal_leg.get("side") or "")
-    if not symbol or not terminal_order_id or terminal_ts is None or closing_side not in {"Buy", "Sell"}:
+    if (
+        not symbol
+        or not terminal_order_id
+        or terminal_updated_ts is None
+        or closing_side not in {"Buy", "Sell"}
+    ):
         return incomplete("terminal closed-PnL row lacks symbol, order, time, or side")
+    terminal_created_ts = terminal_created_ts or terminal_updated_ts
+    if terminal_created_ts > terminal_updated_ts:
+        return incomplete("terminal closed-PnL time range moves backward")
 
     symbol_rows = [
         row
         for row in venue_transactions
-        if str(row.get("symbol") or "").upper() == symbol and (_i(row.get("transactionTime")) or -1) <= terminal_ts
+        if str(row.get("symbol") or "").upper() == symbol
+        and (_i(row.get("transactionTime")) or -1) <= terminal_updated_ts
     ]
     terminal_trades = [
         row for row in symbol_rows if row.get("type") == "TRADE" and str(row.get("orderId") or "") == terminal_order_id
@@ -403,8 +426,15 @@ def _position_settlements(terminal_leg: dict, venue_transactions: list[dict]) ->
         return incomplete("no transaction-log TRADE matches the terminal order", close_order_id=terminal_order_id)
     terminal_trades.sort(key=lambda row: _i(row.get("transactionTime")) or -1)
     terminal_times = [_i(row.get("transactionTime")) for row in terminal_trades]
-    if any(ts is None for ts in terminal_times) or max(ts for ts in terminal_times if ts is not None) != terminal_ts:
+    if any(ts is None for ts in terminal_times):
         return incomplete("terminal order time does not match the closed-PnL row", close_order_id=terminal_order_id)
+    exact_terminal_times = [ts for ts in terminal_times if ts is not None]
+    if (
+        min(exact_terminal_times) < terminal_created_ts
+        or max(exact_terminal_times) > terminal_updated_ts
+    ):
+        return incomplete("terminal order time does not match the closed-PnL row", close_order_id=terminal_order_id)
+    terminal_ts = max(exact_terminal_times)
     if any(str(row.get("side") or "") != closing_side for row in terminal_trades):
         return incomplete("terminal order has inconsistent fill sides", close_order_id=terminal_order_id)
     close_qty = _decimal(terminal_leg.get("closedSize")) or _decimal(terminal_leg.get("qty"))
@@ -1590,6 +1620,7 @@ def render_markdown(
     model_run_label: str | None = None,
     model_commit: str | None = None,
     model_commit_verified: bool = False,
+    venue_realm: str | None = None,
     provenance_name: str = "long_live_vs_model_provenance.json",
 ) -> str:
     model_meta = model_meta or {}
@@ -1624,6 +1655,7 @@ def render_markdown(
     )
     multiplier_text = ", ".join(f"{value:g}x" for value in observed_multipliers) or "not recoverable"
     strategy_ids = ", ".join(cycles.strategy_ids) if cycles and cycles.strategy_ids else "not recoverable"
+    venue_scope = f"Bybit {venue_realm}" if venue_realm else "venue realm not recoverable"
 
     lines = [
         "# LONG: live against the model, pair by pair",
@@ -1632,13 +1664,13 @@ def render_markdown(
         "",
         "## Evidence card",
         "",
-        "- Claim and decision: identify why the demo LONG path differed from the registered model",
+        f"- Claim and decision: identify why the {venue_scope} LONG path differed from the registered model",
         "  during this window; this informs parity debugging, not an alpha or deployment verdict.",
         f"- Validity: **{validity}**.",
         "- Shaped versus graded: the v12 rule was shaped before this window, but this matching and",
         "  decomposition were built after seeing these live records. Treat the reconciliation as",
         "  exploratory even where the underlying days postdate the v12 config commit.",
-        f"- Scope: Bybit demo, per-trade return on entry notional, strategy `{strategy_ids}`,",
+        f"- Scope: {venue_scope}, per-trade return on entry notional, strategy `{strategy_ids}`,",
         f"  {summary['n_pairs']} pair(s), {summary['n_model_while_live_held']} model/live-held,",
         f"  {summary['n_model_only']} model-only,",
         f"  {summary['n_live_only'] + summary['n_gate']} live-only.",
@@ -1648,8 +1680,8 @@ def render_markdown(
             f"({'verified by this invocation' if model_commit_verified else 'operator-supplied, not independently bound to the ledger'});"
         ),
         f"  hashes and argv are in `{provenance_name}`.",
-        "- Does not show: complete point-in-time population parity, paired ENA crowd-fee or net parity,",
-        "  complete all-trade funding attribution, mainnet behavior, or account authority.",
+        "- Does not show: complete point-in-time population parity, complete producer-to-engine identity,",
+        "  funding beyond exact reconstructed positions, behavior outside this venue scope, or account authority.",
         "",
         "## How to read this",
         "",
@@ -1677,8 +1709,8 @@ def render_markdown(
         "  to the engine journal attributes those settlements to the long sleeve; linked funding and",
         "  all-in net are reported separately from the engine's price-plus-fee net.",
         "- Expected, structural differences are bucketed apart from slippage: the model takes a",
-        "  4xATR take-profit while the live path has none, and the LLM gate opens trades the",
-        "  kernel never sees.",
+        "  4xATR take-profit while the live path has none. Any explicitly gate-labeled demo trade",
+        "  is kept separate because that gate does not exist in the kernel.",
         "",
         "## Summary",
         "",
@@ -1904,8 +1936,9 @@ def main(argv: list[str] | None = None) -> int:
     engine_trades = load_engine_long_trades(Path(args.trades).expanduser()) if args.trades else []
     cycles = load_cycle_evidence(Path(args.cycle_reports).expanduser()) if args.cycle_reports else None
     venue_history = _read_jsonl(Path(args.venue_history).expanduser()) if args.venue_history else []
+    venue_realm = _venue_realm(venue_history)
     venue_rows = [row for row in venue_history if row.get("_kind") == "closed_pnl"]
-    venue_transactions_raw = [row for row in venue_history if row.get("_kind") == "txn"]
+    venue_transactions_raw = _venue_transaction_rows(venue_history)
     venue_transactions, venue_transaction_duplicates = _dedupe_venue_transactions(venue_transactions_raw)
 
     live_all = build_live_trades(transitions, engine_trades, cycles, venue_rows, venue_transactions)
@@ -1945,6 +1978,7 @@ def main(argv: list[str] | None = None) -> int:
             model_run_label=model_run_label,
             model_commit=model_commit,
             model_commit_verified=model_commit_verified,
+            venue_realm=venue_realm,
             provenance_name=provenance_path.name,
             inputs={
                 "model ledger": str(model_csv),
@@ -1979,7 +2013,12 @@ def main(argv: list[str] | None = None) -> int:
     provenance = {
         "schema_version": 1,
         "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
-        "claim": "diagnose LONG demo execution parity against the registered model",
+        "claim": (
+            f"diagnose LONG {venue_realm} execution parity against the registered model"
+            if venue_realm
+            else "diagnose LONG live execution parity against the registered model"
+        ),
+        "venue_realm": venue_realm,
         "window": {"start": args.start, "end_exclusive": args.end},
         "pair_window_hours": args.pair_window_hours,
         "warmup_days": args.warmup_days,

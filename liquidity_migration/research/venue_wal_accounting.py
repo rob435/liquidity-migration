@@ -114,6 +114,13 @@ class EngineFill:
     order_boot: EngineBoot | None
 
 
+@dataclass(frozen=True)
+class _ClaimDrop:
+    sequence: int
+    strategy: str
+    symbol: str
+
+
 @dataclass
 class EngineTrade:
     sleeve: str
@@ -423,6 +430,7 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
     raw_fills: list[
         tuple[int, Mapping[str, Any], str, list[Any], EngineBoot | None]
     ] = []
+    claim_drops: list[_ClaimDrop] = []
     issues = list(wal.issues)
 
     def learn_order(request: Mapping[str, Any], *, restatement: bool = False) -> None:
@@ -500,6 +508,30 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
                     (row.sequence, fill_payload, "order_update", list(symbols), active_boot)
                 )
             continue
+        if kind == "claims_dropped":
+            dropped_rows = record.get("rows")
+            if not isinstance(dropped_rows, list):
+                issues.append(f"WAL sequence {row.sequence} has malformed dropped claims")
+                continue
+            for dropped in dropped_rows:
+                if not isinstance(dropped, Mapping):
+                    issues.append(f"WAL sequence {row.sequence} has a malformed dropped claim")
+                    continue
+                strategy = _table_name(strategies, dropped.get("strategy"))
+                symbol = _table_name(symbols, dropped.get("symbol"))
+                signed_qty = _decimal(dropped.get("signed_qty"))
+                if (
+                    strategy is None
+                    or symbol is None
+                    or signed_qty is None
+                    or abs(signed_qty) < FLAT_QTY
+                ):
+                    issues.append(
+                        f"WAL sequence {row.sequence} has an unresolved or invalid dropped claim"
+                    )
+                    continue
+                claim_drops.append(_ClaimDrop(row.sequence, strategy, symbol))
+            continue
         if kind == "recovered_fill":
             raw_fills.append(
                 (row.sequence, record, "recovered_fill", list(symbols), active_boot)
@@ -554,7 +586,7 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
                 seen_exec_ids[engine_fill.exec_id] = engine_fill
         fills.append(engine_fill)
 
-    closed, opened = _group_closed_trades(fills, sleeve, issues)
+    closed, opened = _group_closed_trades(fills, sleeve, issues, claim_drops)
     return WalAccounting(
         orders=orders,
         boots=tuple(boots),
@@ -585,11 +617,26 @@ def _valid_fill(fill: EngineFill) -> bool:
 
 
 def _group_closed_trades(
-    fills: Sequence[EngineFill], sleeve: str, parent_issues: list[str]
+    fills: Sequence[EngineFill],
+    sleeve: str,
+    parent_issues: list[str],
+    claim_drops: Sequence[_ClaimDrop] = (),
 ) -> tuple[list[EngineTrade], list[EngineTrade]]:
     current: dict[str, tuple[Decimal, EngineTrade]] = {}
     closed: list[EngineTrade] = []
-    for fill in sorted(fills, key=lambda item: item.sequence):
+    actions: list[EngineFill | _ClaimDrop] = [*fills, *claim_drops]
+    actions.sort(
+        key=lambda action: (
+            action.sequence,
+            0 if isinstance(action, _ClaimDrop) else 1,
+        )
+    )
+    for action in actions:
+        if isinstance(action, _ClaimDrop):
+            if action.strategy == sleeve:
+                current.pop(action.symbol, None)
+            continue
+        fill = action
         if fill.strategy != sleeve:
             continue
         if fill.symbol is None or not fill.symbol.strip():

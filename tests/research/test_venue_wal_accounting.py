@@ -14,6 +14,7 @@ from liquidity_migration.research.venue_wal_accounting import (
     WAL_MAGIC,
     crc32c,
     _retention_start_ms,
+    parse_wal_accounting,
     read_deployment_evidence,
     read_wal_family,
     reconcile,
@@ -383,6 +384,50 @@ def test_exact_ids_fills_cash_and_funding_make_one_venue_confirmed_trade(tmp_pat
     assert report["deployment"]["activation_receipt"]["commit"] == EXPECTED_COMMIT
     assert report["deployment"]["engine_binary_sha256"] == EXPECTED_BINARY_SHA256
     assert report["deployment"]["engine_config_sha256"] == EXPECTED_CONFIG_SHA256
+
+
+def _records_with_dropped_stale_long_claim() -> list[dict]:
+    records = _wal_records()
+    records[2:2] = [
+        _order("stale-entry", "Buy", 3.0, False),
+        _ack("stale-entry", "stale-venue-entry"),
+        _fill("stale-entry", "stale-exec-entry", "Buy", 3.0, 90.0, 0.10, 950),
+        {
+            "kind": "claims_dropped",
+            "wall_ts_ms": 975,
+            "rows": [{"strategy": 1, "symbol": 0, "signed_qty": 3.0}],
+        },
+    ]
+    return records
+
+
+def test_dropped_stale_claim_does_not_absorb_a_later_long_round_trip(
+    tmp_path: Path,
+) -> None:
+    report = _report(tmp_path, records=_records_with_dropped_stale_long_claim())
+
+    assert report["validity"] == "valid"
+    assert report["summary"] == {
+        "closed_trades": 1,
+        "wal_closed_trades": 1,
+        "venue_confirmed": 1,
+        "not_venue_confirmed": 0,
+        "open_wal_positions": 0,
+    }
+    assert report["trades"][0]["wal_execution_ids"] == ["exec-entry", "exec-exit"]
+
+
+def test_malformed_claim_drop_cannot_erase_a_stale_long_claim(tmp_path: Path) -> None:
+    records = _records_with_dropped_stale_long_claim()
+    records[5]["rows"][0]["signed_qty"] = None
+    wal_path = tmp_path / "engine.wal"
+    _write_wal(wal_path, records)
+
+    accounting = parse_wal_accounting(read_wal_family(wal_path))
+
+    assert accounting.closed_trades == ()
+    assert len(accounting.open_trades) == 1
+    assert any("invalid dropped claim" in issue for issue in accounting.issues)
 
 
 def test_wrong_expected_account_withholds_venue_confirmation(tmp_path: Path) -> None:

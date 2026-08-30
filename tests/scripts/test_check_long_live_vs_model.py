@@ -680,7 +680,8 @@ def test_venue_position_reconstruction_explains_closed_pnl_residual() -> None:
         "symbol": "AAVEUSDT",
         "side": "Sell",
         "orderId": "close-order",
-        "updatedTime": str(terminal_ts),
+        "createdTime": str(terminal_ts - 1),
+        "updatedTime": str(terminal_ts + 1),
         "closedSize": "1.5",
     }
     transactions = [
@@ -792,6 +793,23 @@ def test_duplicate_venue_transactions_are_deduped_and_conflicts_fail() -> None:
         parity._dedupe_venue_transactions([row, conflicting])
 
 
+def test_venue_transaction_loader_accepts_current_and_legacy_row_kinds(
+    tmp_path: Path,
+) -> None:
+    path = _write_jsonl(
+        tmp_path / "venue.jsonl",
+        [
+            {"_kind": "transaction", "id": "current", "symbol": "AAVEUSDT"},
+            {"_kind": "txn", "id": "legacy", "symbol": "AAVEUSDT"},
+        ],
+    )
+
+    assert [row["id"] for row in parity.load_venue_transactions(path)] == [
+        "current",
+        "legacy",
+    ]
+
+
 def test_engine_round_trip_links_exact_venue_position_to_long_sleeve() -> None:
     trade = parity.LiveTrade(
         symbol="AAVEUSDT",
@@ -895,6 +913,13 @@ def test_main_end_to_end_writes_csv_report_and_summary(tmp_path: Path, capsys) -
             }
         ],
     )
+    venue = _write_jsonl(
+        tmp_path / "venue.jsonl",
+        [
+            {"_kind": "capture", "realm": "mainnet"},
+            {"_kind": "transaction", "id": "current-txn", "symbol": "BTCUSDT"},
+        ],
+    )
     out = tmp_path / "out"
     parity.main(
         [
@@ -908,6 +933,8 @@ def test_main_end_to_end_writes_csv_report_and_summary(tmp_path: Path, capsys) -
             str(transitions),
             "--trades",
             str(engine),
+            "--venue-history",
+            str(venue),
             "--data-root",
             str(tmp_path / "data"),
             "--out",
@@ -933,12 +960,17 @@ def test_main_end_to_end_writes_csv_report_and_summary(tmp_path: Path, capsys) -
     text = report_md.read_text(encoding="utf-8")
     assert "cold start" in text.lower()
     assert "funding" in text.lower()
+    assert "Scope: Bybit mainnet" in text
 
     provenance = json.loads(provenance_json.read_text(encoding="utf-8"))
     identities = provenance["input_identities"]
     assert identities["model_ledger"]["sha256"]
     assert identities["transitions"]["sha256"]
     assert identities["engine_journal"]["sha256"]
+    assert identities["venue_history"]["sha256"]
     assert identities["data_root"]["content_hash_complete"] is False
     assert identities["data_root"]["read_by_checker"] is False
     assert identities["archive_manifest_report"]["exists"] is False
+    assert provenance["claim"] == "diagnose LONG mainnet execution parity against the registered model"
+    assert provenance["venue_realm"] == "mainnet"
+    assert provenance["parsed_rows"]["venue_transactions"] == 1
