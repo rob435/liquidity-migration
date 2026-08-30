@@ -380,6 +380,59 @@ it cannot create the replacement or revoke the prior key.
 `STATE.md` records whether rotation is still owed. Do not infer completion from
 a green build or deploy.
 
+## Venue-confirmed LONG accounting
+
+The account-history capture is authenticated but GET-only. Mainnet uses the
+separate `BYBIT_ATTEST_*` key by default; `--credential-set execution` selects
+the rotated engine key explicitly. The capture window must have ended at the
+venue and must remain inside Bybit's two-year history boundary.
+The capture queries authenticated user identity and venue time again after all
+three histories finish, then applies the retention boundary to that final time.
+
+```bash
+python scripts/research/capture_bybit_account_history.py \
+  --realm mainnet \
+  --start "$LONG_TRADE_START_UTC" \
+  --end "$LONG_TRADE_END_UTC" \
+  --out "$LONG_VENUE_CAPTURE"
+
+python scripts/research/reconcile_venue_wal.py \
+  --wal /var/lib/liquidity-migration-engine-mainnet/engine.wal \
+  --venue-history "$LONG_VENUE_CAPTURE" \
+  --sleeve long \
+  --trade-execution-id "$LONG_REGISTERED_EXECUTION_ID" \
+  --expected-realm mainnet \
+  --expected-user-id "$BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" \
+  --deployment-receipt "$DEPLOYED_ACTIVATION_RECEIPT" \
+  --engine-binary "$DEPLOYED_ENGINE_BINARY" \
+  --engine-config "$DEPLOYED_ENGINE_CONFIG" \
+  --expected-commit "$ROLLOUT_COMMIT" \
+  --expected-binary-sha256 "$ROLLOUT_ENGINE_SHA256" \
+  --expected-config-sha256 "$ROLLOUT_ENGINE_CONFIG_SHA256" \
+  --out "$LONG_ACCOUNTING_REPORT"
+```
+
+The three expected identities come from the reviewed rollout record and exact
+config bytes retained independently of the evidence being graded. Do not copy
+an expected value back out of `activation.complete` merely to make the check
+pass. The receipt is the exact six-line durable activation receipt; the binary
+and config inputs are byte-for-byte captures from that deployed generation.
+
+The report says `venue_confirmed` only when the complete WAL family, every
+execution identity, both order identities, exact fill fields, the one-way
+position path, trading fees, closed P&L, account cash changes, and every crowd
+fee (funding) settlement agree. Each fill names its nearest preceding WAL Boot,
+whose exact config SHA-256 must match the retained config and expected digest.
+The activation receipt commit and binary digest must match the independent
+expected values, and the supplied binary and config bytes are rehashed. A
+missing, duplicate, foreign, truncated, wrong-generation, or out-of-retention
+row withholds the label. `--trade-execution-id` selects the unique closed trade
+that contains that immutable execution ID while retaining full-family WAL
+integrity checks. A recovered fill is attributed to the Boot that recorded it;
+the Boot does not by itself prove which historical binary sent the order.
+Producer parity and tape grading are separate evidence and still use the
+registered trade rather than a proxy.
+
 ## Incident rules
 
 - `may_open=false`: leave the engine running for reductions, inspect its WAL and

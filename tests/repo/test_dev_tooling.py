@@ -216,6 +216,18 @@ def test_dev_help_works_outside_repository(tmp_path: Path) -> None:
     assert "scripts/ops.sh --help" in completed.stdout
 
 
+def test_dev_type_gate_includes_venue_wal_accounting_surfaces() -> None:
+    dev = DEV.read_text(encoding="utf-8")
+
+    for target in (
+        "liquidity_migration/research/venue_wal_accounting.py",
+        "scripts/research/capture_bybit_account_history.py",
+        "scripts/research/reconcile_venue_wal.py",
+    ):
+        assert target in dev
+    assert "^liquidity_migration/research/venue_wal_accounting\\.py$" in dev
+
+
 def test_dev_router_uses_selected_python_and_preserves_arguments(tmp_path: Path) -> None:
     fake_python = tmp_path / "python"
     capture = tmp_path / "arguments.txt"

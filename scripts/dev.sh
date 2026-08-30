@@ -41,7 +41,12 @@ cd "$ROOT_DIR"
 
 # One list, used by both `types` and `check`.
 MYPY_TARGETS=(
+  --exclude
+  '^liquidity_migration/research/venue_wal_accounting\.py$'
   liquidity_migration
+  liquidity_migration/research/venue_wal_accounting.py
+  scripts/research/capture_bybit_account_history.py
+  scripts/research/reconcile_venue_wal.py
   scripts/devtools/repo_doctor.py
   scripts/data/build_candidate_tape.py
   scripts/runtime/check_fleet_liveness.py
