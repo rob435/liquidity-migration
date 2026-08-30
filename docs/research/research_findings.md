@@ -5,6 +5,67 @@ Evidence grading and promotion: [docs/research/governance.md](governance.md). Ev
 [AGENTS.md](../../AGENTS.md). Failure taxonomy: [docs/research/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
 Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
+## 2026-08-30 — v13 exit hunt, round two: three new data sources, nothing binds
+
+**Question (owner).** After the give-back program below closed the
+price-path exit families, the owner asked for a genuinely new v13 exit on
+genuinely new data — sentiment, positioning, liquidations — plus a
+book-level re-grade of pyramiding. Same overlay harness and costs as the
+give-back program; same 306-trade 2021→2026-08 v12 ledger.
+
+**Data surveyed.** The crypto Fear & Greed index (alternative.me, 3,129
+daily readings, full window); Binance top-trader long/short ratio
+(`tt_ls_eod`, the input carry v6's registered whale halving reads;
+coverage 2024-04+, 52 of the 306 trades); the precomputed market-adjusted
+(residual) momentum panel; Tardis liquidations — **first-of-month free
+days only** (44 days over 2023-26), which cannot ground a trade-level exit
+rule and was not forced to.
+
+| family | best cell | worst cell | verdict |
+| --- | ---: | ---: | --- |
+| exit on Fear & Greed ≥ 75/80/85 mid-hold | +0.002 (≥85, fires 7×) | −0.116, t −3.3 (≥75) | dead — cuts winners like every price-path trail |
+| hold 2d not 3d when entry-day F&G ≥ 75 | — | −0.033, t −1.5 | dead |
+| exit on top-trader ratio drop ≥ 0.20/0.26/0.35 from entry | — | — | non-binding: fires once in 52 covered trades; a 3-day hold is too short for daily positioning to move that far |
+| exit when residual momentum < 0 / < −0.10 mid-hold | −0.011 (−0.10, fires 7×) | −0.101, t −3.0 (< 0) | dead — "the move is no longer idiosyncratic" still sells the tail |
+
+**Pyramiding, book-level (the owner's preferred framing).** v12 + add
+0.5w at +1×ATR: total +0.600, daily Sharpe 3.15, worst dip −4.9%. v12
+scaled ×1.35 to the identical average gross: total **+0.658, Sharpe
+3.31**, dip −5.5%. At equal risk budget plain size beats the conditional
+add on return and Sharpe (the add's slightly smaller dip is a ~3% MAR
+difference, inside noise). Third refutation of conditional adds, now on
+the fair test.
+
+**Standing count.** Across the v13 program (6 exit families), the
+give-back overlays (5), and this round (4): fifteen mechanism families and
+~40 cells against v12's exits, every one dead or non-binding. v12's exit
+geometry is measured optimal against everything this desk has tried.
+Re-opening exits now requires a new *mechanism class*, not a new
+parameterization. Lane-1 on seen data; overlay caveats as below. Artifact:
+session scratchpad `v13_new_exits_study.py` (session a7ea30ba).
+
+## 2026-08-30 — Carry re-entry after harvest: profitable, no cooldown
+
+**Question (owner).** The 2026-08-25..29 drawdown's biggest single line was
+carry re-buying AGIUSDT days after a +62 USDT harvest and losing −68. Is
+re-entering a just-harvested name a structural loss (the closed 118-cell
+exit program tested exits, never re-entry cooldowns)?
+
+**Method.** The registered v7 book rebuilt on the cross-venue panel
+(`carry_reentry_study.py`, session a7ea30ba); 2,091 held name-days cut
+into 1,262 trips (contiguous held runs per symbol); trips split by the gap
+to the same name's previous trip and by that trip's outcome.
+
+**Result — the opposite of the week's impression.** Fresh entries (no
+prior trip within 14d): +36.2 bp/trip, t +3.7. Re-entries within 7d:
++29.6 bp/trip, t +2.3. The exact AGI shape — re-entry within 7d of a
+> +200 bp winning trip — averages **+37.4 bp/trip** (n 44). Per year,
+re-entries beat fresh entries outright in 2022 (+29.8 vs +7.7), 2023
+(+49.4 vs +22.0), and 2024 (+48.1 vs +6.1), roughly tie 2025, and lag in
+2026 (+3.7 vs +49.9 — weaker, still positive). A re-entry cooldown would
+have deleted a cohort profitable in every meaningful year to soften one
+weak one. **No cooldown.** AGI was one bad draw from a good cohort.
+
 ## 2026-08-30 — LONG give-back and the exit overlays: measured, all lose
 
 **Question (owner).** The demo curve fell 1,757 → 1,655 USDT over 2026-08-25..29
