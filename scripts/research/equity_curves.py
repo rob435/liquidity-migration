@@ -2,9 +2,10 @@
 """One command for standard equity curves.
 
 LONG runs from ``long_native.long_v11a_profile``.
-CARRY renders the deployed rule ``configs/lane2_carry_hold_v7.json``
-through the same --research-config path (cross-venue panel, settlement-exact
-scorer). That is the registered research shape, not a demo daemon replay.
+CARRY renders the deployed rule ``configs/lane2_carry_hold_v7.json`` through
+the shared live reducer on the cross-venue panel's hourly clock. A supplied
+typed pre-settlement tape adds exact fire-time observations; without one the
+report labels the missing running-rate clock as a bounded diagnostic.
 
     bash scripts/research/equity_curves.sh                      # LONG sleeve, last 3 years, bybit_full_pit
     bash scripts/research/equity_curves.sh --sleeves long,carry
@@ -109,19 +110,58 @@ def _run_carry(
     start: str,
     end: str,
     out: Path,
+    presettlement_event_tape: str | None = None,
 ) -> dict[str, Any]:
-    """Render the CARRY sleeve's registered research shape.
+    """Replay the registered CARRY rule through its live decision contract.
 
-    The carry runtime (v7 profile) trades ``configs/lane2_carry_hold_v7.json``,
-    so its standard curve is that same config through the --research-config
-    path. It reads the cross-venue panel, not the demo cycle record; v7's
-    pre-settle exit clock is execution-time and is not modeled here.
+    The panel reconstructs settled prints. A typed event tape supplies the
+    fire-time rate and mark for pre-settlement exits; an absent tape stays a
+    clearly labelled settled-clock diagnostic rather than a parity claim.
     """
-    from liquidity_migration.strategy.carry_demo import CARRY_CONFIG_PATH
-    from liquidity_migration.research.backtest.financed_longs import research_equity_chart
+    from liquidity_migration.core.operational_profile import load_operational_profile
+    from liquidity_migration.research.backtest.financed_longs import (
+        CarryReplaySettings,
+        research_equity_chart,
+    )
+    from liquidity_migration.strategy.carry_config import (
+        CARRY_CONFIG_PATH,
+        resolve_carry_strategy_profile,
+    )
+    from liquidity_migration.strategy.carry_runtime import load_durable_presettlement_events
 
     panel = _load_research_panel(panel_root)
-    return research_equity_chart(panel, CARRY_CONFIG_PATH, out, start=start, end=end)
+    events = (
+        load_durable_presettlement_events(
+            Path(presettlement_event_tape).expanduser().resolve()
+        )
+        if presettlement_event_tape
+        else ()
+    )
+    operational = load_operational_profile(REPO / "configs" / "operational.mainnet.json")
+    carry = operational.carry
+    replay_settings = CarryReplaySettings(
+        environment="mainnet",
+        source_profile=resolve_carry_strategy_profile("v7").profile_name,
+        notional_multiplier=carry.notional_multiplier,
+        entry_leverage=carry.entry_leverage,
+        stop_loss_fraction=carry.declared_stop_loss_fraction,
+        max_new_entries_per_cycle=carry.max_new_entries_per_cycle,
+        capital_reference_usdt=(
+            0.0
+            if operational.capital_reference.tracks_equity
+            else operational.capital_reference_usdt
+        ),
+    )
+    return research_equity_chart(
+        panel,
+        CARRY_CONFIG_PATH,
+        out,
+        start=start,
+        end=end,
+        replay_mode="live_contract",
+        replay_settings=replay_settings,
+        presettlement_events=events,
+    )
 
 
 #: Daily equity CSV produced by each sleeve runner under its output dir.
@@ -531,9 +571,9 @@ def main() -> int:
         help=(
             "Comma list: long, carry. 'carry' renders the registered "
             "research config (lane2_carry_hold_v7, the file the deployed v7 "
-            "profile trades) from the cross-venue panel — a research-shape "
-            "simulation, not a daemon replay; the v7 pre-settle exit clock "
-            "is execution-time and is not modeled here."
+            "profile trades) through the shared CARRY reducer. The panel "
+            "reconstructs settled prints; --carry-presettlement-event-tape "
+            "adds typed fire-time observations."
         ),
     )
     p.add_argument(
@@ -592,6 +632,15 @@ def main() -> int:
         "--panel-root",
         default=DEFAULT_PANEL_ROOT,
         help="Cross-venue panel root for --research-config renders.",
+    )
+    p.add_argument(
+        "--carry-presettlement-event-tape",
+        default=None,
+        help=(
+            "Optional durable CARRY pre-settlement JSONL tape. Its typed fire-time rates and marks "
+            "are replayed by the standard CARRY curve; without it the report is explicitly a "
+            "settled-clock diagnostic."
+        ),
     )
     p.add_argument(
         "--combined",
@@ -681,7 +730,13 @@ def main() -> int:
                     long_profile=args.long_profile,
                 )
             else:
-                payload = _run_carry(args.panel_root, start, end, out)
+                payload = _run_carry(
+                    args.panel_root,
+                    start,
+                    end,
+                    out,
+                    args.carry_presettlement_event_tape,
+                )
         except Exception as exc:  # noqa: BLE001 - report per-sleeve, keep going
             print(f"  [X] {s} failed: {type(exc).__name__}: {exc}\n", flush=True)
             results[s] = {"error": str(exc)}
