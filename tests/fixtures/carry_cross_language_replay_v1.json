@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "name": "carry_lifecycle_to_rust_target_planner_v1",
+  "execution_rules": {
+    "schema_version": 1,
+    "entry_floor_usdt": 6.0,
+    "resize_floor_usdt": 1.0,
+    "resize_floor_fraction": 0.05,
+    "engine_entry_cutoff_ms": 900000,
+    "signal_validity_ms": 21600000,
+    "book_validity_ms": 108000000,
+    "presettlement_window_ms": 900000
+  },
+  "strategy_config": {
+    "schema_version": 1,
+    "profile_name": "carry_hold_v7_live_v1",
+    "accepted_book_sources": [
+      "carry_hold_v7_live_v1",
+      "v7"
+    ],
+    "exit_bp": 3.0,
+    "early_exit_enabled": true,
+    "presettlement_exit_enabled": true,
+    "notional_multiplier": 1.0,
+    "entry_leverage": 2.0,
+    "stop_loss_fraction": 0.35,
+    "max_new_entries_per_cycle": 2,
+    "capital_reference_usdt": 0.0,
+    "execution": {
+      "schema_version": 1,
+      "entry_floor_usdt": 6.0,
+      "resize_floor_usdt": 1.0,
+      "resize_floor_fraction": 0.05,
+      "engine_entry_cutoff_ms": 900000,
+      "signal_validity_ms": 21600000,
+      "book_validity_ms": 108000000,
+      "presettlement_window_ms": 900000
+    }
+  },
+  "prior_state": {
+    "schema_version": 1,
+    "sizing_anchors": [
+      [
+        1799913600000,
+        900.0
+      ],
+      [
+        1800000000000,
+        1000.0
+      ]
+    ],
+    "fired_exits": []
+  },
+  "decision_input": {
+    "schema_version": 1,
+    "now_ms": 1800003000000,
+    "decision": {
+      "schema_version": 1,
+      "decision_ts_ms": 1800000000000,
+      "weights": {
+        "ALPHAUSDT": 0.02,
+        "BETAUSDT": 0.005,
+        "BLOCKUSDT": 0.02,
+        "CAPUSDT": 0.01,
+        "DROPUSDT": 0.02,
+        "DURABLEUSDT": 0.02,
+        "EXITUSDT": 0.03,
+        "GAMMAUSDT": 0.012,
+        "NOPRICEUSDT": 0.007,
+        "PREUSDT": 0.02,
+        "SMALLUSDT": 0.01
+      },
+      "universe_size": 99,
+      "replay_days": 90,
+      "gross": 0.174
+    },
+    "upcoming_decision": {
+      "schema_version": 1,
+      "decision_ts_ms": 1800086400000,
+      "weights": {
+        "ALPHAUSDT": 0.02,
+        "BETAUSDT": 0.005,
+        "BLOCKUSDT": 0.02,
+        "CAPUSDT": 0.01,
+        "DURABLEUSDT": 0.02,
+        "EXITUSDT": 0.03,
+        "GAMMAUSDT": 0.012,
+        "NOPRICEUSDT": 0.007,
+        "PREUSDT": 0.02,
+        "SMALLUSDT": 0.01
+      },
+      "universe_size": 99,
+      "replay_days": 90,
+      "gross": 0.154
+    },
+    "holdings": [
+      {"symbol": "ALPHAUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0},
+      {"symbol": "DROPUSDT", "side": "long", "qty": 3.0, "entry_px": 10.0},
+      {"symbol": "DURABLEUSDT", "side": "long", "qty": 2.0, "entry_px": 10.0},
+      {"symbol": "EXITUSDT", "side": "long", "qty": 4.0, "entry_px": 10.0},
+      {"symbol": "ORPHANUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0},
+      {"symbol": "PREUSDT", "side": "long", "qty": 2.5, "entry_px": 10.0},
+      {"symbol": "SMALLUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0}
+    ],
+    "trail_by_symbol": [
+      ["BLOCKUSDT", -5.0],
+      ["BETAUSDT", -4.0],
+      ["GAMMAUSDT", -3.0],
+      ["NOPRICEUSDT", -2.0],
+      ["CAPUSDT", -1.0]
+    ],
+    "entry_blockers": [
+      ["BLOCKUSDT", "refused"]
+    ],
+    "account_health_error": "",
+    "equity_usdt": 1200.0,
+    "settled_funding": [
+      {"symbol": "EXITUSDT", "settlement_ts_ms": 1800001800000, "rate": -0.0003}
+    ],
+    "presettlement": [
+      {
+        "symbol": "PREUSDT",
+        "observed_ts_ms": 1800003000000,
+        "settlement_ts_ms": 1800003600000,
+        "running_rate": -0.0001,
+        "mark_px": 10.0,
+        "carry_side": "long",
+        "carry_qty": 2.5,
+        "carry_avg_entry_px": 10.0
+      }
+    ],
+    "durable_presettlement_fires": [
+      {
+        "decision_ts_ms": 1800000000000,
+        "symbol": "DURABLEUSDT",
+        "observed_ts_ms": 1800003000000,
+        "settlement_ts_ms": 1800003600000,
+        "running_rate": -0.0001,
+        "mark_px": 10.0,
+        "carry_side": "long",
+        "carry_qty": 2.0,
+        "carry_avg_entry_px": 10.0
+      }
+    ],
+    "previous_book": null
+  },
+  "expected_decision_output": {
+    "schema_version": 1,
+    "action": "write",
+    "target_book_sha256": "ae97f9eea8879ca7dbbb8be0a5b2c689b364342dc5624bddcdfa00f5a1995f57",
+    "next_state": {
+      "schema_version": 1,
+      "sizing_anchors": [
+        [1799913600000, 900.0],
+        [1800000000000, 1000.0]
+      ],
+      "fired_exits": [
+        ["DURABLEUSDT", 1800000000000],
+        ["EXITUSDT", 1800000000000],
+        ["PREUSDT", 1800000000000]
+      ]
+    },
+    "effective_decision": {
+      "schema_version": 1,
+      "decision_ts_ms": 1800000000000,
+      "weights": {
+        "ALPHAUSDT": 0.02,
+        "BETAUSDT": 0.005,
+        "BLOCKUSDT": 0.02,
+        "CAPUSDT": 0.01,
+        "GAMMAUSDT": 0.012,
+        "NOPRICEUSDT": 0.007,
+        "SMALLUSDT": 0.01
+      },
+      "universe_size": 99,
+      "replay_days": 90,
+      "gross": 0.084
+    },
+    "sizing_equity_usdt": 1000.0,
+    "summary": {
+      "desired_book_size": 7,
+      "desired_gross_weight": 0.084,
+      "planned_exits": 5,
+      "planned_entries": 2,
+      "planned_resizes": 1,
+      "entry_cap_deferrals": 1,
+      "entry_validity_expired_skips": 0,
+      "entry_dust_skips": 1,
+      "engine_blocked_entries": 1,
+      "entry_blocked_reason": ""
+    },
+    "settled_exit_fires": ["EXITUSDT"],
+    "presettlement_fires": [
+      {
+        "decision_ts_ms": 1800000000000,
+        "symbol": "PREUSDT",
+        "observed_ts_ms": 1800003000000,
+        "settlement_ts_ms": 1800003600000,
+        "running_rate": -0.0001,
+        "mark_px": 10.0,
+        "carry_side": "long",
+        "carry_qty": 2.5,
+        "carry_avg_entry_px": 10.0
+      }
+    ],
+    "drop_exit_fires": ["DROPUSDT"]
+  },
+  "target_book_utf8": "{\n  \"decision_ts_ms\": 1800000000000,\n  \"source\": \"carry_hold_v7_live_v1\",\n  \"targets\": [\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 20.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"ALPHAUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 12.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"GAMMAUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 7.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"NOPRICEUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 10.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"SMALLUSDT\",\n      \"target_qty\": null\n    }\n  ],\n  \"valid_until_ms\": 1800108000000,\n  \"version\": 2\n}\n",
+  "target_book_sha256": "ae97f9eea8879ca7dbbb8be0a5b2c689b364342dc5624bddcdfa00f5a1995f57",
+  "rust_replay": {
+    "now_ms": 1800003000000,
+    "held_symbols": [
+      "ALPHAUSDT",
+      "DROPUSDT",
+      "DURABLEUSDT",
+      "EXITUSDT",
+      "ORPHANUSDT",
+      "PREUSDT",
+      "SMALLUSDT"
+    ],
+    "prices": {
+      "ALPHAUSDT": 10.0,
+      "GAMMAUSDT": 2.0,
+      "SMALLUSDT": 10.0
+    },
+    "instrument_rule": {
+      "tick_size": 0.01,
+      "qty_step": 0.1,
+      "min_qty": 0.1,
+      "min_notional": 5.0
+    },
+    "held": [
+      {"symbol": "ALPHAUSDT", "side": "buy", "qty": 1.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
+      {"symbol": "DROPUSDT", "side": "buy", "qty": 3.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
+      {"symbol": "DURABLEUSDT", "side": "buy", "qty": 2.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
+      {"symbol": "EXITUSDT", "side": "buy", "qty": 4.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
+      {"symbol": "ORPHANUSDT", "side": "buy", "qty": 1.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
+      {"symbol": "PREUSDT", "side": "buy", "qty": 2.5, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
+      {"symbol": "SMALLUSDT", "side": "buy", "qty": 1.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5}
+    ],
+    "expected_planner_steps": [
+      {"kind": "exit", "symbol": "DROPUSDT", "side": "sell", "qty": 3.0},
+      {"kind": "exit", "symbol": "DURABLEUSDT", "side": "sell", "qty": 2.0},
+      {"kind": "exit", "symbol": "EXITUSDT", "side": "sell", "qty": 4.0},
+      {"kind": "exit", "symbol": "ORPHANUSDT", "side": "sell", "qty": 1.0},
+      {"kind": "exit", "symbol": "PREUSDT", "side": "sell", "qty": 2.5},
+      {"kind": "resize", "symbol": "ALPHAUSDT", "side": "buy", "qty": 1.0, "reduce_only": false, "stop_px": 6.5},
+      {"kind": "enter", "symbol": "GAMMAUSDT", "side": "buy", "qty": 6.0, "stop_px": 1.3}
+    ],
+    "expected_planner_skips": [
+      {"kind": "no_price", "symbol": "NOPRICEUSDT"},
+      {"kind": "too_small_to_bother", "symbol": "SMALLUSDT", "delta_usdt": 0.0}
+    ],
+    "boundary_cases": {
+      "entry_below_floor_usdt": 5.99,
+      "entry_at_floor_usdt": 6.0,
+      "resize_at_absolute_floor_usdt": 1.0,
+      "resize_above_absolute_floor_usdt": 1.01,
+      "resize_at_fraction_floor_usdt": 5.0,
+      "resize_above_fraction_floor_usdt": 5.01
+    }
+  }
+}
