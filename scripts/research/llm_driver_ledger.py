@@ -428,6 +428,44 @@ def judge(facts: dict[str, Any]) -> dict[str, Any] | None:
 RENOMINATION_HOURS = 12
 TRIGGER_SUPPRESSION_HOURS = 24
 
+# The freshness veto (change point 2026-08-30). A trigger whose name this
+# ledger already flagged on two or more distinct earlier UTC days inside the
+# window is a move in at least its third day, and the gate does not publish
+# it: the one measured gate loss class is exactly that chase (AAVE 2026-08-24,
+# scored 7 on its third consecutive mover-day after a +45% three-day run,
+# bought within 2.5% of the top). The judgment row is still journaled in
+# full with the veto marked, so --grade reads the vetoed and published
+# cohorts side by side — that ledger split IS the forward A/B.
+GATE_FRESHNESS_WINDOW_DAYS = 4
+GATE_FRESHNESS_VETO_PRIOR_DAYS = 2
+
+
+def _flag_days_by_symbol(path: Path, now: dt.datetime, *, window_days: int) -> dict[str, set[str]]:
+    """Distinct EARLIER UTC dates each symbol was flagged (mover or trigger).
+
+    Today's own rows are excluded, so a pump's second judged hour cannot veto
+    its first day; only prior calendar days count as staleness.
+    """
+
+    days: dict[str, set[str]] = {}
+    if not path.exists():
+        return days
+    today = now.date()
+    cutoff = today - dt.timedelta(days=window_days)
+    for line in path.open():
+        try:
+            row = json.loads(line)
+            if row.get("row_type", "mover") not in ("mover", "trigger"):
+                continue
+            day = dt.datetime.fromisoformat(row["ts_utc"]).date()
+            if not cutoff <= day < today:
+                continue
+            symbol = str(row["facts"]["symbol"])
+        except Exception:
+            continue
+        days.setdefault(symbol, set()).add(day.isoformat())
+    return days
+
 
 def _recently_nominated(path: Path, now: dt.datetime, *, hours: int, row_type: str | None = None) -> set[str]:
     """Symbols already journaled inside the suppression window: one pump, one
@@ -534,6 +572,7 @@ def cmd_triggers(ledger_dir: Path) -> None:
         print(f"regime off (btc={btc_on} eth={eth_on}); no triggers scanned, candidates cleared")
         return
     recent = _recently_nominated(path, now, hours=TRIGGER_SUPPRESSION_HOURS, row_type="trigger")
+    flag_days = _flag_days_by_symbol(path, now, window_days=GATE_FRESHNESS_WINDOW_DAYS)
 
     body = _http_json(f"{BYBIT_PUBLIC}/v5/market/tickers?category=linear")
     rows = _result_list(body)
@@ -631,12 +670,16 @@ def cmd_triggers(ledger_dir: Path) -> None:
             judgment = judge(facts)
             score = (judgment or {}).get("pump_quality_score")
             would_enter = isinstance(score, (int, float)) and score >= WOULD_ENTER_SCORE
+            prior_days = len(flag_days.get(symbol, ()))
+            freshness_veto = prior_days >= GATE_FRESHNESS_VETO_PRIOR_DAYS
             row = {
                 "ts_utc": now.isoformat(timespec="seconds"),
                 "prompt_version": PROMPT_VERSION,
                 "row_type": "trigger",
                 "would_enter": bool(would_enter),
                 "would_enter_score_min": WOULD_ENTER_SCORE,
+                "freshness_veto": freshness_veto,
+                "prior_flag_days": prior_days,
                 "facts": facts,
                 "judgment": judgment,
             }
@@ -648,6 +691,8 @@ def cmd_triggers(ledger_dir: Path) -> None:
                 if judgment
                 else "unjudged"
             )
+            if freshness_veto:
+                verdict += f" VETOED (flagged on {prior_days} earlier days)"
             print(
                 f"TRIGGER {symbol:<14} {facts['trigger_window_h']}h window "
                 f"+{facts[f'move_{fastest}h']:.0%} depth={depth}  {verdict}"
@@ -701,6 +746,10 @@ def publish_gate_candidates(
     events: list[dict[str, Any]] = []
     for ev in judged_events:
         if not ev.get("would_enter"):
+            continue
+        if ev.get("freshness_veto"):
+            # Journaled in full, published never: the vetoed cohort's forward
+            # returns grade the veto itself.
             continue
         facts = ev.get("facts") or {}
         atr = facts.get("atr_14d_pct")
@@ -774,6 +823,8 @@ def cmd_grade(ledger_dir: Path) -> None:
             continue
         judgment = row.get("judgment") or {}
         row_type = str(row.get("row_type", "mover"))
+        if row.get("freshness_veto"):
+            row_type += "[vetoed]"
         kind = f"{row_type}:{judgment.get('driver_kind', 'unjudged')}"
         version = str(row.get("prompt_version", "?"))
         fwd = _forward_return(row["facts"]["symbol"], int(ts.timestamp() * 1000), 72)

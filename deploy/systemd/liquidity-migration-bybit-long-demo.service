@@ -43,6 +43,11 @@ Environment=LONG_STRATEGY_PROFILE=v12
 # exact-commit step.
 Environment=LONG_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/long-demo.json
 Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/long-demo-state.json
+# Append-only enter/leave attribution log. The state row's entry source
+# ("llm_gate" vs the native "fomo_chase") dies with the row when a position
+# closes, and every close record downstream is pattern-blind -- this log is
+# what lets a close be attributed to its entry source afterwards.
+Environment=LONG_ENGINE_BOOK_TRANSITIONS_PATH=/var/lib/liquidity-migration/targets/long-demo-transitions.jsonl
 # The LLM gate's judged candidates (written hourly by the llm-ledger service)
 # enter through THIS sleeve: same book, same sizing, same exits. Both lines
 # are the kill switch -- set ENABLED=0 (or stop the llm-ledger timer) and the

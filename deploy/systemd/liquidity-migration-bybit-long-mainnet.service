@@ -35,6 +35,8 @@ Environment=LONG_STRATEGY_PROFILE=v12
 # what it asked for last cycle would re-enter every name it holds, for ever.
 Environment=LONG_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/long-mainnet.json
 Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/long-mainnet-state.json
+# Append-only enter/leave attribution log; see the demo unit's note.
+Environment=LONG_ENGINE_BOOK_TRANSITIONS_PATH=/var/lib/liquidity-migration/targets/long-mainnet-transitions.jsonl
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-long-mainnet.service main
 Restart=always
 RestartPreventExitStatus=78

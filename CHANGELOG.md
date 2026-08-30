@@ -6,6 +6,24 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The gate stops chasing old moves, and every LONG entry
+  says where it came from.** Two changes from the give-back program's live
+  receipts (research_findings §LONG give-back). First, the LLM gate's
+  freshness veto: a trigger whose name the ledger already flagged on two or
+  more distinct earlier UTC days within the last four is journaled in full
+  (`freshness_veto`, `prior_flag_days`) and never published — the AAVE
+  2026-08-24 loss was exactly this chase, scored 7 on its third consecutive
+  mover-day after a +45% three-day run and bought within 2.5% of the top.
+  `--grade` buckets vetoed rows separately, so the ledger carries the veto's
+  own forward A/B. Second, both LONG producers append an enter/leave
+  attribution line per book transition (`LONG_ENGINE_BOOK_TRANSITIONS_PATH`,
+  `targets/long-{demo,mainnet}-transitions.jsonl`) carrying the entry's
+  pattern (`llm_gate` vs native `fomo_chase`); since the 2026-08-24 merge no
+  close record could say which entries were the gate's, and this log is the
+  durable split. A failed append warns and never stops the cycle. Six new
+  tests, each proved to fail without its change. This commit is the veto's
+  change point.
+
 - **2026-08-30 — The forward tape has an off-box home.** An hourly uploader
   sends only completed `.zst` segments to Google Drive, checks each new batch
   before advancing its local ledger, and leaves a SHA-256 batch list beside

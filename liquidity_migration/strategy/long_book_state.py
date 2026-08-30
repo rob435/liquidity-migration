@@ -42,8 +42,10 @@ __all__ = [
     "BOOK_STATE_VERSION",
     "BookStateError",
     "LONG_BOOK_STATE_PATH_ENV",
+    "LONG_BOOK_TRANSITIONS_PATH_ENV",
     "LongBookEntry",
     "LongBookState",
+    "append_book_transitions",
     "long_book_state_path",
     "migrate_empty_v1_book_state",
     "read_book_state",
@@ -52,6 +54,12 @@ __all__ = [
 
 #: Where this producer keeps the record. Unset means it keeps none.
 LONG_BOOK_STATE_PATH_ENV = "LONG_ENGINE_BOOK_STATE_PATH"
+
+#: Where the append-only enter/leave attribution log goes. Unset means no
+#: log. It exists because a close is recorded pattern-blind everywhere else
+#: (engine trades, venue records), so "is the gate making money" is only
+#: answerable from this file's enter/leave rows joined to the closes.
+LONG_BOOK_TRANSITIONS_PATH_ENV = "LONG_ENGINE_BOOK_TRANSITIONS_PATH"
 
 #: Bumped when the shape changes in a way an older reader would misread. A
 #: version this module does not know is refused rather than guessed at, and a
@@ -440,6 +448,62 @@ def write_book_state(path: str | Path, state: LongBookState) -> None:
         (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         label="LONG book state",
     )
+
+
+def append_book_transitions(
+    path: str | Path,
+    *,
+    now_ms: int,
+    before: dict[str, LongBookEntry],
+    after: dict[str, LongBookEntry],
+) -> int:
+    """Append one JSON line per name entering or leaving the book.
+
+    This is the durable per-trade attribution the state file cannot give: a
+    held row's ``pattern`` ("llm_gate" for judged entries, "fomo_chase" for
+    native ones) dies with the row when the position closes, while the close
+    itself is recorded pattern-blind by the engine and the venue. An
+    append-only enter/leave log keyed by symbol and time is what lets a close
+    be attributed to its entry source afterwards. Returns the rows written.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for symbol in sorted(set(after) - set(before)):
+        entry = after[symbol]
+        rows.append(
+            {
+                "ts_ms": int(now_ms),
+                "event": "enter",
+                "trade_id": entry.trade_id,
+                "symbol": symbol,
+                "pattern": entry.pattern,
+                "entry_reason": entry.entry_reason,
+                "signal_ts_ms": entry.signal_ts_ms,
+                "notional_usdt": entry.notional_usdt,
+            }
+        )
+    for symbol in sorted(set(before) - set(after)):
+        entry = before[symbol]
+        rows.append(
+            {
+                "ts_ms": int(now_ms),
+                "event": "leave",
+                "trade_id": entry.trade_id,
+                "symbol": symbol,
+                "pattern": entry.pattern,
+                "entry_reason": entry.entry_reason,
+                "signal_ts_ms": entry.signal_ts_ms,
+                "notional_usdt": entry.notional_usdt,
+            }
+        )
+    if not rows:
+        return 0
+    resolved = Path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    with resolved.open("a") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    return len(rows)
 
 
 def migrate_empty_v1_book_state(path: str | Path) -> bool:

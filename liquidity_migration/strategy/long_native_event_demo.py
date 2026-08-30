@@ -108,8 +108,10 @@ from liquidity_migration.rules.engine_targets import (
     render_target_book,
 )
 from liquidity_migration.strategy.long_book_state import (
+    LONG_BOOK_TRANSITIONS_PATH_ENV,
     LongBookEntry,
     LongBookState,
+    append_book_transitions,
     long_book_state_path,
     read_book_state,
     write_book_state,
@@ -474,6 +476,7 @@ def run_long_native_demo_cycle(
         mark_stage("features")
 
         book_state = read_book_state(book_state_path)
+        held_at_cycle_start = dict(book_state.held)
         all_trades = book_state.as_trade_rows()
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features, now_ms=cycle_now_ms
@@ -634,6 +637,19 @@ def run_long_native_demo_cycle(
         # State lands before its matching book. If the process dies between the
         # two writes, the old book is conservative and the next cycle repairs it.
         write_book_state(book_state_path, book_state)
+        transitions_path = os.environ.get(LONG_BOOK_TRANSITIONS_PATH_ENV, "").strip()
+        if transitions_path:
+            try:
+                append_book_transitions(
+                    transitions_path,
+                    now_ms=cycle_now_ms,
+                    before=held_at_cycle_start,
+                    after=book_state.held,
+                )
+            except OSError as exc:
+                # Attribution is bookkeeping; a failed append must not stop
+                # the cycle, but it must not be silent either.
+                _LOGGER.warning("long book: transitions log append failed: %s", exc)
         published_target_book = publish_target_book(
             engine_book_path,
             _long_engine_target_book(

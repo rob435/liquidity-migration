@@ -5,6 +5,71 @@ Evidence grading and promotion: [docs/research/governance.md](governance.md). Ev
 [AGENTS.md](../../AGENTS.md). Failure taxonomy: [docs/research/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
 Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
+## 2026-08-30 — LONG give-back and the exit overlays: measured, all lose
+
+**Question (owner).** The demo curve fell 1,757 → 1,655 USDT over 2026-08-25..29
+(−5.8%). The owner's read: LONG catches the initial pump, then holds through
+the retrace and gives it back — can a retrace-harvesting exit, or an inverse
+(short) overlay, do better?
+
+**What the week actually was (venue receipts, signed reads of the demo
+account's closed-PnL and transaction log).** Realized closed-PnL over the five
+days was −102.6 USDT: carry −119 (−76 after its +42.5 funding income), LONG
+−44, exodus +17. LONG's two losers were different faults: AAVE (−20) was an
+LLM-gate entry scored 7 on its third consecutive mover-day after a +45%
+three-day run, bought within 2.5% of the top (peak excursion +1.6%, trough
+−12%) — a chase, and the gate has no freshness-versus-move-age rule; ENA
+(−24) peaked +17.7% mid-hold and exited −9.7% at the clock — the structural
+give-back. The registered v12 rule itself had a *profitable* model week: its
+2026-08-20..22 entries took profits and its own ENA trade exited +0.15%
+(entry 0.1508, exit 0.15631) where the live book realized −9.7% — the live
+loss came from later, higher entries and a ~21h-later exit clock, not from
+the rule.
+
+**The give-back, quantified (Lane 1).** Fresh v12 run 2021-01-01→2026-08-30
+on the full-PIT root, 306 trades, +48.3% net: median trade peaks +8.6% and
+gives back 6.8 points; the sum of weight-scaled give-back (+1.05 book units)
+is 2.2× the sleeve's entire net (+0.48). Half of trades reach ≥1.5×ATR of
+favorable excursion. The give-back is real and large.
+
+**And no overlay harvests it.** Per-trade exit overlays on the recorded
+trades, hourly intra-hold paths from klines_1h, 45 bp round trip (the v13
+lab's 3× cost model), funding pro-rated; recorded exit kept when a variant
+never triggers. Every cell loses vs recorded v12, most in every calendar year:
+
+| family | cells | total Δ vs v12 | per-trade t |
+| --- | --- | ---: | ---: |
+| chandelier trail (k=1..2×ATR off the running high, armed at 0/+1/+2 ATR) | 6 | −0.063 to −0.386 | −2.9 to −5.8 |
+| breakeven ratchet (stop→entry once +1/+1.5/+2 ATR) | 3 | −0.060 to −0.200 | −2.6 to −4.6 |
+| half scale-out at +1.5/+2/+3 ATR | 3 | −0.020 to −0.101 | −1.4 to −3.7 |
+| short at v12's exit, 24/48/72h hold, 2×ATR stop | 3 | −0.016 to +0.035 | −0.2 to +0.4 |
+
+The short overlay's pooled ≈0 hides the era split: +0.15..+0.16 of its total
+sits in 2022 alone and it loses in 2023, 2024, 2025, and 2026 separately —
+it is short-beta in a bear year, not an edge on these names. Post-exit these
+names keep drifting up, the same "crowding continues" wall as the v13 PV
+factor. Pyramiding into strength (+0.5w once +1×ATR) tested +0.094, t +3.5 —
+and died against its control: unconditional extra size from entry earns the
+same per unit of capital-time (0.041 vs 0.038), so the condition carries no
+information; that lever is the multiplier, already at 6.0.
+
+**Structure.** 34 take-profit exits carry +0.38 of the +0.57 gross; the
+131 three-day-clock exits hold +0.19 gross against +0.46 of give-back. The
+give-back is the price of the tail, and cutting it costs more than it saves —
+consistent with, and extending, the v13 exit grid (six families, all dead).
+
+**Non-conclusions and boundary.** Overlays re-simulate exits on recorded
+trades: earlier exits do not re-open slots, and funding inside a shortened
+hold is pro-rated, so these are Lane-1 numbers on seen data, not a graded
+config. The trade ledger does not record which trigger leg (1d/3d/7d) fired,
+so "stale-move entries underperform inside v12" is not answerable from the
+ledger as written. Since the 2026-08-24 merge, gate-sourced entries are
+indistinguishable from native entries in every persisted record — the gate's
+forward record cannot currently be separated from v12's. Artifacts: session
+scratchpad `exit_overlay_study.py` + `exit_overlay_results.parquet`, v12 run
+`fullbt/long/long_native_trades.csv` (session a7ea30ba); venue history pulled
+2026-08-30 via signed read-only closed-pnl/transaction-log queries.
+
 ## 2026-08-30 — Directional toxic-flow protection: first forward sample
 
 **Forward evidence.** The first funded run after registration produced 10

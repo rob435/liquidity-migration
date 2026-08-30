@@ -542,7 +542,13 @@ wide-stop, and the entry execution recipes (quote-first entries, touch-sized
 windows, and the replay-selected resting recipe). Sizing is the fixed
 multipliers on both sleeves (carry 3.0, LONG 6.0), and the LLM gate's judged
   entries sit inside the LONG sleeve — same book and identity, so their fills
-  grade under LONG v12's config id beside the native entries. Sizing uses two
+  grade under LONG v12's config id beside the native entries; the producers'
+  enter/leave attribution log (`targets/long-{demo,mainnet}-transitions.jsonl`,
+  one line per book transition with the entry's pattern) is what separates
+  the two cohorts when reading that record. The gate also carries a freshness
+  veto: a name its ledger already flagged on ≥2 distinct earlier UTC days in
+  the last 4 is judged and journaled but never published
+  (`docs/trading_logic.md` §LLM GATE, change point 2026-08-30). Sizing uses two
   env dials on both fleets; Exodus copies carry's actual handed-off quantity.
   Mainnet's rendered account document keeps entry leverage 5. The v6 whale
   halving makes the carry producers read one

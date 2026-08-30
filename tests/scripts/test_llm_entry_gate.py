@@ -102,6 +102,50 @@ class TestPublishGateCandidates:
         assert row["events"] == []
 
 
+class TestFreshnessVeto:
+    """A move the ledger already flagged on two earlier days is a chase, and
+    the gate journals its judgment without publishing it. The vetoed cohort's
+    forward returns against the published cohort's is the veto's own grade."""
+
+    def test_a_vetoed_event_is_journaled_but_never_published(self, tmp_path: Path) -> None:
+        vetoed = _event("AAAUSDT")
+        vetoed["freshness_veto"] = True
+        fresh = _event("BBBUSDT")
+        fresh["freshness_veto"] = False
+        published = _publish(tmp_path, [vetoed, fresh])
+        assert [e["symbol"] for e in published] == ["BBBUSDT"]
+        row = json.loads((tmp_path / "candidates.json").read_text())
+        assert [e["symbol"] for e in row["events"]] == ["BBBUSDT"]
+
+    def test_prior_flag_days_counts_distinct_earlier_days_only(self, tmp_path: Path) -> None:
+        path = tmp_path / "ledger.jsonl"
+        rows = [
+            {"ts_utc": "2026-08-19T01:00:00+00:00", "row_type": "mover", "facts": {"symbol": "AAAUSDT"}},
+            {"ts_utc": "2026-08-20T05:00:00+00:00", "row_type": "trigger", "facts": {"symbol": "AAAUSDT"}},
+            # A second row on an already-counted day must not add a day.
+            {"ts_utc": "2026-08-20T09:00:00+00:00", "row_type": "mover", "facts": {"symbol": "AAAUSDT"}},
+            # Today's own rows are not prior days.
+            {"ts_utc": "2026-08-21T02:00:00+00:00", "row_type": "mover", "facts": {"symbol": "AAAUSDT"}},
+            # Outside the window.
+            {"ts_utc": "2026-08-10T02:00:00+00:00", "row_type": "mover", "facts": {"symbol": "AAAUSDT"}},
+            # Not a flag row.
+            {"ts_utc": "2026-08-20T02:00:00+00:00", "row_type": "gate_action", "symbol": "AAAUSDT"},
+            {"ts_utc": "2026-08-20T03:00:00+00:00", "row_type": "mover", "facts": {"symbol": "BBBUSDT"}},
+        ]
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        days = ledger._flag_days_by_symbol(
+            path, NOW, window_days=ledger.GATE_FRESHNESS_WINDOW_DAYS
+        )
+        assert days["AAAUSDT"] == {"2026-08-19", "2026-08-20"}
+        assert days["BBBUSDT"] == {"2026-08-20"}
+        # The AAVE shape: a name flagged on two earlier days reaches the bar.
+        assert len(days["AAAUSDT"]) >= ledger.GATE_FRESHNESS_VETO_PRIOR_DAYS
+        assert len(days["BBBUSDT"]) < ledger.GATE_FRESHNESS_VETO_PRIOR_DAYS
+
+    def test_a_missing_ledger_reads_as_no_prior_days(self, tmp_path: Path) -> None:
+        assert ledger._flag_days_by_symbol(tmp_path / "none.jsonl", NOW, window_days=4) == {}
+
+
 class TestTakerRatioDayMean:
     """The one order-flow fact that graded era-stable. It is a MEAN of the
     five-minute ratios, and the rubric's threshold is only meaningful against

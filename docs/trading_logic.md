@@ -379,6 +379,14 @@ judged by a language model walking the fixed step-rubric over enriched public
 facts; **a pump_quality_score ≥ 6 is an entry candidate**, at the trigger-hour
 price. Everything below 6 stays ledger-only.
 
+**The freshness veto.** A trigger whose name the ledger already flagged (as a
+mover or a trigger) on **two or more distinct earlier UTC days within the
+last four** is journaled in full — judgment, score, `freshness_veto: true`,
+`prior_flag_days` — and never published: a move in its third day of being
+flagged is a chase, not a fresh pump, and chasing is the gate's one measured
+loss class. `--grade` buckets vetoed rows separately, so the ledger carries
+its own forward A/B of what the veto refused against what it let through.
+
 The window set and the rank depth are graded, on 5.5 years of hourly bars
 against the sleeve's own exit geometry
 ([record](research/research_findings.md)): the 1h and 2h
@@ -414,6 +422,14 @@ no gate entries, native entries and all exits unaffected. Stopping
 `llm-ledger.timer`: the candidates file ages out and gate entries stop on
 their own. Every judgment and publication is journaled in the driver ledger
 (`row_type` trigger).
+
+**Attribution.** Both LONG producers append one JSON line per name entering
+or leaving their book (`LONG_ENGINE_BOOK_TRANSITIONS_PATH`, demo
+`targets/long-demo-transitions.jsonl`), carrying the entry's `pattern` —
+`llm_gate` for judged entries, `fomo_chase` for native ones. The held row's
+pattern dies with the row when a position closes and every close record
+downstream is pattern-blind, so this log is what splits gate fills from
+native fills when grading. A failed append warns and never stops the cycle.
 
 ## Shared machinery
 

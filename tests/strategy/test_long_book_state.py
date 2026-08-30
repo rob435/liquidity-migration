@@ -680,3 +680,46 @@ def test_an_unconfirmed_entry_is_not_reconciled_against_the_venue() -> None:
 
     assert after.held["KAITOUSDT"].venue_qty == 0.0
     assert resized == []
+
+
+class TestBookTransitionsLog:
+    """The append-only enter/leave attribution log. Every close downstream is
+    pattern-blind (engine trades, venue records), so this log is the only
+    durable record of which entry source (native vs llm_gate) a trade came
+    from once its held row is gone."""
+
+    def test_enters_and_leaves_append_with_their_pattern(self, tmp_path: Path) -> None:
+        from liquidity_migration.strategy.long_book_state import append_book_transitions
+
+        log = tmp_path / "transitions.jsonl"
+        before = {"OLDUSDT": _entry("OLDUSDT", pattern="fomo_chase", entry_reason="sniper_retrace")}
+        after = {"NEWUSDT": _entry("NEWUSDT", pattern="llm_gate", entry_reason="llm_gate_score")}
+        written = append_book_transitions(log, now_ms=NOW_MS, before=before, after=after)
+        assert written == 2
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        by_event = {row["event"]: row for row in rows}
+        assert by_event["enter"]["symbol"] == "NEWUSDT"
+        assert by_event["enter"]["pattern"] == "llm_gate"
+        assert by_event["enter"]["entry_reason"] == "llm_gate_score"
+        assert by_event["leave"]["symbol"] == "OLDUSDT"
+        assert by_event["leave"]["pattern"] == "fomo_chase"
+        assert all(row["ts_ms"] == NOW_MS for row in rows)
+
+    def test_an_unchanged_book_appends_nothing(self, tmp_path: Path) -> None:
+        from liquidity_migration.strategy.long_book_state import append_book_transitions
+
+        log = tmp_path / "transitions.jsonl"
+        held = {"AAAUSDT": _entry("AAAUSDT")}
+        assert append_book_transitions(log, now_ms=NOW_MS, before=held, after=dict(held)) == 0
+        assert not log.exists()
+
+    def test_the_log_accumulates_across_cycles(self, tmp_path: Path) -> None:
+        from liquidity_migration.strategy.long_book_state import append_book_transitions
+
+        log = tmp_path / "transitions.jsonl"
+        held = {"AAAUSDT": _entry("AAAUSDT", pattern="llm_gate")}
+        append_book_transitions(log, now_ms=NOW_MS, before={}, after=held)
+        append_book_transitions(log, now_ms=NOW_MS + 60_000, before=held, after={})
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        assert [row["event"] for row in rows] == ["enter", "leave"]
+        assert rows[1]["trade_id"] == rows[0]["trade_id"]
