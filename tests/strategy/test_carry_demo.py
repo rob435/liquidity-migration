@@ -280,6 +280,57 @@ def test_view_health_guards_refuse_broken_funding_inputs() -> None:
     # The same staleness on a NON-standing symbol is not a hold-blocker.
     _validate_carry_view_health(stale_standing, decision_ts_ms=D0, standing_symbols={"B"})
 
+    invalid_standing = healthy.with_columns(
+        pl.when(pl.col("symbol") == "A")
+        .then(float("nan"))
+        .otherwise(pl.col("by_funding"))
+        .alias("by_funding")
+    )
+    with pytest.raises(CarrySleeveError, match="non-finite"):
+        _validate_carry_view_health(
+            invalid_standing,
+            decision_ts_ms=D0,
+            standing_symbols={"A"},
+        )
+
+
+@pytest.mark.parametrize("bad_rate", [float("nan"), float("inf"), -float("inf")])
+def test_normalized_funding_events_reject_non_finite_rates(bad_rate: float) -> None:
+    frame = pl.DataFrame(
+        {
+            "symbol": ["AUSDT"],
+            "funding_ts_ms": [D0],
+            "funding_rate": [bad_rate],
+        }
+    )
+    with pytest.raises(CarrySleeveError, match="non-finite"):
+        module._normalized_funding_events(frame)
+
+
+def test_funding_ingress_drops_non_finite_venue_rows(tmp_path: Path) -> None:
+    class _NonFiniteMarket:
+        def get_funding_history(
+            self, symbol: str, start: int, end: int
+        ) -> list[dict[str, str]]:
+            return [
+                {
+                    "fundingRateTimestamp": str(D0),
+                    "fundingRate": "nan",
+                }
+            ]
+
+    state = CarryCycleState()
+    funding, stats = module._refresh_carry_funding_cache(
+        tmp_path,
+        _NonFiniteMarket(),
+        ["AUSDT"],
+        now_ms=D0 + MS_PER_HOUR,
+        replay_days=1,
+        state=state,
+    )
+    assert funding.is_empty()
+    assert stats["funding_rows_appended"] == 0
+
 
 
 

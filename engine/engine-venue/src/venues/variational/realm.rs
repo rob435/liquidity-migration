@@ -57,7 +57,9 @@ impl VariationalRealm {
     /// pressure; nothing reads them yet.
     pub fn credential_vars(self) -> (&'static str, &'static str) {
         match self {
-            VariationalRealm::Mainnet => ("VARIATIONAL_REAL_API_KEY", "VARIATIONAL_REAL_API_SECRET"),
+            VariationalRealm::Mainnet => {
+                ("VARIATIONAL_REAL_API_KEY", "VARIATIONAL_REAL_API_SECRET")
+            }
         }
     }
 

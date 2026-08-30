@@ -39,6 +39,7 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub engine: EngineSection,
     /// Passed to the risk kernel untouched. The engine does not read inside it.
@@ -49,6 +50,7 @@ pub struct Config {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EngineSection {
     pub wal_path: PathBuf,
     /// Which venue adapter to run, by name — not an address. Left out means
@@ -278,6 +280,27 @@ symbols = ["BTCUSDT"]
             Some(20)
         );
         assert!(s.params.get("name").is_none(), "name is not a param");
+    }
+
+    #[test]
+    fn owned_config_sections_refuse_typos_but_strategy_extras_stay_open() {
+        let engine_typo = SAMPLE.replace(
+            "account_view_max_age_ms = 4000",
+            "account_view_max_age_ms = 4000\nmax_quote_age_mss = 1",
+        );
+        assert!(toml::from_str::<Config>(&engine_typo).is_err());
+
+        let top_level_typo = format!("unknown_top_level = true\n{SAMPLE}");
+        assert!(toml::from_str::<Config>(&top_level_typo).is_err());
+
+        let cfg: Config = toml::from_str(SAMPLE).expect("strategy-owned extras remain flattened");
+        assert_eq!(
+            cfg.strategies[0]
+                .params
+                .get("every_nth_quote")
+                .and_then(toml::Value::as_integer),
+            Some(20)
+        );
     }
 
     #[test]

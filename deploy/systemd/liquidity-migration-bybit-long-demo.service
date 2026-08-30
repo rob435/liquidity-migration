@@ -54,11 +54,10 @@ Environment=LONG_ENGINE_BOOK_TRANSITIONS_PATH=/var/lib/liquidity-migration/targe
 # gate stops contributing entries while everything else runs on.
 Environment=LONG_ENGINE_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json
 Environment=LONG_ENGINE_LLM_GATE_ENABLED=1
+Environment=LM_CHILD_STOP_GRACE_SECONDS=80
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-long-demo.service main
-# The trusted supervisor answers a stop by passing SIGTERM to its child,
-# waiting for it, and exiting 143 — the number that says "terminated on
-# request". Without this, systemd files every clean stop as a failure and
-# the watchdog pages the alerts line on every deploy.
+# The trusted supervisor records 143 only when the child finishes inside its
+# grace period. A forced kill stays a service failure.
 SuccessExitStatus=143
 Restart=always
 RestartPreventExitStatus=78

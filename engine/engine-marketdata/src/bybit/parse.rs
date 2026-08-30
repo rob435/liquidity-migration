@@ -276,7 +276,7 @@ impl<'de> Deserialize<'de> for DataPayload {
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 let mut rows = TradeRows::default();
                 while let Some(row) = seq.next_element::<TradeRow>()? {
-                    rows.push(row);
+                    rows.push(row).map_err(de::Error::custom)?;
                 }
                 Ok(DataPayload::Trades(rows))
             }
@@ -299,15 +299,19 @@ struct DataFields {
     #[serde(default)]
     seq: Option<u64>,
 
-    #[serde(rename = "lastPrice", default, deserialize_with = "opt_f64")]
+    #[serde(rename = "lastPrice", default, deserialize_with = "opt_positive_f64")]
     last_price: Option<f64>,
-    #[serde(rename = "markPrice", default, deserialize_with = "opt_f64")]
+    #[serde(rename = "markPrice", default, deserialize_with = "opt_positive_f64")]
     mark_price: Option<f64>,
-    #[serde(rename = "indexPrice", default, deserialize_with = "opt_f64")]
+    #[serde(rename = "indexPrice", default, deserialize_with = "opt_positive_f64")]
     index_price: Option<f64>,
     #[serde(rename = "fundingRate", default, deserialize_with = "opt_f64")]
     funding_rate: Option<f64>,
-    #[serde(rename = "nextFundingTime", default, deserialize_with = "opt_i64")]
+    #[serde(
+        rename = "nextFundingTime",
+        default,
+        deserialize_with = "opt_positive_i64"
+    )]
     next_funding_time: Option<i64>,
 }
 
@@ -322,11 +326,21 @@ struct TradeRows {
 }
 
 impl TradeRows {
-    fn push(&mut self, row: TradeRow) {
+    fn push(&mut self, row: TradeRow) -> Result<(), &'static str> {
         match row.side {
-            TradeSide::Buy => self.buy_qty += row.qty,
-            TradeSide::Sell => self.sell_qty += row.qty,
-            TradeSide::Unknown => return,
+            TradeSide::Buy => {
+                self.buy_qty += row.qty;
+                if !self.buy_qty.is_finite() {
+                    return Err("aggregated buy quantity is not finite");
+                }
+            }
+            TradeSide::Sell => {
+                self.sell_qty += row.qty;
+                if !self.sell_qty.is_finite() {
+                    return Err("aggregated sell quantity is not finite");
+                }
+            }
+            TradeSide::Unknown => return Ok(()),
         }
         self.trade_count = self.trade_count.saturating_add(1);
         if row.seq >= self.seq {
@@ -334,6 +348,7 @@ impl TradeRows {
             self.last_px = row.px;
             self.venue_ts_ms = Some(row.venue_ts_ms);
         }
+        Ok(())
     }
 }
 
@@ -341,11 +356,11 @@ impl TradeRows {
 struct TradeRow {
     #[serde(rename = "S")]
     side: TradeSide,
-    #[serde(rename = "v", deserialize_with = "required_f64")]
+    #[serde(rename = "v", deserialize_with = "required_positive_f64")]
     qty: f64,
-    #[serde(rename = "p", deserialize_with = "required_f64")]
+    #[serde(rename = "p", deserialize_with = "required_positive_f64")]
     px: f64,
-    #[serde(rename = "T")]
+    #[serde(rename = "T", deserialize_with = "required_positive_i64")]
     venue_ts_ms: i64,
     #[serde(default)]
     seq: u64,
@@ -419,6 +434,12 @@ impl<'de> Deserialize<'de> for Level {
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &"a quantity"))?;
                 while seq.next_element::<de::IgnoredAny>()?.is_some() {}
+                if px.0 <= 0.0 {
+                    return Err(de::Error::custom("book price must be positive"));
+                }
+                if qty.0 < 0.0 {
+                    return Err(de::Error::custom("book quantity cannot be negative"));
+                }
                 Ok(Level {
                     px: px.0,
                     qty: qty.0,
@@ -450,8 +471,38 @@ fn required_f64<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
         .ok_or_else(|| de::Error::custom("expected a number, found nothing"))
 }
 
-fn opt_i64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
-    Ok(d.deserialize_any(NumVisitor)?.map(|v| v as i64))
+fn opt_positive_f64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    let value = opt_f64(d)?;
+    if value.is_some_and(|value| value <= 0.0) {
+        return Err(de::Error::custom("price must be positive"));
+    }
+    Ok(value)
+}
+
+fn required_positive_f64<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let value = required_f64(d)?;
+    if value <= 0.0 {
+        return Err(de::Error::custom("value must be positive"));
+    }
+    Ok(value)
+}
+
+fn opt_positive_i64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    let value = d.deserialize_any(IntVisitor)?;
+    if value.is_some_and(|value| value <= 0) {
+        return Err(de::Error::custom("timestamp must be positive"));
+    }
+    Ok(value)
+}
+
+fn required_positive_i64<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let value = d
+        .deserialize_any(IntVisitor)?
+        .ok_or_else(|| de::Error::custom("expected an integer, found nothing"))?;
+    if value <= 0 {
+        return Err(de::Error::custom("timestamp must be positive"));
+    }
+    Ok(value)
 }
 
 /// Reads a number whether it arrives as a JSON string or a JSON number.
@@ -471,12 +522,16 @@ impl<'de> Visitor<'de> for NumVisitor {
         if v.is_empty() {
             return Ok(None);
         }
-        v.parse::<f64>()
-            .map(Some)
-            .map_err(|_| de::Error::custom(format!("not a number: {v}")))
+        let value = v
+            .parse::<f64>()
+            .map_err(|_| de::Error::custom(format!("not a number: {v}")))?;
+        self.visit_f64(value)
     }
 
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        if !v.is_finite() {
+            return Err(de::Error::custom("number must be finite"));
+        }
         Ok(Some(v))
     }
 
@@ -498,6 +553,61 @@ impl<'de> Visitor<'de> for NumVisitor {
 
     fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_any(NumVisitor)
+    }
+}
+
+/// An exact integer the venue may send as a JSON number or as text.
+struct IntVisitor;
+
+impl<'de> Visitor<'de> for IntVisitor {
+    type Value = Option<i64>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an exact integer, or a string holding one")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        value
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|_| de::Error::custom(format!("not an exact integer: {value}")))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(Some(value))
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        i64::try_from(value)
+            .map(Some)
+            .map_err(|_| de::Error::custom("integer is outside the i64 range"))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        if !value.is_finite()
+            || value.fract() != 0.0
+            || value < i64::MIN as f64
+            || value >= -(i64::MIN as f64)
+        {
+            return Err(de::Error::custom("number is not an exact i64 integer"));
+        }
+        Ok(Some(value as i64))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(IntVisitor)
     }
 }
 
@@ -606,6 +716,48 @@ mod tests {
         let t = ticker(raw);
         assert_eq!(t.funding_rate, None);
         assert_eq!(t.mark_px, Some(12.5));
+    }
+
+    #[test]
+    fn malformed_numbers_are_rejected_before_they_reach_market_state() {
+        for value in ["NaN", "inf", "-inf"] {
+            let ticker = format!(
+                r#"{{"topic":"tickers.BTCUSDT","type":"delta","data":{{"markPrice":"{value}"}},"ts":7}}"#
+            );
+            assert!(parse_frame(&ticker).is_err(), "accepted {value}");
+
+            let book = format!(
+                r#"{{"topic":"orderbook.1.BTCUSDT","type":"snapshot","data":{{"b":[["{value}","1"]],"a":[["2","1"]],"u":1}},"ts":7}}"#
+            );
+            assert!(parse_frame(&book).is_err(), "accepted {value}");
+        }
+
+        for timestamp in [r#""1.5""#, "1.5", r#""9223372036854775808""#] {
+            let raw = format!(
+                r#"{{"topic":"tickers.BTCUSDT","type":"delta","data":{{"nextFundingTime":{timestamp}}},"ts":7}}"#
+            );
+            assert!(parse_frame(&raw).is_err(), "accepted {timestamp}");
+        }
+    }
+
+    #[test]
+    fn prices_are_positive_and_book_removal_is_the_only_zero_quantity() {
+        for (px, qty) in [("0", "1"), ("-1", "1"), ("1", "-1")] {
+            let raw = format!(
+                r#"{{"topic":"orderbook.1.BTCUSDT","type":"snapshot","data":{{"b":[["{px}","{qty}"]],"a":[["2","1"]],"u":1}},"ts":7}}"#
+            );
+            assert!(parse_frame(&raw).is_err(), "accepted [{px}, {qty}]");
+        }
+
+        let remove = r#"{"topic":"orderbook.1.BTCUSDT","type":"delta","data":{"b":[["1","0"]],"a":[],"u":2},"ts":7}"#;
+        assert_eq!(book(remove).bids.unwrap().best().unwrap().qty, 0.0);
+
+        for (qty, px) in [("0", "1"), ("1", "0"), ("-1", "1")] {
+            let raw = format!(
+                r#"{{"topic":"publicTrade.BTCUSDT","data":[{{"S":"Buy","v":"{qty}","p":"{px}","T":1}}]}}"#
+            );
+            assert!(parse_frame(&raw).is_err(), "accepted trade {qty} at {px}");
+        }
     }
 
     #[test]

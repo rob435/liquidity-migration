@@ -77,7 +77,7 @@ fn every_variant() -> Vec<WalRecord> {
                 side: Side::Sell,
                 qty: 1.25,
                 px: 3120.5,
-                fee: 0.0021,
+                fee: Some(0.0021),
                 is_maker: true,
                 venue_ts_ms: 1_770_000_000_500,
                 recv_ns: 99_000_999_000,
@@ -135,6 +135,17 @@ fn frame_spans(path: &Path) -> Vec<(u64, u32)> {
     spans
 }
 
+fn frame_payloads(path: &Path) -> Vec<Vec<u8>> {
+    let bytes = fs::read(path).unwrap();
+    frame_spans(path)
+        .into_iter()
+        .map(|(start, len)| {
+            let payload_start = start as usize + 8;
+            bytes[payload_start..payload_start + len as usize].to_vec()
+        })
+        .collect()
+}
+
 fn flip_byte(path: &Path, offset: u64) {
     let mut file = OpenOptions::new()
         .read(true)
@@ -177,6 +188,126 @@ fn roundtrip_every_variant() {
     assert_eq!(seqs, (1..=written.len() as u64).collect::<Vec<_>>());
     assert_eq!(records, written);
     assert_eq!(wal.next_seq(), written.len() as u64 + 1);
+}
+
+#[test]
+fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let records = vec![
+        WalRecord::ExecutionHistoryCheckpoint {
+            through_wall_ts_ms: 1_770_000_000_000,
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "unknown-stream-fee".to_string(),
+                client_order_id: "eng-1".to_string(),
+                symbol: SymbolId(1),
+                side: Side::Buy,
+                qty: 1.0,
+                px: 100.0,
+                fee: None,
+                is_maker: true,
+                venue_ts_ms: 1_770_000_000_001,
+                recv_ns: 2,
+            },
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "explicit-zero-stream-fee".to_string(),
+                client_order_id: "eng-2".to_string(),
+                symbol: SymbolId(1),
+                side: Side::Sell,
+                qty: 1.0,
+                px: 100.0,
+                fee: Some(0.0),
+                is_maker: false,
+                venue_ts_ms: 1_770_000_000_002,
+                recv_ns: 3,
+            },
+        },
+        WalRecord::RecoveredFill {
+            exec_id: "unknown-recovered-fee".to_string(),
+            client_order_id: "eng-3".to_string(),
+            symbol: SymbolId(1),
+            side: Side::Buy,
+            qty: 1.0,
+            px: 100.0,
+            fee: None,
+            is_maker: true,
+            venue_ts_ms: 1_770_000_000_003,
+            recovered_wall_ts_ms: 1_770_000_000_004,
+        },
+        WalRecord::RecoveredFill {
+            exec_id: "explicit-zero-recovered-fee".to_string(),
+            client_order_id: "eng-4".to_string(),
+            symbol: SymbolId(1),
+            side: Side::Sell,
+            qty: 1.0,
+            px: 100.0,
+            fee: Some(0.0),
+            is_maker: false,
+            venue_ts_ms: 1_770_000_000_005,
+            recovered_wall_ts_ms: 1_770_000_000_006,
+        },
+    ];
+    write_records(&path, &records);
+
+    let payloads = frame_payloads(&path);
+    let legacy_view: Vec<WalRecord> = payloads
+        .iter()
+        .map(|payload| {
+            serde_json::from_slice(payload)
+                .expect("the additive wire shape reads without the current WAL decoder")
+        })
+        .collect();
+    assert!(matches!(
+        &legacy_view[0],
+        WalRecord::Note { source, text }
+            if source == "engine.execution_history_checkpoint.v1"
+                && text == "through_wall_ts_ms=1770000000000"
+    ));
+    assert!(matches!(
+        &legacy_view[1],
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill { fee: Some(0.0), .. }
+        }
+    ));
+    assert!(matches!(
+        &legacy_view[2],
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill { fee: Some(0.0), .. }
+        }
+    ));
+    assert!(matches!(
+        &legacy_view[3],
+        WalRecord::RecoveredFill { fee: Some(0.0), .. }
+    ));
+    assert!(matches!(
+        &legacy_view[4],
+        WalRecord::RecoveredFill { fee: Some(0.0), .. }
+    ));
+
+    let unknown_stream: serde_json::Value = serde_json::from_slice(&payloads[1]).unwrap();
+    let explicit_zero_stream: serde_json::Value = serde_json::from_slice(&payloads[2]).unwrap();
+    assert_eq!(unknown_stream["update"]["Fill"]["fee_known"], false);
+    assert!(explicit_zero_stream["update"]["Fill"]
+        .get("fee_known")
+        .is_none());
+    let unknown_recovered: serde_json::Value = serde_json::from_slice(&payloads[3]).unwrap();
+    let explicit_zero_recovered: serde_json::Value = serde_json::from_slice(&payloads[4]).unwrap();
+    assert_eq!(unknown_recovered["fee_known"], false);
+    assert!(explicit_zero_recovered.get("fee_known").is_none());
+
+    let restored: Vec<WalRecord> = replay(&path)
+        .unwrap()
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect();
+    assert_eq!(
+        restored, records,
+        "the current reader restores full semantics"
+    );
 }
 
 #[test]
@@ -419,6 +550,7 @@ fn a_barrier_after_a_rotation_covers_the_new_segment() {
         logged_exposure: Vec::new(),
         intended_stops: Vec::new(),
         recent_execution_ids: Vec::new(),
+        execution_history_through_ms: Some(1_770_000_000_000),
         open_orders: Vec::new(),
     };
     assert!(wal.rotate(&base).unwrap(), "the file-backed log rotates");
@@ -643,7 +775,7 @@ fn a_number_that_is_not_a_number_is_refused_instead_of_bricking_the_log() {
                     side: Side::Buy,
                     qty: 1.0,
                     px: bad,
-                    fee: 0.1,
+                    fee: Some(0.1),
                     is_maker: false,
                     venue_ts_ms: 1_770_000_000_000,
                     recv_ns: 7,

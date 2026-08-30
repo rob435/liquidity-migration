@@ -106,4 +106,4 @@ fi
 
 echo "rescue-ssh-restore-ok"
 echo "Reboot the VPS from local disk, then run the checked deploy from your local checkout:"
-echo 'EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh install'
+echo 'SSH_TARGET=root@YOUR_VPS_HOST EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh install'

@@ -17,10 +17,10 @@
 //! The poll lives in its own task, like every other feed here: `next_event` is
 //! a channel receive, which loses nothing when the engine's `select!` drops it.
 
+use crate::symbols::intern;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use crate::symbols::intern;
 
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId};
 use engine_venue::venues::variational::parse::parse_stats;
@@ -190,14 +190,22 @@ async fn poll_forever(
                 }
                 Err(e) => {
                     warn!(error = %e, "variational stats were unreadable");
-                    if events.send(Err(FeedError::BadMessage(e.to_string()))).await.is_err() {
+                    if events
+                        .send(Err(FeedError::BadMessage(e.to_string())))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }
             },
             Err(e) => {
                 warn!(error = %e, "variational stats could not be read");
-                if events.send(Err(FeedError::Transport(e.to_string()))).await.is_err() {
+                if events
+                    .send(Err(FeedError::Transport(e.to_string())))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -216,7 +224,10 @@ mod tests {
         // about having somewhere to deliver it.
         let mut feed = VariationalPublicFeed::new(
             VariationalRealm::Mainnet,
-            &[Subscription { symbol: "BTCUSDT".into(), feed: Feed::Quote }],
+            &[Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            }],
         );
         assert_eq!(feed.id_of("BTCUSDT"), Some(SymbolId(0)));
         assert_eq!(feed.admit("XAUUSDT", Feed::Ticker), SymbolId(1));

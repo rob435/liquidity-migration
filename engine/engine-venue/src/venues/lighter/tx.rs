@@ -168,8 +168,7 @@ fn field(value: i64) -> u64 {
 
 /// Standard base64, which is what Go's `encoding/json` writes a `[]byte` as.
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -245,7 +244,11 @@ mod tests {
         let fields = distinct.fields(304);
         assert_eq!(fields.len(), 16);
         assert_eq!(fields[0], 304, "the chain id leads");
-        assert_eq!(fields[1], u64::from(TX_TYPE_CREATE_ORDER), "transaction type");
+        assert_eq!(
+            fields[1],
+            u64::from(TX_TYPE_CREATE_ORDER),
+            "transaction type"
+        );
         assert_eq!(fields[2], 7, "nonce");
         assert_eq!(fields[3], 1_700_000_000_000, "expired at");
         assert_eq!(fields[4], 42, "account index");

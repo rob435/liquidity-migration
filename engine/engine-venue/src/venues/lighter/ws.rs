@@ -91,7 +91,10 @@ mod tests {
         let started = std::time::Instant::now();
         let first = feed.next_update().await.unwrap();
         assert!(matches!(first, OrderUpdate::StreamReset { .. }));
-        assert!(started.elapsed() < Duration::from_millis(500), "the first resync waited");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the first resync waited"
+        );
     }
 
     #[tokio::test]
@@ -110,7 +113,10 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(10), feed.next_update()).await;
             assert!(cancelled.is_err(), "the resync fired early");
         }
-        assert!(started.elapsed() < PERIOD, "the cancelling itself took a whole period");
+        assert!(
+            started.elapsed() < PERIOD,
+            "the cancelling itself took a whole period"
+        );
         // Only the rest of that same period is left to wait — not a fresh one.
         let resumed = tokio::time::timeout(PERIOD * 3, feed.next_update())
             .await
@@ -131,6 +137,9 @@ mod tests {
         let started = std::time::Instant::now();
         let second = feed.next_update().await.unwrap();
         assert!(matches!(second, OrderUpdate::StreamReset { .. }));
-        assert!(started.elapsed() >= Duration::from_millis(60), "the resync did not wait");
+        assert!(
+            started.elapsed() >= Duration::from_millis(60),
+            "the resync did not wait"
+        );
     }
 }

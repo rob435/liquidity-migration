@@ -1986,6 +1986,7 @@ def test_a_whole_run_is_one_message_not_one_per_alert(tmp_path, monkeypatch) -> 
 
     units = ["a.timer", "b.timer", "c.timer"]
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: units)
+    monkeypatch.setattr(M, "evaluate_disk_space", lambda path: None)
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
     monkeypatch.setattr("sys.argv", _digest_argv(state_file))
 
@@ -2016,6 +2017,7 @@ def test_a_quiet_run_sends_nothing_at_all(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["ok.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda _units: {"ok.timer": "active"})
+    monkeypatch.setattr(M, "evaluate_disk_space", lambda path: None)
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
     monkeypatch.setattr("sys.argv", _digest_argv(state_file))
 

@@ -448,7 +448,7 @@ fn history(rows: usize, now_ms: i64) -> Vec<VenueExecution> {
             side: Side::Buy,
             qty: 1.0,
             px: 100.0,
-            fee: 0.02,
+            fee: Some(0.02),
             is_maker: true,
             venue_ts_ms: now_ms - 500 + (n % 100) as i64,
         })

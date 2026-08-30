@@ -226,14 +226,31 @@ mod tests {
         // record an order that never existed.
         let mut gw = gateway();
         for said in [
-            gw.send_order(&request()).await.map(|_| ()).unwrap_err().to_string(),
-            gw.cancel_order(SymbolId(0), "eng-1-1").await.unwrap_err().to_string(),
-            gw.amend_order(SymbolId(0), "eng-1-1", AmendSpec { px: Some(1.0), qty: None })
+            gw.send_order(&request())
+                .await
+                .map(|_| ())
+                .unwrap_err()
+                .to_string(),
+            gw.cancel_order(SymbolId(0), "eng-1-1")
                 .await
                 .unwrap_err()
                 .to_string(),
+            gw.amend_order(
+                SymbolId(0),
+                "eng-1-1",
+                AmendSpec {
+                    px: Some(1.0),
+                    qty: None,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
             gw.set_stop(SymbolId(0), 1.0).await.unwrap_err().to_string(),
-            gw.set_leverage(SymbolId(0), 2.0).await.unwrap_err().to_string(),
+            gw.set_leverage(SymbolId(0), 2.0)
+                .await
+                .unwrap_err()
+                .to_string(),
             gw.account_view().await.map(|_| ()).unwrap_err().to_string(),
         ] {
             assert!(

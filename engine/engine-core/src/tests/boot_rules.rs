@@ -41,6 +41,7 @@ async fn an_appended_sleeve_preserves_existing_wal_strategy_ids() {
         strategies: vec!["carry".to_string(), "long".to_string()],
         symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
     }];
+    let replayed = replay_with_history_boundary(&replayed);
     let (carry, _) = Buyer::new("BTCUSDT", 1, 0.01);
     let (long, _) = Buyer::new("ETHUSDT", 1, 0.01);
     let (exodus, _) = Buyer::new("DOGEUSDT", 1, 0.01);

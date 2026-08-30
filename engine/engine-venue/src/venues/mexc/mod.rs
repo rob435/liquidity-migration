@@ -20,8 +20,8 @@ mod sign;
 mod ws;
 
 pub use gateway::MexcGateway;
-pub use ws::MexcOrderFeed;
 pub use realm::MexcRealm;
+pub use ws::MexcOrderFeed;
 
 /// What this venue is called in an account identity, a lease file name, and
 /// the engine's heartbeat.

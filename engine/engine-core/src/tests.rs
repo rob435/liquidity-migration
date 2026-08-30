@@ -77,6 +77,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::Reconciled { .. } => "reconciled",
         WalRecord::SegmentBase { .. } => "segment_base",
         WalRecord::RecoveredFill { .. } => "recovered_fill",
+        WalRecord::ExecutionHistoryCheckpoint { .. } => "execution_history_checkpoint",
         WalRecord::LatchCleared { .. } => "latch_cleared",
         WalRecord::ClaimsDropped { .. } => "claims_dropped",
     }
@@ -962,10 +963,8 @@ async fn build_with_venue_state(
     working: Vec<VenueOrder>,
     held: Vec<engine_types::PositionView>,
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
-    build_with_venue_state_and_rule(
-        verdict, strategies, symbols, replayed, working, held, None,
-    )
-    .await
+    build_with_venue_state_and_rule(verdict, strategies, symbols, replayed, working, held, None)
+        .await
 }
 
 async fn build_with_venue_state_and_rule(
@@ -993,6 +992,7 @@ async fn build_with_venue_state_and_rule(
     let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
+    let replayed = replay_with_history_boundary(replayed);
     let engine = Engine::boot(
         &settings(),
         "0000000000000000",
@@ -1000,7 +1000,7 @@ async fn build_with_venue_state_and_rule(
         risk,
         venue,
         strategies,
-        replayed,
+        &replayed,
     )
     .await
     .expect("boot");
@@ -1051,6 +1051,7 @@ async fn build_inner(
     let executions = venue.executions.clone();
     let (mut risk, risk_saw) = MockRisk::with(verdict);
     risk.amend_verdict = options.amend_verdict;
+    let replayed = replay_with_history_boundary(replayed);
     let engine = Engine::boot(
         settings,
         "0000000000000000",
@@ -1058,7 +1059,7 @@ async fn build_inner(
         risk,
         venue,
         strategies,
-        replayed,
+        &replayed,
     )
     .await
     .expect("boot");
@@ -1078,6 +1079,37 @@ async fn build_inner(
             executions,
         },
     )
+}
+
+/// Test fixtures often name only the records relevant to their assertion.
+/// A real pre-checkpoint WAL still starts with Boot, which is the compatible
+/// recovery boundary. Supply that omitted framing without weakening boot's
+/// refusal of an actually unbounded existing log.
+fn replay_with_history_boundary(replayed: &[WalRecord]) -> Vec<WalRecord> {
+    if replayed.is_empty()
+        || replayed.iter().any(|record| {
+            matches!(
+                record,
+                WalRecord::Boot { .. } | WalRecord::ExecutionHistoryCheckpoint { .. }
+            ) || matches!(
+                record,
+                WalRecord::SegmentBase {
+                    execution_history_through_ms: Some(_),
+                    ..
+                }
+            )
+        })
+    {
+        return replayed.to_vec();
+    }
+    let mut bounded = Vec::with_capacity(replayed.len() + 1);
+    bounded.push(WalRecord::Boot {
+        version: ENGINE_VERSION.into(),
+        config_sha256: "test-fixture".into(),
+        wall_ts_ms: recent_replay_ms(),
+    });
+    bounded.extend_from_slice(replayed);
+    bounded
 }
 
 /// The venue's own row for an order this engine's log sent and the venue is

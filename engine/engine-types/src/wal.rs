@@ -251,12 +251,21 @@ pub enum WalRecord {
         side: Side,
         qty: f64,
         px: f64,
-        fee: f64,
+        /// What the venue charged in account currency. A numeric field in an
+        /// older WAL becomes `Some`; missing or explicit null stays unknown.
+        #[serde(default)]
+        fee: Option<f64>,
         is_maker: bool,
         /// When it happened, by the venue's clock.
         venue_ts_ms: i64,
         /// When this engine learned of it.
         recovered_wall_ts_ms: i64,
+    },
+    /// A complete venue execution-history read reached this wall time and all
+    /// rows it returned are durable before this record. Empty successful reads
+    /// write the same checkpoint; a process stopping does not.
+    ExecutionHistoryCheckpoint {
+        through_wall_ts_ms: i64,
     },
     /// An operator looked at the log (`engine reconcile-clear --execute`):
     /// the per-symbol exposure sum is restated to the venue's own positions,
@@ -338,6 +347,10 @@ pub enum WalRecord {
         /// memory and restated so rotating cannot make an old fill new again.
         #[serde(default)]
         recent_execution_ids: Vec<RecentExecutionId>,
+        /// Newest successful execution-history boundary carried across a log
+        /// rotation. Older segment bases have no such proof.
+        #[serde(default)]
+        execution_history_through_ms: Option<i64>,
         /// Every order still in flight, with the fields its own records
         /// carried.
         open_orders: Vec<OpenOrderState>,
@@ -567,5 +580,94 @@ mod tests {
         assert_eq!(row.symbol, SymbolId(3));
         assert_eq!(row.side, None);
         assert_eq!(row.trigger_px, 90.0);
+    }
+
+    #[test]
+    fn old_numeric_fees_stay_known_and_absent_fees_stay_unknown() {
+        let recovered = WalRecord::RecoveredFill {
+            exec_id: "exec-1".into(),
+            client_order_id: "eng-1".into(),
+            symbol: SymbolId(2),
+            side: Side::Buy,
+            qty: 3.0,
+            px: 4.0,
+            fee: Some(0.25),
+            is_maker: false,
+            venue_ts_ms: 10,
+            recovered_wall_ts_ms: 20,
+        };
+        let mut encoded = serde_json::to_value(&recovered).expect("serialize recovered fill");
+        assert_eq!(encoded["fee"], 0.25, "old numeric wire shape is retained");
+        assert!(matches!(
+            serde_json::from_value::<WalRecord>(encoded.clone()).expect("numeric fee reads"),
+            WalRecord::RecoveredFill {
+                fee: Some(0.25),
+                ..
+            }
+        ));
+        encoded
+            .as_object_mut()
+            .expect("tagged record is an object")
+            .remove("fee");
+        assert!(matches!(
+            serde_json::from_value::<WalRecord>(encoded).expect("missing fee reads"),
+            WalRecord::RecoveredFill { fee: None, .. }
+        ));
+
+        let delivered = WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "exec-2".into(),
+                client_order_id: "eng-2".into(),
+                symbol: SymbolId(1),
+                side: Side::Sell,
+                qty: 1.0,
+                px: 100.0,
+                fee: Some(0.0),
+                is_maker: true,
+                venue_ts_ms: 30,
+                recv_ns: 40,
+            },
+        };
+        let mut encoded = serde_json::to_value(&delivered).expect("serialize stream fill");
+        assert_eq!(encoded["update"]["Fill"]["fee"], 0.0);
+        encoded["update"]["Fill"]
+            .as_object_mut()
+            .expect("fill payload is an object")
+            .remove("fee");
+        assert!(matches!(
+            serde_json::from_value::<WalRecord>(encoded).expect("legacy stream fill reads"),
+            WalRecord::OrderUpdate {
+                update: OrderUpdate::Fill { fee: None, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn old_segment_base_without_history_checkpoint_still_reads() {
+        let base = WalRecord::SegmentBase {
+            wall_ts_ms: 1,
+            strategies: Vec::new(),
+            symbols: Vec::new(),
+            may_open: true,
+            control_anchors: Vec::new(),
+            attribution: Vec::new(),
+            logged_exposure: Vec::new(),
+            intended_stops: Vec::new(),
+            recent_execution_ids: Vec::new(),
+            execution_history_through_ms: Some(123),
+            open_orders: Vec::new(),
+        };
+        let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
+        encoded
+            .as_object_mut()
+            .expect("tagged record is an object")
+            .remove("execution_history_through_ms");
+        assert!(matches!(
+            serde_json::from_value::<WalRecord>(encoded).expect("legacy segment base reads"),
+            WalRecord::SegmentBase {
+                execution_history_through_ms: None,
+                ..
+            }
+        ));
     }
 }

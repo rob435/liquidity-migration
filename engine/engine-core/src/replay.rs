@@ -393,6 +393,9 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 .map(|f| format!("\n             {f}"))
                 .collect::<String>()
         ),
+        WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } => format!(
+            "history    venue executions are durable through {through_wall_ts_ms}"
+        ),
         WalRecord::SegmentBase {
             wall_ts_ms,
             symbols,
@@ -436,7 +439,11 @@ fn update_words(update: &engine_types::OrderUpdate, names: &LogNames) -> String 
             px,
             fee,
             ..
-        } => format!("{client_order_id} filled {qty} at {px}, fee {fee}"),
+        } => format!(
+            "{client_order_id} filled {qty} at {px}, fee {}",
+            fee.map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
         U::FastFill {
             client_order_id,
             qty,
@@ -518,5 +525,27 @@ mod tests {
         );
         assert_eq!(report.in_flight, vec!["b".to_string()]);
         assert!(report.lines.last().unwrap().contains("part-way"));
+    }
+
+    #[test]
+    fn an_unstated_fee_is_rendered_as_unknown() {
+        let report = describe(
+            &[WalRecord::OrderUpdate {
+                update: OrderUpdate::Fill {
+                    exec_id: "exec-1".into(),
+                    client_order_id: "eng-1".into(),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    px: 100.0,
+                    fee: None,
+                    is_maker: false,
+                    venue_ts_ms: 1,
+                    recv_ns: 2,
+                },
+            }],
+            false,
+        );
+        assert!(report.lines.join("\n").contains("fee unknown"));
     }
 }

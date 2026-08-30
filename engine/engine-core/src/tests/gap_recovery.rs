@@ -31,6 +31,10 @@ struct Recovered {
 /// One buy, then a stream reset with the venue's history carrying that order's
 /// fill.
 async fn recover_one_fill() -> Recovered {
+    recover_one_fill_with_fee(Some(0.18)).await
+}
+
+async fn recover_one_fill_with_fee(fee: Option<f64>) -> Recovered {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
@@ -54,7 +58,7 @@ async fn recover_one_fill() -> Recovered {
         side: Side::Buy,
         qty: 0.01,
         px: 30_000.0,
-        fee: 0.18,
+        fee,
         is_maker: false,
         venue_ts_ms: clock::wall_ms(),
     }]);
@@ -130,7 +134,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
                 side: Side::Buy,
                 qty: 0.01,
                 px: 30_000.0,
-                fee: 0.18,
+                fee: Some(0.18),
                 is_maker: false,
                 venue_ts_ms: clock::wall_ms(),
                 recv_ns: clock::now_ns(),
@@ -158,7 +162,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
         side: Side::Sell,
         qty: 0.004,
         px: 29_000.0,
-        fee: 0.07,
+        fee: Some(0.07),
         is_maker: false,
         venue_ts_ms: clock::wall_ms(),
     }]);
@@ -204,7 +208,7 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
         side: Side::Buy,
         qty: 1.0,
         px: 100.0,
-        fee: 0.0,
+        fee: Some(0.0),
         is_maker: false,
         venue_ts_ms: clock::wall_ms(),
         recv_ns: 1,
@@ -252,6 +256,140 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
         logged_exposure.is_empty(),
         "an unowned fill is not trusted exposure"
     );
+}
+
+#[tokio::test]
+async fn a_known_live_fill_with_the_wrong_side_is_durable_but_mutates_nothing() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    let sent = h.sends.lock().unwrap()[0].client_order_id.clone();
+    h.risk_saw.lock().unwrap().clear();
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::Fill {
+                exec_id: "wrong-side-live".into(),
+                client_order_id: sent.clone(),
+                symbol,
+                side: Side::Sell,
+                qty: 0.01,
+                px: 30_000.0,
+                fee: Some(0.1),
+                is_maker: false,
+                venue_ts_ms: clock::wall_ms(),
+                recv_ns: clock::now_ns(),
+            }]),
+            tokio::time::sleep(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+
+    let records = h.records.lock().unwrap();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        WalRecord::Reconciled { may_open: false, findings, .. }
+            if findings.iter().any(|line| line.contains("reported side Sell does not match sent side Buy"))
+    )));
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill { exec_id, .. }
+        } if exec_id == "wrong-side-live"
+    )));
+    drop(records);
+    assert_eq!(engine.in_flight_ids(), vec![sent.as_str()]);
+    assert!(!h
+        .risk_saw
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|update| matches!(update, OrderUpdate::Fill { .. })));
+    let WalRecord::SegmentBase {
+        may_open,
+        logged_exposure,
+        open_orders,
+        ..
+    } = engine.rotation_base(1)
+    else {
+        unreachable!()
+    };
+    assert!(!may_open);
+    assert!(logged_exposure.is_empty());
+    assert_eq!(open_orders.len(), 1, "the original reservation was retired");
+    assert_eq!(open_orders[0].filled_qty, 0.0);
+}
+
+#[tokio::test]
+async fn a_known_recovered_fill_with_the_wrong_symbol_preserves_the_order() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (other, _heard) = Buyer::new("ETHUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build(
+        allow_all(),
+        vec![Box::new(buyer), Box::new(other)],
+        &["BTCUSDT", "ETHUSDT"],
+        &[],
+    )
+    .await;
+    let btc = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(btc, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    let sent = h.sends.lock().unwrap()[0].client_order_id.clone();
+    h.risk_saw.lock().unwrap().clear();
+    *h.executions.lock().unwrap() = Some(vec![VenueExecution {
+        exec_id: "wrong-symbol-recovered".into(),
+        client_order_id: sent.clone(),
+        symbol: "ETHUSDT".into(),
+        side: Side::Buy,
+        qty: 0.01,
+        px: 3_000.0,
+        fee: Some(0.1),
+        is_maker: false,
+        venue_ts_ms: clock::wall_ms(),
+    }]);
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(btc, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            tokio::time::sleep(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+
+    let records = h.records.lock().unwrap();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        WalRecord::Reconciled { may_open: false, findings, .. }
+            if findings.iter().any(|line| line.contains("reported symbol 1 does not match sent symbol 0"))
+    )));
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        WalRecord::RecoveredFill { exec_id, .. } if exec_id == "wrong-symbol-recovered"
+    )));
+    drop(records);
+    assert_eq!(engine.in_flight_ids(), vec![sent.as_str()]);
+    assert!(!h
+        .risk_saw
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|update| matches!(update, OrderUpdate::Fill { .. })));
 }
 
 #[tokio::test]
@@ -319,7 +457,7 @@ async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
         side: Side::Buy,
         qty: 3.0,
         px: 2.0,
-        fee: 0.0,
+        fee: Some(0.0),
         is_maker: false,
         venue_ts_ms: clock::wall_ms(),
     }]);
@@ -380,6 +518,36 @@ async fn execution_history_failure_aborts_boot() {
 }
 
 #[tokio::test]
+async fn an_existing_log_without_a_proven_history_boundary_aborts_boot() {
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    let (risk, _) = MockRisk::with(allow_all());
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let replayed = vec![WalRecord::Names {
+        strategies: vec!["buyer".into()],
+        symbols: vec!["BTCUSDT".into()],
+    }];
+
+    let result = Engine::boot(
+        &settings(),
+        "new",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(subscriber)],
+        &replayed,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(EngineError::Boot(message))
+            if message.contains("no durable execution-history boundary")
+    ));
+}
+
+#[tokio::test]
 async fn a_log_older_than_the_venue_history_window_aborts_boot() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -410,6 +578,145 @@ async fn a_log_older_than_the_venue_history_window_aborts_boot() {
 }
 
 #[tokio::test]
+async fn an_empty_successful_boot_scan_is_checkpointed_durably() {
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (_engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
+
+    let records = h.records.lock().unwrap();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms }
+            if *through_wall_ts_ms > 0
+    )));
+    drop(records);
+    let tape = h.tape.lock().unwrap();
+    let checkpoint = tape
+        .iter()
+        .position(
+            |step| matches!(step, Step::Append(kind) if kind == "execution_history_checkpoint"),
+        )
+        .expect("checkpoint append");
+    assert!(
+        tape.iter()
+            .skip(checkpoint + 1)
+            .any(|step| matches!(step, Step::Barrier)),
+        "the empty scan boundary was not covered by a durability barrier"
+    );
+}
+
+#[tokio::test]
+async fn a_recent_checkpoint_keeps_a_quiet_old_log_restartable() {
+    let now_ms = clock::wall_ms();
+    let replayed = vec![
+        WalRecord::Boot {
+            version: ENGINE_VERSION.into(),
+            config_sha256: "old".into(),
+            wall_ts_ms: now_ms - 8 * 24 * 60 * 60 * 1_000,
+        },
+        WalRecord::ExecutionHistoryCheckpoint {
+            through_wall_ts_ms: now_ms - 1_000,
+        },
+    ];
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+
+    let (_engine, h) = build(
+        allow_all(),
+        vec![Box::new(subscriber)],
+        &["BTCUSDT"],
+        &replayed,
+    )
+    .await;
+
+    assert!(h.records.lock().unwrap().iter().any(|record| matches!(
+        record,
+        WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms }
+            if *through_wall_ts_ms >= now_ms - 1_000
+    )));
+}
+
+#[tokio::test]
+async fn a_later_reconciliation_stamp_does_not_replace_a_history_checkpoint() {
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    let (risk, _) = MockRisk::with(allow_all());
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let now_ms = clock::wall_ms();
+    let replayed = vec![
+        WalRecord::Boot {
+            version: ENGINE_VERSION.into(),
+            config_sha256: "old".into(),
+            wall_ts_ms: now_ms - 8 * 24 * 60 * 60 * 1_000,
+        },
+        WalRecord::Reconciled {
+            wall_ts_ms: now_ms - 1_000,
+            findings: Vec::new(),
+            may_open: true,
+        },
+    ];
+
+    let result = Engine::boot(
+        &settings(),
+        "new",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(subscriber)],
+        &replayed,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(EngineError::Boot(message)) if message.contains("beyond the venue execution-history reach")
+    ));
+}
+
+#[tokio::test]
+async fn a_quiet_running_engine_renews_an_empty_checkpoint() {
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
+    let before = h
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|record| matches!(record, WalRecord::ExecutionHistoryCheckpoint { .. }))
+        .count();
+    engine.renew_execution_history().await.unwrap();
+
+    let after = h
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|record| matches!(record, WalRecord::ExecutionHistoryCheckpoint { .. }))
+        .count();
+    assert_eq!(after, before + 1);
+    let newest = h
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|record| match record {
+            WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } => {
+                Some(*through_wall_ts_ms)
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap();
+    let WalRecord::SegmentBase {
+        execution_history_through_ms,
+        ..
+    } = engine.rotation_base(clock::wall_ms())
+    else {
+        unreachable!()
+    };
+    assert_eq!(execution_history_through_ms, Some(newest));
+}
+
+#[tokio::test]
 async fn a_recovered_fill_is_in_what_the_trading_cost() {
     // It traded, so it cost something. Left out, the traded notional is short
     // by however much the stream missed and every mean taken over it is a
@@ -429,6 +736,22 @@ async fn a_recovered_fill_is_in_what_the_trading_cost() {
 }
 
 #[tokio::test]
+async fn a_recovered_unstated_fee_stays_unknown_in_the_wal_and_costs() {
+    let Recovered { records, costs, .. } = recover_one_fill_with_fee(None).await;
+
+    assert!(records.lock().unwrap().iter().any(|record| matches!(
+        record,
+        WalRecord::RecoveredFill {
+            exec_id,
+            fee: None,
+            ..
+        } if exec_id == "e-1"
+    )));
+    assert_eq!(costs.fee_usdt, None);
+    assert_eq!(costs.fee_coverage(), Some(0.0));
+}
+
+#[tokio::test]
 async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
     // The pass reaches back two minutes past this boot, and the venue hands
     // back everything in that window. A fill the previous run heard on its own
@@ -444,7 +767,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
         side: Side::Buy,
         qty: 0.01,
         px: 30_000.0,
-        fee: 0.18,
+        fee: Some(0.18),
         is_maker: false,
         venue_ts_ms: clock::wall_ms() - 30_000,
         recv_ns: 1,
@@ -473,7 +796,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
             side: Side::Buy,
             qty: 0.01,
             px: 30_000.0,
-            fee: 0.18,
+            fee: Some(0.18),
             is_maker: false,
             venue_ts_ms,
         },
@@ -486,7 +809,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
             side: Side::Buy,
             qty: 0.01,
             px: 30_000.0,
-            fee: 0.18,
+            fee: Some(0.18),
             is_maker: false,
             venue_ts_ms,
         },
@@ -497,7 +820,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
             side: Side::Buy,
             qty: 0.02,
             px: 30_000.0,
-            fee: 0.36,
+            fee: Some(0.36),
             is_maker: false,
             venue_ts_ms: clock::wall_ms(),
         },

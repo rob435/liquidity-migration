@@ -26,7 +26,8 @@ use engine_types::{
     AccountIdentity, AccountView, AmendSpec, EngineEvent, Feed, FeedError, InstrumentRule, Intent,
     MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote,
     RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription,
-    Symbol, SymbolId, VenueCaps, VenueError, VenueGateway, VenueOrder, Wal, WalRecord,
+    Symbol, SymbolId, VenueCaps, VenueError, VenueExecution, VenueGateway, VenueOrder, Wal,
+    WalRecord,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -354,7 +355,7 @@ impl OrderFeed for FillingOrderFeed {
             px,
             // A round two basis points, the maker rate this venue's real
             // counterpart charges on most names.
-            fee: (px * request.qty * 0.0002).abs(),
+            fee: Some((px * request.qty * 0.0002).abs()),
             is_maker: matches!(request.kind, OrderKind::Limit { .. }),
             venue_ts_ms: clock::wall_ms(),
             recv_ns: clock::now_ns(),
@@ -657,6 +658,16 @@ impl VenueGateway for HttpVenue {
     /// boot, so it costs nothing to answer honestly: a pretend venue with a
     /// pretend book is working nothing.
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
+        Ok(Vec::new())
+    }
+
+    /// The bench account exists only in this process. Its fill feed is
+    /// drained by the same run and there is no older execution history.
+    async fn executions(
+        &mut self,
+        _start_ms: i64,
+        _end_ms: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
         Ok(Vec::new())
     }
 

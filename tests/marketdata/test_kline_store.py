@@ -204,7 +204,7 @@ def test_get_klines_returns_inclusive_window() -> None:
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     for hour in range(10):
         ts = hour * MS_PER_HOUR
-        store.add_bar("BTCUSDT", _ws_bar(ts, close=float(hour)), confirmed=True)
+        store.add_bar("BTCUSDT", _ws_bar(ts, close=float(hour + 10)), confirmed=True)
     frame = store.get_klines(
         ["BTCUSDT"], start_ms=2 * MS_PER_HOUR, end_ms=5 * MS_PER_HOUR,
     )
@@ -280,7 +280,7 @@ def test_symbols_with_coverage_in_window_requires_both_ends() -> None:
 def test_bootstrap_symbol_accepts_rest_bars_bulk() -> None:
     """Bootstrap is REST-fed: caller knows the bars are confirmed."""
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
-    bars = [_ws_bar(i * MS_PER_HOUR, close=float(i)) for i in range(1, 6)]
+    bars = [_ws_bar(i * MS_PER_HOUR, close=float(i + 10)) for i in range(1, 6)]
     inserted = store.bootstrap_symbol("BTCUSDT", bars)
     assert inserted == 5
     assert store.row_count() == 5
@@ -351,7 +351,7 @@ def test_concurrent_add_and_get_thread_safety() -> None:
             barrier.wait()
             for i in range(n_bars):
                 ts = base + i * MS_PER_HOUR
-                store.add_bar("BTCUSDT", _ws_bar(ts, close=float(i)), confirmed=True)
+                store.add_bar("BTCUSDT", _ws_bar(ts, close=float(i + 10)), confirmed=True)
         except BaseException as exc:
             errors.append(exc)
 
@@ -381,7 +381,7 @@ def test_flush_and_recover_round_trip(tmp_path: Path) -> None:
     store_a = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     for hour in range(5):
         ts = hour * MS_PER_HOUR
-        store_a.add_bar("BTCUSDT", _ws_bar(ts, close=float(hour)), confirmed=True)
+        store_a.add_bar("BTCUSDT", _ws_bar(ts, close=float(hour + 10)), confirmed=True)
         store_a.add_bar("ETHUSDT", _ws_bar(ts, close=float(hour + 100)), confirmed=True)
     rows_written = store_a.flush_to_disk()
     assert rows_written == 10
@@ -392,7 +392,7 @@ def test_flush_and_recover_round_trip(tmp_path: Path) -> None:
     frame = store_b.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
     assert frame.height == 10
     btc = frame.filter(pl.col("symbol") == "BTCUSDT")
-    assert btc["close"].to_list() == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert btc["close"].to_list() == [10.0, 11.0, 12.0, 13.0, 14.0]
     eth = frame.filter(pl.col("symbol") == "ETHUSDT")
     assert eth["close"].to_list() == [100.0, 101.0, 102.0, 103.0, 104.0]
 
@@ -731,7 +731,7 @@ def test_recover_into_empty_store_normal_path_unchanged(tmp_path: Path) -> None:
     leader = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     for hour in range(5):
         ts = hour * MS_PER_HOUR
-        leader.add_bar("BTCUSDT", _ws_bar(ts, close=float(hour)), confirmed=True)
+        leader.add_bar("BTCUSDT", _ws_bar(ts, close=float(hour + 10)), confirmed=True)
         leader.add_bar("ETHUSDT", _ws_bar(ts, close=float(hour + 100)), confirmed=True)
     assert leader.flush_to_disk() == 10
 

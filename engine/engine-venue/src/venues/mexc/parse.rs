@@ -24,7 +24,7 @@ use engine_types::risk::PositionView;
 use engine_types::VenueError;
 use serde_json::Value;
 
-use crate::json::{num_field, str_field};
+use crate::json::{int_field, num_field, opt_num_field, str_field};
 
 use super::contracts::Contracts;
 
@@ -35,7 +35,10 @@ pub(crate) const SETTLE_CURRENCY: &str = "USDT";
 /// Unwrap the `{"success": …, "code": …, "data": …}` envelope every endpoint
 /// uses, turning the venue's own refusal into a typed rejection.
 pub(crate) fn venue_result(body: &Value) -> Result<&Value, VenueError> {
-    let ok = body.get("success").and_then(Value::as_bool).unwrap_or(false);
+    let ok = body
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
     if ok && code == 0 {
         return body
@@ -86,7 +89,9 @@ pub(crate) fn parse_assets(data: &Value) -> Result<(f64, f64), VenueError> {
         .iter()
         .find(|row| row.get("currency").and_then(Value::as_str) == Some(SETTLE_CURRENCY))
         .ok_or_else(|| {
-            VenueError::BadReply(format!("the account holds no {SETTLE_CURRENCY} balance row"))
+            VenueError::BadReply(format!(
+                "the account holds no {SETTLE_CURRENCY} balance row"
+            ))
         })?;
     let equity = row
         .get("equity")
@@ -95,7 +100,9 @@ pub(crate) fn parse_assets(data: &Value) -> Result<(f64, f64), VenueError> {
     let available = row
         .get("availableBalance")
         .and_then(Value::as_f64)
-        .ok_or_else(|| VenueError::BadReply("the balance row carried no availableBalance".into()))?;
+        .ok_or_else(|| {
+            VenueError::BadReply("the balance row carried no availableBalance".into())
+        })?;
     Ok((equity, available))
 }
 
@@ -113,13 +120,17 @@ pub(crate) fn parse_position_stops(data: &Value) -> HashMap<String, f64> {
         None => return stops,
     };
     for row in rows {
-        let Some(position_id) = id_text(row, "positionId") else { continue };
+        let Some(position_id) = id_text(row, "positionId") else {
+            continue;
+        };
         let order_id = id_text(row, "orderId").unwrap_or_default();
         // "Limit order id; if placed by position, this value is 0."
         if !(order_id.is_empty() || order_id == "0") {
             continue;
         }
-        let Some(px) = row.get("stopLossPrice").and_then(Value::as_f64) else { continue };
+        let Some(px) = row.get("stopLossPrice").and_then(Value::as_f64) else {
+            continue;
+        };
         if px > 0.0 {
             stops.insert(position_id, px);
         }
@@ -144,10 +155,9 @@ pub(crate) fn parse_positions(
         if hold_vol == 0.0 {
             continue;
         }
-        let venue_symbol = row
-            .get("symbol")
-            .and_then(Value::as_str)
-            .ok_or_else(|| VenueError::BadReply("a nonzero position has no readable symbol".into()))?;
+        let venue_symbol = row.get("symbol").and_then(Value::as_str).ok_or_else(|| {
+            VenueError::BadReply("a nonzero position has no readable symbol".into())
+        })?;
         let symbol = contracts.symbol_of(venue_symbol).ok_or_else(|| {
             VenueError::BadReply(format!(
                 "nonzero position in {venue_symbol} cannot be mapped into the configured symbol table"
@@ -158,9 +168,11 @@ pub(crate) fn parse_positions(
                 "nonzero position in {symbol} is absent from the configured symbol table"
             ))
         })?;
-        let contract = contracts
-            .any(symbol)
-            .ok_or_else(|| VenueError::BadReply(format!("contract metadata vanished for position in {symbol}")))?;
+        let contract = contracts.any(symbol).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "contract metadata vanished for position in {symbol}"
+            ))
+        })?;
         if hold_vol < 0.0 {
             return Err(VenueError::BadReply(format!(
                 "position in {venue_symbol} has a negative contract size {hold_vol}"
@@ -182,7 +194,10 @@ pub(crate) fn parse_positions(
             symbol: id,
             side,
             qty: contract.base_for(hold_vol),
-            entry_px: row.get("holdAvgPrice").and_then(Value::as_f64).unwrap_or(0.0),
+            entry_px: row
+                .get("holdAvgPrice")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
             stop_attached: stop_px > 0.0,
             stop_px,
             leverage: row.get("leverage").and_then(Value::as_f64),
@@ -196,8 +211,8 @@ pub(crate) fn parse_open_orders(
     data: &Value,
     contracts: &Contracts,
 ) -> Result<(Vec<VenueOrder>, usize), VenueError> {
-    let rows = rows_of(data)
-        .ok_or_else(|| VenueError::BadReply("open orders carried no rows".into()))?;
+    let rows =
+        rows_of(data).ok_or_else(|| VenueError::BadReply("open orders carried no rows".into()))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let client_order_id = str_field(row, "externalOid")?;
@@ -208,17 +223,22 @@ pub(crate) fn parse_open_orders(
         }
         let venue_symbol = str_field(row, "symbol")?;
         let symbol = contracts.symbol_of(&venue_symbol).ok_or_else(|| {
-            VenueError::BadReply(format!("working order names unknown contract {venue_symbol}"))
+            VenueError::BadReply(format!(
+                "working order names unknown contract {venue_symbol}"
+            ))
         })?;
-        let contract = contracts
-            .any(symbol)
-            .ok_or_else(|| VenueError::BadReply(format!("contract metadata vanished for {symbol}")))?;
-        let side_raw = row
-            .get("side")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| VenueError::BadReply(format!("working order {client_order_id} has no integer side")))?;
+        let contract = contracts.any(symbol).ok_or_else(|| {
+            VenueError::BadReply(format!("contract metadata vanished for {symbol}"))
+        })?;
+        let side_raw = row.get("side").and_then(Value::as_i64).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "working order {client_order_id} has no integer side"
+            ))
+        })?;
         let (side, is_close) = side_of(side_raw).ok_or_else(|| {
-            VenueError::BadReply(format!("working order {client_order_id} has unknown side {side_raw}"))
+            VenueError::BadReply(format!(
+                "working order {client_order_id} has unknown side {side_raw}"
+            ))
         })?;
         let vol = num_field(row, "vol")?;
         let deal_vol = num_field(row, "dealVol")?;
@@ -243,39 +263,68 @@ pub(crate) fn parse_open_orders(
 pub(crate) fn parse_deals(
     data: &Value,
     contracts: &Contracts,
-) -> Result<Vec<VenueExecution>, VenueError> {
+) -> Result<(Vec<VenueExecution>, usize), VenueError> {
     let rows =
         rows_of(data).ok_or_else(|| VenueError::BadReply("order deals carried no rows".into()))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let Some(venue_symbol) = row.get("symbol").and_then(Value::as_str) else { continue };
-        let Some(symbol) = contracts.symbol_of(venue_symbol) else { continue };
-        let Some(contract) = contracts.any(symbol) else { continue };
-        let Some((side, _)) = row.get("side").and_then(Value::as_i64).and_then(side_of) else {
-            continue;
+        let venue_symbol = str_field(row, "symbol")?;
+        let symbol = contracts.symbol_of(&venue_symbol).ok_or_else(|| {
+            VenueError::BadReply(format!("execution names unknown contract {venue_symbol}"))
+        })?;
+        let contract = contracts.any(symbol).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "contract metadata vanished for execution in {symbol}"
+            ))
+        })?;
+        let side_raw = int_field(row, "side")?;
+        let (side, _) = side_of(side_raw).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "execution in {venue_symbol} has unknown side {side_raw}"
+            ))
+        })?;
+        let exec_id = id_text(row, "id")
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                VenueError::BadReply(format!("execution in {venue_symbol} has no readable id"))
+            })?;
+        let client_order_id = match row.get("externalOid") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(value)) => value.clone(),
+            Some(_) => {
+                return Err(VenueError::BadReply(format!(
+                    "execution {exec_id} in {venue_symbol} has a non-string externalOid"
+                )))
+            }
         };
-        let Some(exec_id) = id_text(row, "id") else { continue };
+        let contracts_qty = num_field(row, "vol")?;
+        let qty = contract.base_for(contracts_qty);
+        let px = num_field(row, "price")?;
+        let fee = opt_num_field(row, "fee")?;
+        let taker = row.get("taker").and_then(Value::as_bool).ok_or_else(|| {
+            VenueError::BadReply(format!(
+                "execution {exec_id} in {venue_symbol} has no boolean taker flag"
+            ))
+        })?;
+        let venue_ts_ms = int_field(row, "timestamp")?;
+        if contracts_qty <= 0.0 || !qty.is_finite() || qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
+            return Err(VenueError::BadReply(format!(
+                "execution {exec_id} in {venue_symbol} has non-positive quantity, price, or timestamp"
+            )));
+        }
         out.push(VenueExecution {
             exec_id,
-            client_order_id: row
-                .get("externalOid")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            symbol: venue_symbol.to_string(),
+            client_order_id,
+            symbol: symbol.to_string(),
             side,
-            qty: contract.base_for(row.get("vol").and_then(Value::as_f64).unwrap_or(0.0)),
-            px: row.get("price").and_then(Value::as_f64).unwrap_or(0.0),
-            fee: row.get("fee").and_then(Value::as_f64).unwrap_or(0.0),
-            // The current endpoint calls this `taker`; the retired one called
-            // it `isTaker`. Reading the old name here would report every fill
-            // as a maker fill and quietly flatter the cost report, so the
-            // absent field is read as taker rather than as maker.
-            is_maker: !row.get("taker").and_then(Value::as_bool).unwrap_or(true),
-            venue_ts_ms: row.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
+            qty,
+            px,
+            fee,
+            is_maker: !taker,
+            venue_ts_ms,
         });
     }
-    Ok(out)
+    Ok((out, rows.len()))
 }
 
 /// The venue's own id for an order it just accepted.
@@ -379,8 +428,7 @@ mod tests {
             "positionId": 1109973831, "symbol": "BTC_USDT", "holdVol": 5, "positionType": 1,
             "holdAvgPrice": 109777.5, "leverage": 2, "im": 27.444375, "state": 1
         }]);
-        let out =
-            parse_positions(&data, &contracts(), &ids(), &HashMap::new()).unwrap();
+        let out = parse_positions(&data, &contracts(), &ids(), &HashMap::new()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].qty, 0.0005);
         assert_eq!(out[0].side, Side::Buy);
@@ -447,25 +495,94 @@ mod tests {
             "fee": 0.046, "taker": false, "timestamp": 1787492334852i64,
             "externalOid": "eng-1"
         }]);
-        let out = parse_deals(&data, &contracts()).unwrap();
+        let (out, raw_count) = parse_deals(&data, &contracts()).unwrap();
+        assert_eq!(raw_count, 1);
         assert_eq!(out[0].qty, 0.001);
         assert_eq!(out[0].client_order_id, "eng-1");
+        assert_eq!(out[0].symbol, "BTCUSDT");
+        assert_eq!(out[0].fee, Some(0.046));
         assert!(out[0].is_maker);
     }
 
     #[test]
-    fn a_fill_that_does_not_say_is_counted_as_a_taker() {
-        // The field was renamed, and reading the retired spelling would report
-        // every fill as a maker fill — which flatters the cost report exactly
-        // where it is supposed to be honest.
-        let data = json!([{"id": 1, "symbol": "BTC_USDT", "side": 1, "vol": 1, "price": 1.0}]);
-        assert!(!parse_deals(&data, &contracts()).unwrap()[0].is_maker);
-        let legacy = json!([{"id": 1, "symbol": "BTC_USDT", "side": 1, "vol": 1, "price": 1.0,
-                            "isTaker": false}]);
+    fn a_fill_without_the_current_taker_flag_invalidates_the_page() {
+        let base = json!({
+            "id": 1, "symbol": "BTC_USDT", "side": 1, "vol": 1,
+            "price": 1.0, "timestamp": 1
+        });
+        assert!(parse_deals(&json!([base.clone()]), &contracts()).is_err());
+        let mut legacy = base;
+        legacy["isTaker"] = json!(false);
         assert!(
-            !parse_deals(&legacy, &contracts()).unwrap()[0].is_maker,
-            "the retired field name was read as authoritative"
+            parse_deals(&json!([legacy]), &contracts()).is_err(),
+            "the retired field name was treated as current evidence"
         );
+    }
+
+    #[test]
+    fn a_missing_fee_stays_unknown_and_an_explicit_zero_stays_zero() {
+        let base = json!({
+            "id": 1, "symbol": "BTC_USDT", "side": 1, "vol": 1,
+            "price": 1.0, "taker": true, "timestamp": 1
+        });
+        let (without, _) = parse_deals(&json!([base.clone()]), &contracts()).unwrap();
+        assert_eq!(without[0].fee, None);
+
+        let mut zero = base;
+        zero["fee"] = json!(0.0);
+        let (with_zero, _) = parse_deals(&json!([zero]), &contracts()).unwrap();
+        assert_eq!(with_zero[0].fee, Some(0.0));
+    }
+
+    #[test]
+    fn one_malformed_deal_invalidates_the_whole_page() {
+        let valid = json!({
+            "id": 1, "symbol": "BTC_USDT", "side": 1, "vol": 1,
+            "price": 1.0, "fee": 0.01, "taker": true, "timestamp": 1,
+            "externalOid": "eng-1"
+        });
+        let mut bad_rows = Vec::new();
+        for field in ["id", "symbol", "side", "vol", "price", "taker", "timestamp"] {
+            let mut row = valid.clone();
+            row.as_object_mut().unwrap().remove(field);
+            bad_rows.push(row);
+        }
+        for (field, value) in [
+            ("symbol", json!("UNKNOWN_USDT")),
+            ("side", json!(9)),
+            ("vol", json!(0)),
+            ("price", json!(0)),
+            ("fee", json!("NaN")),
+            ("taker", json!("yes")),
+            ("timestamp", json!(0)),
+            ("externalOid", json!(7)),
+        ] {
+            let mut row = valid.clone();
+            row[field] = value;
+            bad_rows.push(row);
+        }
+        for bad in bad_rows {
+            assert!(
+                parse_deals(&json!([valid.clone(), bad]), &contracts()).is_err(),
+                "a malformed row was silently skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_deal_page_reports_raw_venue_cardinality() {
+        let rows: Vec<Value> = (0..100)
+            .map(|id| {
+                json!({
+                    "id": id, "symbol": "BTC_USDT", "side": 1, "vol": 1,
+                    "price": 1.0, "fee": 0.0, "taker": true,
+                    "timestamp": 1 + id
+                })
+            })
+            .collect();
+        let (parsed, raw_count) = parse_deals(&json!({"resultList": rows}), &contracts()).unwrap();
+        assert_eq!(raw_count, 100);
+        assert_eq!(parsed.len(), raw_count);
     }
 
     #[test]
@@ -507,9 +624,14 @@ mod tests {
                 })
             })
             .collect();
-        let (parsed, raw_count) = parse_open_orders(&json!({"resultList": rows}), &contracts()).unwrap();
+        let (parsed, raw_count) =
+            parse_open_orders(&json!({"resultList": rows}), &contracts()).unwrap();
         assert_eq!(raw_count, 100, "a full page was mistaken for the end");
-        assert_eq!(parsed.len(), raw_count, "the strict parser silently dropped a row");
+        assert_eq!(
+            parsed.len(),
+            raw_count,
+            "the strict parser silently dropped a row"
+        );
     }
 
     #[test]
@@ -531,9 +653,11 @@ mod tests {
         assert!(err.to_string().contains("NOTLISTED_USDT"), "{err}");
 
         let flat = json!([{"symbol": "NOTLISTED_USDT", "holdVol": 0}]);
-        assert!(parse_positions(&flat, &contracts(), &ids(), &HashMap::new())
-            .unwrap()
-            .is_empty());
+        assert!(
+            parse_positions(&flat, &contracts(), &ids(), &HashMap::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

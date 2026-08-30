@@ -77,8 +77,7 @@ fn a_rendered_carry_stop_widens_the_kernel_ceiling() {
     doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(0.2);
     let cfg = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap();
     assert_eq!(
-        cfg.envelope.disaster_stop_fraction,
-        DISASTER_STOP_FRACTION,
+        cfg.envelope.disaster_stop_fraction, DISASTER_STOP_FRACTION,
         "a carry-only tightening must not narrow the other sleeves' ceiling"
     );
 }

@@ -37,17 +37,18 @@ Environment=LONG_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/lo
 Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/long-mainnet-state.json
 # Append-only enter/leave attribution log; see the demo unit's note.
 Environment=LONG_ENGINE_BOOK_TRANSITIONS_PATH=/var/lib/liquidity-migration/targets/long-mainnet-transitions.jsonl
+# A loaded funded LONG rebuild can run for about 19 minutes. The producer
+# drains that pass before exit so it cannot leave a half-published target book.
+Environment=LM_CHILD_STOP_GRACE_SECONDS=1500
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-long-mainnet.service main
-# The trusted supervisor answers a stop by passing SIGTERM to its child,
-# waiting for it, and exiting 143 — the number that says "terminated on
-# request". Without this, systemd files every clean stop as a failure and
-# the watchdog pages the alerts line on every deploy.
+# The trusted supervisor records 143 only when the child finishes inside its
+# grace period. A forced kill stays a service failure.
 SuccessExitStatus=143
 Restart=always
 RestartPreventExitStatus=78
 RestartSec=30
 KillMode=control-group
-TimeoutStopSec=180
+TimeoutStopSec=1530
 Nice=5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

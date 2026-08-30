@@ -1545,7 +1545,12 @@ def _validate_carry_view_health(
     if at_bar.is_empty():
         # decide_book raises its own, more precise staleness error.
         return
-    covered = int(at_bar.get_column("by_funding").is_not_null().sum())
+    covered = int(
+        at_bar.get_column("by_funding")
+        .is_finite()
+        .fill_null(False)
+        .sum()
+    )
     coverage = covered / at_bar.height
     if coverage < MIN_DECISION_FUNDING_COVERAGE:
         raise CarrySleeveError(
@@ -1560,12 +1565,14 @@ def _validate_carry_view_health(
         & (
             pl.col("by_funding_age_h").is_null()
             | (pl.col("by_funding_age_h") > STANDING_FUNDING_MAX_AGE_H)
+            | ~pl.col("by_funding").is_finite().fill_null(False)
         )
     )
     if stale_standing.height:
         names = ",".join(sorted(stale_standing.get_column("symbol").to_list()))
         raise CarrySleeveError(
-            f"standing symbols with live klines but stale funding prints: {names}; "
+            f"standing symbols with live klines but stale funding prints or non-finite rates: "
+            f"{names}; "
             "holding the book rather than risking a false velocity exit on a data hole"
         )
 
@@ -1956,11 +1963,20 @@ def _empty_funding_events() -> pl.DataFrame:
 def _normalized_funding_events(frame: pl.DataFrame) -> pl.DataFrame:
     if frame.is_empty() or not {"symbol", "funding_ts_ms", "funding_rate"} <= set(frame.columns):
         return _empty_funding_events()
-    return frame.select(
+    normalized = frame.select(
         pl.col("symbol").cast(pl.String),
         pl.col("funding_ts_ms").cast(pl.Int64),
         pl.col("funding_rate").cast(pl.Float64),
-    ).unique(subset=["symbol", "funding_ts_ms"], keep="last")
+    )
+    invalid = normalized.filter(
+        pl.col("funding_rate").is_null()
+        | ~pl.col("funding_rate").is_finite().fill_null(False)
+    )
+    if invalid.height:
+        raise CarrySleeveError(
+            f"carry funding events contain {invalid.height} null or non-finite rates"
+        )
+    return normalized.unique(subset=["symbol", "funding_ts_ms"], keep="last")
 
 
 def _refresh_carry_funding_cache(
@@ -2055,6 +2071,9 @@ def _refresh_carry_funding_cache(
                 funding_rate = float(row["fundingRate"])
             except (KeyError, TypeError, ValueError):
                 _logger.warning("carry funding row for %s is malformed: %r", symbol, row)
+                continue
+            if not math.isfinite(funding_rate):
+                _logger.warning("carry funding row for %s has a non-finite rate", symbol)
                 continue
             if funding_ts > floor_ts:
                 fresh_rows.append(

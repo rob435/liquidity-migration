@@ -289,6 +289,15 @@ impl Heartbeat {
                 or_null(facts.costs.arrival_shortfall.mean().map(bps)),
             ),
             (
+                "fill_fee_coverage",
+                or_null(
+                    facts
+                        .costs
+                        .fee_coverage()
+                        .map(|share| format!("{share:.4}")),
+                ),
+            ),
+            (
                 // The other way round: positive means the price moved our way
                 // after the fill, so a persistently negative one is a book
                 // being picked off. Named for its horizon, because a markout
@@ -547,7 +556,7 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 46] = [
+    const KEYS: [&str; 47] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -571,6 +580,7 @@ mod tests {
         "entry_blockers",
         "fill_all_in_arrival_bps",
         "fill_arrival_shortfall_bps",
+        "fill_fee_coverage",
         "fill_markout_1m_our_way_bps",
         "fills",
         "fills_maker_share",
@@ -617,7 +627,7 @@ mod tests {
                 side: Side::Buy,
                 qty: 1.0,
                 px: 101.0,
-                fee: 0.0555,
+                fee: Some(0.0555),
                 is_maker: true,
                 arrival_mid: 100.0,
                 venue_ts_ms: 1,
@@ -1175,6 +1185,7 @@ mod fill_cost_tests {
         let fields = beat_with(&some_costs());
         assert_eq!(fields["fills"], 1);
         assert_eq!(fields["fills_maker_share"], 1.0, "the one fill rested");
+        assert_eq!(fields["fill_fee_coverage"], 1.0);
         assert_eq!(fields["fill_arrival_shortfall_bps"], 100.0);
         assert_eq!(
             fields["fill_all_in_arrival_bps"], 105.5,
@@ -1192,6 +1203,7 @@ mod fill_cost_tests {
             "fills_maker_share",
             "fill_arrival_shortfall_bps",
             "fill_all_in_arrival_bps",
+            "fill_fee_coverage",
             "fill_markout_1m_our_way_bps",
         ] {
             assert!(

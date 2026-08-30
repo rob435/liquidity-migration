@@ -6,14 +6,12 @@ _common / trade_lifecycle.
 """
 from __future__ import annotations
 
-from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any
 
 import polars as pl
 
-from liquidity_migration.core._common import _date_symbol_set, _symbol_set
-from liquidity_migration.data.archive_manifest import V5_LISTING_SOURCE, V5_LISTING_URL_SENTINEL
+from liquidity_migration.core._common import MS_PER_HOUR, _date_symbol_set, _symbol_set
 from liquidity_migration.data.trade_lifecycle import _has_columns
 
 
@@ -182,168 +180,19 @@ def _pit_manifest_metadata(
     }
 
 
-def _symbol_kline_date_bounds(klines: pl.DataFrame) -> dict[str, tuple[str, str]]:
-    """Per-symbol (first, last) kline `date` — the coin's traded lifespan in our archive."""
-    if klines.is_empty() or "symbol" not in klines.columns or "date" not in klines.columns:
-        return {}
-    agg = klines.group_by("symbol").agg(
-        pl.col("date").min().alias("first_date"),
-        pl.col("date").max().alias("last_date"),
-    )
-    return {
-        str(r["symbol"]): (str(r["first_date"]), str(r["last_date"]))
-        for r in agg.drop_nulls(["first_date", "last_date"]).to_dicts()
-    }
-
-
-def _current_listing_derived_date_symbols(
+def _required_pit_date_symbols(
+    _klines: pl.DataFrame,
     archive_manifest: pl.DataFrame,
 ) -> set[tuple[str, str]]:
-    """Manifest pairs independently inferred from a currently-Trading listing."""
+    """Manifest pairs whose hourly partitions a full-PIT build must cover.
 
-    predicates: list[pl.Expr] = []
-    if "source" in archive_manifest.columns:
-        predicates.append(pl.col("source") == V5_LISTING_SOURCE)
-    if "url" in archive_manifest.columns:
-        predicates.append(pl.col("url") == V5_LISTING_URL_SENTINEL)
-    if not predicates:
-        return set()
-    predicate = predicates[0]
-    for extra in predicates[1:]:
-        predicate = predicate | extra
-    return _date_symbol_set(archive_manifest.filter(predicate.fill_null(False)))
-
-
-def _observed_v5_launch_dates(
-    archive_manifest: pl.DataFrame,
-) -> dict[str, tuple[str, ...]]:
-    """Observed v5 listing starts, including a later reused-symbol incarnation."""
-
-    column = "v5_observed_launch_date"
-    if (
-        archive_manifest.is_empty()
-        or "symbol" not in archive_manifest.columns
-        or column not in archive_manifest.columns
-    ):
-        return {}
-    observed = (
-        archive_manifest.select("symbol", column)
-        .drop_nulls(["symbol", column])
-        .unique()
-    )
-    launches: dict[str, set[str]] = {}
-    for symbol, launch_date in observed.iter_rows():
-        value = str(launch_date)
-        if len(value) == 10:
-            launches.setdefault(str(symbol), set()).add(value)
-    return {
-        symbol: tuple(sorted(values))
-        for symbol, values in launches.items()
-    }
-
-
-def _incarnation_segment_bounds(
-    klines: pl.DataFrame,
-    archive_manifest: pl.DataFrame,
-    global_bounds: dict[str, tuple[str, str]],
-) -> tuple[
-    dict[str, tuple[str, ...]],
-    dict[tuple[str, int], tuple[str, str]],
-]:
-    """Return relisting boundaries and traded bounds inside each incarnation.
-
-    Symbols whose observed v5 launch is not later than their first stored kline
-    need no special treatment. For a reused ticker, only its distinct dates are
-    materialized here; the common one-incarnation path retains the cheaper
-    global min/max aggregation.
+    The manifest is the independent membership boundary. Kline starts, ends,
+    and internal gaps are the data being checked, so none of them may narrow
+    the requirement. An empty archive payload records a data-source observation,
+    not proof that the venue had no trading, so the pair remains required.
     """
 
-    observed = _observed_v5_launch_dates(archive_manifest)
-    boundaries = {
-        symbol: tuple(day for day in days if day > bounds[0])
-        for symbol, days in observed.items()
-        if (bounds := global_bounds.get(symbol)) is not None
-        and any(day > bounds[0] for day in days)
-    }
-    boundaries = {symbol: days for symbol, days in boundaries.items() if days}
-    if not boundaries:
-        return {}, {}
-
-    date_rows = (
-        klines.filter(pl.col("symbol").is_in(list(boundaries)))
-        .select("symbol", "date")
-        .drop_nulls()
-        .unique()
-    )
-    segment_bounds: dict[tuple[str, int], tuple[str, str]] = {}
-    for symbol_raw, day_raw in date_rows.iter_rows():
-        symbol = str(symbol_raw)
-        day = str(day_raw)
-        segment = bisect_right(boundaries[symbol], day)
-        key = (symbol, segment)
-        current = segment_bounds.get(key)
-        if current is None:
-            segment_bounds[key] = (day, day)
-        else:
-            segment_bounds[key] = (min(current[0], day), max(current[1], day))
-    return boundaries, segment_bounds
-
-
-def _required_pit_date_symbols(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> set[tuple[str, str]]:
-    """Archive-manifest (date, symbol) pairs that the klines are REQUIRED to cover for
-    a full-PIT universe — i.e. only within each symbol's traded lifespan
-    [first_kline_date, last_kline_date].
-
-    The archive trade manifest (derived from the public *trade* archive) can list a coin
-    OUTSIDE the span of its 1h *kline* archive at both ends:
-
-    - PRE-LISTING (date < first kline): listing/announcement precedes the first trade bar;
-      the trade-archive file is empty (0 trades), so no klines exist or can be built.
-    - POST-DELISTING (date > last kline): an isolated EMPTY trade-archive file (0 trades —
-      a settlement/marker artifact) can land weeks-to-months after the coin stopped
-      trading. Verified on the FTX/Terra collapse cohort — FTT/SRM/RAY/LUNA/UST/ANC/GST/
-      KEEP/BTT — all claimed on 2022-12-12, one date each, long after their real last bar;
-      re-downloading those nine partitions returns Empty (0 rows) every time.
-
-    Both archive-only cases are untradable — a coin with no trades on a date has no
-    price/volume and cannot pass the universe turnover / >=20-bar filters, so it could
-    never be selected. Requiring klines for them is a false tripwire, NOT survivorship
-    protection.
-
-    Reused tickers are split at every persisted v5 ``launchTime`` observed after
-    their first stored kline. Bounds are then derived separately inside each
-    incarnation, so an empty post-delisting/pre-relisting interval cannot be
-    mistaken for a mid-history download hole.
-
-    Survivorship IS preserved: any date within an incarnation's [first, last] —
-    including a genuine mid-history gap where a real trading day's klines are
-    simply missing (observed: FHEUSDT 2025-08-29..10-21, a 54-day
-    archive-download gap, correctly still flagged and then backfilled) — is
-    still required and will still trip the gate. A
-    `bybit_v5_listing` pair is also required at or after the first observed kline even when
-    it lies beyond the current kline tail: that provenance independently records a symbol
-    reported `Trading` through the manifest build boundary. Inferring that upper boundary
-    from the klines being validated would let an incomplete active-symbol tail redefine
-    itself as a completed lifespan and false-pass."""
-    bounds = _symbol_kline_date_bounds(klines)
-    current_listing_pairs = _current_listing_derived_date_symbols(archive_manifest)
-    incarnation_starts, segment_bounds = _incarnation_segment_bounds(
-        klines,
-        archive_manifest,
-        bounds,
-    )
-    out: set[tuple[str, str]] = set()
-    for d, s in _date_symbol_set(archive_manifest):
-        starts = incarnation_starts.get(s)
-        if starts is None:
-            span = bounds.get(s)
-        else:
-            span = segment_bounds.get((s, bisect_right(starts, d)))
-        if span is not None and span[0] <= d and (
-            d <= span[1] or (d, s) in current_listing_pairs
-        ):
-            out.add((d, s))
-    return out
+    return _date_symbol_set(archive_manifest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,16 +250,44 @@ def _full_pit_universe_pass(
 
 
 def _covered_kline_date_symbol_set(klines: pl.DataFrame, *, min_hourly_bars: int = 20) -> set[tuple[str, str]]:
-    if klines.is_empty() or not _has_columns(klines, "date", "symbol"):
+    """Return structurally covered days, including causal nulls before a listing."""
+
+    required = ("date", "symbol", "ts_ms", "open", "high", "low", "close")
+    if klines.is_empty() or not _has_columns(klines, *required):
         return set()
-    # Counts all rows, densified padding included: this is a data-presence gate
-    # ("is the archive kline partition downloaded?"), not a liquidity gate, and
-    # densify only runs on dates that have a real archive file. Counting only
-    # real-volume bars would fail every symbol's genuine partial listing day.
+    derived_date = pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.strftime(
+        "%Y-%m-%d"
+    )
+    open_price = pl.col("open").cast(pl.Float64, strict=False)
+    high_price = pl.col("high").cast(pl.Float64, strict=False)
+    low_price = pl.col("low").cast(pl.Float64, strict=False)
+    close_price = pl.col("close").cast(pl.Float64, strict=False)
+    valid_ohlc = (
+        pl.all_horizontal(
+            [
+                price.is_finite() & (price > 0.0)
+                for price in (open_price, high_price, low_price, close_price)
+            ]
+        )
+        & (high_price >= pl.max_horizontal(open_price, low_price, close_price))
+        & (low_price <= pl.min_horizontal(open_price, high_price, close_price))
+    ).fill_null(False)
     covered = (
-        klines.group_by(["date", "symbol"])
-        .agg(pl.len().alias("hourly_bars"))
-        .filter(pl.col("hourly_bars") >= min_hourly_bars)
+        klines.drop_nulls(["date", "symbol", "ts_ms"])
+        .filter(
+            (pl.col("ts_ms") % MS_PER_HOUR == 0)
+            & (pl.col("date").cast(pl.String) == derived_date)
+        )
+        .with_columns(valid_ohlc.alias("__valid_ohlc"))
+        .group_by(["date", "symbol"])
+        .agg(
+            pl.col("ts_ms").n_unique().alias("aligned_hour_keys"),
+            pl.col("__valid_ohlc").sum().alias("valid_ohlc_rows"),
+        )
+        .filter(
+            (pl.col("aligned_hour_keys") >= min_hourly_bars)
+            & (pl.col("valid_ohlc_rows") >= 1)
+        )
         .select(["date", "symbol"])
     )
     return _date_symbol_set(covered)

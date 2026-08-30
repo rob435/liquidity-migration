@@ -130,7 +130,11 @@ impl fmt::Display for LeaseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LeaseError::AlreadyHeld { path, holder } => {
-                write!(f, "another process already holds the account lease at {}", path.display())?;
+                write!(
+                    f,
+                    "another process already holds the account lease at {}",
+                    path.display()
+                )?;
                 match holder {
                     Some(note) => write!(f, ", and left this note: {note}"),
                     None => write!(f, ", and left no note saying who it is"),
@@ -154,8 +158,16 @@ impl fmt::Display for LeaseError {
             LeaseError::EmptyRole => {
                 write!(f, "an account lease has to say what is holding it")
             }
-            LeaseError::Io { path, doing, source } => {
-                write!(f, "cannot {doing} the account lease at {}: {source}", path.display())
+            LeaseError::Io {
+                path,
+                doing,
+                source,
+            } => {
+                write!(
+                    f,
+                    "cannot {doing} the account lease at {}: {source}",
+                    path.display()
+                )
             }
         }
     }
@@ -192,10 +204,14 @@ pub fn acquire(
     role: &str,
 ) -> Result<AccountLease, LeaseError> {
     let Some(realm) = realm_text(realm) else {
-        return Err(LeaseError::UnknownRealm { given: realm.to_string() });
+        return Err(LeaseError::UnknownRealm {
+            given: realm.to_string(),
+        });
     };
     let Some(id) = account_key_text(user_id) else {
-        return Err(LeaseError::UnknownUserId { given: user_id.to_string() });
+        return Err(LeaseError::UnknownUserId {
+            given: user_id.to_string(),
+        });
     };
     let venue = venue.trim().to_ascii_lowercase();
     acquire_at_for(
@@ -227,10 +243,14 @@ fn acquire_at_for(
 /// For a shadow run, which must never lock the live writer out.
 pub fn probe(venue: &str, realm: &str, user_id: &str) -> Result<LeaseHolder, LeaseError> {
     let Some(realm) = realm_text(realm) else {
-        return Err(LeaseError::UnknownRealm { given: realm.to_string() });
+        return Err(LeaseError::UnknownRealm {
+            given: realm.to_string(),
+        });
     };
     let Some(id) = account_key_text(user_id) else {
-        return Err(LeaseError::UnknownUserId { given: user_id.to_string() });
+        return Err(LeaseError::UnknownUserId {
+            given: user_id.to_string(),
+        });
     };
     probe_at(&canonical_path(venue, realm, &id))
 }
@@ -254,7 +274,11 @@ pub fn probe_at(path: &Path) -> Result<LeaseHolder, LeaseError> {
         Ok(fd) => fd,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(LeaseHolder::Free),
         Err(source) => {
-            return Err(LeaseError::Io { path: path.to_path_buf(), doing: "look at", source })
+            return Err(LeaseError::Io {
+                path: path.to_path_buf(),
+                doing: "look at",
+                source,
+            })
         }
     };
 
@@ -263,12 +287,14 @@ pub fn probe_at(path: &Path) -> Result<LeaseHolder, LeaseError> {
             unlock(fd.0);
             Ok(LeaseHolder::Free)
         }
-        Err(source) if is_would_block(&source) => {
-            Ok(LeaseHolder::Held { note: read_note(fd.0) })
-        }
-        Err(source) => {
-            Err(LeaseError::Io { path: path.to_path_buf(), doing: "look at", source })
-        }
+        Err(source) if is_would_block(&source) => Ok(LeaseHolder::Held {
+            note: read_note(fd.0),
+        }),
+        Err(source) => Err(LeaseError::Io {
+            path: path.to_path_buf(),
+            doing: "look at",
+            source,
+        }),
     }
 }
 
@@ -287,7 +313,9 @@ fn acquire_at_with(
     between: impl FnOnce(),
 ) -> Result<AccountLease, LeaseError> {
     let Some(realm) = realm_text(realm) else {
-        return Err(LeaseError::UnknownRealm { given: realm.to_string() });
+        return Err(LeaseError::UnknownRealm {
+            given: realm.to_string(),
+        });
     };
     let role = role.trim();
     if role.is_empty() {
@@ -321,7 +349,10 @@ fn acquire_at_with(
     })?;
     // From here the descriptor is owned, so every early return below closes
     // it — and closing is also how a lock already taken gets given back.
-    let lease = AccountLease { _fd: fd, path: path.to_path_buf() };
+    let lease = AccountLease {
+        _fd: fd,
+        path: path.to_path_buf(),
+    };
     let fd = lease._fd.0;
 
     between();
@@ -337,7 +368,11 @@ fn acquire_at_with(
             });
         }
         Err(source) => {
-            return Err(LeaseError::Io { path: lease.path.clone(), doing: "lock", source })
+            return Err(LeaseError::Io {
+                path: lease.path.clone(),
+                doing: "lock",
+                source,
+            })
         }
     }
 
@@ -347,7 +382,9 @@ fn acquire_at_with(
     // process opens the new file, is granted its own lock, and two writers
     // are live with nothing anywhere reporting an error.
     if !descriptor_is_the_file_at(fd, path) {
-        return Err(LeaseError::Replaced { path: lease.path.clone() });
+        return Err(LeaseError::Replaced {
+            path: lease.path.clone(),
+        });
     }
 
     write_note(fd, &note(venue, realm, role, user_id)).map_err(|source| LeaseError::Io {
@@ -489,8 +526,9 @@ impl Drop for Fd {
 /// `mode` applies only when the flags create the file; the kernel ignores it
 /// otherwise.
 fn open_at_with_mode(path: &Path, flags: libc::c_int, mode: libc::c_uint) -> io::Result<Fd> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the path contains a zero byte"))?;
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "the path contains a zero byte")
+    })?;
     let fd = retry(|| unsafe { libc::open(c_path.as_ptr(), flags, mode) })?;
     Ok(Fd(fd))
 }
@@ -566,7 +604,10 @@ fn write_note(fd: libc::c_int, note: &str) -> io::Result<()> {
             libc::write(fd, rest.as_ptr().cast::<libc::c_void>(), rest.len())
         })?;
         if written == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "the note made no progress"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "the note made no progress",
+            ));
         }
         rest = &rest[written as usize..];
     }
@@ -587,7 +628,9 @@ fn read_note(fd: libc::c_int) -> Option<String> {
         libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
     })
     .ok()?;
-    let text = String::from_utf8_lossy(&buf[..read as usize]).trim().to_string();
+    let text = String::from_utf8_lossy(&buf[..read as usize])
+        .trim()
+        .to_string();
     (!text.is_empty()).then_some(text)
 }
 
@@ -689,7 +732,11 @@ mod tests {
         // second open in this same process contends exactly as another
         // process would.
         let second = acquire_at(&path, "demo", "engine");
-        let Err(LeaseError::AlreadyHeld { path: refused, holder }) = second else {
+        let Err(LeaseError::AlreadyHeld {
+            path: refused,
+            holder,
+        }) = second
+        else {
             panic!("a second holder was let in: {second:?}");
         };
         assert_eq!(refused, path);
@@ -733,7 +780,10 @@ mod tests {
 
         // And the lock really was let go: the new file is free to take.
         let next = acquire_at(&path, "demo", "engine");
-        assert!(next.is_ok(), "the refused attempt left the file locked: {next:?}");
+        assert!(
+            next.is_ok(),
+            "the refused attempt left the file locked: {next:?}"
+        );
     }
 
     #[test]
@@ -775,7 +825,9 @@ mod tests {
     fn a_user_id_that_cannot_name_a_file_is_refused() {
         // Through the production entry point, and all before it touches a
         // disk — none of these reach /run/lock.
-        for bad in ["", "  ", "0", "0000", "-1", "-0", "12.0", "1 2", "٣", "../etc"] {
+        for bad in [
+            "", "  ", "0", "0000", "-1", "-0", "12.0", "1 2", "٣", "../etc",
+        ] {
             let refused = acquire(VENUE_BYBIT, REALM_DEMO, bad, "engine");
             assert!(
                 matches!(refused, Err(LeaseError::UnknownUserId { .. })),
@@ -797,7 +849,11 @@ mod tests {
         // The general key agrees with it on every number, which is what keeps
         // one Bybit account on one file whichever function named it.
         for number in ["6039967", " 0042 ", "+7"] {
-            assert_eq!(account_key_text(number), account_id_text(number), "{number:?}");
+            assert_eq!(
+                account_key_text(number),
+                account_id_text(number),
+                "{number:?}"
+            );
         }
     }
 
@@ -860,13 +916,19 @@ mod tests {
         let lease = acquire_at(&path, "demo", "engine").unwrap();
 
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.ends_with('\n'), "python writes a newline after it: {raw:?}");
+        assert!(
+            raw.ends_with('\n'),
+            "python writes a newline after it: {raw:?}"
+        );
 
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("the note is JSON");
         let fields = parsed.as_object().expect("the note is an object");
         let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["environment", "pid", "role", "started_at_ns", "venue"]);
+        assert_eq!(
+            keys,
+            ["environment", "pid", "role", "started_at_ns", "venue"]
+        );
         assert_eq!(fields["environment"], "demo");
         assert_eq!(fields["role"], "engine");
         assert_eq!(fields["venue"], "bybit");
@@ -875,7 +937,10 @@ mod tests {
 
         // Python's `json.dumps(..., sort_keys=True)` spelling, byte for byte,
         // so an operator reading the file cannot tell which system wrote it.
-        assert!(raw.starts_with("{\"environment\": \"demo\", \"pid\": "), "{raw}");
+        assert!(
+            raw.starts_with("{\"environment\": \"demo\", \"pid\": "),
+            "{raw}"
+        );
         drop(lease);
     }
 
@@ -901,7 +966,10 @@ mod tests {
 
         let lease = acquire_at(&path, "demo", "engine").unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains('x'), "the last holder's note survived: {raw:?}");
+        assert!(
+            !raw.contains('x'),
+            "the last holder's note survived: {raw:?}"
+        );
         serde_json::from_str::<serde_json::Value>(&raw).expect("the note is JSON");
         drop(lease);
     }
@@ -945,10 +1013,9 @@ mod tests {
         // `canonical_path` to the worker, the same way `demo_fence.rs` proves
         // the venue hosts. A runtime check would have to write into
         // /run/lock, which is the fleet's live lease.
-        let source = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lease.rs"),
-        )
-        .unwrap();
+        let source =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lease.rs"))
+                .unwrap();
         // Only the half above `#[cfg(test)]`. Searching the whole file lets
         // this test match its own source and pass whatever `acquire` does,
         // which is what it did.

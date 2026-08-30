@@ -24,12 +24,7 @@ struct Restore(Vec<(&'static str, Option<String>)>);
 
 impl Restore {
     fn capture(names: &[&'static str]) -> Self {
-        Restore(
-            names
-                .iter()
-                .map(|n| (*n, std::env::var(n).ok()))
-                .collect(),
-        )
+        Restore(names.iter().map(|n| (*n, std::env::var(n).ok())).collect())
     }
 }
 
@@ -48,13 +43,7 @@ impl Drop for Restore {
 fn the_arming_switch_and_the_realms_own_variables_are_what_get_read() {
     let (demo_key, demo_secret) = VenueRealm::Demo.credential_vars();
     let (main_key, main_secret) = VenueRealm::Mainnet.credential_vars();
-    let _restore = Restore::capture(&[
-        "REAL_MONEY",
-        demo_key,
-        demo_secret,
-        main_key,
-        main_secret,
-    ]);
+    let _restore = Restore::capture(&["REAL_MONEY", demo_key, demo_secret, main_key, main_secret]);
 
     // A clean slate: unarmed, with a credential pair present for each realm so
     // that a refusal below is about arming and never about a missing key.
@@ -65,11 +54,18 @@ fn the_arming_switch_and_the_realms_own_variables_are_what_get_read() {
     std::env::set_var(main_secret, "main-secret-not-real");
 
     // Unarmed: demo builds, mainnet does not.
-    let demo = VenueRealm::Demo.credentials().expect("demo should build unarmed");
+    let demo = VenueRealm::Demo
+        .credentials()
+        .expect("demo should build unarmed");
     assert_eq!(demo.realm(), VenueRealm::Demo.as_str());
-    assert_eq!(demo.key(), "demo-key-not-real", "demo read the wrong variable");
+    assert_eq!(
+        demo.key(),
+        "demo-key-not-real",
+        "demo read the wrong variable"
+    );
 
-    let refused = VenueRealm::Mainnet.credentials()
+    let refused = VenueRealm::Mainnet
+        .credentials()
         .expect_err("mainnet built on an unarmed host");
     assert!(
         refused.to_string().contains("REAL_MONEY"),
@@ -80,7 +76,9 @@ fn the_arming_switch_and_the_realms_own_variables_are_what_get_read() {
     // only state in which the engine can reach the funded account, and it is
     // reached only by the owner setting this in the host credential file.
     std::env::set_var("REAL_MONEY", "true");
-    let main = VenueRealm::Mainnet.credentials().expect("mainnet should build armed");
+    let main = VenueRealm::Mainnet
+        .credentials()
+        .expect("mainnet should build armed");
     assert_eq!(main.realm(), VenueRealm::Mainnet.as_str());
     assert_eq!(
         main.key(),
@@ -88,8 +86,9 @@ fn the_arming_switch_and_the_realms_own_variables_are_what_get_read() {
         "mainnet read the wrong variable — a demo key must never authenticate mainnet"
     );
 
-    let demo_refused =
-        VenueRealm::Demo.credentials().expect_err("demo built on an armed host");
+    let demo_refused = VenueRealm::Demo
+        .credentials()
+        .expect_err("demo built on an armed host");
     assert!(
         demo_refused.to_string().contains("REAL_MONEY"),
         "the refusal should name the switch: {demo_refused}"
@@ -99,7 +98,8 @@ fn the_arming_switch_and_the_realms_own_variables_are_what_get_read() {
     // this, `REAL_MONEY=ture` on an armed host silently runs demo.
     std::env::set_var("REAL_MONEY", "ture");
     for realm in [VenueRealm::Demo, VenueRealm::Mainnet] {
-        let err = realm.credentials()
+        let err = realm
+            .credentials()
             .unwrap_err_or_panic(&format!("{realm} accepted a typo'd arming switch"));
         assert!(err.contains("ture"), "{err} should quote the bad value");
     }

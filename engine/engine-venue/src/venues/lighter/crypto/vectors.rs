@@ -61,8 +61,16 @@ fn the_base_field_agrees_with_the_reference() {
     for case in cases {
         let a = u64_at(case, "a");
         let b = u64_at(case, "b");
-        assert_eq!(f::add(f::canonical(a), f::canonical(b)), u64_at(case, "add"), "add {a} {b}");
-        assert_eq!(f::sub(f::canonical(a), f::canonical(b)), u64_at(case, "sub"), "sub {a} {b}");
+        assert_eq!(
+            f::add(f::canonical(a), f::canonical(b)),
+            u64_at(case, "add"),
+            "add {a} {b}"
+        );
+        assert_eq!(
+            f::sub(f::canonical(a), f::canonical(b)),
+            u64_at(case, "sub"),
+            "sub {a} {b}"
+        );
         assert_eq!(f::mul(a, b), u64_at(case, "mul"), "mul {a} {b}");
         assert_eq!(
             f::inverse_or_zero(f::canonical(a)),
@@ -95,18 +103,36 @@ fn the_extensions_harder_operations_agree_with_the_reference() {
     for case in vectors["gfp5_unary"].as_array().expect("gfp5 unary cases") {
         let a = five(case, "a");
         assert_eq!(gfp5::square(&a), five(case, "square"), "square {a:?}");
-        assert_eq!(gfp5::inverse_or_zero(&a), five(case, "inverse"), "inverse {a:?}");
+        assert_eq!(
+            gfp5::inverse_or_zero(&a),
+            five(case, "inverse"),
+            "inverse {a:?}"
+        );
         assert_eq!(gfp5::triple(&a), five(case, "triple"), "triple {a:?}");
-        assert_eq!(gfp5::frobenius(&a), five(case, "frobenius"), "frobenius {a:?}");
-        assert_eq!(gfp5::legendre(&a), u64_at(case, "legendre"), "legendre {a:?}");
+        assert_eq!(
+            gfp5::frobenius(&a),
+            five(case, "frobenius"),
+            "frobenius {a:?}"
+        );
+        assert_eq!(
+            gfp5::legendre(&a),
+            u64_at(case, "legendre"),
+            "legendre {a:?}"
+        );
 
         let expected_ok = case["sqrt_ok"].as_bool().expect("sqrt_ok");
         match gfp5::sqrt(&a) {
             Some(root) => {
-                assert!(expected_ok, "{a:?} has a root here and none in the reference");
+                assert!(
+                    expected_ok,
+                    "{a:?} has a root here and none in the reference"
+                );
                 assert_eq!(root, five(case, "sqrt"), "sqrt {a:?}");
             }
-            None => assert!(!expected_ok, "{a:?} has a root in the reference and none here"),
+            None => assert!(
+                !expected_ok,
+                "{a:?} has a root in the reference and none here"
+            ),
         }
     }
 }
@@ -138,7 +164,11 @@ fn the_hash_agrees_with_the_reference() {
         assert_eq!(out, five(case, "out"), "hash of {input:?}");
         // And the byte encoding, which is what a signature actually covers.
         let expected_bytes = case["bytes"].as_str().expect("bytes");
-        assert_eq!(hex::encode(gfp5::to_le_bytes(&out)), expected_bytes, "{input:?}");
+        assert_eq!(
+            hex::encode(gfp5::to_le_bytes(&out)),
+            expected_bytes,
+            "{input:?}"
+        );
     }
     // One of the cases is sixteen elements — the shape a create-order
     // transaction hashes — so this is not only exercising short inputs.
@@ -160,7 +190,10 @@ fn the_scalar_field_agrees_with_the_reference() {
         assert_eq!(scalar::sub(&a, &b), five(case, "sub"), "sub {a:?} {b:?}");
         assert_eq!(scalar::mul(&a, &b), five(case, "mul"), "mul {a:?} {b:?}");
     }
-    for case in vectors["scalar_from_gfp5"].as_array().expect("from_gfp5 cases") {
+    for case in vectors["scalar_from_gfp5"]
+        .as_array()
+        .expect("from_gfp5 cases")
+    {
         let a = five(case, "a");
         assert_eq!(scalar::from_gfp5(&a), five(case, "out"), "from_gfp5 {a:?}");
     }
@@ -250,7 +283,10 @@ fn a_signature_matches_the_reference_byte_for_byte() {
             case["sig_bytes"].as_str().expect("sig_bytes"),
             "the signature differs from the reference's"
         );
-        assert!(case["valid"].as_bool().unwrap_or(false), "the reference disowned it");
+        assert!(
+            case["valid"].as_bool().unwrap_or(false),
+            "the reference disowned it"
+        );
     }
 }
 

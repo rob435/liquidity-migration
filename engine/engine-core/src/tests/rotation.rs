@@ -103,7 +103,7 @@ fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
             side: Side::Buy,
             qty,
             px: 100.0,
-            fee: 0.01,
+            fee: Some(0.01),
             is_maker: true,
             venue_ts_ms: recent_replay_ms(),
             recv_ns: 6,
@@ -241,9 +241,36 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     )
     .await;
     assert_eq!(engine_b.in_flight_ids(), engine_a.in_flight_ids());
+    let rebuilt = engine_b.rotation_base(recent_replay_ms());
+    let WalRecord::SegmentBase {
+        execution_history_through_ms: rebuilt_checkpoint,
+        ..
+    } = &rebuilt
+    else {
+        unreachable!()
+    };
+    let WalRecord::SegmentBase {
+        execution_history_through_ms: original_checkpoint,
+        ..
+    } = &base
+    else {
+        unreachable!()
+    };
+    assert!(
+        rebuilt_checkpoint >= original_checkpoint,
+        "the successful restart scan advances its own durable boundary"
+    );
+    let mut expected = base.clone();
+    let WalRecord::SegmentBase {
+        execution_history_through_ms,
+        ..
+    } = &mut expected
+    else {
+        unreachable!()
+    };
+    *execution_history_through_ms = *rebuilt_checkpoint;
     assert_eq!(
-        engine_b.rotation_base(recent_replay_ms()),
-        base,
+        rebuilt, expected,
         "orders, latches, names, attribution, exposure and stops all round-trip"
     );
 }
@@ -262,14 +289,14 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         stop_px: 0.0,
         leverage: None,
     }];
-    let log = vec![
+    let log = replay_with_history_boundary(&[
         WalRecord::Names {
             strategies: vec!["buyer".to_string()],
             symbols: vec!["BTCUSDT".to_string()],
         },
         sent("eng-a", 0, 2.0, STOP_BTC),
         fill("eng-a", 0, 2.0),
-    ];
+    ]);
 
     let reconciled_may_open = |records: &Rc<RefCell<Vec<WalRecord>>>| {
         records

@@ -686,7 +686,7 @@ mod tests {
                 assert_eq!(side, Side::Sell);
                 assert_eq!(qty, 1.5);
                 assert_eq!(px, 3000.5);
-                assert_eq!(fee, -0.01);
+                assert_eq!(fee, Some(-0.01));
                 assert!(is_maker, "crossed:false means we were the resting side");
                 assert_eq!(venue_ts_ms, 1701);
             }

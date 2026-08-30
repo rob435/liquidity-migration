@@ -45,7 +45,10 @@ fn trim_trailing_zeros(rendered: &str) -> String {
     if !rendered.contains('.') {
         return rendered.to_string();
     }
-    rendered.trim_end_matches('0').trim_end_matches('.').to_string()
+    rendered
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 #[cfg(test)]

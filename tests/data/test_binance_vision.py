@@ -313,7 +313,7 @@ def test_validate_manifest_rejects_missing_current_listing_tail_without_rewrite(
     assert persisted.to_dicts() == manifest.sort(["date", "symbol", "url"]).to_dicts()
 
 
-def test_validate_manifest_preserves_archive_only_phantom_boundaries(tmp_path):
+def test_validate_manifest_fails_leading_and_terminal_gaps_without_rewriting(tmp_path):
     root = tmp_path / "root"
     jan02 = 1704153600000
     jan03 = jan02 + 24 * MS_PER_HOUR
@@ -334,11 +334,12 @@ def test_validate_manifest_preserves_archive_only_phantom_boundaries(tmp_path):
         partition_by=("date",),
     )
 
-    summary = validate_pit_manifest_coverage(root)
+    with pytest.raises(RuntimeError, match="2 required symbol-day") as exc_info:
+        validate_pit_manifest_coverage(root)
 
-    assert summary["full_pit_universe_pass"] is True
-    assert summary["required_date_symbols"] == 2
-    assert summary["missing_required_date_symbols"] == 0
+    message = str(exc_info.value)
+    assert "2024-01-01/AAAUSDT" in message
+    assert "2024-01-04/AAAUSDT" in message
     assert read_dataset(root, "archive_trade_manifest").height == 4
 
 

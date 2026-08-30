@@ -56,6 +56,12 @@ pub struct ClosedTrade {
     /// How far the fills landed from the price on the screen when their
     /// orders left. Positive is adverse.
     pub arrival_shortfall_bps: Option<f64>,
+    /// Exit against entry before fees. Present whenever this log saw both
+    /// sides, even when the venue omitted a fee.
+    pub gross_usdt: Option<f64>,
+    /// Total venue fee when every contributing fill stated one. `None` is an
+    /// unknown fee, not a numeric zero.
+    pub fees_usdt: Option<f64>,
     /// What it made — absent when this log does not hold the fills that
     /// opened it, which is what a rotation leaves behind. The close is still
     /// worth saying then; what it made is not knowable from here, and a
@@ -81,7 +87,7 @@ pub struct RoundTrip {
 }
 
 /// One sleeve's open position in one symbol.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct Lot {
     signed_qty: f64,
     /// +1 while held long, −1 short. `signed_qty` is zero by the time the
@@ -92,7 +98,7 @@ struct Lot {
     in_value: f64,
     out_qty: f64,
     out_value: f64,
-    fees: f64,
+    fees: Option<f64>,
     fills: u64,
     notional: f64,
     maker_notional: f64,
@@ -106,6 +112,27 @@ struct Lot {
     /// is not what the trip made. Being out by a whole entry is not a small
     /// error — a coin that doubled reads as a profit twice over.
     priced: bool,
+}
+
+impl Default for Lot {
+    fn default() -> Self {
+        Lot {
+            signed_qty: 0.0,
+            held: 0.0,
+            cash: 0.0,
+            in_qty: 0.0,
+            in_value: 0.0,
+            out_qty: 0.0,
+            out_value: 0.0,
+            fees: Some(0.0),
+            fills: 0,
+            notional: 0.0,
+            maker_notional: 0.0,
+            shortfall: Weighted::default(),
+            opened_ms: 0,
+            priced: false,
+        }
+    }
 }
 
 impl Lot {
@@ -138,9 +165,10 @@ impl Lot {
         }
         // Charged pro rata, because a fill split across two lots was one
         // charge at the venue.
-        if fill.fee.is_finite() && fill.qty > 0.0 {
-            self.fees += fill.fee * (qty / fill.qty);
-        }
+        self.fees = match (self.fees, fill.fee.filter(|fee| fee.is_finite())) {
+            (Some(total), Some(fee)) if fill.qty > 0.0 => Some(total + fee * (qty / fill.qty)),
+            _ => None,
+        };
         if let Some(bps) = arrival_shortfall_bps(fill.side, fill.px, fill.arrival_mid) {
             self.shortfall.add(bps, value);
         }
@@ -151,6 +179,7 @@ impl Lot {
     }
 
     fn closed(&self, sleeve: &str, symbol: &str, closed_ms: i64) -> ClosedTrade {
+        let priced = self.priced && self.in_qty > 0.0 && self.in_value > 0.0;
         ClosedTrade {
             sleeve: sleeve.to_string(),
             symbol: symbol.to_string(),
@@ -161,13 +190,15 @@ impl Lot {
             fills: self.fills,
             maker_share: (self.notional > 0.0).then(|| self.maker_notional / self.notional),
             arrival_shortfall_bps: self.shortfall.mean(),
-            round_trip: (self.priced && self.in_qty > 0.0 && self.in_value > 0.0).then(|| {
-                let net = self.cash - self.fees;
+            gross_usdt: priced.then_some(self.cash),
+            fees_usdt: priced.then_some(self.fees).flatten(),
+            round_trip: priced.then_some(self.fees).flatten().map(|fees| {
+                let net = self.cash - fees;
                 RoundTrip {
                     entry_px: self.in_value / self.in_qty,
                     entry_notional_usdt: self.in_value,
                     gross_usdt: self.cash,
-                    fees_usdt: self.fees,
+                    fees_usdt: fees,
                     net_usdt: net,
                     net_bps: 10_000.0 * net / self.in_value,
                     opened_ms: self.opened_ms,
@@ -297,7 +328,7 @@ mod tests {
             side,
             qty,
             px,
-            fee,
+            fee: Some(fee),
             is_maker: false,
             arrival_mid: 0.0,
             venue_ts_ms: ts_ms,
@@ -337,6 +368,23 @@ mod tests {
         assert!((rt.net_usdt - 29.79).abs() < 1e-9, "{}", rt.net_usdt);
         assert!((rt.net_bps - 993.0).abs() < 1.0, "{}", rt.net_bps);
         assert_eq!(rt.held_ms, 7_000);
+    }
+
+    #[test]
+    fn a_closed_trip_with_an_unstated_fee_keeps_gross_but_not_invents_net() {
+        let mut lots = Lots::default();
+        lots.on_fill("long", "BTCUSDT", &fill(Side::Buy, 100.0, 1.0, 0.10, 1_000));
+        let mut close = fill(Side::Sell, 110.0, 1.0, 0.0, 2_000);
+        close.fee = None;
+        lots.on_fill("long", "BTCUSDT", &close);
+
+        let trade = one(&mut lots);
+        assert_eq!(trade.gross_usdt, Some(10.0));
+        assert_eq!(trade.fees_usdt, None);
+        assert_eq!(
+            trade.round_trip, None,
+            "net and net basis points require every fee"
+        );
     }
 
     /// The sign that a per-side ledger gets wrong: a short makes money when

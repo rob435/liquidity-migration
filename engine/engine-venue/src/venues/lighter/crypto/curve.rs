@@ -61,10 +61,7 @@ impl Point {
     }
 
     pub(crate) fn equals(&self, other: &Point) -> bool {
-        gfp5::equals(
-            &gfp5::mul(&self.u, &other.t),
-            &gfp5::mul(&other.u, &self.t),
-        )
+        gfp5::equals(&gfp5::mul(&self.u, &other.t), &gfp5::mul(&other.u, &self.t))
     }
 
     /// One point, one `GF(p^5)` element. The whole public key is this.
@@ -92,10 +89,7 @@ impl Point {
             &t3,
             &gfp5::add(&gfp5::mul(&t5, &B_MUL2), &gfp5::double(&t7)),
         );
-        let t10 = gfp5::mul(
-            &gfp5::add(&t4, &gfp5::double(&t3)),
-            &gfp5::add(&t5, &t7),
-        );
+        let t10 = gfp5::mul(&gfp5::add(&t4, &gfp5::double(&t3)), &gfp5::add(&t5, &t7));
 
         Point {
             x: gfp5::mul(&gfp5::sub(&t10, &t8), &B),
@@ -121,10 +115,7 @@ impl Point {
         Point {
             x: gfp5::mul(&t4, &B_MUL4),
             z: z_new,
-            u: gfp5::sub(
-                &gfp5::square(&gfp5::add(&w1, &z1)),
-                &gfp5::add(&t4, &z_new),
-            ),
+            u: gfp5::sub(&gfp5::square(&gfp5::add(&w1, &z1)), &gfp5::add(&t4, &z_new)),
             t: gfp5::sub(
                 &gfp5::double(&x1),
                 &gfp5::add(&gfp5::mul(&t4, &[4, 0, 0, 0, 0]), &z_new),
@@ -277,7 +268,10 @@ mod tests {
                 refused += 1;
             }
         }
-        assert!(refused > 0, "every element decoded, so decoding checks nothing");
+        assert!(
+            refused > 0,
+            "every element decoded, so decoding checks nothing"
+        );
     }
 
     #[test]

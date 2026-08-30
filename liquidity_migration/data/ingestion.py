@@ -8,10 +8,9 @@ from typing import Any
 
 import polars as pl
 
-from liquidity_migration.data.storage import write_dataset
-
-
 from liquidity_migration.core._common import MS_PER_HOUR
+from liquidity_migration.core.market_numeric import valid_trade_numbers
+from liquidity_migration.data.storage import write_dataset
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +52,10 @@ def normalize_trade(raw: dict[str, Any], symbol: str | None = None, *, index: in
     trade_symbol = str(symbol or raw.get("symbol") or raw.get("s"))
     if side not in {"Buy", "Sell"}:
         raise ValueError(f"Unsupported taker side: {side!r}")
+    if not valid_trade_numbers(ts_ms=ts_ms, price=price, size_base=size_base):
+        raise ValueError(
+            f"Invalid trade numbers: ts_ms={ts_ms!r} price={price!r} size_base={size_base!r}"
+        )
     return {
         "trade_id": trade_id,
         "seq": str(seq) if seq is not None else None,
@@ -81,6 +84,19 @@ def trades_to_frame(trades: list[dict[str, Any]], symbol: str | None = None) -> 
 def aggregate_trade_klines_1h(trades: pl.DataFrame) -> pl.DataFrame:
     if trades.is_empty():
         return pl.DataFrame()
+    required = {"ts_ms", "symbol", "price", "size_base"}
+    missing = sorted(required - set(trades.columns))
+    if missing:
+        raise ValueError(f"trade frame is missing required columns: {missing}")
+    invalid = trades.filter(
+        (pl.col("ts_ms") < 0)
+        | ~pl.col("price").is_finite().fill_null(False)
+        | (pl.col("price") <= 0.0)
+        | ~pl.col("size_base").is_finite().fill_null(False)
+        | (pl.col("size_base") <= 0.0)
+    )
+    if invalid.height:
+        raise ValueError(f"trade frame contains {invalid.height} invalid numeric row(s)")
     filtered = trades.unique(subset=["symbol", "trade_id"], keep="last") if "trade_id" in trades.columns else trades
     # "price" is a deterministic tie-break for id-less trades sharing an exact
     # trade_ts_ms (split fills at one instant): without it open/close would depend

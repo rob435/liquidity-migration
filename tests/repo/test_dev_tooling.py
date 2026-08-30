@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,37 @@ ROOT = Path(__file__).resolve().parents[2]
 DEV = ROOT / "scripts" / "dev.sh"
 DOCTOR = ROOT / "scripts" / "devtools" / "repo_doctor.py"
 PRE_PUSH = ROOT / "scripts" / "git-hooks" / "pre-push"
+
+
+def test_direct_third_party_imports_are_declared() -> None:
+    imported: set[str] = set()
+    for base in (ROOT / "liquidity_migration", ROOT / "scripts"):
+        for path in base.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    imported.add(node.module.split(".", 1)[0])
+
+    distribution_for_import = {
+        "PIL": "pillow",
+        "certifi": "certifi",
+        "matplotlib": "matplotlib",
+        "numpy": "numpy",
+        "polars": "polars",
+        "pyarrow": "pyarrow",
+        "pybit": "pybit",
+        "websocket": "websocket-client",
+        "yaml": "pyyaml",
+    }
+    required = {distribution_for_import[name] for name in imported & distribution_for_import.keys()}
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = {
+        re.split(r"[<>=!~\[]", row, maxsplit=1)[0].lower().replace("_", "-")
+        for row in project["dependencies"]
+    }
+    assert required <= declared
 
 
 def test_locked_requirement_parser_and_comparison(tmp_path: Path) -> None:

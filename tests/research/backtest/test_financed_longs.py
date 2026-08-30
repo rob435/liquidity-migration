@@ -147,11 +147,7 @@ class TestAccounting:
         # charging neither the exit into it nor the re-entry out of it, while
         # gross treats the book as liquidated.
         held = {int(value) for value in w["bar_ts_ms"].unique().to_list()}
-        decision_bars = sorted(
-            value
-            for value in {int(item) for item in u["bar_ts_ms"].unique().to_list()}
-            if min(held) <= value <= max(held)
-        )
+        decision_bars = sorted({int(item) for item in u["bar_ts_ms"].unique().to_list()})
         assert scores["bar_ts_ms"].to_list() == decision_bars
         flat_days = [ts for ts in decision_bars if ts not in held]
         assert flat_days, "fixture must contain at least one interior flat day"
@@ -166,13 +162,36 @@ class TestAccounting:
             if ts not in held and index > 0 and decision_bars[index - 1] in held
         ]
         assert len(entries) == 5
-        assert len(exits) == 4
+        assert len(exits) == 5
         for ts in entries + exits:
             assert by_ts[ts] == pytest.approx(0.10, rel=1e-6)
         for ts in decision_bars:
             if ts not in entries and ts not in exits:
                 assert by_ts[ts] == pytest.approx(0.0, abs=1e-12)
-        assert scores["oneway"].sum() == pytest.approx(0.10 * 9, rel=1e-9)
+        assert scores["oneway"].sum() == pytest.approx(0.10 * 10, rel=1e-9)
+
+    def test_terminal_hold_is_liquidated_on_a_final_cash_row(self) -> None:
+        universe = pl.DataFrame(
+            {
+                "bar_ts_ms": [0, 86_400_000],
+                "symbol": ["AAAUSDT", "AAAUSDT"],
+                "net_return": [0.01, 0.02],
+            }
+        )
+        weights = pl.DataFrame(
+            {
+                "bar_ts_ms": [0, 86_400_000],
+                "symbol": ["AAAUSDT", "AAAUSDT"],
+                "w": [0.25, 0.25],
+            }
+        )
+
+        scores = daily_scores(weights, universe, fee_side_bp=5.0)
+
+        assert scores["bar_ts_ms"].to_list() == [0, 86_400_000]
+        assert scores["gross_bp"].to_list() == pytest.approx([25.0, 50.0])
+        assert scores["oneway"].to_list() == pytest.approx([0.25, 0.25])
+        assert scores["cost_bp"].to_list() == pytest.approx([1.25, 1.25])
 
     def test_vol_scale_uses_strict_prior_window(self) -> None:
         rng = np.random.default_rng(7)

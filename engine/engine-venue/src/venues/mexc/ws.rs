@@ -96,7 +96,10 @@ mod tests {
             feed.next_update().await.unwrap(),
             OrderUpdate::StreamReset { .. }
         ));
-        assert!(started.elapsed() < Duration::from_millis(500), "the first resync waited");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the first resync waited"
+        );
     }
 
     #[tokio::test]
@@ -114,7 +117,10 @@ mod tests {
                 tokio::time::timeout(Duration::from_millis(10), feed.next_update()).await;
             assert!(cancelled.is_err(), "the resync fired early");
         }
-        assert!(started.elapsed() < PERIOD, "the cancelling itself took a whole period");
+        assert!(
+            started.elapsed() < PERIOD,
+            "the cancelling itself took a whole period"
+        );
         let resumed = tokio::time::timeout(PERIOD * 3, feed.next_update())
             .await
             .expect("the resync never came")
@@ -136,6 +142,9 @@ mod tests {
             feed.next_update().await.unwrap(),
             OrderUpdate::StreamReset { .. }
         ));
-        assert!(started.elapsed() >= Duration::from_millis(60), "the resync did not wait");
+        assert!(
+            started.elapsed() >= Duration::from_millis(60),
+            "the resync did not wait"
+        );
     }
 }

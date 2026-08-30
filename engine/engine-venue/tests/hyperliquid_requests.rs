@@ -52,7 +52,9 @@ const META: &str = r#"{"universe":[
 ]}"#;
 
 fn resting(oid: i64) -> String {
-    format!(r#"{{"status":"ok","response":{{"type":"order","data":{{"statuses":[{{"resting":{{"oid":{oid}}}}}]}}}}}}"#)
+    format!(
+        r#"{{"status":"ok","response":{{"type":"order","data":{{"statuses":[{{"resting":{{"oid":{oid}}}}}]}}}}}}"#
+    )
 }
 
 /// Answers every endpoint the gateway reaches. `/info` is one path for many
@@ -87,7 +89,11 @@ fn answer(request: &Recorded) -> (u16, String) {
 
 /// The action out of a recorded `/exchange` request.
 fn action(request: &Recorded) -> Value {
-    request.json().get("action").cloned().expect("every exchange request carries an action")
+    request
+        .json()
+        .get("action")
+        .cloned()
+        .expect("every exchange request carries an action")
 }
 
 #[tokio::test]
@@ -97,8 +103,13 @@ async fn an_entry_and_its_stop_travel_in_one_signed_action() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     gw.send_order(&entry(
-        OrderKind::Limit { px: 94_000.0, tif: TimeInForce::PostOnly },
-        Some(StopSpec { trigger_px: 93_000.0 }),
+        OrderKind::Limit {
+            px: 94_000.0,
+            tif: TimeInForce::PostOnly,
+        },
+        Some(StopSpec {
+            trigger_px: 93_000.0,
+        }),
     ))
     .await
     .unwrap();
@@ -131,9 +142,15 @@ async fn an_entry_and_its_stop_travel_in_one_signed_action() {
 async fn the_body_carries_the_nonce_and_the_signature_beside_the_action() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
-    gw.send_order(&entry(OrderKind::Limit { px: 94_000.0, tif: TimeInForce::Gtc }, None))
-        .await
-        .unwrap();
+    gw.send_order(&entry(
+        OrderKind::Limit {
+            px: 94_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        None,
+    ))
+    .await
+    .unwrap();
 
     let body = server.to_path("/exchange")[0].json();
     assert!(body["nonce"].as_u64().unwrap() > 0);
@@ -151,7 +168,9 @@ async fn a_market_intent_asks_for_a_mid_and_crosses_from_it() {
     // limit priced through the book.
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
-    gw.send_order(&entry(OrderKind::Market, None)).await.unwrap();
+    gw.send_order(&entry(OrderKind::Market, None))
+        .await
+        .unwrap();
 
     let mids: Vec<Recorded> = server
         .to_path("/info")
@@ -173,9 +192,15 @@ async fn a_limit_order_never_asks_for_a_mid() {
     // carries its price.
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
-    gw.send_order(&entry(OrderKind::Limit { px: 94_000.0, tif: TimeInForce::Gtc }, None))
-        .await
-        .unwrap();
+    gw.send_order(&entry(
+        OrderKind::Limit {
+            px: 94_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        None,
+    ))
+    .await
+    .unwrap();
     assert!(server
         .to_path("/info")
         .iter()
@@ -188,8 +213,13 @@ async fn a_reduce_only_order_never_carries_a_stop_even_when_handed_one() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     let mut exit = entry(
-        OrderKind::Limit { px: 96_000.0, tif: TimeInForce::Gtc },
-        Some(StopSpec { trigger_px: 93_000.0 }),
+        OrderKind::Limit {
+            px: 96_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        Some(StopSpec {
+            trigger_px: 93_000.0,
+        }),
     );
     exit.reduce_only = true;
     exit.side = Side::Sell;
@@ -205,13 +235,19 @@ async fn a_reduce_only_order_never_carries_a_stop_even_when_handed_one() {
 async fn a_cancel_names_the_order_by_the_id_the_engine_minted() {
     let server = TestServer::start(|request, _| {
         if request.path == "/exchange" {
-            return (200, r#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#.to_string());
+            return (
+                200,
+                r#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#
+                    .to_string(),
+            );
         }
         answer(request)
     })
     .await;
     let mut gw = gateway(&server);
-    gw.cancel_order(SymbolId(0), "eng-1700000000000-1").await.unwrap();
+    gw.cancel_order(SymbolId(0), "eng-1700000000000-1")
+        .await
+        .unwrap();
 
     let action = action(&server.to_path("/exchange")[0]);
     assert_eq!(action["type"], "cancelByCloid");
@@ -267,7 +303,9 @@ async fn an_asset_the_venue_spells_in_lower_case_can_be_stopped_and_priced() {
     let rules = gw.instrument_rules().await.expect("rules");
     assert!(rules.iter().any(|(symbol, _)| symbol == "KPEPEUSDT"));
 
-    gw.set_stop(SymbolId(0), 0.018).await.expect("the stop found its position");
+    gw.set_stop(SymbolId(0), 0.018)
+        .await
+        .expect("the stop found its position");
     let placed = action(&server.to_path("/exchange")[0]);
     assert_eq!(placed["type"], "order");
 
@@ -319,16 +357,23 @@ async fn a_moved_stop_is_placed_before_the_old_one_is_pulled() {
     })
     .await;
     let mut gw = gateway(&server);
-    gw.set_stop(SymbolId(0), 92_000.0).await.expect("the stop moved");
+    gw.set_stop(SymbolId(0), 92_000.0)
+        .await
+        .expect("the stop moved");
 
     let sent = server.to_path("/exchange");
     assert_eq!(sent.len(), 2, "a place and a cancel");
     assert_eq!(
-        action(&sent[0])["type"], "order",
+        action(&sent[0])["type"],
+        "order",
         "the replacement must go out before the old stop is pulled"
     );
     assert_eq!(action(&sent[1])["type"], "cancel");
-    assert_eq!(action(&sent[1])["cancels"][0]["o"], 55, "the old stop, by its own id");
+    assert_eq!(
+        action(&sent[1])["cancels"][0]["o"],
+        55,
+        "the old stop, by its own id"
+    );
 }
 
 #[tokio::test]
@@ -359,7 +404,10 @@ async fn an_amend_keeps_the_half_it_was_not_asked_to_change() {
     gw.amend_order(
         SymbolId(0),
         "eng-1700000000000-1",
-        AmendSpec { px: Some(93_500.0), qty: None },
+        AmendSpec {
+            px: Some(93_500.0),
+            qty: None,
+        },
     )
     .await
     .unwrap();
@@ -403,12 +451,18 @@ async fn an_amend_refuses_rather_than_guess_a_time_in_force() {
         .amend_order(
             SymbolId(0),
             "eng-1700000000000-1",
-            AmendSpec { px: Some(93_500.0), qty: None },
+            AmendSpec {
+                px: Some(93_500.0),
+                qty: None,
+            },
         )
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("time-in-force"), "{refused}");
-    assert!(server.to_path("/exchange").is_empty(), "an order went out anyway");
+    assert!(
+        server.to_path("/exchange").is_empty(),
+        "an order went out anyway"
+    );
 }
 
 #[tokio::test]
@@ -416,9 +470,19 @@ async fn an_amend_that_changes_nothing_is_refused_before_a_round_trip() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     let refused = gw
-        .amend_order(SymbolId(0), "eng-1", AmendSpec { px: None, qty: None })
+        .amend_order(
+            SymbolId(0),
+            "eng-1",
+            AmendSpec {
+                px: None,
+                qty: None,
+            },
+        )
         .await;
-    assert!(matches!(refused, Err(VenueError::BadRequest(_))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(VenueError::BadRequest(_))),
+        "{refused:?}"
+    );
     assert!(server.to_path("/exchange").is_empty());
 }
 
@@ -486,7 +550,13 @@ async fn a_refusal_buried_in_a_successful_reply_is_still_a_refusal() {
     .await;
     let mut gw = gateway(&server);
     let refused = gw
-        .send_order(&entry(OrderKind::Limit { px: 1.0, tif: TimeInForce::Gtc }, None))
+        .send_order(&entry(
+            OrderKind::Limit {
+                px: 1.0,
+                tif: TimeInForce::Gtc,
+            },
+            None,
+        ))
         .await;
     match refused {
         Err(VenueError::Rejected { message, .. }) => assert!(message.contains("95%"), "{message}"),
@@ -515,11 +585,19 @@ async fn an_entry_accepted_with_its_stop_refused_is_a_refusal() {
     let mut gw = gateway(&server);
     let refused = gw
         .send_order(&entry(
-            OrderKind::Limit { px: 94_000.0, tif: TimeInForce::Gtc },
-            Some(StopSpec { trigger_px: 93_000.0 }),
+            OrderKind::Limit {
+                px: 94_000.0,
+                tif: TimeInForce::Gtc,
+            },
+            Some(StopSpec {
+                trigger_px: 93_000.0,
+            }),
         ))
         .await;
-    assert!(matches!(refused, Err(VenueError::Rejected { .. })), "{refused:?}");
+    assert!(
+        matches!(refused, Err(VenueError::Rejected { .. })),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]
@@ -536,7 +614,13 @@ async fn a_whole_request_failure_carries_the_venues_words() {
     .await;
     let mut gw = gateway(&server);
     let refused = gw
-        .send_order(&entry(OrderKind::Limit { px: 94_000.0, tif: TimeInForce::Gtc }, None))
+        .send_order(&entry(
+            OrderKind::Limit {
+                px: 94_000.0,
+                tif: TimeInForce::Gtc,
+            },
+            None,
+        ))
         .await;
     match refused {
         Err(VenueError::Rejected { message, .. }) => {
@@ -550,7 +634,10 @@ async fn a_whole_request_failure_carries_the_venues_words() {
 async fn leverage_is_a_whole_number_and_is_capped_at_the_assets_maximum() {
     let server = TestServer::start(|request, _| {
         if request.path == "/exchange" {
-            return (200, r#"{"status":"ok","response":{"type":"default"}}"#.to_string());
+            return (
+                200,
+                r#"{"status":"ok","response":{"type":"default"}}"#.to_string(),
+            );
         }
         answer(request)
     })
@@ -582,7 +669,10 @@ async fn the_account_identity_names_the_venue_the_account_and_the_realm() {
     let server = TestServer::start(move |request, _| {
         let body: Value = request.json();
         if request.path == "/info" && body["type"] == "extraAgents" {
-            return (200, format!(r#"[{{"address":"{agent}","name":"engine","validUntil":0}}]"#));
+            return (
+                200,
+                format!(r#"[{{"address":"{agent}","name":"engine","validUntil":0}}]"#),
+            );
         }
         answer(request)
     })
@@ -605,7 +695,10 @@ async fn a_key_the_account_never_approved_stops_the_engine_before_it_trades() {
     match gw.account_identity().await {
         Err(VenueError::Credentials(said)) => {
             assert!(said.contains("API wallet"), "{said}");
-            assert!(said.contains(ACCOUNT), "the refusal should name the account: {said}");
+            assert!(
+                said.contains(ACCOUNT),
+                "the refusal should name the account: {said}"
+            );
         }
         other => panic!("an unapproved key was accepted: {other:?}"),
     }

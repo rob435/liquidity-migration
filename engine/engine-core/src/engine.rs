@@ -122,22 +122,24 @@ pub const ENGINE_VERSION: &str = concat!("engine-core ", env!("CARGO_PKG_VERSION
 /// A gap plus its pads spans minutes; this covers hours of fills.
 const RECENT_FILLS_KEPT: usize = 2048;
 
-/// The newest wall-clock stamp a log carries, of any kind. What fill
-/// recovery measures its window from.
-fn newest_stamp_ms(replayed: &[WalRecord]) -> Option<i64> {
-    let mut newest: Option<i64> = None;
+/// A quiet account renews its execution-history proof daily, well inside the
+/// shortest supported venue history window.
+const HISTORY_CHECKPOINT_INTERVAL_MS: i64 = 86_400_000;
+
+/// The newest boundary a successful execution-history read proved. No generic
+/// wall stamp belongs here: a fill, rotation, or graceful stop does not prove
+/// that an otherwise empty interval was scanned.
+fn execution_history_through_ms(replayed: &[WalRecord]) -> Option<i64> {
+    let mut newest = None;
     for record in replayed {
         let stamp = match record {
-            WalRecord::Boot { wall_ts_ms, .. }
-            | WalRecord::Reconciled { wall_ts_ms, .. }
-            | WalRecord::SegmentBase { wall_ts_ms, .. }
-            | WalRecord::LatchCleared { wall_ts_ms, .. } => Some(*wall_ts_ms),
-            WalRecord::OrderUpdate {
-                update: OrderUpdate::Fill { venue_ts_ms, .. },
-            } => Some(*venue_ts_ms),
-            WalRecord::RecoveredFill { venue_ts_ms, .. } => Some(*venue_ts_ms),
-            WalRecord::FastExecution { venue_ts_ms, .. } => Some(*venue_ts_ms),
-            WalRecord::Markout { fill_ts_ms, .. } => Some(*fill_ts_ms),
+            WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } => {
+                Some(*through_wall_ts_ms)
+            }
+            WalRecord::SegmentBase {
+                execution_history_through_ms,
+                ..
+            } => *execution_history_through_ms,
             _ => None,
         };
         if let Some(stamp) = stamp {
@@ -146,7 +148,27 @@ fn newest_stamp_ms(replayed: &[WalRecord]) -> Option<i64> {
             }
         }
     }
+    newest.or_else(|| legacy_boot_ms(replayed))
+}
+
+/// Older WALs used their boot stamp as the recovery boundary. Keep that one
+/// compatibility path, but never promote a later reconciliation, rotation,
+/// fill, or shutdown stamp into a history proof.
+fn legacy_boot_ms(replayed: &[WalRecord]) -> Option<i64> {
+    let mut newest = None;
+    for record in replayed {
+        if let WalRecord::Boot { wall_ts_ms, .. } = record {
+            if newest.is_none_or(|known| *wall_ts_ms > known) {
+                newest = Some(*wall_ts_ms);
+            }
+        }
+    }
     newest
+}
+
+struct RecoveryOutcome {
+    records: Vec<WalRecord>,
+    through_ms: i64,
 }
 
 #[derive(Debug)]
@@ -411,6 +433,8 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Advanced only when a recovery pass completes, and it is where the
     /// next gap recovery starts reading.
     recovered_until_ms: i64,
+    /// Next wall time at which a quiet run renews the durable history proof.
+    next_history_checkpoint_ms: i64,
     /// Venue execution ids inside the history window, so overlapping
     /// recovery cannot write the same fill twice.
     recovered_exec_ids: ExecutionIds,
@@ -601,19 +625,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // the log rather than a finding against it.
         let mut recovered_exec_ids = ExecutionIds::from_records(replayed, boot_ms)
             .map_err(|e| EngineError::State(e.to_string()))?;
-        let recovered_fills = Self::recover_missed_fills(
+        let recovery = Self::recover_missed_fills(
             &mut wal,
             &mut venue,
             replayed,
             &market.table,
             &mut recovered_exec_ids,
+            boot_ms,
         )
         .await?;
         let effective_owned: Vec<WalRecord>;
-        let effective: &[WalRecord] = if recovered_fills.is_empty() {
+        let effective: &[WalRecord] = if recovery.records.is_empty() {
             replayed
         } else {
-            effective_owned = replayed.iter().cloned().chain(recovered_fills).collect();
+            effective_owned = replayed.iter().cloned().chain(recovery.records).collect();
             &effective_owned
         };
 
@@ -855,9 +880,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             private_stream_ready: true,
             logged_exposure,
             intended_stops,
-            // Boot recovery just read the venue's history up to now; the
-            // next gap starts here.
-            recovered_until_ms: clock::wall_ms(),
+            recovered_until_ms: recovery.through_ms,
+            next_history_checkpoint_ms: recovery
+                .through_ms
+                .saturating_add(HISTORY_CHECKPOINT_INTERVAL_MS),
             recovered_exec_ids,
             recent_fills,
             ledger: LatencyLedger::new(now),
@@ -898,15 +924,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         replayed: &[WalRecord],
         table: &SymbolTable,
         execution_ids: &mut ExecutionIds,
-    ) -> Result<Vec<WalRecord>, EngineError> {
+        fresh_start_ms: i64,
+    ) -> Result<RecoveryOutcome, EngineError> {
         let now_ms = clock::wall_ms();
-        let Some(newest) = newest_stamp_ms(replayed) else {
-            // A fresh log has nothing to be behind on. Whatever the account
-            // already holds predates this engine, and reconcile is what says
-            // so.
-            return Ok(Vec::new());
+        let newest = match execution_history_through_ms(replayed) {
+            Some(stamp) => stamp,
+            None if replayed.is_empty() => fresh_start_ms,
+            None => {
+                return Err(EngineError::Boot(
+                    "the existing log has no durable execution-history boundary".to_string(),
+                ))
+            }
         };
-        let since = newest - RECOVERY_PAD_MS;
+        let since = newest.saturating_sub(RECOVERY_PAD_MS);
         if since < now_ms - RECOVERY_REACH_MS {
             return Err(EngineError::Boot(format!(
                 "the log is {} ms behind, beyond the venue execution-history reach of {} ms",
@@ -915,7 +945,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             )));
         }
         if since >= now_ms {
-            return Ok(Vec::new());
+            return Ok(RecoveryOutcome {
+                records: Vec::new(),
+                through_ms: newest,
+            });
         }
         let mut execs = venue.executions(since, now_ms).await.map_err(|e| {
             EngineError::Boot(format!(
@@ -947,6 +980,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut out = Vec::new();
         let mut recovered = 0usize;
         let mut unknown_findings = Vec::new();
+        let mut recovered_orders = LedgerOfOrders::from_records(replayed);
         for exec in execs {
             if execution_ids.contains(&exec.exec_id, now_ms) {
                 continue;
@@ -991,6 +1025,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 continue;
             };
             let dedup_id = exec.exec_id.clone();
+            if let Err(reason) = recovered_orders.validate_fill(
+                &exec.client_order_id,
+                symbol,
+                exec.side,
+                exec.qty,
+                exec.px,
+            ) {
+                unknown_findings.push(Self::untrusted_fill_line(
+                    &exec.exec_id,
+                    &exec.client_order_id,
+                    symbol,
+                    exec.side,
+                    exec.qty,
+                    exec.px,
+                    &reason,
+                ));
+                execution_ids.insert(dedup_id, now_ms);
+                recovered += 1;
+                continue;
+            }
             let record = WalRecord::RecoveredFill {
                 exec_id: exec.exec_id,
                 client_order_id: exec.client_order_id,
@@ -1005,6 +1059,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             };
             wal.append(&record)?;
             execution_ids.insert(dedup_id, now_ms);
+            recovered_orders.apply(&record);
             out.push(record);
             recovered += 1;
         }
@@ -1017,14 +1072,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             wal.append(&latch)?;
             out.push(latch);
         }
-        if !out.is_empty() {
+        if recovered > 0 {
             tracing::warn!(
                 count = recovered,
                 "recovered fills the private stream never delivered"
             );
-            wal.barrier()?;
         }
-        Ok(out)
+        let checkpoint = WalRecord::ExecutionHistoryCheckpoint {
+            through_wall_ts_ms: now_ms,
+        };
+        wal.append(&checkpoint)?;
+        out.push(checkpoint);
+        wal.barrier()?;
+        Ok(RecoveryOutcome {
+            records: out,
+            through_ms: now_ms,
+        })
     }
 
     /// Compare the log against the venue, write down what was found, and say
@@ -2151,6 +2214,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for mark in self.fills.due(now, &self.market) {
             self.wal.append(&mark.to_record())?;
         }
+        self.checkpoint_history_if_due().await?;
         self.refresh_account_if_due(now).await?;
         self.queue_halted_entry_cancels()?;
 
@@ -2821,32 +2885,46 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             )?;
             return Ok(None);
         };
+        let kind = match intent.kind {
+            OrderKind::Market => OrderKind::Market,
+            OrderKind::Limit { px, tif } => OrderKind::Limit {
+                px: quantize::quantize_px(px, intent.side, &rule),
+                tif,
+            },
+        };
         let mut held = self
             .account
             .positions
             .iter()
             .filter(|position| position.symbol == intent.symbol && position.qty > 0.0);
-        let held_position = held.next();
+        let held_position = held.next().map(|position| (position.side, position.qty));
         let one_position = held.next().is_none();
         let close_position_candidate = intent.reduce_only
             && matches!(intent.kind, OrderKind::Market)
             && self.venue.caps().close_position_below_minimum
             && one_position
-            && held_position.is_some_and(|position| {
+            && held_position.is_some_and(|(side, qty)| {
                 let tolerance = rule.qty_step.max(1e-12) * 1e-9;
-                position.side == intent.side.flipped()
-                    && (allowed_qty - position.qty).abs() <= tolerance
+                side == intent.side.flipped() && (allowed_qty - qty).abs() <= tolerance
             });
-        let close_rule = InstrumentRule {
-            min_qty: 0.0,
-            ..rule
-        };
-        let quantize_rule = if close_position_candidate {
-            &close_rule
+        let held_qty = held_position.map(|(_, qty)| qty).unwrap_or(0.0);
+        let close_below_minimum_qty = close_position_candidate && held_qty + 1e-12 < rule.min_qty;
+        let mut close_below_minimum_value = false;
+        if close_position_candidate {
+            if let Some(reference_px) = self.reference_px(intent.symbol, &kind) {
+                close_below_minimum_value = held_qty * reference_px + 1e-9 < rule.min_notional;
+            }
+        }
+        let close_position =
+            close_position_candidate && (close_below_minimum_qty || close_below_minimum_value);
+        let qty = if close_position {
+            // Bybit receives qty=0 for this request and closes the whole venue
+            // position. The WAL keeps the actual held quantity so its fill can
+            // be validated and accounted without inventing one venue step.
+            held_qty
+        } else if let Some(qty) = quantize::quantize_qty(allowed_qty, &rule) {
+            qty
         } else {
-            &rule
-        };
-        let Some(qty) = quantize::quantize_qty(allowed_qty, quantize_rule) else {
             self.refuse(
                 &client_order_id,
                 &intent,
@@ -2857,19 +2935,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             )?;
             return Ok(None);
         };
-        let kind = match intent.kind {
-            OrderKind::Market => OrderKind::Market,
-            OrderKind::Limit { px, tif } => OrderKind::Limit {
-                px: quantize::quantize_px(px, intent.side, &rule),
-                tif,
-            },
-        };
-        let below_minimum_qty = qty + 1e-12 < rule.min_qty;
-        let mut below_minimum_value = false;
         if let Some(reference_px) = self.reference_px(intent.symbol, &kind) {
             let notional = qty * reference_px;
-            below_minimum_value = notional + 1e-9 < rule.min_notional;
-            if below_minimum_value && !close_position_candidate {
+            if notional + 1e-9 < rule.min_notional && !close_position {
                 self.refuse(
                     &client_order_id,
                     &intent,
@@ -2881,7 +2949,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 return Ok(None);
             }
         }
-        let close_position = close_position_candidate && (below_minimum_qty || below_minimum_value);
 
         let request = OrderRequest {
             client_order_id: client_order_id.clone(),
@@ -4028,14 +4095,34 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(false)
     }
 
-    /// After a private-stream gap: ask the venue what traded while the
-    /// stream was away and fold anything the log missed into the same books
-    /// a delivered fill feeds. Failure stops the run because the missing
-    /// interval makes the exposure state unknown.
+    async fn checkpoint_history_if_due(&mut self) -> Result<(), EngineError> {
+        if clock::wall_ms() < self.next_history_checkpoint_ms {
+            return Ok(());
+        }
+        self.renew_execution_history().await
+    }
+
+    pub(crate) async fn renew_execution_history(&mut self) -> Result<(), EngineError> {
+        self.recover_history("while renewing the durable execution-history checkpoint")
+            .await
+    }
+
+    /// After a private-stream gap: ask the venue what traded while the stream
+    /// was away. The same pass also renews the quiet-run checkpoint.
     async fn recover_gap_fills(&mut self) -> Result<(), EngineError> {
+        self.recover_history("after a private-stream gap").await
+    }
+
+    /// Fold one complete execution-history interval through the ordinary fill
+    /// books, then write its boundary after every returned row. Failure stops
+    /// the run: advancing without the read would make the next boot trust a
+    /// hole, and continuing until the venue forgets it would make repair
+    /// impossible.
+    async fn recover_history(&mut self, context: &str) -> Result<(), EngineError> {
         let now_ms = clock::wall_ms();
         let since = (self.recovered_until_ms - RECOVERY_PAD_MS).max(now_ms - RECOVERY_REACH_MS);
         if since >= now_ms {
+            self.next_history_checkpoint_ms = now_ms.saturating_add(HISTORY_CHECKPOINT_INTERVAL_MS);
             return Ok(());
         }
         let mut execs = match self.venue.executions(since, now_ms).await {
@@ -4045,7 +4132,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.wal.append(&WalRecord::Reconciled {
                     wall_ts_ms: now_ms,
                     findings: vec![format!(
-                        "execution history is unavailable after a private-stream gap: {error}"
+                        "execution history is unavailable {context}: {error}"
                     )],
                     may_open: false,
                 })?;
@@ -4102,6 +4189,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 recovered += 1;
                 continue;
             };
+            if let Err(reason) = self.orders.validate_fill(
+                &exec.client_order_id,
+                symbol,
+                exec.side,
+                exec.qty,
+                exec.px,
+            ) {
+                foreign.push(Self::untrusted_fill_line(
+                    &exec.exec_id,
+                    &exec.client_order_id,
+                    symbol,
+                    exec.side,
+                    exec.qty,
+                    exec.px,
+                    &reason,
+                ));
+                self.recovered_exec_ids.insert(exec.exec_id, now_ms);
+                recovered += 1;
+                continue;
+            }
             let record = WalRecord::RecoveredFill {
                 exec_id: exec.exec_id.clone(),
                 client_order_id: exec.client_order_id.clone(),
@@ -4183,18 +4290,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             recovered += 1;
         }
         if recovered > 0 {
-            tracing::warn!(count = recovered, "recovered fills from the stream gap");
-            if !foreign.is_empty() {
-                self.may_open = false;
-                self.wal.append(&WalRecord::Reconciled {
-                    wall_ts_ms: now_ms,
-                    findings: foreign,
-                    may_open: false,
-                })?;
-            }
-            self.wal.barrier()?;
+            tracing::warn!(count = recovered, "recovered fills from execution history");
         }
+        if !foreign.is_empty() {
+            self.may_open = false;
+            self.wal.append(&WalRecord::Reconciled {
+                wall_ts_ms: now_ms,
+                findings: foreign,
+                may_open: false,
+            })?;
+        }
+        self.wal.append(&WalRecord::ExecutionHistoryCheckpoint {
+            through_wall_ts_ms: now_ms,
+        })?;
+        self.wal.barrier()?;
         self.recovered_until_ms = now_ms;
+        self.next_history_checkpoint_ms = now_ms.saturating_add(HISTORY_CHECKPOINT_INTERVAL_MS);
         Ok(())
     }
 
@@ -4224,6 +4335,27 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             } else {
                 client_order_id
             }
+        )
+    }
+
+    fn untrusted_fill_line(
+        exec_id: &str,
+        client_order_id: &str,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        px: f64,
+        reason: &str,
+    ) -> String {
+        format!(
+            "symbol {}: an untrusted fill for order {} (execution {}, side {side:?}, quantity {qty}, price {px}) was not applied: {reason}",
+            symbol.0,
+            if client_order_id.is_empty() {
+                "<blank>"
+            } else {
+                client_order_id
+            },
+            if exec_id.is_empty() { "<blank>" } else { exec_id },
         )
     }
 
@@ -4299,6 +4431,43 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .map_err(|e| EngineError::State(e.to_string()))?
             {
                 tracing::warn!(exec_id, "duplicate fill ignored");
+                return Ok(());
+            }
+        }
+        if let OrderUpdate::Fill {
+            exec_id,
+            client_order_id,
+            symbol,
+            side,
+            qty,
+            px,
+            ..
+        } = &update
+        {
+            if let Err(reason) =
+                self.orders
+                    .validate_fill(client_order_id, *symbol, *side, *qty, *px)
+            {
+                let finding = Self::untrusted_fill_line(
+                    exec_id,
+                    client_order_id,
+                    *symbol,
+                    *side,
+                    *qty,
+                    *px,
+                    &reason,
+                );
+                if let Some(exec_id) = delivered_exec_id {
+                    self.recovered_exec_ids.insert(exec_id, dedup_seen_ms);
+                }
+                self.may_open = false;
+                tracing::error!(%finding, "untrusted fill left order and risk state unchanged");
+                self.wal.append(&WalRecord::Reconciled {
+                    wall_ts_ms: dedup_seen_ms,
+                    findings: vec![finding],
+                    may_open: false,
+                })?;
+                self.wal.barrier()?;
                 return Ok(());
             }
         }
@@ -4834,6 +5003,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })
                 .collect(),
             recent_execution_ids: self.recovered_exec_ids.rows(wall_ts_ms),
+            execution_history_through_ms: Some(self.recovered_until_ms),
             open_orders: self
                 .orders
                 .in_flight()

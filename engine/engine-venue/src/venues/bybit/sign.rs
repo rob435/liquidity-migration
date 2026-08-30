@@ -112,7 +112,9 @@ mod tests {
     fn signature_is_lowercase_hex_of_the_right_length() {
         let sig = rest_signature(SECRET, TS, KEY, POST_BODY);
         assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(sig
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 
     #[test]

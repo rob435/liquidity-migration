@@ -76,7 +76,7 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
             // Three basis points above the midpoint that order was sent at.
             px: 30_009.0,
             qty: 0.01,
-            fee: 0.0,
+            fee: Some(0.0),
             is_maker: true,
             venue_ts_ms: 4,
             recv_ns: 4,
@@ -118,7 +118,7 @@ async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
             side: Side::Buy,
             px: 30_009.0,
             qty: 0.01,
-            fee: 0.0,
+            fee: Some(0.0),
             is_maker: false,
             venue_ts_ms: 4,
             recv_ns: 4,

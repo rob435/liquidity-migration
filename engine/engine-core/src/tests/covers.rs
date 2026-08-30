@@ -297,7 +297,7 @@ async fn a_cancel_releases_only_the_unfilled_remainder() {
                     side: Side::Buy,
                     qty: 0.004,
                     px: 30_000.0,
-                    fee: 0.0,
+                    fee: Some(0.0),
                     is_maker: false,
                     venue_ts_ms: 1,
                     recv_ns: 1,

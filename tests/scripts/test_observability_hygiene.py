@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +29,153 @@ def test_the_drill_is_hardwired_to_the_demo_engine() -> None:
     assert "engine-mainnet" not in text
     assert text.startswith("#!/usr/bin/env bash")
     assert "set -euo pipefail" in text
+
+
+def test_the_drill_accepts_only_a_fresh_exact_process_heartbeat(tmp_path: Path) -> None:
+    text = DRILL.read_text(encoding="utf-8")
+    blocks = re.findall(r"<<'PY'\n(.*?)\nPY", text, re.DOTALL)
+    validator = next(block for block in blocks if "def exact_int" in block)
+    now_ms = time.time_ns() // 1_000_000
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "account_observed_wall_ts_ms": now_ms,
+                "account_user_id": "555899665",
+                "may_open": True,
+                "mode": "live",
+                "pid": 321,
+                "realm": "demo",
+                "venue": "bybit",
+                "wall_ts_ms": now_ms,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc_root = tmp_path / "proc"
+    (proc_root / "321").mkdir(parents=True)
+    (proc_root / "321" / "cgroup").write_text(
+        "0::/system.slice/liquidity-migration-engine.service\n", encoding="utf-8"
+    )
+
+    argv = [
+        sys.executable,
+        "-",
+        str(heartbeat),
+        "555899665",
+        "bybit",
+        "demo",
+        "/system.slice/liquidity-migration-engine.service",
+        str(now_ms - 1),
+        "0",
+        str(proc_root),
+    ]
+    accepted = subprocess.run(
+        argv, input=validator, text=True, capture_output=True, check=False
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.strip() == "321 clean"
+
+    argv[-2] = "321"
+    stale_process = subprocess.run(
+        argv, input=validator, text=True, capture_output=True, check=False
+    )
+    assert stale_process.returncode != 0
+    assert "prior engine process" in stale_process.stderr
+
+    argv[-2] = "0"
+    heartbeat.write_text(
+        heartbeat.read_text(encoding="utf-8").replace('"555899665"', '"other"'),
+        encoding="utf-8",
+    )
+    wrong_account = subprocess.run(
+        argv, input=validator, text=True, capture_output=True, check=False
+    )
+    assert wrong_account.returncode != 0
+    assert "account_user_id" in wrong_account.stderr
+
+
+def test_the_drill_uses_the_service_cgroup_and_requires_a_new_generation() -> None:
+    text = DRILL.read_text(encoding="utf-8")
+    assert 'systemctl kill --signal=KILL "$UNIT"' in text
+    assert 'kill -9 "$engine_pid"' not in text
+    assert 'systemctl show -p InvocationID --value "$UNIT"' in text
+    assert '[ "$new_invocation_id" != "$invocation_id" ]' in text
+    assert "FAILED to kill the engine service cgroup" in text
+
+
+def test_the_drill_reports_a_manager_kill_failure_before_claiming_recovery(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    trace = tmp_path / "systemctl.trace"
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text(
+        """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
+case "$*" in
+  "show -p MainPID --value liquidity-migration-engine.service") echo 111 ;;
+  "show -p ControlGroup --value liquidity-migration-engine.service")
+    echo /system.slice/liquidity-migration-engine.service ;;
+  "show -p InvocationID --value liquidity-migration-engine.service")
+    echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+  "kill --signal=KILL liquidity-migration-engine.service") exit 42 ;;
+  *) echo "unexpected systemctl call: $*" >&2; exit 99 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    now_ms = time.time_ns() // 1_000_000
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "account_observed_wall_ts_ms": now_ms,
+                "account_user_id": "555899665",
+                "may_open": True,
+                "mode": "live",
+                "pid": 222,
+                "realm": "demo",
+                "venue": "bybit",
+                "wall_ts_ms": now_ms,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc_root = tmp_path / "proc"
+    (proc_root / "222").mkdir(parents=True)
+    (proc_root / "222" / "cgroup").write_text(
+        "0::/system.slice/liquidity-migration-engine.service\n", encoding="utf-8"
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SYSTEMCTL_TRACE": str(trace),
+        "CHAOS_DRILL_PYTHON": sys.executable,
+        "CHAOS_DRILL_PROC_ROOT": str(proc_root),
+        "LIVENESS_ENGINE_HEARTBEAT_FILE": str(heartbeat),
+        "EXPECTED_ENGINE_ACCOUNT_USER_ID": "555899665",
+        "EXPECTED_ENGINE_VENUE": "bybit",
+        "EXPECTED_ENGINE_REALM": "demo",
+        "TELEGRAM_ENABLED": "0",
+    }
+    result = subprocess.run(
+        ["bash", str(DRILL)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "FAILED to kill the engine service cgroup" in result.stdout
+    assert trace.read_text(encoding="utf-8").splitlines()[-1] == (
+        "kill --signal=KILL liquidity-migration-engine.service"
+    )
 
 
 def test_an_unconfigured_backup_is_a_note_and_a_clean_exit() -> None:

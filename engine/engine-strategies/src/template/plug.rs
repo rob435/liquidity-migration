@@ -5,13 +5,13 @@
 //! to [`plan`].
 
 use engine_types::{
-    Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy,
-    StrategyCtx, StrategyId, Subscription, SymbolId, TimeInForce,
+    Feed, InstrumentRule, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy, StrategyCtx,
+    StrategyId, Subscription, SymbolId, TimeInForce,
 };
 
-use super::plan::{Held, Rules, Step, plan};
-use crate::BuildError;
+use super::plan::{plan, Held, Rules, Step};
 use crate::params::Params;
+use crate::BuildError;
 
 /// The name a config block uses. Change it when you copy this.
 pub const NAME: &str = "template";
@@ -44,7 +44,10 @@ impl Template {
             "buy" => magnitude,
             "sell" => -magnitude,
             other => {
-                return Err(p.invalid("side", format!("expected \"buy\" or \"sell\", got {other:?}")))
+                return Err(p.invalid(
+                    "side",
+                    format!("expected \"buy\" or \"sell\", got {other:?}"),
+                ))
             }
         };
         let tolerance_fraction = p.positive("tolerance_fraction")?;
@@ -67,9 +70,24 @@ impl Template {
         // this strategy does not know is a typo in a config the research
         // system wrote, and a typo that is ignored is a silent change of
         // behaviour.
-        p.reject_unknown(&["symbol", "side", "target_qty", "tolerance_fraction", "stop_loss_fraction"])?;
+        p.reject_unknown(&[
+            "symbol",
+            "side",
+            "target_qty",
+            "tolerance_fraction",
+            "stop_loss_fraction",
+        ])?;
 
-        Ok(Self { id, symbol_name, symbol: None, rules: Rules { target_qty, tolerance_fraction, stop_loss_fraction } })
+        Ok(Self {
+            id,
+            symbol_name,
+            symbol: None,
+            rules: Rules {
+                target_qty,
+                tolerance_fraction,
+                stop_loss_fraction,
+            },
+        })
     }
 
     /// Symbols are interned by the engine at boot from the union of every
@@ -147,7 +165,10 @@ impl Template {
             kind: if reduce_only {
                 OrderKind::Market
             } else {
-                OrderKind::Limit { px: mark_px, tif: TimeInForce::Gtc }
+                OrderKind::Limit {
+                    px: mark_px,
+                    tif: TimeInForce::Gtc,
+                }
             },
             stop: stop_px.map(|trigger_px| StopSpec { trigger_px }),
             reduce_only,
@@ -177,7 +198,10 @@ impl Strategy for Template {
     /// What market data to receive. Collected once at boot across every
     /// strategy, so asking for a feed twice costs nothing.
     fn subscriptions(&self) -> Vec<Subscription> {
-        vec![Subscription { symbol: self.symbol_name.clone(), feed: Feed::Quote }]
+        vec![Subscription {
+            symbol: self.symbol_name.clone(),
+            feed: Feed::Quote,
+        }]
     }
 
     // Override only the hooks this strategy acts on — quotes, here. Every

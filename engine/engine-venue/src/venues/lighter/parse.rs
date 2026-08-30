@@ -43,14 +43,19 @@ pub(crate) fn parse_markets(reply: &Value) -> Result<Vec<Market>, VenueError> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         // A market the venue is not currently running is not one to trade.
-        let status = row.get("status").and_then(Value::as_str).unwrap_or("active");
+        let status = row
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("active");
         if !status.eq_ignore_ascii_case("active") {
             continue;
         }
         out.push(Market {
             symbol: str_field(row, "symbol")?,
             index: i16::try_from(int_field(row, "market_id")?).map_err(|_| {
-                VenueError::BadReply("a market index does not fit the venue's own field".to_string())
+                VenueError::BadReply(
+                    "a market index does not fit the venue's own field".to_string(),
+                )
             })?,
             size_decimals: u32::try_from(int_field(row, "supported_size_decimals")?)
                 .map_err(|_| VenueError::BadReply("negative size decimals".to_string()))?,
@@ -175,7 +180,10 @@ pub(crate) fn parse_working_orders(
             },
             qty: original,
             filled_qty: (original - remaining).max(0.0),
-            reduce_only: row.get("reduce_only").and_then(Value::as_bool).unwrap_or(false),
+            reduce_only: row
+                .get("reduce_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         });
     }
     Ok(out)
@@ -227,14 +235,20 @@ pub(crate) fn stops_by_market(
         .ok_or_else(|| VenueError::BadReply("the order reply carries no orders".to_string()))?;
     let mut out: std::collections::HashMap<i16, Stops> = std::collections::HashMap::new();
     for row in rows {
-        if !row.get("reduce_only").and_then(Value::as_bool).unwrap_or(false) {
+        if !row
+            .get("reduce_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
         let kind = row.get("type").and_then(Value::as_str).unwrap_or_default();
         if !kind.to_ascii_lowercase().contains("stop") {
             continue;
         }
-        let Some(trigger) = opt_num_field(row, "trigger_price")? else { continue };
+        let Some(trigger) = opt_num_field(row, "trigger_price")? else {
+            continue;
+        };
         if trigger <= 0.0 {
             continue;
         }
@@ -249,7 +263,10 @@ pub(crate) fn stops_by_market(
                 held.lowest = held.lowest.min(trigger);
                 held.highest = held.highest.max(trigger);
             })
-            .or_insert(Stops { lowest: trigger, highest: trigger });
+            .or_insert(Stops {
+                lowest: trigger,
+                highest: trigger,
+            });
     }
     Ok(out)
 }
@@ -308,14 +325,12 @@ pub(crate) fn parse_executions(
             side: if we_sold { Side::Sell } else { Side::Buy },
             qty: num_field(row, "size")?,
             px: num_field(row, "price")?,
-            // The row states one fee, and it is the taker's — the side that
-            // crossed. Charging it to a fill we made would be recording the
-            // counterparty's cost as ours, which is the wrong number in every
-            // execution-cost table the engine produces.
+            // The row states only the taker's fee. When we made the price it
+            // states the counterparty's cost, not that our own fee was zero.
             fee: if we_made {
-                0.0
+                None
             } else {
-                opt_num_field(row, "fee")?.unwrap_or(0.0)
+                opt_num_field(row, "fee")?
             },
             is_maker: we_made,
             venue_ts_ms: int_field(row, "timestamp")?,
@@ -378,7 +393,10 @@ mod tests {
         assert_eq!(markets[0].symbol, "BTC");
         assert_eq!(markets[0].index, 0);
         assert_eq!(markets[1].symbol, "ETH");
-        assert_eq!(markets[1].index, 1, "the venue's index, not a position in this list");
+        assert_eq!(
+            markets[1].index, 1,
+            "the venue's index, not a position in this list"
+        );
     }
 
     #[test]
@@ -392,20 +410,29 @@ mod tests {
     #[test]
     fn a_position_is_unprotected_until_a_stop_order_says_otherwise() {
         let reply = json!({"code": 200, "accounts": [{"collateral": "1", "available_balance": "1",
-            "positions": [
-                {"market_id": 0, "symbol": "BTC", "sign": 1, "position": "0.01",
-                 "avg_entry_price": "95000", "initial_margin_fraction": "0.05"}
-            ]}]});
+        "positions": [
+            {"market_id": 0, "symbol": "BTC", "sign": 1, "position": "0.01",
+             "avg_entry_price": "95000", "initial_margin_fraction": "0.05"}
+        ]}]});
         let resolve = |name: &str| (name == "BTCUSDT").then_some(SymbolId(0));
 
         let bare = parse_positions(&reply, &markets(), &HashMap::new(), &resolve).unwrap();
         assert_eq!(bare.len(), 1);
-        assert!(!bare[0].stop_attached, "a position with no stop read as protected");
+        assert!(
+            !bare[0].stop_attached,
+            "a position with no stop read as protected"
+        );
         assert_eq!(bare[0].side, Side::Buy);
         assert_eq!(bare[0].qty, 0.01);
         assert_eq!(bare[0].leverage, Some(20.0), "one over the margin fraction");
 
-        let stops = HashMap::from([(0i16, Stops { lowest: 93_000.0, highest: 93_000.0 })]);
+        let stops = HashMap::from([(
+            0i16,
+            Stops {
+                lowest: 93_000.0,
+                highest: 93_000.0,
+            },
+        )]);
         let guarded = parse_positions(&reply, &markets(), &stops, &resolve).unwrap();
         assert!(guarded[0].stop_attached);
         assert_eq!(guarded[0].stop_px, 93_000.0);
@@ -414,15 +441,18 @@ mod tests {
     #[test]
     fn a_short_reads_as_a_sell() {
         let reply = json!({"code": 200, "accounts": [{"collateral": "1", "available_balance": "1",
-            "positions": [
-                {"market_id": 0, "symbol": "BTC", "sign": -1, "position": "0.5",
-                 "avg_entry_price": "95000", "initial_margin_fraction": "0"}
-            ]}]});
+        "positions": [
+            {"market_id": 0, "symbol": "BTC", "sign": -1, "position": "0.5",
+             "avg_entry_price": "95000", "initial_margin_fraction": "0"}
+        ]}]});
         let resolve = |_: &str| Some(SymbolId(0));
         let rows = parse_positions(&reply, &markets(), &HashMap::new(), &resolve).unwrap();
         assert_eq!(rows[0].side, Side::Sell);
         assert_eq!(rows[0].qty, 0.5);
-        assert_eq!(rows[0].leverage, None, "a zero margin fraction says nothing");
+        assert_eq!(
+            rows[0].leverage, None,
+            "a zero margin fraction says nothing"
+        );
     }
 
     #[test]
@@ -438,7 +468,11 @@ mod tests {
         let flat = json!({"code": 200, "accounts": [{"positions": [{
             "symbol": "ETH", "position": "0"
         }]}]});
-        assert!(parse_positions(&flat, &markets(), &HashMap::new(), &resolve).unwrap().is_empty());
+        assert!(
+            parse_positions(&flat, &markets(), &HashMap::new(), &resolve)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -488,7 +522,11 @@ mod tests {
         let stops = stops_by_market(&reply).unwrap();
         assert_eq!(stops.get(&0).map(|s| s.nearest(Side::Buy)), Some(93_000.0));
         assert_eq!(stops.get(&1), None, "a take-profit is not protection");
-        assert_eq!(stops.get(&2), None, "a stop that could open is not protection");
+        assert_eq!(
+            stops.get(&2),
+            None,
+            "a stop that could open is not protection"
+        );
     }
 
     #[test]
@@ -502,7 +540,10 @@ mod tests {
              "trigger_price": "9300000", "client_order_index": 1}
         ]});
         let stops = stops_by_market(&reply).unwrap();
-        assert_eq!(stops.get(&0).map(|s| s.nearest(Side::Buy)), Some(9_300_000.0));
+        assert_eq!(
+            stops.get(&0).map(|s| s.nearest(Side::Buy)),
+            Some(9_300_000.0)
+        );
     }
 
     #[test]
@@ -513,9 +554,21 @@ mod tests {
             {"market_index": 0, "reduce_only": true, "type": "stop_loss",
              "trigger_price": "93000", "client_order_index": 2}
         ]});
-        let held = stops_by_market(&reply).unwrap().get(&0).copied().expect("a stop");
-        assert_eq!(held.nearest(Side::Buy), 93_000.0, "a long stops at the higher trigger");
-        assert_eq!(held.nearest(Side::Sell), 90_000.0, "a short stops at the lower one");
+        let held = stops_by_market(&reply)
+            .unwrap()
+            .get(&0)
+            .copied()
+            .expect("a stop");
+        assert_eq!(
+            held.nearest(Side::Buy),
+            93_000.0,
+            "a long stops at the higher trigger"
+        );
+        assert_eq!(
+            held.nearest(Side::Sell),
+            90_000.0,
+            "a short stops at the lower one"
+        );
     }
 
     #[test]
@@ -543,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fill_we_made_is_not_charged_the_takers_fee() {
+    fn a_fill_we_made_does_not_inherit_the_takers_fee_or_invent_zero() {
         // The row carries one fee and it belongs to the side that crossed.
         let reply = json!({"code": 200, "trades": [
             {"trade_id": 21, "market_id": 0, "size": "0.01", "price": "95000",
@@ -556,10 +609,26 @@ mod tests {
              "bid_client_order_index": 7, "ask_client_order_index": 8}
         ]});
         let rows = parse_executions(&reply, 42, &markets()).unwrap();
-        assert!(rows[0].is_maker, "we were the ask and the maker was the ask");
-        assert_eq!(rows[0].fee, 0.0, "a fill we made was charged the taker's fee");
+        assert!(
+            rows[0].is_maker,
+            "we were the ask and the maker was the ask"
+        );
+        assert_eq!(rows[0].fee, None, "the maker's own fee was not stated");
         assert!(!rows[1].is_maker);
-        assert_eq!(rows[1].fee, 0.03, "a fill we took carries its fee");
+        assert_eq!(rows[1].fee, Some(0.03), "a fill we took carries its fee");
+    }
+
+    #[test]
+    fn a_taker_fill_with_no_stated_fee_keeps_it_unknown() {
+        let reply = json!({"code": 200, "trades": [
+            {"trade_id": 23, "market_id": 0, "size": "0.01", "price": "95000",
+             "timestamp": 1700, "is_maker_ask": true,
+             "ask_account_id": 99, "bid_account_id": 42,
+             "bid_client_order_index": 7, "ask_client_order_index": 8}
+        ]});
+        let rows = parse_executions(&reply, 42, &markets()).unwrap();
+        assert!(!rows[0].is_maker);
+        assert_eq!(rows[0].fee, None);
     }
 
     #[test]
@@ -583,7 +652,9 @@ mod tests {
              "ask_account_id": 98, "bid_account_id": 99,
              "bid_client_order_index": 7, "ask_client_order_index": 8}
         ]});
-        assert!(parse_executions(&strangers, 42, &markets()).unwrap().is_empty());
+        assert!(parse_executions(&strangers, 42, &markets())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

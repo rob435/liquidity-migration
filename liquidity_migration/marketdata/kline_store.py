@@ -35,6 +35,7 @@ from typing import Any
 import polars as pl
 
 from liquidity_migration.core._common import MS_PER_HOUR, exact_duration_ms
+from liquidity_migration.core.market_numeric import valid_kline_numbers
 
 
 _logger = logging.getLogger("liquidity_migration.marketdata.kline_store")
@@ -134,6 +135,16 @@ def _parse_ws_kline_event(bar: Mapping[str, Any]) -> _Bar | None:
     volume = _coerce("volume")
     turnover = _coerce("turnover")
     if None in (open_, high, low, close, volume, turnover):
+        return None
+    if not valid_kline_numbers(
+        ts_ms=ts_ms,
+        open_price=float(open_),
+        high_price=float(high),
+        low_price=float(low),
+        close_price=float(close),
+        volume_base=float(volume),
+        turnover_quote=float(turnover),
+    ):
         return None
     return _Bar(
         ts_ms=ts_ms,
@@ -723,6 +734,16 @@ class KlineStore:
                         source=str(row["source"]),
                     )
                 except (TypeError, ValueError, KeyError):
+                    continue
+                if not valid_kline_numbers(
+                    ts_ms=bar.ts_ms,
+                    open_price=bar.open,
+                    high_price=bar.high,
+                    low_price=bar.low,
+                    close_price=bar.close,
+                    volume_base=bar.volume_base,
+                    turnover_quote=bar.turnover_quote,
+                ):
                     continue
                 symbol_bars = self._bars.setdefault(symbol, {})
                 symbol_bars[ts_ms] = bar

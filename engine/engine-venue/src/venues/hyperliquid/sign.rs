@@ -81,7 +81,11 @@ pub(crate) fn action_hash(
 
 /// The EIP-712 digest the wallet actually signs.
 pub(crate) fn agent_digest(connection_id: [u8; 32], mainnet: bool) -> [u8; 32] {
-    let source = if mainnet { SOURCE_MAINNET } else { SOURCE_TESTNET };
+    let source = if mainnet {
+        SOURCE_MAINNET
+    } else {
+        SOURCE_TESTNET
+    };
 
     let domain_type = keccak(
         b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
@@ -127,14 +131,14 @@ pub(crate) fn sign_l1_action(
     expires_after: Option<u64>,
     mainnet: bool,
 ) -> Result<WireSignature, VenueError> {
-    let digest = agent_digest(action_hash(action, vault_address, nonce, expires_after), mainnet);
+    let digest = agent_digest(
+        action_hash(action, vault_address, nonce, expires_after),
+        mainnet,
+    );
     sign_digest(key, digest)
 }
 
-pub(crate) fn sign_digest(
-    key: &SigningKey,
-    digest: [u8; 32],
-) -> Result<WireSignature, VenueError> {
+pub(crate) fn sign_digest(key: &SigningKey, digest: [u8; 32]) -> Result<WireSignature, VenueError> {
     let (signature, recovery): (Signature, RecoveryId) = key.sign_prehash_recoverable(&digest);
     let bytes = signature.to_bytes();
     Ok(WireSignature {
@@ -148,7 +152,10 @@ pub(crate) fn sign_digest(
 /// Read a wallet key: 32 bytes of hex, with or without the `0x`.
 pub(crate) fn parse_key(raw: &str) -> Result<SigningKey, VenueError> {
     let trimmed = raw.trim();
-    let body = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
+    let body = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
     let bytes = hex::decode(body).map_err(|_| {
         VenueError::Credentials(
             "the Hyperliquid API-wallet key is not hex; it is a 32-byte private key, \
@@ -162,8 +169,11 @@ pub(crate) fn parse_key(raw: &str) -> Result<SigningKey, VenueError> {
             bytes.len()
         )));
     }
-    SigningKey::from_slice(&bytes)
-        .map_err(|e| VenueError::Credentials(format!("the API-wallet key is not a valid secp256k1 key: {e}")))
+    SigningKey::from_slice(&bytes).map_err(|e| {
+        VenueError::Credentials(format!(
+            "the API-wallet key is not a valid secp256k1 key: {e}"
+        ))
+    })
 }
 
 /// The 20-byte address a signing key signs as.
@@ -198,7 +208,10 @@ pub(crate) fn address_text(address: [u8; 20]) -> String {
 /// stderr and the journal.
 pub(crate) fn parse_address(raw: &str) -> Result<[u8; 20], VenueError> {
     let trimmed = raw.trim();
-    let body = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
+    let body = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
     let bytes = hex::decode(body).map_err(|_| {
         VenueError::Credentials(
             "the Hyperliquid account address is not hex; it is a 20-byte address, written \
@@ -263,7 +276,9 @@ mod tests {
                 px: "1670.1".to_string(),
                 sz: "0.0147".to_string(),
                 reduce_only: false,
-                kind: super::super::wire::OrderKindWire::Limit { tif: TimeInForce::Ioc },
+                kind: super::super::wire::OrderKindWire::Limit {
+                    tif: TimeInForce::Ioc,
+                },
                 cloid: None,
             }],
             "na",
@@ -284,13 +299,25 @@ mod tests {
             ("num", Mp::Int(100_000_000_000)),
         ]);
         let mainnet = sign_l1_action(&key(), &action, None, 0, None, true).unwrap();
-        assert_eq!(mainnet.r, "0x53749d5b30552aeb2fca34b530185976545bb22d0b3ce6f62e31be961a59298");
-        assert_eq!(mainnet.s, "0x755c40ba9bf05223521753995abb2f73ab3229be8ec921f350cb447e384d8ed8");
+        assert_eq!(
+            mainnet.r,
+            "0x53749d5b30552aeb2fca34b530185976545bb22d0b3ce6f62e31be961a59298"
+        );
+        assert_eq!(
+            mainnet.s,
+            "0x755c40ba9bf05223521753995abb2f73ab3229be8ec921f350cb447e384d8ed8"
+        );
         assert_eq!(mainnet.v, 27);
 
         let testnet = sign_l1_action(&key(), &action, None, 0, None, false).unwrap();
-        assert_eq!(testnet.r, "0x542af61ef1f429707e3c76c5293c80d01f74ef853e34b76efffcb57e574f9510");
-        assert_eq!(testnet.s, "0x17b8b32f086e8cdede991f1e2c529f5dd5297cbe8128500e00cbaf766204a613");
+        assert_eq!(
+            testnet.r,
+            "0x542af61ef1f429707e3c76c5293c80d01f74ef853e34b76efffcb57e574f9510"
+        );
+        assert_eq!(
+            testnet.s,
+            "0x17b8b32f086e8cdede991f1e2c529f5dd5297cbe8128500e00cbaf766204a613"
+        );
         assert_eq!(testnet.v, 28);
     }
 
@@ -304,19 +331,33 @@ mod tests {
                 px: "100".to_string(),
                 sz: "100".to_string(),
                 reduce_only: false,
-                kind: super::super::wire::OrderKindWire::Limit { tif: TimeInForce::Gtc },
+                kind: super::super::wire::OrderKindWire::Limit {
+                    tif: TimeInForce::Gtc,
+                },
                 cloid: None,
             }],
             "na",
         );
         let mainnet = sign_l1_action(&key(), &action, None, 0, None, true).unwrap();
-        assert_eq!(mainnet.r, "0xd65369825a9df5d80099e513cce430311d7d26ddf477f5b3a33d2806b100d78e");
-        assert_eq!(mainnet.s, "0x2b54116ff64054968aa237c20ca9ff68000f977c93289157748a3162b6ea940e");
+        assert_eq!(
+            mainnet.r,
+            "0xd65369825a9df5d80099e513cce430311d7d26ddf477f5b3a33d2806b100d78e"
+        );
+        assert_eq!(
+            mainnet.s,
+            "0x2b54116ff64054968aa237c20ca9ff68000f977c93289157748a3162b6ea940e"
+        );
         assert_eq!(mainnet.v, 28);
 
         let testnet = sign_l1_action(&key(), &action, None, 0, None, false).unwrap();
-        assert_eq!(testnet.r, "0x82b2ba28e76b3d761093aaded1b1cdad4960b3af30212b343fb2e6cdfa4e3d54");
-        assert_eq!(testnet.s, "0x6b53878fc99d26047f4d7e8c90eb98955a109f44209163f52d8dc4278cbbd9f5");
+        assert_eq!(
+            testnet.r,
+            "0x82b2ba28e76b3d761093aaded1b1cdad4960b3af30212b343fb2e6cdfa4e3d54"
+        );
+        assert_eq!(
+            testnet.s,
+            "0x6b53878fc99d26047f4d7e8c90eb98955a109f44209163f52d8dc4278cbbd9f5"
+        );
         assert_eq!(testnet.v, 27);
     }
 

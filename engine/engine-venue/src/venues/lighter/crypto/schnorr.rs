@@ -89,7 +89,11 @@ pub(crate) fn sign_with_nonce(
 
 /// Sign, deriving the nonce from the key and the message.
 pub(crate) fn sign(hashed_message: &Element, secret: &Scalar) -> Signature {
-    sign_with_nonce(hashed_message, secret, &derive_nonce(secret, hashed_message))
+    sign_with_nonce(
+        hashed_message,
+        secret,
+        &derive_nonce(secret, hashed_message),
+    )
 }
 
 /// A nonce that depends on the secret and the message and on nothing else.
@@ -168,9 +172,8 @@ pub(crate) fn secret_from_seed(seed: &[u8]) -> Result<Scalar, VenueError> {
     let mut wide = [0u8; 40];
     wide[..32].copy_from_slice(&first);
     wide[32..].copy_from_slice(&second[..8]);
-    scalar::from_be_bytes(&wide).ok_or_else(|| {
-        VenueError::Credentials("the seed did not produce a usable key".to_string())
-    })
+    scalar::from_be_bytes(&wide)
+        .ok_or_else(|| VenueError::Credentials("the seed did not produce a usable key".to_string()))
 }
 
 #[cfg(test)]
@@ -253,7 +256,11 @@ mod tests {
         for (i, limb) in modulus.iter().enumerate() {
             bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
         }
-        assert_eq!(Signature::from_bytes(&bytes), None, "a non-canonical s was accepted");
+        assert_eq!(
+            Signature::from_bytes(&bytes),
+            None,
+            "a non-canonical s was accepted"
+        );
     }
 
     #[test]
@@ -277,6 +284,9 @@ mod tests {
     fn signing_with_a_supplied_nonce_is_what_the_derived_one_feeds() {
         let sk = secret();
         let nonce = derive_nonce(&sk, &message());
-        assert_eq!(sign(&message(), &sk), sign_with_nonce(&message(), &sk, &nonce));
+        assert_eq!(
+            sign(&message(), &sk),
+            sign_with_nonce(&message(), &sk, &nonce)
+        );
     }
 }

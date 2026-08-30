@@ -53,7 +53,7 @@ def _densify_daily_grid(resid: pl.DataFrame) -> pl.DataFrame:
         .with_columns(
             pl.int_ranges(pl.col("_first"), pl.col("_last") + MS_PER_DAY, MS_PER_DAY).alias("ts_ms")
         )
-        .explode("ts_ms")
+        .explode("ts_ms", empty_as_null=True)
         .select("symbol", "ts_ms")
     )
     return (
@@ -88,7 +88,7 @@ def _append_trailing_pad(resid: pl.DataFrame, *, end: str) -> pl.DataFrame:
                 MS_PER_DAY,
             ).alias("ts_ms")
         )
-        .explode("ts_ms")
+        .explode("ts_ms", empty_as_null=True)
         .filter(pl.col("ts_ms").is_not_null())
         .with_columns(pl.lit(None, dtype=pl.Float64).alias("residual_return"))
         .select("symbol", "ts_ms", "residual_return")

@@ -120,15 +120,13 @@ where
 
 type ServerSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
-async fn one_connection(
-    stream: tokio::net::TcpStream,
-    conn: Conn,
-    seen: Arc<Mutex<Vec<Value>>>,
-) {
+async fn one_connection(stream: tokio::net::TcpStream, conn: Conn, seen: Arc<Mutex<Vec<Value>>>) {
     let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
         return;
     };
-    let Some(auth) = next_json(&mut socket).await else { return };
+    let Some(auth) = next_json(&mut socket).await else {
+        return;
+    };
     seen.lock().unwrap().push(auth);
     tokio::time::sleep(conn.auth_delay).await;
 
@@ -155,7 +153,9 @@ async fn one_connection(
             {
                 return;
             }
-            let Some(subscribe) = next_json(&mut socket).await else { return };
+            let Some(subscribe) = next_json(&mut socket).await else {
+                return;
+            };
             seen.lock().unwrap().push(subscribe);
             let _ = socket
                 .send(Message::text(
@@ -343,7 +343,7 @@ async fn the_feed_authenticates_subscribes_and_maps_what_arrives() {
             assert_eq!(side, Side::Buy);
             assert_eq!(qty, 0.01);
             assert_eq!(px, 95900.1);
-            assert_eq!(fee, 0.527);
+            assert_eq!(fee, Some(0.527));
             assert_eq!(venue_ts_ms, 1_746_270_400_353);
         }
         other => panic!("expected Fill, got {other:?}"),
@@ -517,7 +517,11 @@ async fn a_refused_auth_is_retried_until_it_takes() {
         OrderUpdate::Ack(ack) => assert_eq!(ack.client_order_id, "eng-1"),
         other => panic!("expected Ack, got {other:?}"),
     }
-    assert_eq!(server.connections(), 3, "expected two refusals then a good one");
+    assert_eq!(
+        server.connections(),
+        3,
+        "expected two refusals then a good one"
+    );
     let auths = server.seen().iter().filter(|op| op["op"] == "auth").count();
     assert_eq!(auths, 3, "every attempt signed a fresh auth op");
 }

@@ -44,6 +44,8 @@ ENVIRONMENT=""
 REASON="operator flatten"
 EXECUTE=0
 WAIT_SECONDS=300
+MAX_HEARTBEAT_AGE_SECONDS="${FLATTEN_MAX_HEARTBEAT_AGE_SECONDS:-30}"
+POLL_SECONDS="${FLATTEN_POLL_SECONDS:-5}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -62,45 +64,155 @@ case "$ENVIRONMENT" in
     *) echo "--environment must be demo or mainnet, and has no default" >&2; usage ;;
 esac
 
+case "$WAIT_SECONDS" in
+    ''|*[!0-9]*) echo "--wait-seconds must be a non-negative integer" >&2; usage ;;
+esac
+case "$MAX_HEARTBEAT_AGE_SECONDS" in
+    ''|*[!0-9]*) echo "FLATTEN_MAX_HEARTBEAT_AGE_SECONDS must be a positive integer" >&2; exit 2 ;;
+    0) echo "FLATTEN_MAX_HEARTBEAT_AGE_SECONDS must be positive" >&2; exit 2 ;;
+esac
+
 if [ "$ENVIRONMENT" = demo ]; then
-    HEARTBEAT=/var/lib/liquidity-migration-engine/heartbeat.json
+    DEFAULT_HEARTBEAT=/var/lib/liquidity-migration-engine/heartbeat.json
+    DEFAULT_ENGINE_ENV=/etc/liquidity-migration/engine.env
     ENGINE_UNIT=liquidity-migration-engine.service
     PRODUCERS=(
         liquidity-migration-bybit-carry-demo.service
         liquidity-migration-bybit-long-demo.service
     )
-    BOOKS=(
-        /var/lib/liquidity-migration/targets/carry-demo.json
-        /var/lib/liquidity-migration/targets/long-demo.json
-        /var/lib/liquidity-migration/targets/exodus-demo.json
-    )
+    BOOK_NAMES=(carry-demo.json long-demo.json exodus-demo.json)
 else
-    HEARTBEAT=/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
+    DEFAULT_HEARTBEAT=/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
+    DEFAULT_ENGINE_ENV=/etc/liquidity-migration/engine-mainnet.env
     ENGINE_UNIT=liquidity-migration-engine-mainnet.service
     PRODUCERS=(
         liquidity-migration-bybit-carry-mainnet.service
         liquidity-migration-bybit-long-mainnet.service
     )
-    BOOKS=(
-        /var/lib/liquidity-migration/targets/carry-mainnet.json
-        /var/lib/liquidity-migration/targets/long-mainnet.json
-        /var/lib/liquidity-migration/targets/exodus-mainnet.json
-    )
+    BOOK_NAMES=(carry-mainnet.json long-mainnet.json exodus-mainnet.json)
 fi
 
-held_symbols() {
-    python3 - "$HEARTBEAT" <<'PY'
-import json, sys
+HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-$DEFAULT_HEARTBEAT}"
+ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-$DEFAULT_ENGINE_ENV}"
+TARGET_ROOT="${FLATTEN_TARGET_ROOT:-/var/lib/liquidity-migration/targets}"
+BOOKS=()
+for name in "${BOOK_NAMES[@]}"; do
+    BOOKS+=("$TARGET_ROOT/$name")
+done
+
+heartbeat_state() {
+    python3 - "$HEARTBEAT" "$ENGINE_ENV" "$ENVIRONMENT" "$MAX_HEARTBEAT_AGE_SECONDS" <<'PY'
+import json
+import math
+import sys
+import time
+
+heartbeat_path, environment_path, requested_realm, raw_max_age = sys.argv[1:]
+
+
+def unknown(message):
+    print(f"heartbeat unknown: {message}", file=sys.stderr)
+    raise SystemExit(4)
+
+
+contract = {}
 try:
-    beat = json.loads(open(sys.argv[1]).read())
-except OSError:
-    sys.exit(3)
+    with open(environment_path, encoding="utf-8") as handle:
+        for number, raw in enumerate(handle, start=1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                unknown(f"{environment_path}:{number} is not KEY=value")
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if key in contract:
+                unknown(f"{environment_path}:{number} repeats {key}")
+            contract[key] = value.strip()
+except OSError as exc:
+    unknown(f"cannot read identity contract {environment_path}: {exc}")
+
+required = {
+    "account_user_id": contract.get("EXPECTED_ENGINE_ACCOUNT_USER_ID", ""),
+    "venue": contract.get("EXPECTED_ENGINE_VENUE", ""),
+    "realm": contract.get("EXPECTED_ENGINE_REALM", ""),
+}
+missing = [name for name, value in required.items() if not value]
+if missing:
+    unknown("identity contract is missing " + ", ".join(missing))
+if required["realm"] != requested_realm:
+    unknown(
+        f"identity contract realm {required['realm']!r} does not match"
+        f" requested realm {requested_realm!r}"
+    )
+
+try:
+    with open(heartbeat_path, "rb") as handle:
+        beat = json.load(handle)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    unknown(f"cannot read {heartbeat_path}: {exc}")
+if not isinstance(beat, dict):
+    unknown("heartbeat is not a JSON object")
+
+for field, expected in required.items():
+    observed = beat.get(field)
+    if observed != expected:
+        unknown(f"{field} expected {expected!r}, observed {observed!r}")
+
+engine_version = beat.get("engine_version")
+if not isinstance(engine_version, str) or not engine_version:
+    unknown("engine_version is missing or invalid")
+expected_version = contract.get("EXPECTED_ENGINE_VERSION", "")
+if expected_version and engine_version != expected_version:
+    unknown(
+        f"engine_version expected {expected_version!r}, observed {engine_version!r}"
+    )
+
+now_ms = int(time.time() * 1_000)
+max_age_ms = int(raw_max_age) * 1_000
+for field in ("wall_ts_ms", "account_observed_wall_ts_ms"):
+    stamp = beat.get(field)
+    if isinstance(stamp, bool) or not isinstance(stamp, int) or stamp <= 0:
+        unknown(f"{field} is missing or invalid")
+    age_ms = now_ms - stamp
+    if age_ms < 0:
+        unknown(f"{field} is {-age_ms}ms in the future")
+    if age_ms > max_age_ms:
+        unknown(f"{field} is {age_ms / 1_000:.1f}s old")
+
 rows = beat.get("positions")
 if not isinstance(rows, list):
-    # An engine too old to say what it holds. Refusing is the only honest
-    # answer: this command's whole job is to close what is there.
-    sys.exit(4)
-print(" ".join(sorted(str(r.get("symbol") or "") for r in rows if r.get("symbol"))))
+    unknown("positions is not an array")
+symbols = []
+seen = set()
+for index, row in enumerate(rows):
+    if not isinstance(row, dict):
+        unknown(f"position {index} is not an object")
+    symbol = row.get("symbol")
+    qty = row.get("qty")
+    if (
+        not isinstance(symbol, str)
+        or not symbol
+        or symbol != symbol.upper()
+        or not symbol.isalnum()
+    ):
+        unknown(f"position {index} has an invalid symbol")
+    if symbol in seen:
+        unknown(f"positions repeats {symbol}")
+    if (
+        isinstance(qty, bool)
+        or not isinstance(qty, (int, float))
+        or not math.isfinite(float(qty))
+        or float(qty) <= 0.0
+    ):
+        unknown(f"position {symbol} has an invalid quantity")
+    seen.add(symbol)
+    symbols.append(symbol)
+
+if symbols:
+    print(f"HELD\t{beat['wall_ts_ms']}\t" + " ".join(sorted(symbols)))
+else:
+    print(f"FLAT\t{beat['wall_ts_ms']}")
 PY
 }
 
@@ -137,37 +249,79 @@ if ! systemctl is-active --quiet "$ENGINE_UNIT"; then
     exit 5
 fi
 
-SYMBOLS="$(held_symbols)" || {
-    status=$?
-    case "$status" in
-        3) echo "flatten refused: no engine heartbeat at $HEARTBEAT" >&2 ;;
-        4) echo "flatten refused: this engine does not publish what it holds" >&2 ;;
-        *) echo "flatten refused: could not read $HEARTBEAT" >&2 ;;
+load_heartbeat_state() {
+    SNAPSHOT="$(heartbeat_state)" || return $?
+    case "$SNAPSHOT" in
+        $'FLAT\t'*) HEARTBEAT_STATE=FLAT; SYMBOLS="" ;;
+        $'HELD\t'*)
+            HEARTBEAT_STATE=HELD
+            SNAPSHOT_REST="${SNAPSHOT#*$'\t'}"
+            SYMBOLS="${SNAPSHOT_REST#*$'\t'}"
+            ;;
+        *) echo "flatten refused: heartbeat parser returned an invalid state" >&2; return 4 ;;
     esac
-    exit "$status"
 }
 
-if [ -z "$SYMBOLS" ]; then
-    printf 'flatten status=no_configured_positions global_flat=unproven environment=%s reason=%s\n' "$ENVIRONMENT" "$REASON"
-    exit 6
-fi
-
-printf 'flatten environment=%s reason=%s held=%s\n' "$ENVIRONMENT" "$REASON" "$SYMBOLS"
-for unit in "${PRODUCERS[@]}"; do
-    printf 'would stop unit=%s\n' "$unit"
-done
-for book in "${BOOKS[@]}"; do
-    printf 'would write zero book path=%s symbols=%s\n' "$book" "$SYMBOLS"
-done
-
 if [ "$EXECUTE" -eq 0 ]; then
+    if load_heartbeat_state; then
+        :
+    else
+        status=$?
+        echo "flatten refused: configured-position state is unknown" >&2
+        exit "$status"
+    fi
+    printf 'flatten environment=%s reason=%s configured_state=%s held=%s\n' \
+        "$ENVIRONMENT" "$REASON" "$HEARTBEAT_STATE" "${SYMBOLS:-none}"
+    for unit in "${PRODUCERS[@]}"; do
+        printf 'would stop unit=%s\n' "$unit"
+    done
+    for book in "${BOOKS[@]}"; do
+        printf 'would write zero book path=%s symbols=%s\n' "$book" "${SYMBOLS:-none}"
+    done
+    if [ "$HEARTBEAT_STATE" = FLAT ]; then
+        printf 'flatten status=no_configured_positions global_flat=unproven environment=%s reason=%s\n' "$ENVIRONMENT" "$REASON"
+        exit 6
+    fi
     echo "flatten status=planned (pass --execute to do it)"
     exit 0
 fi
 
+printf 'flatten environment=%s reason=%s action=execute\n' "$ENVIRONMENT" "$REASON"
 for unit in "${PRODUCERS[@]}"; do
-    systemctl stop "$unit" 2>/dev/null || true
+    printf 'would stop unit=%s\n' "$unit"
+    if ! systemctl stop "$unit"; then
+        printf 'flatten refused: failed to stop producer unit=%s; no books written\n' "$unit" >&2
+        exit 5
+    fi
+done
+for unit in "${PRODUCERS[@]}"; do
+    active_state="$(systemctl show --property=ActiveState --value "$unit")" || {
+        printf 'flatten refused: could not verify producer unit=%s inactive; no books written\n' "$unit" >&2
+        exit 5
+    }
+    if [ "$active_state" != inactive ]; then
+        printf 'flatten refused: producer unit=%s state=%s, expected inactive; no books written\n' \
+            "$unit" "${active_state:-unknown}" >&2
+        exit 5
+    fi
     printf 'stopped unit=%s\n' "$unit"
+done
+
+if ! systemctl is-active --quiet "$ENGINE_UNIT"; then
+    echo "flatten refused: $ENGINE_UNIT stopped before it could read the books; no books written" >&2
+    exit 5
+fi
+
+if load_heartbeat_state; then
+    :
+else
+    status=$?
+    echo "flatten refused: configured-position state is unknown; producers remain stopped; no books written" >&2
+    exit "$status"
+fi
+printf 'flatten configured_state=%s held=%s\n' "$HEARTBEAT_STATE" "${SYMBOLS:-none}"
+for book in "${BOOKS[@]}"; do
+    printf 'would write zero book path=%s symbols=%s\n' "$book" "${SYMBOLS:-none}"
 done
 
 # The book is written to every sleeve because a name belongs to whichever
@@ -177,22 +331,52 @@ for book in "${BOOKS[@]}"; do
     write_zero_book "$book" "flatten_$source_name" "$SYMBOLS"
     printf 'wrote path=%s\n' "$book"
 done
+books_written_ms="$(python3 - <<'PY'
+import time
+print(int(time.time() * 1_000))
+PY
+)"
 
 # Deliberately leave LONG producer state untouched. The heartbeat is scoped to
 # configured symbols and cannot authorize a schema-v2 state reset.
 
-left="$(held_symbols || true)"
+left="$SYMBOLS"
 deadline=$(( $(date +%s) + WAIT_SECONDS ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    sleep 5
-    left="$(held_symbols || true)"
-    if [ -z "$left" ]; then
-        printf 'flatten status=configured_positions_closed global_flat=unproven state_reset=refused environment=%s\n' "$ENVIRONMENT" >&2
-        echo "note: producers remain stopped; use venue-global account evidence before any state reset or restart." >&2
-        exit 6
+while :; do
+    SNAPSHOT="$(heartbeat_state)" || {
+        echo "flatten status=heartbeat_unknown global_flat=unproven; producers remain stopped" >&2
+        exit 5
+    }
+    case "$SNAPSHOT" in
+        $'FLAT\t'*)
+            observed_ms="${SNAPSHOT#*$'\t'}"
+            left=""
+            ;;
+        $'HELD\t'*)
+            SNAPSHOT_REST="${SNAPSHOT#*$'\t'}"
+            observed_ms="${SNAPSHOT_REST%%$'\t'*}"
+            left="${SNAPSHOT_REST#*$'\t'}"
+            ;;
+        *) echo "flatten status=heartbeat_unknown global_flat=unproven; producers remain stopped" >&2; exit 5 ;;
+    esac
+
+    if [ "$observed_ms" -gt "$books_written_ms" ]; then
+        if [ -z "$left" ]; then
+            printf 'flatten status=configured_positions_closed global_flat=unproven state_reset=refused environment=%s\n' "$ENVIRONMENT" >&2
+            echo "note: producers remain stopped; use venue-global account evidence before any state reset or restart." >&2
+            exit 6
+        fi
+        printf 'still held=%s\n' "$left"
+    else
+        printf 'waiting for post-write heartbeat last_wall_ts_ms=%s books_written_ms=%s\n' \
+            "$observed_ms" "$books_written_ms"
     fi
-    printf 'still held=%s\n' "$left"
+
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        break
+    fi
+    sleep "$POLL_SECONDS"
 done
 
-printf 'flatten status=timed_out environment=%s still_held=%s\n' "$ENVIRONMENT" "$left" >&2
+printf 'flatten status=timed_out environment=%s still_held=%s\n' "$ENVIRONMENT" "${left:-unknown}" >&2
 exit 5

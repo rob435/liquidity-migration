@@ -96,9 +96,13 @@ pub fn parse_stats(stats: &Value) -> Result<Vec<Listing>, VenueError> {
 /// wider quote read as the touch would make every spread look worse than the
 /// venue's own smallest ticket.
 fn smallest_quote(quotes: Option<&Value>) -> (Option<f64>, Option<f64>) {
-    let Some(quotes) = quotes else { return (None, None) };
+    let Some(quotes) = quotes else {
+        return (None, None);
+    };
     for size in ["size_1k", "size_100k", "size_1m"] {
-        let Some(at_size) = quotes.get(size) else { continue };
+        let Some(at_size) = quotes.get(size) else {
+            continue;
+        };
         let bid = num_field(at_size, "bid").ok();
         let ask = num_field(at_size, "ask").ok();
         if bid.is_some() && ask.is_some() {
@@ -179,7 +183,10 @@ mod tests {
         assert_eq!(ticker.mark_px, 95000.5);
         assert_eq!(ticker.last_px, 95000.5);
         assert_eq!(ticker.index_px, 0.0, "no index price is published");
-        assert_eq!(ticker.next_funding_ms, 0, "an interval is not a settlement time");
+        assert_eq!(
+            ticker.next_funding_ms, 0,
+            "an interval is not a settlement time"
+        );
     }
 
     #[test]

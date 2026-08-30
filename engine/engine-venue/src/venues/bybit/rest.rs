@@ -52,7 +52,8 @@ impl RestClient {
 
     /// Signed POST. The signature covers the exact body bytes sent.
     pub(crate) async fn post_signed(&self, path: &str, body: &Value) -> Result<Value, VenueError> {
-        let body = serde_json::to_string(body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
+        let body =
+            serde_json::to_string(body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
         let ts = wall_ms();
         let sign = rest_signature(self.creds.secret(), ts, self.creds.key(), &body);
         self.http

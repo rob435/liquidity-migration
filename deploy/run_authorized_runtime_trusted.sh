@@ -550,23 +550,67 @@ fi
 # only at exec would let a killed deploy leave the already-started subset
 # running in the same boot. Keep the launcher as the service main process and
 # revoke within one polling interval after the short lease expires or vanishes.
+stop_grace_seconds="${LM_CHILD_STOP_GRACE_SECONDS:-20}"
+case "$stop_grace_seconds" in
+    ""|*[!0-9]*) refuse "LM_CHILD_STOP_GRACE_SECONDS must be a positive integer" ;;
+esac
+[ "$stop_grace_seconds" -gt 0 ] \
+    || refuse "LM_CHILD_STOP_GRACE_SECONDS must be greater than zero"
+
 child_pid=""
+child_was_forced=0
+child_stop_status=0
+child_is_running() {
+    local process_stat process_tail process_state
+    [ -n "$child_pid" ] || return 1
+    kill -0 "$child_pid" 2>/dev/null || return 1
+    if [ -r "/proc/$child_pid/stat" ]; then
+        process_stat="$(<"/proc/$child_pid/stat")" 2>/dev/null || return 1
+        process_tail="${process_stat##*) }"
+        process_state="${process_tail%% *}"
+        [ "$process_state" != Z ] || return 1
+    fi
+    return 0
+}
 terminate_child() {
-    local attempt
+    local deadline
     trap - INT TERM HUP
-    if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+    child_was_forced=0
+    child_stop_status=0
+    if child_is_running; then
         kill -TERM "$child_pid" 2>/dev/null || true
-        for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-            kill -0 "$child_pid" 2>/dev/null || break
+        deadline=$((SECONDS + stop_grace_seconds))
+        while child_is_running && [ "$SECONDS" -lt "$deadline" ]; do
             sleep 0.25
         done
-        kill -KILL "$child_pid" 2>/dev/null || true
+        if child_is_running; then
+            child_was_forced=1
+            kill -KILL "$child_pid" 2>/dev/null || true
+        fi
     fi
-    wait "$child_pid" 2>/dev/null || true
+    if wait "$child_pid" 2>/dev/null; then
+        child_stop_status=0
+    else
+        child_stop_status=$?
+    fi
+    [ "$child_was_forced" -eq 0 ] \
+        && { [ "$child_stop_status" -eq 0 ] || [ "$child_stop_status" -eq 143 ]; }
 }
-trap 'terminate_child; exit 130' INT
-trap 'terminate_child; exit 143' TERM
-trap 'terminate_child; exit 129' HUP
+stop_for_signal() {
+    local clean_status="$1" forced_status="$2"
+    if terminate_child; then
+        exit "$clean_status"
+    fi
+    if [ "$child_was_forced" -eq 1 ]; then
+        echo "authorized runtime had to kill workload after ${stop_grace_seconds}s" >&2
+    else
+        echo "authorized runtime workload failed during shutdown status=${child_stop_status}" >&2
+    fi
+    exit "$forced_status"
+}
+trap 'stop_for_signal 130 70' INT
+trap 'stop_for_signal 143 70' TERM
+trap 'stop_for_signal 129 70' HUP
 
 /bin/bash "$CHECKOUT_WRAPPER" "$@" &
 child_pid=$!
@@ -574,17 +618,13 @@ child_pid=$!
 # supervisor after the fork so its two-second timer and file reads cannot
 # preempt an execution engine or producer.
 if ! /usr/bin/renice -n 19 -p "$$" >/dev/null; then
-    terminate_child
+    terminate_child || true
     refuse "cannot demote the activation-authority supervisor"
 fi
-while kill -0 "$child_pid" 2>/dev/null; do
-    process_stat="$(<"/proc/$child_pid/stat")" 2>/dev/null || break
-    process_tail="${process_stat##*) }"
-    process_state="${process_tail%% *}"
-    [ "$process_state" != Z ] || break
+while child_is_running; do
     if ! activation_authority_valid; then
         echo "authorized runtime revoking workload: activation authority disappeared, expired, or changed" >&2
-        terminate_child
+        terminate_child || true
         exit 78
     fi
     sleep 2

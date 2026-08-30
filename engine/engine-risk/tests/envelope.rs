@@ -25,9 +25,7 @@ fn observe(kernel: &mut Kernel, equity: f64) -> RiskVerdict {
 fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
     use engine_types::orders::OrderUpdate;
 
-    let cfg = KernelConfig {
-        ..demo_config()
-    };
+    let cfg = KernelConfig { ..demo_config() };
     let mut kernel = Kernel::new(cfg).expect("config");
     kernel.observe_price(BUSDT, 10.0);
     kernel.observe_price(CUSDT, 10.0);
@@ -42,7 +40,7 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
         side: Side::Buy,
         qty: 40_000.0,
         px: 10.0,
-        fee: 0.0,
+        fee: Some(0.0),
         is_maker: false,
         venue_ts_ms: 0,
         recv_ns: 2 * SEC,
@@ -77,9 +75,7 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
 #[test]
 // test_a_profile_without_the_block_keeps_the_historical_fixed_reference
 fn a_config_that_does_not_track_equity_keeps_its_fixed_reference() {
-    let cfg = KernelConfig {
-        ..demo_config()
-    };
+    let cfg = KernelConfig { ..demo_config() };
     let mut kernel = Kernel::new(cfg).expect("config");
     observe(&mut kernel, 1.0);
     assert_eq!(kernel.capital_reference_usdt(), 250_000.0);

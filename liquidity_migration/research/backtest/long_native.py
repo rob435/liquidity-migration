@@ -273,7 +273,7 @@ def _write_mtm_chart(
         color="#1f77b4",
         lw=1.4,
         label=(
-            f"daily MTM (deployment-true): ret {s['mtm_total_return']:+.1%} "
+            f"daily MTM view: ret {s['mtm_total_return']:+.1%} "
             f"DD {s['mtm_max_drawdown']:.1%} Sharpe {s['mtm_daily_sharpe']}"
         ),
     )
@@ -416,8 +416,8 @@ def run_long_native_research(
     if not monthly.is_empty():
         monthly.write_csv(output_dir / "long_native_monthly.csv")
 
-    # Honest daily mark-to-market rendering (the exit-booked curve reads as a step
-    # function on this sparse book; the MTM view is the deployment-true one).
+    # The exit-booked curve is a step function on this sparse book; this view
+    # marks held trades daily without claiming live execution parity.
     mtm_metadata: dict[str, Any] = {}
     try:
         mtm = _mtm_daily_curve(trades, klines)
@@ -534,6 +534,30 @@ def _filter_signal_window(features: pl.DataFrame, *, start: str, end: str) -> pl
     if end:
         features = features.filter(pl.col("ts_ms") < date_ms(end))
     return features
+
+
+def _entry_at_next_hour_open(
+    bars: dict[str, Any],
+    *,
+    observed_bar_idx: int,
+    window_end_ts_ms: int | None,
+) -> tuple[int, int, float] | None:
+    """Enter only after the completed bar that established a retrace or deadline."""
+
+    observation_end_ts_ms = int(bars["bar_end_ts_ms"][observed_bar_idx])
+    if window_end_ts_ms is not None and observation_end_ts_ms >= window_end_ts_ms:
+        return None
+    entry_bar_idx = observed_bar_idx + 1
+    if entry_bar_idx >= len(bars["bar_end_ts_ms"]):
+        return None
+    if int(bars["bar_end_ts_ms"][entry_bar_idx]) != observation_end_ts_ms + MS_PER_HOUR:
+        return None
+    entry_price = float(bars["open"][entry_bar_idx])
+    if not math.isfinite(entry_price) or entry_price <= 0.0:
+        return None
+    # The next bar opens at the instant the observed bar closes. Keep the
+    # observed index so exit scanning includes every bar after entry.
+    return observation_end_ts_ms, observed_bar_idx, entry_price
 
 
 def _run_long_pipeline(
@@ -683,13 +707,8 @@ def _run_long_pipeline(
         pending_entries: list[tuple[str, dict[str, Any]]] = []
         for row, stop_pct, take_profit_pct, hold_days in candidates:
             symbol = str(row["symbol"])
-            entry_ts_ms = ts + exact_duration_ms(hours=config.entry_delay_hours)
-            if window_end_ts_ms is not None and entry_ts_ms > window_end_ts_ms:
-                stats["skipped_no_entry_bar"] += 1
-                continue
             bars = bars_by_symbol.get(symbol)
-            entry_idx = bars["by_end"].get(entry_ts_ms) if bars else None
-            if entry_idx is None or bars is None:
+            if bars is None:
                 stats["skipped_no_entry_bar"] += 1
                 continue
             signal_idx = bars["by_end"].get(ts)
@@ -700,35 +719,31 @@ def _run_long_pipeline(
             retrace_threshold = signal_close * (1.0 - config.fc_sniper_retrace_pct)
             first_hour = max(1, config.entry_delay_hours)
             deadline_hour = max(first_hour, config.fc_sniper_deadline_hours)
-            fired = False
+            observed_idx: int | None = None
             for hour in range(first_hour, deadline_hour + 1):
                 candidate_ts = ts + exact_duration_ms(hours=hour)
                 candidate_idx = bars["by_end"].get(candidate_ts)
                 if candidate_idx is None:
                     continue
-                if float(bars["close"][candidate_idx]) <= retrace_threshold:
-                    entry_ts_ms = candidate_ts
-                    entry_idx = candidate_idx
-                    fired = True
+                if float(bars["low"][candidate_idx]) <= retrace_threshold:
+                    observed_idx = int(candidate_idx)
                     break
-            if not fired:
+            if observed_idx is None:
                 deadline_ts = ts + exact_duration_ms(hours=deadline_hour)
-                if window_end_ts_ms is not None and deadline_ts > window_end_ts_ms:
-                    stats["skipped_no_entry_bar"] += 1
-                    continue
                 deadline_idx = bars["by_end"].get(deadline_ts)
                 if deadline_idx is None:
                     stats["skipped_no_entry_bar"] += 1
                     continue
-                entry_ts_ms = deadline_ts
-                entry_idx = deadline_idx
-            if window_end_ts_ms is not None and entry_ts_ms > window_end_ts_ms:
+                observed_idx = int(deadline_idx)
+            entry = _entry_at_next_hour_open(
+                bars,
+                observed_bar_idx=observed_idx,
+                window_end_ts_ms=window_end_ts_ms,
+            )
+            if entry is None:
                 stats["skipped_no_entry_bar"] += 1
                 continue
-            entry_price = float(bars["close"][entry_idx])
-            if not math.isfinite(entry_price) or entry_price <= 0.0:
-                stats["skipped_no_entry_bar"] += 1
-                continue
+            entry_ts_ms, entry_idx, entry_price = entry
 
             vol_estimate = _safe_float(row.get("realized_vol")) or config.vol_floor_annual
             vol_used = max(vol_estimate, config.vol_floor_annual)
@@ -769,7 +784,7 @@ def _run_long_pipeline(
             grouped_entries.setdefault(int(item[1]["entry_ts_ms"]), []).append(item)
         for entry_ts_ms, items in sorted(grouped_entries.items()):
             _scan_all_positions(entry_ts_ms)
-            for symbol, position in sorted(items, key=lambda item: item[0]):
+            for symbol, position in items:
                 if symbol in open_positions:
                     stats["skipped_already_held"] += 1
                     continue

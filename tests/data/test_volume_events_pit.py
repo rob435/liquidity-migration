@@ -1,11 +1,12 @@
 """Tests for the PIT membership / full-PIT universe gate in
 liquidity_migration/data/volume_events_pit.py.
 
-Survivorship semantics: pre-listing and post-delisting empty manifest claims are NOT
-required (they would be false tripwires), but a genuine mid-history gap within a
-symbol's traded lifespan IS.
+Every manifest pair is an independent membership boundary. The kline frame being
+checked cannot redefine that boundary from its own first or last row.
 """
 from __future__ import annotations
+
+from datetime import UTC, datetime
 
 import polars as pl
 import pytest
@@ -15,7 +16,6 @@ from liquidity_migration.data.volume_events_pit import (
     _full_pit_universe_pass,
     _pit_manifest_metadata,
     _required_pit_date_symbols,
-    _symbol_kline_date_bounds,
     filter_klines_to_pit_membership,
 )
 
@@ -23,9 +23,20 @@ from liquidity_migration.data.volume_events_pit import (
 def _klines(rows: list[tuple[str, str]], *, bars_per_day: int = 1) -> pl.DataFrame:
     """Build a klines frame with `bars_per_day` hourly rows per (symbol, date)."""
     out: list[dict[str, object]] = []
-    for symbol, date in rows:
+    for symbol, day in rows:
+        start_ms = int(datetime.fromisoformat(day).replace(tzinfo=UTC).timestamp() * 1_000)
         for hour in range(bars_per_day):
-            out.append({"symbol": symbol, "date": date, "ts_ms": hour})
+            out.append(
+                {
+                    "symbol": symbol,
+                    "date": day,
+                    "ts_ms": start_ms + hour * 3_600_000,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                }
+            )
     return pl.DataFrame(out)
 
 
@@ -96,40 +107,88 @@ def test_pit_filter_rejects_date_timestamp_disagreement() -> None:
         )
 
 
-def test_required_pit_excludes_prelisting_and_postdelisting_keeps_midgap() -> None:
-    # AAA trades 01-02 and 01-04 (a real one-day gap on 01-03 within its lifespan).
+def test_required_pit_keeps_leading_internal_and_terminal_manifest_pairs() -> None:
     klines = _klines([("AAA", "2025-01-02"), ("AAA", "2025-01-04")])
-    # Manifest also claims a pre-listing day (01-01) and a post-delisting day (01-05).
     manifest = _manifest(
         [
-            ("AAA", "2025-01-01"),  # pre-listing: before first kline -> NOT required
+            ("AAA", "2025-01-01"),
             ("AAA", "2025-01-02"),
-            ("AAA", "2025-01-03"),  # mid-gap within lifespan -> REQUIRED
+            ("AAA", "2025-01-03"),
             ("AAA", "2025-01-04"),
-            ("AAA", "2025-01-05"),  # post-delisting empty phantom -> NOT required
+            ("AAA", "2025-01-05"),
         ]
     )
-    assert _symbol_kline_date_bounds(klines) == {"AAA": ("2025-01-02", "2025-01-04")}
     required = _required_pit_date_symbols(klines, manifest)
     assert required == {
+        ("2025-01-01", "AAA"),
         ("2025-01-02", "AAA"),
-        ("2025-01-03", "AAA"),  # the genuine mid-history gap is still required
+        ("2025-01-03", "AAA"),
         ("2025-01-04", "AAA"),
+        ("2025-01-05", "AAA"),
     }
 
 
-def test_required_pit_skips_symbol_absent_from_klines() -> None:
+def test_required_pit_keeps_symbol_absent_from_klines() -> None:
     klines = _klines([("AAA", "2025-01-02")])
     manifest = _manifest([("AAA", "2025-01-02"), ("BBB", "2025-01-02")])
-    # BBB has no kline bounds, so none of its manifest dates are required.
-    assert _required_pit_date_symbols(klines, manifest) == {("2025-01-02", "AAA")}
+    assert _required_pit_date_symbols(klines, manifest) == {
+        ("2025-01-02", "AAA"),
+        ("2025-01-02", "BBB"),
+    }
+
+
+def test_archive_payload_observation_does_not_narrow_required_membership() -> None:
+    digest = "a" * 64
+    manifest = pl.DataFrame(
+        {
+            "symbol": ["EMPTY", "NOHASH", "INFERRED", "TRADED"],
+            "date": ["2025-01-01"] * 4,
+            "source": [
+                "bybit_public_trading_archive",
+                "bybit_public_trading_archive",
+                "bybit_v5_listing",
+                "bybit_public_trading_archive",
+            ],
+            "membership_inferred": [False, False, True, False],
+            "archive_observed_payload_state": [
+                "empty_payload",
+                "empty_payload",
+                "empty_payload",
+                None,
+            ],
+            "archive_observed_content_sha256": [digest, None, digest, None],
+        }
+    )
+    covered = _klines(
+        [
+            ("NOHASH", "2025-01-01"),
+            ("INFERRED", "2025-01-01"),
+            ("TRADED", "2025-01-01"),
+        ],
+        bars_per_day=24,
+    )
+
+    assert _required_pit_date_symbols(covered, manifest) == {
+        ("2025-01-01", "EMPTY"),
+        ("2025-01-01", "NOHASH"),
+        ("2025-01-01", "INFERRED"),
+        ("2025-01-01", "TRADED"),
+    }
+    assert _full_pit_universe_pass(covered, manifest) is False
+    metadata = _pit_manifest_metadata(
+        manifest,
+        pl.DataFrame({"symbol": ["NOHASH", "INFERRED", "TRADED"]}),
+        covered,
+    )
+    assert metadata["manifest_date_symbols"] == 4
+    assert metadata["manifest_date_symbols_missing_from_klines"] == 1
 
 
 def test_full_pit_pass_true_when_covered_false_when_midgap_missing() -> None:
     manifest = _manifest(
         [("AAA", "2025-01-02"), ("AAA", "2025-01-03"), ("AAA", "2025-01-04")]
     )
-    # Covered: every required (date, symbol) has >= 20 hourly bars.
+    # Covered: every required pair has >=20 aligned keys and a valid OHLC row.
     covered = _klines(
         [("AAA", "2025-01-02"), ("AAA", "2025-01-03"), ("AAA", "2025-01-04")],
         bars_per_day=24,
@@ -173,7 +232,7 @@ def test_full_pit_fails_when_current_listing_tail_is_missing() -> None:
     assert metadata["full_pit_universe_pass"] is False
 
 
-def test_current_listing_provenance_does_not_require_prelisting_day() -> None:
+def test_manifest_boundary_is_not_inferred_from_first_kline() -> None:
     manifest = pl.DataFrame(
         {
             "symbol": ["AAA", "AAA"],
@@ -185,11 +244,12 @@ def test_current_listing_provenance_does_not_require_prelisting_day() -> None:
     klines = _klines([("AAA", "2025-01-02")], bars_per_day=24)
 
     assert _required_pit_date_symbols(klines, manifest) == {
-        ("2025-01-02", "AAA")
+        ("2025-01-01", "AAA"),
+        ("2025-01-02", "AAA"),
     }
 
 
-def test_reused_ticker_is_bounded_per_v5_listing_incarnation() -> None:
+def test_reused_ticker_manifest_pairs_are_not_inferred_away() -> None:
     manifest = pl.DataFrame(
         {
             "symbol": ["AAA"] * 8,
@@ -241,14 +301,13 @@ def test_reused_ticker_is_bounded_per_v5_listing_incarnation() -> None:
     assert required == {
         ("2025-01-01", "AAA"),
         ("2025-01-02", "AAA"),
+        ("2025-01-03", "AAA"),
+        ("2025-01-05", "AAA"),
+        ("2025-01-06", "AAA"),
         ("2025-01-07", "AAA"),
         ("2025-01-08", "AAA"),
-        # Independently inferred active tail remains required.
         ("2025-01-09", "AAA"),
     }
-    assert ("2025-01-03", "AAA") not in required
-    assert ("2025-01-05", "AAA") not in required
-    assert ("2025-01-06", "AAA") not in required
 
 
 def test_reused_ticker_still_requires_gap_inside_new_incarnation() -> None:
@@ -282,8 +341,54 @@ def test_reused_ticker_still_requires_gap_inside_new_incarnation() -> None:
 
 
 def test_covered_set_requires_min_hourly_bars() -> None:
-    # A day with < 20 hourly bars is treated as not-downloaded (data-presence gate).
+    # A day with <20 aligned hour keys is treated as not downloaded.
     thin = _klines([("AAA", "2025-01-02")], bars_per_day=10)
     assert _covered_kline_date_symbol_set(thin) == set()
     full = _klines([("AAA", "2025-01-02")], bars_per_day=20)
     assert _covered_kline_date_symbol_set(full) == {("2025-01-02", "AAA")}
+
+
+def test_structural_coverage_accepts_causal_prelisting_nulls_but_not_all_nulls() -> None:
+    partial = _klines([("AAA", "2025-01-02")], bars_per_day=24)
+    for column in ("open", "high", "low", "close"):
+        partial = partial.with_columns(
+            pl.Series(column, [None] * 12 + [1.0] * 12, dtype=pl.Float64)
+        )
+    assert _covered_kline_date_symbol_set(partial) == {("2025-01-02", "AAA")}
+
+    all_null = partial.with_columns(
+        [
+            pl.lit(None, dtype=pl.Float64).alias(column)
+            for column in ("open", "high", "low", "close")
+        ]
+    )
+    assert _covered_kline_date_symbol_set(all_null) == set()
+
+
+def test_structural_coverage_requires_ohlc_columns() -> None:
+    keys_only = _klines([("AAA", "2025-01-02")], bars_per_day=24).select(
+        "date", "symbol", "ts_ms"
+    )
+    assert _covered_kline_date_symbol_set(keys_only) == set()
+
+
+def test_duplicate_hourly_rows_do_not_satisfy_coverage() -> None:
+    ten = _klines([("AAA", "2025-01-02")], bars_per_day=10)
+    duplicated = pl.concat([ten, ten], how="vertical")
+    assert duplicated.height == 20
+    assert _covered_kline_date_symbol_set(duplicated) == set()
+
+
+def test_off_grid_rows_do_not_count_as_hourly_keys() -> None:
+    off_grid = _klines([("AAA", "2025-01-02")], bars_per_day=20).with_columns(
+        (pl.col("ts_ms") + 1).alias("ts_ms")
+    )
+    assert _covered_kline_date_symbol_set(off_grid) == set()
+
+
+def test_full_pit_fails_on_leading_and_terminal_gaps() -> None:
+    manifest = _manifest(
+        [("AAA", "2025-01-01"), ("AAA", "2025-01-02"), ("AAA", "2025-01-03")]
+    )
+    middle_only = _klines([("AAA", "2025-01-02")], bars_per_day=24)
+    assert _full_pit_universe_pass(middle_only, manifest) is False

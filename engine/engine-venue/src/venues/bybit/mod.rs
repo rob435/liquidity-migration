@@ -13,7 +13,7 @@ mod sign;
 mod trade_ws;
 mod ws;
 
-pub use gateway::{BybitGateway, BybitInventoryProbe};
+pub use gateway::{BybitGateway, BybitInventoryProbe, BybitOrderReceipt};
 pub use realm::VenueRealm;
 pub use ws::BybitOrderFeed;
 

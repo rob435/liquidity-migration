@@ -12,8 +12,12 @@ use engine_types::{Action, InstrumentRule, OrderKind, Side, StrategyId};
 use super::plug::Template;
 use crate::mock_ctx::{Harness, RestingSeed};
 
-const RULE: InstrumentRule =
-    InstrumentRule { tick_size: 0.01, qty_step: 0.001, min_qty: 0.001, min_notional: 5.0 };
+const RULE: InstrumentRule = InstrumentRule {
+    tick_size: 0.01,
+    qty_step: 0.001,
+    min_qty: 0.001,
+    min_notional: 5.0,
+};
 
 fn config() -> toml::Value {
     toml::from_str(
@@ -42,7 +46,10 @@ fn flat_it_enters_with_a_stop() {
     let intent = h.one_intent();
     assert_eq!(intent.side, Side::Buy);
     assert!((intent.qty - 1.0).abs() < 1e-12);
-    assert!(intent.stop.is_some(), "the kernel refuses an opening order with no stop");
+    assert!(
+        intent.stop.is_some(),
+        "the kernel refuses an opening order with no stop"
+    );
     assert!(!intent.reduce_only);
     let stop = intent.stop.expect("checked above");
     assert!((stop.trigger_px - 80.0).abs() < 1e-9, "{}", stop.trigger_px);
@@ -63,8 +70,14 @@ fn overweight_it_reduces_without_a_stop() {
     h.quote("BTCUSDT", 99.0, 101.0);
     let intent = h.one_intent();
     assert_eq!(intent.side, Side::Sell);
-    assert!(intent.reduce_only, "taking exposure off can never be allowed to add any");
-    assert!(intent.stop.is_none(), "a reducing order does not open anything to stop");
+    assert!(
+        intent.reduce_only,
+        "taking exposure off can never be allowed to add any"
+    );
+    assert!(
+        intent.stop.is_none(),
+        "a reducing order does not open anything to stop"
+    );
     assert!(
         matches!(intent.kind, OrderKind::Market),
         "an exit that rests is exposure nobody wanted, still on the book"
@@ -77,7 +90,11 @@ fn an_entry_rests_rather_than_crossing() {
     let mut h = bench();
     h.quote("BTCUSDT", 99.0, 101.0);
     let intent = h.one_intent();
-    assert!(matches!(intent.kind, OrderKind::Limit { .. }), "{:?}", intent.kind);
+    assert!(
+        matches!(intent.kind, OrderKind::Limit { .. }),
+        "{:?}",
+        intent.kind
+    );
 }
 
 #[test]
@@ -90,14 +107,20 @@ fn an_order_already_working_stops_it_deciding_again() {
         client_order_id: "eng-1".into(),
         symbol,
         side: Side::Buy,
-        kind: OrderKind::Limit { px: 100.0, tif: engine_types::TimeInForce::Gtc },
+        kind: OrderKind::Limit {
+            px: 100.0,
+            tif: engine_types::TimeInForce::Gtc,
+        },
         qty: 1.0,
         filled_qty: 0.0,
         reduce_only: false,
         acked: true,
     });
     h.quote("BTCUSDT", 99.0, 101.0);
-    assert!(h.drain_actions().is_empty(), "the working order is the previous answer");
+    assert!(
+        h.drain_actions().is_empty(),
+        "the working order is the previous answer"
+    );
 }
 
 #[test]
@@ -116,17 +139,28 @@ fn an_order_under_the_venue_minimum_is_not_emitted() {
     let mut h = Harness::new(Box::new(plug));
     h.ctx.set_rule(
         "BTCUSDT",
-        InstrumentRule { tick_size: 0.01, qty_step: 0.001, min_qty: 0.001, min_notional: 5_000.0 },
+        InstrumentRule {
+            tick_size: 0.01,
+            qty_step: 0.001,
+            min_qty: 0.001,
+            min_notional: 5_000.0,
+        },
     );
     h.quote("BTCUSDT", 99.0, 101.0);
-    assert!(h.drain_actions().is_empty(), "100 USDT of notional is under a 5,000 floor");
+    assert!(
+        h.drain_actions().is_empty(),
+        "100 USDT of notional is under a 5,000 floor"
+    );
 }
 
 #[test]
 fn a_broken_book_decides_nothing() {
     let mut h = bench();
     h.quote("BTCUSDT", 0.0, 0.0);
-    assert!(h.drain_actions().is_empty(), "no price is not a price of zero");
+    assert!(
+        h.drain_actions().is_empty(),
+        "no price is not a price of zero"
+    );
 }
 
 #[test]

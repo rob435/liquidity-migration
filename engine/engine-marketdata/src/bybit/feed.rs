@@ -127,12 +127,15 @@ impl Handoff {
         }) = &item
         {
             for queued in state.items.iter_mut().rev() {
-                let Some(queued_key) = market_key(queued) else { break };
+                let Some(queued_key) = market_key(queued) else {
+                    break;
+                };
                 if queued_key == (symbol.0, 2) {
                     if let Ok(MarketEvent::Trades { trades, .. }) = queued {
                         trades.buy_qty += incoming.buy_qty;
                         trades.sell_qty += incoming.sell_qty;
-                        trades.trade_count = trades.trade_count.saturating_add(incoming.trade_count);
+                        trades.trade_count =
+                            trades.trade_count.saturating_add(incoming.trade_count);
                         if incoming.seq >= trades.seq {
                             trades.last_px = incoming.last_px;
                             trades.seq = incoming.seq;
@@ -146,14 +149,20 @@ impl Handoff {
         }
         if let Some(key) = market_key(&item) {
             for queued in state.items.iter_mut().rev() {
-                let Some(queued_key) = market_key(queued) else { break };
+                let Some(queued_key) = market_key(queued) else {
+                    break;
+                };
                 if queued_key == key {
                     *queued = item;
                     return true;
                 }
             }
         } else {
-            let controls = state.items.iter().filter(|item| market_key(item).is_none()).count();
+            let controls = state
+                .items
+                .iter()
+                .filter(|item| market_key(item).is_none())
+                .count();
             if controls >= MAX_PENDING_EPOCHS {
                 state.items.clear();
             }
@@ -262,7 +271,10 @@ impl BybitPublicFeed {
     /// first dial carries it like any other.
     pub fn admit(&mut self, symbol: &str, feed: Feed) -> SymbolId {
         let symbol = symbol.to_uppercase();
-        let sub = Subscription { symbol: symbol.clone(), feed };
+        let sub = Subscription {
+            symbol: symbol.clone(),
+            feed,
+        };
         let topic = topic_for(&sub);
         let known = self.topics.contains(&topic);
         if !known {
@@ -297,10 +309,7 @@ impl BybitPublicFeed {
         };
         // The engine runs one thread, so this stays on it.
         let worker = tokio::spawn(worker.run());
-        self.inbox = Some(Inbox {
-            events,
-            worker,
-        });
+        self.inbox = Some(Inbox { events, worker });
     }
 }
 
@@ -429,7 +438,8 @@ impl FeedWorker {
                     return Ok(connected);
                 }
                 Err(e) => {
-                    if matches!(&e, FeedError::Transport(text) if text.starts_with("subscribe refused:")) {
+                    if matches!(&e, FeedError::Transport(text) if text.starts_with("subscribe refused:"))
+                    {
                         return Err(e);
                     }
                     warn!(url = %self.url, backoff = ?self.backoff, "market feed dial failed: {e}");
@@ -479,12 +489,17 @@ impl FeedWorker {
         if fresh.is_empty() {
             return Ok(());
         }
-        info!(topics = fresh.len(), "subscribing to symbols taken on since boot");
+        info!(
+            topics = fresh.len(),
+            "subscribing to symbols taken on since boot"
+        );
         for chunk in fresh.chunks(TOPICS_PER_MESSAGE) {
             let payload = subscribe_payload(chunk);
             tokio::time::timeout(SUBSCRIBE_REPLY_TIMEOUT, socket.send(Message::text(payload)))
                 .await
-                .map_err(|_| FeedError::Transport("market subscription send timed out".to_string()))?
+                .map_err(|_| {
+                    FeedError::Transport("market subscription send timed out".to_string())
+                })?
                 .map_err(|e| FeedError::Transport(e.to_string()))?;
             self.await_admission_ack(socket).await?;
         }
@@ -497,13 +512,19 @@ impl FeedWorker {
                 let message = socket
                     .next()
                     .await
-                    .ok_or_else(|| FeedError::Transport("market socket closed before subscription ack".to_string()))?
+                    .ok_or_else(|| {
+                        FeedError::Transport(
+                            "market socket closed before subscription ack".to_string(),
+                        )
+                    })?
                     .map_err(|e| FeedError::Transport(e.to_string()))?;
                 if let Some((success, ret_msg)) = subscription_ack(&message)? {
                     return if success {
                         Ok(())
                     } else {
-                        Err(FeedError::Transport(format!("subscribe refused: {ret_msg}")))
+                        Err(FeedError::Transport(format!(
+                            "subscribe refused: {ret_msg}"
+                        )))
                     };
                 }
                 let recv_ns = self.clock.now_ns();
@@ -519,7 +540,9 @@ impl FeedWorker {
             }
         })
         .await
-        .map_err(|_| FeedError::Transport("no market subscription ack from the venue".to_string()))?
+        .map_err(|_| {
+            FeedError::Transport("no market subscription ack from the venue".to_string())
+        })?
     }
 
     fn bump_backoff(&mut self) {
@@ -665,7 +688,6 @@ impl MarketFeed for BybitPublicFeed {
     fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
         Some(BybitPublicFeed::admit(self, symbol, feed))
     }
-
 }
 
 const PING_PAYLOAD: &str = r#"{"op":"ping"}"#;
@@ -709,7 +731,9 @@ async fn send_subscription(
             let message = socket
                 .next()
                 .await
-                .ok_or_else(|| FeedError::Transport("market socket closed before subscription ack".to_string()))?
+                .ok_or_else(|| {
+                    FeedError::Transport("market socket closed before subscription ack".to_string())
+                })?
                 .map_err(|e| FeedError::Transport(e.to_string()))?;
             if let Message::Ping(payload) = &message {
                 socket
@@ -721,7 +745,9 @@ async fn send_subscription(
             match subscription_ack(&message)? {
                 Some((true, _)) => return Ok(()),
                 Some((false, ret_msg)) => {
-                    return Err(FeedError::Transport(format!("subscribe refused: {ret_msg}")))
+                    return Err(FeedError::Transport(format!(
+                        "subscribe refused: {ret_msg}"
+                    )))
                 }
                 None => pending.push((clock.now_ns(), message)),
             }
@@ -743,9 +769,7 @@ fn subscription_ack(message: &Message) -> Result<Option<(bool, String)>, FeedErr
             op: "subscribe",
             success,
             ret_msg,
-        } => {
-            Ok(Some((success, ret_msg.to_string())))
-        }
+        } => Ok(Some((success, ret_msg.to_string()))),
         _ => Ok(None),
     }
 }
@@ -839,7 +863,10 @@ mod tests {
         let handoff = Handoff::new();
         let quote = |symbol, bid_px| MarketEvent::Quote {
             symbol: SymbolId(symbol),
-            quote: engine_types::Quote { bid_px, ..engine_types::Quote::default() },
+            quote: engine_types::Quote {
+                bid_px,
+                ..engine_types::Quote::default()
+            },
         };
         assert!(handoff.push(Ok(quote(0, 10.0))));
         assert!(handoff.push(Ok(quote(0, 11.0))));
@@ -847,10 +874,19 @@ mod tests {
         assert!(handoff.push(Ok(MarketEvent::FeedReset { recv_ns: 7 })));
         assert!(handoff.push(Ok(quote(0, 12.0))));
 
-        assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(0), quote })) if quote.bid_px == 11.0));
-        assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(1), quote })) if quote.bid_px == 20.0));
-        assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::FeedReset { recv_ns: 7 }))));
-        assert!(matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(0), quote })) if quote.bid_px == 12.0));
+        assert!(
+            matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(0), quote })) if quote.bid_px == 11.0)
+        );
+        assert!(
+            matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(1), quote })) if quote.bid_px == 20.0)
+        );
+        assert!(matches!(
+            handoff.recv().await,
+            Some(Ok(MarketEvent::FeedReset { recv_ns: 7 }))
+        ));
+        assert!(
+            matches!(handoff.recv().await, Some(Ok(MarketEvent::Quote { symbol: SymbolId(0), quote })) if quote.bid_px == 12.0)
+        );
     }
 
     #[tokio::test]

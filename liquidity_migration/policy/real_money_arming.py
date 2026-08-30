@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from liquidity_migration.core.env_flags import FALSE_ENV_VALUES, TRUE_ENV_VALUES
+from liquidity_migration.core.durable_file import durable_atomic_replace, durable_create
 from liquidity_migration.policy.real_money_profile import (
     RealMoneyDials,
     dial_environment_keys,
@@ -375,16 +376,14 @@ def _render(args: argparse.Namespace) -> int:
     if output.exists() and not args.overwrite:
         print(f"refusing to overwrite {output}; pass --overwrite", file=sys.stderr)
         return 2
-    output.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
-    if not args.overwrite:
-        flags |= os.O_EXCL
-    descriptor = os.open(output, flags, 0o600)
     try:
-        os.write(descriptor, data)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        if args.overwrite:
+            durable_atomic_replace(output, data, label="real-money profile")
+        else:
+            durable_create(output, data, label="real-money profile")
+    except FileExistsError:
+        print(f"refusing to overwrite {output}; pass --overwrite", file=sys.stderr)
+        return 2
     summary: dict[str, Any] = {
         "output": str(output),
         "dials": source,

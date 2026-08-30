@@ -138,13 +138,20 @@ mod tests {
     fn signature_is_lowercase_hex_of_the_right_length() {
         let sig = rest_signature(SECRET, KEY, TS, POST_BODY);
         assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(sig
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 
     #[test]
     fn a_changed_body_changes_the_signature() {
         let a = rest_signature(SECRET, KEY, TS, POST_BODY);
-        let b = rest_signature(SECRET, KEY, TS, &POST_BODY.replace("\"side\":1", "\"side\":3"));
+        let b = rest_signature(
+            SECRET,
+            KEY,
+            TS,
+            &POST_BODY.replace("\"side\":1", "\"side\":3"),
+        );
         assert_ne!(a, b);
     }
 }

@@ -10,6 +10,7 @@ pub mod account_state_bench;
 pub mod assembly;
 pub mod attribution;
 pub mod bench;
+pub mod canary;
 pub mod clear;
 pub mod clock;
 pub mod config;

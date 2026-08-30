@@ -71,6 +71,14 @@ engine — the execution loop
       adapter. Succeeds only when the credential-wide inventory is fresh and
       empty. Sends no orders and changes no venue state.
 
+  engine canary-order --config engine.toml --symbol XRPUSDT
+                      --expected-user-id 579580669 --execute
+      On Bybit Demo only, take the account lease, rest one minimum-value
+      post-only order away from the touch with an attached stop, cancel it,
+      and prove the derivative account clean twice. Any fill is closed in full
+      and makes the command fail after cleanup. Without --execute, no
+      credential or network is touched.
+
   engine reconcile-clear --config engine.toml [--note TEXT] [--execute]
       The deliberate look the may-open latch waits for. Stop the engine
       first (this takes the log's own lock). Shows the standing findings;
@@ -211,6 +219,19 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
                     .unwrap_or("engine.toml".into()),
             );
             runtime()?.block_on(engine_core::flatness::run(&config))
+        }
+        "canary-order" => {
+            let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+            let symbol = value(args, "--symbol").ok_or("canary-order needs --symbol SYMBOL")?;
+            let expected_user_id = value(args, "--expected-user-id")
+                .ok_or("canary-order needs --expected-user-id USER_ID")?;
+            let execute = args.iter().any(|arg| arg == "--execute");
+            runtime()?.block_on(engine_core::canary::run(
+                &config,
+                &symbol,
+                &expected_user_id,
+                execute,
+            ))
         }
         "replay" => {
             let path = value(args, "--wal").ok_or("replay needs --wal PATH")?;

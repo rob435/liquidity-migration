@@ -17,7 +17,10 @@ from typing import Any
 
 import polars as pl
 
+from liquidity_migration.core._common import calendar_roll, calendar_shift
+
 HOUR_MS = 3_600_000
+DAY_MS = 24 * HOUR_MS
 
 
 REQUIRED_COLUMNS = (
@@ -185,9 +188,46 @@ def _settlement_flag() -> pl.Expr:
 def settlement_exact_funding(hold_hours: int) -> pl.Expr:
     """Funding a LONG pays over ``(t, t + hold_hours]``; settlements only."""
     fresh = pl.when(_settlement_flag()).then(pl.col("by_funding")).otherwise(0.0)
-    # The shift must sit inside the window: outside it shifts the materialized
-    # column, handing each symbol's last `hold_hours` rows the next symbol's sums.
-    return fresh.rolling_sum(hold_hours).shift(-hold_hours).over("symbol")
+    aligned = pl.col("bar_ts_ms").shift(-hold_hours).over("symbol") == (
+        pl.col("bar_ts_ms") + hold_hours * HOUR_MS
+    )
+    future_sum = (
+        calendar_roll(
+            fresh,
+            "sum",
+            hold_hours,
+            shifted=False,
+            min_samples=hold_hours,
+            time_col="bar_ts_ms",
+            period_ms=HOUR_MS,
+        )
+        .shift(-hold_hours)
+        .over("symbol")
+    )
+    return pl.when(aligned).then(future_sum).otherwise(None)
+
+
+def _hour_shift(value: pl.Expr, hours: int) -> pl.Expr:
+    return calendar_shift(value, hours, time_col="bar_ts_ms", day_ms=HOUR_MS)
+
+
+def _hour_roll(
+    value: pl.Expr,
+    agg: str,
+    hours: int,
+    *,
+    shifted: bool = False,
+    min_samples: int | None = None,
+) -> pl.Expr:
+    return calendar_roll(
+        value,
+        agg,
+        hours,
+        shifted=shifted,
+        min_samples=hours if min_samples is None else min_samples,
+        time_col="bar_ts_ms",
+        period_ms=HOUR_MS,
+    ).over("symbol")
 
 
 #: Crowding persistence is measured over this many of the symbol's own
@@ -252,37 +292,51 @@ def _signal_frame(panel: pl.DataFrame, momentum_lookback_hours: int) -> pl.DataF
     frame = panel.filter(close > 0).sort(["symbol", "bar_ts_ms"])
     frame = frame.with_columns(
         [
-            pl.col("by_turnover_quote").rolling_sum(24).over("symbol").alias("adv24"),
+            _hour_roll(pl.col("by_turnover_quote"), "sum", 24).alias("adv24"),
             settlement_exact_funding(24).alias("funding_paid"),
             # PIT trailing settled funding over (t-24h, t]: the daily premium
             # currently being paid; v2's sizing basis. Settlements at bars
             # <= t only — same convention as the by_funding decision signal.
-            pl.when(_settlement_flag()).then(pl.col("by_funding")).otherwise(0.0)
-            .rolling_sum(24).over("symbol").alias("trail_fund_24h"),
-            (close.shift(-24).over("symbol") / close - 1.0).alias("price_return"),
-            (close / close.shift(momentum_lookback_hours).over("symbol") - 1.0).alias("momentum"),
+            _hour_roll(
+                pl.when(_settlement_flag()).then(pl.col("by_funding")).otherwise(0.0),
+                "sum",
+                24,
+            ).alias("trail_fund_24h"),
+            (_hour_shift(close, -24) / close - 1.0).alias("price_return"),
+            (close / _hour_shift(close, momentum_lookback_hours) - 1.0).alias("momentum"),
             # v3 conditioning variables, all PIT at bars <= t: trailing 3d
             # return, trailing 30d vol of 24h returns (shifted a bar), and the
             # 2d change in the trailing daily funding rate.
-            (close / close.shift(72).over("symbol") - 1.0).alias("ret_3d"),
-            (close / close.shift(24).over("symbol") - 1.0).alias("_r24"),
+            (close / _hour_shift(close, 72) - 1.0).alias("ret_3d"),
+            (close / _hour_shift(close, 24) - 1.0).alias("_r24"),
             (
                 pl.col("bar_ts_ms").shift(-24).over("symbol") - pl.col("bar_ts_ms") == 24 * HOUR_MS
             ).alias("contiguous"),
         ]
     )
     frame = frame.with_columns(
-        pl.col("_r24").rolling_std(720).shift(1).over("symbol").alias("vol_30d_daily"),
-        (pl.col("trail_fund_24h") - pl.col("trail_fund_24h").shift(48).over("symbol")).alias(
+        _hour_roll(pl.col("_r24"), "std", 720, shifted=True).alias("_vol_30d_daily"),
+        _hour_roll(
+            pl.col("_r24").is_finite().fill_null(False).cast(pl.UInt16),
+            "sum",
+            720,
+            shifted=True,
+        ).alias("_vol_30d_samples"),
+        (pl.col("trail_fund_24h") - _hour_shift(pl.col("trail_fund_24h"), 48)).alias(
             "dtrail_2d"
         ),
         # v5 conditioning: trailing-24h turnover now vs 72h earlier, PIT at
         # bars <= t. A zero denominator yields a non-finite value, which the
         # weights loop treats as null (fails open).
-        (pl.col("adv24") / pl.col("adv24").shift(72).over("symbol") - 1.0).alias(
+        (pl.col("adv24") / _hour_shift(pl.col("adv24"), 72) - 1.0).alias(
             "turn_growth_3d"
         ),
-    ).drop("_r24")
+    ).with_columns(
+        pl.when(pl.col("_vol_30d_samples") == 720)
+        .then(pl.col("_vol_30d_daily"))
+        .otherwise(None)
+        .alias("vol_30d_daily")
+    ).drop("_r24", "_vol_30d_daily", "_vol_30d_samples")
     if "bn_tt_ls" in frame.columns:
         # Binance top-trader position long/short ratio, panel-attached as the
         # last COMPLETE UTC day's end value (join-asof, age recorded). Values
@@ -294,7 +348,7 @@ def _signal_frame(panel: pl.DataFrame, momentum_lookback_hours: int) -> pl.DataF
             .otherwise(None)
         )
         frame = frame.with_columns(
-            (fresh - fresh.shift(72).over("symbol")).alias("d_tt_ls_3d")
+            (fresh - _hour_shift(fresh, 72)).alias("d_tt_ls_3d")
         )
     # Attached unconditionally so the research and live frames cannot diverge on
     # whether the column exists; configs that leave persistence off ignore it.
@@ -408,6 +462,14 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
         raise FinancedLongsError(
             f"{cfg.config_id}: enabled features require prepared columns {missing}"
         )
+    invalid_funding = universe.filter(
+        pl.col("by_funding").is_not_null()
+        & ~pl.col("by_funding").is_finite().fill_null(False)
+    )
+    if invalid_funding.height:
+        raise FinancedLongsError(
+            f"{cfg.config_id}: by_funding contains {invalid_funding.height} non-finite values"
+        )
     cols = ["bar_ts_ms", "symbol", "by_funding", *dict.fromkeys(need)]
     d = (
         universe.select(cols)
@@ -429,12 +491,20 @@ def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataF
         wh = g["d_tt_ls_3d"].to_numpy() if whaled else None
         ts = g["bar_ts_ms"].to_numpy()
         state = False
+        previous_ts: int | None = None
         for i in range(len(ts)):
+            current_ts = int(ts[i])
+            if previous_ts is not None and current_ts != previous_ts + DAY_MS:
+                state = False
+            previous_ts = current_ts
+            exited = False
             if state and not (fv[i] < -exit_):
                 state = False
+                exited = True
             if state and veled and vl is not None and math.isfinite(vl[i]) and vl[i] > vel_thr:
                 state = False
-            if fv[i] < -enter:
+                exited = True
+            if not state and not exited and fv[i] < -enter:
                 # Filters block ENTRY only on known-bad values; a null
                 # conditioning value fails open (young history), documented in
                 # the v3 registration.

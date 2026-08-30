@@ -69,10 +69,24 @@ if command -v sshd >/dev/null 2>&1; then
   printf '%s\n' "$effective_sshd_config" | grep -Eq '^authenticationmethods publickey$'
 fi
 
+ssh_restarted=0
 if command -v systemctl >/dev/null 2>&1; then
-  systemctl restart ssh.service || systemctl restart sshd.service || true
-else
-  service ssh restart || service sshd restart || true
+  if systemctl restart ssh.service && systemctl is-active --quiet ssh.service; then
+    ssh_restarted=1
+  elif systemctl restart sshd.service && systemctl is-active --quiet sshd.service; then
+    ssh_restarted=1
+  fi
 fi
+if [ "$ssh_restarted" -eq 0 ] && command -v service >/dev/null 2>&1; then
+  if service ssh restart && service ssh status >/dev/null 2>&1; then
+    ssh_restarted=1
+  elif service sshd restart && service sshd status >/dev/null 2>&1; then
+    ssh_restarted=1
+  fi
+fi
+[ "$ssh_restarted" -eq 1 ] || {
+  echo "SSH configuration is valid, but the SSH service did not restart cleanly." >&2
+  exit 1
+}
 
 echo "ssh-restore-ok"

@@ -86,6 +86,7 @@ echo "[2/4] Bybit — 1h klines via v5 kline API (category=$CATEGORY, manifest-g
 "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
   archive-download-klines-1h-api \
     --category "$CATEGORY" \
+    --min-existing-bars 20 \
     --start "$START" --end "$END" --workers "$KLINE_WORKERS"
 
 echo

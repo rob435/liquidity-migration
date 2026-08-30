@@ -171,8 +171,14 @@ mod tests {
 
     #[test]
     fn both_realms_parse_and_no_bare_word_does() {
-        assert_eq!(LighterRealm::parse("lighter_mainnet").unwrap(), LighterRealm::Mainnet);
-        assert_eq!(LighterRealm::parse(" Lighter_Testnet ").unwrap(), LighterRealm::Testnet);
+        assert_eq!(
+            LighterRealm::parse("lighter_mainnet").unwrap(),
+            LighterRealm::Mainnet
+        );
+        assert_eq!(
+            LighterRealm::parse(" Lighter_Testnet ").unwrap(),
+            LighterRealm::Testnet
+        );
         for refused in ["", "mainnet", "testnet", "lighter", "zklighter"] {
             assert!(LighterRealm::parse(refused).is_err(), "{refused:?}");
         }
@@ -227,8 +233,10 @@ mod tests {
         // used to fail — after the credentials had been read and the account
         // addressed.
         for malformed in ["", "42", "42:", ":3", "abc:3", "42:abc", "-1:3", "0:3"] {
-            assert!(AccountKey::parse(malformed).is_err(), "{malformed:?} was accepted");
+            assert!(
+                AccountKey::parse(malformed).is_err(),
+                "{malformed:?} was accepted"
+            );
         }
     }
-
 }

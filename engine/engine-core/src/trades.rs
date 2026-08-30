@@ -111,6 +111,8 @@ mod tests {
             fills: 3,
             maker_share: Some(1.0),
             arrival_shortfall_bps: Some(0.4),
+            gross_usdt: net.map(|net_usdt| net_usdt + 0.53),
+            fees_usdt: net.map(|_| 0.53),
             round_trip: net.map(|net_usdt| RoundTrip {
                 entry_px: 0.068,
                 entry_notional_usdt: 478.10,
@@ -144,6 +146,8 @@ mod tests {
             "fills",
             "maker_share",
             "arrival_shortfall_bps",
+            "gross_usdt",
+            "fees_usdt",
             "round_trip",
         ] {
             assert!(line.get(key).is_some(), "{key} is missing from {line}");
@@ -175,6 +179,22 @@ mod tests {
         let line: serde_json::Value = serde_json::from_str(written.trim()).expect("json");
         assert!(line["round_trip"].is_null(), "{line}");
         assert_eq!(line["symbol"], "COTIUSDT");
+    }
+
+    #[test]
+    fn an_unknown_fee_is_written_as_null_without_erasing_gross() {
+        let path = temp_path("trades-unknown-fee");
+        let mut unknown = trade("BTCUSDT", Some(16.28));
+        unknown.fees_usdt = None;
+        unknown.round_trip = None;
+        Trades::new(path.to_path_buf()).write(&[unknown]);
+
+        let written = std::fs::read_to_string(path.path()).expect("a file");
+        let line: serde_json::Value = serde_json::from_str(written.trim()).expect("json");
+        let gross = line["gross_usdt"].as_f64().expect("gross is numeric");
+        assert!((gross - 16.81).abs() < 1e-12, "{gross}");
+        assert!(line["fees_usdt"].is_null(), "{line}");
+        assert!(line["round_trip"].is_null(), "{line}");
     }
 
     /// A reader that remembers a byte offset depends on this.

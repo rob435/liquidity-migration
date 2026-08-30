@@ -53,10 +53,9 @@ pub(crate) fn int_field(obj: &Value, name: &str) -> Result<i64, VenueError> {
         Some(Value::Number(n)) => n
             .as_i64()
             .ok_or_else(|| VenueError::BadReply(format!("field {name} is not a whole number"))),
-        Some(Value::String(s)) => s
-            .trim()
-            .parse::<i64>()
-            .map_err(|_| VenueError::BadReply(format!("field {name} is not a whole number: {s:?}"))),
+        Some(Value::String(s)) => s.trim().parse::<i64>().map_err(|_| {
+            VenueError::BadReply(format!("field {name} is not a whole number: {s:?}"))
+        }),
         _ => Err(VenueError::BadReply(format!(
             "field {name} is missing or not a whole number"
         ))),

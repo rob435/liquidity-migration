@@ -42,8 +42,6 @@ from liquidity_migration.rules.carry_hold import (
     top_n_universe,
 )
 
-DAY_MS = 86_400_000
-
 #: Renames that make Binance the traded venue. One implementation, two venues:
 #: the replication arms must not be two different code paths.
 BINANCE_VIEW = {
@@ -84,7 +82,7 @@ def prepare(panel: pl.DataFrame, momentum_lookback_hours: int = 168) -> pl.DataF
 def daily_scores(
     weights: pl.DataFrame, universe: pl.DataFrame, fee_side_bp: float
 ) -> pl.DataFrame:
-    """One row per decision day: gross, measured-turnover cost, and net, in bp."""
+    """Daily gross, turnover cost, and net rows, including cash and final liquidation."""
     rets = universe.select("bar_ts_ms", "symbol", "net_return")
     j = weights.join(rets, on=["bar_ts_ms", "symbol"], how="left").with_columns(
         (pl.col("w") * pl.col("net_return").fill_null(0.0)).alias("_pnl")
@@ -94,19 +92,9 @@ def daily_scores(
         int(k[0] if isinstance(k, tuple) else k): dict(zip(v["symbol"].to_list(), v["w"].to_list()))
         for k, v in weights.partition_by("bar_ts_ms", as_dict=True).items()
     }
-    # Iterate every DECISION bar in the record, not only the bars that produced
-    # weights: a gate-flip day selects nothing, so its exit and re-entry would
-    # go uncharged and the flat day would vanish from the day count. The record
-    # still spans first-weighted to last-weighted bar.
-    weighted_bars = sorted(pivot)
-    ts_sorted: list[int] = []
-    if weighted_bars:
-        low, high = weighted_bars[0], weighted_bars[-1]
-        ts_sorted = [
-            int(value)
-            for value in sorted({int(item) for item in universe["bar_ts_ms"].unique().to_list()})
-            if low <= int(value) <= high
-        ]
+    # Score the whole decision record. Flat bars are cash, and the first flat
+    # bar after a hold carries the exit turnover.
+    ts_sorted = sorted({int(item) for item in universe["bar_ts_ms"].unique().to_list()})
     prev: dict[str, float] = {}
     rows: dict[str, list] = {"bar_ts_ms": [], "oneway": []}
     for t in ts_sorted:
@@ -116,6 +104,8 @@ def daily_scores(
             sum(abs(cur.get(s, 0.0) - prev.get(s, 0.0)) for s in set(cur) | set(prev))
         )
         prev = cur
+    if prev and rows["oneway"]:
+        rows["oneway"][-1] += sum(abs(weight) for weight in prev.values())
     turn = pl.DataFrame(rows, schema={"bar_ts_ms": pl.Int64, "oneway": pl.Float64})
     return (
         turn.join(gross, on="bar_ts_ms", how="left")

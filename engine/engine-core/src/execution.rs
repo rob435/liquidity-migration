@@ -185,15 +185,16 @@ impl Weighted {
 
 /// What one strategy's trading in one symbol cost. Also the shape of every
 /// rollup, because merging two of these is how a rollup is made.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Costs {
     pub fills: u64,
     /// Fills where we were the resting side, and what they traded.
     pub maker_fills: u64,
     pub maker_notional_usdt: f64,
     pub notional_usdt: f64,
-    /// What the venue charged, in account currency. Negative is a rebate.
-    pub fee_usdt: f64,
+    /// What the venue charged, in account currency. Negative is a rebate;
+    /// `None` means at least one fill did not state a fee.
+    pub fee_usdt: Option<f64>,
     pub arrival_shortfall: Weighted,
     pub fee: Weighted,
     /// `arrival_shortfall_bps + fee_bps`, accumulated per fill and only where
@@ -214,6 +215,24 @@ pub struct Costs {
     /// different things about the run: one is a market that went quiet, the
     /// other is this process falling behind.
     pub marks_late: u64,
+}
+
+impl Default for Costs {
+    fn default() -> Self {
+        Costs {
+            fills: 0,
+            maker_fills: 0,
+            maker_notional_usdt: 0.0,
+            notional_usdt: 0.0,
+            fee_usdt: Some(0.0),
+            arrival_shortfall: Weighted::default(),
+            fee: Weighted::default(),
+            all_in: Weighted::default(),
+            markout: [Weighted::default(); HORIZONS_MS.len()],
+            marks_unmeasurable: 0,
+            marks_late: 0,
+        }
+    }
 }
 
 impl Costs {
@@ -237,12 +256,21 @@ impl Costs {
         (self.notional_usdt > 0.0).then(|| self.arrival_shortfall.weight / self.notional_usdt)
     }
 
+    /// How much traded notional carried a venue-stated fee. A zero fee still
+    /// has coverage; an absent fee does not.
+    pub fn fee_coverage(&self) -> Option<f64> {
+        (self.notional_usdt > 0.0).then(|| self.fee.weight / self.notional_usdt)
+    }
+
     pub fn merge(&mut self, other: &Costs) {
         self.fills += other.fills;
         self.maker_fills += other.maker_fills;
         self.maker_notional_usdt += other.maker_notional_usdt;
         self.notional_usdt += other.notional_usdt;
-        self.fee_usdt += other.fee_usdt;
+        self.fee_usdt = match (self.fee_usdt, other.fee_usdt) {
+            (Some(mine), Some(theirs)) => Some(mine + theirs),
+            _ => None,
+        };
         self.arrival_shortfall.merge(&other.arrival_shortfall);
         self.fee.merge(&other.fee);
         self.all_in.merge(&other.all_in);
@@ -263,7 +291,7 @@ pub struct Fill {
     pub side: Side,
     pub qty: f64,
     pub px: f64,
-    pub fee: f64,
+    pub fee: Option<f64>,
     pub is_maker: bool,
     /// `M0`, from the order's own `OrderSent` record. Zero when the book could
     /// not be read then, which makes every arrival number for this fill
@@ -438,11 +466,13 @@ impl Fills {
                 costs.maker_notional_usdt += notional;
             }
         }
-        if fill.fee.is_finite() {
-            costs.fee_usdt += fill.fee;
-        }
+        let stated_fee = fill.fee.filter(|fee| fee.is_finite());
+        costs.fee_usdt = match (costs.fee_usdt, stated_fee) {
+            (Some(total), Some(fee)) => Some(total + fee),
+            _ => None,
+        };
         let shortfall = arrival_shortfall_bps(fill.side, fill.px, fill.arrival_mid);
-        let fee = fee_bps(fill.fee, fill.px, fill.qty);
+        let fee = stated_fee.and_then(|fee| fee_bps(fee, fill.px, fill.qty));
         if let Some(bps) = shortfall {
             costs.arrival_shortfall.add(bps, notional);
         }

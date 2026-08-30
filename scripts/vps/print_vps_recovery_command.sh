@@ -8,6 +8,8 @@ cd "$ROOT"
 mode=normal
 if [ "${1:-}" = --rescue-only ]; then mode=rescue; shift; fi
 commit="$(git rev-parse "${1:-HEAD}^{commit}")"
+ssh_target="${SSH_TARGET:-root@208.84.103.4}"
+printf -v ssh_target_q '%q' "$ssh_target"
 
 encode() { git show "$commit:$1" | base64 | tr -d '\n'; }
 embedded() {
@@ -41,10 +43,10 @@ $rescue
 
 # After SSH is restored, run from this trusted local checkout. Install requires
 # the whole liquidity-migration fleet to be stopped and never starts a unit.
-EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh install
+SSH_TARGET=$ssh_target_q EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh install
 
 # Issue a new exact-head authorization only after configuring and reviewing the
 # stopped host. Then activate and verify without another checkout/config edit:
-EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh activate
-EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh verify
+SSH_TARGET=$ssh_target_q EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh activate
+SSH_TARGET=$ssh_target_q EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh verify
 EOF

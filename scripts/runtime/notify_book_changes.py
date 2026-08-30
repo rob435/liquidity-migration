@@ -73,6 +73,13 @@ class Account:
     trades: str
 
 
+@dataclass(frozen=True)
+class TradeRead:
+    trades: list[dict]
+    next_offset: int
+    malformed_offset: int | None = None
+
+
 ACCOUNTS = (
     Account(
         name="demo",
@@ -118,7 +125,7 @@ def read_positive_targets(path: str) -> dict[str, float] | None:
         return None
 
 
-def read_new_trades(path: str, offset: int) -> tuple[list[dict], int] | None:
+def read_new_trades(path: str, offset: int) -> TradeRead | None:
     """Whole JSON lines added since `offset`, and where to read from next.
 
     None when the file is not there at all. A file shorter than the offset
@@ -131,23 +138,37 @@ def read_new_trades(path: str, offset: int) -> tuple[list[dict], int] | None:
     except OSError:
         return None
     if size < offset:
-        return [], size
-    trades = []
-    with open(path) as fh:
+        return TradeRead(trades=[], next_offset=size)
+    trades: list[dict] = []
+    with open(path, "rb") as fh:
         fh.seek(offset)
         body = fh.read()
-    # A line still being written has no newline yet; the rest waits for the
-    # next run rather than being parsed in half.
-    consumed = body.rfind("\n") + 1
-    for line in body[:consumed].splitlines():
-        line = line.strip()
+    consumed = 0
+    malformed_offset: int | None = None
+    for raw_line in body.splitlines(keepends=True):
+        # A line still being written has no newline yet; the rest waits for the
+        # next run rather than being parsed in half.
+        if not raw_line.endswith(b"\n"):
+            break
+        line = raw_line.strip()
         if not line:
+            consumed += len(raw_line)
             continue
         try:
-            trades.append(json.loads(line))
-        except Exception:
-            continue
-    return trades, offset + consumed
+            trade = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            malformed_offset = offset + consumed
+            break
+        if not isinstance(trade, dict):
+            malformed_offset = offset + consumed
+            break
+        trades.append(trade)
+        consumed += len(raw_line)
+    return TradeRead(
+        trades=trades,
+        next_offset=offset + consumed,
+        malformed_offset=malformed_offset,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -380,7 +401,7 @@ def batched(messages: list[str]) -> list[str]:
     return out
 
 
-def send(messages: list[str], *, enabled: bool) -> None:
+def send(messages: list[str], *, enabled: bool) -> bool:
     for body in batched(messages):
         try:
             sent = send_telegram_message(
@@ -388,17 +409,34 @@ def send(messages: list[str], *, enabled: bool) -> None:
             )
         except Exception as exc:
             print(f"unsent ({exc.__class__.__name__}): {body.splitlines()[0]}")
-            continue
+            return False
         head = body.splitlines()[0]
         lines = body.count("\n\n") + 1
         print(f"{'sent' if sent else 'unsent'} {lines} update(s), first: {head}")
+        if not sent:
+            return False
+    return True
 
 
 def yesterday_utc(now_s: float) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(now_s - 86_400))
 
 
-def main() -> None:
+def write_state(path: Path, state: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w") as handle:
+        handle.write(json.dumps(state, indent=1, sort_keys=True))
+        handle.flush()
+        os.fsync(handle.fileno())
+    tmp.replace(path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def main() -> int:
     state_path = Path(os.environ.get("BOOK_NOTIFY_STATE", STATE_PATH))
     state_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -411,17 +449,19 @@ def main() -> None:
     enabled = os.environ.get("TELEGRAM_ENABLED", "").strip() == "1"
     messages: list[str] = []
     books_now: dict[str, dict[str, float]] = {}
+    malformed_trades: list[tuple[str, int]] = []
 
     for account in ACCOUNTS:
         new_trades = None
         read = read_new_trades(account.trades, int(offsets.get(account.trades, 0)))
         if read is not None:
-            new_trades, offset = read
+            new_trades = read.trades
+            offset = read.next_offset
             if account.trades not in offsets:
                 # Everything already in the file happened before this reader
-                # existed. Baseline to the end of it rather than announcing a
-                # history.
-                offset = os.path.getsize(account.trades)
+                # existed. Baseline through its valid complete lines rather
+                # than announcing a history. A malformed line remains the
+                # boundary until it is repaired.
                 print(f"baselined {account.trades} at {offset} bytes")
             else:
                 for trade in new_trades:
@@ -433,6 +473,12 @@ def main() -> None:
                         continue
                     messages.append(exit_message(trade, account.tag))
             offsets[account.trades] = offset
+            if read.malformed_offset is not None:
+                malformed_trades.append((account.trades, read.malformed_offset))
+                print(
+                    f"malformed trade blocks {account.trades}"
+                    f" at byte {read.malformed_offset}"
+                )
 
         for sleeve, path in account.books.items():
             key = f"{account.name}/{sleeve}"
@@ -460,15 +506,16 @@ def main() -> None:
             messages.append(summary)
         state["summarised_day"] = day
 
-    send(messages, enabled=enabled)
+    if not send(messages, enabled=enabled):
+        print("notification state retained for retry")
+        return 1
     if not messages:
         print("nothing to say")
 
     state["books"] = books_now
     state["trade_offsets"] = offsets
-    tmp = state_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
-    tmp.replace(state_path)
+    write_state(state_path, state)
+    return 1 if malformed_trades else 0
 
 
 def trades_of_day(day: str) -> list[dict]:
@@ -500,4 +547,4 @@ def trades_of_day(day: str) -> list[dict]:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

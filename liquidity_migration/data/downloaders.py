@@ -14,6 +14,7 @@ from liquidity_migration.marketdata.binance import BinanceDataError, BinanceUSDM
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.data.ingestion import normalize_funding_history
+from liquidity_migration.core.market_numeric import valid_kline_numbers
 from liquidity_migration.data.storage import dataset_path, write_dataset
 
 
@@ -304,6 +305,7 @@ def _download_rest_symbol_datasets(
                 symbol,
                 local_client.get_premium_index_klines(symbol, "60", s, e),
                 source="bybit_premium_index",
+                positive_prices=False,
             ),
         )
     return outputs
@@ -385,6 +387,7 @@ def _download_binance_symbol_datasets(
                 symbol,
                 local_client.get_premium_index_klines(symbol, interval, s, e),
                 source="binance_usdm_premium_index",
+                positive_prices=False,
             ),
             marker_suffix=f"_{interval}",
         )
@@ -659,33 +662,69 @@ def _iter_marker_files(marker_dir: Path, *, prefix: str, suffix_full: str) -> li
 def _normalize_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
     output = []
     for row in rows:
+        ts_ms = int(row[0])
+        open_price = float(row[1])
+        high_price = float(row[2])
+        low_price = float(row[3])
+        close_price = float(row[4])
+        volume_base, turnover_quote = float(row[5]), float(row[6])
+        if not valid_kline_numbers(
+            ts_ms=ts_ms,
+            open_price=open_price,
+            high_price=high_price,
+            low_price=low_price,
+            close_price=close_price,
+            volume_base=volume_base,
+            turnover_quote=turnover_quote,
+        ):
+            raise ValueError(f"{source} returned an invalid kline for {symbol} at {ts_ms}")
         output.append(
             {
-                "ts_ms": int(row[0]),
+                "ts_ms": ts_ms,
                 "symbol": symbol,
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "volume_base": float(row[5]),
-                "turnover_quote": float(row[6]),
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+                "volume_base": volume_base,
+                "turnover_quote": turnover_quote,
                 "source": source,
             }
         )
     return sorted(output, key=lambda item: item["ts_ms"])
 
 
-def _normalize_price_index_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
+def _normalize_price_index_klines(
+    symbol: str,
+    rows: list,
+    *,
+    source: str,
+    positive_prices: bool = True,
+) -> list[dict]:
     output = []
     for row in rows:
+        ts_ms = int(row[0])
+        open_price = float(row[1])
+        high_price = float(row[2])
+        low_price = float(row[3])
+        close_price = float(row[4])
+        if not valid_kline_numbers(
+            ts_ms=ts_ms,
+            open_price=open_price,
+            high_price=high_price,
+            low_price=low_price,
+            close_price=close_price,
+            positive_prices=positive_prices,
+        ):
+            raise ValueError(f"{source} returned an invalid kline for {symbol} at {ts_ms}")
         output.append(
             {
-                "ts_ms": int(row[0]),
+                "ts_ms": ts_ms,
                 "symbol": symbol,
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
                 "source": source,
             }
         )
@@ -695,28 +734,66 @@ def _normalize_price_index_klines(symbol: str, rows: list, *, source: str) -> li
 def _normalize_binance_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
     output = []
     for row in rows:
+        ts_ms = int(row[0])
+        open_price = float(row[1])
+        high_price = float(row[2])
+        low_price = float(row[3])
+        close_price = float(row[4])
+        volume_base = float(row[5])
+        turnover_quote = float(row[7])
+        trade_count = int(row[8])
+        taker_buy_volume_base = float(row[9])
+        taker_buy_turnover_quote = float(row[10])
+        valid_taker = (
+            trade_count >= 0
+            and _is_valid_volume(taker_buy_volume_base)
+            and _is_valid_volume(taker_buy_turnover_quote)
+            and taker_buy_volume_base <= volume_base
+            and taker_buy_turnover_quote <= turnover_quote
+        )
+        if not valid_kline_numbers(
+            ts_ms=ts_ms,
+            open_price=open_price,
+            high_price=high_price,
+            low_price=low_price,
+            close_price=close_price,
+            volume_base=volume_base,
+            turnover_quote=turnover_quote,
+        ) or not valid_taker:
+            raise ValueError(f"{source} returned an invalid kline for {symbol} at {ts_ms}")
         output.append(
             {
-                "ts_ms": int(row[0]),
+                "ts_ms": ts_ms,
                 "symbol": symbol,
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "volume_base": float(row[5]),
-                "turnover_quote": float(row[7]),
-                "trade_count": int(row[8]),
-                "taker_buy_volume_base": float(row[9]),
-                "taker_buy_turnover_quote": float(row[10]),
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+                "volume_base": volume_base,
+                "turnover_quote": turnover_quote,
+                "trade_count": trade_count,
+                "taker_buy_volume_base": taker_buy_volume_base,
+                "taker_buy_turnover_quote": taker_buy_turnover_quote,
                 "source": source,
             }
         )
     return sorted(output, key=lambda item: item["ts_ms"])
 
 
-def _normalize_binance_price_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
+def _normalize_binance_price_klines(
+    symbol: str,
+    rows: list,
+    *,
+    source: str,
+    positive_prices: bool = True,
+) -> list[dict]:
     # Binance mark/index klines carry the same leading (ts, o, h, l, c) columns as Bybit's.
-    return _normalize_price_index_klines(symbol, rows, source=source)
+    return _normalize_price_index_klines(
+        symbol,
+        rows,
+        source=source,
+        positive_prices=positive_prices,
+    )
 
 
 def _normalize_binance_funding(symbol: str, rows: list[dict]) -> list[dict]:

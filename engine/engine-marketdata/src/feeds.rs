@@ -36,12 +36,14 @@ impl MarketFeeds {
             VenueName::BybitDemo | VenueName::BybitMainnet => {
                 MarketFeeds::Bybit(BybitPublicFeed::new(subs))
             }
-            VenueName::HyperliquidTestnet => MarketFeeds::Hyperliquid(
-                HyperliquidPublicFeed::new(HyperliquidRealm::Testnet, subs),
-            ),
-            VenueName::HyperliquidMainnet => MarketFeeds::Hyperliquid(
-                HyperliquidPublicFeed::new(HyperliquidRealm::Mainnet, subs),
-            ),
+            VenueName::HyperliquidTestnet => MarketFeeds::Hyperliquid(HyperliquidPublicFeed::new(
+                HyperliquidRealm::Testnet,
+                subs,
+            )),
+            VenueName::HyperliquidMainnet => MarketFeeds::Hyperliquid(HyperliquidPublicFeed::new(
+                HyperliquidRealm::Mainnet,
+                subs,
+            )),
             VenueName::LighterTestnet => {
                 MarketFeeds::Lighter(LighterPublicFeed::new(LighterRealm::Testnet, subs))
             }
@@ -51,9 +53,10 @@ impl MarketFeeds {
             VenueName::MexcMainnet => {
                 MarketFeeds::Mexc(MexcPublicFeed::new(MexcRealm::Mainnet, subs))
             }
-            VenueName::VariationalMainnet => MarketFeeds::Variational(
-                VariationalPublicFeed::new(VariationalRealm::Mainnet, subs),
-            ),
+            VenueName::VariationalMainnet => MarketFeeds::Variational(VariationalPublicFeed::new(
+                VariationalRealm::Mainnet,
+                subs,
+            )),
         }
     }
 

@@ -135,7 +135,14 @@ mod tests {
         );
         // `mainnet` alone is Bybit's realm. Accepting it here would put two
         // venues on one name in the heartbeat every producer reads.
-        for refused in ["", "mainnet", "testnet", "demo", "hyperliquid", "hl_mainnet"] {
+        for refused in [
+            "",
+            "mainnet",
+            "testnet",
+            "demo",
+            "hyperliquid",
+            "hl_mainnet",
+        ] {
             assert!(
                 HyperliquidRealm::parse(refused).is_err(),
                 "{refused:?} was accepted as a Hyperliquid realm"
@@ -165,5 +172,4 @@ mod tests {
         assert!(!HyperliquidRealm::Testnet.is_real_money());
         assert!(!HyperliquidRealm::Testnet.signs_as_mainnet());
     }
-
 }

@@ -49,6 +49,7 @@ from liquidity_migration.data.archive_manifest import (
 )
 from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.data import storage as storage_module
+from liquidity_migration.core.market_numeric import valid_kline_numbers
 from liquidity_migration.data.storage import read_dataset, replace_dataset, write_dataset
 from liquidity_migration.core.symbol_codec import (
     SymbolIdentityError,
@@ -68,8 +69,8 @@ VISION_FILES = "https://data.binance.vision"
 MONTHLY_KLINES_PREFIX = "data/futures/um/monthly/klines/"
 DAILY_KLINES_PREFIX = "data/futures/um/daily/klines/"
 
-# A (symbol, date) partition needs at least this many hourly bars to count as a
-# tradable PIT day — matches volume_events._covered_kline_date_symbol_set.
+# A (symbol, date) partition needs this many aligned hour keys plus at least one
+# valid OHLC row. Leading causal nulls remain explicit on partial listing days.
 MIN_HOURLY_BARS = 20
 _TRANSACTIONAL_DATASETS = ("klines_1h", "archive_trade_manifest")
 _INCOMPLETE_PUBLICATION_MARKER = ".binance_vision_publish_incomplete.json"
@@ -325,21 +326,34 @@ def parse_month_csv(symbol: str, raw: bytes) -> list[dict]:
                 if len(parts) < 8 or not parts[0].lstrip("-").isdigit():
                     continue  # header or malformed
                 try:
-                    rows.append(
-                        {
-                            "ts_ms": int(parts[0]),
-                            "symbol": symbol,
-                            "open": float(parts[1]),
-                            "high": float(parts[2]),
-                            "low": float(parts[3]),
-                            "close": float(parts[4]),
-                            "volume_base": float(parts[5]),
-                            "turnover_quote": float(parts[7]),
-                            "source": "binance_vision_um_1h",
-                        }
-                    )
+                    ts_ms = int(parts[0])
+                    open_price, high_price, low_price, close_price = map(float, parts[1:5])
+                    volume_base, turnover_quote = float(parts[5]), float(parts[7])
                 except ValueError:
                     continue
+                if not valid_kline_numbers(
+                    ts_ms=ts_ms,
+                    open_price=open_price,
+                    high_price=high_price,
+                    low_price=low_price,
+                    close_price=close_price,
+                    volume_base=volume_base,
+                    turnover_quote=turnover_quote,
+                ):
+                    continue
+                rows.append(
+                    {
+                        "ts_ms": ts_ms,
+                        "symbol": symbol,
+                        "open": open_price,
+                        "high": high_price,
+                        "low": low_price,
+                        "close": close_price,
+                        "volume_base": volume_base,
+                        "turnover_quote": turnover_quote,
+                        "source": "binance_vision_um_1h",
+                    }
+                )
     return rows
 
 
@@ -640,7 +654,8 @@ def validate_pit_manifest_coverage(
         )
         problems.append(
             f"{len(assessment.missing_required_date_symbols)} required symbol-day(s) "
-            f"lack >={required_bars} hourly bars (sample: {sample})"
+            f"lack >={required_bars} aligned hour keys with a valid OHLC row "
+            f"(sample: {sample})"
         )
     raise RuntimeError(
         "PIT manifest/kline validation failed; independent manifest left unchanged: "

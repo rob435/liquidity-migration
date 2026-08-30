@@ -116,30 +116,48 @@ class TestReadNewTrades:
         path = tmp_path / "trades.jsonl"
         first = json.dumps(_trade()) + "\n"
         path.write_text(first)
-        trades, offset = notify.read_new_trades(str(path), 0)
-        assert [t["symbol"] for t in trades] == ["ONGUSDT"]
-        assert offset == len(first)
+        read = notify.read_new_trades(str(path), 0)
+        assert [t["symbol"] for t in read.trades] == ["ONGUSDT"]
+        assert read.next_offset == len(first)
 
         with path.open("a") as fh:
             fh.write(json.dumps(_trade(symbol="MOVEUSDT")) + "\n")
-        trades, offset = notify.read_new_trades(str(path), offset)
-        assert [t["symbol"] for t in trades] == ["MOVEUSDT"]
-        assert offset == path.stat().st_size
+        read = notify.read_new_trades(str(path), read.next_offset)
+        assert [t["symbol"] for t in read.trades] == ["MOVEUSDT"]
+        assert read.next_offset == path.stat().st_size
 
     def test_a_half_written_line_waits_for_the_rest_of_itself(self, tmp_path: Path) -> None:
         path = tmp_path / "trades.jsonl"
         whole = json.dumps(_trade()) + "\n"
         path.write_text(whole + '{"sleeve": "carry", "sym')
-        trades, offset = notify.read_new_trades(str(path), 0)
-        assert len(trades) == 1
-        assert offset == len(whole), "the torn tail is read again next time"
+        read = notify.read_new_trades(str(path), 0)
+        assert len(read.trades) == 1
+        assert read.next_offset == len(whole), "the torn tail is read again next time"
 
     def test_a_file_that_shrank_re_baselines_rather_than_replaying(self, tmp_path: Path) -> None:
         path = tmp_path / "trades.jsonl"
         path.write_text(json.dumps(_trade()) + "\n")
-        trades, offset = notify.read_new_trades(str(path), 10_000)
-        assert trades == []
-        assert offset == path.stat().st_size
+        read = notify.read_new_trades(str(path), 10_000)
+        assert read.trades == []
+        assert read.next_offset == path.stat().st_size
+
+    def test_a_malformed_complete_line_blocks_at_its_first_byte(self, tmp_path: Path) -> None:
+        path = tmp_path / "trades.jsonl"
+        first = json.dumps(_trade()) + "\n"
+        malformed = "{broken}\n"
+        later = json.dumps(_trade(symbol="MOVEUSDT")) + "\n"
+        path.write_text(first + malformed + later)
+
+        read = notify.read_new_trades(str(path), 0)
+
+        assert [trade["symbol"] for trade in read.trades] == ["ONGUSDT"]
+        assert read.next_offset == len(first)
+        assert read.malformed_offset == len(first)
+
+        blocked = notify.read_new_trades(str(path), read.next_offset)
+        assert blocked.trades == []
+        assert blocked.next_offset == len(first)
+        assert blocked.malformed_offset == len(first)
 
 
 class TestExitMessage:
@@ -523,3 +541,135 @@ class TestOneWholeRun:
         assert len(sent) == 1 and self._bodies(sent)[0].startswith("🟢 Sun 23 Aug")
         notify.main()
         assert len(sent) == 1, "the same day is not summarised twice"
+
+    def test_a_false_send_retains_the_trade_for_retry(self, tmp_path, monkeypatch) -> None:
+        self._fleet(tmp_path, monkeypatch)
+        trades = tmp_path / "trades.jsonl"
+        trades.write_text("")
+        self._write_book(tmp_path / "carry.json", {})
+        self._write_book(tmp_path / "exodus.json", {})
+        assert notify.main() == 0
+        state_path = tmp_path / "state.json"
+        before = state_path.read_bytes()
+
+        with trades.open("a") as handle:
+            handle.write(json.dumps(_trade()) + "\n")
+        attempts: list[str] = []
+        outcomes = iter((False, True))
+
+        def sender(body, **_):
+            attempts.append(body)
+            return next(outcomes)
+
+        monkeypatch.setattr(notify, "send_telegram_message", sender)
+        assert notify.main() == 1
+        assert state_path.read_bytes() == before
+        assert notify.main() == 0
+        assert attempts[0] == attempts[1]
+        state = json.loads(state_path.read_text())
+        assert state["trade_offsets"][str(trades)] == trades.stat().st_size
+
+    def test_a_send_exception_retains_the_trade_for_retry(self, tmp_path, monkeypatch) -> None:
+        self._fleet(tmp_path, monkeypatch)
+        trades = tmp_path / "trades.jsonl"
+        trades.write_text("")
+        self._write_book(tmp_path / "carry.json", {})
+        self._write_book(tmp_path / "exodus.json", {})
+        assert notify.main() == 0
+        state_path = tmp_path / "state.json"
+        before = state_path.read_bytes()
+        with trades.open("a") as handle:
+            handle.write(json.dumps(_trade()) + "\n")
+
+        attempts = 0
+
+        def sender(_body, **_):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("offline")
+            return True
+
+        monkeypatch.setattr(notify, "send_telegram_message", sender)
+        assert notify.main() == 1
+        assert state_path.read_bytes() == before
+        assert notify.main() == 0
+        assert attempts == 2
+
+    def test_a_partial_batch_retries_every_uncommitted_update(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._fleet(tmp_path, monkeypatch)
+        trades = tmp_path / "trades.jsonl"
+        trades.write_text("")
+        self._write_book(tmp_path / "carry.json", {})
+        self._write_book(tmp_path / "exodus.json", {})
+        assert notify.main() == 0
+        state_path = tmp_path / "state.json"
+        before = state_path.read_bytes()
+        with trades.open("a") as handle:
+            handle.write(json.dumps(_trade()) + "\n")
+            handle.write(json.dumps(_trade(symbol="MOVEUSDT")) + "\n")
+
+        monkeypatch.setattr(notify, "MAX_MESSAGE_CHARS", 1)
+        attempts: list[str] = []
+        outcomes = iter((True, False, True, True))
+
+        def sender(body, **_):
+            attempts.append(body)
+            return next(outcomes)
+
+        monkeypatch.setattr(notify, "send_telegram_message", sender)
+        assert notify.main() == 1
+        assert state_path.read_bytes() == before
+        assert notify.main() == 0
+        assert attempts[:2] == attempts[2:]
+
+    def test_failed_delivery_retains_books_offsets_and_summary_day(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        self._fleet(tmp_path, monkeypatch)
+        trades = tmp_path / "trades.jsonl"
+        trades.write_text("")
+        self._write_book(tmp_path / "carry.json", {})
+        self._write_book(tmp_path / "exodus.json", {})
+        assert notify.main() == 0
+        state_path = tmp_path / "state.json"
+        before = state_path.read_bytes()
+
+        monkeypatch.setattr(notify, "yesterday_utc", lambda _now: "2026-08-23")
+        self._write_book(tmp_path / "carry.json", {"MOVEUSDT": 200.0})
+        with trades.open("a") as handle:
+            handle.write(json.dumps(_trade(closed_ms=1_787_500_000_000)) + "\n")
+        outcomes = iter((False, True))
+        monkeypatch.setattr(
+            notify,
+            "send_telegram_message",
+            lambda _body, **_: next(outcomes),
+        )
+
+        assert notify.main() == 1
+        assert state_path.read_bytes() == before
+        assert notify.main() == 0
+        state = json.loads(state_path.read_text())
+        assert state["books"]["demo/CARRY"] == {"MOVEUSDT": 200.0}
+        assert state["trade_offsets"][str(trades)] == trades.stat().st_size
+        assert state["summarised_day"] == "2026-08-23"
+
+    def test_malformed_trade_keeps_its_offset_and_exits_nonzero(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        sent = self._fleet(tmp_path, monkeypatch)
+        trades = tmp_path / "trades.jsonl"
+        trades.write_text("")
+        self._write_book(tmp_path / "carry.json", {})
+        self._write_book(tmp_path / "exodus.json", {})
+        assert notify.main() == 0
+        state_path = tmp_path / "state.json"
+        old_offset = json.loads(state_path.read_text())["trade_offsets"][str(trades)]
+
+        trades.write_text("{broken}\n" + json.dumps(_trade()) + "\n")
+        assert notify.main() == 1
+        state = json.loads(state_path.read_text())
+        assert state["trade_offsets"][str(trades)] == old_offset
+        assert sent == []

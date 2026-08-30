@@ -265,8 +265,9 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     let kinds = appends(&h.tape);
     let want = [
         "boot",
-        "note",       // boot says which mode it is in
-        "names",      // and what its sleeve and symbol ids mean
+        "note",  // boot says which mode it is in
+        "names", // and what its sleeve and symbol ids mean
+        "execution_history_checkpoint",
         "reconciled", // and what the venue said, against the log
         "intent",
         "verdict",
@@ -385,6 +386,7 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
             "boot",
             "note",
             "names",
+            "execution_history_checkpoint",
             "reconciled",
             "intent",
             "verdict",
@@ -442,6 +444,7 @@ async fn retired_control_anchors_are_ignored_and_cannot_halt_entries() {
             state: "{malformed-retired-state".into(),
         },
     ];
+    let replayed = replay_with_history_boundary(&replayed);
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
     let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
@@ -488,6 +491,7 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
         wire_ns: 3,
         arrival_mid: 0.0,
     }];
+    let replayed = replay_with_history_boundary(&replayed);
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
@@ -542,13 +546,14 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
                 side: Side::Buy,
                 qty: 9.0,
                 px: 100.0,
-                fee: 0.0,
+                fee: Some(0.0),
                 is_maker: true,
                 venue_ts_ms: recent_replay_ms(),
                 recv_ns: 1,
             },
         },
     ];
+    let replayed = replay_with_history_boundary(&replayed);
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
@@ -635,6 +640,7 @@ async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
         wire_ns: 3,
         arrival_mid: 0.0,
     }];
+    let replayed = replay_with_history_boundary(&replayed);
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -1088,7 +1094,7 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
                 side: Side::Buy,
                 qty: 1.0,
                 px: 100.0,
-                fee: 0.0,
+                fee: Some(0.0),
                 is_maker: true,
                 venue_ts_ms: fill_ms,
                 recv_ns: 1,
@@ -1639,6 +1645,40 @@ async fn a_whole_position_below_the_minimum_uses_the_venue_close_path() {
 }
 
 #[tokio::test]
+async fn a_whole_position_below_one_step_keeps_its_real_accounting_quantity() {
+    let exiter = SloppyExiter {
+        symbol: "BTCUSDT".into(),
+        sent: false,
+        qty: 0.0005,
+    };
+    let (mut engine, h) = build_with_venue_state_and_rule(
+        allow_all(),
+        vec![Box::new(exiter)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+        vec![held_long(0.0005)],
+        Some(raised_minimum_rule()),
+    )
+    .await;
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let sends = h.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].qty, 0.0005);
+    assert!(sends[0].reduce_only);
+    assert!(sends[0].close_position);
+}
+
+#[tokio::test]
 async fn a_partial_position_below_the_minimum_is_still_refused() {
     let exiter = SloppyExiter {
         symbol: "BTCUSDT".into(),
@@ -1954,7 +1994,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
                 side: Side::Buy,
                 qty: 0.01,
                 px: 30_000.0,
-                fee: 0.1,
+                fee: Some(0.1),
                 is_maker: false,
                 venue_ts_ms: recent_replay_ms() + 1,
                 recv_ns: 2,
@@ -1992,7 +2032,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
             side: Side::Buy,
             qty: 0.01,
             px: 30_000.0,
-            fee: 0.1,
+            fee: Some(0.1),
             is_maker: false,
             venue_ts_ms: 4,
             recv_ns: 4,

@@ -85,9 +85,9 @@ class _RecordingPool:
 def _bar_row(ts_ms: int, *, close: float = 100.0) -> dict:
     return {
         "ts_ms": ts_ms,
-        "open": close - 1.0,
+        "open": close,
         "high": close + 1.0,
-        "low": close - 2.0,
+        "low": max(close * 0.5, close - 1.0),
         "close": close,
         "volume_base": 10.0,
         "turnover_quote": 1000.0,
@@ -136,7 +136,7 @@ def _build_manager(
         return _instruments_payload(initial_symbols)
     def _default_klines(symbol, interval, start, end):
         # 5 days × 24 bars/day = 120 rows per symbol.
-        return [_bar_row(start + i * MS_PER_HOUR, close=float(i)) for i in range(120)]
+        return [_bar_row(start + i * MS_PER_HOUR, close=float(i + 10)) for i in range(120)]
     market = _FakeMarketData(
         instruments_factory=instruments_factory or _default_instruments,
         kline_factory=kline_factory or _default_klines,
@@ -422,7 +422,7 @@ def test_on_bar_dispatch_adds_to_store(tmp_path: Path) -> None:
         now_ms = int(time.time() * 1000)
         bar = {
             "start": (now_ms // MS_PER_HOUR) * MS_PER_HOUR,
-            "open": "1", "high": "1", "low": "1", "close": "9",
+            "open": "9", "high": "9", "low": "9", "close": "9",
             "volume": "1", "turnover": "9",
         }
         # Confirmed bar lands in the store.
@@ -449,7 +449,7 @@ def test_on_bar_sets_cycle_wake_event_on_new_confirmed_boundary(tmp_path: Path) 
         callback = pool.callbacks[-1]
         now_ms = int(time.time() * 1000)
         h = (now_ms // MS_PER_HOUR) * MS_PER_HOUR
-        bar = {"start": h, "open": "1", "high": "1", "low": "1", "close": "9", "volume": "1", "turnover": "9"}
+        bar = {"start": h, "open": "9", "high": "9", "low": "9", "close": "9", "volume": "1", "turnover": "9"}
 
         # Confirmed new-boundary bar -> wake set.
         wake.clear()

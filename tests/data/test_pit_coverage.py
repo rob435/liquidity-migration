@@ -101,6 +101,10 @@ def test_coverage_fresh_manifest_is_not_stale(tmp_path):
     assert st.manifest_margin_days == 0
     assert st.manifest_lag_vs_klines_days == 1
     assert st.per_symbol_manifest_lags == ()
+    msg = pc.format_coverage(st)
+    assert "Date endpoints do not prove row-level PIT reconcile" in msg
+    assert "validate-manifest" in msg
+    assert "Strict PIT reconcile is valid" not in msg
 
 
 def test_coverage_stale_manifest_flagged(tmp_path):

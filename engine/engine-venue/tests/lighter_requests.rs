@@ -19,7 +19,8 @@ use serde_json::Value;
 use support::{Recorded, TestServer};
 
 /// Forty bytes of hex; obviously not a real key.
-const KEY: &str = "0101010101010101010101010101010101010101010101010101010101010101010101010101010f";
+const KEY: &str =
+    "0101010101010101010101010101010101010101010101010101010101010101010101010101010f";
 const ACCOUNT: &str = "42:3";
 
 fn gateway(server: &TestServer) -> LighterGateway {
@@ -79,7 +80,9 @@ fn transaction(request: &Recorded) -> (u8, Value) {
     let mut tx_type = 0u8;
     let mut info = String::new();
     for pair in request.body.split('&') {
-        let Some((key, value)) = pair.split_once('=') else { continue };
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
         match key {
             "tx_type" => tx_type = value.parse().expect("a transaction type"),
             "tx_info" => info = percent_decode(value),
@@ -114,7 +117,10 @@ async fn an_order_goes_out_form_encoded_with_its_transaction_type() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     gw.send_order(&entry(
-        OrderKind::Limit { px: 95_000.15, tif: TimeInForce::PostOnly },
+        OrderKind::Limit {
+            px: 95_000.15,
+            tif: TimeInForce::PostOnly,
+        },
         None,
     ))
     .await
@@ -147,7 +153,10 @@ async fn prices_and_sizes_are_the_markets_own_integers() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     gw.send_order(&entry(
-        OrderKind::Limit { px: 95_000.15, tif: TimeInForce::Gtc },
+        OrderKind::Limit {
+            px: 95_000.15,
+            tif: TimeInForce::Gtc,
+        },
         None,
     ))
     .await
@@ -166,14 +175,24 @@ async fn prices_and_sizes_are_the_markets_own_integers() {
 async fn every_transaction_carries_a_signature() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
-    gw.send_order(&entry(OrderKind::Limit { px: 95_000.0, tif: TimeInForce::Gtc }, None))
-        .await
-        .unwrap();
+    gw.send_order(&entry(
+        OrderKind::Limit {
+            px: 95_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        None,
+    ))
+    .await
+    .unwrap();
     let (_, tx) = transaction(&server.to_path("/api/v1/sendTx")[0]);
     let signature = tx["Sig"].as_str().expect("a signature");
     // Eighty bytes, base64.
     assert_eq!(signature.len(), 108, "{signature}");
-    assert_ne!(signature.trim_matches('A'), "", "the signature is all zeros");
+    assert_ne!(
+        signature.trim_matches('A'),
+        "",
+        "the signature is all zeros"
+    );
 }
 
 #[tokio::test]
@@ -183,8 +202,13 @@ async fn a_stop_is_a_second_transaction_on_the_other_side() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     gw.send_order(&entry(
-        OrderKind::Limit { px: 95_000.0, tif: TimeInForce::Gtc },
-        Some(StopSpec { trigger_px: 93_000.0 }),
+        OrderKind::Limit {
+            px: 95_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        Some(StopSpec {
+            trigger_px: 93_000.0,
+        }),
     ))
     .await
     .unwrap();
@@ -208,7 +232,10 @@ async fn a_stop_is_a_second_transaction_on_the_other_side() {
     assert_ne!(stop["Price"], stop["TriggerPrice"]);
     // And its nonce is the next one, not a repeat.
     let (_, first) = transaction(&sent[0]);
-    assert_ne!(stop["Nonce"], first["Nonce"], "two transactions shared a nonce");
+    assert_ne!(
+        stop["Nonce"], first["Nonce"],
+        "two transactions shared a nonce"
+    );
 }
 
 #[tokio::test]
@@ -223,7 +250,10 @@ async fn a_stop_the_venue_refuses_does_not_unsay_the_entry_it_accepted() {
         if request.path == "/api/v1/sendTx" {
             let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n == 1 {
-                return (200, r#"{"code":21120,"message":"trigger price out of range"}"#.to_string());
+                return (
+                    200,
+                    r#"{"code":21120,"message":"trigger price out of range"}"#.to_string(),
+                );
             }
         }
         answer(request)
@@ -232,13 +262,22 @@ async fn a_stop_the_venue_refuses_does_not_unsay_the_entry_it_accepted() {
     let mut gw = gateway(&server);
     let ack = gw
         .send_order(&entry(
-            OrderKind::Limit { px: 95_000.0, tif: TimeInForce::Gtc },
-            Some(StopSpec { trigger_px: 93_000.0 }),
+            OrderKind::Limit {
+                px: 95_000.0,
+                tif: TimeInForce::Gtc,
+            },
+            Some(StopSpec {
+                trigger_px: 93_000.0,
+            }),
         ))
         .await
         .expect("the entry was accepted, so the order exists");
     assert_eq!(ack.client_order_id, "eng-1700000000000-1");
-    assert_eq!(server.to_path("/api/v1/sendTx").len(), 2, "both were attempted");
+    assert_eq!(
+        server.to_path("/api/v1/sendTx").len(),
+        2,
+        "both were attempted"
+    );
 }
 
 #[tokio::test]
@@ -246,8 +285,13 @@ async fn an_exit_never_carries_a_stop_even_when_handed_one() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     let mut exit = entry(
-        OrderKind::Limit { px: 96_000.0, tif: TimeInForce::Gtc },
-        Some(StopSpec { trigger_px: 93_000.0 }),
+        OrderKind::Limit {
+            px: 96_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        Some(StopSpec {
+            trigger_px: 93_000.0,
+        }),
     );
     exit.reduce_only = true;
     exit.side = Side::Sell;
@@ -262,13 +306,18 @@ async fn an_exit_never_carries_a_stop_even_when_handed_one() {
 async fn a_cancel_names_the_order_by_the_index_the_engine_minted() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
-    gw.cancel_order(SymbolId(0), "eng-1700000000000-1").await.unwrap();
+    gw.cancel_order(SymbolId(0), "eng-1700000000000-1")
+        .await
+        .unwrap();
 
     let (tx_type, tx) = transaction(&server.to_path("/api/v1/sendTx")[0]);
     assert_eq!(tx_type, 15, "the venue's cancel transaction type");
     assert_eq!(tx["MarketIndex"], 0);
     let index = tx["Index"].as_i64().expect("a client order index");
-    assert!(index > 0 && index < (1 << 48), "outside the venue's range: {index}");
+    assert!(
+        index > 0 && index < (1 << 48),
+        "outside the venue's range: {index}"
+    );
 }
 
 #[tokio::test]
@@ -278,9 +327,15 @@ async fn the_nonce_is_asked_for_once_and_then_counted() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     for _ in 0..3 {
-        gw.send_order(&entry(OrderKind::Limit { px: 95_000.0, tif: TimeInForce::Gtc }, None))
-            .await
-            .unwrap();
+        gw.send_order(&entry(
+            OrderKind::Limit {
+                px: 95_000.0,
+                tif: TimeInForce::Gtc,
+            },
+            None,
+        ))
+        .await
+        .unwrap();
     }
     assert_eq!(
         server.to_path("/api/v1/nextNonce").len(),
@@ -301,14 +356,23 @@ async fn a_refused_transaction_makes_the_next_one_ask_again() {
     // not have consumed the nonce of the one it refused.
     let server = TestServer::start(|request, count| {
         if request.path == "/api/v1/sendTx" && count == 0 {
-            return (200, r#"{"code":21120,"message":"invalid nonce"}"#.to_string());
+            return (
+                200,
+                r#"{"code":21120,"message":"invalid nonce"}"#.to_string(),
+            );
         }
         answer(request)
     })
     .await;
     let mut gw = gateway(&server);
     let refused = gw
-        .send_order(&entry(OrderKind::Limit { px: 95_000.0, tif: TimeInForce::Gtc }, None))
+        .send_order(&entry(
+            OrderKind::Limit {
+                px: 95_000.0,
+                tif: TimeInForce::Gtc,
+            },
+            None,
+        ))
         .await;
     match refused {
         Err(VenueError::Rejected { code, message }) => {
@@ -317,9 +381,15 @@ async fn a_refused_transaction_makes_the_next_one_ask_again() {
         }
         other => panic!("expected a rejection, got {other:?}"),
     }
-    gw.send_order(&entry(OrderKind::Limit { px: 95_000.0, tif: TimeInForce::Gtc }, None))
-        .await
-        .unwrap();
+    gw.send_order(&entry(
+        OrderKind::Limit {
+            px: 95_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        None,
+    ))
+    .await
+    .unwrap();
     assert_eq!(
         server.to_path("/api/v1/nextNonce").len(),
         2,
@@ -351,22 +421,34 @@ async fn a_busy_window_is_walked_rather_than_truncated() {
                     })
                     .collect()
             } else {
-                vec![r#"{"trade_id":9001,"market_id":0,"size":"0.01","price":"95000",
+                vec![
+                    r#"{"trade_id":9001,"market_id":0,"size":"0.01","price":"95000",
                          "timestamp":1200,"fee":"0.01","is_maker_ask":true,
                          "ask_account_id":99,"bid_account_id":42,
                          "bid_client_order_index":1,"ask_client_order_index":2}"#
-                    .to_string()]
+                        .to_string(),
+                ]
             };
-            return (200, format!(r#"{{"code":200,"trades":[{}]}}"#, rows.join(",")));
+            return (
+                200,
+                format!(r#"{{"code":200,"trades":[{}]}}"#, rows.join(",")),
+            );
         }
         answer(request)
     })
     .await;
     let mut gw = gateway(&server);
     let fills = gw.executions(0, 100_000).await.expect("a walked history");
-    assert_eq!(server.to_path("/api/v1/trades").len(), 2, "the full page was taken as the end");
+    assert_eq!(
+        server.to_path("/api/v1/trades").len(),
+        2,
+        "the full page was taken as the end"
+    );
     assert_eq!(fills.len(), 101, "a fill past the first page was lost");
-    assert!(fills.iter().any(|f| f.exec_id == "9001"), "the second page never arrived");
+    assert!(
+        fills.iter().any(|f| f.exec_id == "9001"),
+        "the second page never arrived"
+    );
 }
 
 #[tokio::test]
@@ -425,9 +507,19 @@ async fn an_amend_is_refused_rather_than_turned_into_a_different_trade() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
     let refused = gw
-        .amend_order(SymbolId(0), "eng-1", AmendSpec { px: Some(1.0), qty: None })
+        .amend_order(
+            SymbolId(0),
+            "eng-1",
+            AmendSpec {
+                px: Some(1.0),
+                qty: None,
+            },
+        )
         .await;
-    assert!(matches!(refused, Err(VenueError::BadRequest(_))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(VenueError::BadRequest(_))),
+        "{refused:?}"
+    );
     assert!(server.to_path("/api/v1/sendTx").is_empty());
     assert!(!gw.caps().amend_in_place);
 }

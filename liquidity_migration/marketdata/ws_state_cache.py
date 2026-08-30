@@ -98,8 +98,10 @@ class TickerCache:
             applied = 0
             for row in _message_rows(message):
                 try:
-                    self._apply_ticker_update_locked(row)
-                    applied += 1
+                    if self._apply_ticker_update_locked(row):
+                        applied += 1
+                    else:
+                        self._stats.dropped_events += 1
                 except Exception as exc:
                     self._stats.dropped_events += 1
                     _logger.warning("ticker_cache event drop: %s", exc)
@@ -180,21 +182,25 @@ class TickerCache:
 
     # -- internals -----------------------------------------------------
 
-    def _apply_ticker_update_locked(self, row: Mapping[str, Any]) -> None:
+    def _apply_ticker_update_locked(self, row: Mapping[str, Any]) -> bool:
         symbol = str(row.get("symbol", "") or "")
-        if not symbol:
-            return
+        updates = {
+            key: value
+            for key, value in row.items()
+            if key != "symbol" and value is not None
+        }
+        if not symbol or not updates:
+            return False
         self._symbol_update_monotonic[symbol] = time.monotonic()
         existing = self._rows_by_symbol.get(symbol)
         if existing is None:
-            self._rows_by_symbol[symbol] = dict(row)
-            return
+            self._rows_by_symbol[symbol] = {"symbol": symbol, **updates}
+            return True
         # pybit already accumulates deltas into a complete row, but merge non-None
         # fields anyway in case that changes. Copy then rebind rather than mutate
         # in place, so readers never observe a partial merge.
         merged = dict(existing)
-        for key, value in row.items():
-            if value is None:
-                continue
+        for key, value in updates.items():
             merged[key] = value
         self._rows_by_symbol[symbol] = merged
+        return True

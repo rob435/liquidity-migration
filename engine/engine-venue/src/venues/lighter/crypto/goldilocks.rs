@@ -78,7 +78,11 @@ pub(crate) fn reduce128(x: u128) -> u64 {
     }
     let t1 = hi_lo.wrapping_mul(EPSILON);
     let (sum, carried) = t0.overflowing_add(t1);
-    let folded = if carried { sum.wrapping_add(EPSILON) } else { sum };
+    let folded = if carried {
+        sum.wrapping_add(EPSILON)
+    } else {
+        sum
+    };
     canonical(folded)
 }
 

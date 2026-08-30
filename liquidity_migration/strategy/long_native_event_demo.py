@@ -499,7 +499,7 @@ def run_long_native_demo_cycle(
             now_ms=cycle_now_ms,
             strategy=strategy,
             price_by_symbol=price_by_symbol,
-            max_new_entries=demo.max_new_entries_per_cycle,
+            max_new_entries=None,
             funnel_observer=funnel_observer,
             retrace_watch=retrace_watch,
         )
@@ -509,7 +509,7 @@ def run_long_native_demo_cycle(
             # The judged gate is an entry source inside this sleeve, not a
             # second strategy: its events become candidates in the native
             # shape and share every cut below. Native candidates keep their
-            # order; the per-cycle pacing cap then applies to the union.
+            # score order and stay ahead of the judged-gate source.
             gate_candidates, gate_skips = _llm_gate_candidates(
                 gate_events,
                 strategy=strategy,
@@ -525,7 +525,6 @@ def run_long_native_demo_cycle(
                 for candidate in candidates
                 if candidate["symbol"] not in gate_symbols
             ] + gate_candidates
-            candidates = candidates[: max(demo.max_new_entries_per_cycle, 0)]
         repeated_attempts = [
             candidate
             for candidate in candidates
@@ -606,13 +605,7 @@ def run_long_native_demo_cycle(
                     if str(candidate.get("symbol") or "").upper() not in blocked_symbols
                 ]
 
-        current_trades = book_state.as_trade_rows()
-        free_slots = max(
-            strategy.max_concurrent_positions - _count_long_target_reservations(current_trades),
-            0,
-        )
-        candidates = candidates[:free_slots]
-        entry_candidates = len(candidates)
+        entry_limit = max(demo.max_new_entries_per_cycle, 0)
         skipped_engine_account_health = 0
 
         asked_before = set(book_state.held)
@@ -633,7 +626,16 @@ def run_long_native_demo_cycle(
                 if engine_reading is not None
                 else {}
             ),
+            max_new_entries=entry_limit,
+            max_total_positions=strategy.max_concurrent_positions,
         )
+        admitted_symbols = set(book_state.held) - asked_before
+        candidates = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("symbol") or "").upper() in admitted_symbols
+        ]
+        entry_candidates = len(candidates)
         # State lands before its matching book. If the process dies between the
         # two writes, the old book is conservative and the next cycle repairs it.
         write_book_state(book_state_path, book_state)
@@ -979,7 +981,15 @@ def _llm_gate_candidates(
     }
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for event in events:
+    for event in sorted(
+        events,
+        key=lambda item: (
+            -int(_float(item.get("trigger_ts_ms"))),
+            -_float(item.get("score")),
+            _float(item.get("turnover_rank")) or 1e9,
+            str(item.get("symbol") or "").upper(),
+        ),
+    ):
         symbol = str(event.get("symbol") or "").upper()
         score = _float(event.get("score"))
         trigger_ts_ms = int(_float(event.get("trigger_ts_ms")))
@@ -1077,7 +1087,7 @@ def _select_long_entry_candidates(
     now_ms: int,
     strategy: LongNativeConfig,
     price_by_symbol: dict[str, float],
-    max_new_entries: int,
+    max_new_entries: int | None,
     funnel_observer: DecisionFunnelObserver | None = None,
     funnel_venue: str = "bybit",
     retrace_watch: list[dict[str, Any]] | None = None,
@@ -1296,7 +1306,9 @@ def _select_long_entry_candidates(
             str(c["symbol"]),
         )
     )
-    return deduped[:max_new_entries], skips
+    if max_new_entries is None:
+        return deduped, skips
+    return deduped[: max(max_new_entries, 0)], skips
 
 
 def _long_pre_gate_funnel_rows(
@@ -1597,6 +1609,8 @@ def _advance_long_book_state(
     cooldown_days: int,
     held_symbols: frozenset[str] | None,
     venue_holdings: Mapping[str, tuple[str, float, float]] | None = None,
+    max_new_entries: int | None = None,
+    max_total_positions: int | None = None,
 ) -> tuple[LongBookState, list[str]]:
     """Move the record on by one cycle: drop what exited, add what entered.
 
@@ -1690,7 +1704,12 @@ def _advance_long_book_state(
         left_at_ms[symbol] = now_ms
     attempted_signals_ms = dict(state.attempted_signals_ms)
 
+    entries_added = 0
     for candidate in candidates:
+        if max_new_entries is not None and entries_added >= max(max_new_entries, 0):
+            break
+        if max_total_positions is not None and len(held) >= max(max_total_positions, 0):
+            break
         trade_id = str(candidate.get("trade_id") or "")
         symbol = str(candidate.get("symbol") or "").upper()
         signal_ts_ms = int(candidate.get("signal_ts_ms") or 0)
@@ -1754,6 +1773,7 @@ def _advance_long_book_state(
         )
         attempted_signals_ms[symbol] = signal_ts_ms
         left_at_ms.pop(symbol, None)
+        entries_added += 1
 
     # A name out of cooldown no longer changes any decision, and keeping every
     # symbol ever traded would grow this file without end.

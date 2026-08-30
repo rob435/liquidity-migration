@@ -50,7 +50,7 @@ fn fill(side: Side, px: f64, qty: f64, arrival_mid: f64) -> Fill {
         side,
         qty,
         px,
-        fee: 0.0,
+        fee: Some(0.0),
         is_maker: false,
         arrival_mid,
         venue_ts_ms: 1_700_000_000_000,
@@ -237,7 +237,7 @@ fn an_average_of_nothing_is_not_zero() {
 fn the_ledger_prices_a_fill_against_the_book_when_the_order_left() {
     let mut fills = Fills::default();
     let mut f = fill(Side::Buy, 101.0, 10.0, 100.0);
-    f.fee = 0.5555;
+    f.fee = Some(0.5555);
     fills.on_fill(&f, 0);
 
     let total = fills.total();
@@ -247,6 +247,40 @@ fn the_ledger_prices_a_fill_against_the_book_when_the_order_left() {
     assert_eq!(total.fee.mean(), Some(5.5));
     assert_eq!(total.all_in_arrival_bps(), Some(105.5));
     assert_eq!(total.arrival_coverage(), Some(1.0));
+    assert_eq!(total.fee_coverage(), Some(1.0));
+    assert_eq!(total.fee_usdt, Some(0.5555));
+}
+
+#[test]
+fn an_unstated_fee_is_not_folded_as_zero() {
+    let mut fills = Fills::default();
+    let mut known = fill(Side::Buy, 100.0, 10.0, 100.0);
+    known.fee = Some(1.0);
+    fills.on_fill(&known, 0);
+
+    let mut unknown = fill(Side::Buy, 100.0, 10.0, 100.0);
+    unknown.client_order_id = "eng-2".into();
+    unknown.fee = None;
+    fills.on_fill(&unknown, 0);
+
+    let total = fills.total();
+    assert_eq!(total.fills, 2);
+    assert_eq!(
+        total.fee_usdt, None,
+        "the incomplete sum is not zero-filled"
+    );
+    assert_eq!(total.fee.mean(), Some(10.0), "the known half stays usable");
+    assert_eq!(total.fee_coverage(), Some(0.5));
+    assert_eq!(total.all_in_arrival_bps(), Some(10.0));
+    assert_eq!(
+        total.all_in.weight, 1_000.0,
+        "only the known half contributes"
+    );
+
+    let mut explicit_zero = Fills::default();
+    explicit_zero.on_fill(&fill(Side::Buy, 100.0, 1.0, 100.0), 0);
+    assert_eq!(explicit_zero.total().fee_usdt, Some(0.0));
+    assert_eq!(explicit_zero.total().fee_coverage(), Some(1.0));
 }
 
 #[test]
@@ -303,10 +337,10 @@ fn the_all_in_number_is_not_two_means_over_different_fills() {
     // different populations, and the rollup is exactly where they diverge.
     let mut fills = Fills::default();
     let mut measured = fill(Side::Buy, 101.0, 10.0, 100.0);
-    measured.fee = 0.5555; // 5.5 bp on 1,010
+    measured.fee = Some(0.5555); // 5.5 bp on 1,010
     fills.on_fill(&measured, 0);
     let mut blind = fill(Side::Buy, 101.0, 10.0, 0.0);
-    blind.fee = 10.1; // 100 bp, and no book to measure the rest against
+    blind.fee = Some(10.1); // 100 bp, and no book to measure the rest against
     fills.on_fill(&blind, 0);
 
     let total = fills.total();
@@ -518,7 +552,7 @@ fn filled(id: &str, px: f64, is_maker: bool) -> WalRecord {
             side: Side::Buy,
             qty: 10.0,
             px,
-            fee: 0.5555,
+            fee: Some(0.5555),
             is_maker,
             venue_ts_ms: 1_700_000_000_000,
             recv_ns: 1,
@@ -553,7 +587,7 @@ fn the_log_alone_says_what_the_trading_cost() {
                 side: Side::Buy,
                 qty: 10.0,
                 px,
-                fee: 0.5555,
+                fee: Some(0.5555),
                 is_maker,
                 arrival_mid: 100.0,
                 venue_ts_ms: 1_700_000_000_000,
@@ -710,7 +744,7 @@ fn filled_for(id: &str, symbol: SymbolId, px: f64) -> WalRecord {
             side: Side::Buy,
             qty: 10.0,
             px,
-            fee: 0.0,
+            fee: Some(0.0),
             is_maker: false,
             venue_ts_ms: 1_700_000_000_000,
             recv_ns: 1,
@@ -792,7 +826,7 @@ fn recovered(id: &str, symbol: SymbolId, px: f64, venue_ts_ms: i64) -> WalRecord
         side: Side::Buy,
         qty: 10.0,
         px,
-        fee: 0.5,
+        fee: Some(0.5),
         is_maker: false,
         venue_ts_ms,
         recovered_wall_ts_ms: venue_ts_ms + 60_000,
@@ -950,7 +984,7 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
                 side,
                 qty,
                 px,
-                fee: 0.0,
+                fee: Some(0.0),
                 is_maker: false,
                 venue_ts_ms: 1,
                 recv_ns: 1,
@@ -989,7 +1023,7 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
             side: Side::Sell,
             qty: 2.0,
             px: 110.0,
-            fee: 0.0,
+            fee: Some(0.0),
             is_maker: false,
             arrival_mid: 0.0,
             venue_ts_ms: 9,
@@ -1026,6 +1060,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
         logged_exposure: vec![],
         intended_stops: vec![],
         recent_execution_ids: vec![],
+        execution_history_through_ms: Some(1),
         open_orders: vec![],
     };
     fn order(id: &str) -> WalRecord {
@@ -1054,7 +1089,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
                 side,
                 qty,
                 px,
-                fee: 0.0,
+                fee: Some(0.0),
                 is_maker: false,
                 venue_ts_ms: 1,
                 recv_ns: 1,

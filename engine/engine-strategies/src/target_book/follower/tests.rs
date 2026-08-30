@@ -134,8 +134,7 @@ fn an_empty_book_exits_everything_held() {
 fn a_fresh_follower_exits_a_dynamic_symbol_named_by_a_zero_target() {
     let mut h = Harness::new(follower(&["SEEDUSDT"]));
     h.ctx.set_wall_ms(NOW_MS);
-    h.ctx
-        .set_position("DYNAMICUSDT", Side::Sell, 4.0, 10.0);
+    h.ctx.set_position("DYNAMICUSDT", Side::Sell, 4.0, 10.0);
 
     h.targets(book(vec![target("DYNAMICUSDT", 0.0)]));
 
@@ -419,7 +418,10 @@ fn a_refused_entry_and_an_unfillable_size_are_published_for_the_producer() {
     let mut h = bench(&["KAITOUSDT", "COTIUSDT"], 10.0);
 
     // COTI at $4 is under the $6 entry floor: planned, then skipped.
-    h.targets(book(vec![target("KAITOUSDT", 100.0), target("COTIUSDT", 4.0)]));
+    h.targets(book(vec![
+        target("KAITOUSDT", 100.0),
+        target("COTIUSDT", 4.0),
+    ]));
     assert_eq!(h.drain().len(), 1, "only KAITO is enterable");
 
     let blockers = h.strategy.entry_blockers();
@@ -430,7 +432,11 @@ fn a_refused_entry_and_an_unfillable_size_are_published_for_the_producer() {
     );
 
     let symbol = h.ctx.id_of("KAITOUSDT");
-    h.refuse_as(symbol, false, "AvailableMarginExhausted { available_usdt: 0.5 }");
+    h.refuse_as(
+        symbol,
+        false,
+        "AvailableMarginExhausted { available_usdt: 0.5 }",
+    );
     h.quote("KAITOUSDT", 9.5, 10.5);
 
     let mut blockers = h.strategy.entry_blockers();
@@ -438,10 +444,7 @@ fn a_refused_entry_and_an_unfillable_size_are_published_for_the_producer() {
     assert_eq!(
         blockers,
         vec![
-            (
-                "COTIUSDT".to_string(),
-                "below_entry_floor".to_string()
-            ),
+            ("COTIUSDT".to_string(), "below_entry_floor".to_string()),
             (
                 "KAITOUSDT".to_string(),
                 "AvailableMarginExhausted { available_usdt: 0.5 }".to_string(),
@@ -452,7 +455,10 @@ fn a_refused_entry_and_an_unfillable_size_are_published_for_the_producer() {
 
     // A new book clears the kernel latch; once COTI's ask clears the floor
     // it stops being reported too.
-    h.targets(book(vec![target("KAITOUSDT", 100.0), target("COTIUSDT", 40.0)]));
+    h.targets(book(vec![
+        target("KAITOUSDT", 100.0),
+        target("COTIUSDT", 40.0),
+    ]));
     h.drain();
     assert!(
         h.strategy.entry_blockers().is_empty(),
@@ -480,7 +486,10 @@ fn what_was_sent_is_remembered_until_the_reading_shows_it() {
         "nothing resting and a stale reading must not become a second entry"
     );
     h.quote("KAITOUSDT", 9.4, 10.6);
-    assert!(h.drain().is_empty(), "and it does not drift back on later quotes");
+    assert!(
+        h.drain().is_empty(),
+        "and it does not drift back on later quotes"
+    );
 }
 
 #[test]
@@ -507,7 +516,9 @@ fn a_bigger_target_adds_and_carries_a_stop_anchored_on_the_entry() {
     assert!(!intent.reduce_only);
     // Adding is opening, and the risk kernel refuses an opening order with
     // no stop, so the whole position's stop is re-declared here.
-    let stop = intent.stop.expect("an addition carries a stop or it is refused");
+    let stop = intent
+        .stop
+        .expect("an addition carries a stop or it is refused");
     assert!(
         (stop.trigger_px - 7.8).abs() < 1e-9,
         "35% below the 12.0 entry, got {}",
@@ -634,7 +645,10 @@ fn entries_cross_the_spread_unless_the_config_asks_them_to_rest() {
     let mut h = bench(&["KAITOUSDT"], 10.0);
     h.targets(book(vec![target("KAITOUSDT", 60.0)]));
     let intent = h.one_intent();
-    assert!(intent.work.is_none(), "an entry crosses unless asked otherwise");
+    assert!(
+        intent.work.is_none(),
+        "an entry crosses unless asked otherwise"
+    );
 }
 
 /// The same bench, but with the follower told to rest its entries.
@@ -644,9 +658,8 @@ fn resting_bench(symbols: &[&str], px: f64) -> Harness {
         .map(|s| format!("\"{s}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let config: toml::Value =
-        toml::from_str(&format!("symbols = [{list}]\nrest_entries = true\n"))
-            .expect("test config parses");
+    let config: toml::Value = toml::from_str(&format!("symbols = [{list}]\nrest_entries = true\n"))
+        .expect("test config parses");
     let plug = TargetBookFollower::from_params(StrategyId(0), &config).expect("it builds");
     let mut h = Harness::new(Box::new(plug));
     h.ctx.set_wall_ms(NOW_MS);
@@ -689,7 +702,10 @@ fn trimming_a_position_is_not_worked_either() {
     h.targets(book(vec![target("KAITOUSDT", 30.0)]));
     let intent = h.one_intent();
     assert!(intent.reduce_only, "60 USDT down to 30 is a trim");
-    assert!(intent.work.is_none(), "a trim takes exposure off; it does not wait for a price");
+    assert!(
+        intent.work.is_none(),
+        "a trim takes exposure off; it does not wait for a price"
+    );
 }
 
 #[test]
@@ -718,16 +734,18 @@ fn the_resting_dials_reach_the_policy_the_entry_carries() {
     h.targets(book(vec![target("KAITOUSDT", 60.0)]));
 
     let work = h.one_intent().work.expect("the entry is worked");
-    assert!(work.hold_decision_px, "a dial the config sets and nothing reads is not a dial");
+    assert!(
+        work.hold_decision_px,
+        "a dial the config sets and nothing reads is not a dial"
+    );
     assert!(work.give_up_instead_of_crossing);
 }
 
 #[test]
 fn a_resting_dial_without_resting_is_refused_rather_than_left_inert() {
-    let bad: toml::Value = toml::from_str(
-        "symbols = [\"KAITOUSDT\"]\nhold_decision_price = true\n",
-    )
-    .expect("test config parses");
+    let bad: toml::Value =
+        toml::from_str("symbols = [\"KAITOUSDT\"]\nhold_decision_price = true\n")
+            .expect("test config parses");
     assert!(TargetBookFollower::from_params(StrategyId(0), &bad).is_err());
 }
 
@@ -736,16 +754,17 @@ fn the_resting_dials_are_off_unless_the_config_says_otherwise() {
     let mut h = resting_bench(&["KAITOUSDT"], 10.0);
     h.targets(book(vec![target("KAITOUSDT", 60.0)]));
     let work = h.one_intent().work.expect("the entry is worked");
-    assert!(!work.hold_decision_px, "the measured recipe is what a silent config gets");
+    assert!(
+        !work.hold_decision_px,
+        "the measured recipe is what a silent config gets"
+    );
     assert!(!work.give_up_instead_of_crossing);
 }
 
 #[test]
 fn a_rest_entries_value_that_is_not_true_or_false_is_refused() {
-    let bad: toml::Value = toml::from_str(
-        "symbols = [\"KAITOUSDT\"]\nrest_entries = \"yes\"\n",
-    )
-    .expect("test config parses");
+    let bad: toml::Value = toml::from_str("symbols = [\"KAITOUSDT\"]\nrest_entries = \"yes\"\n")
+        .expect("test config parses");
     assert!(TargetBookFollower::from_params(StrategyId(0), &bad).is_err());
 }
 
@@ -761,7 +780,10 @@ fn stopped_out(h: &mut Harness) {
     h.ctx.set_wall_ms(NOW_MS);
     h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));
-    assert!(h.drain().is_empty(), "already at target, so nothing is sent");
+    assert!(
+        h.drain().is_empty(),
+        "already at target, so nothing is sent"
+    );
     h.ctx.set_position("KAITOUSDT", Side::Buy, 0.0, 10.0);
 }
 
@@ -787,7 +809,10 @@ fn the_same_book_written_again_does_not_clear_the_latch() {
 
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));
 
-    assert!(h.drain().is_empty(), "a fresh copy of the same decision is not new news");
+    assert!(
+        h.drain().is_empty(),
+        "a fresh copy of the same decision is not new news"
+    );
 }
 
 #[test]
@@ -819,7 +844,10 @@ fn a_latched_name_is_not_exited_either() {
     h.ctx.set_position("KAITOUSDT", Side::Buy, 10.0, 10.0);
     h.quote("KAITOUSDT", 9.5, 10.5);
 
-    assert!(h.drain().is_empty(), "no exit for a name we were told to leave alone");
+    assert!(
+        h.drain().is_empty(),
+        "no exit for a name we were told to leave alone"
+    );
 }
 
 #[test]
@@ -910,7 +938,8 @@ fn a_follower_does_not_exit_a_position_another_sleeve_opened() {
     // never opened.
     let mut h = bench(&["KAITOUSDT", "BTCUSDT"], 10.0);
     h.ctx.set_wall_ms(NOW_MS);
-    h.ctx.set_foreign_position("BTCUSDT", Side::Buy, 1.0, 60_000.0);
+    h.ctx
+        .set_foreign_position("BTCUSDT", Side::Buy, 1.0, 60_000.0);
 
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));
 
@@ -955,7 +984,10 @@ fn a_follower_does_not_add_to_a_hand_position_either() {
 
     h.targets(book(vec![target("BTCUSDT", 100_000.0)]));
 
-    assert!(h.drain().is_empty(), "the hand position is left alone entirely");
+    assert!(
+        h.drain().is_empty(),
+        "the hand position is left alone entirely"
+    );
 }
 
 #[test]
@@ -971,7 +1003,8 @@ fn our_own_position_is_still_exited_when_the_book_stops_naming_it() {
     let sent = h.drain();
     let btc = h.ctx.id_of("BTCUSDT");
     assert!(
-        sent.iter().any(|intent| intent.symbol == btc && intent.reduce_only),
+        sent.iter()
+            .any(|intent| intent.symbol == btc && intent.reduce_only),
         "our own position still exits, got {sent:?}"
     );
 }
@@ -982,7 +1015,8 @@ fn a_follower_does_not_enter_a_name_another_sleeve_is_holding() {
     // position means the second entry would silently replace the first's.
     let mut h = bench(&["KAITOUSDT"], 10.0);
     h.ctx.set_wall_ms(NOW_MS);
-    h.ctx.set_foreign_position("KAITOUSDT", Side::Buy, 5.0, 10.0);
+    h.ctx
+        .set_foreign_position("KAITOUSDT", Side::Buy, 5.0, 10.0);
 
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));
 
@@ -996,7 +1030,8 @@ fn a_follower_does_not_enter_a_name_another_sleeve_is_holding() {
 fn a_name_the_other_sleeve_lets_go_of_becomes_ours_again() {
     let mut h = bench(&["KAITOUSDT"], 10.0);
     h.ctx.set_wall_ms(NOW_MS);
-    h.ctx.set_foreign_position("KAITOUSDT", Side::Buy, 5.0, 10.0);
+    h.ctx
+        .set_foreign_position("KAITOUSDT", Side::Buy, 5.0, 10.0);
     h.targets(book(vec![target("KAITOUSDT", 100.0)]));
     assert!(h.drain().is_empty(), "not ours yet");
 
@@ -1053,5 +1088,8 @@ fn an_empty_first_book_closes_an_attributed_nonseed_position_after_restart() {
 
     let intent = h.one_intent();
     assert_eq!(intent.symbol, h.ctx.id_of("ONTUSDT"));
-    assert!(intent.reduce_only, "the recovered carry position must close");
+    assert!(
+        intent.reduce_only,
+        "the recovered carry position must close"
+    );
 }

@@ -30,7 +30,10 @@ use crate::json::{int_field, num_field, opt_num_field, str_field};
 /// Unwrap the `{"status": ..., "response": ...}` envelope every `/exchange`
 /// reply shares.
 pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
-    let status = envelope.get("status").and_then(Value::as_str).unwrap_or_default();
+    let status = envelope
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if status != "ok" {
         // The failure body is a bare string on this venue, not an object.
         let message = match envelope.get("response") {
@@ -77,7 +80,9 @@ pub(crate) fn all_accepted(data: &Value) -> Result<Vec<Value>, VenueError> {
         .and_then(Value::as_array)
         .ok_or_else(|| VenueError::BadReply("reply carries no statuses".to_string()))?;
     if statuses.is_empty() {
-        return Err(VenueError::BadReply("reply carries an empty statuses list".to_string()));
+        return Err(VenueError::BadReply(
+            "reply carries an empty statuses list".to_string(),
+        ));
     }
     for status in statuses {
         if let Some(message) = status.get("error").and_then(Value::as_str) {
@@ -126,7 +131,10 @@ pub(crate) fn parse_meta(result: &Value) -> Result<Vec<Asset>, VenueError> {
         // A delisted asset keeps its position in the list — the numbers are
         // positional, so it cannot be skipped — but it must not be offered as
         // tradable.
-        let delisted = row.get("isDelisted").and_then(Value::as_bool).unwrap_or(false);
+        let delisted = row
+            .get("isDelisted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if delisted {
             continue;
         }
@@ -135,9 +143,8 @@ pub(crate) fn parse_meta(result: &Value) -> Result<Vec<Asset>, VenueError> {
             index: u32::try_from(index).map_err(|_| {
                 VenueError::BadReply("the venue lists more assets than fit an index".to_string())
             })?,
-            sz_decimals: u32::try_from(int_field(row, "szDecimals")?).map_err(|_| {
-                VenueError::BadReply("szDecimals is negative".to_string())
-            })?,
+            sz_decimals: u32::try_from(int_field(row, "szDecimals")?)
+                .map_err(|_| VenueError::BadReply("szDecimals is negative".to_string()))?,
             max_leverage: opt_num_field(row, "maxLeverage")?.unwrap_or(1.0),
         });
     }
@@ -176,12 +183,14 @@ pub(crate) fn parse_positions(
     let rows = result
         .get("assetPositions")
         .and_then(Value::as_array)
-        .ok_or_else(|| VenueError::BadReply("no assetPositions in the account reply".to_string()))?;
+        .ok_or_else(|| {
+            VenueError::BadReply("no assetPositions in the account reply".to_string())
+        })?;
     let mut out = Vec::new();
     for row in rows {
-        let position = row
-            .get("position")
-            .ok_or_else(|| VenueError::BadReply("an assetPosition carries no position".to_string()))?;
+        let position = row.get("position").ok_or_else(|| {
+            VenueError::BadReply("an assetPosition carries no position".to_string())
+        })?;
         let coin = str_field(position, "coin")?;
         // Signed: negative is short. A zero row is a position the venue has
         // closed but still lists.
@@ -244,24 +253,40 @@ pub(crate) fn stops_by_coin(orders: &Value) -> Result<HashMap<String, Stops>, Ve
         .ok_or_else(|| VenueError::BadReply("the open-order reply is not a list".to_string()))?;
     let mut out: HashMap<String, Stops> = HashMap::new();
     for row in rows {
-        if !row.get("isTrigger").and_then(Value::as_bool).unwrap_or(false) {
+        if !row
+            .get("isTrigger")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
-        if !row.get("reduceOnly").and_then(Value::as_bool).unwrap_or(false) {
+        if !row
+            .get("reduceOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
-        let kind = row.get("orderType").and_then(Value::as_str).unwrap_or_default();
+        let kind = row
+            .get("orderType")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if !kind.eq_ignore_ascii_case("Stop Market") && !kind.eq_ignore_ascii_case("Stop Limit") {
             continue;
         }
-        let Some(trigger) = opt_num_field(row, "triggerPx")? else { continue };
+        let Some(trigger) = opt_num_field(row, "triggerPx")? else {
+            continue;
+        };
         let coin = str_field(row, "coin")?;
         out.entry(coin)
             .and_modify(|held| {
                 held.lowest = held.lowest.min(trigger);
                 held.highest = held.highest.max(trigger);
             })
-            .or_insert(Stops { lowest: trigger, highest: trigger });
+            .or_insert(Stops {
+                lowest: trigger,
+                highest: trigger,
+            });
     }
     Ok(out)
 }
@@ -303,7 +328,10 @@ pub(crate) fn parse_working_orders(orders: &Value) -> Result<Vec<VenueOrder>, Ve
             side: side_of(row)?,
             qty: original,
             filled_qty: (original - remaining).max(0.0),
-            reduce_only: row.get("reduceOnly").and_then(Value::as_bool).unwrap_or(false),
+            reduce_only: row
+                .get("reduceOnly")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         });
     }
     Ok(out)
@@ -315,8 +343,13 @@ fn is_supported_native_stop(row: &Value) -> Result<bool, VenueError> {
     {
         return Ok(false);
     }
-    let kind = row.get("orderType").and_then(Value::as_str).unwrap_or_default();
-    let Some(trigger) = opt_num_field(row, "triggerPx")? else { return Ok(false) };
+    let kind = row
+        .get("orderType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(trigger) = opt_num_field(row, "triggerPx")? else {
+        return Ok(false);
+    };
     Ok(
         (kind.eq_ignore_ascii_case("Stop Market") || kind.eq_ignore_ascii_case("Stop Limit"))
             && trigger > 0.0,
@@ -350,7 +383,7 @@ pub(crate) fn parse_execution(row: &Value) -> Result<VenueExecution, VenueError>
         side: side_of(row)?,
         qty: num_field(row, "sz")?,
         px: num_field(row, "px")?,
-        fee: num_field(row, "fee")?,
+        fee: Some(num_field(row, "fee")?),
         // `crossed` says we took liquidity, so the maker share is its opposite.
         is_maker: !row.get("crossed").and_then(Value::as_bool).unwrap_or(true),
         venue_ts_ms: int_field(row, "time")?,
@@ -400,7 +433,10 @@ mod tests {
         // And the same when it is the second order of the pair that failed —
         // an entry accepted with its stop refused.
         let pair = json!({"statuses": [{"resting": {"oid": 7}}, {"error": "bad trigger"}]});
-        assert!(all_accepted(&pair).is_err(), "a refused stop passed unnoticed");
+        assert!(
+            all_accepted(&pair).is_err(),
+            "a refused stop passed unnoticed"
+        );
     }
 
     #[test]
@@ -412,7 +448,12 @@ mod tests {
         assert_eq!(ack.ack_ns, 99);
 
         let filled = json!({"filled": {"oid": 777, "totalSz": "0.01", "avgPx": "95000"}});
-        assert_eq!(parse_order_ack(&filled, "eng-1-2", 1).unwrap().venue_order_id, "777");
+        assert_eq!(
+            parse_order_ack(&filled, "eng-1-2", 1)
+                .unwrap()
+                .venue_order_id,
+            "777"
+        );
 
         // Anything else is unreadable rather than assumed acknowledged.
         assert!(parse_order_ack(&json!({"waitingForFill": {}}), "x", 1).is_err());
@@ -459,7 +500,10 @@ mod tests {
 
         let bare = parse_positions(&state, &HashMap::new(), &resolve).unwrap();
         assert_eq!(bare.len(), 1);
-        assert!(!bare[0].stop_attached, "a position with no stop read as protected");
+        assert!(
+            !bare[0].stop_attached,
+            "a position with no stop read as protected"
+        );
         assert_eq!(bare[0].stop_px, 0.0);
         assert_eq!(bare[0].side, Side::Buy);
         assert_eq!(bare[0].qty, 0.01);
@@ -467,7 +511,10 @@ mod tests {
 
         let stops = HashMap::from([(
             "BTC".to_string(),
-            Stops { lowest: 93_000.0, highest: 93_000.0 },
+            Stops {
+                lowest: 93_000.0,
+                highest: 93_000.0,
+            },
         )]);
         let guarded = parse_positions(&state, &stops, &resolve).unwrap();
         assert!(guarded[0].stop_attached);
@@ -497,7 +544,9 @@ mod tests {
         let flat = json!({"assetPositions": [
             {"position": {"coin": "SOL", "szi": "0"}}
         ]});
-        assert!(parse_positions(&flat, &HashMap::new(), &resolve).unwrap().is_empty());
+        assert!(parse_positions(&flat, &HashMap::new(), &resolve)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -513,10 +562,17 @@ mod tests {
              "orderType": "Stop Market", "triggerPx": "0.1", "sz": "10", "side": "A"}
         ]);
         let stops = stops_by_coin(&orders).unwrap();
-        assert_eq!(stops.get("BTC").map(|s| s.nearest(Side::Buy)), Some(93_000.0));
+        assert_eq!(
+            stops.get("BTC").map(|s| s.nearest(Side::Buy)),
+            Some(93_000.0)
+        );
         assert_eq!(stops.get("ETH"), None, "a take-profit is not protection");
         assert_eq!(stops.get("SOL"), None, "a plain limit is not a stop");
-        assert_eq!(stops.get("DOGE"), None, "a stop that could open is not protection");
+        assert_eq!(
+            stops.get("DOGE"),
+            None,
+            "a stop that could open is not protection"
+        );
     }
 
     #[test]
@@ -533,8 +589,16 @@ mod tests {
         ]);
         let stops = stops_by_coin(&orders).unwrap();
         let held = stops.get("BTC").copied().expect("a stop");
-        assert_eq!(held.nearest(Side::Buy), 93_000.0, "a long stops at the higher trigger");
-        assert_eq!(held.nearest(Side::Sell), 90_000.0, "a short stops at the lower one");
+        assert_eq!(
+            held.nearest(Side::Buy),
+            93_000.0,
+            "a long stops at the higher trigger"
+        );
+        assert_eq!(
+            held.nearest(Side::Sell),
+            90_000.0,
+            "a short stops at the lower one"
+        );
 
         // And the order the venue lists them in does not decide it.
         let reversed = json!([
@@ -543,7 +607,10 @@ mod tests {
             {"coin": "BTC", "isTrigger": true, "reduceOnly": true,
              "orderType": "Stop Market", "triggerPx": "90000", "sz": "0.01", "side": "A"}
         ]);
-        assert_eq!(stops_by_coin(&reversed).unwrap().get("BTC").copied(), Some(held));
+        assert_eq!(
+            stops_by_coin(&reversed).unwrap().get("BTC").copied(),
+            Some(held)
+        );
     }
 
     #[test]
@@ -625,7 +692,7 @@ mod tests {
         assert_eq!(rows[0].venue_ts_ms, 1700);
         assert!(rows[1].is_maker);
         assert_eq!(rows[1].side, Side::Sell);
-        assert_eq!(rows[1].fee, -0.01);
+        assert_eq!(rows[1].fee, Some(-0.01));
     }
 
     #[test]

@@ -20,9 +20,9 @@ file.
   whole fleet up. That host file is how a sleeve is held down — it can only
   turn one off, never on — and the Telegram pause button writes it.
 
-  The funded account has roughly 151 USDT equity and is flat; the funded engine
-  trades it when a book asks for exposure. The demo account carries the larger
-  practice book. Exact live truth is `scripts/ops.sh status`, never this prose.
+  The funded account has roughly 150 USDT equity and currently carries the
+  engine's ONGUSDT carry position. The demo account carries the larger practice
+  book. Exact live truth is `scripts/ops.sh status`, never this prose.
 
   The fleet runs on `208.84.103.4` at the repository's current `main`. The funded key
   declares that address as primary and `116.202.15.128` as its deliberate
@@ -132,9 +132,9 @@ file.
   toggle.** Armed, the funded units start and the funded engine sends orders
   and takes that account's lease; unset, they do not start at all. The engine
   carries no second switch of its own — there is no shadow mode and no live
-  flag, and a stale `ENGINE_LIVE` left in a host file does nothing. To keep the
-  funded fleet off for good, delete
-  `/etc/liquidity-migration/engine-mainnet.env`.
+  flag, and a stale `ENGINE_LIVE` left in a host file does nothing. To stop the
+  funded fleet and persist the switch off, run `scripts/ops.sh deploy
+  disarm-mainnet`.
 
   What is not done, plainly:
 
@@ -171,14 +171,18 @@ file.
   box**: the fleet's 555899665, whose lease the live engine holds, and
   579580669 (credentials in `bybit-quote-lab.env`), whose lease nothing holds —
   the lease is what keeps the quote lab and an engine from ever writing to one
-  account at once.
+  account at once. `engine canary-order` is the bounded submit/cancel proof for
+  the second account; it cannot select mainnet.
 
 ### The funded account
 
-- **It holds 150.85 USDT equity and no position or open order.** This is a
-  signed venue read, and the mainnet producers size their books from the same
-  account. Money in the account changes what they publish and, through the
-  tracked reference, every cap with it.
+- **It holds 150.42 USDT equity and an engine-owned ONGUSDT carry long of 182
+  at 0.1237.** The position runs at 5× leverage and the venue holds its exact
+  Full, mark-price, reduce-only close stop at 0.08041. No other derivative
+  position or open order appeared in the signed account scan. The mainnet
+  producers size their books from this same account. Money in the account
+  changes what they publish and, through the tracked reference, every cap with
+  it.
 - **There is no account daily-loss circuit breaker.** Operational-profile
   schema v2 removed the field and the engine no longer restores, evaluates, or
   writes daily-loss anchors. Historical WAL anchor and verdict shapes remain
@@ -600,12 +604,11 @@ ones is indistinguishable from them.
 | 2026-08-04 withdrawals await owner confirmation | The venue's own transaction log shows the money leaving through the account login (the API key holds no transfer/withdraw permission — probed, refused), so this was by hand. **If these withdrawals are not the owner's, treat the venue login as compromised immediately** |
 | Nothing bounds convergence toward a stale accepted target while producers are down | Deliberately not built — a liveness-coupled trading halt needing owner design |
 | Kline bootstrap logs `failed=N` on restart with an intact store | It re-fetches a window it already holds and counts zero new inserts as failure; bounded ~40–50 s per restart. Tracked follow-up |
-| The LONG demo producer is SIGKILLed by every stop | It drains its cycle on SIGTERM, but a cycle runs ~180–350 s against the unit's 90 s `TimeoutStopSec`. Harmless for deploys (`require_quiescent` accepts `failed`, targets publish atomically), but no LONG stop is ever graceful |
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |
 | Entries execute ~23 minutes after the price the scorer models | Live runs the delayed-entry stress case, not the bar-close headline case. Recorded with the measured capacity numbers in `docs/research/research_findings.md` |
 | Intraday notional tracking is bounded, not continuous | Deliberately left as an owner decision; `docs/research/research_findings.md` states it rather than treating it as settled |
 | No independent venue/WAL agreement page | The engine reconciles and latches `may_open=false` on uncertainty, while the watchdog pages on that latch and heartbeat freshness. A separately rendered mismatch summary is still absent. |
-| No positive liveness signal reaches the chat | There is no hourly digest and the dead-man's switch URL is unprovisioned, so silence means either a healthy fleet or a dead box. The engine's heartbeat is checked on-box only, and an on-box watchdog cannot report that the box died |
+| No continuous off-box liveness signal | The daily digest is a point-in-time message, not a dead-man signal. The external heartbeat URL is unprovisioned, so silence between digests still means either a healthy fleet or a dead box |
 
 Audit reports are not kept as standing files. Their findings live in the topic
 docs — `docs/research/research_findings.md`, `docs/architecture.md`,

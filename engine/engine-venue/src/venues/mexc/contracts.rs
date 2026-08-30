@@ -143,7 +143,9 @@ impl Contracts {
             .ok_or_else(|| VenueError::BadReply("contract detail carried no data array".into()))?;
         let mut by_symbol = HashMap::with_capacity(rows.len());
         for row in rows {
-            let Some(contract) = read_row(row) else { continue };
+            let Some(contract) = read_row(row) else {
+                continue;
+            };
             by_symbol.insert(contract.0, contract.1);
         }
         if by_symbol.is_empty() {
@@ -237,7 +239,10 @@ fn read_row(row: &Value) -> Option<(Symbol, Contract)> {
     if !(price_unit.is_finite() && price_unit > 0.0) {
         return None;
     }
-    let max_vol = row.get("maxVol").and_then(Value::as_f64).unwrap_or(f64::MAX);
+    let max_vol = row
+        .get("maxVol")
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::MAX);
     Some((
         format!("{base}{quote}"),
         Contract {
@@ -251,10 +256,16 @@ fn read_row(row: &Value) -> Option<(Symbol, Contract)> {
                 .get("limitMaxVol")
                 .and_then(Value::as_f64)
                 .unwrap_or(max_vol),
-            max_leverage: row.get("maxLeverage").and_then(Value::as_f64).unwrap_or(1.0),
+            max_leverage: row
+                .get("maxLeverage")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0),
             // Absent reads as "not permitted". A contract whose row does not
             // say is not one to find out about by sending an order.
-            api_allowed: row.get("apiAllowed").and_then(Value::as_bool).unwrap_or(false),
+            api_allowed: row
+                .get("apiAllowed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         },
     ))
 }
@@ -309,11 +320,29 @@ mod tests {
     fn base_coin_becomes_whole_contracts() {
         let t = table();
         // 1 BTC at 0.0001 per contract is 10,000 contracts.
-        assert_eq!(t.tradable("BTCUSDT").unwrap().vol_for(1.0, Ceiling::Limit).unwrap(), 10_000);
+        assert_eq!(
+            t.tradable("BTCUSDT")
+                .unwrap()
+                .vol_for(1.0, Ceiling::Limit)
+                .unwrap(),
+            10_000
+        );
         // The only case where the naive pass-through would have been right.
-        assert_eq!(t.tradable("XRPUSDT").unwrap().vol_for(250.0, Ceiling::Limit).unwrap(), 250);
+        assert_eq!(
+            t.tradable("XRPUSDT")
+                .unwrap()
+                .vol_for(250.0, Ceiling::Limit)
+                .unwrap(),
+            250
+        );
         // 300 TUT at 100 per contract is 3 contracts.
-        assert_eq!(t.tradable("TUTUSDT").unwrap().vol_for(300.0, Ceiling::Limit).unwrap(), 3);
+        assert_eq!(
+            t.tradable("TUTUSDT")
+                .unwrap()
+                .vol_for(300.0, Ceiling::Limit)
+                .unwrap(),
+            3
+        );
     }
 
     #[test]
@@ -321,8 +350,20 @@ mod tests {
         // 0.0003 / 0.0001 is 2.9999999999999996 in binary floating point.
         // Truncating sends two contracts where the kernel approved three.
         let t = table();
-        assert_eq!(t.tradable("BTCUSDT").unwrap().vol_for(0.0003, Ceiling::Limit).unwrap(), 3);
-        assert_eq!(t.tradable("BTCUSDT").unwrap().vol_for(0.0007, Ceiling::Limit).unwrap(), 7);
+        assert_eq!(
+            t.tradable("BTCUSDT")
+                .unwrap()
+                .vol_for(0.0003, Ceiling::Limit)
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            t.tradable("BTCUSDT")
+                .unwrap()
+                .vol_for(0.0007, Ceiling::Limit)
+                .unwrap(),
+            7
+        );
     }
 
     #[test]
@@ -331,7 +372,11 @@ mod tests {
         // kernel approved. The engine quantizes to `qty_step`, which IS the
         // contract size, so reaching this means something upstream skipped it.
         let t = table();
-        let err = t.tradable("TUTUSDT").unwrap().vol_for(150.0, Ceiling::Limit).unwrap_err();
+        let err = t
+            .tradable("TUTUSDT")
+            .unwrap()
+            .vol_for(150.0, Ceiling::Limit)
+            .unwrap_err();
         assert!(err.to_string().contains("not a whole number"), "{err}");
     }
 
@@ -339,10 +384,22 @@ mod tests {
     fn a_size_under_the_venue_minimum_or_over_its_maximum_is_refused() {
         let t = table();
         // Half a contract of TUT.
-        assert!(t.tradable("TUTUSDT").unwrap().vol_for(50.0, Ceiling::Limit).is_err());
+        assert!(t
+            .tradable("TUTUSDT")
+            .unwrap()
+            .vol_for(50.0, Ceiling::Limit)
+            .is_err());
         // maxVol is 500 contracts = 50,000 TUT.
-        assert!(t.tradable("TUTUSDT").unwrap().vol_for(60_000.0, Ceiling::Limit).is_err());
-        assert!(t.tradable("TUTUSDT").unwrap().vol_for(50_000.0, Ceiling::Limit).is_ok());
+        assert!(t
+            .tradable("TUTUSDT")
+            .unwrap()
+            .vol_for(60_000.0, Ceiling::Limit)
+            .is_err());
+        assert!(t
+            .tradable("TUTUSDT")
+            .unwrap()
+            .vol_for(50_000.0, Ceiling::Limit)
+            .is_ok());
     }
 
     #[test]
@@ -416,7 +473,10 @@ mod tests {
         )
         .unwrap();
         let t = Contracts::parse(&body).unwrap();
-        assert!(t.any("XUSDT").is_none(), "a row with no contract size was kept");
+        assert!(
+            t.any("XUSDT").is_none(),
+            "a row with no contract size was kept"
+        );
         assert!(t.any("BTCUSDT").is_some());
     }
 
@@ -428,7 +488,10 @@ mod tests {
         )
         .unwrap();
         let t = Contracts::parse(&body).unwrap();
-        assert!(t.tradable("YUSDT").is_err(), "a silent row was treated as tradable");
+        assert!(
+            t.tradable("YUSDT").is_err(),
+            "a silent row was treated as tradable"
+        );
     }
 
     #[test]

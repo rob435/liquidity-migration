@@ -28,7 +28,7 @@ WorkingDirectory=/var/lib/liquidity-migration-engine-mainnet
 # build a mainnet gateway at all — it fails at the credential read, before a
 # socket is opened, and says which switch is missing.
 EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 # This owner receives its write-key family plus the exact account user id that
 # the gateway binds at startup. Demo and read-only attestor credentials are
 # removed even if they were present in PID 1's environment.
@@ -37,12 +37,11 @@ UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY B
 # copy to fill in. No live switch lives here: REAL_MONEY in the credential
 # file is what decides whether this unit runs at all.
 EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
+Environment=LM_CHILD_STOP_GRACE_SECONDS=20
 
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-engine-mainnet.service main
-# The trusted supervisor answers a stop by passing SIGTERM to its child,
-# waiting for it, and exiting 143 — the number that says "terminated on
-# request". Without this, systemd files every clean stop as a failure and
-# the watchdog pages the alerts line on every deploy.
+# The trusted supervisor records 143 only when the child finishes inside its
+# grace period. A forced kill stays a service failure.
 SuccessExitStatus=143
 Restart=always
 RestartPreventExitStatus=78

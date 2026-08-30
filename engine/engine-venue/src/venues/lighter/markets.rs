@@ -190,7 +190,11 @@ mod tests {
     #[test]
     fn every_market_the_rules_advertise_can_be_looked_up_again() {
         let markets = Markets::from_rows(vec![
-            Market { symbol: "kPEPE".to_string(), index: 7, ..market() },
+            Market {
+                symbol: "kPEPE".to_string(),
+                index: 7,
+                ..market()
+            },
             market(),
         ]);
         for (symbol, _) in markets.instrument_rules() {
@@ -217,7 +221,11 @@ mod tests {
         // `2.9 * 10` is 28.999999999999996, so scaling and flooring without
         // shaving the dust sends a buy one tick below where the strategy put
         // it, and a size one step under what the risk kernel approved.
-        let m = Market { size_decimals: 2, price_decimals: 1, ..market() };
+        let m = Market {
+            size_decimals: 2,
+            price_decimals: 1,
+            ..market()
+        };
         assert_eq!(venue_price(2.9, Side::Buy, &m).unwrap(), 29);
         assert_eq!(venue_price(2.9, Side::Sell, &m).unwrap(), 29);
         assert_eq!(venue_size(0.29, &m).unwrap(), 29);
@@ -248,7 +256,10 @@ mod tests {
         let m = market();
         assert_eq!(venue_size(0.123456, &m).unwrap(), 12345);
         assert_eq!(venue_size(1.0, &m).unwrap(), 100_000);
-        assert!(venue_size(0.000001, &m).is_err(), "a size that rounds to nothing");
+        assert!(
+            venue_size(0.000001, &m).is_err(),
+            "a size that rounds to nothing"
+        );
     }
 
     #[test]
@@ -271,5 +282,4 @@ mod tests {
         assert_eq!(rule.min_qty, 0.0001);
         assert_eq!(rule.min_notional, 10.0);
     }
-
 }

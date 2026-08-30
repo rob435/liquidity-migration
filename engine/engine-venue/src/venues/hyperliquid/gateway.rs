@@ -24,8 +24,8 @@ use std::collections::HashMap;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
-    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce, VenueExecution,
-    VenueOrder,
+    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce,
+    VenueExecution, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
@@ -48,7 +48,7 @@ use super::wire::{
 use crate::creds::Credentials;
 use crate::http::HttpClient;
 use crate::json::int_field;
-use crate::{mono_ns, wall_ms};
+use crate::{account_scan, mono_ns, wall_ms};
 
 const PATH_INFO: &str = "/info";
 const PATH_EXCHANGE: &str = "/exchange";
@@ -159,9 +159,12 @@ impl HyperliquidGateway {
     }
 
     fn name_of(&self, id: SymbolId) -> Result<&str, VenueError> {
-        self.names.get(id.0 as usize).map(String::as_str).ok_or_else(|| {
-            VenueError::BadRequest(format!("symbol id {} is not in the gateway's table", id.0))
-        })
+        self.names
+            .get(id.0 as usize)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                VenueError::BadRequest(format!("symbol id {} is not in the gateway's table", id.0))
+            })
     }
 
     fn address_text(&self) -> String {
@@ -183,8 +186,11 @@ impl HyperliquidGateway {
     }
 
     async fn info(&self, body: Value) -> Result<Value, VenueError> {
-        let text = serde_json::to_string(&body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
-        self.http.post(PATH_INFO, text, "application/json", &[]).await
+        let text =
+            serde_json::to_string(&body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
+        self.http
+            .post(PATH_INFO, text, "application/json", &[])
+            .await
     }
 
     /// Sign one action and send it. The value that was hashed is the value
@@ -204,7 +210,8 @@ impl HyperliquidGateway {
             "nonce": nonce,
             "signature": {"r": signature.r, "s": signature.s, "v": signature.v},
         });
-        let text = serde_json::to_string(&body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
+        let text =
+            serde_json::to_string(&body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
         let envelope = self
             .http
             .post(PATH_EXCHANGE, text, "application/json", &[])
@@ -256,7 +263,9 @@ impl HyperliquidGateway {
                 // of the passive rounding a resting order wants.
                 (
                     venue_px(through, req.side.flipped(), asset.sz_decimals)?,
-                    OrderKindWire::Limit { tif: TimeInForce::Ioc },
+                    OrderKindWire::Limit {
+                        tif: TimeInForce::Ioc,
+                    },
                 )
             }
             OrderKind::Limit { px, tif } => (
@@ -312,9 +321,9 @@ impl HyperliquidGateway {
             .get(coin)
             .and_then(Value::as_str)
             .ok_or_else(|| VenueError::BadReply(format!("the venue quotes no mid for {coin}")))?;
-        let px: f64 = text
-            .parse()
-            .map_err(|_| VenueError::BadReply(format!("the mid for {coin} is not a number: {text:?}")))?;
+        let px: f64 = text.parse().map_err(|_| {
+            VenueError::BadReply(format!("the mid for {coin} is not a number: {text:?}"))
+        })?;
         if !px.is_finite() || px <= 0.0 {
             return Err(VenueError::BadReply(format!("the mid for {coin} is {px}")));
         }
@@ -421,9 +430,9 @@ impl VenueGateway for HyperliquidGateway {
         let asset = self.asset_of_id(symbol).await?;
         let wanted = cloid::to_cloid(client_order_id);
         let open = self.open_orders().await?;
-        let rows = open
-            .as_array()
-            .ok_or_else(|| VenueError::BadReply("the open-order reply is not a list".to_string()))?;
+        let rows = open.as_array().ok_or_else(|| {
+            VenueError::BadReply("the open-order reply is not a list".to_string())
+        })?;
         let current = rows
             .iter()
             .find(|row| row.get("cloid").and_then(Value::as_str) == Some(wanted.as_str()))
@@ -469,7 +478,10 @@ impl VenueGateway for HyperliquidGateway {
             is_buy,
             px,
             sz,
-            reduce_only: current.get("reduceOnly").and_then(Value::as_bool).unwrap_or(false),
+            reduce_only: current
+                .get("reduceOnly")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             kind: OrderKindWire::Limit { tif },
             cloid: Some(wanted.clone()),
         };
@@ -542,7 +554,8 @@ impl VenueGateway for HyperliquidGateway {
         let capped = whole.min(asset.max_leverage.floor().max(1.0) as i64);
         // Cross margin, which is how the venue's accounts are held here and
         // what `clearinghouseState`'s equity means.
-        self.exchange(update_leverage_action(asset.index, true, capped)).await?;
+        self.exchange(update_leverage_action(asset.index, true, capped))
+            .await?;
         Ok(())
     }
 
@@ -595,8 +608,9 @@ impl VenueGateway for HyperliquidGateway {
             "user": self.address_text(),
         }));
         let orders = self.open_orders();
-        let (state, orders) = futures_util::future::try_join(state, orders).await?;
-        let observed_ns = mono_ns();
+        let (observed_ns, reply) =
+            account_scan(futures_util::future::try_join(state, orders)).await;
+        let (state, orders) = reply?;
 
         let (equity_usdt, available_usdt) = parse_margin(&state)?;
         let stops = stops_by_coin(&orders)?;
@@ -689,9 +703,13 @@ fn position_of(state: &Value, coin: &str) -> Result<Option<(Side, f64)>, VenueEr
     let rows = state
         .get("assetPositions")
         .and_then(Value::as_array)
-        .ok_or_else(|| VenueError::BadReply("no assetPositions in the account reply".to_string()))?;
+        .ok_or_else(|| {
+            VenueError::BadReply("no assetPositions in the account reply".to_string())
+        })?;
     for row in rows {
-        let Some(position) = row.get("position") else { continue };
+        let Some(position) = row.get("position") else {
+            continue;
+        };
         if position.get("coin").and_then(Value::as_str) != Some(coin) {
             continue;
         }
@@ -717,13 +735,24 @@ fn stop_oids(orders: &Value, coin: &str) -> Result<Vec<i64>, VenueError> {
         if row.get("coin").and_then(Value::as_str) != Some(coin) {
             continue;
         }
-        if !row.get("isTrigger").and_then(Value::as_bool).unwrap_or(false) {
+        if !row
+            .get("isTrigger")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
-        if !row.get("reduceOnly").and_then(Value::as_bool).unwrap_or(false) {
+        if !row
+            .get("reduceOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
-        let kind = row.get("orderType").and_then(Value::as_str).unwrap_or_default();
+        let kind = row
+            .get("orderType")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if !kind.to_ascii_lowercase().starts_with("stop") {
             continue;
         }
@@ -780,10 +809,18 @@ mod tests {
         let buy = gw
             .entry_wire(&request(OrderKind::Market, Side::Buy), &asset(), 100_000.0)
             .unwrap();
-        assert!(matches!(buy.kind, OrderKindWire::Limit { tif: TimeInForce::Ioc }));
+        assert!(matches!(
+            buy.kind,
+            OrderKindWire::Limit {
+                tif: TimeInForce::Ioc
+            }
+        ));
         let buy_px: f64 = buy.px.parse().unwrap();
         assert!(buy_px > 100_000.0, "a buy must cross: {buy_px}");
-        assert!(buy_px <= 105_000.0, "and by no more than the slippage bound: {buy_px}");
+        assert!(
+            buy_px <= 105_000.0,
+            "and by no more than the slippage bound: {buy_px}"
+        );
 
         let sell = gw
             .entry_wire(&request(OrderKind::Market, Side::Sell), &asset(), 100_000.0)
@@ -799,21 +836,32 @@ mod tests {
         let wire = gw
             .entry_wire(
                 &request(
-                    OrderKind::Limit { px: 99_999.4, tif: TimeInForce::PostOnly },
+                    OrderKind::Limit {
+                        px: 99_999.4,
+                        tif: TimeInForce::PostOnly,
+                    },
                     Side::Buy,
                 ),
                 &asset(),
                 0.0,
             )
             .unwrap();
-        assert!(matches!(wire.kind, OrderKindWire::Limit { tif: TimeInForce::PostOnly }));
+        assert!(matches!(
+            wire.kind,
+            OrderKindWire::Limit {
+                tif: TimeInForce::PostOnly
+            }
+        ));
         // Rounded toward the passive side, so a post-only order is never
         // rounded into crossing.
         assert_eq!(wire.px, "99999");
         assert_eq!(wire.sz, "0.01");
         assert_eq!(wire.asset, 3);
         assert!(wire.is_buy);
-        assert_eq!(wire.cloid.as_deref(), Some(cloid::to_cloid("eng-1700000000000-1").as_str()));
+        assert_eq!(
+            wire.cloid.as_deref(),
+            Some(cloid::to_cloid("eng-1700000000000-1").as_str())
+        );
     }
 
     #[test]
@@ -823,7 +871,9 @@ mod tests {
         assert!(!stop.is_buy, "the stop on a long must sell");
         assert!(stop.reduce_only);
         match stop.kind {
-            OrderKindWire::Trigger { is_market, tpsl, .. } => {
+            OrderKindWire::Trigger {
+                is_market, tpsl, ..
+            } => {
                 assert!(is_market, "a stop that cannot fill is not a stop");
                 assert_eq!(tpsl, "sl");
             }

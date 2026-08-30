@@ -102,8 +102,14 @@ mod tests {
 
     #[test]
     fn the_one_realm_parses_and_no_bare_word_does() {
-        assert_eq!(MexcRealm::parse("mexc_mainnet").unwrap(), MexcRealm::Mainnet);
-        assert_eq!(MexcRealm::parse(" Mexc_MainNet ").unwrap(), MexcRealm::Mainnet);
+        assert_eq!(
+            MexcRealm::parse("mexc_mainnet").unwrap(),
+            MexcRealm::Mainnet
+        );
+        assert_eq!(
+            MexcRealm::parse(" Mexc_MainNet ").unwrap(),
+            MexcRealm::Mainnet
+        );
         for refused in ["", "mainnet", "mexc", "mexc_testnet", "mexc_demo"] {
             assert!(
                 MexcRealm::parse(refused).is_err(),
@@ -138,7 +144,15 @@ mod tests {
         let ws = MexcRealm::Mainnet.websocket();
         assert!(rest.starts_with("https://api."), "{rest}");
         assert!(ws.starts_with("wss://contract."), "{ws}");
-        let host_of = |url: &str| url.split("://").nth(1).unwrap().split('/').next().unwrap().to_string();
+        let host_of = |url: &str| {
+            url.split("://")
+                .nth(1)
+                .unwrap()
+                .split('/')
+                .next()
+                .unwrap()
+                .to_string()
+        };
         assert_ne!(host_of(rest), host_of(ws));
     }
 

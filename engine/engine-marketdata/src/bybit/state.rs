@@ -140,20 +140,10 @@ impl FeedState {
         if frame.snapshot {
             state.depth = Depth::default();
             if let Some(bids) = frame.bids {
-                replace_side(
-                    &mut state.depth.bids,
-                    &mut state.depth.bid_len,
-                    bids,
-                    true,
-                );
+                replace_side(&mut state.depth.bids, &mut state.depth.bid_len, bids, true);
             }
             if let Some(asks) = frame.asks {
-                replace_side(
-                    &mut state.depth.asks,
-                    &mut state.depth.ask_len,
-                    asks,
-                    false,
-                );
+                replace_side(&mut state.depth.asks, &mut state.depth.ask_len, asks, false);
             }
             state.has_snapshot = true;
         } else {
@@ -166,45 +156,29 @@ impl FeedState {
             if let Some(bids) = frame.bids {
                 if !bids.is_empty() {
                     if frame.depth == 1 {
-                        replace_side(
-                            &mut state.depth.bids,
-                            &mut state.depth.bid_len,
-                            bids,
-                            true,
-                        );
+                        replace_side(&mut state.depth.bids, &mut state.depth.bid_len, bids, true);
                     } else {
-                        apply_side(
-                            &mut state.depth.bids,
-                            &mut state.depth.bid_len,
-                            bids,
-                            true,
-                        );
+                        apply_side(&mut state.depth.bids, &mut state.depth.bid_len, bids, true);
                     }
                 }
             }
             if let Some(asks) = frame.asks {
                 if !asks.is_empty() {
                     if frame.depth == 1 {
-                        replace_side(
-                            &mut state.depth.asks,
-                            &mut state.depth.ask_len,
-                            asks,
-                            false,
-                        );
+                        replace_side(&mut state.depth.asks, &mut state.depth.ask_len, asks, false);
                     } else {
-                        apply_side(
-                            &mut state.depth.asks,
-                            &mut state.depth.ask_len,
-                            asks,
-                            false,
-                        );
+                        apply_side(&mut state.depth.asks, &mut state.depth.ask_len, asks, false);
                     }
                 }
             }
         }
         state.last_update_id = frame.update_id;
         state.depth.update_id = frame.update_id;
-        state.depth.seq = if frame.seq == 0 { frame.update_id } else { frame.seq };
+        state.depth.seq = if frame.seq == 0 {
+            frame.update_id
+        } else {
+            frame.seq
+        };
         state.depth.venue_ts_ms = frame.venue_ts_ms;
         state.depth.recv_ns = recv_ns;
 
@@ -282,23 +256,13 @@ impl FeedState {
     }
 }
 
-fn replace_side(
-    out: &mut [BookLevel; BOOK_DEPTH],
-    len: &mut u8,
-    levels: Levels,
-    bids: bool,
-) {
+fn replace_side(out: &mut [BookLevel; BOOK_DEPTH], len: &mut u8, levels: Levels, bids: bool) {
     *out = [BookLevel::default(); BOOK_DEPTH];
     *len = 0;
     apply_side(out, len, levels, bids);
 }
 
-fn apply_side(
-    out: &mut [BookLevel; BOOK_DEPTH],
-    len: &mut u8,
-    changes: Levels,
-    bids: bool,
-) {
+fn apply_side(out: &mut [BookLevel; BOOK_DEPTH], len: &mut u8, changes: Levels, bids: bool) {
     for change in changes.iter() {
         let active = *len as usize;
         if let Some(index) = out[..active].iter().position(|level| level.px == change.px) {
@@ -316,7 +280,13 @@ fn apply_side(
         }
         let insert = out[..active]
             .iter()
-            .position(|level| if bids { change.px > level.px } else { change.px < level.px })
+            .position(|level| {
+                if bids {
+                    change.px > level.px
+                } else {
+                    change.px < level.px
+                }
+            })
             .unwrap_or(active);
         if insert >= BOOK_DEPTH {
             continue;
@@ -634,8 +604,20 @@ mod tests {
         assert_eq!(next.bids[0], BookLevel { px: 99.5, qty: 6.0 });
         assert_eq!(next.bids[1], BookLevel { px: 99.0, qty: 7.0 });
         assert_eq!(next.bids[2], BookLevel { px: 98.0, qty: 3.0 });
-        assert_eq!(next.asks[0], BookLevel { px: 100.5, qty: 8.0 });
-        assert_eq!(next.asks[1], BookLevel { px: 101.0, qty: 4.0 });
+        assert_eq!(
+            next.asks[0],
+            BookLevel {
+                px: 100.5,
+                qty: 8.0
+            }
+        );
+        assert_eq!(
+            next.asks[1],
+            BookLevel {
+                px: 101.0,
+                qty: 4.0
+            }
+        );
         assert_eq!(next.seq, 1001);
         assert_eq!(next.update_id, 101);
     }

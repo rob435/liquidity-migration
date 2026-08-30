@@ -26,13 +26,20 @@ fn build(side: &str, extra: &str) -> Harness {
 /// Arrive in Holding: touch the level, acknowledge, fill.
 fn entered(side: &str, extra: &str) -> Harness {
     let mut h = build(side, extra);
-    let (bid, ask) = if side == "buy" { (99.9, 100.0) } else { (100.0, 100.1) };
+    let (bid, ask) = if side == "buy" {
+        (99.9, 100.0)
+    } else {
+        (100.0, 100.1)
+    };
     h.quote(SYM, bid, ask);
     assert_eq!(h.drain().len(), 1, "the entry should have been sent");
     h.ack("c1");
     let filled = if side == "buy" { Side::Buy } else { Side::Sell };
     h.fill("c1", SYM, filled, 2.0, 100.0);
-    assert!(h.drain().is_empty(), "a fill alone should not emit anything");
+    assert!(
+        h.drain().is_empty(),
+        "a fill alone should not emit anything"
+    );
     h
 }
 
@@ -77,14 +84,62 @@ fn entry_triggers_on_the_touch_and_not_before() {
         fires: bool,
     }
     let cases = [
-        Case { what: "buy: ask exactly at the level", side: "buy", bid: 99.9, ask: 100.0, fires: true },
-        Case { what: "buy: ask gapped through the level", side: "buy", bid: 98.0, ask: 99.5, fires: true },
-        Case { what: "buy: ask a tick above the level", side: "buy", bid: 99.9, ask: 100.1, fires: false },
-        Case { what: "buy: bid below, ask still above", side: "buy", bid: 99.0, ask: 100.5, fires: false },
-        Case { what: "sell: bid exactly at the level", side: "sell", bid: 100.0, ask: 100.1, fires: true },
-        Case { what: "sell: bid gapped through the level", side: "sell", bid: 100.5, ask: 100.6, fires: true },
-        Case { what: "sell: bid a tick below the level", side: "sell", bid: 99.9, ask: 100.0, fires: false },
-        Case { what: "sell: ask above, bid still below", side: "sell", bid: 99.5, ask: 100.4, fires: false },
+        Case {
+            what: "buy: ask exactly at the level",
+            side: "buy",
+            bid: 99.9,
+            ask: 100.0,
+            fires: true,
+        },
+        Case {
+            what: "buy: ask gapped through the level",
+            side: "buy",
+            bid: 98.0,
+            ask: 99.5,
+            fires: true,
+        },
+        Case {
+            what: "buy: ask a tick above the level",
+            side: "buy",
+            bid: 99.9,
+            ask: 100.1,
+            fires: false,
+        },
+        Case {
+            what: "buy: bid below, ask still above",
+            side: "buy",
+            bid: 99.0,
+            ask: 100.5,
+            fires: false,
+        },
+        Case {
+            what: "sell: bid exactly at the level",
+            side: "sell",
+            bid: 100.0,
+            ask: 100.1,
+            fires: true,
+        },
+        Case {
+            what: "sell: bid gapped through the level",
+            side: "sell",
+            bid: 100.5,
+            ask: 100.6,
+            fires: true,
+        },
+        Case {
+            what: "sell: bid a tick below the level",
+            side: "sell",
+            bid: 99.9,
+            ask: 100.0,
+            fires: false,
+        },
+        Case {
+            what: "sell: ask above, bid still below",
+            side: "sell",
+            bid: 99.5,
+            ask: 100.4,
+            fires: false,
+        },
     ];
 
     for case in cases {
@@ -92,12 +147,20 @@ fn entry_triggers_on_the_touch_and_not_before() {
         h.quote(SYM, case.bid, case.ask);
         let intents = h.drain();
         if !case.fires {
-            assert!(intents.is_empty(), "{}: expected no order, got {intents:?}", case.what);
+            assert!(
+                intents.is_empty(),
+                "{}: expected no order, got {intents:?}",
+                case.what
+            );
             continue;
         }
         assert_eq!(intents.len(), 1, "{}", case.what);
         let intent = &intents[0];
-        let want_side = if case.side == "buy" { Side::Buy } else { Side::Sell };
+        let want_side = if case.side == "buy" {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         assert_eq!(intent.side, want_side, "{}", case.what);
         assert_eq!(intent.strategy, ID, "{}", case.what);
         assert_eq!(intent.kind, OrderKind::Market, "{}", case.what);
@@ -105,7 +168,9 @@ fn entry_triggers_on_the_touch_and_not_before() {
         assert!(!intent.reduce_only, "{}", case.what);
         assert_eq!(intent.tag, "touch-entry", "{}", case.what);
         // An entry always carries its stop.
-        let stop = intent.stop.unwrap_or_else(|| panic!("{}: entry had no stop", case.what));
+        let stop = intent
+            .stop
+            .unwrap_or_else(|| panic!("{}: entry had no stop", case.what));
         let want_stop = if case.side == "buy" { 95.0 } else { 105.0 };
         assert_eq!(stop.trigger_px, want_stop, "{}", case.what);
     }
@@ -127,7 +192,10 @@ fn entry_is_sent_once_however_often_the_level_is_touched() {
     h.quote(SYM, 99.0, 99.5);
     h.quote(SYM, 98.0, 98.5);
     h.quote(SYM, 99.9, 100.0);
-    assert!(h.drain().is_empty(), "the entry must not be sent again while it is in flight");
+    assert!(
+        h.drain().is_empty(),
+        "the entry must not be sent again while it is in flight"
+    );
 }
 
 #[test]
@@ -157,14 +225,70 @@ fn take_profit_exits_on_the_touch_and_not_before() {
         exits: bool,
     }
     let cases = [
-        Case { what: "buy: bid reaches the take level", side: "buy", take: "take_px = 110.0", bid: 110.0, ask: 110.2, exits: true },
-        Case { what: "buy: bid past the take level", side: "buy", take: "take_px = 110.0", bid: 112.0, ask: 112.2, exits: true },
-        Case { what: "buy: bid short of the take level", side: "buy", take: "take_px = 110.0", bid: 109.9, ask: 110.1, exits: false },
-        Case { what: "sell: ask reaches the take level", side: "sell", take: "take_px = 90.0", bid: 89.8, ask: 90.0, exits: true },
-        Case { what: "sell: ask past the take level", side: "sell", take: "take_px = 90.0", bid: 87.8, ask: 88.0, exits: true },
-        Case { what: "sell: ask short of the take level", side: "sell", take: "take_px = 90.0", bid: 89.9, ask: 90.1, exits: false },
-        Case { what: "buy: no take level configured", side: "buy", take: "", bid: 200.0, ask: 200.2, exits: false },
-        Case { what: "sell: no take level configured", side: "sell", take: "", bid: 1.0, ask: 1.2, exits: false },
+        Case {
+            what: "buy: bid reaches the take level",
+            side: "buy",
+            take: "take_px = 110.0",
+            bid: 110.0,
+            ask: 110.2,
+            exits: true,
+        },
+        Case {
+            what: "buy: bid past the take level",
+            side: "buy",
+            take: "take_px = 110.0",
+            bid: 112.0,
+            ask: 112.2,
+            exits: true,
+        },
+        Case {
+            what: "buy: bid short of the take level",
+            side: "buy",
+            take: "take_px = 110.0",
+            bid: 109.9,
+            ask: 110.1,
+            exits: false,
+        },
+        Case {
+            what: "sell: ask reaches the take level",
+            side: "sell",
+            take: "take_px = 90.0",
+            bid: 89.8,
+            ask: 90.0,
+            exits: true,
+        },
+        Case {
+            what: "sell: ask past the take level",
+            side: "sell",
+            take: "take_px = 90.0",
+            bid: 87.8,
+            ask: 88.0,
+            exits: true,
+        },
+        Case {
+            what: "sell: ask short of the take level",
+            side: "sell",
+            take: "take_px = 90.0",
+            bid: 89.9,
+            ask: 90.1,
+            exits: false,
+        },
+        Case {
+            what: "buy: no take level configured",
+            side: "buy",
+            take: "",
+            bid: 200.0,
+            ask: 200.2,
+            exits: false,
+        },
+        Case {
+            what: "sell: no take level configured",
+            side: "sell",
+            take: "",
+            bid: 1.0,
+            ask: 1.2,
+            exits: false,
+        },
     ];
 
     for case in cases {
@@ -172,12 +296,20 @@ fn take_profit_exits_on_the_touch_and_not_before() {
         h.quote(SYM, case.bid, case.ask);
         let intents = h.drain();
         if !case.exits {
-            assert!(intents.is_empty(), "{}: expected no exit, got {intents:?}", case.what);
+            assert!(
+                intents.is_empty(),
+                "{}: expected no exit, got {intents:?}",
+                case.what
+            );
             continue;
         }
         assert_eq!(intents.len(), 1, "{}", case.what);
         let intent = &intents[0];
-        let want_side = if case.side == "buy" { Side::Sell } else { Side::Buy };
+        let want_side = if case.side == "buy" {
+            Side::Sell
+        } else {
+            Side::Buy
+        };
         assert_eq!(intent.side, want_side, "{}", case.what);
         assert_eq!(intent.kind, OrderKind::Market, "{}", case.what);
         assert!(intent.reduce_only, "{}: an exit may only reduce", case.what);
@@ -213,9 +345,13 @@ fn partial_entry_fills_add_up() {
 #[test]
 fn a_concurrent_entry_fill_gets_a_residual_exit() {
     let mut h = build("buy", "take_px = 110.0");
-    h.quote(SYM, 99.9, 100.0); h.drain(); h.ack("c1");
+    h.quote(SYM, 99.9, 100.0);
+    h.drain();
+    h.ack("c1");
     h.fill("c1", SYM, Side::Buy, 0.5, 100.0);
-    h.quote(SYM, 110.0, 110.2); assert_eq!(h.one_intent().qty, 0.5); h.ack("x1");
+    h.quote(SYM, 110.0, 110.2);
+    assert_eq!(h.one_intent().qty, 0.5);
+    h.ack("x1");
     h.fill("c1", SYM, Side::Buy, 1.5, 100.0);
     h.fill("x1", SYM, Side::Sell, 0.5, 110.0);
     h.quote(SYM, 109.0, 109.2);
@@ -249,14 +385,19 @@ fn a_late_entry_cancel_is_not_mistaken_for_the_unacked_exit() {
 
     h.cancelled("c1");
     h.quote(SYM, 109.0, 109.2);
-    assert!(h.drain().is_empty(), "the first exit is still with the venue");
+    assert!(
+        h.drain().is_empty(),
+        "the first exit is still with the venue"
+    );
 }
 
 #[test]
 fn an_engine_refused_exit_is_retried() {
     let mut h = entered("buy", "take_px = 110.0");
-    h.quote(SYM, 110.0, 110.2); h.drain();
-    let symbol = h.ctx.id_of(SYM); h.refuse(symbol, true);
+    h.quote(SYM, 110.0, 110.2);
+    h.drain();
+    let symbol = h.ctx.id_of(SYM);
+    h.refuse(symbol, true);
     h.quote(SYM, 109.0, 109.2);
     assert_eq!(h.one_intent().qty, 2.0);
 }
@@ -267,7 +408,10 @@ fn ttl_is_armed_at_the_fill_and_exits_when_it_expires() {
     h.ctx.set_now(1_000_000_000);
     h.quote(SYM, 99.9, 100.0);
     h.drain();
-    assert!(h.ctx.arm_calls.is_empty(), "the timer is armed at the fill, not at the send");
+    assert!(
+        h.ctx.arm_calls.is_empty(),
+        "the timer is armed at the fill, not at the send"
+    );
 
     h.ack("c1");
     h.fill("c1", SYM, Side::Buy, 2.0, 100.0);
@@ -299,7 +443,11 @@ fn a_ttl_that_expires_after_the_take_exit_does_nothing() {
     h.ack("c1");
     h.fill("c1", SYM, Side::Buy, 2.0, 100.0);
     h.quote(SYM, 110.0, 110.2);
-    assert_eq!(h.drain().len(), 1, "the take level should have sent the exit");
+    assert_eq!(
+        h.drain().len(),
+        1,
+        "the take level should have sent the exit"
+    );
 
     assert!(h.fire_next_timer());
     assert!(h.drain().is_empty(), "the exit is already with the venue");
@@ -343,7 +491,10 @@ fn a_second_rejected_exit_stops_the_plug() {
     h.reject("x2", "second refusal");
     h.quote(SYM, 108.0, 108.2);
     h.quote(SYM, 120.0, 120.2);
-    assert!(h.drain().is_empty(), "two refusals is a job for a human, not a third order");
+    assert!(
+        h.drain().is_empty(),
+        "two refusals is a job for a human, not a third order"
+    );
 }
 
 #[test]
@@ -420,7 +571,11 @@ fn a_feed_reset_leaves_the_entry_armed() {
     h.feed_reset();
     assert!(h.drain().is_empty(), "a reset is not a reason to trade");
     h.quote(SYM, 99.9, 100.0);
-    assert_eq!(h.one_intent().tag, "touch-entry", "the level is absolute, so it still counts");
+    assert_eq!(
+        h.one_intent().tag,
+        "touch-entry",
+        "the level is absolute, so it still counts"
+    );
 }
 
 #[test]

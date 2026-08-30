@@ -33,11 +33,10 @@ UnsetEnvironment=BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP 
 # Config path and heartbeat path. deploy/engine.env.template is the copy to
 # fill in.
 EnvironmentFile=/etc/liquidity-migration/engine.env
+Environment=LM_CHILD_STOP_GRACE_SECONDS=20
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-engine.service main
-# The trusted supervisor answers a stop by passing SIGTERM to its child,
-# waiting for it, and exiting 143 — the number that says "terminated on
-# request". Without this, systemd files every clean stop as a failure and
-# the watchdog pages the alerts line on every deploy.
+# The trusted supervisor records 143 only when the child finishes inside its
+# grace period. A forced kill stays a service failure.
 SuccessExitStatus=143
 Restart=always
 RestartPreventExitStatus=78

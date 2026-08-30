@@ -408,7 +408,7 @@ mod tests {
                     side: Side::Buy,
                     qty: 1.0,
                     px: 100.0,
-                    fee: 0.0,
+                    fee: Some(0.0),
                     is_maker: false,
                     venue_ts_ms: 0,
                     recv_ns: 0,

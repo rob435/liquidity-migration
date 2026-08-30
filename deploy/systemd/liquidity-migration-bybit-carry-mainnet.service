@@ -47,11 +47,10 @@ Environment=WS_KLINES_BOOTSTRAP_WORKERS=2
 Environment=POLARS_MAX_THREADS=1
 Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
+Environment=LM_CHILD_STOP_GRACE_SECONDS=170
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-carry-mainnet.service main
-# The trusted supervisor answers a stop by passing SIGTERM to its child,
-# waiting for it, and exiting 143 — the number that says "terminated on
-# request". Without this, systemd files every clean stop as a failure and
-# the watchdog pages the alerts line on every deploy.
+# The trusted supervisor records 143 only when the child finishes inside its
+# grace period. A forced kill stays a service failure.
 SuccessExitStatus=143
 Restart=always
 RestartPreventExitStatus=78

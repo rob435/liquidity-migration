@@ -57,7 +57,7 @@ mod json;
 mod registry;
 mod tls;
 
-pub(crate) use clock::{mono_ns, wall_ms};
+pub(crate) use clock::{account_scan, mono_ns, wall_ms};
 
 pub use arming::{check_arming, check_arming_with, env_flag, real_money_armed, REAL_MONEY_ENV};
 pub use creds::Credentials;
@@ -67,7 +67,8 @@ pub use registry::{
     VARIATIONAL_MAINNET,
 };
 pub use venues::bybit::{
-    BybitGateway, BybitInventoryProbe, BybitOrderFeed, VenueRealm, API_KEY_ENV, API_SECRET_ENV,
+    BybitGateway, BybitInventoryProbe, BybitOrderFeed, BybitOrderReceipt, VenueRealm, API_KEY_ENV,
+    API_SECRET_ENV,
 };
 pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
 pub use venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};

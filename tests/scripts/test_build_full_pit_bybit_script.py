@@ -26,6 +26,7 @@ def test_builder_validates_independent_manifest_without_filtering_it() -> None:
 
     assert manifest < klines < validation < ancillary
     assert "filter-manifest --data-root" not in text
+    assert "--min-existing-bars 20" in text
     assert "validate_bybit_manifest_provenance" in text
 
 

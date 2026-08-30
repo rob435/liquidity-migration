@@ -239,6 +239,7 @@ mod tests {
                 exec_id: "kept".to_string(),
                 seen_ms: 10,
             }],
+            execution_history_through_ms: Some(20),
             open_orders: Vec::new(),
         };
         let mut restored = ExecutionIds::from_records(&[record], 20).unwrap();

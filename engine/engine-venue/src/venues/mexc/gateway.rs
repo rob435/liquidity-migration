@@ -38,7 +38,7 @@ use super::rest::RestClient;
 use super::VENUE_NAME;
 use crate::creds::Credentials;
 use crate::fmt::venue_num;
-use crate::mono_ns;
+use crate::{account_scan, mono_ns};
 
 const PATH_CONTRACT_DETAIL: &str = "/api/v1/contract/detail";
 const PATH_ASSETS: &str = "/api/v1/private/account/assets";
@@ -82,6 +82,23 @@ const TREND_LAST_PRICE: i64 = 1;
 /// loop forever.
 const MAX_PAGES: u32 = 20;
 const PAGE_SIZE: u32 = 100;
+
+fn execution_page_complete(symbol: &str, page: u32, raw_count: usize) -> Result<bool, VenueError> {
+    if raw_count > PAGE_SIZE as usize {
+        return Err(VenueError::BadReply(format!(
+            "execution page {page} for {symbol} returned {raw_count} rows after requesting {PAGE_SIZE}"
+        )));
+    }
+    if raw_count < PAGE_SIZE as usize {
+        return Ok(true);
+    }
+    if page >= MAX_PAGES {
+        return Err(VenueError::BadReply(format!(
+            "execution history for {symbol} still had pages after {MAX_PAGES} full pages"
+        )));
+    }
+    Ok(false)
+}
 
 pub struct MexcGateway {
     realm: MexcRealm,
@@ -129,12 +146,7 @@ impl MexcGateway {
         self.realm
     }
 
-    fn build(
-        realm: MexcRealm,
-        base_url: &str,
-        creds: Credentials,
-        symbols: Vec<Symbol>,
-    ) -> Self {
+    fn build(realm: MexcRealm, base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
         let ids = symbols
             .iter()
             .enumerate()
@@ -178,9 +190,15 @@ impl MexcGateway {
         let contracts = self.contracts().await?;
         let mut out = HashMap::new();
         for row in &rows {
-            let Some(venue_symbol) = row.get("symbol").and_then(Value::as_str) else { continue };
-            let Some(symbol) = contracts.symbol_of(venue_symbol) else { continue };
-            let Some(id) = id_text(row, "positionId") else { continue };
+            let Some(venue_symbol) = row.get("symbol").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(symbol) = contracts.symbol_of(venue_symbol) else {
+                continue;
+            };
+            let Some(id) = id_text(row, "positionId") else {
+                continue;
+            };
             out.insert(symbol.clone(), id);
         }
         Ok(out)
@@ -209,9 +227,18 @@ impl MexcGateway {
     fn venue_type(kind: &OrderKind) -> i64 {
         match kind {
             OrderKind::Market => 5,
-            OrderKind::Limit { tif: TimeInForce::PostOnly, .. } => 2,
-            OrderKind::Limit { tif: TimeInForce::Ioc, .. } => 3,
-            OrderKind::Limit { tif: TimeInForce::Gtc, .. } => 1,
+            OrderKind::Limit {
+                tif: TimeInForce::PostOnly,
+                ..
+            } => 2,
+            OrderKind::Limit {
+                tif: TimeInForce::Ioc,
+                ..
+            } => 3,
+            OrderKind::Limit {
+                tif: TimeInForce::Gtc,
+                ..
+            } => 1,
         }
     }
 }
@@ -261,7 +288,10 @@ impl VenueGateway for MexcGateway {
         };
         let (venue_symbol, vol) = {
             let contract = self.contracts().await?.tradable(&name)?;
-            (contract.venue_symbol.clone(), contract.vol_for(req.qty, ceiling)?)
+            (
+                contract.venue_symbol.clone(),
+                contract.vol_for(req.qty, ceiling)?,
+            )
         };
 
         let mut body = json!({
@@ -307,10 +337,18 @@ impl VenueGateway for MexcGateway {
         client_order_id: &str,
     ) -> Result<(), VenueError> {
         let name = self.name_of(symbol)?.clone();
-        let venue_symbol = self.contracts().await?.tradable(&name)?.venue_symbol.clone();
+        let venue_symbol = self
+            .contracts()
+            .await?
+            .tradable(&name)?
+            .venue_symbol
+            .clone();
         // The endpoint takes a list even for one order.
         let body = json!([{ "symbol": venue_symbol, "externalOid": client_order_id }]);
-        let reply = self.rest.post_signed(PATH_ORDER_CANCEL_EXTERNAL, &body).await?;
+        let reply = self
+            .rest
+            .post_signed(PATH_ORDER_CANCEL_EXTERNAL, &body)
+            .await?;
         venue_result(&reply)?;
         Ok(())
     }
@@ -446,22 +484,27 @@ impl VenueGateway for MexcGateway {
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
-        let assets = self.rest.get_signed(PATH_ASSETS, &[]).await?;
-        let (equity_usdt, available_usdt) = parse_assets(venue_result(&assets)?)?;
-        let positions_body = self.rest.get_signed(PATH_POSITIONS, &[]).await?;
-        let positions_data = venue_result(&positions_body)?.clone();
-        // The position rows say nothing about stops, so the stop book is read
-        // alongside and joined in. Without it every position would report
-        // itself unprotected, and the engine would act on that.
-        let stops = parse_position_stops(&self.stop_records().await?);
-        let ids = self.ids.clone();
-        let contracts = self.contracts().await?;
-        let positions = parse_positions(&positions_data, contracts, &ids, &stops)?;
+        let (observed_ns, reply) = account_scan(async {
+            let assets = self.rest.get_signed(PATH_ASSETS, &[]).await?;
+            let (equity_usdt, available_usdt) = parse_assets(venue_result(&assets)?)?;
+            let positions_body = self.rest.get_signed(PATH_POSITIONS, &[]).await?;
+            let positions_data = venue_result(&positions_body)?.clone();
+            // The position rows say nothing about stops, so the stop book is read
+            // alongside and joined in. Without it every position would report
+            // itself unprotected, and the engine would act on that.
+            let stops = parse_position_stops(&self.stop_records().await?);
+            let ids = self.ids.clone();
+            let contracts = self.contracts().await?;
+            let positions = parse_positions(&positions_data, contracts, &ids, &stops)?;
+            Ok::<_, VenueError>((equity_usdt, available_usdt, positions))
+        })
+        .await;
+        let (equity_usdt, available_usdt, positions) = reply?;
         Ok(AccountView {
             equity_usdt,
             available_usdt,
             positions,
-            observed_ns: mono_ns(),
+            observed_ns,
         })
     }
 
@@ -511,10 +554,18 @@ impl VenueGateway for MexcGateway {
         let names = self.names.clone();
         let mut out = Vec::new();
         for name in names {
-            let venue_symbol = match self.contracts().await?.any(&name) {
-                Some(contract) => contract.venue_symbol.clone(),
-                None => continue,
-            };
+            let venue_symbol = self
+                .contracts()
+                .await?
+                .any(&name)
+                .ok_or_else(|| {
+                    VenueError::BadReply(format!(
+                        "configured symbol {name} is absent from the MEXC contract table"
+                    ))
+                })?
+                .venue_symbol
+                .clone();
+            let mut complete = false;
             for page in 1..=MAX_PAGES {
                 let body = self
                     .rest
@@ -531,12 +582,17 @@ impl VenueGateway for MexcGateway {
                     .await?;
                 let data = venue_result(&body)?.clone();
                 let contracts = self.contracts().await?;
-                let rows = parse_deals(&data, contracts)?;
-                let short_page = rows.len() < PAGE_SIZE as usize;
+                let (rows, raw_count) = parse_deals(&data, contracts)?;
                 out.extend(rows);
-                if short_page {
+                if execution_page_complete(&name, page, raw_count)? {
+                    complete = true;
                     break;
                 }
+            }
+            if !complete {
+                return Err(VenueError::BadReply(format!(
+                    "execution history for {name} still had pages after {MAX_PAGES} full pages"
+                )));
             }
         }
         Ok(out)
@@ -558,18 +614,35 @@ mod tests {
     }
 
     #[test]
+    fn execution_pagination_needs_a_raw_short_page() {
+        assert!(execution_page_complete("BTCUSDT", 1, 99).unwrap());
+        assert!(!execution_page_complete("BTCUSDT", 1, 100).unwrap());
+        assert!(execution_page_complete("BTCUSDT", MAX_PAGES, 100).is_err());
+        assert!(execution_page_complete("BTCUSDT", 1, 101).is_err());
+    }
+
+    #[test]
     fn post_only_is_an_order_type_here_not_a_time_in_force() {
         assert_eq!(MexcGateway::venue_type(&OrderKind::Market), 5);
         assert_eq!(
-            MexcGateway::venue_type(&OrderKind::Limit { px: 1.0, tif: TimeInForce::Gtc }),
+            MexcGateway::venue_type(&OrderKind::Limit {
+                px: 1.0,
+                tif: TimeInForce::Gtc
+            }),
             1
         );
         assert_eq!(
-            MexcGateway::venue_type(&OrderKind::Limit { px: 1.0, tif: TimeInForce::PostOnly }),
+            MexcGateway::venue_type(&OrderKind::Limit {
+                px: 1.0,
+                tif: TimeInForce::PostOnly
+            }),
             2
         );
         assert_eq!(
-            MexcGateway::venue_type(&OrderKind::Limit { px: 1.0, tif: TimeInForce::Ioc }),
+            MexcGateway::venue_type(&OrderKind::Limit {
+                px: 1.0,
+                tif: TimeInForce::Ioc
+            }),
             3
         );
     }
@@ -580,7 +653,10 @@ mod tests {
         let gw = MexcGateway::for_test("http://127.0.0.1:1", MexcRealm::Mainnet, creds, vec![]);
         let caps = gw.caps();
         assert!(caps.native_position_stop);
-        assert!(!caps.amend_in_place, "MEXC has no amend for an ordinary order");
+        assert!(
+            !caps.amend_in_place,
+            "MEXC has no amend for an ordinary order"
+        );
         assert!(caps.set_leverage);
     }
 
@@ -590,17 +666,34 @@ mod tests {
         // three, and the wrong `stopLossReverse` turns a stop-out into an
         // opposite position that carries no stop of its own.
         assert_eq!(REVERSE_NO, 2, "2 is 'no' — 1 would reverse");
-        assert_eq!(VOL_TYPE_POSITION, 2, "2 tracks the position; 1 is a fixed size");
-        assert_eq!(POSITION_MODE_ONE_WAY, 2, "hedge mode holds two positions per symbol");
+        assert_eq!(
+            VOL_TYPE_POSITION, 2,
+            "2 tracks the position; 1 is a fixed size"
+        );
+        assert_eq!(
+            POSITION_MODE_ONE_WAY, 2,
+            "hedge mode holds two positions per symbol"
+        );
     }
 
     #[tokio::test]
     async fn an_amend_is_refused_rather_than_turned_into_a_replacement() {
         let creds = MexcRealm::Mainnet.credentials_for_test("k", "s");
-        let mut gw =
-            MexcGateway::for_test("http://127.0.0.1:1", MexcRealm::Mainnet, creds, vec!["BTCUSDT".into()]);
+        let mut gw = MexcGateway::for_test(
+            "http://127.0.0.1:1",
+            MexcRealm::Mainnet,
+            creds,
+            vec!["BTCUSDT".into()],
+        );
         let err = gw
-            .amend_order(SymbolId(0), "eng-1", AmendSpec { px: Some(1.0), qty: None })
+            .amend_order(
+                SymbolId(0),
+                "eng-1",
+                AmendSpec {
+                    px: Some(1.0),
+                    qty: None,
+                },
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no amend"), "{err}");
@@ -617,8 +710,17 @@ mod tests {
             creds,
             vec!["BTCUSDT".to_string()],
         );
-        assert_eq!(VenueGateway::add_symbol(&mut gw, "BTCUSDT"), Some(SymbolId(0)));
-        assert_eq!(VenueGateway::add_symbol(&mut gw, "ETHUSDT"), Some(SymbolId(1)));
-        assert_eq!(VenueGateway::add_symbol(&mut gw, "ETHUSDT"), Some(SymbolId(1)));
+        assert_eq!(
+            VenueGateway::add_symbol(&mut gw, "BTCUSDT"),
+            Some(SymbolId(0))
+        );
+        assert_eq!(
+            VenueGateway::add_symbol(&mut gw, "ETHUSDT"),
+            Some(SymbolId(1))
+        );
+        assert_eq!(
+            VenueGateway::add_symbol(&mut gw, "ETHUSDT"),
+            Some(SymbolId(1))
+        );
     }
 }

@@ -280,8 +280,12 @@ def format_coverage(status: CoverageStatus) -> str:
     if status.manifest_covers_latest_signal:
         margin = status.manifest_margin_days
         lines.append(
-            f"  VERDICT: ✅ manifest covers the latest signal day (margin {margin:+d}d). "
-            "Strict PIT reconcile is valid."
+            f"  DATE TAIL: ✅ manifest reaches the latest signal day (margin {margin:+d}d)."
+        )
+        lines.append(
+            "             Date endpoints do not prove row-level PIT reconcile; run "
+            "`python -m liquidity_migration.data.binance_vision validate-manifest "
+            "--data-root <root>` for that proof."
         )
     else:
         gap = -(status.manifest_margin_days or 0)

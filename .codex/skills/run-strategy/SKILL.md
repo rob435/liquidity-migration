@@ -29,19 +29,24 @@ Do not maintain a static package-subcommand list.
 ## Canonical wrappers
 
 - Deployment/account state: `scripts/ops.sh status`.
-- Deploy: `scripts/ops.sh deploy {install,activate,staged,rollout,
-  stop-mainnet}`. `staged` installs and activates in one
-  command; `rollout`'s venue-flat proof is advisory on a no-mainnet fleet.
-  There is no `recover` mode and no
-  operational-authority receipt — both were removed on 2026-07-31.
+- Deploy a new generation on a host with funded configuration only through
+  `scripts/ops.sh deploy rollout --profile operational`. Inspect current help
+  before using `install`, `activate`, or `staged`; those modes refuse a funded
+  generation change.
+- Stop or persistently disarm funded trading with `scripts/ops.sh deploy
+  stop-mainnet` or `scripts/ops.sh deploy disarm-mainnet` respectively.
 - Mainnet arming state (read-only): `scripts/ops.sh real-money preflight`.
-- Wedged order commands: `scripts/ops.sh wedged-command`.
-- Account evidence: `scripts/ops.sh venue-accounting`; apply
-  `pit-reconcile`.
-- Ledger reset: `scripts/ops.sh reset`, dry-run unless `--execute`.
+- Credential-wide flatness evidence: `scripts/ops.sh attest-flat
+  --environment demo|mainnet`; apply `pit-reconcile` before drawing an
+  accounting conclusion.
 - Equity curves: `scripts/ops.sh equity`; apply `equity-curve`.
 - Tests: `scripts/dev.sh test` (local only; not an operator route).
 - Data builds: use the per-venue builders or current package command help.
+- One bounded live demo order proof: inspect `engine help`, then use
+  `engine canary-order --config PATH --symbol SYMBOL --expected-user-id UID
+  --execute`. It only accepts `bybit_demo`, takes the account lease, and must
+  finish with an exact terminal order state and two clean derivative-account
+  readings. Never substitute a raw signed request or point it at mainnet.
 
 ## Forward safety
 

@@ -144,7 +144,7 @@ def _add_archive_download_klines_1h_api_parser(subparsers) -> None:
         "--min-existing-bars",
         type=int,
         default=1,
-        help="With missing-only mode, rebuild partitions with fewer than this many 1h bars; default treats any written partition as processed.",
+        help="With missing-only mode, rebuild partitions with fewer than this many aligned 1h rows, including explicit causal nulls; default treats any written partition as processed.",
     )
     archive_klines_1h_api.add_argument("--limit", type=int, default=1000, help="Bybit page size, capped at 1000.")
     archive_klines_1h_api.add_argument(

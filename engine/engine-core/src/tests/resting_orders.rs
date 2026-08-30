@@ -831,7 +831,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
                 side: Side::Buy,
                 qty: 0.25,
                 px: 29_000.0,
-                fee: 0.0,
+                fee: Some(0.0),
                 is_maker: false,
                 venue_ts_ms: recent_replay_ms(),
                 recv_ns: 4,

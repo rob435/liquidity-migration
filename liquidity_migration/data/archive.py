@@ -21,6 +21,7 @@ import polars as pl
 
 from liquidity_migration.core._common import MS_PER_HOUR
 from liquidity_migration.data.ingestion import aggregate_trade_klines_1h, trades_to_frame
+from liquidity_migration.core.market_numeric import valid_trade_numbers
 
 
 _logger = logging.getLogger("liquidity_migration.data.archive")
@@ -92,11 +93,30 @@ def _content_length(response: object) -> int | None:
 
 def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) -> pl.DataFrame:
     file_path = Path(path)
+    expected_symbol = symbol.strip().upper() if symbol is not None else None
     try:
         frame = pl.read_csv(file_path)
         if {"timestamp", "side", "size", "price", "trdMatchID"}.issubset(frame.columns):
-            symbol_expr = pl.lit(symbol) if symbol is not None else pl.col("symbol").cast(pl.Utf8)
-            return (
+            if expected_symbol is not None and "symbol" in frame.columns:
+                invalid_symbol = frame.filter(
+                    (
+                        pl.col("symbol")
+                        .cast(pl.Utf8, strict=False)
+                        .str.strip_chars()
+                        .str.to_uppercase()
+                        != expected_symbol
+                    ).fill_null(True)
+                )
+                if not invalid_symbol.is_empty():
+                    raise ValueError(
+                        "public trade archive row symbol does not match the requested symbol"
+                    )
+            symbol_expr = (
+                pl.lit(expected_symbol)
+                if expected_symbol is not None
+                else pl.col("symbol").cast(pl.Utf8)
+            )
+            trades = (
                 frame.select(
                     [
                         pl.col("trdMatchID").cast(pl.Utf8).alias("trade_id"),
@@ -114,6 +134,18 @@ def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) ->
                 .unique(subset=["symbol", "trade_id"], keep="last")
                 .sort(["symbol", "ts_ms", "trade_id"])
             )
+            invalid = trades.filter(
+                (pl.col("ts_ms") < 0)
+                | ~pl.col("price").is_finite().fill_null(False)
+                | (pl.col("price") <= 0.0)
+                | ~pl.col("size_base").is_finite().fill_null(False)
+                | (pl.col("size_base") <= 0.0)
+            )
+            if invalid.height:
+                raise ValueError(
+                    f"public trade archive contains {invalid.height} invalid numeric row(s)"
+                )
+            return trades
     except (pl.exceptions.PolarsError, OSError, UnicodeDecodeError):
         # Fall through to the byte-reader only for "not a plain polars-readable
         # CSV" failures. Anything else (MemoryError, real bugs) must propagate
@@ -131,11 +163,19 @@ def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) ->
             data = archive.read(names[0])
     text = data.decode("utf-8")
     reader = csv.DictReader(io.StringIO(text))
-    return trades_to_frame(list(reader), symbol=symbol)
+    rows = list(reader)
+    if expected_symbol is not None and "symbol" in (reader.fieldnames or []):
+        for row in rows:
+            if str(row.get("symbol") or "").strip().upper() != expected_symbol:
+                raise ValueError(
+                    "public trade archive row symbol does not match the requested symbol"
+                )
+    return trades_to_frame(rows, symbol=expected_symbol)
 
 
 def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None = None) -> pl.DataFrame:
     file_path = Path(path)
+    expected_symbol = symbol.strip().upper() if symbol is not None else None
     if os.environ.get(ARCHIVE_VECTORIZE_1H_ENV, "").strip().lower() in {"1", "true", "yes"}:
         try:
             return _read_public_trade_archive_klines_1h_vectorized(file_path, symbol=symbol)
@@ -155,13 +195,24 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
             # Track earliest/latest trade timestamps instead of trusting CSV order.
             bar_ts: dict[tuple[int, str], tuple[int, int]] = {}
             for raw in reader:
-                raw_symbol = str(symbol or raw.get("symbol") or "").upper()
+                if expected_symbol is not None and "symbol" in (reader.fieldnames or []):
+                    archived_symbol = str(raw.get("symbol") or "").strip().upper()
+                    if archived_symbol != expected_symbol:
+                        raise ValueError(
+                            "public trade archive row symbol does not match the requested symbol"
+                        )
+                raw_symbol = str(expected_symbol or raw.get("symbol") or "").upper()
                 if not raw_symbol:
                     raise ValueError("archive row is missing symbol")
                 ts_ms = int(float(raw["timestamp"]) * 1000.0)
                 hour_ms = ts_ms // MS_PER_HOUR * MS_PER_HOUR
                 price = float(raw["price"])
                 size_base = float(raw["size"])
+                if not valid_trade_numbers(ts_ms=ts_ms, price=price, size_base=size_base):
+                    raise ValueError(
+                        f"invalid public trade row: ts_ms={ts_ms!r} "
+                        f"price={price!r} size_base={size_base!r}"
+                    )
                 quote_value = price * size_base
                 key = (hour_ms, raw_symbol)
                 bar = bars.get(key)
@@ -204,6 +255,25 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
         return aggregate_trade_klines_1h(trades)
 
 
+def empty_public_trade_archive_payload_state(path: str | Path) -> str | None:
+    """Classify an empty archive payload without interpreting venue activity."""
+
+    with _public_trade_text_handle(Path(path)) as handle:
+        reader = csv.reader(handle)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return "empty_payload"
+        required = {"timestamp", "size", "price", "trdMatchID"}
+        if not required.issubset({value.strip() for value in header}):
+            raise ValueError("unsupported public trade archive schema")
+        try:
+            next(reader)
+        except StopIteration:
+            return "header_only"
+    return None
+
+
 def _read_public_trade_archive_klines_1h_vectorized(file_path: Path, *, symbol: str | None = None) -> pl.DataFrame:
     header = pl.read_csv(file_path, n_rows=0)
     columns = set(header.columns)
@@ -230,6 +300,33 @@ def _read_public_trade_archive_klines_1h_vectorized(file_path: Path, *, symbol: 
     )
     if frame.is_empty():
         return pl.DataFrame()
+    if symbol is not None and has_symbol_column:
+        expected_symbol = symbol.strip().upper()
+        invalid_symbol = frame.filter(
+            (
+                pl.col("symbol")
+                .cast(pl.Utf8, strict=False)
+                .str.strip_chars()
+                .str.to_uppercase()
+                != expected_symbol
+            ).fill_null(True)
+        )
+        if not invalid_symbol.is_empty():
+            raise ValueError(
+                "public trade archive row symbol does not match the requested symbol"
+            )
+    invalid = frame.filter(
+        ~pl.col("timestamp").is_finite().fill_null(False)
+        | (pl.col("timestamp") < 0.0)
+        | ~pl.col("price").is_finite().fill_null(False)
+        | (pl.col("price") <= 0.0)
+        | ~pl.col("size").is_finite().fill_null(False)
+        | (pl.col("size") <= 0.0)
+    )
+    if invalid.height:
+        raise ValueError(
+            f"public trade archive contains {invalid.height} invalid numeric row(s)"
+        )
     symbol_expr = pl.lit(symbol.upper()) if symbol is not None else pl.col("symbol").cast(pl.Utf8).str.to_uppercase()
     return (
         frame.select(

@@ -1,6 +1,6 @@
 ---
 name: pit-reconcile
-description: Assess current account-journal, venue-accounting, PIT, and model evidence. Use for journal/venue mismatches, fill or P&L evidence, archive_trade_manifest coverage, pit_membership_fail, or execution-accounting claims. Keep PIT validity separate from operational authorization and never treat projections as account authority.
+description: Assess current engine-WAL, authenticated venue, PIT, and model evidence. Use for WAL/venue mismatches, fill or P&L evidence, archive_trade_manifest coverage, pit_membership_fail, or execution-accounting claims. Keep PIT validity separate from operational authorization and never treat projections as account authority.
 ---
 
 # Reconcile account and PIT evidence
@@ -10,7 +10,7 @@ Start from current surfaces:
 ```bash
 scripts/ops.sh help
 scripts/ops.sh status
-scripts/ops.sh venue-accounting --help
+scripts/ops.sh attest-flat --environment demo
 python -m liquidity_migration --help
 ```
 
@@ -18,33 +18,38 @@ These are demo or research tools. They never authorize real money.
 
 ## Account evidence
 
-The canonical account journal is position, order, fill, fee, funding, and P&L
-authority. Sleeve trade/order Parquet, dashboards, and notifications are
-projections.
+The Rust engine's write-ahead log (WAL) is the durable local order and fill
+record. Sleeve books, strategy Parquet, dashboards, heartbeats, and
+notifications are projections. The venue remains the authority for what the
+account currently holds and which orders and executions it accepted.
 
-For a stopped demo interval, use:
+For current credential-wide flatness, use the concrete realm:
 
 ```bash
-scripts/ops.sh venue-accounting \
-  --account-root /absolute/demo-account-root \
-  --account-id bybit-demo-unified \
-  --start-time-ms START_MS \
-  --output /absolute/new/venue-accounting.json
+scripts/ops.sh attest-flat --environment demo
 ```
 
-Inspect current help for optional end time, sample floors, and tolerances. The
-command captures Bybit executions, closed P&L, funding, positions, and orders;
-replays the journal; checks lineage and totals; and requires local/venue
-flatness where claimed. It is evidence only for the named interval.
+This runs the installed venue adapter's two-scan proof across the credential,
+not just the symbols in the heartbeat. It proves flatness only; it does not
+prove historical fills, fees, funding, or P&L.
 
-For live mismatches, inspect the exact journal head/hash chain, owner health,
-reconciliation events, immutable venue identifiers, and authenticated venue
-snapshot. Preserve contradictory facts and stop unsafe writers. Do not repair
-the headline by editing projections or resetting before flatness is proved.
+Read a WAL with the exact installed engine or the matching local build:
 
-The combined backtest/demo/paper structural comparison was removed with the
-paper fleet on 2026-08-03; use `venue-accounting` receipts and the journal
-tools for demo-vs-backtest questions.
+```bash
+/opt/liquidity-migration-engine/bin/engine replay --wal /absolute/path/to/engine.wal
+/opt/liquidity-migration-engine/bin/engine fills --wal /absolute/path/to/engine.wal
+```
+
+Record the engine version, checkout commit, WAL path and segment set. Compare
+immutable client/order/execution identifiers and quantities with authenticated
+venue results for the same account and interval. Do not turn a WAL total into a
+venue-confirmed fee, funding, or P&L claim without that join.
+
+For live mismatches, inspect the exact WAL segment set and replay head, owner
+health, reconciliation events, immutable venue identifiers, and authenticated
+venue snapshot. Preserve contradictory facts and stop unsafe writers. Do not
+repair the headline by editing projections or resetting before flatness is
+proved.
 
 ## PIT evidence
 

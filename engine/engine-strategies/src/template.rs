@@ -92,5 +92,5 @@ pub mod plug;
 #[cfg(test)]
 mod plug_tests;
 
-pub use plan::{Held, Rules, Step, plan};
+pub use plan::{plan, Held, Rules, Step};
 pub use plug::Template;

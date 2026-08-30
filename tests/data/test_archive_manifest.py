@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import polars as pl
@@ -277,10 +280,13 @@ def test_empty_manifest_has_expected_schema_and_no_rows() -> None:
         "source",
         "membership_source",
         "membership_inferred",
-        "first_archive_observed_date",
-        "v5_observed_launch_date",
-        "membership_provenance_limitation",
-    ]
+            "first_archive_observed_date",
+            "v5_observed_launch_date",
+            "membership_provenance_limitation",
+            "archive_observed_payload_state",
+            "archive_observed_content_sha256",
+            "archive_observed_at",
+        ]
     assert manifest.schema["date"] == pl.String
 
 
@@ -588,6 +594,44 @@ def test_select_manifest_rows_missing_only_keeps_sparse_partitions(tmp_path) -> 
     assert ("2025-01-01", "BTCUSDT") in {(row["date"], row["symbol"]) for row in rows}
 
 
+def test_select_manifest_rows_counts_causal_padding_as_archive_coverage(tmp_path) -> None:
+    day_start_ms = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    rows = []
+    for hour in range(24):
+        price = None if hour < 12 else 1.0
+        rows.append(
+            {
+                "ts_ms": day_start_ms + hour * 3_600_000,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+            }
+        )
+    _write_partition(
+        tmp_path,
+        "klines_1h",
+        "BTCUSDT",
+        "2025-01-01",
+        pl.DataFrame(rows),
+    )
+    config = ArchiveHourlyKlineApiDownloadConfig(
+        missing_only=True,
+        min_existing_bars=20,
+    )
+
+    selected = _select_manifest_rows(
+        _manifest_frame(),
+        data_root=tmp_path,
+        config=config,
+        dataset="klines_1h",
+    )
+
+    assert ("2025-01-01", "BTCUSDT") not in {
+        (row["date"], row["symbol"]) for row in selected
+    }
+
+
 def test_select_manifest_rows_applies_skip_list(tmp_path, monkeypatch) -> None:
     skip_file = tmp_path / "skip.csv"
     skip_file.write_text("2025-01-01,BTCUSDT\n", encoding="utf-8")
@@ -664,6 +708,312 @@ def test_run_archive_api_download_marks_empty_when_api_returns_no_rows(tmp_path,
     assert payload["downloaded"] == 0
     assert payload["empty"] == 1
     assert (tmp_path / "reports" / "archive_klines_1h_api_fixture.json").exists()
+
+
+def test_run_archive_api_download_falls_back_to_exact_independent_trade_archive(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive_url = (
+        "https://public.bybit.com/trading/AAAUSDT/"
+        "AAAUSDT2025-01-01.csv.gz?manifest=exact"
+    )
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": archive_url,
+                "source": am.ARCHIVE_SCRAPE_SOURCE,
+                "membership_inferred": False,
+            }
+        ]
+    )
+    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+    day_start_ms = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    monkeypatch.setattr(
+        manifest_module,
+        "_fetch_bybit_api_klines",
+        lambda *args, **kwargs: [
+            [str(day_start_ms), "999", "999", "999", "999", "1", "999"]
+        ],
+    )
+    download_calls: list[tuple[str, Path]] = []
+
+    def fake_archive_download(url, destination, **kwargs):
+        download_calls.append((url, destination))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        csv_text = "\n".join(
+            [
+                "timestamp,symbol,side,size,price,trdMatchID",
+                "1735689600,AAAUSDT,Buy,1,100,t0",
+                "1735696800,AAAUSDT,Sell,2,110,t2",
+            ]
+        )
+        destination.write_bytes(gzip.compress(csv_text.encode("utf-8")))
+        return destination
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", fake_archive_download)
+
+    payload = run_archive_hourly_klines_api_download(
+        tmp_path,
+        config=ArchiveHourlyKlineApiDownloadConfig(
+            start="2025-01-01",
+            end="2025-01-02",
+            workers=1,
+            min_existing_bars=20,
+            name="fallback",
+        ),
+    )
+
+    assert payload["downloaded"] == 1
+    assert payload["archive_fallback_downloaded"] == 1
+    assert [call[0] for call in download_calls] == [archive_url]
+    cached_path = download_calls[0][1]
+    assert cached_path.is_file()
+    assert cached_path.parent == (
+        tmp_path / ".cache" / am.ARCHIVE_KLINE_CACHE_DIR / "AAAUSDT" / "2025-01-01"
+    )
+    bars = read_dataset(tmp_path, "klines_1h").sort("ts_ms")
+    assert bars.height == 24
+    assert bars["source"].unique().to_list() == ["bybit_public_trades"]
+    assert bars.row(1, named=True)["ts_ms"] == day_start_ms + 3_600_000
+    assert bars.row(1, named=True)["open"] == 100.0
+    assert bars.row(1, named=True)["close"] == 100.0
+    assert bars.row(1, named=True)["volume_base"] == 0.0
+    assert bars.row(2, named=True)["open"] == 110.0
+
+
+def test_archive_fallback_keeps_unknown_prelisting_hours_null(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive_url = "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz"
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": archive_url,
+                "source": am.ARCHIVE_SCRAPE_SOURCE,
+                "membership_inferred": False,
+            }
+        ]
+    )
+    write_dataset(
+        manifest,
+        tmp_path,
+        "archive_trade_manifest",
+        partition_by=("date",),
+        append=False,
+    )
+    monkeypatch.setattr(manifest_module, "_fetch_bybit_api_klines", lambda *args, **kwargs: [])
+
+    def fake_archive_download(url, destination, **kwargs):
+        assert url == archive_url
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(
+            gzip.compress(
+                (
+                    "timestamp,symbol,side,size,price,trdMatchID\n"
+                    "1735732800,AAAUSDT,Buy,1,100,t12\n"
+                ).encode("utf-8")
+            )
+        )
+        return destination
+
+    monkeypatch.setattr(
+        manifest_module,
+        "download_public_trade_archive",
+        fake_archive_download,
+    )
+
+    payload = run_archive_hourly_klines_api_download(
+        tmp_path,
+        config=ArchiveHourlyKlineApiDownloadConfig(
+            start="2025-01-01",
+            end="2025-01-02",
+            workers=1,
+            min_existing_bars=20,
+            name="partial-listing",
+        ),
+    )
+
+    assert payload["downloaded"] == 1
+    bars = read_dataset(tmp_path, "klines_1h").sort("ts_ms")
+    assert bars.height == 24
+    assert bars.filter(pl.col("open").is_not_null()).height == 12
+    assert bars.row(11, named=True)["open"] is None
+    assert bars.row(12, named=True)["open"] == 100.0
+
+
+def test_archive_fallback_fails_without_writing_incomplete_archive(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive_url = "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz"
+    monkeypatch.setattr(manifest_module, "_fetch_bybit_api_klines", lambda *args, **kwargs: [])
+
+    def fake_archive_download(url, destination, **kwargs):
+        raise RuntimeError("truncated archive body")
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", fake_archive_download)
+    result = manifest_module._download_api_hourly_group(
+        tmp_path,
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": archive_url,
+                "source": am.ARCHIVE_SCRAPE_SOURCE,
+                "membership_inferred": False,
+            }
+        ],
+        ArchiveHourlyKlineApiDownloadConfig(
+            missing_only=False,
+            min_existing_bars=20,
+            retries=0,
+        ),
+    )[0]
+
+    assert result["status"] == "failed"
+    assert result["download_source"] == "bybit_public_trades"
+    assert "truncated archive body" in result["error"]
+    assert not _kline_partition_file_exists(
+        tmp_path,
+        dataset="klines_1h",
+        symbol="AAAUSDT",
+        date="2025-01-01",
+    )
+
+
+@pytest.mark.parametrize(
+    ("archive_payload", "expected_state"),
+    [
+        (b"", "empty_payload"),
+        (b"timestamp,symbol,side,size,price,trdMatchID\n", "header_only"),
+    ],
+)
+def test_empty_direct_archive_payload_is_hashed_persisted_and_reported(
+    tmp_path,
+    monkeypatch,
+    archive_payload: bytes,
+    expected_state: str,
+) -> None:
+    archive_url = "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz"
+    manifest = am.stamp_bybit_manifest_provenance(
+        pl.DataFrame(
+            [
+                {
+                    "symbol": "AAAUSDT",
+                    "date": "2025-01-01",
+                    "url": archive_url,
+                    "source": am.ARCHIVE_SCRAPE_SOURCE,
+                }
+            ]
+        )
+    )
+    write_dataset(
+        manifest,
+        tmp_path,
+        "archive_trade_manifest",
+        partition_by=("date",),
+        append=False,
+    )
+    monkeypatch.setattr(manifest_module, "_fetch_bybit_api_klines", lambda *args, **kwargs: [])
+    body = gzip.compress(archive_payload)
+
+    def fake_archive_download(url, destination, **kwargs):
+        assert url == archive_url
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(body)
+        return destination
+
+    monkeypatch.setattr(
+        manifest_module,
+        "download_public_trade_archive",
+        fake_archive_download,
+    )
+
+    payload = run_archive_hourly_klines_api_download(
+        tmp_path,
+        config=ArchiveHourlyKlineApiDownloadConfig(
+            start="2025-01-01",
+            end="2025-01-02",
+            workers=1,
+            min_existing_bars=20,
+            name="confirmed-empty",
+        ),
+    )
+
+    assert payload["archives_without_trade_rows"] == 1
+    assert payload["empty"] == 0
+    assert payload["failures"] == 0
+    persisted = read_dataset(tmp_path, "archive_trade_manifest")
+    assert persisted["archive_observed_payload_state"].to_list() == [
+        expected_state
+    ]
+    assert persisted["archive_observed_content_sha256"].to_list() == [
+        hashlib.sha256(body).hexdigest()
+    ]
+    assert datetime.fromisoformat(persisted["archive_observed_at"][0]).tzinfo is not None
+    am.validate_bybit_manifest_provenance(persisted)
+    report = (tmp_path / "reports" / "archive_klines_1h_api_confirmed-empty.md").read_text()
+    assert "| Public archives yielding no trade rows | 1 |" in report
+
+
+def test_archive_fallback_is_not_used_for_inferred_v5_only_membership(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(manifest_module, "_fetch_bybit_api_klines", lambda *args, **kwargs: [])
+
+    def fail_archive_download(*args, **kwargs):
+        raise AssertionError("inferred membership has no independently observed archive URL")
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", fail_archive_download)
+    result = manifest_module._download_api_hourly_group(
+        tmp_path,
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": am.V5_LISTING_URL_SENTINEL,
+                "source": am.V5_LISTING_SOURCE,
+                "membership_inferred": True,
+            }
+        ],
+        ArchiveHourlyKlineApiDownloadConfig(missing_only=False, min_existing_bars=20),
+    )[0]
+
+    assert result["status"] == "empty"
+    assert result["download_source"] == ""
+
+
+def test_archive_fallback_rejects_url_filename_for_wrong_manifest_key(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(manifest_module, "_fetch_bybit_api_klines", lambda *args, **kwargs: [])
+    result = manifest_module._download_api_hourly_group(
+        tmp_path,
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/BBBUSDT2025-01-01.csv.gz",
+                "source": am.ARCHIVE_SCRAPE_SOURCE,
+                "membership_inferred": False,
+            }
+        ],
+        ArchiveHourlyKlineApiDownloadConfig(
+            missing_only=False,
+            min_existing_bars=20,
+        ),
+    )[0]
+
+    assert result["status"] == "failed"
+    assert "does not match its manifest symbol/date" in result["error"]
 
 
 def test_download_api_hourly_group_returns_empty_for_no_rows(tmp_path) -> None:
@@ -903,6 +1253,34 @@ def test_stamp_bybit_manifest_provenance_preserves_v5_launch_date() -> None:
     am.validate_bybit_manifest_provenance(stamped)
 
 
+def test_stamp_bybit_manifest_provenance_preserves_hashed_archive_observation() -> None:
+    digest = "a" * 64
+    frame = pl.DataFrame(
+        [
+            {
+                "date": "2025-01-01",
+                "symbol": "AAAUSDT",
+                "url": "https://public.bybit.com/trading/AAAUSDT/a.csv.gz",
+                "source": am.ARCHIVE_SCRAPE_SOURCE,
+                "archive_observed_payload_state": "empty_payload",
+                "archive_observed_content_sha256": digest,
+                "archive_observed_at": "2026-08-30T02:30:00+00:00",
+            }
+        ]
+    )
+
+    stamped = am.stamp_bybit_manifest_provenance(frame)
+
+    assert stamped["archive_observed_payload_state"].to_list() == [
+        "empty_payload"
+    ]
+    assert stamped["archive_observed_content_sha256"].to_list() == [digest]
+    assert stamped["archive_observed_at"].to_list() == [
+        "2026-08-30T02:30:00+00:00"
+    ]
+    am.validate_bybit_manifest_provenance(stamped)
+
+
 def test_build_manifest_attaches_v5_launch_to_archive_rows(monkeypatch) -> None:
     base_url = "https://archive.test/trading/"
     monkeypatch.setattr(
@@ -960,6 +1338,79 @@ def test_validate_bybit_manifest_provenance_rejects_contradictory_class() -> Non
 
     with pytest.raises(RuntimeError, match="contradict"):
         am.validate_bybit_manifest_provenance(corrupt)
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        {
+            "archive_observed_payload_state": "empty_payload",
+            "archive_observed_content_sha256": None,
+            "archive_observed_at": "2026-08-30T02:30:00+00:00",
+        },
+        {
+            "archive_observed_payload_state": None,
+            "archive_observed_content_sha256": "a" * 64,
+            "archive_observed_at": "2026-08-30T02:30:00+00:00",
+        },
+        {
+            "archive_observed_payload_state": "empty_payload",
+            "archive_observed_content_sha256": "a" * 64,
+            "archive_observed_at": None,
+        },
+    ],
+)
+def test_validate_bybit_manifest_provenance_rejects_unbacked_archive_observation(
+    corrupt: dict[str, object],
+) -> None:
+    valid = am.stamp_bybit_manifest_provenance(
+        pl.DataFrame(
+            [
+                {
+                    "date": "2025-01-01",
+                    "symbol": "AAAUSDT",
+                    "url": "https://public.bybit.com/trading/AAAUSDT/a.csv.gz",
+                    "source": am.ARCHIVE_SCRAPE_SOURCE,
+                }
+            ]
+        )
+    )
+    invalid = valid.with_columns(
+        pl.lit(corrupt["archive_observed_payload_state"], dtype=pl.String).alias(
+            "archive_observed_payload_state"
+        ),
+        pl.lit(corrupt["archive_observed_content_sha256"], dtype=pl.String).alias(
+            "archive_observed_content_sha256"
+        ),
+        pl.lit(corrupt["archive_observed_at"], dtype=pl.String).alias(
+            "archive_observed_at"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="contradict"):
+        am.validate_bybit_manifest_provenance(invalid)
+
+
+def test_validate_bybit_manifest_provenance_rejects_payload_observation_on_inferred_row() -> None:
+    inferred = am.stamp_bybit_manifest_provenance(
+        pl.DataFrame(
+            [
+                {
+                    "date": "2025-01-01",
+                    "symbol": "AAAUSDT",
+                    "url": am.V5_LISTING_URL_SENTINEL,
+                    "source": am.V5_LISTING_SOURCE,
+                }
+            ]
+        )
+    ).with_columns(
+        pl.lit("empty_payload").alias("archive_observed_payload_state"),
+        pl.lit("a" * 64).alias("archive_observed_content_sha256"),
+        pl.lit("2026-08-30T02:30:00+00:00").alias("archive_observed_at"),
+    )
+
+    with pytest.raises(RuntimeError, match="contradict"):
+        am.validate_bybit_manifest_provenance(inferred)
 
 
 def test_synthesize_v5_listing_skips_symbol_dates_already_in_archive() -> None:
@@ -1131,6 +1582,35 @@ def test_union_with_persisted_manifest_preserves_new_provenance_column(tmp_path)
         for row in merged.select("symbol", "v5_observed_launch_date").to_dicts()
     }
     assert values == {"BTCUSDT": "2026-07-01", "ETHUSDT": None}
+
+
+def test_union_with_persisted_manifest_keeps_hashed_empty_archive_evidence(
+    tmp_path,
+) -> None:
+    digest = "b" * 64
+    persisted = _manifest(
+        [("BTCUSDT", "2024-01-01", "btc.csv.gz")]
+    ).with_columns(
+        pl.lit("empty_payload").alias("archive_observed_payload_state"),
+        pl.lit(digest).alias("archive_observed_content_sha256"),
+        pl.lit("2026-08-30T02:30:00+00:00").alias("archive_observed_at"),
+    )
+    write_dataset(
+        persisted,
+        tmp_path,
+        "archive_trade_manifest",
+        partition_by=("date",),
+        append=False,
+    )
+    rebuilt = _manifest([("BTCUSDT", "2024-01-01", "btc.csv.gz")])
+
+    merged = am._union_with_persisted_manifest(tmp_path, rebuilt)
+
+    assert merged["archive_observed_payload_state"].to_list() == ["empty_payload"]
+    assert merged["archive_observed_content_sha256"].to_list() == [digest]
+    assert merged["archive_observed_at"].to_list() == [
+        "2026-08-30T02:30:00+00:00"
+    ]
 
 
 def test_run_archive_manifest_persist_is_non_destructive(tmp_path, monkeypatch) -> None:

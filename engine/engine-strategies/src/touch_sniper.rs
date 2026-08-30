@@ -61,7 +61,15 @@ pub struct TouchSniper {
 impl TouchSniper {
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
         let p = Params::new(NAME, params)?;
-        p.reject_unknown(&["symbol", "side", "trigger_px", "qty", "stop_px", "take_px", "ttl_s"])?;
+        p.reject_unknown(&[
+            "symbol",
+            "side",
+            "trigger_px",
+            "qty",
+            "stop_px",
+            "take_px",
+            "ttl_s",
+        ])?;
 
         let symbol_name = p.string("symbol")?;
         if symbol_name.is_empty() {
@@ -71,14 +79,19 @@ impl TouchSniper {
             "buy" => Side::Buy,
             "sell" => Side::Sell,
             other => {
-                return Err(p.invalid("side", format!("expected \"buy\" or \"sell\", got \"{other}\"")))
+                return Err(p.invalid(
+                    "side",
+                    format!("expected \"buy\" or \"sell\", got \"{other}\""),
+                ))
             }
         };
         // An entry always carries a stop, so `stop_px` is required, not optional.
         let stop_px = p.positive("stop_px")?;
         let ttl_ns = match p.opt_u64("ttl_s")? {
             None => None,
-            Some(0) => return Err(p.invalid("ttl_s", "expected a number of seconds above 0, got 0")),
+            Some(0) => {
+                return Err(p.invalid("ttl_s", "expected a number of seconds above 0, got 0"))
+            }
             Some(s) => Some(s.saturating_mul(1_000_000_000)),
         };
 
@@ -141,7 +154,9 @@ impl TouchSniper {
             side: self.side,
             qty: self.qty,
             kind: OrderKind::Market,
-            stop: Some(StopSpec { trigger_px: self.stop_px }),
+            stop: Some(StopSpec {
+                trigger_px: self.stop_px,
+            }),
             reduce_only: false,
             tag: ENTRY_TAG.to_string(),
             decided_ns,
@@ -158,7 +173,10 @@ impl TouchSniper {
         // Leave what we actually got filled. The configured size is only a
         // fallback for the case where the fill news has not reached us.
         let qty = (self.entry_filled_qty - self.exit_filled_qty).max(0.0);
-        if qty <= self.qty.max(1.0) * 1e-12 { self.state = State::Done; return; }
+        if qty <= self.qty.max(1.0) * 1e-12 {
+            self.state = State::Done;
+            return;
+        }
         ctx.place(Intent {
             strategy: self.id,
             symbol,
@@ -208,9 +226,11 @@ impl TouchSniper {
                 OrderUpdate::Ack(ack) if is_ours(&self.entry_order, &ack.client_order_id) => {
                     self.entry_order = Some(ack.client_order_id.clone());
                 }
-                OrderUpdate::Fill { client_order_id, qty, .. }
-                    if is_ours(&self.entry_order, client_order_id) =>
-                {
+                OrderUpdate::Fill {
+                    client_order_id,
+                    qty,
+                    ..
+                } if is_ours(&self.entry_order, client_order_id) => {
                     self.entry_order = Some(client_order_id.clone());
                     self.entry_filled_qty += qty;
                     self.state = State::Holding;
@@ -223,9 +243,7 @@ impl TouchSniper {
                 }
                 | OrderUpdate::Cancelled {
                     client_order_id, ..
-                }
-                    if is_ours(&self.entry_order, client_order_id) =>
-                {
+                } if is_ours(&self.entry_order, client_order_id) => {
                     // Sending the same entry again at the same level is how you
                     // end up chasing a price down. Whether to re-arm is the
                     // research side's call, not this layer's.
@@ -235,7 +253,12 @@ impl TouchSniper {
             },
             State::Holding => {
                 // Later pieces of the same entry still count toward exit size.
-                if let OrderUpdate::Fill { client_order_id, qty, .. } = update {
+                if let OrderUpdate::Fill {
+                    client_order_id,
+                    qty,
+                    ..
+                } = update
+                {
                     if is_ours(&self.entry_order, client_order_id) {
                         self.entry_filled_qty += qty;
                     }
@@ -247,14 +270,18 @@ impl TouchSniper {
                 OrderUpdate::Ack(ack) if is_ours(&self.exit_order, &ack.client_order_id) => {
                     self.exit_order = Some(ack.client_order_id.clone());
                 }
-                OrderUpdate::Fill { client_order_id, qty, .. }
-                    if is_ours(&self.entry_order, client_order_id) =>
-                {
+                OrderUpdate::Fill {
+                    client_order_id,
+                    qty,
+                    ..
+                } if is_ours(&self.entry_order, client_order_id) => {
                     self.entry_filled_qty += qty;
                 }
-                OrderUpdate::Fill { client_order_id, qty, .. }
-                    if is_ours(&self.exit_order, client_order_id) =>
-                {
+                OrderUpdate::Fill {
+                    client_order_id,
+                    qty,
+                    ..
+                } if is_ours(&self.exit_order, client_order_id) => {
                     self.exit_filled_qty += qty;
                     let tolerance = self.qty.max(1.0) * 1e-12;
                     if self.entry_filled_qty - self.exit_filled_qty <= tolerance {
@@ -279,9 +306,9 @@ impl TouchSniper {
                         self.resend_exit_on_next_quote = true;
                     }
                 }
-                OrderUpdate::Reject { client_order_id, .. }
-                    if is_ours(&self.exit_order, client_order_id) =>
-                {
+                OrderUpdate::Reject {
+                    client_order_id, ..
+                } if is_ours(&self.exit_order, client_order_id) => {
                     // An exit must not silently die, so try once more on the
                     // next quote. If the venue refuses twice the position needs
                     // a human, not another order from here.
@@ -295,10 +322,16 @@ impl TouchSniper {
                 _ => {}
             },
             State::Done => {
-                if let OrderUpdate::Fill { client_order_id, qty, .. } = update {
+                if let OrderUpdate::Fill {
+                    client_order_id,
+                    qty,
+                    ..
+                } = update
+                {
                     if is_ours(&self.entry_order, client_order_id) {
                         self.entry_filled_qty += qty;
-                        if self.entry_filled_qty > self.exit_filled_qty + self.qty.max(1.0) * 1e-12 {
+                        if self.entry_filled_qty > self.exit_filled_qty + self.qty.max(1.0) * 1e-12
+                        {
                             self.state = State::ExitSent;
                             self.resend_exit_on_next_quote = true;
                         }
@@ -316,7 +349,10 @@ impl Strategy for TouchSniper {
     }
 
     fn subscriptions(&self) -> Vec<Subscription> {
-        vec![Subscription { symbol: self.symbol_name.clone(), feed: Feed::Quote }]
+        vec![Subscription {
+            symbol: self.symbol_name.clone(),
+            feed: Feed::Quote,
+        }]
     }
 
     // Only what this plug acts on is overridden: quotes, its own timer, and
@@ -334,9 +370,10 @@ impl Strategy for TouchSniper {
             return;
         };
         match event {
-            MarketEvent::Quote { symbol: from, quote } if *from == symbol => {
-                self.on_quote(symbol, quote, ctx)
-            }
+            MarketEvent::Quote {
+                symbol: from,
+                quote,
+            } if *from == symbol => self.on_quote(symbol, quote, ctx),
             // Another symbol, a ticker, or a feed reset. A reset in particular
             // changes nothing: the levels are absolute prices, not something
             // derived from the stream that just dropped, and news about our
@@ -364,14 +401,25 @@ impl Strategy for TouchSniper {
         self.order_news(update, ctx);
     }
 
-    fn on_intent_refused(&mut self, symbol: SymbolId, reduce_only: bool, _reason: &str, ctx: &mut dyn StrategyCtx) {
-        if self.resolve(&*ctx) != Some(symbol) { return; }
+    fn on_intent_refused(
+        &mut self,
+        symbol: SymbolId,
+        reduce_only: bool,
+        _reason: &str,
+        ctx: &mut dyn StrategyCtx,
+    ) {
+        if self.resolve(&*ctx) != Some(symbol) {
+            return;
+        }
         if !reduce_only && self.state == State::EntrySent {
             self.state = State::Done;
         } else if reduce_only && self.state == State::ExitSent {
             self.exit_rejects += 1;
-            if self.exit_rejects >= 2 { self.state = State::Done; }
-            else { self.resend_exit_on_next_quote = true; }
+            if self.exit_rejects >= 2 {
+                self.state = State::Done;
+            } else {
+                self.resend_exit_on_next_quote = true;
+            }
         }
     }
 }

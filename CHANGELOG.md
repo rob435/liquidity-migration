@@ -6,6 +6,30 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The whole-repository audit removes silent ambiguity at the
+  inputs, order path, account edge, and deploy edge.** Market numbers now
+  reject NaN, infinity, non-positive prices and invalid sizes at one shared
+  boundary; funding, rolling clocks, WebSocket liveness, LONG admission,
+  historical entry prices, financed cash, carry re-entry, and terminal
+  liquidation all have direct regression cases. The Rust adapters validate
+  fill identity and quantity before changing state, start scans at the real
+  subscription boundary, parse venue numbers and cursors strictly, keep empty
+  execution checkpoints durable, and preserve unknown fee truth. WAL formats
+  remain backward-readable. Deploys bind one fetched commit and one SSH host,
+  stop children with a measured grace, join timer triggers to their service
+  invocations, keep notification retries durable, and make flattening refuse
+  stale or partial account evidence. A new demo-only `engine canary-order`
+  takes the account lease, verifies the authenticated UID, sends one protected
+  minimum PostOnly order, requires exact terminal status and venue-clock
+  execution history, and reconciles any ambiguous fill through one full close.
+  The Bybit archive repair recovered 1,180 of 1,454 thin or missing symbol-days;
+  strict full-PIT coverage still fails on 265 listing-inferred empty days and
+  nine official gzip objects that decompress to zero bytes. Those 274 rows stay
+  visible and required. Dependency locks were rebuilt and matched, both Python
+  and Rust advisory scans found no known vulnerability, and the complete check
+  finished with Ruff, mypy, 1,792 Python tests and the full Rust workspace
+  green.
+
 - **2026-08-30 — The gate stops chasing old moves, and every LONG entry
   says where it came from.** Two changes from the give-back program's live
   receipts (research_findings §LONG give-back). First, the LLM gate's

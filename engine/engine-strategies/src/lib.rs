@@ -60,21 +60,39 @@ pub enum BuildError {
     /// No plug by that name is compiled in.
     UnknownStrategy { name: String },
     /// The params were not a table of key/value pairs at all.
-    ParamsNotATable { strategy: &'static str, got: &'static str },
+    ParamsNotATable {
+        strategy: &'static str,
+        got: &'static str,
+    },
     /// A required parameter is absent.
-    MissingParam { strategy: &'static str, param: &'static str },
+    MissingParam {
+        strategy: &'static str,
+        param: &'static str,
+    },
     /// A parameter is present but unusable.
-    InvalidParam { strategy: &'static str, param: &'static str, detail: String },
+    InvalidParam {
+        strategy: &'static str,
+        param: &'static str,
+        detail: String,
+    },
     /// A key the strategy does not read — a typo would otherwise silently
     /// change behavior (a misspelled take_px means "no profit level").
-    UnknownParam { strategy: &'static str, param: String, known: &'static [&'static str] },
+    UnknownParam {
+        strategy: &'static str,
+        param: String,
+        known: &'static [&'static str],
+    },
 }
 
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BuildError::UnknownStrategy { name } => {
-                write!(f, "unknown strategy \"{name}\" (known: {})", known_strategies().join(", "))
+                write!(
+                    f,
+                    "unknown strategy \"{name}\" (known: {})",
+                    known_strategies().join(", ")
+                )
             }
             BuildError::ParamsNotATable { strategy, got } => {
                 write!(f, "{strategy}: expected a table of parameters, got {got}")
@@ -82,10 +100,18 @@ impl fmt::Display for BuildError {
             BuildError::MissingParam { strategy, param } => {
                 write!(f, "{strategy}: missing parameter \"{param}\"")
             }
-            BuildError::InvalidParam { strategy, param, detail } => {
+            BuildError::InvalidParam {
+                strategy,
+                param,
+                detail,
+            } => {
                 write!(f, "{strategy}: parameter \"{param}\" is invalid: {detail}")
             }
-            BuildError::UnknownParam { strategy, param, known } => {
+            BuildError::UnknownParam {
+                strategy,
+                param,
+                known,
+            } => {
                 write!(
                     f,
                     "{strategy}: parameter \"{param}\" is not one it reads (it reads: {})",
@@ -136,6 +162,8 @@ pub fn build_strategy(
 ) -> Result<Box<dyn Strategy>, BuildError> {
     match PLUGS.iter().find(|(known, _)| *known == name) {
         Some((_, build)) => build(strategy_id, params),
-        None => Err(BuildError::UnknownStrategy { name: name.to_string() }),
+        None => Err(BuildError::UnknownStrategy {
+            name: name.to_string(),
+        }),
     }
 }

@@ -304,7 +304,10 @@ pub struct VenueExecution {
     pub side: Side,
     pub qty: f64,
     pub px: f64,
-    pub fee: f64,
+    /// What the venue charged in account currency. `None` means the venue did
+    /// not state it; zero is reserved for a fee the venue explicitly stated
+    /// was zero.
+    pub fee: Option<f64>,
     pub is_maker: bool,
     pub venue_ts_ms: i64,
 }
@@ -430,7 +433,10 @@ pub enum OrderUpdate {
         side: Side,
         qty: f64,
         px: f64,
-        fee: f64,
+        /// What the venue charged in account currency. Older log records carry
+        /// a number here and deserialize as `Some`; an absent field is unknown.
+        #[serde(default)]
+        fee: Option<f64>,
         /// We were the resting side: somebody else crossed the spread to
         /// trade with us. The venue says so on every execution, and it is the
         /// difference between earning the spread and paying it — so a maker

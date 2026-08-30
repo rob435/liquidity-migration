@@ -28,8 +28,8 @@ use std::collections::HashMap;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
-    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce, VenueExecution,
-    VenueOrder,
+    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce,
+    VenueExecution, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
@@ -54,7 +54,7 @@ use super::tx::{
 use crate::creds::Credentials;
 use crate::http::{percent_encode, HttpClient};
 use crate::json::int_field;
-use crate::{mono_ns, wall_ms};
+use crate::{account_scan, mono_ns, wall_ms};
 
 const PATH_SEND_TX: &str = "/api/v1/sendTx";
 const PATH_NEXT_NONCE: &str = "/api/v1/nextNonce";
@@ -164,9 +164,12 @@ impl LighterGateway {
     }
 
     fn name_of(&self, id: SymbolId) -> Result<&str, VenueError> {
-        self.names.get(id.0 as usize).map(String::as_str).ok_or_else(|| {
-            VenueError::BadRequest(format!("symbol id {} is not in the gateway's table", id.0))
-        })
+        self.names
+            .get(id.0 as usize)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                VenueError::BadRequest(format!("symbol id {} is not in the gateway's table", id.0))
+            })
     }
 
     /// The public key this account's API key slot must be registered with.
@@ -256,16 +259,18 @@ impl LighterGateway {
     }
 
     /// Sign a transaction and post it.
-    async fn send_tx(&mut self, tx_type: u8, hashed: &gfp5::Element, body: Value) -> Result<Value, VenueError> {
+    async fn send_tx(
+        &mut self,
+        tx_type: u8,
+        hashed: &gfp5::Element,
+        body: Value,
+    ) -> Result<Value, VenueError> {
         let signature = schnorr::sign(hashed, &self.secret);
         let mut signed = body;
         signed["Sig"] = Value::String(base64_signature(&signature.to_bytes()));
-        let info = serde_json::to_string(&signed)
-            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
-        let form = format!(
-            "tx_type={tx_type}&tx_info={}",
-            percent_encode(&info)
-        );
+        let info =
+            serde_json::to_string(&signed).map_err(|e| VenueError::BadRequest(e.to_string()))?;
+        let form = format!("tx_type={tx_type}&tx_info={}", percent_encode(&info));
         let sent = self
             .http
             .post(PATH_SEND_TX, form, "application/x-www-form-urlencoded", &[])
@@ -320,8 +325,12 @@ impl LighterGateway {
             nonce: self.take_nonce().await?,
         };
         let hashed = protection.hash(self.realm.chain_id());
-        self.send_tx(TX_TYPE_CREATE_ORDER, &hashed, protection.to_json(&[0u8; 80]))
-            .await?;
+        self.send_tx(
+            TX_TYPE_CREATE_ORDER,
+            &hashed,
+            protection.to_json(&[0u8; 80]),
+        )
+        .await?;
         Ok(())
     }
 
@@ -524,14 +533,11 @@ impl VenueGateway for LighterGateway {
         let ids = &self.ids;
         let resolve = |name: &str| ids.get(name).copied();
         let held = parse_positions(&account, &self.markets, &HashMap::new(), &resolve)?;
-        let position = held
-            .iter()
-            .find(|p| p.symbol == symbol)
-            .ok_or_else(|| {
-                VenueError::BadRequest(format!(
-                    "there is no open position in {name} for a stop to protect"
-                ))
-            })?;
+        let position = held.iter().find(|p| p.symbol == symbol).ok_or_else(|| {
+            VenueError::BadRequest(format!(
+                "there is no open position in {name} for a stop to protect"
+            ))
+        })?;
 
         // Which stops are standing now, read before anything is sent, so the
         // list is exactly the old ones and the replacement cannot be in it.
@@ -547,7 +553,10 @@ impl VenueGateway for LighterGateway {
                         // back as no match, and the old stop is left standing
                         // beside the new one.
                         int_field(row, "market_index").ok() == Some(i64::from(market.index))
-                            && row.get("reduce_only").and_then(Value::as_bool).unwrap_or(false)
+                            && row
+                                .get("reduce_only")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
                             && row
                                 .get("type")
                                 .and_then(Value::as_str)
@@ -639,8 +648,9 @@ impl VenueGateway for LighterGateway {
         let account_query = format!("by=index&value={}", self.account.account_index);
         let account = self.get(PATH_ACCOUNT, &account_query);
         let orders = self.active_orders();
-        let (account, orders) = futures_util::future::try_join(account, orders).await?;
-        let observed_ns = mono_ns();
+        let (observed_ns, reply) =
+            account_scan(futures_util::future::try_join(account, orders)).await;
+        let (account, orders) = reply?;
 
         let (equity_usdt, available_usdt) = parse_margin(&account)?;
         let stops = stops_by_market(&orders)?;
@@ -779,7 +789,8 @@ mod tests {
     use super::*;
 
     /// Forty bytes of hex; obviously not a real key.
-    const KEY: &str = "0101010101010101010101010101010101010101010101010101010101010101010101010101010f";
+    const KEY: &str =
+        "0101010101010101010101010101010101010101010101010101010101010101010101010101010f";
 
     /// A well-formed order whose only interesting field is the nonce.
     fn placeholder_order() -> CreateOrder {
@@ -836,15 +847,24 @@ mod tests {
             (ORDER_TYPE_MARKET, TIF_IMMEDIATE_OR_CANCEL)
         );
         assert_eq!(
-            gw.order_type_and_tif(OrderKind::Limit { px: 1.0, tif: TimeInForce::PostOnly }),
+            gw.order_type_and_tif(OrderKind::Limit {
+                px: 1.0,
+                tif: TimeInForce::PostOnly
+            }),
             (ORDER_TYPE_LIMIT, TIF_POST_ONLY)
         );
         assert_eq!(
-            gw.order_type_and_tif(OrderKind::Limit { px: 1.0, tif: TimeInForce::Gtc }),
+            gw.order_type_and_tif(OrderKind::Limit {
+                px: 1.0,
+                tif: TimeInForce::Gtc
+            }),
             (ORDER_TYPE_LIMIT, TIF_GOOD_TILL_TIME)
         );
         assert_eq!(
-            gw.order_type_and_tif(OrderKind::Limit { px: 1.0, tif: TimeInForce::Ioc }),
+            gw.order_type_and_tif(OrderKind::Limit {
+                px: 1.0,
+                tif: TimeInForce::Ioc
+            }),
             (ORDER_TYPE_LIMIT, TIF_IMMEDIATE_OR_CANCEL)
         );
     }
@@ -896,13 +916,19 @@ mod tests {
         // says nothing about whether the venue consumed the nonce.
         let mut gw = gateway();
         gw.next_nonce = Some(7);
-        let order = CreateOrder { nonce: 7, ..placeholder_order() };
+        let order = CreateOrder {
+            nonce: 7,
+            ..placeholder_order()
+        };
         let hashed = order.hash(gw.realm.chain_id());
         let sent = gw
             .send_tx(TX_TYPE_CREATE_ORDER, &hashed, order.to_json(&[0u8; 80]))
             .await;
         assert!(matches!(sent, Err(VenueError::Transport(_))), "{sent:?}");
-        assert_eq!(gw.next_nonce, None, "a dead socket left the counter advanced");
+        assert_eq!(
+            gw.next_nonce, None,
+            "a dead socket left the counter advanced"
+        );
     }
 
     #[tokio::test]

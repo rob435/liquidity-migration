@@ -75,7 +75,11 @@ pub enum Step {
         stop_px: f64,
     },
     /// Close what is held, whole.
-    Exit { symbol: String, side: Side, qty: f64 },
+    Exit {
+        symbol: String,
+        side: Side,
+        qty: f64,
+    },
     /// Move an existing position toward its target without closing it.
     Resize {
         symbol: String,
@@ -205,7 +209,9 @@ pub fn plan(
         let book_entry_deadline = valid_until_ms.saturating_sub(rules.entry_cutoff_ms);
         let entry_deadline = target
             .entry_valid_until_ms
-            .map_or(book_entry_deadline, |deadline| deadline.min(book_entry_deadline));
+            .map_or(book_entry_deadline, |deadline| {
+                deadline.min(book_entry_deadline)
+            });
         let entries_allowed = now_ms < entry_deadline;
 
         // Zero, or a target that rounds to nothing, is an explicit exit.
@@ -221,17 +227,23 @@ pub fn plan(
         }
 
         let Some(px) = facts.price(symbol).filter(|p| *p > 0.0) else {
-            skipped.push(Skipped::NoPrice { symbol: symbol.to_string() });
+            skipped.push(Skipped::NoPrice {
+                symbol: symbol.to_string(),
+            });
             continue;
         };
         let Some(rule) = facts.rule(symbol) else {
-            skipped.push(Skipped::NoInstrumentRule { symbol: symbol.to_string() });
+            skipped.push(Skipped::NoInstrumentRule {
+                symbol: symbol.to_string(),
+            });
             continue;
         };
 
         let exact_target_qty = if let Some(raw) = target.target_qty {
             let Some(magnitude) = quantize_qty(raw.abs(), &rule) else {
-                skipped.push(Skipped::BelowVenueMinimum { symbol: symbol.to_string() });
+                skipped.push(Skipped::BelowVenueMinimum {
+                    symbol: symbol.to_string(),
+                });
                 continue;
             };
             Some(if raw > 0.0 { magnitude } else { -magnitude })
@@ -251,17 +263,24 @@ pub fn plan(
         let delta_qty = exact_target_qty.map(|wanted| {
             let raw = wanted - standing_qty;
             let magnitude = round_clean(raw.abs(), rule.qty_step);
-            if raw >= 0.0 { magnitude } else { -magnitude }
+            if raw >= 0.0 {
+                magnitude
+            } else {
+                -magnitude
+            }
         });
         let delta_usdt = delta_qty.map_or(target.notional_usdt - standing, |qty| qty * px);
 
         match position {
             None => {
                 if !entries_allowed {
-                    skipped.push(Skipped::EntryWindowClosed { symbol: symbol.to_string() });
+                    skipped.push(Skipped::EntryWindowClosed {
+                        symbol: symbol.to_string(),
+                    });
                     continue;
                 }
-                let size = exact_target_qty.map_or(target.notional_usdt.abs(), |qty| qty.abs() * px);
+                let size =
+                    exact_target_qty.map_or(target.notional_usdt.abs(), |qty| qty.abs() * px);
                 if size < rules.entry_floor_usdt {
                     skipped.push(Skipped::BelowEntryFloor {
                         symbol: symbol.to_string(),
@@ -271,7 +290,9 @@ pub fn plan(
                 }
                 let raw_qty = exact_target_qty.map_or(size / px, f64::abs);
                 let Some(qty) = quantize_qty(raw_qty, &rule) else {
-                    skipped.push(Skipped::BelowVenueMinimum { symbol: symbol.to_string() });
+                    skipped.push(Skipped::BelowVenueMinimum {
+                        symbol: symbol.to_string(),
+                    });
                     continue;
                 };
                 opens.push(Step::Enter {
@@ -327,25 +348,36 @@ pub fn plan(
                 }
                 let growing = delta_usdt.abs() > 0.0 && (delta_usdt > 0.0) == (standing > 0.0);
                 if growing && !entries_allowed {
-                    skipped.push(Skipped::EntryWindowClosed { symbol: symbol.to_string() });
+                    skipped.push(Skipped::EntryWindowClosed {
+                        symbol: symbol.to_string(),
+                    });
                     continue;
                 }
                 let raw_qty = delta_qty.map_or(delta_usdt.abs() / px, |qty| {
                     round_clean(qty.abs(), rule.qty_step)
                 });
                 let Some(qty) = quantize_qty(raw_qty, &rule) else {
-                    skipped.push(Skipped::BelowVenueMinimum { symbol: symbol.to_string() });
+                    skipped.push(Skipped::BelowVenueMinimum {
+                        symbol: symbol.to_string(),
+                    });
                     continue;
                 };
-                let side = if growing { want_side } else { want_side.flipped() };
+                let side = if growing {
+                    want_side
+                } else {
+                    want_side.flipped()
+                };
                 let step = Step::Resize {
                     symbol: symbol.to_string(),
                     side,
                     qty,
                     reduce_only: !growing,
                     stop_px: growing.then(|| {
-                        let anchor =
-                            if position.entry_px > 0.0 { position.entry_px } else { px };
+                        let anchor = if position.entry_px > 0.0 {
+                            position.entry_px
+                        } else {
+                            px
+                        };
                         stop_price(anchor, want_side, target.stop_loss_fraction)
                     }),
                 };
@@ -405,7 +437,10 @@ fn restop(
     if (wanted - position.stop_px).abs() <= rule.tick_size.max(position.stop_px * 1e-6) {
         return None;
     }
-    Some(Step::Restop { symbol: symbol.to_string(), stop_px: wanted })
+    Some(Step::Restop {
+        symbol: symbol.to_string(),
+        stop_px: wanted,
+    })
 }
 
 /// Where the stop sits for a position opened at `px`.
@@ -428,8 +463,12 @@ mod tests {
         rules: BTreeMap<String, InstrumentRule>,
     }
 
-    const RULE: InstrumentRule =
-        InstrumentRule { tick_size: 0.01, qty_step: 0.1, min_qty: 0.1, min_notional: 5.0 };
+    const RULE: InstrumentRule = InstrumentRule {
+        tick_size: 0.01,
+        qty_step: 0.1,
+        min_qty: 0.1,
+        min_notional: 5.0,
+    };
 
     impl Facts {
         pub(super) fn with(symbol: &str, px: f64) -> Self {
@@ -439,7 +478,16 @@ mod tests {
             me
         }
         fn holding(mut self, symbol: &str, qty: f64, side: Side, px: f64) -> Self {
-            self.held.insert(symbol.into(), Held { qty, side, px, entry_px: px, stop_px: 0.0 });
+            self.held.insert(
+                symbol.into(),
+                Held {
+                    qty,
+                    side,
+                    px,
+                    entry_px: px,
+                    stop_px: 0.0,
+                },
+            );
             self.px.insert(symbol.into(), px);
             self.rules.insert(symbol.into(), RULE);
             self
@@ -448,13 +496,18 @@ mod tests {
         pub(super) fn holding_behind(mut self, symbol: &str, px: f64, stop_px: f64) -> Self {
             self.held.insert(
                 symbol.into(),
-                Held { qty: 1.0, side: Side::Buy, px, entry_px: px, stop_px },
+                Held {
+                    qty: 1.0,
+                    side: Side::Buy,
+                    px,
+                    entry_px: px,
+                    stop_px,
+                },
             );
             self.px.insert(symbol.into(), px);
             self.rules.insert(symbol.into(), RULE);
             self
         }
-
     }
 
     impl SymbolFacts for Facts {
@@ -527,7 +580,11 @@ mod tests {
         let plan = plan_now(&[], &["COTIUSDT".into()], &facts);
         assert_eq!(
             plan.steps,
-            vec![Step::Exit { symbol: "COTIUSDT".into(), side: Side::Sell, qty: 50.0 }]
+            vec![Step::Exit {
+                symbol: "COTIUSDT".into(),
+                side: Side::Sell,
+                qty: 50.0
+            }]
         );
     }
 
@@ -535,9 +592,10 @@ mod tests {
     fn an_empty_book_exits_everything_held() {
         // Deciding cash is a decision, and it gets acted on. The caller is
         // what must tell "no book" from "an empty book".
-        let facts = Facts::default()
-            .holding("A", 10.0, Side::Buy, 5.0)
-            .holding("B", 20.0, Side::Sell, 5.0);
+        let facts =
+            Facts::default()
+                .holding("A", 10.0, Side::Buy, 5.0)
+                .holding("B", 20.0, Side::Sell, 5.0);
         let plan = plan_now(&[], &["A".into(), "B".into()], &facts);
         assert_eq!(plan.steps.len(), 2);
         assert!(plan.steps.iter().all(|s| matches!(s, Step::Exit { .. })));
@@ -547,7 +605,14 @@ mod tests {
     fn a_zero_target_is_an_exit_not_an_absence() {
         let facts = Facts::default().holding("A", 10.0, Side::Buy, 5.0);
         let plan = plan_now(&[target("A", 0.0)], &["A".into()], &facts);
-        assert_eq!(plan.steps, vec![Step::Exit { symbol: "A".into(), side: Side::Sell, qty: 10.0 }]);
+        assert_eq!(
+            plan.steps,
+            vec![Step::Exit {
+                symbol: "A".into(),
+                side: Side::Sell,
+                qty: 10.0
+            }]
+        );
     }
 
     #[test]
@@ -561,7 +626,10 @@ mod tests {
         facts.rules.insert("NEW".into(), RULE);
         let plan = plan_now(&[target("NEW", 100.0)], &["OLD".into()], &facts);
         assert_eq!(plan.steps.len(), 2);
-        assert!(matches!(plan.steps[0], Step::Exit { .. }), "exit must come first");
+        assert!(
+            matches!(plan.steps[0], Step::Exit { .. }),
+            "exit must come first"
+        );
         assert!(matches!(plan.steps[1], Step::Enter { .. }));
     }
 
@@ -599,14 +667,24 @@ mod tests {
         let mut facts = Facts::default();
         facts.held.insert(
             "A".into(),
-            Held { qty: 10.0, side: Side::Buy, px: 8.0, entry_px: 10.0, stop_px: 0.0 },
+            Held {
+                qty: 10.0,
+                side: Side::Buy,
+                px: 8.0,
+                entry_px: 10.0,
+                stop_px: 0.0,
+            },
         );
         facts.px.insert("A".into(), 8.0);
         facts.rules.insert("A".into(), RULE);
         let plan = plan_now(&[target("A", 160.0)], &["A".into()], &facts);
         match &plan.steps[0] {
             Step::Resize { stop_px, .. } => {
-                assert_eq!(*stop_px, Some(6.5), "anchored on the 10.0 entry, not the 8.0 mark");
+                assert_eq!(
+                    *stop_px,
+                    Some(6.5),
+                    "anchored on the 10.0 entry, not the 8.0 mark"
+                );
             }
             other => panic!("expected a resize, got {other:?}"),
         }
@@ -649,7 +727,12 @@ mod tests {
         let mut facts = Facts::with("A", 1000.0);
         facts.rules.insert(
             "A".into(),
-            InstrumentRule { tick_size: 0.01, qty_step: 1.0, min_qty: 1.0, min_notional: 5.0 },
+            InstrumentRule {
+                tick_size: 0.01,
+                qty_step: 1.0,
+                min_qty: 1.0,
+                min_notional: 5.0,
+            },
         );
         let plan = plan_now(&[target("A", 100.0)], &[], &facts);
         assert!(plan.steps.is_empty());
@@ -672,7 +755,10 @@ mod tests {
             PlanRules::FLEET,
         );
         assert_eq!(plan.steps.len(), 1);
-        assert!(matches!(plan.steps[0], Step::Exit { .. }), "the exit still goes");
+        assert!(
+            matches!(plan.steps[0], Step::Exit { .. }),
+            "the exit still goes"
+        );
         assert!(matches!(plan.skipped[0], Skipped::EntryWindowClosed { .. }));
     }
 
@@ -768,7 +854,13 @@ mod tests {
 
         let plan = plan_now(&[wanted], &["A".into()], &facts);
 
-        assert!(matches!(plan.steps.as_slice(), [Step::Resize { reduce_only: true, .. }]));
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [Step::Resize {
+                reduce_only: true,
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -793,17 +885,13 @@ mod tests {
         let facts = Facts::with("A", 10.0);
         let late = VALID - PlanRules::FLEET.entry_cutoff_ms;
 
-        let plan = plan(
-            &[wanted],
-            &[],
-            &facts,
-            late,
-            VALID,
-            PlanRules::FLEET,
-        );
+        let plan = plan(&[wanted], &[], &facts, late, VALID, PlanRules::FLEET);
 
         assert!(plan.steps.is_empty());
-        assert!(matches!(plan.skipped.as_slice(), [Skipped::EntryWindowClosed { .. }]));
+        assert!(matches!(
+            plan.skipped.as_slice(),
+            [Skipped::EntryWindowClosed { .. }]
+        ));
     }
 
     #[test]
@@ -812,7 +900,14 @@ mod tests {
         // carrying a stop that belongs to the side it just left.
         let facts = Facts::default().holding("A", 10.0, Side::Buy, 10.0);
         let plan = plan_now(&[target("A", -100.0)], &["A".into()], &facts);
-        assert_eq!(plan.steps, vec![Step::Exit { symbol: "A".into(), side: Side::Sell, qty: 10.0 }]);
+        assert_eq!(
+            plan.steps,
+            vec![Step::Exit {
+                symbol: "A".into(),
+                side: Side::Sell,
+                qty: 10.0
+            }]
+        );
     }
 
     #[test]
@@ -852,11 +947,21 @@ mod tests {
 mod restop_tests {
     use super::*;
 
-    const RULE: InstrumentRule =
-        InstrumentRule { tick_size: 0.01, qty_step: 0.001, min_qty: 0.001, min_notional: 5.0 };
+    const RULE: InstrumentRule = InstrumentRule {
+        tick_size: 0.01,
+        qty_step: 0.001,
+        min_qty: 0.001,
+        min_notional: 5.0,
+    };
 
     fn held(entry_px: f64, stop_px: f64) -> Held {
-        Held { qty: 1.0, side: Side::Buy, px: entry_px, entry_px, stop_px }
+        Held {
+            qty: 1.0,
+            side: Side::Buy,
+            px: entry_px,
+            entry_px,
+            stop_px,
+        }
     }
 
     fn target(fraction: f64) -> Target {
@@ -892,7 +997,13 @@ mod restop_tests {
 
     #[test]
     fn a_short_tightens_downward() {
-        let position = Held { qty: 1.0, side: Side::Sell, px: 100.0, entry_px: 100.0, stop_px: 130.0 };
+        let position = Held {
+            qty: 1.0,
+            side: Side::Sell,
+            px: 100.0,
+            entry_px: 100.0,
+            stop_px: 130.0,
+        };
         match restop("A", &target(0.15), &position, Side::Sell, &RULE) {
             Some(Step::Restop { stop_px, .. }) => assert!((stop_px - 115.0).abs() < 1e-9),
             other => panic!("expected a restop, got {other:?}"),
@@ -912,7 +1023,6 @@ mod restop_tests {
     fn a_position_with_no_stop_is_left_to_boots_repair() {
         assert!(restop("A", &target(0.15), &held(100.0, 0.0), Side::Buy, &RULE).is_none());
     }
-
 }
 
 #[cfg(test)]
@@ -932,7 +1042,14 @@ mod restop_plan_tests {
             entry_valid_until_ms: None,
             target_qty: None,
         };
-        let plan = plan(&[target], &["A".into()], &facts, 0, 60 * 60 * 1000, PlanRules::FLEET);
+        let plan = plan(
+            &[target],
+            &["A".into()],
+            &facts,
+            0,
+            60 * 60 * 1000,
+            PlanRules::FLEET,
+        );
         let restop = plan
             .steps
             .iter()
@@ -960,7 +1077,14 @@ mod restop_plan_tests {
             target_qty: None,
         };
         // now_ms is past valid_until_ms: entries are long closed.
-        let plan = plan(&[target], &["A".into()], &facts, 9_000_000, 1_000_000, PlanRules::FLEET);
+        let plan = plan(
+            &[target],
+            &["A".into()],
+            &facts,
+            9_000_000,
+            1_000_000,
+            PlanRules::FLEET,
+        );
         assert!(
             plan.steps.iter().any(|s| matches!(s, Step::Restop { .. })),
             "steps: {:?}",

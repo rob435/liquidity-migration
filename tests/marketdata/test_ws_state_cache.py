@@ -114,6 +114,33 @@ def test_ticker_event_drops_rows_without_symbol() -> None:
     assert cache.symbol_count() == 0
 
 
+def test_rejected_or_empty_symbol_rows_do_not_refresh_liveness(monkeypatch) -> None:
+    import liquidity_migration.marketdata.ws_state_cache as wsc
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+    cache = TickerCache()
+    cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])
+
+    clock["t"] = 200.0
+    cache.on_ticker_event(
+        _ws_message(
+            {"lastPrice": "30100"},
+            {"symbol": "BTCUSDT", "lastPrice": None},
+        )
+    )
+
+    assert cache.seconds_since_last_event() == 100.0
+    assert cache.seconds_since_last_ws_event() == float("inf")
+    assert cache.get("BTCUSDT")["lastPrice"] == "30000"
+    assert cache.stats()["dropped_events"] == 2
+
+    clock["t"] = 210.0
+    cache.on_ticker_event(_ws_message({"symbol": "BTCUSDT", "lastPrice": "30100"}))
+    assert cache.seconds_since_last_event() == 0.0
+    assert cache.seconds_since_last_ws_event() == 0.0
+
+
 def test_ticker_thread_safety_concurrent_update_and_read() -> None:
     cache = TickerCache()
     cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])

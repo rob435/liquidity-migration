@@ -248,6 +248,7 @@ def _cmd_archive_download_klines_1h_api(args: argparse.Namespace, config: Resear
         f"rows={payload['rows']} "
         f"downloaded={payload['downloaded']} "
         f"cached={payload['cached']} "
+        f"archives_without_trade_rows={payload.get('archives_without_trade_rows', 0)} "
         f"empty={payload['empty']} "
         f"failed={payload['failures']} "
         f"path={data_root / 'reports' / ('archive_klines_1h_api_' + _archive_safe_name(args.name) + '.md')}"
@@ -497,4 +498,3 @@ def _validate_datasets(requested: set[str], known: frozenset[str], *, venue: str
             f"Unknown {venue} dataset(s): {', '.join(unknown)}. Known datasets: {', '.join(sorted(known))}."
         )
     return requested
-

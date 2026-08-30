@@ -60,7 +60,10 @@ fn to_bytes(client_order_id: &str) -> [u8; 16] {
 /// The engine id a cloid was made from, or `None` when it was hashed or was
 /// never one of ours.
 pub(crate) fn from_cloid(cloid: &str) -> Option<String> {
-    let body = cloid.trim().strip_prefix("0x").or_else(|| cloid.trim().strip_prefix("0X"))?;
+    let body = cloid
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| cloid.trim().strip_prefix("0X"))?;
     let bytes = hex::decode(body).ok()?;
     let bytes: [u8; 16] = bytes.try_into().ok()?;
     // The scheme byte alone is one byte in two hundred and fifty-six: this
@@ -96,7 +99,8 @@ fn split_engine_id(id: &str) -> Option<(u64, u64)> {
     if !boot.bytes().all(|b| b.is_ascii_digit()) || !counter.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    if (boot.starts_with('0') && boot.len() > 1) || (counter.starts_with('0') && counter.len() > 1) {
+    if (boot.starts_with('0') && boot.len() > 1) || (counter.starts_with('0') && counter.len() > 1)
+    {
         return None;
     }
     let boot_ms: u64 = boot.parse().ok()?;
@@ -167,7 +171,12 @@ mod tests {
     fn a_padded_or_signed_number_is_not_packed() {
         // These parse as numbers and print back differently, so packing them
         // would hand back an id the engine never minted.
-        for odd in ["eng-01700000000000-1", "eng-1700000000000-01", "eng-+1-1", "eng--1-1"] {
+        for odd in [
+            "eng-01700000000000-1",
+            "eng-1700000000000-01",
+            "eng-+1-1",
+            "eng--1-1",
+        ] {
             assert_eq!(from_cloid(&to_cloid(odd)), None, "{odd} was packed");
         }
     }

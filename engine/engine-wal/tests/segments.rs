@@ -13,7 +13,10 @@ fn log_path(dir: &TempDir) -> PathBuf {
 }
 
 fn note(text: &str) -> WalRecord {
-    WalRecord::Note { source: "test".to_string(), text: text.to_string() }
+    WalRecord::Note {
+        source: "test".to_string(),
+        text: text.to_string(),
+    }
 }
 
 /// A restatement with something recognizable in it, so a test can tell a
@@ -24,11 +27,15 @@ fn base(mark: &str) -> WalRecord {
         strategies: vec!["carry".to_string()],
         symbols: vec!["BTCUSDT".to_string()],
         may_open: true,
-        control_anchors: vec![AnchorState { source: "risk".to_string(), state: mark.to_string() }],
+        control_anchors: vec![AnchorState {
+            source: "risk".to_string(),
+            state: mark.to_string(),
+        }],
         attribution: Vec::new(),
         logged_exposure: Vec::new(),
         intended_stops: Vec::new(),
         recent_execution_ids: Vec::new(),
+        execution_history_through_ms: Some(7),
         open_orders: Vec::new(),
     }
 }
@@ -42,7 +49,10 @@ fn rotated_family(dir: &TempDir) -> PathBuf {
         wal.append(&note(text)).unwrap();
     }
     wal.barrier().unwrap();
-    assert!(wal.rotate(&base("rotated")).unwrap(), "a file-backed log rotates");
+    assert!(
+        wal.rotate(&base("rotated")).unwrap(),
+        "a file-backed log rotates"
+    );
     wal.append(&note("four")).unwrap();
     wal.append(&note("five")).unwrap();
     wal.barrier().unwrap();
@@ -64,7 +74,10 @@ fn rotation_starts_a_numbered_segment_and_archives_the_old_one_untouched() {
     let dir = TempDir::new().unwrap();
     let family = rotated_family(&dir);
     let second = PathBuf::from(format!("{}.000002", family.display()));
-    assert!(second.exists(), "the next segment is numbered, in the same directory");
+    assert!(
+        second.exists(),
+        "the next segment is numbered, in the same directory"
+    );
 
     // The old segment is an archive: still there, still exactly the records
     // it held when rotation happened.
@@ -184,8 +197,15 @@ fn a_rotation_truncated_at_any_byte_falls_back_cleanly() {
         // The chain read sees the same history: the torn leftover holds no
         // records and is skipped without flagging damage.
         let (chained, damaged) = replay_chain(&path).unwrap();
-        assert_eq!(texts(&chained), ["one", "two", "three"], "cut at byte {cut}");
-        assert!(!damaged, "cut at byte {cut}: an abandoned rotation is not damage");
+        assert_eq!(
+            texts(&chained),
+            ["one", "two", "three"],
+            "cut at byte {cut}"
+        );
+        assert!(
+            !damaged,
+            "cut at byte {cut}: an abandoned rotation is not damage"
+        );
     }
 
     // And the moment the restatement is whole, the new segment is trusted —
@@ -235,7 +255,11 @@ fn a_torn_leftover_is_never_reused_and_the_next_rotation_skips_its_number() {
     );
 
     let (_, replayed) = open_current(&path).unwrap();
-    assert_eq!(texts(&replayed), ["two"], "boot picks the finished rotation");
+    assert_eq!(
+        texts(&replayed),
+        ["two"],
+        "boot picks the finished rotation"
+    );
     let (chained, damaged) = replay_chain(&path).unwrap();
     assert_eq!(texts(&chained), ["one", "two"]);
     assert!(!damaged);
@@ -249,7 +273,10 @@ fn segment_size_counts_the_file_and_the_buffer() {
     let empty = wal.segment_size();
     assert_eq!(empty, 8, "a fresh segment is its magic header");
     wal.append(&note("buffered, not yet pushed")).unwrap();
-    assert!(wal.segment_size() > empty, "buffered bytes count toward the threshold");
+    assert!(
+        wal.segment_size() > empty,
+        "buffered bytes count toward the threshold"
+    );
     let before_flush = wal.segment_size();
     wal.flush().unwrap();
     assert_eq!(
@@ -261,7 +288,9 @@ fn segment_size_counts_the_file_and_the_buffer() {
     wal.rotate(&base("fresh")).unwrap();
     let after = wal.segment_size();
     assert_eq!(
-        fs::metadata(dir.path().join("engine.wal.000002")).unwrap().len(),
+        fs::metadata(dir.path().join("engine.wal.000002"))
+            .unwrap()
+            .len(),
         after,
         "the count is the new segment's bytes, nothing carried over"
     );
@@ -279,7 +308,10 @@ fn the_lock_on_the_family_path_survives_a_rotation() {
     wal.append(&note("one")).unwrap();
     wal.rotate(&base("rotated")).unwrap();
     assert!(
-        matches!(engine_wal::lock(&path), Err(engine_wal::WalLockError::AlreadyHeld { .. })),
+        matches!(
+            engine_wal::lock(&path),
+            Err(engine_wal::WalLockError::AlreadyHeld { .. })
+        ),
         "the family lock still refuses a second writer after rotation"
     );
     drop(held);

@@ -50,8 +50,11 @@ replay reads the membership manifest valid for each decision timestamp and
 joins features backward in time. Delisted symbols remain in earlier frames;
 new listings cannot leak into dates before their first eligible observation.
 
-Manifest validation requires enough hourly bars for a claimed symbol/day and
-rejects a partition whose declared date disagrees with its timestamps.
+Manifest validation requires at least 20 unique, aligned hour keys and one valid
+OHLC row for a claimed symbol/day. Leading rows may keep prices null before a
+midday listing; they state that the price was not yet known and do not count as
+observed or executable bars. Validation rejects a partition whose declared date
+disagrees with its timestamps.
 Cross-venue research is bounded by the verified intersection of both venues'
 membership and data coverage.
 

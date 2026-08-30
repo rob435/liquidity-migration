@@ -94,7 +94,7 @@ fn an_order_the_log_has_ended_stops_being_worked() {
                 side: Side::Buy,
                 qty: 1.0,
                 px: 99.0,
-                fee: 0.0,
+                fee: Some(0.0),
                 is_maker: false,
                 venue_ts_ms: 0,
                 recv_ns: 0,

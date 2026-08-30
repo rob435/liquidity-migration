@@ -75,7 +75,11 @@ fn order_wire(order: &OrderWire) -> Mp {
             "limit",
             Mp::Map(vec![("tif", Mp::str(tif_str(*tif)))]),
         )]),
-        OrderKindWire::Trigger { is_market, trigger_px, tpsl } => Mp::Map(vec![(
+        OrderKindWire::Trigger {
+            is_market,
+            trigger_px,
+            tpsl,
+        } => Mp::Map(vec![(
             "trigger",
             Mp::Map(vec![
                 ("isMarket", Mp::Bool(*is_market)),
@@ -217,7 +221,9 @@ mod tests {
             px: "1670.1".to_string(),
             sz: "0.0147".to_string(),
             reduce_only: false,
-            kind: OrderKindWire::Limit { tif: TimeInForce::Ioc },
+            kind: OrderKindWire::Limit {
+                tif: TimeInForce::Ioc,
+            },
             cloid: cloid.map(str::to_string),
         }
     }
@@ -287,13 +293,22 @@ mod tests {
 
     #[test]
     fn the_other_three_actions_carry_their_own_names() {
-        assert_eq!(to_json(&cancel_by_cloid_action(3, "0x1"))["type"], "cancelByCloid");
+        assert_eq!(
+            to_json(&cancel_by_cloid_action(3, "0x1"))["type"],
+            "cancelByCloid"
+        );
         let by_oid = to_json(&cancel_action(3, 99));
         assert_eq!(by_oid["type"], "cancel");
         assert_eq!(by_oid["cancels"][0]["a"], 3);
         assert_eq!(by_oid["cancels"][0]["o"], 99);
-        assert_eq!(to_json(&cancel_by_cloid_action(3, "0x1"))["cancels"][0]["asset"], 3);
-        assert_eq!(to_json(&modify_action("0x1", limit(None)))["type"], "batchModify");
+        assert_eq!(
+            to_json(&cancel_by_cloid_action(3, "0x1"))["cancels"][0]["asset"],
+            3
+        );
+        assert_eq!(
+            to_json(&modify_action("0x1", limit(None)))["type"],
+            "batchModify"
+        );
         let lev = to_json(&update_leverage_action(2, true, 5));
         assert_eq!(lev["type"], "updateLeverage");
         assert_eq!(lev["asset"], 2);

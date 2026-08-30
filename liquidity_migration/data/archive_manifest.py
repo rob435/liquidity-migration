@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -21,10 +22,21 @@ import certifi
 import polars as pl
 from pyarrow import parquet as pq
 
-from liquidity_migration.core._common import safe_name
-from liquidity_migration.data.ingestion import densify_trade_klines_1h
-from liquidity_migration.data.storage import dataset_path, read_dataset, write_dataset
+from liquidity_migration.core._common import MS_PER_HOUR, safe_name
 from liquidity_migration.core.symbol_codec import encode_symbol_partition
+from liquidity_migration.data.archive import (
+    download_public_trade_archive,
+    empty_public_trade_archive_payload_state,
+    read_public_trade_archive_klines_1h,
+)
+from liquidity_migration.data.ingestion import densify_trade_klines_1h
+from liquidity_migration.core.market_numeric import valid_kline_numbers
+from liquidity_migration.data.storage import (
+    dataset_path,
+    read_dataset,
+    replace_dataset,
+    write_dataset,
+)
 
 
 DEFAULT_BYBIT_PUBLIC_TRADING_URL = "https://public.bybit.com/trading/"
@@ -40,6 +52,8 @@ V5_LISTING_URL_SENTINEL = "bybit_v5_listing"
 V5_LISTING_SOURCE = "bybit_v5_listing"
 ARCHIVE_SCRAPE_SOURCE = "bybit_public_trading_archive"
 V5_KLINE_COVERAGE_SOURCE = "bybit_v5_kline_coverage"
+MIN_FULL_PIT_HOURLY_BARS = 20
+ARCHIVE_KLINE_CACHE_DIR = "archive_trade_klines_1h"
 
 _BYBIT_MANIFEST_PROVENANCE_COLUMNS = (
     "date",
@@ -51,7 +65,21 @@ _BYBIT_MANIFEST_PROVENANCE_COLUMNS = (
     "first_archive_observed_date",
     "v5_observed_launch_date",
     "membership_provenance_limitation",
+    "archive_observed_payload_state",
+    "archive_observed_content_sha256",
+    "archive_observed_at",
 )
+
+
+class ArchiveYieldsNoTradeRowsError(RuntimeError):
+    """An exact public-trade archive payload yields no trade rows."""
+
+    def __init__(self, archive_path: Path, *, payload_state: str) -> None:
+        self.archive_path = archive_path
+        self.payload_state = payload_state
+        super().__init__(
+            f"public trade archive payload yields no trade-derived hourly bars: {payload_state}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +394,9 @@ def stamp_bybit_manifest_provenance(
                 "first_archive_observed_date": pl.String,
                 "v5_observed_launch_date": pl.String,
                 "membership_provenance_limitation": pl.String,
+                "archive_observed_payload_state": pl.String,
+                "archive_observed_content_sha256": pl.String,
+                "archive_observed_at": pl.String,
             }
         )
     required = {"date", "symbol", "url", "source"}
@@ -390,6 +421,30 @@ def stamp_bybit_manifest_provenance(
     else:
         frame = frame.with_columns(
             pl.col("v5_observed_launch_date").cast(pl.String, strict=False)
+        )
+    if "archive_observed_payload_state" not in frame.columns:
+        frame = frame.with_columns(
+            pl.lit(None, dtype=pl.String).alias("archive_observed_payload_state")
+        )
+    else:
+        frame = frame.with_columns(
+            pl.col("archive_observed_payload_state").cast(pl.String, strict=False)
+        )
+    if "archive_observed_content_sha256" not in frame.columns:
+        frame = frame.with_columns(
+            pl.lit(None, dtype=pl.String).alias("archive_observed_content_sha256")
+        )
+    else:
+        frame = frame.with_columns(
+            pl.col("archive_observed_content_sha256").cast(pl.String, strict=False)
+        )
+    if "archive_observed_at" not in frame.columns:
+        frame = frame.with_columns(
+            pl.lit(None, dtype=pl.String).alias("archive_observed_at")
+        )
+    else:
+        frame = frame.with_columns(
+            pl.col("archive_observed_at").cast(pl.String, strict=False)
         )
     known_sources = {
         ARCHIVE_SCRAPE_SOURCE,
@@ -464,6 +519,8 @@ def validate_bybit_manifest_provenance(manifest: pl.DataFrame) -> None:
         raise RuntimeError(f"Bybit manifest lacks provenance columns: {missing}")
     if manifest.schema["membership_inferred"] != pl.Boolean:
         raise RuntimeError("Bybit manifest membership_inferred must be Boolean")
+    if manifest.schema["archive_observed_payload_state"] != pl.String:
+        raise RuntimeError("Bybit manifest archive_observed_payload_state must be String")
     invalid_launch_dates = manifest.filter(
         pl.col("v5_observed_launch_date").is_not_null()
         & ~pl.col("v5_observed_launch_date")
@@ -484,6 +541,27 @@ def validate_bybit_manifest_provenance(manifest: pl.DataFrame) -> None:
     nonblank_limitation = limitation.is_not_null() & (
         limitation.cast(pl.String).str.strip_chars() != ""
     )
+    archive_state = pl.col("archive_observed_payload_state")
+    archive_observed = archive_state.is_not_null()
+    archive_hash = pl.col("archive_observed_content_sha256")
+    archive_observed_at = pl.col("archive_observed_at")
+    valid_archive_observation = (
+        (
+            ~archive_observed
+            & archive_hash.is_null()
+            & archive_observed_at.is_null()
+        )
+        | (
+            archive_observed
+            & archive_state.is_in(["empty_payload", "header_only"])
+            & (source == ARCHIVE_SCRAPE_SOURCE)
+            & pl.col("membership_inferred").eq(False)
+            & archive_hash.cast(pl.String).str.contains(r"^[0-9a-f]{64}$")
+            & archive_observed_at.cast(pl.String).str.contains(
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
+            )
+        )
+    ).fill_null(False)
     valid_class = (
         (
             (source == ARCHIVE_SCRAPE_SOURCE)
@@ -505,6 +583,7 @@ def validate_bybit_manifest_provenance(manifest: pl.DataFrame) -> None:
         (pl.col("membership_source") == source)
         & nonblank_limitation
         & valid_class
+        & valid_archive_observation
     ).fill_null(False)
     invalid = manifest.filter(~valid).select(
         "date",
@@ -513,6 +592,9 @@ def validate_bybit_manifest_provenance(manifest: pl.DataFrame) -> None:
         "membership_source",
         "membership_inferred",
         "first_archive_observed_date",
+        "archive_observed_payload_state",
+        "archive_observed_content_sha256",
+        "archive_observed_at",
     )
     if not invalid.is_empty():
         raise RuntimeError(
@@ -736,10 +818,22 @@ def _union_with_persisted_manifest(data_root: str | Path, manifest: pl.DataFrame
             frame = frame.with_columns(additions)
         return frame.select(columns)
 
+    keys = ["symbol", "date", "url"]
     combined = pl.concat(
         [align(manifest), align(previous)], how="vertical_relaxed"
     )
-    return combined.unique(subset=["symbol", "date", "url"], keep="first").sort(["date", "symbol", "url"])
+    values = [column for column in columns if column not in keys]
+    return (
+        combined.group_by(keys, maintain_order=True)
+        .agg(
+            [
+                pl.col(column).drop_nulls().first().alias(column)
+                for column in values
+            ]
+        )
+        .select(columns)
+        .sort(["date", "symbol", "url"])
+    )
 
 
 def _detect_universe_shrink(data_root: str | Path, *, new_symbols: list[str]) -> str:
@@ -801,21 +895,38 @@ def run_archive_hourly_klines_api_download(
                 _write_archive_download_progress(progress_path, results, total_rows=len(rows), workers=worker_count)
 
     result_frame = pl.DataFrame(results, infer_schema_length=None) if results else _empty_download_results()
+    archives_without_trade_rows = (
+        result_frame.filter(pl.col("status") == "archive_without_trade_rows").height
+        if not result_frame.is_empty()
+        else 0
+    )
+    if archives_without_trade_rows:
+        _record_empty_archive_payload_observations(data_root, result_frame)
     failures = result_frame.filter(pl.col("status") == "failed").height if not result_frame.is_empty() else 0
     downloaded = result_frame.filter(pl.col("status") == "downloaded").height if not result_frame.is_empty() else 0
+    archive_fallback_downloaded = (
+        result_frame.filter(
+            (pl.col("status") == "downloaded")
+            & (pl.col("download_source") == "bybit_public_trades")
+        ).height
+        if not result_frame.is_empty()
+        else 0
+    )
     cached = result_frame.filter(pl.col("status") == "cached").height if not result_frame.is_empty() else 0
     empty = result_frame.filter(pl.col("status") == "empty").height if not result_frame.is_empty() else 0
     payload = {
         "name": config.name,
         "dataset": "klines_1h",
         "interval": "1h",
-        "source": "bybit_v5_market_kline",
+        "source": "bybit_v5_market_kline+bybit_public_trades_fallback",
         "source_url": config.api_url,
         "rows": len(rows),
         "workers": worker_count,
         "downloaded": downloaded,
+        "archive_fallback_downloaded": archive_fallback_downloaded,
         "cached": cached,
         "empty": empty,
+        "archives_without_trade_rows": archives_without_trade_rows,
         "failures": failures,
         "archives_deleted": 0,
         "created_at": datetime.now(tz=UTC).isoformat(),
@@ -850,6 +961,7 @@ def _download_api_hourly_group(
     sorted_rows = sorted(rows, key=lambda row: str(row["date"]))
     symbol = str(sorted_rows[0]["symbol"])
     required_bars = max(int(config.min_existing_bars), 1)
+    fallback_required_bars = max(required_bars, MIN_FULL_PIT_HOURLY_BARS)
     results_by_date: dict[str, dict[str, Any]] = {}
     pending_rows: list[dict[str, Any]] = []
     for row in sorted_rows:
@@ -861,8 +973,7 @@ def _download_api_hourly_group(
             symbol=symbol,
             date=archive_date,
         )
-        existing_count = existing_bar_rows if required_bars <= 1 else existing_valid_bar_rows
-        if config.missing_only and existing_count >= required_bars:
+        if config.missing_only and existing_bar_rows >= required_bars:
             results_by_date[archive_date] = _download_result(
                 row,
                 status="cached",
@@ -899,15 +1010,58 @@ def _download_api_hourly_group(
     for row_date in sorted(pending_dates):
         row = pending_by_date[row_date]
         records = by_date.get(row_date, [])
-        if not records:
-            results_by_date[row_date] = _download_result(row, status="empty", bar_rows=0, valid_bar_rows=0)
-            continue
+        initial_price = previous_kline_close(data_root, symbol=symbol, archive_date=row_date, dataset="klines_1h")
         klines = (
             pl.DataFrame(records, infer_schema_length=None)
             .unique(subset=["ts_ms", "symbol"], keep="last")
             .sort(["symbol", "ts_ms"])
+            if records
+            else pl.DataFrame()
         )
-        initial_price = previous_kline_close(data_root, symbol=symbol, archive_date=row_date, dataset="klines_1h")
+        archive_url = _independent_archive_url(row)
+        if archive_url is not None and klines.height < fallback_required_bars:
+            try:
+                klines, archive_path, valid_bar_rows = _reconstruct_archive_hourly_klines(
+                    data_root,
+                    archive_url=archive_url,
+                    symbol=symbol,
+                    archive_date=row_date,
+                    initial_price=initial_price,
+                )
+            except ArchiveYieldsNoTradeRowsError as exc:
+                results_by_date[row_date] = _download_result(
+                    row,
+                    status="archive_without_trade_rows",
+                    bar_rows=0,
+                    valid_bar_rows=0,
+                    archive_path=str(exc.archive_path),
+                    archive_payload_state=exc.payload_state,
+                    download_source="bybit_public_trades",
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 - one bad archive row must remain visible without aborting other days
+                results_by_date[row_date] = _download_result(
+                    row,
+                    status="failed",
+                    bar_rows=0,
+                    valid_bar_rows=0,
+                    download_source="bybit_public_trades",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            write_dataset(klines, data_root, "klines_1h", append=False)
+            results_by_date[row_date] = _download_result(
+                row,
+                status="downloaded",
+                bar_rows=klines.height,
+                valid_bar_rows=valid_bar_rows,
+                archive_path=str(archive_path),
+                download_source="bybit_public_trades",
+            )
+            continue
+        if klines.is_empty():
+            results_by_date[row_date] = _download_result(row, status="empty", bar_rows=0, valid_bar_rows=0)
+            continue
         klines = densify_trade_klines_1h(klines, archive_date=row_date, initial_price=initial_price).with_columns(
             pl.lit("bybit_v5_market_kline").alias("source")
         )
@@ -918,6 +1072,7 @@ def _download_api_hourly_group(
             status="downloaded",
             bar_rows=klines.height,
             valid_bar_rows=valid_bar_rows,
+            download_source="bybit_v5_market_kline",
             archive_path=_bybit_api_kline_url(
                 config,
                 symbol=symbol,
@@ -934,6 +1089,225 @@ def _download_api_hourly_group(
             ),
         )
     return [results_by_date[str(row["date"])] for row in sorted_rows]
+
+
+def _independent_archive_url(row: Mapping[str, Any]) -> str | None:
+    """Return the exact archive URL only for directly observed membership."""
+
+    if str(row.get("source", "")) != ARCHIVE_SCRAPE_SOURCE:
+        return None
+    if row.get("membership_inferred") is True:
+        return None
+    return str(row.get("url", "")).strip()
+
+
+def _archive_kline_cache_path(
+    data_root: str | Path,
+    *,
+    archive_url: str,
+    symbol: str,
+    archive_date: str,
+) -> Path:
+    parsed = urlparse(archive_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError(f"public trade archive URL is not HTTP(S): {archive_url!r}")
+    basename = Path(unquote(parsed.path)).name
+    if not basename.lower().endswith((".csv", ".csv.gz", ".csv.zip")):
+        raise RuntimeError(f"public trade archive URL has an unsupported file name: {archive_url!r}")
+    expected_names = {
+        f"{symbol.upper()}{archive_date}.csv",
+        f"{symbol.upper()}{archive_date}.csv.gz",
+        f"{symbol.upper()}{archive_date}.csv.zip",
+    }
+    if basename not in expected_names:
+        raise RuntimeError(
+            "public trade archive URL file name does not match its manifest symbol/date"
+        )
+    url_digest = hashlib.sha256(archive_url.encode("utf-8")).hexdigest()[:16]
+    cache_name = f"{url_digest}-{safe_name(basename, fallback='archive.csv.gz')}"
+    return (
+        Path(data_root).expanduser()
+        / ".cache"
+        / ARCHIVE_KLINE_CACHE_DIR
+        / encode_symbol_partition(symbol)
+        / archive_date
+        / cache_name
+    )
+
+
+def _reconstruct_archive_hourly_klines(
+    data_root: str | Path,
+    *,
+    archive_url: str,
+    symbol: str,
+    archive_date: str,
+    initial_price: float | None,
+) -> tuple[pl.DataFrame, Path, int]:
+    cache_path = _archive_kline_cache_path(
+        data_root,
+        archive_url=archive_url,
+        symbol=symbol,
+        archive_date=archive_date,
+    )
+    archive_path = download_public_trade_archive(archive_url, cache_path)
+    payload_state = empty_public_trade_archive_payload_state(archive_path)
+    if payload_state is not None:
+        raise ArchiveYieldsNoTradeRowsError(
+            archive_path,
+            payload_state=payload_state,
+        )
+    sparse = read_public_trade_archive_klines_1h(archive_path, symbol=symbol)
+    if sparse.is_empty():
+        raise RuntimeError(
+            "public trade archive reader returned no bars from a non-empty payload"
+        )
+    missing = sorted(
+        {"ts_ms", "symbol", "open", "high", "low", "close", "volume_base", "turnover_quote"}
+        - set(sparse.columns)
+    )
+    if missing:
+        raise RuntimeError(f"public trade archive hourly bars lack columns: {missing}")
+
+    day_start = datetime.combine(
+        date.fromisoformat(archive_date),
+        datetime.min.time(),
+        tzinfo=UTC,
+    )
+    day_start_ms = int(day_start.timestamp() * 1000)
+    day_end_ms = int((day_start + timedelta(days=1)).timestamp() * 1000)
+    invalid_keys = sparse.filter(
+        (pl.col("symbol") != symbol)
+        | (pl.col("ts_ms") < day_start_ms)
+        | (pl.col("ts_ms") >= day_end_ms)
+        | (pl.col("ts_ms") % MS_PER_HOUR != 0)
+    )
+    if not invalid_keys.is_empty():
+        raise RuntimeError(
+            "public trade archive produced symbol/hour keys outside its manifest row"
+        )
+    if sparse.select(["ts_ms", "symbol"]).unique().height != sparse.height:
+        raise RuntimeError("public trade archive produced duplicate hourly keys")
+
+    dense = densify_trade_klines_1h(
+        sparse,
+        archive_date=archive_date,
+        initial_price=initial_price,
+    )
+    expected_hours = {day_start_ms + hour * MS_PER_HOUR for hour in range(24)}
+    if dense.height != 24 or set(dense["ts_ms"].to_list()) != expected_hours:
+        raise RuntimeError("public trade archive did not densify to the exact UTC day")
+    valid_bar_rows = _valid_price_rows(dense)
+    return dense, archive_path, valid_bar_rows
+
+
+def _record_empty_archive_payload_observations(
+    data_root: str | Path,
+    results: pl.DataFrame,
+) -> int:
+    """Persist exact payload observations without inferring venue activity."""
+
+    observed = results.filter(pl.col("status") == "archive_without_trade_rows")
+    if observed.is_empty():
+        return 0
+
+    evidence: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    observed_at = datetime.now(tz=UTC).isoformat()
+    for row in observed.select(
+        "symbol",
+        "date",
+        "url",
+        "archive_path",
+        "archive_payload_state",
+    ).to_dicts():
+        symbol = str(row["symbol"])
+        archive_date = str(row["date"])
+        archive_url = str(row["url"])
+        key = (symbol, archive_date, archive_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        archive_path = Path(str(row["archive_path"])).expanduser()
+        expected_path = _archive_kline_cache_path(
+            data_root,
+            archive_url=archive_url,
+            symbol=symbol,
+            archive_date=archive_date,
+        )
+        if archive_path.resolve() != expected_path.resolve():
+            raise RuntimeError(
+                "empty-archive evidence path does not match its manifest URL cache key"
+            )
+        payload_state = empty_public_trade_archive_payload_state(archive_path)
+        if payload_state != str(row["archive_payload_state"]):
+            raise RuntimeError(
+                "public trade archive payload changed during empty-payload recheck"
+            )
+        digest = hashlib.sha256()
+        with archive_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        evidence.append(
+            {
+                "symbol": symbol,
+                "date": archive_date,
+                "url": archive_url,
+                "__observed_archive_payload_state": payload_state,
+                "__observed_archive_content_sha256": digest.hexdigest(),
+                "__observed_archive_observed_at": observed_at,
+            }
+        )
+
+    evidence_frame = pl.DataFrame(evidence, infer_schema_length=None)
+    manifest = stamp_bybit_manifest_provenance(
+        read_dataset(data_root, "archive_trade_manifest")
+    )
+    keys = ["symbol", "date", "url"]
+    matched = manifest.join(evidence_frame.select(keys), on=keys, how="inner")
+    if matched.height != evidence_frame.height:
+        raise RuntimeError(
+            "empty-archive evidence does not match one current manifest row per archive"
+        )
+    invalid = matched.filter(
+        (pl.col("source") != ARCHIVE_SCRAPE_SOURCE)
+        | pl.col("membership_inferred").ne(False)
+    )
+    if not invalid.is_empty():
+        raise RuntimeError(
+            "empty-archive payload evidence may only attach to directly observed public archives"
+        )
+
+    manifest = (
+        manifest.join(evidence_frame, on=keys, how="left")
+        .with_columns(
+            pl.when(pl.col("__observed_archive_payload_state").is_not_null())
+            .then(pl.col("__observed_archive_payload_state"))
+            .otherwise(pl.col("archive_observed_payload_state"))
+            .alias("archive_observed_payload_state"),
+            pl.when(pl.col("__observed_archive_content_sha256").is_not_null())
+            .then(pl.col("__observed_archive_content_sha256"))
+            .otherwise(pl.col("archive_observed_content_sha256"))
+            .alias("archive_observed_content_sha256"),
+            pl.when(pl.col("__observed_archive_observed_at").is_not_null())
+            .then(pl.col("__observed_archive_observed_at"))
+            .otherwise(pl.col("archive_observed_at"))
+            .alias("archive_observed_at"),
+        )
+        .drop(
+            "__observed_archive_payload_state",
+            "__observed_archive_content_sha256",
+            "__observed_archive_observed_at",
+        )
+    )
+    manifest = stamp_bybit_manifest_provenance(manifest)
+    validate_bybit_manifest_provenance(manifest)
+    replace_dataset(
+        manifest,
+        data_root,
+        "archive_trade_manifest",
+        partition_by=("date",),
+    )
+    return evidence_frame.height
 
 
 def _missing_date_request_windows(
@@ -1027,19 +1401,36 @@ def _parse_bybit_api_kline_row(row: Any, *, symbol: str) -> dict[str, Any] | Non
         return None
     try:
         ts_ms = int(row[0])
-        return {
+        open_price = float(row[1])
+        high_price = float(row[2])
+        low_price = float(row[3])
+        close_price = float(row[4])
+        volume_base = float(row[5])
+        turnover_quote = float(row[6])
+        parsed = {
             "ts_ms": ts_ms,
             "symbol": symbol,
-            "open": float(row[1]),
-            "high": float(row[2]),
-            "low": float(row[3]),
-            "close": float(row[4]),
-            "volume_base": float(row[5]),
-            "turnover_quote": float(row[6]),
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume_base": volume_base,
+            "turnover_quote": turnover_quote,
             "source": "bybit_v5_market_kline",
         }
     except (TypeError, ValueError):
         return None
+    if not valid_kline_numbers(
+        ts_ms=ts_ms,
+        open_price=open_price,
+        high_price=high_price,
+        low_price=low_price,
+        close_price=close_price,
+        volume_base=volume_base,
+        turnover_quote=turnover_quote,
+    ):
+        return None
+    return parsed
 
 
 def _date_from_ts_ms(ts_ms: int) -> str:
@@ -1116,7 +1507,9 @@ def format_archive_klines_report(payload: dict[str, Any]) -> str:
         "| Status | Count |",
         "|---|---:|",
         f"| Downloaded | {payload['downloaded']} |",
+        f"| Downloaded from public-trade fallback | {payload.get('archive_fallback_downloaded', 0)} |",
         f"| Cached | {payload['cached']} |",
+        f"| Public archives yielding no trade rows | {payload.get('archives_without_trade_rows', 0)} |",
         f"| Empty | {payload['empty']} |",
         f"| Skipped (v5 listing) | {payload.get('skipped_v5_listing', 0)} |",
         f"| Failed | {payload['failures']} |",
@@ -1164,7 +1557,12 @@ def _select_manifest_rows(
             rows = [
                 row
                 for row in rows
-                if _kline_partition_valid_bar_rows(data_root, dataset=dataset, symbol=row["symbol"], date=row["date"])
+                if _kline_partition_bar_rows(
+                    data_root,
+                    dataset=dataset,
+                    symbol=row["symbol"],
+                    date=row["date"],
+                )
                 < min_existing_bars
             ]
     if config.max_rows > 0:
@@ -1209,7 +1607,9 @@ def _download_result(
     status: str,
     bar_rows: int,
     valid_bar_rows: int,
+    download_source: str = "",
     archive_path: str = "",
+    archive_payload_state: str = "",
     archive_deleted: bool = False,
     archive_cleanup_error: str = "",
     error: str = "",
@@ -1221,7 +1621,9 @@ def _download_result(
         "status": status,
         "bar_rows": bar_rows,
         "valid_bar_rows": valid_bar_rows,
+        "download_source": download_source,
         "archive_path": archive_path,
+        "archive_payload_state": archive_payload_state,
         "archive_deleted": archive_deleted,
         "archive_cleanup_error": archive_cleanup_error,
         "error": error,
@@ -1329,7 +1731,9 @@ def _empty_download_results() -> pl.DataFrame:
             "status": pl.Series([], dtype=pl.String),
             "bar_rows": pl.Series([], dtype=pl.Int64),
             "valid_bar_rows": pl.Series([], dtype=pl.Int64),
+            "download_source": pl.Series([], dtype=pl.String),
             "archive_path": pl.Series([], dtype=pl.String),
+            "archive_payload_state": pl.Series([], dtype=pl.String),
             "archive_deleted": pl.Series([], dtype=pl.Boolean),
             "archive_cleanup_error": pl.Series([], dtype=pl.String),
             "error": pl.Series([], dtype=pl.String),

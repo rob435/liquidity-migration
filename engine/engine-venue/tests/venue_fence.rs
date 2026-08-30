@@ -82,9 +82,7 @@ fn venue_hosts() -> Vec<VenueHosts> {
         VenueHosts {
             venue: "variational",
             domains: vec![[".variational", ".io"].concat()],
-            allowed: vec![
-                ["omni-client-api.prod.ap-northeast-1", ".variational", ".io"].concat()
-            ],
+            allowed: vec![["omni-client-api.prod.ap-northeast-1", ".variational", ".io"].concat()],
         },
     ]
 }
@@ -110,7 +108,9 @@ fn scanned_sources() -> Vec<PathBuf> {
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -152,9 +152,8 @@ fn hosts_in(text: &str, domains: &[String]) -> Vec<String> {
 /// crate now has one — and without the anchor a `realm.rs` inside any of them
 /// would become a second legal place to write that venue's hosts.
 fn is_host_home(file: &Path, venue: &str) -> bool {
-    let named = |path: Option<&Path>, want: &str| {
-        path.and_then(Path::file_name).is_some_and(|n| n == want)
-    };
+    let named =
+        |path: Option<&Path>, want: &str| path.and_then(Path::file_name).is_some_and(|n| n == want);
     file.file_name().is_some_and(|n| n == "realm.rs")
         && named(file.parent(), venue)
         && named(file.parent().and_then(Path::parent), "venues")
@@ -232,7 +231,11 @@ fn testnet_and_every_alternate_domain_are_absent() {
     for file in scanned_sources() {
         let text = std::fs::read_to_string(&file).unwrap();
         for host in &forbidden {
-            assert!(!text.contains(host.as_str()), "{} contains {host}", file.display());
+            assert!(
+                !text.contains(host.as_str()),
+                "{} contains {host}",
+                file.display()
+            );
         }
     }
 }
@@ -242,9 +245,19 @@ fn the_realm_tables_are_the_shipped_ones() {
     use engine_venue::{HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueRealm};
 
     let demo_rest = ["https://", &["api-demo", ".bybit", ".com"].concat()].concat();
-    let demo_ws = ["wss://", &["stream-demo", ".bybit", ".com"].concat(), "/v5/private"].concat();
+    let demo_ws = [
+        "wss://",
+        &["stream-demo", ".bybit", ".com"].concat(),
+        "/v5/private",
+    ]
+    .concat();
     let main_rest = ["https://", &["api", ".bybit", ".com"].concat()].concat();
-    let main_ws = ["wss://", &["stream", ".bybit", ".com"].concat(), "/v5/private"].concat();
+    let main_ws = [
+        "wss://",
+        &["stream", ".bybit", ".com"].concat(),
+        "/v5/private",
+    ]
+    .concat();
     let public_ws = [
         "wss://",
         &["stream", ".bybit", ".com"].concat(),
@@ -257,21 +270,38 @@ fn the_realm_tables_are_the_shipped_ones() {
     assert_eq!(VenueRealm::Mainnet.private_ws(), main_ws);
     assert_eq!(VenueRealm::Demo.public_ws(), public_ws);
 
-    let hl_test = ["https://", &["api", ".hyperliquid-testnet", ".xyz"].concat()].concat();
+    let hl_test = [
+        "https://",
+        &["api", ".hyperliquid-testnet", ".xyz"].concat(),
+    ]
+    .concat();
     let hl_main = ["https://", &["api", ".hyperliquid", ".xyz"].concat()].concat();
     assert_eq!(HyperliquidRealm::Testnet.rest_base(), hl_test);
     assert_eq!(HyperliquidRealm::Mainnet.rest_base(), hl_main);
     assert_eq!(
         HyperliquidRealm::Testnet.websocket(),
-        ["wss://", &["api", ".hyperliquid-testnet", ".xyz"].concat(), "/ws"].concat()
+        [
+            "wss://",
+            &["api", ".hyperliquid-testnet", ".xyz"].concat(),
+            "/ws"
+        ]
+        .concat()
     );
     assert_eq!(
         HyperliquidRealm::Mainnet.websocket(),
         ["wss://", &["api", ".hyperliquid", ".xyz"].concat(), "/ws"].concat()
     );
 
-    let lighter_main = ["https://", &["mainnet", ".zklighter", ".elliot", ".ai"].concat()].concat();
-    let lighter_test = ["https://", &["testnet", ".zklighter", ".elliot", ".ai"].concat()].concat();
+    let lighter_main = [
+        "https://",
+        &["mainnet", ".zklighter", ".elliot", ".ai"].concat(),
+    ]
+    .concat();
+    let lighter_test = [
+        "https://",
+        &["testnet", ".zklighter", ".elliot", ".ai"].concat(),
+    ]
+    .concat();
     assert_eq!(LighterRealm::Mainnet.rest_base(), lighter_main);
     assert_eq!(LighterRealm::Testnet.rest_base(), lighter_test);
     assert_eq!(
@@ -291,7 +321,10 @@ fn the_realm_tables_are_the_shipped_ones() {
     let mexc_ws = ["wss://", &["contract", ".mexc", ".com"].concat(), "/edge"].concat();
     assert_eq!(MexcRealm::Mainnet.rest_base(), mexc_rest);
     assert_eq!(MexcRealm::Mainnet.websocket(), mexc_ws);
-    assert!(MexcRealm::Mainnet.is_real_money(), "MEXC has no practice realm");
+    assert!(
+        MexcRealm::Mainnet.is_real_money(),
+        "MEXC has no practice realm"
+    );
 
     assert_eq!(
         VariationalRealm::Mainnet.rest_base(),
@@ -331,7 +364,10 @@ fn the_one_file_rule_would_notice_a_host_in_another_file() {
     // The other half of non-vacuity: the scanner really does see a host when
     // one is planted, so the fence passing above means absence, not blindness.
     for (host, domains) in [
-        (["api", ".bybit", ".com"].concat(), vec![[".bybit", ".com"].concat()]),
+        (
+            ["api", ".bybit", ".com"].concat(),
+            vec![[".bybit", ".com"].concat()],
+        ),
         (
             ["api", ".hyperliquid", ".xyz"].concat(),
             vec![[".hyperliquid", ".xyz"].concat()],
@@ -343,7 +379,11 @@ fn the_one_file_rule_would_notice_a_host_in_another_file() {
     ] {
         let planted = format!("\"https://{host}\"");
         let found = hosts_in(&planted, &domains);
-        assert_eq!(found.len(), 1, "the planted host {host} was not seen: {found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "the planted host {host} was not seen: {found:?}"
+        );
         assert_eq!(found[0], host);
     }
 }
@@ -479,15 +519,22 @@ fn a_credential_refusal_never_quotes_the_value_it_refused() {
                 .map(|_| ())
                 .unwrap_err()
                 .to_string();
-        assert!(!refused.contains(secret), "a refusal quoted the key: {refused}");
+        assert!(
+            !refused.contains(secret),
+            "a refusal quoted the key: {refused}"
+        );
     }
     for realm in [LighterRealm::Testnet, LighterRealm::Mainnet] {
         let creds = realm.credentials_for_test(secret, secret);
-        let refused = engine_venue::LighterGateway::for_test("http://127.0.0.1:1", realm, creds, vec![])
-            .map(|_| ())
-            .unwrap_err()
-            .to_string();
-        assert!(!refused.contains(secret), "a refusal quoted the key: {refused}");
+        let refused =
+            engine_venue::LighterGateway::for_test("http://127.0.0.1:1", realm, creds, vec![])
+                .map(|_| ())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            !refused.contains(secret),
+            "a refusal quoted the key: {refused}"
+        );
     }
 }
 

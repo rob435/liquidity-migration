@@ -366,13 +366,19 @@ impl TargetBookFollower {
         // An entry the kernel just refused is left out of this pass entirely,
         // the same way a foreign holding is: planning it again would only
         // produce the same refusal on the next quote. The next book clears it.
-        targets.retain(|target| !self.refused_entries.iter().any(|(name, _)| name == &target.symbol));
+        targets.retain(|target| {
+            !self
+                .refused_entries
+                .iter()
+                .any(|(name, _)| name == &target.symbol)
+        });
         held.retain(|symbol| !self.refused_entries.iter().any(|(name, _)| name == symbol));
 
         // The latch lifts when the producer stops asking for the name, not
         // when the next book lands. See the module note: a producer writing
         // the same decision every minute would clear it every minute.
-        self.closed_under_us.retain(|symbol| wants(&targets, symbol));
+        self.closed_under_us
+            .retain(|symbol| wants(&targets, symbol));
         for symbol in &self.was_held {
             if held.contains(symbol) {
                 continue;
@@ -438,7 +444,8 @@ impl TargetBookFollower {
                 Skipped::TooSmallToBother { .. } => continue,
             };
             if wants(&targets, symbol) && !held.iter().any(|name| name == symbol) {
-                self.skipped_entries.push((symbol.clone(), reason.to_string()));
+                self.skipped_entries
+                    .push((symbol.clone(), reason.to_string()));
             }
         }
 
@@ -475,8 +482,14 @@ impl TargetBookFollower {
             });
             // Remember a reduce before it goes out, so the flat that follows
             // is read as ours rather than as somebody else closing the name.
-            if matches!(step, Step::Exit { .. } | Step::Resize { reduce_only: true, .. })
-                && !self.we_reduced.iter().any(|name| name == step.symbol())
+            if matches!(
+                step,
+                Step::Exit { .. }
+                    | Step::Resize {
+                        reduce_only: true,
+                        ..
+                    }
+            ) && !self.we_reduced.iter().any(|name| name == step.symbol())
             {
                 self.we_reduced.push(step.symbol().to_string());
             }
@@ -491,10 +504,7 @@ impl TargetBookFollower {
             }
             let intent = match step {
                 Step::Enter {
-                    side,
-                    qty,
-                    stop_px,
-                    ..
+                    side, qty, stop_px, ..
                 } => Intent {
                     strategy: self.id,
                     symbol,
@@ -659,8 +669,7 @@ impl Strategy for TargetBookFollower {
                         .iter()
                         .any(|id| id == order.client_order_id)
                 {
-                    self.revoked_entries
-                        .push(order.client_order_id.to_string());
+                    self.revoked_entries.push(order.client_order_id.to_string());
                 }
             }
         }

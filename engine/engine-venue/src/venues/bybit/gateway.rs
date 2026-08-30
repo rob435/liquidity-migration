@@ -40,6 +40,7 @@ const PATH_ORDER_CREATE: &str = "/v5/order/create";
 const PATH_ORDER_CANCEL: &str = "/v5/order/cancel";
 const PATH_ORDER_CANCEL_BATCH: &str = "/v5/order/cancel-batch";
 const PATH_ORDER_AMEND: &str = "/v5/order/amend";
+const PATH_ORDER_HISTORY: &str = "/v5/order/history";
 const PATH_TRADING_STOP: &str = "/v5/position/trading-stop";
 const PATH_SET_LEVERAGE: &str = "/v5/position/set-leverage";
 const PATH_WALLET: &str = "/v5/account/wallet-balance";
@@ -98,6 +99,31 @@ pub struct BybitGateway {
     attestation_key: bool,
     last_mutation_timing: Option<VenueMutationTiming>,
     last_rate_wait_ns: Option<u64>,
+}
+
+/// One exact order as Bybit currently records it. Used by the bounded demo
+/// canary after an asynchronous create or cancel reply: acceptance is not a
+/// terminal state, while this carries both the state and cumulative fill.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BybitOrderReceipt {
+    pub symbol: String,
+    pub client_order_id: String,
+    pub status: String,
+    pub cumulative_filled_qty: f64,
+    pub updated_ms: i64,
+}
+
+impl BybitOrderReceipt {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "Rejected" | "PartiallyFilledCanceled" | "Filled" | "Cancelled" | "Deactivated"
+        )
+    }
+
+    pub fn has_fill(&self) -> bool {
+        self.cumulative_filled_qty > 0.0
+    }
 }
 
 #[derive(Default)]
@@ -375,6 +401,38 @@ impl BybitGateway {
         }
         self.clock_checked = true;
         Ok(())
+    }
+
+    /// A fresh venue wall-clock boundary for execution-history reads.
+    pub async fn venue_time_ms(&self) -> Result<i64, VenueError> {
+        let envelope = self.rest.get_public(PATH_TIME, "").await?;
+        let server_ms = server_time_ms(&envelope)?;
+        venue_result(envelope)?;
+        Ok(server_ms)
+    }
+
+    /// Read one client order id from the realtime cache, then the durable
+    /// history endpoint when the cache has no row. The id is exact and unique;
+    /// any different or repeated row is an unreadable reply, not absence.
+    pub async fn order_receipt(
+        &self,
+        symbol: SymbolId,
+        client_order_id: &str,
+    ) -> Result<Option<BybitOrderReceipt>, VenueError> {
+        let symbol = self.name_of(symbol)?;
+        let query = format!(
+            "category={CATEGORY}&symbol={}&orderLinkId={}&limit=1",
+            percent_encode(symbol),
+            percent_encode(client_order_id)
+        );
+        let realtime = self.rest.get_signed(PATH_ORDERS_OPEN, &query).await?;
+        if let Some(receipt) =
+            parse_order_receipt(&venue_result(realtime)?, symbol, client_order_id)?
+        {
+            return Ok(Some(receipt));
+        }
+        let history = self.rest.get_signed(PATH_ORDER_HISTORY, &query).await?;
+        parse_order_receipt(&venue_result(history)?, symbol, client_order_id)
     }
 
     /// Add a symbol the engine has since interned. Ids stay in step with the
@@ -1605,14 +1663,7 @@ fn validate_server_clock(
     sent_ms: i64,
     received_ms: i64,
 ) -> Result<(), VenueError> {
-    let server_ms = match envelope.get("time") {
-        Some(Value::Number(value)) => value.as_i64(),
-        Some(Value::String(value)) => value.parse().ok(),
-        _ => None,
-    }
-    .ok_or_else(|| {
-        VenueError::BadReply("time reply has no millisecond server clock".to_string())
-    })?;
+    let server_ms = server_time_ms(envelope)?;
     let recv_window_ms = RECV_WINDOW_MS
         .parse::<i64>()
         .expect("Bybit receive window is a decimal integer");
@@ -1635,6 +1686,96 @@ fn validate_server_clock(
         )));
     }
     Ok(())
+}
+
+fn server_time_ms(envelope: &Value) -> Result<i64, VenueError> {
+    match envelope.get("time") {
+        Some(Value::Number(value)) => value.as_i64(),
+        Some(Value::String(value)) => value.parse().ok(),
+        _ => None,
+    }
+    .filter(|value| *value > 0)
+    .ok_or_else(|| VenueError::BadReply("time reply has no millisecond server clock".to_string()))
+}
+
+fn parse_order_receipt(
+    result: &Value,
+    expected_symbol: &str,
+    expected_client_id: &str,
+) -> Result<Option<BybitOrderReceipt>, VenueError> {
+    let category = result
+        .get("category")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VenueError::BadReply("order receipt has no category".to_string()))?;
+    if category != CATEGORY {
+        return Err(VenueError::BadReply(format!(
+            "order receipt category is {category:?}, expected {CATEGORY:?}"
+        )));
+    }
+    let rows = result
+        .get("list")
+        .and_then(Value::as_array)
+        .ok_or_else(|| VenueError::BadReply("order receipt has no list array".to_string()))?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if rows.len() != 1 {
+        return Err(VenueError::BadReply(format!(
+            "exact order receipt returned {} rows",
+            rows.len()
+        )));
+    }
+    let row = &rows[0];
+    let text = |field: &str| {
+        row.get(field)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| VenueError::BadReply(format!("order receipt has no {field}")))
+    };
+    let symbol = text("symbol")?;
+    let client_order_id = text("orderLinkId")?;
+    if symbol != expected_symbol || client_order_id != expected_client_id {
+        return Err(VenueError::BadReply(format!(
+            "order receipt identity is symbol={symbol:?} link_id={client_order_id:?}, expected symbol={expected_symbol:?} link_id={expected_client_id:?}"
+        )));
+    }
+    let status = text("orderStatus")?;
+    if !matches!(
+        status.as_str(),
+        "New"
+            | "PartiallyFilled"
+            | "Untriggered"
+            | "Triggered"
+            | "Rejected"
+            | "PartiallyFilledCanceled"
+            | "Filled"
+            | "Cancelled"
+            | "Deactivated"
+    ) {
+        return Err(VenueError::BadReply(format!(
+            "order receipt has unknown status {status:?}"
+        )));
+    }
+    let cumulative_filled_qty = text("cumExecQty")?.parse::<f64>().map_err(|_| {
+        VenueError::BadReply("order receipt cumExecQty is not a number".to_string())
+    })?;
+    if !cumulative_filled_qty.is_finite() || cumulative_filled_qty < 0.0 {
+        return Err(VenueError::BadReply(format!(
+            "order receipt has invalid cumExecQty {cumulative_filled_qty}"
+        )));
+    }
+    let updated_ms = text("updatedTime")?
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| VenueError::BadReply("order receipt updatedTime is invalid".to_string()))?;
+    Ok(Some(BybitOrderReceipt {
+        symbol,
+        client_order_id,
+        status,
+        cumulative_filled_qty,
+        updated_ms,
+    }))
 }
 
 fn side_str(side: Side) -> &'static str {
@@ -1838,6 +1979,69 @@ mod tests {
         );
         assert!(validate_server_clock(&reply(13_000), 10_000, 16_000).is_ok());
         assert!(validate_server_clock(&reply(10_000), 10_001, 10_000).is_err());
+    }
+
+    #[test]
+    fn exact_order_receipts_carry_terminal_state_and_cumulative_fill() {
+        let result = serde_json::json!({
+            "category": "linear",
+            "list": [{
+                "symbol": "XRPUSDT",
+                "orderLinkId": "lm-canary-1",
+                "orderStatus": "Cancelled",
+                "cumExecQty": "0.3",
+                "updatedTime": "1788000000000"
+            }]
+        });
+        let receipt = parse_order_receipt(&result, "XRPUSDT", "lm-canary-1")
+            .unwrap()
+            .unwrap();
+        assert!(receipt.is_terminal());
+        assert!(receipt.has_fill());
+        assert_eq!(receipt.cumulative_filled_qty, 0.3);
+
+        let active = serde_json::json!({
+            "category": "linear",
+            "list": [{
+                "symbol": "XRPUSDT",
+                "orderLinkId": "lm-canary-1",
+                "orderStatus": "New",
+                "cumExecQty": "0",
+                "updatedTime": "1788000000001"
+            }]
+        });
+        let receipt = parse_order_receipt(&active, "XRPUSDT", "lm-canary-1")
+            .unwrap()
+            .unwrap();
+        assert!(!receipt.is_terminal());
+        assert!(!receipt.has_fill());
+    }
+
+    #[test]
+    fn exact_order_receipts_reject_wrong_identity_status_and_numbers() {
+        let row = |status: &str, qty: &str| {
+            serde_json::json!({
+                "category": "linear",
+                "list": [{
+                    "symbol": "ETHUSDT",
+                    "orderLinkId": "wrong",
+                    "orderStatus": status,
+                    "cumExecQty": qty,
+                    "updatedTime": "1788000000000"
+                }]
+            })
+        };
+        assert!(parse_order_receipt(&row("Cancelled", "0"), "XRPUSDT", "lm-canary-1").is_err());
+
+        let mut bad_status = row("Mystery", "0");
+        bad_status["list"][0]["symbol"] = "XRPUSDT".into();
+        bad_status["list"][0]["orderLinkId"] = "lm-canary-1".into();
+        assert!(parse_order_receipt(&bad_status, "XRPUSDT", "lm-canary-1").is_err());
+
+        let mut bad_qty = row("Cancelled", "NaN");
+        bad_qty["list"][0]["symbol"] = "XRPUSDT".into();
+        bad_qty["list"][0]["orderLinkId"] = "lm-canary-1".into();
+        assert!(parse_order_receipt(&bad_qty, "XRPUSDT", "lm-canary-1").is_err());
     }
 
     #[test]

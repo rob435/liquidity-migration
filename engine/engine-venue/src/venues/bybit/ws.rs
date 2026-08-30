@@ -732,10 +732,8 @@ pub(crate) fn map_execution_row(
         side,
         qty,
         px,
-        // A maker rebate comes back negative; it is a fee either way.
-        fee: opt_num_field(row, "execFee")
-            .map_err(bad_field)?
-            .unwrap_or(0.0),
+        // A maker rebate comes back negative; absence is not a zero charge.
+        fee: opt_num_field(row, "execFee").map_err(bad_field)?,
         // Absent means taker. The venue sends this on every execution, so an
         // absent one is a message shape we do not know — and the expensive
         // side is the safe thing to assume about a fill we cannot classify.
@@ -972,7 +970,7 @@ mod tests {
                 assert_eq!(side, Side::Sell);
                 assert_eq!(qty, 0.5);
                 assert_eq!(px, 95900.1);
-                assert_eq!(fee, 26.3725275);
+                assert_eq!(fee, Some(26.3725275));
                 assert!(!is_maker, "this row does not say it rested");
                 assert_eq!(venue_ts_ms, 1_746_270_400_353);
                 assert_eq!(recv_ns, 99);
@@ -1266,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_fee_reads_as_zero_but_a_missing_price_does_not() {
+    fn a_missing_fee_stays_unknown_but_a_missing_price_is_invalid() {
         let base = json!({
             "execId": "missing-field",
             "execQty": "1", "execTime": "1", "orderLinkId": "eng-1",
@@ -1275,7 +1273,7 @@ mod tests {
         let mut no_fee = base.clone();
         no_fee["execPrice"] = json!("100");
         match map_execution_row(&no_fee, &resolve, 1).unwrap().unwrap() {
-            OrderUpdate::Fill { fee, .. } => assert_eq!(fee, 0.0),
+            OrderUpdate::Fill { fee, .. } => assert_eq!(fee, None),
             other => panic!("expected Fill, got {other:?}"),
         }
         assert!(map_execution_row(&base, &resolve, 1).is_err());

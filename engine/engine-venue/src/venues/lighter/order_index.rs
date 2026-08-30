@@ -70,7 +70,10 @@ pub(crate) fn from_index(index: i64) -> Option<String> {
     let body = index & (PACKED_FLAG - 1);
     let since = (body >> COUNTER_BITS) as u64;
     let counter = (body & (MAX_COUNTER as i64)) as u64;
-    Some(format!("{ENGINE_PREFIX}{}-{counter}", (since + EPOCH_S) * 1000))
+    Some(format!(
+        "{ENGINE_PREFIX}{}-{counter}",
+        (since + EPOCH_S) * 1000
+    ))
 }
 
 /// `eng-<boot ms>-<n>` split into its two numbers.
@@ -116,7 +119,11 @@ mod tests {
             "eng-1600000000000-1",
             "eng-2000000000000-42",
         ] {
-            assert_eq!(from_index(to_index(id)).as_deref(), Some(id), "{id} did not survive");
+            assert_eq!(
+                from_index(to_index(id)).as_deref(),
+                Some(id),
+                "{id} did not survive"
+            );
         }
     }
 
@@ -142,7 +149,10 @@ mod tests {
         ] {
             let index = to_index(id);
             assert!(index > 0, "{id} made {index}");
-            assert!(index <= MAX_INDEX, "{id} made {index}, above the venue's ceiling");
+            assert!(
+                index <= MAX_INDEX,
+                "{id} made {index}, above the venue's ceiling"
+            );
         }
     }
 

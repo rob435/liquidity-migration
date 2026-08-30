@@ -15,6 +15,7 @@ from liquidity_migration.data.archive import (
     ArchiveFileNotFoundError,
     download_archive_bytes,
     download_public_trade_archive,
+    empty_public_trade_archive_payload_state,
     read_public_trade_archive,
     read_public_trade_archive_klines_1h,
 )
@@ -38,6 +39,39 @@ def test_archive_hourly_kline_default_resumes_written_partitions() -> None:
 
 def test_archive_hourly_api_kline_default_resumes_written_partitions() -> None:
     assert ArchiveHourlyKlineApiDownloadConfig().min_existing_bars == 1
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (b"", "empty_payload"),
+        (b"timestamp,symbol,side,size,price,trdMatchID\n", "header_only"),
+        (
+            b"timestamp,symbol,side,size,price,trdMatchID\n"
+            b"1735689600,AAAUSDT,Buy,1,1,t1\n",
+            None,
+        ),
+    ],
+)
+def test_empty_public_trade_archive_payload_state(
+    tmp_path,
+    payload: bytes,
+    expected: str | None,
+) -> None:
+    archive = tmp_path / "AAAUSDT2025-01-01.csv.gz"
+    archive.write_bytes(gzip.compress(payload))
+
+    assert empty_public_trade_archive_payload_state(archive) == expected
+
+
+def test_empty_public_trade_archive_payload_state_rejects_malformed_header(
+    tmp_path,
+) -> None:
+    archive = tmp_path / "AAAUSDT2025-01-01.csv.gz"
+    archive.write_bytes(gzip.compress(b"not,a,trade,schema\n"))
+
+    with pytest.raises(ValueError, match="unsupported"):
+        empty_public_trade_archive_payload_state(archive)
 
 
 def test_read_bybit_public_trade_csv_gz_archive(tmp_path) -> None:
@@ -95,6 +129,26 @@ def test_read_bybit_public_trade_archive_streams_1h_klines(tmp_path) -> None:
             "turnover_quote": 0.36,
         },
     ]
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [read_public_trade_archive, read_public_trade_archive_klines_1h],
+)
+def test_public_trade_archive_rejects_wrong_embedded_symbol(
+    tmp_path,
+    reader,
+) -> None:
+    archive = tmp_path / "AAAUSDT2025-01-01.csv.gz"
+    archive.write_bytes(
+        gzip.compress(
+            b"timestamp,symbol,side,size,price,trdMatchID\n"
+            b"1735689600,BBBUSDT,Buy,1,1,t1\n"
+        )
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        reader(archive, symbol="AAAUSDT")
 
 
 def test_streamed_1h_klines_open_close_robust_to_descending_row_order(tmp_path) -> None:
@@ -400,7 +454,7 @@ def test_rest_kline_download_writes_each_symbol_and_resumes(tmp_path, monkeypatc
         def get_klines(self, symbol, interval, start, end):
             calls.append((symbol, interval))
             close = 100.0 + len(calls)
-            return [[start, "100", "101", "99", str(close), "10", "1000"]]
+            return [[start, "100", "110", "99", str(close), "10", "1000"]]
 
     monkeypatch.setattr(downloaders, "BybitMarketData", FakeMarketData)
 

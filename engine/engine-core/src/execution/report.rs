@@ -274,11 +274,21 @@ pub fn trips(fills: &Fills) -> String {
     let unpriced = fills
         .closed()
         .iter()
-        .filter(|trade| trade.round_trip.is_none())
+        .filter(|trade| trade.gross_usdt.is_none())
         .count();
     if unpriced > 0 {
         out.push_str(&format!(
             "  {unpriced} close(s) are left out: this log does not hold what opened them.\n"
+        ));
+    }
+    let unknown_fees = fills
+        .closed()
+        .iter()
+        .filter(|trade| trade.gross_usdt.is_some() && trade.fees_usdt.is_none())
+        .count();
+    if unknown_fees > 0 {
+        out.push_str(&format!(
+            "  {unknown_fees} close(s) have gross money but no net: at least one venue fee was not stated.\n"
         ));
     }
     out
@@ -403,6 +413,14 @@ fn footer(total: &Costs, fills: &Fills) -> String {
         )),
         _ => {}
     }
+    match total.fee_coverage() {
+        Some(share) if share < 0.999 => out.push_str(&format!(
+            "  the fee and all-in columns cover {:.0}% of what traded; the venue did not\n  \
+             state a fee for the rest. Unknown fees are not counted as zero.\n",
+            share * 100.0
+        )),
+        _ => {}
+    }
     if total.marks_unmeasurable > 0 {
         out.push_str(&format!(
             "  {} markout(s) had no readable book inside the lateness bound and were\n  \
@@ -508,7 +526,7 @@ mod tests {
                     side: Side::Buy,
                     qty: 1.0,
                     px: 101.0,
-                    fee: 0.0555,
+                    fee: Some(0.0555),
                     is_maker: true,
                     venue_ts_ms: 1,
                     recv_ns: 1,
@@ -592,7 +610,7 @@ mod tests {
                 side: Side::Buy,
                 qty: 1.0,
                 px: 101.0,
-                fee: 0.0,
+                fee: None,
                 is_maker: false,
                 venue_ts_ms: 2,
                 recv_ns: 2,
@@ -600,6 +618,10 @@ mod tests {
         });
         let text = of_log(&records);
         assert!(text.contains("cover 50%"), "{text}");
+        assert!(
+            text.contains("Unknown fees are not counted as zero"),
+            "{text}"
+        );
         assert!(
             text.contains("long"),
             "the second sleeve is named too: {text}"

@@ -251,7 +251,10 @@ mod tests {
         );
         // Every symbol the rules advertise can be looked up again.
         for (symbol, _) in assets.instrument_rules() {
-            assert!(assets.for_symbol(&symbol).is_ok(), "{symbol} is advertised and unreachable");
+            assert!(
+                assets.for_symbol(&symbol).is_ok(),
+                "{symbol} is advertised and unreachable"
+            );
         }
     }
 
@@ -287,7 +290,10 @@ mod tests {
         assert_eq!(venue_sz(0.123456, 4).unwrap(), "0.1234");
         assert_eq!(venue_sz(1.0, 4).unwrap(), "1");
         assert_eq!(venue_sz(1.5, 0).unwrap(), "1");
-        assert!(venue_sz(0.00004, 4).is_err(), "a size that rounds to nothing");
+        assert!(
+            venue_sz(0.00004, 4).is_err(),
+            "a size that rounds to nothing"
+        );
         for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(venue_sz(bad, 4).is_err(), "{bad} was accepted as a size");
         }
@@ -312,8 +318,14 @@ mod tests {
         // up could cross the spread and pay the taker fee, on an order the
         // strategy asked to rest.
         for (px, sz_decimals) in [(1670.123, 5), (0.0001234, 0), (12.3456, 2), (99_999.9, 5)] {
-            let buy: f64 = venue_px(px, Side::Buy, sz_decimals).unwrap().parse().unwrap();
-            let sell: f64 = venue_px(px, Side::Sell, sz_decimals).unwrap().parse().unwrap();
+            let buy: f64 = venue_px(px, Side::Buy, sz_decimals)
+                .unwrap()
+                .parse()
+                .unwrap();
+            let sell: f64 = venue_px(px, Side::Sell, sz_decimals)
+                .unwrap()
+                .parse()
+                .unwrap();
             assert!(buy <= px + 1e-12, "a buy at {px} rounded up to {buy}");
             assert!(sell >= px - 1e-12, "a sell at {px} rounded down to {sell}");
         }
@@ -324,7 +336,10 @@ mod tests {
         // The venue reads these as decimal strings and rejects exponents.
         for px in [1e-6, 1e-5, 1e9, 0.000001234] {
             let text = venue_px(px, Side::Buy, 0).unwrap();
-            assert!(!text.contains('e') && !text.contains('E'), "{px} rendered as {text}");
+            assert!(
+                !text.contains('e') && !text.contains('E'),
+                "{px} rendered as {text}"
+            );
         }
         assert!(!venue_sz(1e-4, 8).unwrap().contains('e'));
     }

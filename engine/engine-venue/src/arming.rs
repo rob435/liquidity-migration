@@ -76,11 +76,7 @@ pub fn check_arming(realm: &str, is_real_money: bool) -> Result<(), VenueError> 
 /// process environment — which is shared by every test in a binary and racy to
 /// mutate from a parallel suite. `tests/arming_env.rs` covers the reading half
 /// in a process of its own.
-pub fn check_arming_with(
-    realm: &str,
-    is_real_money: bool,
-    armed: bool,
-) -> Result<(), VenueError> {
+pub fn check_arming_with(realm: &str, is_real_money: bool, armed: bool) -> Result<(), VenueError> {
     match (is_real_money, armed) {
         (true, false) => Err(VenueError::Credentials(format!(
             "the {realm} realm requires {REAL_MONEY_ENV} to be explicitly armed; naming \
@@ -120,11 +116,15 @@ mod tests {
 
     #[test]
     fn each_refusal_says_which_way_to_fix_it() {
-        let unarmed = check_arming_with("mainnet", true, false).unwrap_err().to_string();
+        let unarmed = check_arming_with("mainnet", true, false)
+            .unwrap_err()
+            .to_string();
         assert!(unarmed.contains(REAL_MONEY_ENV), "{unarmed}");
         assert!(unarmed.contains("armed"), "{unarmed}");
 
-        let armed = check_arming_with("demo", false, true).unwrap_err().to_string();
+        let armed = check_arming_with("demo", false, true)
+            .unwrap_err()
+            .to_string();
         assert!(armed.contains(REAL_MONEY_ENV), "{armed}");
         assert!(armed.contains("unset it"), "{armed}");
     }
@@ -133,7 +133,9 @@ mod tests {
     fn the_refusal_names_the_realm_that_was_asked_for() {
         // Four venues now share these two sentences, so an operator reading
         // one has to be able to tell which realm they named.
-        let said = check_arming_with("hyperliquid_testnet", false, true).unwrap_err().to_string();
+        let said = check_arming_with("hyperliquid_testnet", false, true)
+            .unwrap_err()
+            .to_string();
         assert!(said.contains("hyperliquid_testnet"), "{said}");
     }
 
@@ -144,8 +146,14 @@ mod tests {
         // practice realm.
         for typo in ["ture", "yse", "enabled", "y", "2", "-1", "null"] {
             let err = flag_value(REAL_MONEY_ENV, typo).unwrap_err();
-            assert!(matches!(err, VenueError::Credentials(_)), "{typo:?} gave {err:?}");
-            assert!(err.to_string().contains(typo), "{err} should quote {typo:?}");
+            assert!(
+                matches!(err, VenueError::Credentials(_)),
+                "{typo:?} gave {err:?}"
+            );
+            assert!(
+                err.to_string().contains(typo),
+                "{err} should quote {typo:?}"
+            );
         }
     }
 }

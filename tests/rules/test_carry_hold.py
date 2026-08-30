@@ -21,6 +21,7 @@ from liquidity_migration.rules.carry_hold import (
     HOUR_MS,
     CarryHoldConfig,
     FinancedLongsError,
+    _signal_frame,
     carry_hold_weights,
     daily_grid,
     prepare_decision,
@@ -116,6 +117,59 @@ class TestCarryHoldState:
         # 13 names at cap 0.10 exceeds 1.0, so per-name weight must be scaled down
         per_name = w.filter(pl.col("bar_ts_ms") == w["bar_ts_ms"].max())["w"]
         assert float(per_name.max()) < carry_cfg.per_name_cap
+
+    def test_universe_gap_resets_state_and_requires_a_fresh_entry_signal(
+        self, carry_cfg: CarryHoldConfig
+    ) -> None:
+        gap = pl.DataFrame(
+            {
+                "bar_ts_ms": [0, 2 * 24 * HOUR_MS],
+                "symbol": ["XUSDT", "XUSDT"],
+                "by_funding": [-0.002, -0.0005],
+            }
+        )
+        held = carry_hold_weights(gap, carry_cfg)
+        assert held["bar_ts_ms"].to_list() == [0]
+
+        fresh = gap.with_columns(
+            pl.when(pl.col("bar_ts_ms") > 0)
+            .then(-0.002)
+            .otherwise(pl.col("by_funding"))
+            .alias("by_funding")
+        )
+        assert carry_hold_weights(fresh, carry_cfg)["bar_ts_ms"].to_list() == [
+            0,
+            2 * 24 * HOUR_MS,
+        ]
+
+    def test_recovery_exit_cannot_reenter_on_the_same_signal_row(
+        self, carry_cfg: CarryHoldConfig
+    ) -> None:
+        cfg = dataclasses.replace(carry_cfg, trail_recovery_exit_bp_2d=30.0)
+        universe = pl.DataFrame(
+            {
+                "bar_ts_ms": [0, 24 * HOUR_MS, 48 * HOUR_MS],
+                "symbol": ["XUSDT"] * 3,
+                "by_funding": [-0.002] * 3,
+                "dtrail_2d": [0.0, 0.004, 0.0],
+            }
+        )
+
+        assert carry_hold_weights(universe, cfg)["bar_ts_ms"].to_list() == [
+            0,
+            48 * HOUR_MS,
+        ]
+
+    def test_non_finite_funding_is_rejected(self, carry_cfg: CarryHoldConfig) -> None:
+        universe = pl.DataFrame(
+            {
+                "bar_ts_ms": [0, 24 * HOUR_MS],
+                "symbol": ["XUSDT", "XUSDT"],
+                "by_funding": [-0.002, float("nan")],
+            }
+        )
+        with pytest.raises(FinancedLongsError, match="non-finite"):
+            carry_hold_weights(universe, carry_cfg)
 
 
 class TestDepthScaling:
@@ -337,6 +391,37 @@ class TestPrepareDecision:
         # momentum needs 168h of history: bar 167 is the first with a full
         # lookback, so nothing younger may appear in the live frame either.
         assert int(live["bar_ts_ms"].min()) >= 168 * HOUR_MS  # type: ignore[arg-type]
+
+    def test_clock_features_do_not_bridge_one_missing_hour(self) -> None:
+        missing_hour = 800
+        panel = (
+            _panel(symbols=1, hours=1_550)
+            .filter(pl.col("bar_ts_ms") != missing_hour * HOUR_MS)
+            .with_columns(
+                pl.lit(1.5).alias("bn_tt_ls"),
+                pl.lit(1.0).alias("bn_tt_ls_age_h"),
+            )
+        )
+        frame = _signal_frame(panel, momentum_lookback_hours=168)
+
+        def row(hour: int) -> dict[str, object]:
+            selected = frame.filter(pl.col("bar_ts_ms") == hour * HOUR_MS)
+            assert selected.height == 1
+            return selected.row(0, named=True)
+
+        before = row(missing_hour - 1)
+        assert before["funding_paid"] is None
+        assert before["price_return"] is None
+        assert before["contiguous"] is False
+        assert row(missing_hour + 1)["adv24"] is None
+        assert row(missing_hour + 48)["dtrail_2d"] is None
+        three_days = row(missing_hour + 72)
+        assert three_days["ret_3d"] is None
+        assert three_days["turn_growth_3d"] is None
+        assert three_days["d_tt_ls_3d"] is None
+        assert row(missing_hour + 168)["momentum"] is None
+        assert row(1_520)["vol_30d_daily"] is None
+        assert row(1_545)["vol_30d_daily"] is not None
 
 
 #: The exact age sequence the production panel carries across one 8h funding

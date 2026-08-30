@@ -48,6 +48,112 @@ const FRAME_HEADER_LEN: usize = 8;
 /// grows an unbounded buffer.
 const BUFFER_HIGH_WATER: usize = 64 * 1024;
 
+const FEE_KNOWN_FIELD: &str = "fee_known";
+const HISTORY_CHECKPOINT_FIELD: &str = "execution_history_through_ms";
+const HISTORY_CHECKPOINT_SOURCE: &str = "engine.execution_history_checkpoint.v1";
+
+fn json_error(error: serde_json::Error) -> WalError {
+    WalError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn fee_payload_mut(
+    value: &mut serde_json::Value,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    let recovered = value.get("kind").and_then(serde_json::Value::as_str) == Some("recovered_fill");
+    if recovered {
+        return value.as_object_mut();
+    }
+    let delivered = value.get("kind").and_then(serde_json::Value::as_str) == Some("order_update");
+    if !delivered {
+        return None;
+    }
+    value
+        .as_object_mut()?
+        .get_mut("update")?
+        .as_object_mut()?
+        .get_mut("Fill")?
+        .as_object_mut()
+}
+
+/// Serialize the current in-memory record into the rollback-readable WAL
+/// shape. New semantic state rides on fields and record kinds an older reader
+/// already accepts; the current reader restores the richer type on replay.
+fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalError> {
+    if let WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } = record {
+        let mut value = serde_json::Map::new();
+        value.insert(
+            "kind".to_string(),
+            serde_json::Value::String("note".to_string()),
+        );
+        value.insert(
+            "source".to_string(),
+            serde_json::Value::String(HISTORY_CHECKPOINT_SOURCE.to_string()),
+        );
+        value.insert(
+            "text".to_string(),
+            serde_json::Value::String(format!("through_wall_ts_ms={through_wall_ts_ms}")),
+        );
+        value.insert(
+            HISTORY_CHECKPOINT_FIELD.to_string(),
+            serde_json::Value::from(*through_wall_ts_ms),
+        );
+        return serde_json::to_writer(writer, &value).map_err(json_error);
+    }
+
+    let unknown_fee = matches!(
+        record,
+        WalRecord::OrderUpdate {
+            update: engine_types::OrderUpdate::Fill { fee: None, .. }
+        } | WalRecord::RecoveredFill { fee: None, .. }
+    );
+    if !unknown_fee {
+        return serde_json::to_writer(writer, record).map_err(json_error);
+    }
+
+    let mut value = serde_json::to_value(record).map_err(json_error)?;
+    let payload = fee_payload_mut(&mut value).ok_or_else(|| {
+        WalError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown-fee record has no compatible fee payload",
+        ))
+    })?;
+    payload.insert("fee".to_string(), serde_json::Value::from(0.0));
+    payload.insert(FEE_KNOWN_FIELD.to_string(), serde_json::Value::Bool(false));
+    serde_json::to_writer(writer, &value).map_err(json_error)
+}
+
+fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
+    let has_fee_marker = payload
+        .windows(FEE_KNOWN_FIELD.len())
+        .any(|window| window == FEE_KNOWN_FIELD.as_bytes());
+    let has_checkpoint_marker = payload
+        .windows(HISTORY_CHECKPOINT_FIELD.len())
+        .any(|window| window == HISTORY_CHECKPOINT_FIELD.as_bytes());
+    if !has_fee_marker && !has_checkpoint_marker {
+        return serde_json::from_slice(payload);
+    }
+
+    let mut value: serde_json::Value = serde_json::from_slice(payload)?;
+    let checkpoint = value.get("kind").and_then(serde_json::Value::as_str) == Some("note")
+        && value.get("source").and_then(serde_json::Value::as_str)
+            == Some(HISTORY_CHECKPOINT_SOURCE);
+    if checkpoint {
+        if let Some(through_wall_ts_ms) = value
+            .get(HISTORY_CHECKPOINT_FIELD)
+            .and_then(serde_json::Value::as_i64)
+        {
+            return Ok(WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms });
+        }
+    }
+
+    if let Some(payload) = fee_payload_mut(&mut value) {
+        if payload.get(FEE_KNOWN_FIELD) == Some(&serde_json::Value::Bool(false)) {
+            payload.insert("fee".to_string(), serde_json::Value::Null);
+        }
+    }
+    serde_json::from_value(value)
+}
+
 /// The append-only log writer.
 /// The thread that waits on the disk, so the order path does not have to.
 ///
@@ -206,27 +312,32 @@ impl WalWriter {
 /// their checksum are real data, and deleting them is not the log's call. So one
 /// such record makes the whole log unopenable, at the next boot, for good.
 fn reads_back(payload: &[u8]) -> Result<(), WalError> {
-    if !payload.windows(4).any(|window| window == b"null") {
+    let has_null = payload.windows(4).any(|window| window == b"null");
+    let has_compat_marker = payload
+        .windows(FEE_KNOWN_FIELD.len())
+        .any(|window| window == FEE_KNOWN_FIELD.as_bytes())
+        || payload
+            .windows(HISTORY_CHECKPOINT_FIELD.len())
+            .any(|window| window == HISTORY_CHECKPOINT_FIELD.as_bytes());
+    if !has_null && !has_compat_marker {
         return Ok(());
     }
-    serde_json::from_slice::<WalRecord>(payload)
-        .map(|_: WalRecord| ())
-        .map_err(|e| {
-            WalError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("this record does not read back, so it is not written: {e}"),
-            ))
-        })
+    read_record(payload).map(|_: WalRecord| ()).map_err(|e| {
+        WalError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("this record does not read back, so it is not written: {e}"),
+        ))
+    })
 }
 
 impl Wal for WalWriter {
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError> {
         let start = self.buf.len();
         self.buf.extend_from_slice(&[0u8; FRAME_HEADER_LEN]);
-        if let Err(e) = serde_json::to_writer(&mut self.buf, record) {
+        if let Err(e) = write_record(&mut self.buf, record) {
             // A half-written record must not become a frame.
             self.buf.truncate(start);
-            return Err(WalError::Io(io::Error::new(io::ErrorKind::InvalidData, e)));
+            return Err(e);
         }
 
         if let Err(e) = reads_back(&self.buf[start + FRAME_HEADER_LEN..]) {
@@ -327,8 +438,7 @@ impl Wal for WalWriter {
         file.write_all(&MAGIC)?;
         let mut frame: Vec<u8> = Vec::with_capacity(BUFFER_HIGH_WATER);
         frame.extend_from_slice(&[0u8; FRAME_HEADER_LEN]);
-        serde_json::to_writer(&mut frame, base)
-            .map_err(|e| WalError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+        write_record(&mut frame, base)?;
         reads_back(&frame[FRAME_HEADER_LEN..])?;
         let payload = &frame[FRAME_HEADER_LEN..];
         let payload_len = payload.len() as u32;
@@ -745,11 +855,10 @@ fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
 
         // Checksum good but the bytes are not a record we understand: the disk
         // is fine and the data is real, so refuse rather than delete it.
-        let record: WalRecord =
-            serde_json::from_slice(&payload).map_err(|e| WalError::Corrupt {
-                offset,
-                detail: format!("frame passed its checksum but is not a readable record: {e}"),
-            })?;
+        let record: WalRecord = read_record(&payload).map_err(|e| WalError::Corrupt {
+            offset,
+            detail: format!("frame passed its checksum but is not a readable record: {e}"),
+        })?;
 
         offset += FRAME_HEADER_LEN as u64 + payload_len;
         let seq = records.len() as u64 + 1;

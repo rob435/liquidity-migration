@@ -260,6 +260,8 @@ def test_funded_owner_retains_only_its_load_bearing_account_identity() -> None:
         line for line in funded.splitlines() if line.startswith("UnsetEnvironment=")
     )
     assert "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" not in unset
+    for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERT_CHAT_ID"):
+        assert key in unset
     for name, body in units.items():
         if not name.endswith(".service") or name == "liquidity-migration-engine-mainnet.service":
             continue
@@ -427,7 +429,8 @@ def test_funded_exodus_and_maker_canary_are_wired_to_the_engine() -> None:
     )
 
     flatten = _read("scripts/vps/flatten_account.sh")
-    assert expected in flatten
+    assert "BOOK_NAMES=(carry-mainnet.json long-mainnet.json exodus-mainnet.json)" in flatten
+    assert 'BOOKS+=("$TARGET_ROOT/$name")' in flatten
 
 
 def test_demo_engine_template_has_an_exact_account_id_and_mainnet_requires_one() -> None:
@@ -1381,7 +1384,7 @@ def test_activation_receipt_commits_only_after_full_in_boot_verification() -> No
 def test_runtime_supervisor_revokes_same_boot_partial_activation() -> None:
     launcher = _read("deploy/run_authorized_runtime_trusted.sh")
     child_start = launcher.index('/bin/bash "$CHECKOUT_WRAPPER" "$@" &')
-    monitor = launcher.index('while kill -0 "$child_pid"')
+    monitor = launcher.index("while child_is_running", child_start)
     recheck = launcher.index("if ! activation_authority_valid", monitor)
     terminate = launcher.index("terminate_child", recheck)
     refuse = launcher.index("exit 78", terminate)
@@ -2565,6 +2568,44 @@ def test_vps_workflow_is_serialized_and_time_bounded() -> None:
     assert "ServerAliveInterval=15" in vps and "ServerAliveCountMax=3" in vps
 
 
+def test_vps_workflow_builds_known_hosts_from_the_configured_host() -> None:
+    workflow = _read(".github/workflows/vps-deploy.yml")
+    assert workflow.count('ssh-keyscan -T 10 -t ed25519 -- "$VPS_HOST"') == 2
+    assert workflow.count('test "$host_fingerprints" = "$VPS_ED25519_FINGERPRINT"') == 2
+    assert workflow.count("mv ~/.ssh/known_hosts.candidate ~/.ssh/known_hosts") == 2
+    assert "208.84.103.4 ssh-ed25519" not in workflow
+
+
+def test_one_click_deploy_pins_a_fetched_commit_and_uses_rollout() -> None:
+    script = _read("scripts/deploy_everything.command")
+    assert "git fetch --quiet origin main" in script
+    assert "git fetch --quiet origin main ||" not in script
+    assert "deploy_commit=\"$(git rev-parse 'origin/main^{commit}')\"" in script
+    assert 'ssh_target="${SSH_TARGET:-root@208.84.103.4}"' in script
+    assert 'git worktree add --quiet --detach "$controller_root" "$deploy_commit"' in script
+    assert 'git -C "$controller_root" rev-parse HEAD' in script
+    assert 'cd "$controller_root"' in script
+    assert 'SSH_TARGET="$ssh_target" EXPECTED_COMMIT="$deploy_commit"' in script
+    assert 'EXPECTED_COMMIT="$deploy_commit"' in script
+    assert "scripts/ops.sh deploy rollout --profile operational" in script
+    assert "deploy staged" not in script
+
+
+def test_ssh_recovery_never_claims_success_after_a_failed_restart() -> None:
+    restore = _read("scripts/vps/vps_restore_ssh_access.sh")
+    assert "systemctl restart ssh.service ||" not in restore
+    assert "service ssh restart ||" not in restore
+    assert restore.index('systemctl is-active --quiet ssh.service') < restore.index(
+        'echo "ssh-restore-ok"'
+    )
+    assert '[ "$ssh_restarted" -eq 1 ]' in restore
+
+    generator = _read("scripts/vps/print_vps_recovery_command.sh")
+    assert generator.count("SSH_TARGET=$ssh_target_q EXPECTED_COMMIT=") == 3
+    rescue = _read("scripts/vps/vps_rescue_restore_ssh_access.sh")
+    assert "SSH_TARGET=root@YOUR_VPS_HOST EXPECTED_COMMIT=" in rescue
+
+
 def test_runtime_dependencies_are_exact_version_pins() -> None:
     rows = [
         line.strip()
@@ -2585,6 +2626,30 @@ def test_oneshots_and_daemons_have_bounded_resources() -> None:
         assert "MemoryMax=" in body, name
         if "Type=oneshot" in body:
             assert "TimeoutStartSec=" in body, name
+
+
+def test_status_checks_every_timer_backed_oneshot_result() -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    verify = _function(deploy, "verify_topology", "start_if")
+    checked = set(
+        re.findall(r"\s+(liquidity-migration-[\w-]+\.service)(?:;|\s*\\)", verify)
+    )
+    timer_backed = {
+        path.name.replace(".timer", ".service")
+        for path in SYSTEMD.glob("liquidity-migration-*.timer")
+    }
+    assert timer_backed <= checked
+    assert verify.count("verify_timer_job") == len(timer_backed)
+    for unit in (
+        "liquidity-migration-telegram-controls.service",
+        "liquidity-migration-llm-ledger.timer",
+        "liquidity-migration-trade-notify.timer",
+        "liquidity-migration-backup.timer",
+        "liquidity-migration-chaos-drill.timer",
+        "liquidity-migration-forward-capture.service",
+        "liquidity-migration-forward-upload.timer",
+    ):
+        assert f"verify_unit on {unit}" in verify
 
 
 def test_liveness_units_bind_exact_engine_identity_without_venue_credentials() -> None:
@@ -2630,13 +2695,9 @@ def test_dispatched_scripts_can_import_the_package_when_run_as_a_file() -> None:
         assert bootstrap < min(imports), f"{relative} imports the package before the path is set"
 
 
-def test_a_long_running_unit_counts_a_commanded_stop_as_success() -> None:
-    # The trusted supervisor traps TERM, passes it to its child, waits, and
-    # exits 143. systemd's default success set is {0}, so without this every
-    # `systemctl stop` — every deploy — is filed as `Failed with result
-    # 'exit-code'`, and the watchdog pages the alerts line for it.
+def test_a_long_running_unit_records_only_a_graceful_commanded_stop_as_success() -> None:
     wrapper = _read("deploy/run_authorized_runtime_trusted.sh")
-    assert "exit 143' TERM" in wrapper, "the supervisor no longer exits 143 on TERM"
+    assert "stop_for_signal 143 70' TERM" in wrapper
 
     for name, text in _units().items():
         if not name.endswith(".service") or "Type=simple" not in text:
@@ -2650,3 +2711,111 @@ def test_a_long_running_unit_counts_a_commanded_stop_as_success() -> None:
         assert any("143" in codes for codes in allowed), (
             f"{name} does not count 143 as success, so every stop of it pages"
         )
+        grace = [
+            int(line.rsplit("=", 1)[1])
+            for line in text.splitlines()
+            if line.startswith("Environment=LM_CHILD_STOP_GRACE_SECONDS=")
+        ]
+        timeout = [
+            int(line.split("=", 1)[1].removesuffix("s"))
+            for line in text.splitlines()
+            if line.startswith("TimeoutStopSec=")
+        ]
+        assert len(grace) == len(timeout) == 1, name
+        assert 0 < grace[0] < timeout[0], name
+
+
+def test_trusted_supervisor_reports_a_forced_child_kill_as_failure() -> None:
+    wrapper = _read("deploy/run_authorized_runtime_trusted.sh")
+    helpers = wrapper[
+        wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")
+    ]
+    harness = f"""
+set -u
+stop_grace_seconds=1
+child_pid=""
+child_was_forced=0
+{helpers}
+{shlex.quote(sys.executable)} -c 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)' &
+child_pid=$!
+sleep 0.2
+stop_for_signal 143 70
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 70
+    assert "had to kill workload" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("handler_status", "expected_status", "message"),
+    [(0, 143, ""), (1, 70, "failed during shutdown status=1")],
+)
+def test_trusted_supervisor_preserves_child_shutdown_failure(
+    handler_status: int, expected_status: int, message: str
+) -> None:
+    wrapper = _read("deploy/run_authorized_runtime_trusted.sh")
+    helpers = wrapper[
+        wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")
+    ]
+    child = (
+        "import signal,time; "
+        f"signal.signal(signal.SIGTERM, lambda *_: exit({handler_status})); "
+        "time.sleep(30)"
+    )
+    harness = f"""
+set -u
+stop_grace_seconds=2
+child_pid=""
+child_was_forced=0
+child_stop_status=0
+{helpers}
+{shlex.quote(sys.executable)} -c {shlex.quote(child)} &
+child_pid=$!
+sleep 0.2
+stop_for_signal 143 70
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == expected_status
+    assert message in result.stderr
+
+
+def test_trusted_supervisor_accepts_a_default_sigterm_exit() -> None:
+    wrapper = _read("deploy/run_authorized_runtime_trusted.sh")
+    helpers = wrapper[
+        wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")
+    ]
+    harness = f"""
+set -u
+stop_grace_seconds=2
+child_pid=""
+child_was_forced=0
+child_stop_status=0
+{helpers}
+{shlex.quote(sys.executable)} -c 'import time; time.sleep(30)' &
+child_pid=$!
+sleep 0.2
+stop_for_signal 143 70
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 143, result.stderr

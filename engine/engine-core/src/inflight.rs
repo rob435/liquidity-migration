@@ -384,6 +384,57 @@ impl LedgerOfOrders {
             .map(|order| order.request.strategy)
     }
 
+    /// Check an authoritative fill before it can change any order, risk, or
+    /// position state. An unknown id is handled by reconciliation; a known id
+    /// has a stronger contract because the WAL says exactly what was sent.
+    pub fn validate_fill(
+        &self,
+        client_order_id: &str,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        px: f64,
+    ) -> Result<(), String> {
+        if !qty.is_finite() || qty <= 0.0 {
+            return Err(format!(
+                "reported quantity {qty} is not finite and positive"
+            ));
+        }
+        if !px.is_finite() || px <= 0.0 {
+            return Err(format!("reported price {px} is not finite and positive"));
+        }
+
+        let Some(order) = self.orders.get(client_order_id) else {
+            return Ok(());
+        };
+        if order.request.symbol != symbol {
+            return Err(format!(
+                "reported symbol {} does not match sent symbol {}",
+                symbol.0, order.request.symbol.0
+            ));
+        }
+        if order.request.side != side {
+            return Err(format!(
+                "reported side {side:?} does not match sent side {:?}",
+                order.request.side
+            ));
+        }
+        if !order.request.qty.is_finite()
+            || order.request.qty <= 0.0
+            || !order.filled_qty.is_finite()
+            || order.filled_qty < 0.0
+        {
+            return Err("the sent order carries invalid quantity state".to_string());
+        }
+        let remaining = (order.request.qty - order.filled_qty).max(0.0);
+        if qty > remaining + QTY_EPS {
+            return Err(format!(
+                "reported quantity {qty} exceeds the order's remaining quantity {remaining}"
+            ));
+        }
+        Ok(())
+    }
+
     pub fn in_flight(&self) -> Vec<&OrderRec> {
         self.orders.values().filter(|o| o.in_flight()).collect()
     }
@@ -592,7 +643,7 @@ mod tests {
                 side: Side::Buy,
                 qty,
                 px: 100.0,
-                fee: 0.0,
+                fee: Some(0.0),
                 is_maker: false,
                 venue_ts_ms: 0,
                 recv_ns: 0,
@@ -626,7 +677,7 @@ mod tests {
             side: Side::Buy,
             qty,
             px: 100.0,
-            fee: 0.0,
+            fee: Some(0.0),
             is_maker: false,
             venue_ts_ms: 0,
             recovered_wall_ts_ms: 0,
@@ -655,6 +706,38 @@ mod tests {
             LedgerOfOrders::from_records(&[sent("a", 1.0), fill("a", 0.4), fill("a", 0.6)]);
         assert!(ledger.in_flight_ids().is_empty());
         assert_eq!(ledger.orders["a"].ending, Some(Ending::Filled));
+    }
+
+    #[test]
+    fn a_known_fill_must_match_the_order_before_it_can_mutate_state() {
+        let ledger = LedgerOfOrders::from_records(&[sent("a", 1.0)]);
+        assert!(ledger
+            .validate_fill("a", SymbolId(0), Side::Buy, 1.0, 100.0)
+            .is_ok());
+
+        for (symbol, side, qty, px, reason) in [
+            (SymbolId(1), Side::Buy, 1.0, 100.0, "reported symbol"),
+            (SymbolId(0), Side::Sell, 1.0, 100.0, "reported side"),
+            (SymbolId(0), Side::Buy, f64::NAN, 100.0, "reported quantity"),
+            (SymbolId(0), Side::Buy, 1.0, f64::INFINITY, "reported price"),
+        ] {
+            let error = ledger
+                .validate_fill("a", symbol, side, qty, px)
+                .expect_err("malformed fill was trusted");
+            assert!(error.contains(reason), "{error}");
+        }
+    }
+
+    #[test]
+    fn cumulative_fills_cannot_exceed_the_quantity_that_was_sent() {
+        let ledger = LedgerOfOrders::from_records(&[sent("a", 1.0), fill("a", 0.6)]);
+        assert!(ledger
+            .validate_fill("a", SymbolId(0), Side::Buy, 0.4, 100.0)
+            .is_ok());
+        let error = ledger
+            .validate_fill("a", SymbolId(0), Side::Buy, 0.400_000_01, 100.0)
+            .expect_err("an overfill was trusted");
+        assert!(error.contains("remaining quantity 0.4"), "{error}");
     }
 
     #[test]

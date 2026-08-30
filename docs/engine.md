@@ -957,7 +957,20 @@ that account's single-writer lease. Funded status is read from
   arbitrary instant near boot, so a raw `account_observed_ns` means nothing
   read from outside the process.
 
-Two operator capabilities sit beside the engine, one built and one owed:
+The bounded demo order proof is `engine canary-order --config PATH --symbol
+XRPUSDT --expected-user-id UID --execute`. It accepts only a config selecting
+`bybit_demo`, takes that exact account's writer lease, checks the authenticated
+UID, and refuses any derivative position or open order before sending. It
+rests one minimum-value PostOnly buy below the live bid with a Full mark-price
+stop, proves New, requests cancellation, and requires an exact terminal order
+state plus two fresh flat account readings. Execution history is bounded by
+the venue's clock. If any part fills, the command sends one full reduce-only
+close, reconciles that exact close rather than blindly retrying it, proves the
+account clean, and still exits as a failed canary. Demo wallet assets are not
+derivative exposure; unrelated orders or positions are reported only after
+the canary has torn down its own state.
+
+Two other operator capabilities sit beside the engine, one built and one owed:
 
 1. **Flatten** — `ops.sh flatten`, on the engine's own path. It stops the
    producers, then writes a book of explicit zero rows naming everything the
@@ -971,10 +984,9 @@ Two operator capabilities sit beside the engine, one built and one owed:
 
 **It is installed on the host, and `REAL_MONEY` is the only thing that decides
 whether it runs.** Armed, the unit starts, the engine sends orders and takes the
-funded account's single-writer lease. Unset, the unit does not start. Delete
-`/etc/liquidity-migration/engine-mainnet.env` to keep it off for good — a
-stopped unit would not stick, because the deploy starts it wherever its env
-file and the binary both exist.
+funded account's single-writer lease. Unset, the unit does not start. Run
+`scripts/ops.sh deploy disarm-mainnet` to stop the funded fleet and atomically
+persist `REAL_MONEY=false`; merely stopping a unit does not survive a rollout.
 
 The account it reads, the caps it reads them under, and why it is left running
 rather than stopped are operational state, so they live in one place:

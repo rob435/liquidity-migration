@@ -1401,6 +1401,272 @@ verify_unit() {
     verify_note "$message"
 }
 
+systemd_property_value() {
+    local payload="$1" property="$2" line value="" matches=0
+    while IFS= read -r line; do
+        if [[ "$line" == "$property="* ]]; then
+            value="${line#*=}"
+            matches=$((matches + 1))
+        fi
+    done <<< "$payload"
+    [ "$matches" -eq 1 ] || return 1
+    printf '%s\n' "$value"
+}
+
+systemd_unit_object_path() {
+    local unit="$1" reply
+    reply="$(
+        /usr/bin/busctl --system call \
+            org.freedesktop.systemd1 \
+            /org/freedesktop/systemd1 \
+            org.freedesktop.systemd1.Manager \
+            GetUnit s "$unit" 2>/dev/null
+    )" || return 1
+    [[ "$reply" =~ ^o\ \"([/A-Za-z0-9_]+)\"$ ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+timer_last_trigger_monotonic_usec() {
+    local timer="$1" object_path reply
+    object_path="$(systemd_unit_object_path "$timer")" || return 1
+    reply="$(
+        /usr/bin/busctl --system get-property \
+            org.freedesktop.systemd1 \
+            "$object_path" \
+            org.freedesktop.systemd1.Timer \
+            LastTriggerUSecMonotonic 2>/dev/null
+    )" || return 1
+    [[ "$reply" =~ ^t\ ([0-9]+)$ ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+monotonic_now_usec() {
+    /usr/bin/python3 -c \
+        'import time; print(time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000)'
+}
+
+timer_verify_unsigned() {
+    [[ "$1" =~ ^[0-9]{1,18}$ ]]
+}
+
+# A timer being active only proves that systemd intends to run its service.
+# Join the timer's raw monotonic trigger to the service invocation so reset
+# failures, old successes, and missed schedules cannot look healthy.
+verify_timer_job() {
+    local timer="$1" service="$2"
+    local first_delay_seconds="$3" cadence_seconds="$4"
+    local accuracy_seconds="$5" runtime_seconds="$6"
+    local timer_show service_show timer_load_state timer_state timer_result
+    local timer_active_usec service_load_state service_state invocation_id
+    local result exec_code exec_status
+    local service_changed_usec start_usec exit_usec last_trigger_usec now_usec
+    local trigger_usec=0 basis_usec grace_usec stale_usec runtime_usec
+    local pristine_first_run=0 historical_success=0
+    local policy_seconds slack_seconds=5
+
+    for policy_seconds in \
+        "$first_delay_seconds" "$cadence_seconds" \
+        "$accuracy_seconds" "$runtime_seconds"; do
+        if ! timer_verify_unsigned "$policy_seconds"; then
+            verify_note "$timer verification policy is invalid"
+            return 0
+        fi
+    done
+    if [ "$cadence_seconds" -eq 0 ] || [ "$runtime_seconds" -eq 0 ]; then
+        verify_note "$timer verification policy is invalid"
+        return 0
+    fi
+
+    if ! systemctl cat "$service" >/dev/null 2>&1; then
+        verify_note "$service is missing"
+        return 0
+    fi
+    if ! timer_show="$(
+        systemctl show "$timer" --all --no-pager \
+            --property=LoadState \
+            --property=ActiveState \
+            --property=Result \
+            --property=ActiveEnterTimestampMonotonic 2>/dev/null
+    )"; then
+        verify_note "$timer status is unavailable"
+        return 0
+    fi
+    # Read the trigger before the service. If a fire lands between the two
+    # snapshots, the newer service invocation remains valid; the reverse order
+    # could compare a new trigger with the preceding invocation and false-fail.
+    if ! last_trigger_usec="$(timer_last_trigger_monotonic_usec "$timer")"; then
+        verify_note "$timer last-trigger status is unavailable"
+        return 0
+    fi
+    if ! service_show="$(
+        systemctl show "$service" --all --no-pager \
+            --property=LoadState \
+            --property=ActiveState \
+            --property=InvocationID \
+            --property=Result \
+            --property=ExecMainCode \
+            --property=ExecMainStatus \
+            --property=StateChangeTimestampMonotonic \
+            --property=ExecMainStartTimestampMonotonic \
+            --property=ExecMainExitTimestampMonotonic 2>/dev/null
+    )"; then
+        verify_note "$service status is unavailable"
+        return 0
+    fi
+    if ! timer_load_state="$(systemd_property_value "$timer_show" LoadState)" \
+        || ! timer_state="$(systemd_property_value "$timer_show" ActiveState)" \
+        || ! timer_result="$(systemd_property_value "$timer_show" Result)" \
+        || ! timer_active_usec="$(
+            systemd_property_value "$timer_show" ActiveEnterTimestampMonotonic
+        )"; then
+        verify_note "$timer status is ambiguous"
+        return 0
+    fi
+    if ! service_load_state="$(systemd_property_value "$service_show" LoadState)" \
+        || ! service_state="$(systemd_property_value "$service_show" ActiveState)" \
+        || ! invocation_id="$(systemd_property_value "$service_show" InvocationID)" \
+        || ! result="$(systemd_property_value "$service_show" Result)" \
+        || ! exec_code="$(systemd_property_value "$service_show" ExecMainCode)" \
+        || ! exec_status="$(systemd_property_value "$service_show" ExecMainStatus)" \
+        || ! service_changed_usec="$(
+            systemd_property_value "$service_show" StateChangeTimestampMonotonic
+        )" \
+        || ! start_usec="$(
+            systemd_property_value "$service_show" ExecMainStartTimestampMonotonic
+        )" \
+        || ! exit_usec="$(
+            systemd_property_value "$service_show" ExecMainExitTimestampMonotonic
+        )"; then
+        verify_note "$service status is ambiguous"
+        return 0
+    fi
+    if ! now_usec="$(monotonic_now_usec)"; then
+        verify_note "the monotonic clock is unavailable while checking $timer"
+        return 0
+    fi
+    if ! timer_verify_unsigned "$timer_active_usec" \
+        || ! timer_verify_unsigned "$last_trigger_usec" \
+        || ! timer_verify_unsigned "$now_usec" \
+        || [ "$timer_active_usec" -eq 0 ] \
+        || [ "$timer_active_usec" -gt "$now_usec" ] \
+        || [ "$last_trigger_usec" -gt "$now_usec" ]; then
+        verify_note "$timer timing evidence is ambiguous"
+        return 0
+    fi
+    if [ "$timer_load_state" != loaded ] \
+        || [ "$timer_state" != active ] \
+        || [ "$timer_result" != success ]; then
+        verify_note "$timer is not a healthy active timer"
+        return 0
+    fi
+    if [ "$last_trigger_usec" -ge "$timer_active_usec" ]; then
+        trigger_usec="$last_trigger_usec"
+    fi
+    if [ "$service_load_state" != loaded ]; then
+        verify_note "$service is not loaded"
+        return 0
+    fi
+    if ! timer_verify_unsigned "$service_changed_usec" \
+        || [ "$service_changed_usec" -gt "$now_usec" ]; then
+        verify_note "$service status is ambiguous"
+        return 0
+    fi
+
+    if [ "$service_state" = failed ]; then
+        verify_note "$service is failed"
+        return 0
+    fi
+    case "$service_state" in
+        activating)
+            if [[ ! "$invocation_id" =~ ^[0-9a-fA-F]{32}$ ]] \
+                || ! timer_verify_unsigned "$start_usec" \
+                || ! timer_verify_unsigned "$exit_usec" \
+                || [ "$exit_usec" -ne 0 ]; then
+                verify_note "$service has ambiguous in-progress invocation evidence"
+                return 0
+            fi
+            basis_usec="$start_usec"
+            if [ "$basis_usec" -eq 0 ]; then
+                basis_usec="$service_changed_usec"
+            fi
+            if [ "$basis_usec" -lt "$timer_active_usec" ] \
+                || { [ "$trigger_usec" -ne 0 ] && [ "$basis_usec" -lt "$trigger_usec" ]; } \
+                || [ "$basis_usec" -gt "$now_usec" ]; then
+                verify_note "$service in-progress invocation is not current for $timer"
+                return 0
+            fi
+            runtime_usec=$(( (runtime_seconds + slack_seconds) * 1000000 ))
+            if [ $((now_usec - basis_usec)) -gt "$runtime_usec" ]; then
+                verify_note "$service in-progress invocation is overdue"
+            fi
+            return 0
+            ;;
+        inactive) ;;
+        *)
+            verify_note "$service has ambiguous active state $service_state"
+            return 0
+            ;;
+    esac
+
+    if [[ ! "$invocation_id" =~ ^[0-9a-fA-F]{32}$ ]] \
+        || ! timer_verify_unsigned "$start_usec" \
+        || [ "$start_usec" -eq 0 ] \
+        || [ "$start_usec" -lt "$timer_active_usec" ] \
+        || { [ "$trigger_usec" -ne 0 ] && [ "$start_usec" -lt "$trigger_usec" ]; }; then
+        if [ "$trigger_usec" -ne 0 ]; then
+            verify_note "$service has no current invocation for $timer's latest trigger"
+            return 0
+        fi
+        if [ -z "$invocation_id" ] \
+            && timer_verify_unsigned "$start_usec" \
+            && [ "$start_usec" -eq 0 ] \
+            && timer_verify_unsigned "$exit_usec" \
+            && [ "$exit_usec" -eq 0 ] \
+            && [ "$result" = success ] \
+            && [ "$exec_code" = 0 ] \
+            && [ "$exec_status" = 0 ]; then
+            pristine_first_run=1
+        fi
+        if [[ "$invocation_id" =~ ^[0-9a-fA-F]{32}$ ]] \
+            && timer_verify_unsigned "$start_usec" \
+            && [ "$start_usec" -gt 0 ] \
+            && timer_verify_unsigned "$exit_usec" \
+            && [ "$exit_usec" -ge "$start_usec" ] \
+            && [ "$exit_usec" -lt "$timer_active_usec" ] \
+            && [ "$result" = success ] \
+            && [ "$exec_code" = 1 ] \
+            && [ "$exec_status" = 0 ]; then
+            historical_success=1
+        fi
+        if [ "$pristine_first_run" -ne 1 ] \
+            && [ "$historical_success" -ne 1 ]; then
+            verify_note "$service has ambiguous first-run evidence for $timer"
+            return 0
+        fi
+        grace_usec=$(( (first_delay_seconds + accuracy_seconds + slack_seconds) * 1000000 ))
+        if [ $((now_usec - timer_active_usec)) -le "$grace_usec" ]; then
+            return 0
+        fi
+        verify_note "$service has not completed its first run for $timer"
+        return 0
+    fi
+    if ! timer_verify_unsigned "$exit_usec" \
+        || [ "$exit_usec" -eq 0 ] \
+        || [ "$exit_usec" -lt "$start_usec" ] \
+        || [ "$exit_usec" -gt "$now_usec" ]; then
+        verify_note "$service completed invocation timing is ambiguous"
+        return 0
+    fi
+    if [ "$result" != success ] || [ "$exec_code" != 1 ] || [ "$exec_status" != 0 ]; then
+        verify_note "$service latest completed invocation is not successful (Result=$result ExecMainCode=$exec_code ExecMainStatus=$exec_status)"
+        return 0
+    fi
+    stale_usec=$(( (cadence_seconds + accuracy_seconds + slack_seconds) * 1000000 ))
+    if [ $((now_usec - exit_usec)) -gt "$stale_usec" ]; then
+        verify_note "$service latest successful invocation is stale for $timer"
+    fi
+}
+
 verify_topology() {
     local activation_policy="${1:-complete}"
     case "$activation_policy" in
@@ -1430,11 +1696,10 @@ verify_topology() {
         verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
         verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
         verify_unit on liquidity-migration-mainnet-liveness.timer "mainnet liveness timer is not active"
-        # An enabled timer says nothing about the run it fires. A watchdog that
-        # fails every fire is the silence it exists to break.
-        if systemctl is-failed --quiet liquidity-migration-mainnet-liveness.service; then
-            verify_note "liquidity-migration-mainnet-liveness.service is failed"
-        fi
+        verify_timer_job \
+            liquidity-migration-mainnet-liveness.timer \
+            liquidity-migration-mainnet-liveness.service \
+            60 180 15 120
     else
         for mainnet_unit in \
             liquidity-migration-engine-mainnet.service \
@@ -1445,31 +1710,37 @@ verify_topology() {
         done
     fi
     verify_unit on liquidity-migration-demo-liveness.timer "liveness timer is not active"
-    # First-rollout tolerance: the pre-install verification runs against the
-    # outgoing topology, where a unit introduced by this commit does not exist
-    # yet. Once installed the manifest check requires the fragment, so this
-    # cannot skip a deleted unit.
-    if systemctl cat liquidity-migration-telegram-controls.service >/dev/null 2>&1; then
-        verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
-    fi
-    if systemctl cat liquidity-migration-llm-ledger.timer >/dev/null 2>&1; then
-        verify_unit on liquidity-migration-llm-ledger.timer "LLM ledger timer is not active"
-    fi
-    if systemctl cat liquidity-migration-trade-notify.timer >/dev/null 2>&1; then
-        verify_unit on liquidity-migration-trade-notify.timer "trade notify timer is not active"
-    fi
-    if systemctl cat liquidity-migration-backup.timer >/dev/null 2>&1; then
-        verify_unit on liquidity-migration-backup.timer "nightly backup timer is not active"
-    fi
-    if systemctl cat liquidity-migration-chaos-drill.timer >/dev/null 2>&1; then
-        verify_unit on liquidity-migration-chaos-drill.timer "weekly chaos drill timer is not active"
-    fi
-    if systemctl cat liquidity-migration-forward-capture.service >/dev/null 2>&1; then
-        verify_unit on liquidity-migration-forward-capture.service "forward market capture is not active"
-    fi
-    if systemctl cat liquidity-migration-forward-upload.timer >/dev/null 2>&1; then
-        verify_unit on liquidity-migration-forward-upload.timer "forward market upload timer is not active"
-    fi
+    verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
+    verify_unit on liquidity-migration-llm-ledger.timer "LLM ledger timer is not active"
+    verify_unit on liquidity-migration-trade-notify.timer "trade notify timer is not active"
+    verify_unit on liquidity-migration-backup.timer "nightly backup timer is not active"
+    verify_unit on liquidity-migration-chaos-drill.timer "weekly chaos drill timer is not active"
+    verify_unit on liquidity-migration-forward-capture.service "forward market capture is not active"
+    verify_unit on liquidity-migration-forward-upload.timer "forward market upload timer is not active"
+    verify_timer_job \
+        liquidity-migration-demo-liveness.timer \
+        liquidity-migration-demo-liveness.service \
+        60 180 15 120
+    verify_timer_job \
+        liquidity-migration-llm-ledger.timer \
+        liquidity-migration-llm-ledger.service \
+        3600 3600 120 600
+    verify_timer_job \
+        liquidity-migration-trade-notify.timer \
+        liquidity-migration-trade-notify.service \
+        300 300 30 120
+    verify_timer_job \
+        liquidity-migration-backup.timer \
+        liquidity-migration-backup.service \
+        86400 86400 300 900
+    verify_timer_job \
+        liquidity-migration-chaos-drill.timer \
+        liquidity-migration-chaos-drill.service \
+        604800 604800 600 300
+    verify_timer_job \
+        liquidity-migration-forward-upload.timer \
+        liquidity-migration-forward-upload.service \
+        3600 3600 60 1800
     verify_unit on "$ENGINE_UNIT" "required demo Rust engine is not active"
     if [ ! -x "$ENGINE_BINARY" ] || [ ! -r "${ENGINE_BINARY}.release" ]; then
         verify_note "required commit-bound Rust engine artifact is missing"
@@ -1517,13 +1788,6 @@ verify_topology() {
             fi
         fi
     fi
-    for oneshot in \
-        liquidity-migration-demo-liveness.service; do
-        if systemctl is-failed --quiet "$oneshot"; then
-            verify_note "$oneshot is failed"
-        fi
-    done
-
     # Report the commit the host is actually on, not the one the caller asked
     # about. Echoing EXPECTED_COMMIT made a stale host indistinguishable from a
     # current one in the only line an operator reads.

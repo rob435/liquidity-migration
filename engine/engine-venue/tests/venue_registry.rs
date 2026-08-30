@@ -17,7 +17,8 @@ fn adapter(server: &TestServer) -> BybitGateway {
     BybitGateway::for_test(
         &server.base_url(),
         VenueRealm::Demo,
-        VenueRealm::Demo.credentials_for_test("demoKey000000000001", "demoSecret00000000000000000001"),
+        VenueRealm::Demo
+            .credentials_for_test("demoKey000000000001", "demoSecret00000000000000000001"),
         vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
     )
 }
@@ -30,14 +31,19 @@ fn market_order() -> OrderRequest {
         side: Side::Buy,
         qty: 0.001,
         kind: OrderKind::Market,
-        stop: Some(StopSpec { trigger_px: 93000.5 }),
+        stop: Some(StopSpec {
+            trigger_px: 93000.5,
+        }),
         reduce_only: false,
         close_position: false,
     }
 }
 
 fn ok(result: &str) -> (u16, String) {
-    (200, format!(r#"{{"retCode":0,"retMsg":"OK","result":{result},"time":1700000000000}}"#))
+    (
+        200,
+        format!(r#"{{"retCode":0,"retMsg":"OK","result":{result},"time":1700000000000}}"#),
+    )
 }
 
 /// Answers every endpoint the seven methods reach.
@@ -64,14 +70,20 @@ async fn every_method_reaches_the_adapter_behind_the_name() {
     let server = TestServer::start(|request, _| answer(&request.path)).await;
     let mut venue = Venue::Bybit(adapter(&server));
 
-    assert!(venue.caps().native_position_stop, "caps came from the adapter");
+    assert!(
+        venue.caps().native_position_stop,
+        "caps came from the adapter"
+    );
     venue.send_order(&market_order()).await.unwrap();
     venue.cancel_order(SymbolId(0), "eng-1").await.unwrap();
     venue
         .amend_order(
             SymbolId(0),
             "eng-1",
-            AmendSpec { px: Some(94_000.5), qty: None },
+            AmendSpec {
+                px: Some(94_000.5),
+                qty: None,
+            },
         )
         .await
         .unwrap();

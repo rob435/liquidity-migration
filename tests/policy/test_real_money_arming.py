@@ -211,6 +211,71 @@ def test_render_refuses_silent_overwrite(tmp_path: Path) -> None:
     assert output.read_bytes() == original
 
 
+def test_render_profile_retries_short_writes_before_atomic_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import liquidity_migration.core.durable_file as durable_file
+
+    credential = _credential(tmp_path)
+    output = _private_file(tmp_path / "profile.json", b"old-profile\n")
+    expected, _profile = render_real_money_profile()
+    real_write = durable_file.os.write
+
+    def short_write(descriptor: int, data: bytes | memoryview) -> int:
+        limit = max(1, len(data) // 3)
+        return real_write(descriptor, data[:limit])
+
+    monkeypatch.setattr(durable_file.os, "write", short_write)
+    status = main(
+        [
+            "render-profile",
+            "--from-env",
+            str(credential),
+            "--execute",
+            "--output",
+            str(output),
+            "--overwrite",
+        ]
+    )
+    assert status == 0
+    assert output.read_bytes() == expected
+
+
+def test_render_profile_failure_preserves_previous_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import liquidity_migration.core.durable_file as durable_file
+
+    credential = _credential(tmp_path)
+    output = _private_file(tmp_path / "profile.json", b"old-profile\n")
+    old_bytes = output.read_bytes()
+    real_write = durable_file.os.write
+    calls = 0
+
+    def fail_after_partial_write(descriptor: int, data: bytes | memoryview) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_write(descriptor, data[: max(1, len(data) // 3)])
+        raise OSError("synthetic profile write failure")
+
+    monkeypatch.setattr(durable_file.os, "write", fail_after_partial_write)
+    status = main(
+        [
+            "render-profile",
+            "--from-env",
+            str(credential),
+            "--execute",
+            "--output",
+            str(output),
+            "--overwrite",
+        ]
+    )
+    assert status == 2
+    assert output.read_bytes() == old_bytes
+    assert list(tmp_path.glob(".profile.json.*.tmp")) == []
+
+
 def test_default_telegram_replaces_empty_values_without_printing_them(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -122,14 +122,9 @@ fn verify_key_identity(
         .ok_or_else(|| VenueError::BadReply("API-key info has no ips array".to_string()))?;
     let mut expected_addresses = Vec::with_capacity(expected_ips.len());
     for (variable, raw_ip) in expected_ips {
-        let address = raw_ip
-            .trim()
-            .parse::<std::net::IpAddr>()
-            .map_err(|_| {
-                VenueError::Credentials(format!(
-                    "{variable} must be one literal production host IP"
-                ))
-            })?;
+        let address = raw_ip.trim().parse::<std::net::IpAddr>().map_err(|_| {
+            VenueError::Credentials(format!("{variable} must be one literal production host IP"))
+        })?;
         if address.is_unspecified() || address.is_loopback() || address.is_multicast() {
             return Err(VenueError::Credentials(format!(
                 "{variable} must name one production host IP"
@@ -1086,12 +1081,12 @@ pub(crate) fn parse_executions(
             side,
             qty,
             px,
-            fee: opt_num_field(row, "execFee")?.unwrap_or(0.0),
+            fee: opt_num_field(row, "execFee")?,
             is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
             venue_ts_ms,
         });
     }
-    Ok((out, next_cursor(result)))
+    Ok((out, str_field(result, "nextPageCursor")?))
 }
 
 fn next_cursor(result: &Value) -> String {
@@ -2004,7 +1999,7 @@ mod tests {
                 // moves the position: kept.
                 {"execId": "e-3", "orderLinkId": "", "symbol": "ACEUSDT",
                  "side": "Sell", "execQty": "10", "execPrice": "0.05",
-                 "execFee": "0.0003", "isMaker": true,
+                 "isMaker": true,
                  "execTime": "1787176627878", "execType": "Trade"},
             ],
             "nextPageCursor": ""
@@ -2017,9 +2012,11 @@ mod tests {
         assert_eq!(rows[0].side, Side::Sell);
         assert_eq!(rows[0].qty, 1526.0);
         assert_eq!(rows[0].px, 0.05413);
+        assert_eq!(rows[0].fee, Some(0.0454));
         assert_eq!(rows[0].venue_ts_ms, 1_787_176_627_876);
         assert!(!rows[0].is_maker);
         assert_eq!(rows[1].client_order_id, "");
+        assert_eq!(rows[1].fee, None, "an absent fee is not numeric zero");
         assert!(rows[1].is_maker);
     }
 
@@ -2037,5 +2034,25 @@ mod tests {
         };
         assert!(parse_executions(&page("", "1")).is_err());
         assert!(parse_executions(&page("e-zero", "0")).is_err());
+    }
+
+    #[test]
+    fn execution_history_requires_an_explicit_string_cursor() {
+        let empty = json!({"list": [], "nextPageCursor": ""});
+        assert_eq!(parse_executions(&empty).unwrap().1, "");
+
+        let more = json!({"list": [], "nextPageCursor": "opaque-next"});
+        assert_eq!(parse_executions(&more).unwrap().1, "opaque-next");
+
+        for malformed in [
+            json!({"list": []}),
+            json!({"list": [], "nextPageCursor": 7}),
+            json!({"list": [], "nextPageCursor": null}),
+        ] {
+            assert!(
+                matches!(parse_executions(&malformed), Err(VenueError::BadReply(_))),
+                "accepted {malformed}"
+            );
+        }
     }
 }

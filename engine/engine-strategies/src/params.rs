@@ -13,12 +13,19 @@ impl<'a> Params<'a> {
     pub(crate) fn new(strategy: &'static str, value: &'a toml::Value) -> Result<Self, BuildError> {
         match value.as_table() {
             Some(table) => Ok(Self { strategy, table }),
-            None => Err(BuildError::ParamsNotATable { strategy, got: type_name(value) }),
+            None => Err(BuildError::ParamsNotATable {
+                strategy,
+                got: type_name(value),
+            }),
         }
     }
 
     pub(crate) fn invalid(&self, param: &'static str, detail: impl Into<String>) -> BuildError {
-        BuildError::InvalidParam { strategy: self.strategy, param, detail: detail.into() }
+        BuildError::InvalidParam {
+            strategy: self.strategy,
+            param,
+            detail: detail.into(),
+        }
     }
 
     /// Refuse any key outside the strategy's read set, naming both the key
@@ -37,16 +44,20 @@ impl<'a> Params<'a> {
     }
 
     fn get(&self, param: &'static str) -> Result<&'a toml::Value, BuildError> {
-        self.table
-            .get(param)
-            .ok_or(BuildError::MissingParam { strategy: self.strategy, param })
+        self.table.get(param).ok_or(BuildError::MissingParam {
+            strategy: self.strategy,
+            param,
+        })
     }
 
     pub(crate) fn string(&self, param: &'static str) -> Result<String, BuildError> {
         let value = self.get(param)?;
         match value.as_str() {
             Some(s) => Ok(s.to_string()),
-            None => Err(self.invalid(param, format!("expected a string, got {}", type_name(value)))),
+            None => Err(self.invalid(
+                param,
+                format!("expected a string, got {}", type_name(value)),
+            )),
         }
     }
 
@@ -66,7 +77,10 @@ impl<'a> Params<'a> {
                 None => {
                     return Err(self.invalid(
                         param,
-                        format!("expected a list of strings, found {} in it", type_name(item)),
+                        format!(
+                            "expected a list of strings, found {} in it",
+                            type_name(item)
+                        ),
                     ))
                 }
             }
@@ -88,10 +102,7 @@ impl<'a> Params<'a> {
         }
     }
 
-    pub(crate) fn opt_nonnegative(
-        &self,
-        param: &'static str,
-    ) -> Result<Option<f64>, BuildError> {
+    pub(crate) fn opt_nonnegative(&self, param: &'static str) -> Result<Option<f64>, BuildError> {
         let Some(value) = self.table.get(param) else {
             return Ok(None);
         };
@@ -109,9 +120,12 @@ impl<'a> Params<'a> {
         let Some(value) = self.table.get(param) else {
             return Ok(default);
         };
-        value
-            .as_bool()
-            .ok_or_else(|| self.invalid(param, format!("expected true or false, got {}", type_name(value))))
+        value.as_bool().ok_or_else(|| {
+            self.invalid(
+                param,
+                format!("expected true or false, got {}", type_name(value)),
+            )
+        })
     }
 
     pub(crate) fn opt_u64(&self, param: &'static str) -> Result<Option<u64>, BuildError> {
@@ -119,11 +133,17 @@ impl<'a> Params<'a> {
             return Ok(None);
         };
         let Some(n) = value.as_integer() else {
-            return Err(self.invalid(param, format!("expected a whole number, got {}", type_name(value))));
+            return Err(self.invalid(
+                param,
+                format!("expected a whole number, got {}", type_name(value)),
+            ));
         };
-        u64::try_from(n)
-            .map(Some)
-            .map_err(|_| self.invalid(param, format!("expected a whole number of at least 0, got {n}")))
+        u64::try_from(n).map(Some).map_err(|_| {
+            self.invalid(
+                param,
+                format!("expected a whole number of at least 0, got {n}"),
+            )
+        })
     }
 
     fn as_positive(&self, param: &'static str, value: &toml::Value) -> Result<f64, BuildError> {
@@ -139,7 +159,10 @@ impl<'a> Params<'a> {
             toml::Value::Float(f) => *f,
             toml::Value::Integer(i) => *i as f64,
             other => {
-                return Err(self.invalid(param, format!("expected a number, got {}", type_name(other))))
+                return Err(self.invalid(
+                    param,
+                    format!("expected a number, got {}", type_name(other)),
+                ))
             }
         };
         if !n.is_finite() {
