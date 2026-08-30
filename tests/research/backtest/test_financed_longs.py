@@ -196,9 +196,38 @@ class TestLiveContractReplay:
         assert int(diagnostics["drop_exit_fires"]) >= 1
         assert int(diagnostics["sizing_anchor_requests"]) >= 1
         assert int(diagnostics["entry_cap_deferrals"]) >= 1
-        assert diagnostics["max_active_names"] == 2
+        assert diagnostics["max_active_names"] == 3
         assert diagnostics["admission_trail"] == "trail_fund_24h"
         assert diagnostics["resize_mark_missing_skips"] == 0
+        assert int(diagnostics["idle_cadence_wakes"]) >= 1
+        assert diagnostics["execution_model"] == (
+            "modeled_immediate_target_fill_at_observed_hourly_mark"
+        )
+
+    def test_carries_quantity_and_reapplies_resize_deadband_at_hourly_marks(
+        self,
+        carry_cfg: CarryHoldConfig,
+    ) -> None:
+        panel = _positive_panel(
+            symbols=1,
+            funding_bp={"BTCUSDT": [-15.0]},
+            drift={"BTCUSDT": 0.10},
+        )
+        universe = _universe(panel)
+        weights = carry_hold_weights(universe, carry_cfg)
+
+        scores, diagnostics = live_contract_scores(
+            weights,
+            universe,
+            panel,
+            carry_cfg,
+            replay_settings=_replay_settings(),
+        )
+
+        assert scores.height > 1
+        assert int(diagnostics["hourly_mark_wakes"]) > 0
+        assert int(diagnostics["planned_resizes"]) > 0
+        assert diagnostics["holding_state"] == "carried_quantity_entry_and_current_mark"
 
     def test_rejects_a_presettlement_tape_from_another_decision_source(
         self,

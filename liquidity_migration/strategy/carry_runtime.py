@@ -93,8 +93,8 @@ def carry_strategy_config(
         profile_name=profile_name,
         accepted_book_sources=(compatibility_source,),
         exit_bp=float(rule.exit_bp),
-        early_exit_enabled=bool(early_exit_enabled),
-        presettlement_exit_enabled=bool(presettlement_exit_enabled),
+        early_exit_enabled=early_exit_enabled,
+        presettlement_exit_enabled=presettlement_exit_enabled,
         notional_multiplier=float(notional_multiplier),
         entry_leverage=float(entry_leverage),
         stop_loss_fraction=float(stop_loss_fraction),
@@ -194,6 +194,24 @@ def load_durable_presettlement_events(path: Path) -> tuple[CarryPresettlementEve
     tape = JsonlStrategyEventTape(path)
     tape.ensure_durable()
     return load_carry_presettlement_events(path)
+
+
+def in_scope_presettlement_events(
+    events: tuple[CarryPresettlementEvent, ...],
+    *,
+    environment: str,
+    source_profile: str,
+    source_config_id: str,
+) -> tuple[CarryPresettlementEvent, ...]:
+    """Keep only durable handoffs owned by this exact CARRY deployment."""
+
+    return tuple(
+        event
+        for event in events
+        if event.environment == environment
+        and event.source_profile == source_profile
+        and event.source_config_id == source_config_id
+    )
 
 
 def presettlement_event_from_fire(

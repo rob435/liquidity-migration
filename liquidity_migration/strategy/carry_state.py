@@ -240,8 +240,12 @@ class CarryCycleState:
                 self.canonical_reducer_state = True
                 self.early_exits = next_fired
                 self.sizing_equity_by_decision = next_anchors
-            if next_fired != load_carry_exit_state(exit_state_path):
+            try:
                 persist_carry_exit_state(exit_state_path, next_fired)
+            except (OSError, ValueError):
+                # Schema v2 is authoritative. This legacy mirror cannot gate
+                # the reducer transition or target-book publication.
+                pass
             return
         if next_fired != (self.early_exits or {}):
             persist_carry_exit_state(exit_state_path, next_fired)

@@ -43,7 +43,10 @@ class ExecutionRules:
     presettlement_window_ms: int = 15 * 60 * 1000
 
     def __post_init__(self) -> None:
-        if self.schema_version != CARRY_CONTRACT_SCHEMA_VERSION:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != CARRY_CONTRACT_SCHEMA_VERSION
+        ):
             raise ValueError("unsupported CARRY execution-rules schema")
         for name in ("entry_floor_usdt", "resize_floor_usdt"):
             value = getattr(self, name)
@@ -316,6 +319,10 @@ class StrategyConfig:
     execution: ExecutionRules = FLEET_EXECUTION_RULES
 
     def __post_init__(self) -> None:
+        if type(self.early_exit_enabled) is not bool:
+            raise ValueError("early_exit_enabled must be a boolean")
+        if type(self.presettlement_exit_enabled) is not bool:
+            raise ValueError("presettlement_exit_enabled must be a boolean")
         if not self.profile_name or not self.profile_name.replace("_", "").replace("-", "").isalnum():
             raise ValueError("CARRY profile name must be a plain identifier")
         sources = tuple(dict.fromkeys((self.profile_name, *self.accepted_book_sources)))

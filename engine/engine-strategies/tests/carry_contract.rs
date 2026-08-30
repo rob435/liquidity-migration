@@ -256,7 +256,10 @@ fn carry_fixture_pins_exact_bytes_planner_events_and_fleet_floors() {
     let recorded = fixture.execution_rules;
     assert_eq!(recorded.schema_version, 1);
     assert_eq!(PlanRules::FLEET.entry_floor_usdt, recorded.entry_floor_usdt);
-    assert_eq!(PlanRules::FLEET.resize_floor_usdt, recorded.resize_floor_usdt);
+    assert_eq!(
+        PlanRules::FLEET.resize_floor_usdt,
+        recorded.resize_floor_usdt
+    );
     assert_eq!(
         PlanRules::FLEET.resize_floor_fraction,
         recorded.resize_floor_fraction
@@ -281,8 +284,10 @@ fn carry_fixture_pins_exact_bytes_planner_events_and_fleet_floors() {
     assert_eq!(book.source, "carry_hold_v7_live_v1");
     assert_eq!(book.decision_ts_ms, 1_800_000_000_000);
 
-    let mut facts = Facts::default();
-    facts.prices = fixture.rust_replay.prices.clone();
+    let mut facts = Facts {
+        prices: fixture.rust_replay.prices.clone(),
+        ..Facts::default()
+    };
     for symbol in facts.prices.keys() {
         facts
             .rules
@@ -341,7 +346,10 @@ fn carry_fixture_pins_exact_bytes_planner_events_and_fleet_floors() {
         3_600_001,
         PlanRules::FLEET,
     );
-    assert!(matches!(below.skipped.as_slice(), [Skipped::BelowEntryFloor { .. }]));
+    assert!(matches!(
+        below.skipped.as_slice(),
+        [Skipped::BelowEntryFloor { .. }]
+    ));
     let at = plan(
         &[target("BOUNDARYUSDT", cases.entry_at_floor_usdt)],
         &[],
@@ -355,12 +363,10 @@ fn carry_fixture_pins_exact_bytes_planner_events_and_fleet_floors() {
     let absolute_facts = boundary_facts(Some(10.0));
     let held = vec!["BOUNDARYUSDT".to_owned()];
     let at_absolute = plan(
-        &[
-            target(
-                "BOUNDARYUSDT",
-                10.0 + cases.resize_at_absolute_floor_usdt,
-            ),
-        ],
+        &[target(
+            "BOUNDARYUSDT",
+            10.0 + cases.resize_at_absolute_floor_usdt,
+        )],
         &held,
         &absolute_facts,
         1,
@@ -372,28 +378,27 @@ fn carry_fixture_pins_exact_bytes_planner_events_and_fleet_floors() {
         [Skipped::TooSmallToBother { .. }]
     ));
     let above_absolute = plan(
-        &[
-            target(
-                "BOUNDARYUSDT",
-                10.0 + cases.resize_above_absolute_floor_usdt,
-            ),
-        ],
+        &[target(
+            "BOUNDARYUSDT",
+            10.0 + cases.resize_above_absolute_floor_usdt,
+        )],
         &held,
         &absolute_facts,
         1,
         3_600_001,
         PlanRules::FLEET,
     );
-    assert!(matches!(above_absolute.steps.as_slice(), [Step::Resize { .. }]));
+    assert!(matches!(
+        above_absolute.steps.as_slice(),
+        [Step::Resize { .. }]
+    ));
 
     let fraction_facts = boundary_facts(Some(100.0));
     let at_fraction = plan(
-        &[
-            target(
-                "BOUNDARYUSDT",
-                100.0 + cases.resize_at_fraction_floor_usdt,
-            ),
-        ],
+        &[target(
+            "BOUNDARYUSDT",
+            100.0 + cases.resize_at_fraction_floor_usdt,
+        )],
         &held,
         &fraction_facts,
         1,
@@ -405,17 +410,18 @@ fn carry_fixture_pins_exact_bytes_planner_events_and_fleet_floors() {
         [Skipped::TooSmallToBother { .. }]
     ));
     let above_fraction = plan(
-        &[
-            target(
-                "BOUNDARYUSDT",
-                100.0 + cases.resize_above_fraction_floor_usdt,
-            ),
-        ],
+        &[target(
+            "BOUNDARYUSDT",
+            100.0 + cases.resize_above_fraction_floor_usdt,
+        )],
         &held,
         &fraction_facts,
         1,
         3_600_001,
         PlanRules::FLEET,
     );
-    assert!(matches!(above_fraction.steps.as_slice(), [Step::Resize { .. }]));
+    assert!(matches!(
+        above_fraction.steps.as_slice(),
+        [Step::Resize { .. }]
+    ));
 }

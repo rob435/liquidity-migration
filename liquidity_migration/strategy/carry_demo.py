@@ -93,6 +93,7 @@ from liquidity_migration.strategy.carry_runtime import (
     carry_strategy_config,
     commit_carry_output,
     durable_presettlement_fire,
+    in_scope_presettlement_events,
     load_durable_presettlement_events,
     presettlement_event_from_fire,
     settled_funding_observations,
@@ -2201,10 +2202,11 @@ def run_carry_demo_cycle(
                     presettle_error,
                 )
 
-        durable_events = tuple(
-            event
-            for event in load_durable_presettlement_events(effective_config.presettlement_event_path)
-            if event.environment == environment and event.source_config_id == rule.config_id
+        durable_events = in_scope_presettlement_events(
+            load_durable_presettlement_events(effective_config.presettlement_event_path),
+            environment=environment,
+            source_profile=strategy_profile.profile_name,
+            source_config_id=rule.config_id,
         )
         upcoming_frozen = (
             state.frozen_decision(decision.decision_ts_ms + DAY_MS)

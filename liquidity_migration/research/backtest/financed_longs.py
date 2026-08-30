@@ -88,6 +88,24 @@ class CarryReplaySettings:
     max_new_entries_per_cycle: int
     capital_reference_usdt: float = 0.0
     equity_usdt: float = 1_000_000.0
+    idle_cycle_ms: int = 60_000
+
+    def __post_init__(self) -> None:
+        if type(self.idle_cycle_ms) is not int or self.idle_cycle_ms <= 0:
+            raise ValueError("CARRY replay idle cycle must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplayHolding:
+    qty: float
+    entry_px: float
+
+
+@dataclass(frozen=True, slots=True)
+class _ReducerReplayStep:
+    weights: dict[str, float]
+    oneway_turnover: float
+    entry_cap_deferrals: int
 
 
 def venue_view(panel: pl.DataFrame, venue: str) -> pl.DataFrame:
@@ -265,7 +283,11 @@ def live_contract_scores(
     prior = CarryPriorState()
     active_decision: CarryDecision | None = None
     active_weights: dict[str, float] = {}
+    active_holdings: dict[str, _ReplayHolding] = {}
+    active_notional_base = replay_settings.equity_usdt * replay_settings.notional_multiplier
     active_day: int | None = None
+    pending_entry_deferrals = 0
+    next_cadence_wake_ms: int | None = None
     gross_by_day = {ts: 0.0 for ts in decision_times}
     turnover_by_day = {ts: 0.0 for ts in decision_times}
     settled_fire_count = 0
@@ -273,8 +295,23 @@ def live_contract_scores(
     drop_fire_count = 0
     anchor_request_count = 0
     entry_cap_deferral_count = 0
+    planned_resize_count = 0
     resize_mark_missing_count = 0
     max_active_names = 0
+    cadence_wake_count = 0
+    hourly_mark_wake_count = 0
+    unpriced_execution_skip_count = 0
+
+    def marked_weights(
+        marks: Mapping[str, float],
+        *,
+        notional_base: float,
+    ) -> dict[str, float]:
+        return {
+            symbol: holding.qty * marks[symbol] / notional_base
+            for symbol, holding in sorted(active_holdings.items())
+            if symbol in marks
+        }
 
     def reduce_at(
         now_ms: int,
@@ -285,28 +322,21 @@ def live_contract_scores(
         presettlement: tuple[PresettlementObservation, ...] = (),
         sizing_anchor_requests: tuple[SizingAnchorRequest, ...] = (),
         marks: Mapping[str, float] | None = None,
-    ) -> dict[str, float]:
+    ) -> _ReducerReplayStep:
         nonlocal prior, settled_fire_count, presettlement_fire_count, drop_fire_count
-        nonlocal entry_cap_deferral_count, resize_mark_missing_count, max_active_names
+        nonlocal entry_cap_deferral_count, planned_resize_count
+        nonlocal resize_mark_missing_count, max_active_names
+        nonlocal active_notional_base, unpriced_execution_skip_count
         mark_by_symbol = marks or {}
         holdings = tuple(
             CarryHolding(
                 symbol=symbol,
                 side="long",
-                qty=(
-                    weight
-                    * replay_settings.equity_usdt
-                    * replay_settings.notional_multiplier
-                    / mark_by_symbol[symbol]
-                    if symbol in mark_by_symbol
-                    else weight
-                    * replay_settings.equity_usdt
-                    * replay_settings.notional_multiplier
-                ),
-                entry_px=mark_by_symbol.get(symbol, 1.0),
+                qty=holding.qty,
+                entry_px=holding.entry_px,
                 mark_px=mark_by_symbol.get(symbol),
             )
-            for symbol, weight in sorted(active_weights.items())
+            for symbol, holding in sorted(active_holdings.items())
         )
         output = decide_carry(
             CarryDecisionInput(
@@ -330,24 +360,74 @@ def live_contract_scores(
         presettlement_fire_count += len(output.presettlement_fires)
         drop_fire_count += len(output.drop_exit_fires)
         entry_cap_deferral_count += output.summary.entry_cap_deferrals
+        planned_resize_count += output.summary.planned_resizes
         resize_mark_missing_count += output.summary.resize_mark_missing_skips
         if output.target_book_text is None:
-            return dict(active_weights)
+            return _ReducerReplayStep(
+                weights=marked_weights(
+                    mark_by_symbol,
+                    notional_base=active_notional_base,
+                ),
+                oneway_turnover=0.0,
+                entry_cap_deferrals=output.summary.entry_cap_deferrals,
+            )
         parsed = parse_target_book_bytes(output.target_book_text.encode())
         if output.sizing_equity_usdt is None:
             raise FinancedLongsError("CARRY contract replay wrote targets without sizing equity")
         notional_base = output.sizing_equity_usdt * replay_settings.notional_multiplier
-        replayed = {
-            target.symbol: target.notional_usdt / notional_base
-            for target in parsed.targets
-        }
-        max_active_names = max(max_active_names, len(replayed))
-        return replayed
-
-    def charge_transition(day: int, before: Mapping[str, float], after: Mapping[str, float]) -> None:
-        turnover_by_day[day] += sum(
-            abs(float(after.get(symbol, 0.0)) - float(before.get(symbol, 0.0)))
-            for symbol in set(before) | set(after)
+        active_notional_base = notional_base
+        target_by_symbol = {target.symbol: target for target in parsed.targets}
+        oneway_turnover = 0.0
+        for symbol in sorted(set(active_holdings) - set(target_by_symbol)):
+            exiting_holding = active_holdings.pop(symbol)
+            mark = mark_by_symbol.get(symbol)
+            if mark is None:
+                unpriced_execution_skip_count += 1
+                active_holdings[symbol] = exiting_holding
+                continue
+            oneway_turnover += abs(exiting_holding.qty * mark) / notional_base
+        for symbol, target in sorted(target_by_symbol.items()):
+            mark = mark_by_symbol.get(symbol)
+            if mark is None:
+                unpriced_execution_skip_count += 1
+                continue
+            target_notional = float(target.notional_usdt)
+            target_qty = target_notional / mark
+            standing_holding = active_holdings.get(symbol)
+            if standing_holding is None:
+                if abs(target_notional) < contract_config.execution.entry_floor_usdt:
+                    continue
+                active_holdings[symbol] = _ReplayHolding(
+                    qty=target_qty,
+                    entry_px=mark,
+                )
+                oneway_turnover += abs(target_notional) / notional_base
+                continue
+            standing_notional = standing_holding.qty * mark
+            resize_floor = max(
+                contract_config.execution.resize_floor_usdt,
+                contract_config.execution.resize_floor_fraction * abs(standing_notional),
+            )
+            delta = target_notional - standing_notional
+            if abs(delta) <= resize_floor:
+                continue
+            entry_px = standing_holding.entry_px
+            if target_qty > standing_holding.qty:
+                added_qty = target_qty - standing_holding.qty
+                entry_px = (
+                    standing_holding.qty * standing_holding.entry_px + added_qty * mark
+                ) / target_qty
+            active_holdings[symbol] = _ReplayHolding(
+                qty=target_qty,
+                entry_px=entry_px,
+            )
+            oneway_turnover += abs(delta) / notional_base
+        replayed = marked_weights(mark_by_symbol, notional_base=notional_base)
+        max_active_names = max(max_active_names, len(active_holdings))
+        return _ReducerReplayStep(
+            weights=replayed,
+            oneway_turnover=oneway_turnover,
+            entry_cap_deferrals=output.summary.entry_cap_deferrals,
         )
 
     batch_ts: int | None = None
@@ -355,12 +435,19 @@ def live_contract_scores(
 
     def consume_hour(ts: int, rows: list[dict[str, object]]) -> None:
         nonlocal active_decision, active_weights, active_day, observation_index
-        nonlocal anchor_request_count
+        nonlocal anchor_request_count, cadence_wake_count
+        nonlocal hourly_mark_wake_count
+        nonlocal pending_entry_deferrals, next_cadence_wake_ms
+        reduced_at_hour_boundary = False
         hour_marks: dict[str, float] = {}
         for hour_row in rows:
             mark_px = _finite_float(hour_row["by_close"])
             if mark_px is not None and mark_px > 0.0:
                 hour_marks[str(hour_row["symbol"])] = mark_px
+        active_weights = marked_weights(
+            hour_marks,
+            notional_base=active_notional_base,
+        )
         if ts in decisions:
             next_decision = decisions[ts]
             if (
@@ -368,8 +455,7 @@ def live_contract_scores(
                 and active_day is not None
                 and next_decision.decision_ts_ms == active_decision.decision_ts_ms + DAY_MS
             ):
-                before_drop = dict(active_weights)
-                active_weights = reduce_at(
+                drop_step = reduce_at(
                     ts,
                     decision=active_decision,
                     upcoming=next_decision,
@@ -382,12 +468,20 @@ def live_contract_scores(
                     marks=hour_marks,
                 )
                 anchor_request_count += 1
-                charge_transition(active_day, before_drop, active_weights)
-            before = dict(active_weights)
+                active_weights = drop_step.weights
+                turnover_by_day[active_day] += drop_step.oneway_turnover
             active_decision = next_decision
             active_day = ts
-            active_weights = reduce_at(ts, decision=active_decision, marks=hour_marks)
-            charge_transition(ts, before, active_weights)
+            decision_step = reduce_at(ts, decision=active_decision, marks=hour_marks)
+            active_weights = decision_step.weights
+            turnover_by_day[ts] += decision_step.oneway_turnover
+            pending_entry_deferrals = decision_step.entry_cap_deferrals
+            next_cadence_wake_ms = (
+                ts + replay_settings.idle_cycle_ms
+                if pending_entry_deferrals
+                else None
+            )
+            reduced_at_hour_boundary = True
         if active_decision is None or active_day is None:
             return
 
@@ -404,14 +498,37 @@ def live_contract_scores(
                 )
         settled = tuple(settled_rows)
         if settled and ts > active_decision.decision_ts_ms:
-            before = dict(active_weights)
-            active_weights = reduce_at(
+            settled_step = reduce_at(
                 ts,
                 decision=active_decision,
                 settled=settled,
                 marks=hour_marks,
             )
-            charge_transition(active_day, before, active_weights)
+            active_weights = settled_step.weights
+            turnover_by_day[active_day] += settled_step.oneway_turnover
+            pending_entry_deferrals = settled_step.entry_cap_deferrals
+            next_cadence_wake_ms = (
+                ts + replay_settings.idle_cycle_ms
+                if pending_entry_deferrals
+                else None
+            )
+            reduced_at_hour_boundary = True
+
+        if not reduced_at_hour_boundary:
+            hourly_step = reduce_at(
+                ts,
+                decision=active_decision,
+                marks=hour_marks,
+            )
+            active_weights = hourly_step.weights
+            turnover_by_day[active_day] += hourly_step.oneway_turnover
+            pending_entry_deferrals = hourly_step.entry_cap_deferrals
+            next_cadence_wake_ms = (
+                ts + replay_settings.idle_cycle_ms
+                if pending_entry_deferrals
+                else None
+            )
+            hourly_mark_wake_count += 1
 
         in_hour_events: list[CarryPresettlementEvent] = []
         while (
@@ -440,10 +557,34 @@ def live_contract_scores(
             )
             for event in in_hour_events
         )
+        cadence_boundary_ms = (
+            min(row.observed_ts_ms for row in in_hour)
+            if in_hour
+            else ts + HOUR_MS
+        )
+        while (
+            pending_entry_deferrals
+            and next_cadence_wake_ms is not None
+            and next_cadence_wake_ms < cadence_boundary_ms
+        ):
+            cadence_step = reduce_at(
+                next_cadence_wake_ms,
+                decision=active_decision,
+                marks=hour_marks,
+            )
+            active_weights = cadence_step.weights
+            turnover_by_day[active_day] += cadence_step.oneway_turnover
+            pending_entry_deferrals = cadence_step.entry_cap_deferrals
+            cadence_wake_count += 1
+            next_cadence_wake_ms = (
+                next_cadence_wake_ms + replay_settings.idle_cycle_ms
+                if pending_entry_deferrals
+                else None
+            )
         weights_before_presettle = dict(active_weights)
+        holdings_before_presettle = set(active_holdings)
         if in_hour:
-            before = dict(active_weights)
-            active_weights = reduce_at(
+            presettlement_step = reduce_at(
                 max(row.observed_ts_ms for row in in_hour),
                 decision=active_decision,
                 presettlement=in_hour,
@@ -456,8 +597,35 @@ def live_contract_scores(
                     },
                 },
             )
-            charge_transition(active_day, before, active_weights)
-        removed = set(weights_before_presettle) - set(active_weights)
+            active_weights = presettlement_step.weights
+            turnover_by_day[active_day] += presettlement_step.oneway_turnover
+            pending_entry_deferrals = presettlement_step.entry_cap_deferrals
+            next_cadence_wake_ms = (
+                max(row.observed_ts_ms for row in in_hour)
+                + replay_settings.idle_cycle_ms
+                if pending_entry_deferrals
+                else None
+            )
+        while (
+            pending_entry_deferrals
+            and next_cadence_wake_ms is not None
+            and next_cadence_wake_ms < ts + HOUR_MS
+        ):
+            cadence_step = reduce_at(
+                next_cadence_wake_ms,
+                decision=active_decision,
+                marks=hour_marks,
+            )
+            active_weights = cadence_step.weights
+            turnover_by_day[active_day] += cadence_step.oneway_turnover
+            pending_entry_deferrals = cadence_step.entry_cap_deferrals
+            cadence_wake_count += 1
+            next_cadence_wake_ms = (
+                next_cadence_wake_ms + replay_settings.idle_cycle_ms
+                if pending_entry_deferrals
+                else None
+            )
+        removed = holdings_before_presettle - set(active_holdings)
         marks = {row.symbol: row.mark_px for row in in_hour if row.symbol in removed}
         if any(marks[symbol] is None for symbol in removed):
             missing = ",".join(sorted(symbol for symbol in removed if marks.get(symbol) is None))
@@ -509,7 +677,7 @@ def live_contract_scores(
     if batch_ts is not None:
         consume_hour(batch_ts, batch)
     if active_day is not None:
-        turnover_by_day[active_day] += sum(active_weights.values())
+        turnover_by_day[active_day] += sum(abs(weight) for weight in active_weights.values())
 
     rows = []
     for ts in decision_times:
@@ -534,18 +702,27 @@ def live_contract_scores(
         "drop_exit_fires": drop_fire_count,
         "sizing_anchor_requests": anchor_request_count,
         "entry_cap_deferrals": entry_cap_deferral_count,
+        "planned_resizes": planned_resize_count,
         "resize_mark_missing_skips": resize_mark_missing_count,
+        "unpriced_execution_skips": unpriced_execution_skip_count,
         "max_active_names": max_active_names,
         "pre_settlement_clock": (
             "typed_event_replay" if replay_events else "missing_typed_running_rate_observations"
         ),
         "max_new_entries_per_cycle": replay_settings.max_new_entries_per_cycle,
         "admission_trail": "trail_fund_24h",
+        "idle_cycle_ms": replay_settings.idle_cycle_ms,
+        "idle_cadence_wakes": cadence_wake_count,
+        "hourly_mark_wakes": hourly_mark_wake_count,
+        "holding_state": "carried_quantity_entry_and_current_mark",
+        "execution_model": "modeled_immediate_target_fill_at_observed_hourly_mark",
         "live_parity": False,
         "boundary": (
-            "Hourly closes reconstruct the settled-print fallback. Exact v7 pre-settlement returns "
-            "require typed running-rate observations with fire-time marks; queue, fills, and intrahour "
-            "paths remain outside this diagnostic."
+            "The reducer wakes on the configured idle cadence and carries modeled quantities through "
+            "the Rust $1/5% resize deadband. Hourly marks approximate the quote-driven follower and "
+            "target fills are assumed at those marks; venue queue, event-driven fill wakes, "
+            "quantization, and intrahour prices are not reconstructed. Exact "
+            "v7 pre-settlement returns require typed running-rate observations with fire-time marks."
         ),
     }
     return pl.DataFrame(rows), diagnostics

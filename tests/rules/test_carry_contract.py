@@ -165,6 +165,27 @@ def test_missing_holding_mark_is_unclassified_not_a_false_no_resize() -> None:
     assert output.summary.resize_mark_missing_skips == 1
 
 
+def test_contract_rejects_boolean_schema_and_non_boolean_flags() -> None:
+    with pytest.raises(ValueError, match="execution-rules schema"):
+        ExecutionRules(schema_version=True)  # type: ignore[arg-type]
+
+    config = {
+        "profile_name": "carry_test_v1",
+        "accepted_book_sources": (),
+        "exit_bp": 3.0,
+        "early_exit_enabled": True,
+        "presettlement_exit_enabled": True,
+        "notional_multiplier": 1.0,
+        "entry_leverage": 1.0,
+        "stop_loss_fraction": 0.35,
+        "max_new_entries_per_cycle": 1,
+    }
+    with pytest.raises(ValueError, match="early_exit_enabled must be a boolean"):
+        StrategyConfig(**{**config, "early_exit_enabled": 1})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="presettlement_exit_enabled must be a boolean"):
+        StrategyConfig(**{**config, "presettlement_exit_enabled": 0})  # type: ignore[arg-type]
+
+
 def test_adapter_rejects_an_observation_later_than_its_post_read_clock() -> None:
     cycle_started_ms = 1_800_000_000_000
     observation = PresettlementObservation(
