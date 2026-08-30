@@ -50,9 +50,13 @@ timer, reading two kinds of file for two different questions.
 
 The vocabulary is two dots: 🟢 made money, 🔴 lost it — only on messages that carry a verdict; the
 rest are bare text. Every message names its account — RM is the funded account (real money), DEMO the
-demo. The verdict and the money are the first line, bold, because a phone's notification preview shows
-one line and that line is the whole point. Messages are Telegram HTML (`parse_mode=HTML`), which is
-what the bold and the monospace table below are.
+demo. The verdict and the money are the first line, because a phone's notification preview shows one
+line and that line is the whole point.
+
+Every message is one monospace block: builders write plain text, and `as_block` in
+[`liquidity_migration/ops/telegram.py`](../liquidity_migration/ops/telegram.py) escapes it and wraps it
+once, at the send. So columns line up, the whole thing copies in a tap, and a `<` in a venue symbol
+cannot make Telegram reject the message. Nothing carries prose that explains itself.
 
 **Entries come from the target books.** A symbol appearing with size is a sleeve's decision, and that
 is news the moment it is decided, before anything fills.
@@ -80,15 +84,14 @@ decision-time anchor, so chasing lands in slip rather than being hidden by re-an
 four significant figures, and every return reads as percent of the position — basis points stay in the
 engine's own reports.
 
-**"After fees" means after fees and nothing else.** The crowd fee (funding) is settled into the wallet
-on the venue's own eight-hourly clock and the engine is never told about it, so no number here carries
-it. For carry, whose expected edge *is* the crowd fee, that makes these numbers the price move and the
-costs — not the whole of what the sleeve earned.
+**Every net is after fees and nothing else.** The crowd fee (funding) is settled into the wallet on
+the venue's own eight-hourly clock and the engine is never told about it, so no number here carries it.
+For carry, whose expected edge *is* the crowd fee, that makes these numbers the price move and the
+costs — not the whole of what the sleeve earned. The messages do not say so; this doc does.
 
-A close the engine cannot price says so rather than claiming a zero:
+A close the engine cannot price is marked, not claimed as a zero:
 
-    DEMO CARRY closed ONGUSDT · long · out 0.0886
-    opened before this log, so what it made is unknown
+    DEMO CARRY closed ONGUSDT · long · out 0.0886 · unpriced
 
 That happens when the fills that opened the position are in a log segment boot no longer replays. The
 quantity survives the rotation in the new segment's restatement and the prices do not, so the close is
@@ -101,16 +104,22 @@ passes what Telegram will take.
 the day's colour, and the per-sleeve lines are a monospace win–loss table:
 
     🟢 Sun 23 Aug · 8 trips · 6 won · +$103.90
+
     DEMO CARRY    3–0  +$62.40
     DEMO EXODUS   3–2  +$41.50
-    best +$34.05 · DEMO EXODUS COTIUSDT
+
+    best  +$34.05 · DEMO EXODUS COTIUSDT
     worst -$2.26 · DEMO EXODUS COTIUSDT
-    after fees — funding settles to the wallet separately
 
 Rows are per account as well as per sleeve — real money and demo run the same sleeves, and one row
 adding both would put play money and the owner's own in a single figure.
 
 It is stamped by the day it covers, so a run that could not send retries rather than skipping it.
+
+**Sleeves that only exercise the machinery say nothing.** `HIDDEN_SLEEVES` in the notifier names them —
+`maker_canary` is one — and their closed trades reach stdout and journald and go no further: no
+message, no row, and no part of the day's trip count or total. They are order-path exercise, not a
+trading result, and a dozen of them in a day would otherwise bury the two trades that were.
 
 With no closed-trade file at all — an engine whose config names no `trades_path` — exits fall back to
 the books: `DEMO CARRY exits ONGUSDT`, `DEMO EXODUS covers ONGUSDT` — with nothing about what they

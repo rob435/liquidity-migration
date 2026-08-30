@@ -2004,7 +2004,8 @@ def test_a_whole_run_is_one_message_not_one_per_alert(tmp_path, monkeypatch) -> 
     assert len(sent) == 1, f"three clears must be one message, got {len(sent)}: {sent}"
     for unit in units:
         assert f"unit:{unit}" in sent[0]
-    assert sent[0].startswith("✅")
+    assert sent[0].startswith("<pre>✅"), "every message the watchdog sends is one block"
+    assert sent[0].endswith("</pre>")
 
 
 def test_a_quiet_run_sends_nothing_at_all(tmp_path, monkeypatch) -> None:

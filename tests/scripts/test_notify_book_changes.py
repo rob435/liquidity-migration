@@ -19,6 +19,8 @@ assert _SPEC.loader is not None
 sys.modules[_SPEC.name] = notify
 _SPEC.loader.exec_module(notify)
 
+from liquidity_migration.ops.telegram import as_block  # noqa: E402
+
 
 def test_default_funded_account_includes_exodus_book() -> None:
     funded = next(account for account in notify.ACCOUNTS if account.name == "funded")
@@ -141,9 +143,9 @@ class TestReadNewTrades:
 
 
 class TestExitMessage:
-    def test_the_verdict_and_the_money_are_the_first_line_in_bold(self) -> None:
+    def test_the_verdict_and_the_money_are_the_first_line(self) -> None:
         lines = notify.exit_message(_trade(), "").splitlines()
-        assert lines[0] == "🟢 CARRY <b>+$16.28</b> · ONGUSDT"
+        assert lines[0] == "🟢 CARRY +$16.28 · ONGUSDT"
         assert lines[1] == "long 8h 38m · 0.06846 → 0.07072 · +3.24%"
         assert lines[2] == "$503 · fee $0.55 · maker 100% · slip paid 0.01%"
 
@@ -156,7 +158,7 @@ class TestExitMessage:
         trade = _trade()
         trade["round_trip"] = dict(trade["round_trip"], net_usdt=-2.26, net_bps=-45.0)
         lines = notify.exit_message(trade, "").splitlines()
-        assert lines[0] == "🔴 CARRY <b>-$2.26</b> · ONGUSDT"
+        assert lines[0] == "🔴 CARRY -$2.26 · ONGUSDT"
 
     def test_the_funded_account_is_tagged(self) -> None:
         assert notify.exit_message(_trade(), "RM ").startswith("🟢 RM CARRY ")
@@ -164,13 +166,14 @@ class TestExitMessage:
     def test_a_close_the_log_cannot_price_says_so_rather_than_claiming_zero(self) -> None:
         body = notify.exit_message(_trade(round_trip=None), "")
         assert "$0.00" not in body
-        assert body.splitlines()[0] == "CARRY closed ONGUSDT · long · out 0.07072"
-        assert "what it made is unknown" in body
+        assert body == "CARRY closed ONGUSDT · long · out 0.07072 · unpriced"
 
-    def test_a_symbol_is_escaped_because_telegram_html_rejects_a_stray_bracket(self) -> None:
+    def test_a_symbol_is_escaped_at_the_boundary_not_by_the_builder(self) -> None:
         body = notify.exit_message(_trade(symbol="A<B&C"), "")
-        assert "A&lt;B&amp;C" in body
-        assert "A<B" not in body
+        # The builder writes the venue's own text; as_block does the escaping,
+        # once, for whatever it is wrapped with.
+        assert "A<B&C" in body
+        assert "A&lt;B&amp;C" in as_block(body)
 
 
 class TestDailySummary:
@@ -187,9 +190,9 @@ class TestDailySummary:
             _trade(sleeve="long", symbol="SOLUSDT", round_trip=None),
         ]
 
-    def test_the_dot_is_the_days_colour_and_the_money_is_bold(self) -> None:
+    def test_the_dot_is_the_days_colour(self) -> None:
         body = notify.daily_summary(self._rows(), "2026-08-23")
-        assert body.startswith("🟢 <b>Sun 23 Aug</b> · 3 trips · 2 won · <b>+$39.92</b>")
+        assert body.startswith("🟢 Sun 23 Aug · 3 trips · 2 won · +$39.92")
 
     def test_a_losing_day_opens_red(self) -> None:
         rows = self._rows()
@@ -197,25 +200,26 @@ class TestDailySummary:
         body = notify.daily_summary(rows, "2026-08-23")
         assert body.startswith("🔴")
 
-    def test_the_sleeve_table_is_monospace_with_win_loss_records(self) -> None:
+    def test_the_sleeve_table_carries_win_loss_records(self) -> None:
         body = notify.daily_summary(self._rows(), "2026-08-23")
-        assert "<pre>" in body and "</pre>" in body
-        table = body.split("<pre>")[1].split("</pre>")[0]
-        assert "CARRY" in table and "2–0" in table
-        assert "EXODUS" in table and "0–1" in table
+        assert "<pre>" not in body, "the block is put on at the send, not here"
+        assert "CARRY" in body and "2–0" in body
+        assert "EXODUS" in body and "0–1" in body
 
     def test_it_names_the_best_and_the_worst(self) -> None:
         body = notify.daily_summary(self._rows(), "2026-08-23")
-        assert "best +$25.90 · CARRY MOVEUSDT" in body
+        assert "best  +$25.90 · CARRY MOVEUSDT" in body
         assert "worst -$2.26 · EXODUS COTIUSDT" in body
 
     def test_it_counts_what_it_could_not_price(self) -> None:
         body = notify.daily_summary(self._rows(), "2026-08-23")
         assert "1 trip unpriced" in body
 
-    def test_it_says_funding_is_missing_in_one_quiet_line(self) -> None:
+    def test_it_carries_no_explanatory_prose(self) -> None:
         body = notify.daily_summary(self._rows(), "2026-08-23")
-        assert "<i>after fees — funding settles to the wallet separately</i>" in body
+        for prose in ("after fees", "funding settles", "opened before this log"):
+            assert prose not in body, f"{prose!r} is explanation, not news"
+        assert "<i>" not in body and "<b>" not in body
 
     def test_a_day_with_nothing_priced_sends_nothing(self) -> None:
         assert notify.daily_summary([_trade(round_trip=None)], "2026-08-23") is None
@@ -226,8 +230,7 @@ class TestDailySummary:
         rows[0]["account_tag"] = "DEMO "
         rows[1] = dict(rows[1], account_tag="RM ")
         body = notify.daily_summary(rows, "2026-08-23")
-        table = body.split("<pre>")[1].split("</pre>")[0]
-        assert "DEMO CARRY" in table and "RM CARRY" in table
+        assert "DEMO CARRY" in body and "RM CARRY" in body
 
     def test_the_white_dot_is_retired(self) -> None:
         assert "⚪" not in notify.exit_message(_trade(), "DEMO ")
@@ -240,6 +243,38 @@ class TestDailySummary:
         body = notify.daily_summary([self._rows()[0]], "2026-08-23")
         assert "1 trip · won" in body
         assert "best" not in body, "one trip is its own best and worst"
+
+
+class TestTheCanaryStaysOffThePhone:
+    """`maker_canary` exercises the order path. It is not a trading result,
+    so it reaches the log and nothing else — including no total."""
+
+    def test_it_is_absent_from_the_summary_and_from_its_totals(self) -> None:
+        real = _trade(sleeve="carry", symbol="ONGUSDT", closed_ms=1_787_500_000_000)
+        canary = [
+            _trade(
+                sleeve="maker_canary",
+                symbol="AGIUSDT",
+                closed_ms=1_787_500_000_000,
+                round_trip=dict(_trade()["round_trip"], net_usdt=-0.015, net_bps=-1.0),
+            )
+            for _ in range(12)
+        ]
+        body = notify.daily_summary([real, *canary], "2026-08-23")
+        assert "MAKER_CANARY" not in body and "AGIUSDT" not in body
+        # One trip, not thirteen, and the day's money is the real trade's.
+        assert body.startswith("🟢 Sun 23 Aug · 1 trip · won · +$16.28")
+        assert "unpriced" not in body, "a hidden sleeve is not an unpriced trip"
+
+    def test_a_day_of_nothing_but_canary_says_nothing(self) -> None:
+        canary = _trade(sleeve="maker_canary", closed_ms=1_787_500_000_000)
+        assert notify.daily_summary([canary], "2026-08-23") is None
+
+    def test_the_sleeve_name_is_matched_however_it_is_cased(self) -> None:
+        assert notify.hidden({"sleeve": "MAKER_CANARY"})
+        assert notify.hidden({"sleeve": "maker_canary"})
+        assert not notify.hidden({"sleeve": "carry"})
+        assert not notify.hidden({})
 
 
 class TestBatching:
@@ -335,6 +370,16 @@ class TestOneWholeRun:
         monkeypatch.setattr(notify, "ACCOUNTS", tuple(accounts))
         return sent
 
+    def _bodies(self, sent: list[str]) -> list[str]:
+        """The wire bodies with the block taken off — and every message that
+        went out has to have been one."""
+
+        out = []
+        for body in sent:
+            assert body.startswith("<pre>") and body.endswith("</pre>"), body
+            out.append(body[len("<pre>") : -len("</pre>")])
+        return out
+
     def _write_book(self, path: Path, rows: dict[str, float]) -> None:
         path.write_text(
             json.dumps(
@@ -356,7 +401,7 @@ class TestOneWholeRun:
         notify.main()
         self._write_book(tmp_path / "carry.json", {"ONGUSDT": 478.10})
         notify.main()
-        assert sent == ["DEMO CARRY enters ONGUSDT · $478"]
+        assert self._bodies(sent) == ["DEMO CARRY enters ONGUSDT · $478"]
 
     def test_with_no_engine_file_an_exit_still_pages_off_the_book(
         self, tmp_path, monkeypatch
@@ -367,7 +412,7 @@ class TestOneWholeRun:
         notify.main()
         self._write_book(tmp_path / "carry.json", {})
         notify.main()
-        assert sent == ["DEMO CARRY exits ONGUSDT"]
+        assert self._bodies(sent) == ["DEMO CARRY exits ONGUSDT"]
 
     def test_with_an_engine_file_the_exit_comes_with_its_money_and_only_once(
         self, tmp_path, monkeypatch
@@ -385,8 +430,9 @@ class TestOneWholeRun:
         notify.main()
 
         assert len(sent) == 1, sent
-        assert sent[0].startswith("🟢 DEMO CARRY <b>+$16.28</b> · ONGUSDT")
-        assert "exits ONGUSDT" not in sent[0], "the book must not say it too"
+        body = self._bodies(sent)[0]
+        assert body.startswith("🟢 DEMO CARRY +$16.28 · ONGUSDT")
+        assert "exits ONGUSDT" not in body, "the book must not say it too"
 
     def test_a_trade_already_in_the_file_is_history_not_news(
         self, tmp_path, monkeypatch
@@ -429,8 +475,26 @@ class TestOneWholeRun:
         notify.main()
 
         assert len(sent) == 1, "one run, one buzz"
-        assert "🟢 DEMO CARRY <b>+$16.28</b> · ONGUSDT" in sent[0]
-        assert "🟢 RM CARRY <b>+$16.28</b> · AGIUSDT" in sent[0]
+        body = self._bodies(sent)[0]
+        assert "🟢 DEMO CARRY +$16.28 · ONGUSDT" in body
+        assert "🟢 RM CARRY +$16.28 · AGIUSDT" in body
+        assert body.count("<pre>") == 0, "one block holds the whole run"
+
+    def test_a_canary_close_is_logged_but_never_sent(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        sent = self._fleet(tmp_path, monkeypatch)
+        trades = tmp_path / "trades.jsonl"
+        trades.write_text("")
+        self._write_book(tmp_path / "carry.json", {})
+        self._write_book(tmp_path / "exodus.json", {})
+        notify.main()
+        with trades.open("a") as fh:
+            fh.write(json.dumps(_trade(sleeve="maker_canary", symbol="AGIUSDT")) + "\n")
+        notify.main()
+
+        assert sent == [], "the canary is not a trading result"
+        assert "not shown (maker_canary): DEMO AGIUSDT" in capsys.readouterr().out
 
     def test_an_unreadable_book_is_not_a_mass_exit(self, tmp_path, monkeypatch) -> None:
         sent = self._fleet(tmp_path, monkeypatch)
@@ -456,6 +520,6 @@ class TestOneWholeRun:
         self._write_book(tmp_path / "carry.json", {})
         self._write_book(tmp_path / "exodus.json", {})
         notify.main()
-        assert len(sent) == 1 and sent[0].startswith("🟢 <b>Sun 23 Aug</b>")
+        assert len(sent) == 1 and self._bodies(sent)[0].startswith("🟢 Sun 23 Aug")
         notify.main()
         assert len(sent) == 1, "the same day is not summarised twice"

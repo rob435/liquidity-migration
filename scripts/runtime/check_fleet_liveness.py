@@ -54,7 +54,7 @@ from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
     StrategyCycleHealth,
     read_strategy_cycle_health,
 )
-from liquidity_migration.ops.telegram import send_telegram_message  # noqa: E402
+from liquidity_migration.ops.telegram import as_block, send_telegram_message  # noqa: E402
 
 # Severity order for message framing only.
 CRITICAL = "CRITICAL"
@@ -1744,7 +1744,9 @@ def main() -> int:
         for message in format_alert_digest(to_send, resolved, scope_name=scope_name, ts=ts):
             delivered = False
             try:
-                delivered = send_telegram_message(message, channel="alerts")
+                delivered = send_telegram_message(
+                    as_block(message), channel="alerts", parse_mode="HTML"
+                )
             except Exception as exc:
                 print(f"(telegram send failed: {exc})")
             if not delivered:
@@ -1792,7 +1794,9 @@ def main() -> int:
             print(digest)
             delivered = False
             try:
-                delivered = send_telegram_message(digest, channel="alerts")
+                delivered = send_telegram_message(
+                    as_block(digest), channel="alerts", parse_mode="HTML"
+                )
             except Exception as exc:  # noqa: BLE001 — a digest must never take the watchdog down
                 print(f"(telegram digest send failed: {exc})")
             if delivered:

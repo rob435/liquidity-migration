@@ -21,6 +21,19 @@ class TelegramConfig:
     rate_limit_retry_cap_seconds: float = 5.0
 
 
+def as_block(text: str) -> str:
+    """Wrap a whole message as Telegram's monospace block.
+
+    Every message the fleet sends goes out this way, so escaping happens once,
+    here, at the boundary: builders write plain text and never carry markup.
+    An unescaped `<` in a venue symbol makes Telegram reject the message
+    outright, and it would be rejected silently.
+    """
+
+    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"<pre>{escaped}</pre>"
+
+
 def send_telegram_message(
     text: str,
     *,
@@ -38,7 +51,8 @@ def send_telegram_message(
     #
     # parse_mode="HTML" is opt-in per call because it changes what a message
     # may contain: Telegram rejects a stray `<` outright, so only a caller
-    # that escapes its own text may ask for it. The watchdog sends plain.
+    # that escapes its own text may ask for it. `as_block` is that escaping,
+    # and every caller in the fleet goes out through it.
     if channel not in ("main", "alerts"):
         raise ValueError(f"unknown telegram channel {channel!r}")
     if not enabled:

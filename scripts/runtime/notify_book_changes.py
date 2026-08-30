@@ -8,22 +8,24 @@ prices, the fees, the time held, and the money. An exit is worth reading only
 with those numbers next to it, so exits come from the engine and entries from
 the books.
 
-The look is deliberate and small. Two dots — 🟢 made money, 🔴 lost it — on
-the messages that carry a verdict, and bare text on the ones that do not; the
-verdict and the money lead, bold, because the phone's notification preview
-shows one line and that line is the whole point. Prices carry four
-significant figures: past that they are texture, and the percent figure
-already says what moved. Returns read as percent of the position, never
-basis points. Messages are Telegram HTML, so every symbol and
-sleeve name is escaped here.
+The look is deliberate and small. Every message is one monospace block, so
+columns line up and the whole thing can be copied in a tap. Two dots — 🟢
+made money, 🔴 lost it — on the messages that carry a verdict, and bare text
+on the ones that do not; the verdict and the money lead, because the phone's
+notification preview shows one line and that line is the whole point. Prices
+carry four significant figures: past that they are texture, and the percent
+figure already says what moved. Returns read as percent of the position,
+never basis points. Builders write plain text; `as_block` escapes it.
 
 Every message names its account: RM is the funded account (real money), DEMO
 is the demo.
 
 **Net here is after the venue's fees and nothing else.** The crowd fee
 (funding) is settled into the wallet on the venue's own clock and the engine
-is never told about it, so no number here carries it. The daily summary says
-so once a day.
+is never told about it, so no number here carries it.
+
+Sleeves that only exercise the machinery are named in `HIDDEN_SLEEVES`: they
+are printed to the log and kept out of every message and every total.
 
 Messages go to the main line (the owner's DM with the bot); the group is the
 alerting line and gets nothing from here.
@@ -35,7 +37,6 @@ producer mid-write must not read as a mass exit.
 
 from __future__ import annotations
 
-import html
 import json
 import math
 import os
@@ -47,10 +48,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from liquidity_migration.ops.telegram import send_telegram_message
+from liquidity_migration.ops.telegram import as_block, send_telegram_message
 
 TARGETS = "/var/lib/liquidity-migration/targets"
 STATE_PATH = "/var/lib/liquidity-migration/book-notify/state.json"
+
+#: Sleeves that exist to exercise the machinery rather than to make money.
+#: Their trades reach the log and nothing else — not a message, not a total.
+HIDDEN_SLEEVES = frozenset({"maker_canary"})
 
 #: Telegram refuses a message past 4096 characters; a batch is split under it.
 MAX_MESSAGE_CHARS = 3_500
@@ -150,11 +155,8 @@ def read_new_trades(path: str, offset: int) -> tuple[list[dict], int] | None:
 # --------------------------------------------------------------------------
 
 
-def esc(text: object) -> str:
-    """Telegram HTML rejects a stray ``<`` outright — the message never
-    arrives. So everything dynamic passes through here."""
-
-    return html.escape(str(text), quote=False)
+def hidden(trade: dict) -> bool:
+    return str(trade.get("sleeve", "")).lower() in HIDDEN_SLEEVES
 
 
 def money(usdt: float) -> str:
@@ -225,20 +227,17 @@ def exit_message(trade: dict, tag: str) -> str:
     """One closed position. The verdict is the first line, and the money is
     bold — the phone's notification preview shows nothing else."""
 
-    sleeve = esc(str(trade.get("sleeve", "?")).upper())
-    symbol = esc(trade.get("symbol", "?"))
-    side = esc(trade.get("side", "?"))
+    sleeve = str(trade.get("sleeve", "?")).upper()
+    symbol = trade.get("symbol", "?")
+    side = trade.get("side", "?")
     round_trip = trade.get("round_trip")
 
     if not round_trip:
         # The fills that opened it are in a log segment the engine no longer
         # replays. The close is still news; the money is not knowable.
-        return "\n".join(
-            [
-                f"{tag}{sleeve} closed {symbol} · {side}"
-                f" · out {price(float(trade.get('exit_px', 0.0)))}",
-                "opened before this log, so what it made is unknown",
-            ]
+        return (
+            f"{tag}{sleeve} closed {symbol} · {side}"
+            f" · out {price(float(trade.get('exit_px', 0.0)))} · unpriced"
         )
 
     net = float(round_trip["net_usdt"])
@@ -260,7 +259,7 @@ def exit_message(trade: dict, tag: str) -> str:
             stats.append(f"slip {verb} {percent(abs(cost)).lstrip('+')}")
     return "\n".join(
         [
-            f"{'🟢' if net >= 0 else '🔴'} {tag}{sleeve} <b>{money(net)}</b> · {symbol}",
+            f"{'🟢' if net >= 0 else '🔴'} {tag}{sleeve} {money(net)} · {symbol}",
             f"{side} {held(int(round_trip['held_ms']))}"
             f" · {price(float(round_trip['entry_px']))}"
             f" → {price(float(trade.get('exit_px', 0.0)))}"
@@ -277,7 +276,7 @@ def entry_messages(
 
     verb = "shorts" if sleeve == "EXODUS" else "enters"
     return [
-        f"{tag}{esc(sleeve)} {verb} {esc(symbol)} · {notional(now[symbol])}"
+        f"{tag}{sleeve} {verb} {symbol} · {notional(now[symbol])}"
         for symbol in sorted(set(now) - set(before))
     ]
 
@@ -290,7 +289,7 @@ def book_exit_messages(
 
     verb = "covers" if sleeve == "EXODUS" else "exits"
     return [
-        f"{tag}{esc(sleeve)} {verb} {esc(symbol)}"
+        f"{tag}{sleeve} {verb} {symbol}"
         for symbol in sorted(set(before) - set(now))
     ]
 
@@ -298,6 +297,7 @@ def book_exit_messages(
 def daily_summary(trades: list[dict], day: str) -> str | None:
     """What the closed positions made yesterday. The dot is the day's colour."""
 
+    trades = [t for t in trades if not hidden(t)]
     priced = [t for t in trades if t.get("round_trip")]
     if not priced:
         return None
@@ -314,8 +314,9 @@ def daily_summary(trades: list[dict], day: str) -> str | None:
         score = f"{won} won"
     trips = "1 trip" if len(nets) == 1 else f"{len(nets)} trips"
     lines = [
-        f"{'🟢' if total >= 0 else '🔴'} <b>{human_day(day)}</b>"
-        f" · {trips} · {score} · <b>{money(total)}</b>"
+        f"{'🟢' if total >= 0 else '🔴'} {human_day(day)}"
+        f" · {trips} · {score} · {money(total)}",
+        "",
     ]
 
     by_sleeve: dict[str, list[float]] = {}
@@ -323,7 +324,7 @@ def daily_summary(trades: list[dict], day: str) -> str | None:
         # The account is part of the row's name: real money and demo run the
         # same sleeves, and one row adding both would put play money and the
         # owner's own in a single figure.
-        label = esc(str(trade.get("account_tag", "")) + str(trade["sleeve"]).upper())
+        label = str(trade.get("account_tag", "")) + str(trade["sleeve"]).upper()
         by_sleeve.setdefault(label, []).append(float(trade["round_trip"]["net_usdt"]))
     name_w = max(len(name) for name in by_sleeve)
     sums = {name: sum(rows) for name, rows in by_sleeve.items()}
@@ -333,27 +334,27 @@ def daily_summary(trades: list[dict], day: str) -> str | None:
         wins = sum(1 for net in by_sleeve[name] if net > 0)
         record = f"{wins}–{len(by_sleeve[name]) - wins}"
         rows.append(f"{name:<{name_w}}  {record:>5}  {money(sums[name]):>{money_w}}")
-    lines.append("<pre>" + "\n".join(rows) + "</pre>")
+    lines += rows
 
     if len(priced) >= 2:
+        lines.append("")
         best = max(priced, key=lambda t: float(t["round_trip"]["net_usdt"]))
         worst = min(priced, key=lambda t: float(t["round_trip"]["net_usdt"]))
         lines.append(
-            f"best {money(float(best['round_trip']['net_usdt']))}"
-            f" · {esc(str(best.get('account_tag', '')) + str(best['sleeve']).upper())}"
-            f" {esc(best['symbol'])}"
+            f"best  {money(float(best['round_trip']['net_usdt']))}"
+            f" · {str(best.get('account_tag', '')) + str(best['sleeve']).upper()}"
+            f" {best['symbol']}"
         )
         lines.append(
             f"worst {money(float(worst['round_trip']['net_usdt']))}"
-            f" · {esc(str(worst.get('account_tag', '')) + str(worst['sleeve']).upper())}"
-            f" {esc(worst['symbol'])}"
+            f" · {str(worst.get('account_tag', '')) + str(worst['sleeve']).upper()}"
+            f" {worst['symbol']}"
         )
 
-    lines.append("<i>after fees — funding settles to the wallet separately</i>")
     unpriced = len(trades) - len(priced)
     if unpriced:
         word = "trip" if unpriced == 1 else "trips"
-        lines.append(f"<i>{unpriced} {word} unpriced — opened before this log</i>")
+        lines.append(f"{unpriced} {word} unpriced")
     return "\n".join(lines)
 
 
@@ -383,7 +384,7 @@ def send(messages: list[str], *, enabled: bool) -> None:
     for body in batched(messages):
         try:
             sent = send_telegram_message(
-                body, enabled=enabled, channel="main", parse_mode="HTML"
+                as_block(body), enabled=enabled, channel="main", parse_mode="HTML"
             )
         except Exception as exc:
             print(f"unsent ({exc.__class__.__name__}): {body.splitlines()[0]}")
@@ -424,6 +425,12 @@ def main() -> None:
                 print(f"baselined {account.trades} at {offset} bytes")
             else:
                 for trade in new_trades:
+                    if hidden(trade):
+                        print(
+                            f"not shown ({trade.get('sleeve')}):"
+                            f" {account.tag}{trade.get('symbol')}"
+                        )
+                        continue
                     messages.append(exit_message(trade, account.tag))
             offsets[account.trades] = offset
 

@@ -31,6 +31,18 @@ edit STATE.md to match.
   environment files never enter this path. The first live object matched the
   VPS copy in both size and MD5; the Drive account reported roughly 5 TB free.
 
+- **2026-08-30 — Every Telegram message is one monospace block, and the
+  canary is off the phone.** Builders write plain text; `as_block` escapes it
+  and wraps it once at the send, so trade updates, the daily summary, watchdog
+  alerts and the engine digest all arrive as a block that copies in a tap and
+  keeps its columns. The prose that explained itself is gone — the funding
+  caveat, the reason a close could not be priced — and lives in
+  [docs/notifications.md](docs/notifications.md) where it is read once instead
+  of every day. `maker_canary` exercises the order path rather than earning,
+  so its closed trades now reach stdout and journald only: no message, no row,
+  and no part of the day's trip count or total. A day that was reported as
+  "14 trips · none won · -$10.92" reads as "2 trips · none won · -$10.74".
+
 - **2026-08-30 — The fleet was reaching Singapore by way of another
   continent.** Bybit is served through CloudFront, which picks its edge from
   the resolver the query arrives on. The box resolved over IPv6, has no
