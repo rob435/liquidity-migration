@@ -122,10 +122,10 @@ if [ "$baseline_verdict" != clean ]; then
 fi
 
 killed_wall_ms="$(date +%s%3N)"
-if ! systemctl kill --signal=KILL "$UNIT"; then
-    report "DEMO chaos drill FAILED to kill the engine service cgroup. No recovery claim is possible. ref chaos_drill"
-    exit 1
-fi
+kill_status=0
+# systemd can report one vanished cgroup member after signaling the others.
+# The new process generation below decides whether the crash actually happened.
+systemctl kill --signal=KILL "$UNIT" || kill_status=$?
 started=$SECONDS
 
 verdict="timeout"
@@ -146,7 +146,11 @@ done
 took=$((SECONDS - started))
 case "$verdict" in
 clean)
-    report "DEMO chaos drill: killed the engine (pid $engine_pid); back in ${took}s with a fresh exact-account heartbeat and may open. Recovery clean."
+    if [ "$kill_status" -eq 0 ]; then
+        report "DEMO chaos drill: killed the engine (pid $engine_pid); back in ${took}s with a fresh exact-account heartbeat and may open. Recovery clean."
+    else
+        report "DEMO chaos drill: systemctl returned status $kill_status after dispatch, but engine pid $engine_pid was replaced and the new generation has a fresh exact-account heartbeat and may open. Recovery clean."
+    fi
     exit 0
     ;;
 latched)
@@ -154,7 +158,11 @@ latched)
     exit 1
     ;;
 *)
-    report "DEMO chaos drill: the engine did NOT come back healthy within ${WAIT_S}s of being killed. Go and look now. ref chaos_drill"
+    if [ "$kill_status" -eq 0 ]; then
+        report "DEMO chaos drill: the engine did NOT come back healthy within ${WAIT_S}s of being killed. Go and look now. ref chaos_drill"
+    else
+        report "DEMO chaos drill: systemctl kill returned status $kill_status and no fresh new engine generation was proved within ${WAIT_S}s. No recovery claim is possible. Go and look now. ref chaos_drill"
+    fi
     exit 1
     ;;
 esac

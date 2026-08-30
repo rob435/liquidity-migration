@@ -101,10 +101,11 @@ def test_the_drill_uses_the_service_cgroup_and_requires_a_new_generation() -> No
     assert 'kill -9 "$engine_pid"' not in text
     assert 'systemctl show -p InvocationID --value "$UNIT"' in text
     assert '[ "$new_invocation_id" != "$invocation_id" ]' in text
-    assert "FAILED to kill the engine service cgroup" in text
+    assert "kill_status=$?" in text
+    assert "no fresh new engine generation was proved" in text
 
 
-def test_the_drill_reports_a_manager_kill_failure_before_claiming_recovery(
+def test_a_nonzero_kill_without_generation_evidence_cannot_claim_recovery(
     tmp_path: Path,
 ) -> None:
     bin_dir = tmp_path / "bin"
@@ -156,6 +157,7 @@ esac
         "SYSTEMCTL_TRACE": str(trace),
         "CHAOS_DRILL_PYTHON": sys.executable,
         "CHAOS_DRILL_PROC_ROOT": str(proc_root),
+        "CHAOS_DRILL_WAIT_S": "0",
         "LIVENESS_ENGINE_HEARTBEAT_FILE": str(heartbeat),
         "EXPECTED_ENGINE_ACCOUNT_USER_ID": "555899665",
         "EXPECTED_ENGINE_VENUE": "bybit",
@@ -172,10 +174,120 @@ esac
         check=False,
     )
     assert result.returncode == 1
-    assert "FAILED to kill the engine service cgroup" in result.stdout
+    assert "systemctl kill returned status 42" in result.stdout
+    assert "No recovery claim is possible" in result.stdout
     assert trace.read_text(encoding="utf-8").splitlines()[-1] == (
         "kill --signal=KILL liquidity-migration-engine.service"
     )
+
+
+def test_a_nonzero_kill_is_accepted_only_after_proved_recovery(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    trace = tmp_path / "systemctl.trace"
+    state = tmp_path / "killed"
+    heartbeat = tmp_path / "heartbeat.json"
+    proc_root = tmp_path / "proc"
+
+    date = bin_dir / "date"
+    date.write_text(
+        """#!/usr/bin/env bash
+exec "$CHAOS_DRILL_PYTHON" -c 'import time; print(time.time_ns() // 1_000_000)'
+""",
+        encoding="utf-8",
+    )
+    date.chmod(0o755)
+    sleep = bin_dir / "sleep"
+    sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    sleep.chmod(0o755)
+
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text(
+        """#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SYSTEMCTL_TRACE"
+case "$*" in
+  "show -p MainPID --value liquidity-migration-engine.service")
+    if [ -e "$DRILL_STATE" ]; then echo 333; else echo 111; fi ;;
+  "show -p ControlGroup --value liquidity-migration-engine.service")
+    echo /system.slice/liquidity-migration-engine.service ;;
+  "show -p InvocationID --value liquidity-migration-engine.service")
+    if [ -e "$DRILL_STATE" ]; then
+      echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    else
+      echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    fi ;;
+  "kill --signal=KILL liquidity-migration-engine.service")
+    now="$($CHAOS_DRILL_PYTHON -c 'import time; print(time.time_ns() // 1_000_000)')"
+    fresh=$((now + 1000))
+    mkdir -p "$CHAOS_DRILL_PROC_ROOT/444"
+    printf '0::/system.slice/liquidity-migration-engine.service\n' \
+      > "$CHAOS_DRILL_PROC_ROOT/444/cgroup"
+    printf '{"account_observed_wall_ts_ms":%s,"account_user_id":"555899665","may_open":true,"mode":"live","pid":444,"realm":"demo","venue":"bybit","wall_ts_ms":%s}\n' \
+      "$fresh" "$fresh" > "$LIVENESS_ENGINE_HEARTBEAT_FILE"
+    : > "$DRILL_STATE"
+    echo 'Failed to kill unit: Invalid argument' >&2
+    exit 1 ;;
+  "is-active --quiet liquidity-migration-engine.service")
+    [ -e "$DRILL_STATE" ] ;;
+  *) echo "unexpected systemctl call: $*" >&2; exit 99 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    now_ms = time.time_ns() // 1_000_000
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "account_observed_wall_ts_ms": now_ms,
+                "account_user_id": "555899665",
+                "may_open": True,
+                "mode": "live",
+                "pid": 222,
+                "realm": "demo",
+                "venue": "bybit",
+                "wall_ts_ms": now_ms,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (proc_root / "222").mkdir(parents=True)
+    (proc_root / "222" / "cgroup").write_text(
+        "0::/system.slice/liquidity-migration-engine.service\n", encoding="utf-8"
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SYSTEMCTL_TRACE": str(trace),
+        "DRILL_STATE": str(state),
+        "CHAOS_DRILL_PYTHON": sys.executable,
+        "CHAOS_DRILL_PROC_ROOT": str(proc_root),
+        "CHAOS_DRILL_WAIT_S": "6",
+        "LIVENESS_ENGINE_HEARTBEAT_FILE": str(heartbeat),
+        "EXPECTED_ENGINE_ACCOUNT_USER_ID": "555899665",
+        "EXPECTED_ENGINE_VENUE": "bybit",
+        "EXPECTED_ENGINE_REALM": "demo",
+        "TELEGRAM_ENABLED": "0",
+    }
+    result = subprocess.run(
+        ["bash", str(DRILL)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Invalid argument" in result.stderr
+    assert "systemctl returned status 1 after dispatch" in result.stdout
+    assert "engine pid 222 was replaced" in result.stdout
+    assert "Recovery clean" in result.stdout
+    calls = trace.read_text(encoding="utf-8").splitlines()
+    assert "kill --signal=KILL liquidity-migration-engine.service" in calls
+    assert "is-active --quiet liquidity-migration-engine.service" in calls
 
 
 def test_an_unconfigured_backup_is_a_note_and_a_clean_exit() -> None:
