@@ -5,8 +5,8 @@ use engine_types::{
 use sha2::{Digest, Sha256};
 
 use super::plan::{
-    decide, DecisionInput, DecisionOutput, Effect, RestoreInput, RestoredOrder, SniperCheckpoint,
-    SniperConfig, SniperState, CHECKPOINT_SCHEMA_VERSION,
+    decide, DecisionInput, DecisionOutput, Effect, RestoreInput, RestoredCheckpoint, RestoredOrder,
+    SniperCheckpoint, SniperConfig, SniperState, CHECKPOINT_SCHEMA_VERSION,
 };
 use crate::params::Params;
 use crate::BuildError;
@@ -89,17 +89,23 @@ impl TouchSniper {
         self.symbol
     }
 
-    fn restore(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) {
+    fn restore(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) -> bool {
         if self.restored {
-            return;
+            return false;
         }
-        let checkpoint = ctx
-            .strategy_checkpoint(symbol)
-            .filter(|saved| {
-                saved.schema_version == CHECKPOINT_SCHEMA_VERSION
-                    && saved.decision_fingerprint == self.fingerprint
-            })
-            .and_then(|saved| serde_json::from_slice(&saved.payload).ok());
+        let checkpoint = match ctx.strategy_checkpoint(symbol) {
+            None => RestoredCheckpoint::Missing,
+            Some(saved) if saved.decision_fingerprint != self.fingerprint => {
+                RestoredCheckpoint::FingerprintMismatch
+            }
+            Some(saved) if saved.schema_version != CHECKPOINT_SCHEMA_VERSION => {
+                RestoredCheckpoint::Invalid
+            }
+            Some(saved) => match serde_json::from_slice::<SniperCheckpoint>(&saved.payload) {
+                Ok(checkpoint) if checkpoint.consumed => RestoredCheckpoint::Valid(checkpoint),
+                Ok(_) | Err(_) => RestoredCheckpoint::Invalid,
+            },
+        };
         let mut orders = Vec::new();
         ctx.resting(&mut orders);
         let resting = orders
@@ -125,6 +131,7 @@ impl TouchSniper {
         );
         self.restored = true;
         self.apply(symbol, output, ctx);
+        true
     }
 
     fn apply(&mut self, symbol: SymbolId, output: DecisionOutput, ctx: &mut dyn StrategyCtx) {
@@ -147,6 +154,10 @@ impl TouchSniper {
                     work: None,
                     leverage: None,
                 }),
+                Effect::CancelEntry { client_order_id } => ctx.cancel(symbol, &client_order_id),
+                Effect::ArmCancelRetry => {
+                    ctx.arm_timer(super::plan::CANCEL_RETRY_TIMER, 1_000_000_000)
+                }
                 Effect::PlaceExit { side, qty } => ctx.place(Intent {
                     strategy: self.id,
                     symbol,
@@ -184,7 +195,12 @@ impl TouchSniper {
         input: DecisionInput<'_>,
         ctx: &mut dyn StrategyCtx,
     ) {
-        self.restore(symbol, ctx);
+        let restored_now = self.restore(symbol, ctx);
+        // The engine updates attribution and its resting-order ledger before
+        // routing order news. Restore already contains that order's result.
+        if restored_now && matches!(input, DecisionInput::Order { .. }) {
+            return;
+        }
         let output = decide(input, &self.state, &self.config);
         self.apply(symbol, output, ctx);
     }

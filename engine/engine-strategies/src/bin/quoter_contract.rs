@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 
 use engine_strategies::quoter::plan::{
-    executable_quote_px, plan_quotes_protected, price_rule, reduce_micro, MicroRules, MicroState,
-    QuoteRules, QuoteStep, Resting, SignalInput,
+    decide, DecisionInput, DecisionRules, MicroRules, MicroState, QuoteEffect, QuoteRules,
+    SignalInput, WorkingQuote,
 };
-use engine_types::{BookLevel, Depth, Quote, Side, TradeFlow, BOOK_DEPTH};
+use engine_types::{BookLevel, Depth, InstrumentRule, Quote, Side, TradeFlow, BOOK_DEPTH};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -77,6 +77,14 @@ impl Init {
             adaptive: true,
         }
     }
+
+    fn rules(&self, arm: &Arm) -> DecisionRules {
+        DecisionRules {
+            quote: self.base(),
+            micro: self.micro(arm),
+            quote_enabled: true,
+        }
+    }
 }
 
 fn millis_to_ns(value: f64) -> u64 {
@@ -136,8 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if init.arms.is_empty() {
         return Err("init needs at least one arm".into());
     }
-    let signal_rules = init.micro(&init.arms[0]);
-    let mut state = MicroState::default();
+    let mut states = BTreeMap::<String, MicroState>::new();
     let mut depth = Depth::default();
     let mut quote = Quote::default();
     let stdout = io::stdout();
@@ -145,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for line in lines {
         let request: Request = serde_json::from_str(&line?)?;
-        match request.event {
+        let signal = match request.event {
             Event::Depth {
                 recv_ns,
                 bids,
@@ -153,34 +160,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 depth = wire_depth(recv_ns, &bids, &asks)?;
                 quote = depth.quote();
-                state = reduce_micro(
-                    state,
-                    SignalInput::Depth {
-                        bids: &depth.bids[..depth.bid_len as usize],
-                        asks: &depth.asks[..depth.ask_len as usize],
-                        recv_ns,
-                    },
-                    signal_rules,
-                );
+                SignalInput::Depth {
+                    bids: &depth.bids[..depth.bid_len as usize],
+                    asks: &depth.asks[..depth.ask_len as usize],
+                    recv_ns,
+                }
             }
             Event::Trades {
                 recv_ns,
                 buy_qty,
                 sell_qty,
                 last_px,
-            } => {
-                state = reduce_micro(
-                    state,
-                    SignalInput::Trades(TradeFlow {
-                        buy_qty,
-                        sell_qty,
-                        last_px,
-                        recv_ns,
-                        ..TradeFlow::default()
-                    }),
-                    signal_rules,
-                );
-            }
+            } => SignalInput::Trades(TradeFlow {
+                buy_qty,
+                sell_qty,
+                last_px,
+                recv_ns,
+                ..TradeFlow::default()
+            }),
             Event::Touch { recv_ns, bid, ask } => {
                 quote = Quote {
                     bid_px: bid[0],
@@ -190,48 +187,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     recv_ns,
                     ..Quote::default()
                 };
-                state = reduce_micro(
-                    state,
-                    SignalInput::Touch {
-                        bid: BookLevel {
-                            px: bid[0],
-                            qty: bid[1],
-                        },
-                        ask: BookLevel {
-                            px: ask[0],
-                            qty: ask[1],
-                        },
-                        recv_ns,
+                SignalInput::Touch {
+                    bid: BookLevel {
+                        px: bid[0],
+                        qty: bid[1],
                     },
-                    signal_rules,
-                );
+                    ask: BookLevel {
+                        px: ask[0],
+                        qty: ask[1],
+                    },
+                    recv_ns,
+                }
             }
-        }
+        };
 
         let prices = init
             .arms
             .iter()
             .map(|arm| {
                 let held = request.working.get(&arm.name).cloned().unwrap_or_default();
-                let resting = resting(&held);
-                let priced = price_rule(
-                    quote,
-                    &depth,
-                    Some(&state),
-                    &resting,
-                    init.base(),
-                    init.micro(arm),
+                let working = working_quotes(&held);
+                let output = decide(
+                    states.get(&arm.name).copied().unwrap_or_default(),
+                    DecisionInput {
+                        signal: Some(signal),
+                        quote,
+                        depth: &depth,
+                        position: 0.0,
+                        working: &working,
+                        foreign_owner: false,
+                        flatten_pending: false,
+                        instrument: Some(InstrumentRule {
+                            tick_size: request.tick_size,
+                            qty_step: 0.0,
+                            min_qty: 0.0,
+                            min_notional: 0.0,
+                        }),
+                    },
+                    init.rules(arm),
                 );
-                let steps = plan_quotes_protected(
+                states.insert(arm.name.clone(), output.state);
+                let next = apply_effects(
+                    held,
+                    &output.effects,
                     quote.bid_px,
                     quote.ask_px,
-                    priced.fair_px,
-                    0.0,
-                    &resting,
-                    priced.rules,
-                    priced.protection,
+                    request.tick_size,
                 );
-                let next = apply_steps(held, &steps, quote.bid_px, quote.ask_px, request.tick_size);
                 (arm.name.clone(), next)
             })
             .collect();
@@ -267,37 +269,43 @@ fn wire_depth(recv_ns: u64, bids: &[[f64; 2]], asks: &[[f64; 2]]) -> Result<Dept
     Ok(depth)
 }
 
-fn resting(working: &Working) -> Vec<Resting> {
+fn working_quotes(working: &Working) -> Vec<WorkingQuote> {
     [
         (Side::Buy, "bid", working.bid),
         (Side::Sell, "ask", working.ask),
     ]
     .into_iter()
     .filter_map(|(side, id, px)| {
-        px.map(|px| Resting {
+        px.map(|px| WorkingQuote {
             client_order_id: id.to_string(),
             side,
             px,
+            remaining_qty: 1.0,
+            reduce_only: false,
         })
     })
     .collect()
 }
 
-fn apply_steps(working: Working, steps: &[QuoteStep], bid: f64, ask: f64, tick: f64) -> Prices {
+fn apply_effects(
+    working: Working,
+    effects: &[QuoteEffect],
+    bid: f64,
+    ask: f64,
+    tick: f64,
+) -> Prices {
     let mut next = Prices {
         bid: working.bid,
         ask: working.ask,
     };
-    for step in steps {
-        match step {
-            QuoteStep::Place { side, px, .. } => {
-                set_side(
-                    &mut next,
-                    *side,
-                    Some(executable_quote_px(*side, *px, bid, ask, tick)),
-                );
-            }
-            QuoteStep::Move {
+    for effect in effects {
+        match effect {
+            QuoteEffect::Place { side, px, .. } => set_side(
+                &mut next,
+                *side,
+                Some(executable_quote_px(*side, *px, bid, ask, tick)),
+            ),
+            QuoteEffect::Move {
                 client_order_id,
                 px,
             } => {
@@ -312,7 +320,7 @@ fn apply_steps(working: Working, steps: &[QuoteStep], bid: f64, ask: f64, tick: 
                     Some(executable_quote_px(side, *px, bid, ask, tick)),
                 );
             }
-            QuoteStep::Pull { client_order_id } => {
+            QuoteEffect::Pull { client_order_id } => {
                 let side = if client_order_id == "ask" {
                     Side::Sell
                 } else {
@@ -320,6 +328,7 @@ fn apply_steps(working: Working, steps: &[QuoteStep], bid: f64, ask: f64, tick: 
                 };
                 set_side(&mut next, side, None);
             }
+            QuoteEffect::Flatten { .. } => {}
         }
     }
     next
@@ -330,4 +339,21 @@ fn set_side(prices: &mut Prices, side: Side, px: Option<f64>) {
         Side::Buy => prices.bid = px,
         Side::Sell => prices.ask = px,
     }
+}
+
+/// Apply the engine's directional tick rounding to a reducer target.
+fn executable_quote_px(side: Side, wanted: f64, bid: f64, ask: f64, tick: f64) -> f64 {
+    let passive = match side {
+        Side::Buy => wanted.min(ask - tick),
+        Side::Sell => wanted.max(bid + tick),
+    };
+    if !passive.is_finite() || !tick.is_finite() || tick <= 0.0 {
+        return passive;
+    }
+    let steps = engine_types::quantize::steps(passive, tick);
+    let snapped = match side {
+        Side::Buy => steps.floor(),
+        Side::Sell => steps.ceil(),
+    };
+    engine_types::quantize::round_clean(snapped * tick, tick)
 }

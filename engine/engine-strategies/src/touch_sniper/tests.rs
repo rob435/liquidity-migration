@@ -52,6 +52,33 @@ fn consumed_checkpoint(extra: &str) -> StrategyCheckpoint {
     }
 }
 
+fn exit_checkpoint_before_cancel(h: &mut Harness, client_order_id: &str) -> StrategyCheckpoint {
+    let mut actions = h.drain_actions();
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::SetStrategyCheckpoint { .. }, Action::Cancel {
+            client_order_id: actual,
+            ..
+        }] if actual == client_order_id
+    ));
+    match actions.remove(0) {
+        Action::SetStrategyCheckpoint { checkpoint, .. } => checkpoint,
+        other => panic!("exit checkpoint must precede cancel, got {other:?}"),
+    }
+}
+
+fn exit_checkpoint_before_place(h: &mut Harness) -> StrategyCheckpoint {
+    let mut actions = h.drain_actions();
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::SetStrategyCheckpoint { .. }, Action::Place(intent)] if intent.reduce_only
+    ));
+    match actions.remove(0) {
+        Action::SetStrategyCheckpoint { checkpoint, .. } => checkpoint,
+        other => panic!("exit checkpoint must precede exit, got {other:?}"),
+    }
+}
+
 #[test]
 fn the_consumed_arm_is_queued_before_the_entry() {
     let mut h = build("buy", "");
@@ -152,6 +179,204 @@ fn a_restored_ttl_position_without_a_durable_deadline_exits_now() {
     assert!(actions.iter().any(|action| {
         matches!(action, Action::Place(intent) if intent.reduce_only && intent.side == Side::Sell)
     }));
+}
+
+#[test]
+fn a_fill_as_the_first_restart_wake_is_not_counted_twice() {
+    let checkpoint = consumed_checkpoint("take_px = 110.0");
+    let mut restarted = build("buy", "take_px = 110.0");
+    restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+
+    // The harness charges attribution before delivery, matching the engine.
+    restarted.fill("surviving-entry", SYM, Side::Buy, 2.0, 100.0);
+    assert!(restarted.drain_actions().is_empty());
+    restarted.quote(SYM, 110.0, 110.2);
+    let exit = restarted.one_intent();
+    assert_eq!(
+        exit.qty, 2.0,
+        "the restored fill was already in attribution"
+    );
+    assert!(exit.reduce_only);
+}
+
+#[test]
+fn a_restored_partial_entry_is_cancelled_before_the_exit_is_sized() {
+    let checkpoint = consumed_checkpoint("take_px = 110.0");
+    let mut restarted = build("buy", "take_px = 110.0");
+    restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+    restarted.ctx.set_my_position(SYM, 0.75);
+    let symbol = restarted.ctx.id_of(SYM);
+    restarted.ctx.resting.push(RestingSeed {
+        client_order_id: "part-filled-entry".into(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Market,
+        qty: 2.0,
+        filled_qty: 0.75,
+        reduce_only: false,
+        acked: true,
+    });
+
+    restarted.quote(SYM, 110.0, 110.2);
+    exit_checkpoint_before_cancel(&mut restarted, "part-filled-entry");
+
+    // A fill racing the cancel becomes part of the final exit size.
+    restarted.fill("part-filled-entry", SYM, Side::Buy, 0.25, 100.0);
+    assert!(restarted.drain_actions().is_empty());
+    restarted.cancelled("part-filled-entry");
+    let exit = restarted.one_intent();
+    assert!(exit.reduce_only);
+    assert_eq!(exit.qty, 1.0);
+}
+
+#[test]
+fn a_pending_partial_entry_exit_resumes_after_restart_below_the_take() {
+    let mut live = build("buy", "take_px = 110.0");
+    live.quote(SYM, 99.9, 100.0);
+    live.drain_actions();
+    live.ack("entry");
+    live.fill("entry", SYM, Side::Buy, 0.5, 100.0);
+    live.quote(SYM, 110.0, 110.2);
+    let checkpoint = exit_checkpoint_before_cancel(&mut live, "entry");
+
+    let mut restarted = build("buy", "take_px = 110.0");
+    restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+    restarted.ctx.set_my_position(SYM, 0.5);
+    let symbol = restarted.ctx.id_of(SYM);
+    restarted.ctx.resting.push(RestingSeed {
+        client_order_id: "entry".into(),
+        symbol,
+        side: Side::Buy,
+        kind: OrderKind::Market,
+        qty: 2.0,
+        filled_qty: 0.5,
+        reduce_only: false,
+        acked: true,
+    });
+
+    restarted.quote(SYM, 105.0, 105.2);
+    assert!(matches!(
+        restarted.one_action(),
+        Action::Cancel {
+            client_order_id,
+            ..
+        } if client_order_id == "entry"
+    ));
+}
+
+#[test]
+fn a_refused_or_rejected_exit_restarts_as_an_exit_below_the_take() {
+    for venue_reject in [false, true] {
+        let mut live = entered("buy", "take_px = 110.0");
+        live.quote(SYM, 110.0, 110.2);
+        let checkpoint = exit_checkpoint_before_place(&mut live);
+        if venue_reject {
+            live.ack("exit");
+            live.reject("exit", "test rejection");
+        } else {
+            let symbol = live.ctx.id_of(SYM);
+            live.refuse(symbol, true);
+        }
+
+        let mut restarted = build("buy", "take_px = 110.0");
+        restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+        restarted.ctx.set_my_position(SYM, 2.0);
+        restarted.quote(SYM, 105.0, 105.2);
+        let exit = restarted.one_intent();
+        assert!(exit.reduce_only);
+        assert_eq!(exit.qty, 2.0);
+    }
+}
+
+#[test]
+fn an_unconfirmed_entry_cancel_is_retried_on_a_timer() {
+    let mut h = build("buy", "take_px = 110.0");
+    h.quote(SYM, 99.9, 100.0);
+    h.drain_actions();
+    h.ack("entry");
+    h.fill("entry", SYM, Side::Buy, 0.5, 100.0);
+    h.quote(SYM, 110.0, 110.2);
+    exit_checkpoint_before_cancel(&mut h, "entry");
+
+    assert!(h.fire_next_timer());
+    assert!(matches!(
+        h.one_action(),
+        Action::Cancel {
+            client_order_id,
+            ..
+        } if client_order_id == "entry"
+    ));
+}
+
+#[test]
+fn a_matching_but_invalid_checkpoint_fails_closed() {
+    let valid = consumed_checkpoint("");
+    for checkpoint in [
+        StrategyCheckpoint {
+            payload: b"not-json".to_vec(),
+            ..valid.clone()
+        },
+        StrategyCheckpoint {
+            schema_version: valid.schema_version + 1,
+            ..valid.clone()
+        },
+        StrategyCheckpoint {
+            payload: br#"{"consumed":false,"ttl_due_wall_ms":null}"#.to_vec(),
+            ..valid.clone()
+        },
+    ] {
+        let mut restarted = build("buy", "");
+        restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+        restarted.quote(SYM, 99.9, 100.0);
+        let actions = restarted.drain_actions();
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, Action::SetStrategyCheckpoint { .. })));
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, Action::Place(intent) if !intent.reduce_only)));
+    }
+}
+
+#[test]
+fn uncertain_checkpoint_identity_closes_a_partial_entry_below_the_take() {
+    let valid = consumed_checkpoint("take_px = 110.0");
+    let mut mismatch = valid.clone();
+    mismatch.decision_fingerprint = "different-config".into();
+    let malformed = StrategyCheckpoint {
+        payload: b"not-json".to_vec(),
+        ..valid
+    };
+
+    for checkpoint in [mismatch, malformed] {
+        let mut restarted = build("buy", "take_px = 110.0");
+        restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+        restarted.ctx.set_my_position(SYM, 0.5);
+        let symbol = restarted.ctx.id_of(SYM);
+        restarted.ctx.resting.push(RestingSeed {
+            client_order_id: "entry".into(),
+            symbol,
+            side: Side::Buy,
+            kind: OrderKind::Market,
+            qty: 2.0,
+            filled_qty: 0.5,
+            reduce_only: false,
+            acked: true,
+        });
+
+        restarted.quote(SYM, 105.0, 105.2);
+        exit_checkpoint_before_cancel(&mut restarted, "entry");
+    }
+}
+
+#[test]
+fn a_version_one_checkpoint_without_the_exit_latch_still_restores() {
+    let mut checkpoint = consumed_checkpoint("");
+    checkpoint.payload = br#"{"consumed":true,"ttl_due_wall_ms":null}"#.to_vec();
+    let mut restarted = build("buy", "");
+    restarted.ctx.set_strategy_checkpoint(SYM, checkpoint);
+    restarted.quote(SYM, 99.9, 100.0);
+    assert!(restarted.drain_actions().is_empty());
 }
 
 #[test]
@@ -438,6 +663,8 @@ fn exit_size_follows_the_fill_not_the_config() {
     h.ack("c1");
     h.fill("c1", SYM, Side::Buy, 1.25, 100.0);
     h.quote(SYM, 110.0, 110.2);
+    exit_checkpoint_before_cancel(&mut h, "c1");
+    h.cancelled("c1");
     assert_eq!(h.one_intent().qty, 1.25);
 }
 
@@ -461,10 +688,12 @@ fn a_concurrent_entry_fill_gets_a_residual_exit() {
     h.ack("c1");
     h.fill("c1", SYM, Side::Buy, 0.5, 100.0);
     h.quote(SYM, 110.0, 110.2);
-    assert_eq!(h.one_intent().qty, 0.5);
-    h.ack("x1");
+    exit_checkpoint_before_cancel(&mut h, "c1");
     h.fill("c1", SYM, Side::Buy, 1.5, 100.0);
+    assert_eq!(h.one_intent().qty, 2.0);
+    h.ack("x1");
     h.fill("x1", SYM, Side::Sell, 0.5, 110.0);
+    h.cancelled("x1");
     h.quote(SYM, 109.0, 109.2);
     assert_eq!(h.one_intent().qty, 1.5);
 }
@@ -492,9 +721,10 @@ fn a_late_entry_cancel_is_not_mistaken_for_the_unacked_exit() {
     h.ack("c1");
     h.fill("c1", SYM, Side::Buy, 0.5, 100.0);
     h.quote(SYM, 110.0, 110.2);
-    assert_eq!(h.one_intent().qty, 0.5);
+    exit_checkpoint_before_cancel(&mut h, "c1");
 
     h.cancelled("c1");
+    assert_eq!(h.one_intent().qty, 0.5);
     h.quote(SYM, 109.0, 109.2);
     assert!(
         h.drain().is_empty(),
@@ -589,7 +819,7 @@ fn a_rejected_exit_is_resent_on_the_next_quote() {
 }
 
 #[test]
-fn a_second_rejected_exit_stops_the_plug() {
+fn repeated_rejected_exits_keep_de_risking_the_open_position() {
     let mut h = entered("buy", "take_px = 110.0");
     h.quote(SYM, 110.0, 110.2);
     h.drain();
@@ -601,11 +831,9 @@ fn a_second_rejected_exit_stops_the_plug() {
     h.ack("x2");
     h.reject("x2", "second refusal");
     h.quote(SYM, 108.0, 108.2);
-    h.quote(SYM, 120.0, 120.2);
-    assert!(
-        h.drain().is_empty(),
-        "two refusals is a job for a human, not a third order"
-    );
+    let third = h.one_intent();
+    assert!(third.reduce_only);
+    assert_eq!(third.qty, 2.0);
 }
 
 #[test]

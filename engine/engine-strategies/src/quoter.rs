@@ -7,12 +7,15 @@
 //! `Action::Cancel` and `Action::Amend`, and reads its own working orders
 //! through `StrategyCtx::resting`, since the engine mints the order ids.
 //!
-//! [`plan::plan_quotes`] is the decision and it is pure.
+//! [`plan::decide`] is the complete decision and it is pure.
 
 pub mod plan;
 pub mod plug;
 #[cfg(test)]
 mod plug_tests;
 
-pub use plan::{plan_quotes, plan_quotes_at, QuoteRules, QuoteStep, Resting};
+pub use plan::{
+    decide, DecisionInput, DecisionOutput, DecisionRules, MicroRules, MicroState, QuoteEffect,
+    QuoteRules, SignalInput, WorkingQuote,
+};
 pub use plug::Quoter;

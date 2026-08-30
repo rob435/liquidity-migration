@@ -7,7 +7,7 @@
 //! engine carries — one whose whole decision is in the loop, reacting to a
 //! price in microseconds rather than following a book decided hours ago.
 
-use engine_types::{BookLevel, Depth, Quote, Side, TradeFlow};
+use engine_types::{BookLevel, Depth, InstrumentRule, Quote, Side, TradeFlow};
 use serde::{Deserialize, Serialize};
 
 /// Where a quote should be and how far it may drift before it is worth
@@ -110,13 +110,69 @@ pub enum SignalInput<'a> {
     Trades(TradeFlow),
 }
 
+/// The full immutable rule set for one quoter decision.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct DecisionRules {
+    pub quote: QuoteRules,
+    pub micro: MicroRules,
+    pub quote_enabled: bool,
+}
+
+/// One live order as the reducer needs to see it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkingQuote {
+    pub client_order_id: String,
+    pub side: Side,
+    pub px: f64,
+    pub remaining_qty: f64,
+    pub reduce_only: bool,
+}
+
+/// Everything that can change one symbol's quote decision on this wake.
+pub struct DecisionInput<'a> {
+    pub signal: Option<SignalInput<'a>>,
+    pub quote: Quote,
+    pub depth: &'a Depth,
+    pub position: f64,
+    pub working: &'a [WorkingQuote],
+    pub foreign_owner: bool,
+    pub flatten_pending: bool,
+    pub instrument: Option<InstrumentRule>,
+}
+
+/// Ordered instructions for the mutable adapter.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QuoteEffect {
+    Pull {
+        client_order_id: String,
+    },
+    Move {
+        client_order_id: String,
+        px: f64,
+    },
+    Place {
+        side: Side,
+        px: f64,
+        qty: f64,
+        stop_px: Option<f64>,
+        reduce_only: bool,
+    },
+    Flatten {
+        side: Side,
+        qty: f64,
+    },
+}
+
+/// The next signal state and every quote action, in application order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecisionOutput {
+    pub state: MicroState,
+    pub effects: Vec<QuoteEffect>,
+}
+
 /// Reduce one public market observation. Time is monotonic even when the
 /// venue's touch and depth topics arrive out of order.
-pub fn reduce_micro(
-    mut state: MicroState,
-    input: SignalInput<'_>,
-    rules: MicroRules,
-) -> MicroState {
+fn reduce_micro(mut state: MicroState, input: SignalInput<'_>, rules: MicroRules) -> MicroState {
     match input {
         SignalInput::Touch { bid, ask, recv_ns } => {
             decay_to(&mut state, recv_ns, rules);
@@ -252,7 +308,7 @@ fn take_touch(state: &mut MicroState, bid: BookLevel, ask: BookLevel, recv_ns: u
     };
 }
 
-pub fn flow_score(state: &MicroState, rules: MicroRules) -> f64 {
+pub(crate) fn flow_score(state: &MicroState, rules: MicroRules) -> f64 {
     let weight = rules.flow_fast_weight + rules.flow_slow_weight;
     if weight <= 0.0 {
         return 0.0;
@@ -262,14 +318,14 @@ pub fn flow_score(state: &MicroState, rules: MicroRules) -> f64 {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub struct PricedQuote {
-    pub fair_px: f64,
-    pub rules: QuoteRules,
-    pub protection: SideProtection,
+struct PricedQuote {
+    fair_px: f64,
+    rules: QuoteRules,
+    protection: SideProtection,
 }
 
 /// Price the adaptive rule from one immutable state snapshot.
-pub fn price_rule(
+fn price_rule(
     quote: Quote,
     depth: &Depth,
     state: Option<&MicroState>,
@@ -342,7 +398,7 @@ pub fn price_rule(
     }
 }
 
-pub fn queue_ahead(depth: &Depth, side: Side, px: f64) -> f64 {
+pub(crate) fn queue_ahead(depth: &Depth, side: Side, px: f64) -> f64 {
     match side {
         Side::Buy => depth.bids[..depth.bid_len as usize]
             .iter()
@@ -358,38 +414,24 @@ pub fn queue_ahead(depth: &Depth, side: Side, px: f64) -> f64 {
 }
 
 /// Keep a planned price on the passive side of the touch.
-pub fn maker_quote_px(side: Side, wanted: f64, bid: f64, ask: f64, tick: f64) -> f64 {
+fn maker_quote_px(side: Side, wanted: f64, bid: f64, ask: f64, tick: f64) -> f64 {
     match side {
         Side::Buy => wanted.min(ask - tick),
         Side::Sell => wanted.max(bid + tick),
     }
 }
 
-/// Apply the maker cap and venue tick exactly as the engine boundary does.
-pub fn executable_quote_px(side: Side, wanted: f64, bid: f64, ask: f64, tick: f64) -> f64 {
-    let passive = maker_quote_px(side, wanted, bid, ask, tick);
-    if !passive.is_finite() || !tick.is_finite() || tick <= 0.0 {
-        return passive;
-    }
-    let steps = engine_types::quantize::steps(passive, tick);
-    let snapped = match side {
-        Side::Buy => steps.floor(),
-        Side::Sell => steps.ceil(),
-    };
-    engine_types::quantize::round_clean(snapped * tick, tick)
-}
-
 /// One of this strategy's quotes that is currently working.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Resting {
-    pub client_order_id: String,
-    pub side: Side,
-    pub px: f64,
+struct Resting {
+    client_order_id: String,
+    side: Side,
+    px: f64,
 }
 
 /// What to do about one side of the market.
 #[derive(Clone, Debug, PartialEq)]
-pub enum QuoteStep {
+enum QuoteStep {
     /// Nothing is resting on this side and one should be.
     Place {
         side: Side,
@@ -407,10 +449,10 @@ pub enum QuoteStep {
 /// Extra distance or a complete withdrawal on the side current flow is
 /// attacking. The untouched side keeps the ordinary quote exactly.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub struct SideProtection {
-    pub bid_extra: f64,
-    pub ask_extra: f64,
-    pub pull: Option<Side>,
+struct SideProtection {
+    bid_extra: f64,
+    ask_extra: f64,
+    pull: Option<Side>,
 }
 
 /// Where the quotes are centred, given what is already held.
@@ -420,7 +462,7 @@ pub struct SideProtection {
 /// quotes closer. `position` is signed, positive long, and the lean is capped
 /// at the ceiling so a position somehow past it cannot send the centre through
 /// the floor.
-pub fn centre(mid: f64, position: f64, rules: QuoteRules) -> f64 {
+fn centre(mid: f64, position: f64, rules: QuoteRules) -> f64 {
     if rules.skew <= 0.0 || rules.max_position <= 0.0 || !position.is_finite() {
         return mid;
     }
@@ -433,7 +475,8 @@ pub fn centre(mid: f64, position: f64, rules: QuoteRules) -> f64 {
 /// A crossed or empty book yields no quotes and pulls what is resting — a
 /// price that is not a price is not something to quote around, and staying in
 /// the market on a broken feed is how a maker gets picked off.
-pub fn plan_quotes(
+#[cfg(test)]
+fn plan_quotes(
     bid_px: f64,
     ask_px: f64,
     position: f64,
@@ -451,9 +494,10 @@ pub fn plan_quotes(
 }
 
 /// The same order decision around an externally estimated fair price. The
-/// live quoter supplies this from depth and trades; the plain wrapper above
-/// keeps the original midpoint contract for simple callers and replay tests.
-pub fn plan_quotes_at(
+/// live quoter supplies this from depth and trades; the test wrapper uses the
+/// midpoint for cases that do not need adaptive inputs.
+#[cfg(test)]
+fn plan_quotes_at(
     bid_px: f64,
     ask_px: f64,
     fair_px: f64,
@@ -477,7 +521,7 @@ pub fn plan_quotes_at(
 /// shape avoids paying for protection on the side the evidence does not say
 /// is dangerous.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_quotes_protected(
+fn plan_quotes_protected(
     bid_px: f64,
     ask_px: f64,
     fair_px: f64,
@@ -535,11 +579,171 @@ pub fn plan_quotes_protected(
     steps
 }
 
-pub fn quote_stop_px(px: f64, side: Side, fraction: f64) -> f64 {
+fn quote_stop_px(px: f64, side: Side, fraction: f64) -> f64 {
     match side {
         Side::Buy => px * (1.0 - fraction),
         Side::Sell => px * (1.0 + fraction),
     }
+}
+
+/// Reduce one wake into the next state and the complete ordered quote action.
+///
+/// Live trading and the research replay both enter here. The caller applies
+/// effects and owns request pacing; it does not recompute signal, fair value,
+/// inventory protection, quote placement, or disabled-state draining.
+pub fn decide(prior: MicroState, input: DecisionInput<'_>, rules: DecisionRules) -> DecisionOutput {
+    let state = input
+        .signal
+        .map_or(prior, |signal| reduce_micro(prior, signal, rules.micro));
+    let pull_all = || {
+        input
+            .working
+            .iter()
+            .map(|order| QuoteEffect::Pull {
+                client_order_id: order.client_order_id.clone(),
+            })
+            .collect()
+    };
+
+    if input.foreign_owner {
+        return DecisionOutput {
+            state,
+            effects: pull_all(),
+        };
+    }
+    if !rules.quote_enabled {
+        let effects = if !input.working.is_empty() {
+            pull_all()
+        } else if !input.flatten_pending && input.position.abs() > 1e-12 {
+            vec![QuoteEffect::Flatten {
+                side: if input.position > 0.0 {
+                    Side::Sell
+                } else {
+                    Side::Buy
+                },
+                qty: input.position.abs(),
+            }]
+        } else {
+            Vec::new()
+        };
+        return DecisionOutput { state, effects };
+    }
+
+    let position_tolerance = (input.position.abs() * 1e-9).max(1e-12);
+    let unsafe_quotes: Vec<_> = input
+        .working
+        .iter()
+        .filter(|order| {
+            let should_reduce = match order.side {
+                Side::Buy => input.position < -position_tolerance,
+                Side::Sell => input.position > position_tolerance,
+            };
+            order.reduce_only != should_reduce
+                || (should_reduce
+                    && order.remaining_qty > input.position.abs() + position_tolerance)
+        })
+        .map(|order| QuoteEffect::Pull {
+            client_order_id: order.client_order_id.clone(),
+        })
+        .collect();
+    if !unsafe_quotes.is_empty() {
+        return DecisionOutput {
+            state,
+            effects: unsafe_quotes,
+        };
+    }
+
+    let Some(instrument) = input.instrument else {
+        return DecisionOutput {
+            state,
+            effects: Vec::new(),
+        };
+    };
+    let resting: Vec<_> = input
+        .working
+        .iter()
+        .map(|order| Resting {
+            client_order_id: order.client_order_id.clone(),
+            side: order.side,
+            px: order.px,
+        })
+        .collect();
+    let priced = price_rule(
+        input.quote,
+        input.depth,
+        Some(&state),
+        &resting,
+        rules.quote,
+        rules.micro,
+    );
+    let steps = plan_quotes_protected(
+        input.quote.bid_px,
+        input.quote.ask_px,
+        priced.fair_px,
+        input.position,
+        &resting,
+        priced.rules,
+        priced.protection,
+    );
+    let mut effects = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            QuoteStep::Pull { client_order_id } => {
+                effects.push(QuoteEffect::Pull { client_order_id });
+            }
+            QuoteStep::Move {
+                client_order_id,
+                px,
+            } => {
+                let side = input
+                    .working
+                    .iter()
+                    .find(|order| order.client_order_id == client_order_id)
+                    .map(|order| order.side)
+                    .unwrap_or(Side::Buy);
+                effects.push(QuoteEffect::Move {
+                    client_order_id,
+                    px: maker_quote_px(
+                        side,
+                        px,
+                        input.quote.bid_px,
+                        input.quote.ask_px,
+                        instrument.tick_size,
+                    ),
+                });
+            }
+            QuoteStep::Place { side, px, qty, .. } => {
+                let px = maker_quote_px(
+                    side,
+                    px,
+                    input.quote.bid_px,
+                    input.quote.ask_px,
+                    instrument.tick_size,
+                );
+                let reduce_only = match side {
+                    Side::Buy => input.position < -position_tolerance,
+                    Side::Sell => input.position > position_tolerance,
+                };
+                let qty = if reduce_only {
+                    qty.min(input.position.abs())
+                } else {
+                    qty
+                };
+                if qty < instrument.min_qty || qty * px < instrument.min_notional {
+                    continue;
+                }
+                effects.push(QuoteEffect::Place {
+                    side,
+                    px,
+                    qty,
+                    stop_px: (!reduce_only)
+                        .then(|| quote_stop_px(px, side, priced.rules.stop_loss_fraction)),
+                    reduce_only,
+                });
+            }
+        }
+    }
+    DecisionOutput { state, effects }
 }
 
 #[cfg(test)]

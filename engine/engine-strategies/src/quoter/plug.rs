@@ -26,21 +26,20 @@
 //!
 //! The live path prices from the reconstructed L50 book, aggressor trades,
 //! short-horizon movement and inventory. Queue value raises the bar for
-//! moving a good resting order. The old midpoint path remains available to
-//! replay old configs exactly; neither path is evidence of profit until a
-//! forward run grades its fills and markouts.
+//! moving a good resting order. A static config uses midpoint pricing without
+//! adaptive terms; neither mode is evidence of profit until a forward run
+//! grades its fills and markouts.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use engine_types::{
-    BookLevel, EngineEvent, Feed, InstrumentRule, Intent, MarketEvent, OrderKind, OrderUpdate,
-    QuoteFillFeatures, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, SymbolId,
-    TimeInForce,
+    BookLevel, EngineEvent, Feed, Intent, MarketEvent, OrderKind, OrderUpdate, QuoteFillFeatures,
+    Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, SymbolId, TimeInForce,
 };
 
 use super::plan::{
-    flow_score, maker_quote_px, plan_quotes_protected, price_rule, queue_ahead, quote_stop_px,
-    reduce_micro, MicroRules, MicroState, QuoteRules, QuoteStep, Resting, SignalInput,
+    decide, flow_score, queue_ahead, DecisionInput, DecisionRules, MicroRules, MicroState,
+    QuoteEffect, QuoteRules, SignalInput, WorkingQuote,
 };
 use crate::params::Params;
 use crate::BuildError;
@@ -94,7 +93,7 @@ pub struct Quoter {
     micro: HashMap<SymbolId, MicroState>,
     /// Scratch, kept between wakes so reading our own book allocates nothing
     /// on the hot path.
-    working: Vec<Resting>,
+    working: Vec<WorkingQuote>,
     /// What we have already asked the venue about each order. Pruned every
     /// pass to what is still working, so it cannot outgrow the book.
     asked: HashMap<String, Asked>,
@@ -165,10 +164,9 @@ impl Quoter {
                  distance from the centre means a quote is never moved",
             ));
         }
-        // Absent means no lean: quote symmetrically whatever is held, which
-        // is the strategy exactly as it was before the lean existed. Present
-        // and it must be a real number, the same way every other optional dial
-        // in this crate reads.
+        // Absent means no lean: quote symmetrically whatever is held. Present
+        // values follow the same positive-number rule as every optional dial
+        // in this crate.
         let skew = p.opt_positive("skew_bps")?.unwrap_or(0.0) / 10_000.0;
         if skew > half_spread {
             return Err(p.invalid(
@@ -324,12 +322,6 @@ impl Quoter {
         self.ids.contains(&Some(symbol))
     }
 
-    fn reduce_signal(&mut self, symbol: SymbolId, input: SignalInput<'_>) {
-        let prior = self.micro.get(&symbol).copied().unwrap_or_default();
-        self.micro
-            .insert(symbol, reduce_micro(prior, input, self.micro_rules));
-    }
-
     /// Ask the venue to pull an order, unless we have just asked.
     fn pull(&mut self, symbol: SymbolId, id: &str, now_ns: u64, ctx: &mut dyn StrategyCtx) {
         if let Some(asked) = self.asked.get(id) {
@@ -389,7 +381,12 @@ impl Quoter {
         );
     }
 
-    fn requote(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) {
+    fn requote(
+        &mut self,
+        symbol: SymbolId,
+        signal: Option<SignalInput<'_>>,
+        ctx: &mut dyn StrategyCtx,
+    ) {
         // Our own working orders on this symbol, as the planner wants them.
         // The buffer is reused between wakes, so this allocates only when a
         // quote's id is longer than the last one that lived in the slot.
@@ -412,152 +409,87 @@ impl Quoter {
                 .get(&symbol)
                 .copied()
                 .unwrap_or_default();
-        let position_tolerance = (position.abs() * 1e-9).max(1e-12);
-        let unsafe_quotes: Vec<String> = out
-            .iter()
-            .filter(|order| order.symbol == symbol)
-            .filter(|order| order.px().is_some())
-            .filter(|order| {
-                let should_reduce = match order.side {
-                    Side::Buy => position < -position_tolerance,
-                    Side::Sell => position > position_tolerance,
-                };
-                order.reduce_only != should_reduce
-                    || (should_reduce
-                        && order.remaining_qty() > position.abs() + position_tolerance)
-            })
-            .map(|order| order.client_order_id.to_string())
-            .collect();
         for order in out.iter().filter(|o| o.symbol == symbol) {
             if let Some(px) = order.px() {
-                self.working.push(Resting {
+                self.working.push(WorkingQuote {
                     client_order_id: order.client_order_id.to_string(),
                     side: order.side,
                     px,
+                    remaining_qty: order.remaining_qty(),
+                    reduce_only: order.reduce_only,
                 });
             }
         }
         drop(out);
         let now_ns = ctx.now_ns();
-
-        // Somebody else's name. Pull anything of ours that is resting in it
-        // and leave it: there is one venue stop per position, so two sleeves
-        // here would have one stop between them.
-        if ctx.foreign_position(symbol) {
-            let mine: Vec<String> = self
-                .working
-                .iter()
-                .map(|o| o.client_order_id.clone())
-                .collect();
-            for id in mine {
-                self.pull(symbol, &id, now_ns, ctx);
-            }
-            return;
-        }
-
-        if !self.quote_enabled {
-            let mine: Vec<String> = self
-                .working
-                .iter()
-                .map(|order| order.client_order_id.clone())
-                .collect();
-            for id in mine {
-                self.pull(symbol, &id, now_ns, ctx);
-            }
-            if !self.working.is_empty() || self.flatten_pending.contains(&symbol) {
-                return;
-            }
-            if position.abs() > 1e-12 {
-                self.flatten_pending.insert(symbol);
-                ctx.place(Intent {
-                    strategy: self.id,
-                    symbol,
-                    side: if position > 0.0 {
-                        Side::Sell
-                    } else {
-                        Side::Buy
-                    },
-                    qty: position.abs(),
-                    kind: OrderKind::Market,
-                    stop: None,
-                    reduce_only: true,
-                    tag: "quote-drain".to_string(),
-                    decided_ns: now_ns,
-                    work: None,
-                    leverage: None,
-                });
-            }
-            return;
-        }
-
-        // A flat book has two opening quotes. Once either fills, the other
-        // side is an exit, not permission to pass through flat and open the
-        // opposite position. Pull the stale shape first and wait for its
-        // terminal update before replacing it. Cancel and replace in one wake
-        // would leave both orders live during the venue round trip.
-        if !unsafe_quotes.is_empty() {
-            for id in unsafe_quotes {
-                self.pull(symbol, &id, now_ns, ctx);
-            }
-            return;
-        }
-
-        let Some(rule) = ctx.instrument(symbol) else {
-            return;
-        };
         let quote = *ctx.quote(symbol);
         let depth = *ctx.depth(symbol);
-        // This strategy's own fills, not the account's reading. See the header.
-        let priced = price_rule(
-            quote,
-            &depth,
-            self.micro.get(&symbol),
-            &self.working,
-            self.rules,
-            self.micro_rules,
+        let rule = ctx.instrument(symbol);
+        let output = decide(
+            self.micro.get(&symbol).copied().unwrap_or_default(),
+            DecisionInput {
+                signal,
+                quote,
+                depth: &depth,
+                position,
+                working: &self.working,
+                foreign_owner: ctx.foreign_position(symbol),
+                flatten_pending: self.flatten_pending.contains(&symbol),
+                instrument: rule,
+            },
+            DecisionRules {
+                quote: self.rules,
+                micro: self.micro_rules,
+                quote_enabled: self.quote_enabled,
+            },
         );
-        let steps = plan_quotes_protected(
-            quote.bid_px,
-            quote.ask_px,
-            priced.fair_px,
-            position,
-            &self.working,
-            priced.rules,
-            priced.protection,
-        );
-        for step in steps {
-            match step {
-                QuoteStep::Place { side, px, qty, .. } => {
-                    let px = maker_quote_px(side, px, quote.bid_px, quote.ask_px, rule.tick_size);
-                    let reduce_only = match side {
-                        Side::Buy => position < -position_tolerance,
-                        Side::Sell => position > position_tolerance,
-                    };
-                    let qty = if reduce_only {
-                        qty.min(position.abs())
-                    } else {
-                        qty
-                    };
-                    let stop = (!reduce_only).then(|| StopSpec {
-                        trigger_px: quote_stop_px(px, side, priced.rules.stop_loss_fraction),
-                    });
-                    self.place(symbol, side, px, qty, stop, reduce_only, &rule, ctx)
+        self.micro.insert(symbol, output.state);
+        for effect in output.effects {
+            match effect {
+                QuoteEffect::Pull { client_order_id } => {
+                    self.pull(symbol, &client_order_id, now_ns, ctx)
                 }
-                QuoteStep::Move {
+                QuoteEffect::Move {
                     client_order_id,
                     px,
-                } => {
-                    let side = self
-                        .working
-                        .iter()
-                        .find(|order| order.client_order_id == client_order_id)
-                        .map(|order| order.side)
-                        .unwrap_or(Side::Buy);
-                    let px = maker_quote_px(side, px, quote.bid_px, quote.ask_px, rule.tick_size);
-                    self.move_to(symbol, &client_order_id, px, rule.tick_size, now_ns, ctx)
-                }
-                QuoteStep::Pull { client_order_id } => {
-                    self.pull(symbol, &client_order_id, now_ns, ctx)
+                } => self.move_to(
+                    symbol,
+                    &client_order_id,
+                    px,
+                    rule.map_or(0.0, |rule| rule.tick_size),
+                    now_ns,
+                    ctx,
+                ),
+                QuoteEffect::Place {
+                    side,
+                    px,
+                    qty,
+                    stop_px,
+                    reduce_only,
+                } => self.place(
+                    symbol,
+                    side,
+                    px,
+                    qty,
+                    stop_px.map(|trigger_px| StopSpec { trigger_px }),
+                    reduce_only,
+                    ctx,
+                ),
+                QuoteEffect::Flatten { side, qty } => {
+                    self.flatten_pending.insert(symbol);
+                    ctx.place(Intent {
+                        strategy: self.id,
+                        symbol,
+                        side,
+                        qty,
+                        kind: OrderKind::Market,
+                        stop: None,
+                        reduce_only: true,
+                        tag: "quote-drain".to_string(),
+                        decided_ns: now_ns,
+                        work: None,
+                        leverage: None,
+                    });
                 }
             }
         }
@@ -680,15 +612,8 @@ impl Quoter {
         qty: f64,
         stop: Option<StopSpec>,
         reduce_only: bool,
-        rule: &InstrumentRule,
         ctx: &mut dyn StrategyCtx,
     ) {
-        // A quote below the venue's minimum is not a quote. The engine
-        // quantizes again before sending; this only avoids emitting an intent
-        // that could never become an order.
-        if qty * px < rule.min_notional || qty < rule.min_qty {
-            return;
-        }
         ctx.place(Intent {
             strategy: self.id,
             symbol,
@@ -736,21 +661,17 @@ impl Strategy for Quoter {
 
     fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
         self.resolve(&*ctx);
-        let symbol = match event {
-            EngineEvent::Market(MarketEvent::Depth { symbol, depth }) => {
-                self.reduce_signal(
-                    *symbol,
-                    SignalInput::Depth {
-                        bids: &depth.bids[..depth.bid_len as usize],
-                        asks: &depth.asks[..depth.ask_len as usize],
-                        recv_ns: depth.recv_ns,
-                    },
-                );
-                *symbol
-            }
+        let (symbol, signal) = match event {
+            EngineEvent::Market(MarketEvent::Depth { symbol, depth }) => (
+                *symbol,
+                Some(SignalInput::Depth {
+                    bids: &depth.bids[..depth.bid_len as usize],
+                    asks: &depth.asks[..depth.ask_len as usize],
+                    recv_ns: depth.recv_ns,
+                }),
+            ),
             EngineEvent::Market(MarketEvent::Trades { symbol, trades }) => {
-                self.reduce_signal(*symbol, SignalInput::Trades(*trades));
-                *symbol
+                (*symbol, Some(SignalInput::Trades(*trades)))
             }
             // The touch, on its own faster topic. The venue publishes it
             // about twice as often as the deep book, and it is what the
@@ -758,23 +679,20 @@ impl Strategy for Quoter {
             // publication interval of staleness removed from every quote.
             // The book and queue terms stay on the deep book, which is the
             // only thing that carries them.
-            EngineEvent::Market(MarketEvent::Quote { symbol, quote }) => {
-                self.reduce_signal(
-                    *symbol,
-                    SignalInput::Touch {
-                        bid: BookLevel {
-                            px: quote.bid_px,
-                            qty: quote.bid_qty,
-                        },
-                        ask: BookLevel {
-                            px: quote.ask_px,
-                            qty: quote.ask_qty,
-                        },
-                        recv_ns: quote.recv_ns,
+            EngineEvent::Market(MarketEvent::Quote { symbol, quote }) => (
+                *symbol,
+                Some(SignalInput::Touch {
+                    bid: BookLevel {
+                        px: quote.bid_px,
+                        qty: quote.bid_qty,
                     },
-                );
-                *symbol
-            }
+                    ask: BookLevel {
+                        px: quote.ask_px,
+                        qty: quote.ask_qty,
+                    },
+                    recv_ns: quote.recv_ns,
+                }),
+            ),
             EngineEvent::Market(MarketEvent::FeedReset { .. }) => {
                 self.pull_all_on_feed_reset(ctx);
                 return;
@@ -791,7 +709,7 @@ impl Strategy for Quoter {
                 ..
             }) => {
                 self.note_fast_fill(exec_id, *symbol, *side, *qty);
-                *symbol
+                (*symbol, None)
             }
             EngineEvent::Order(OrderUpdate::Fill {
                 exec_id,
@@ -820,7 +738,7 @@ impl Strategy for Quoter {
                 {
                     self.flatten_pending.remove(symbol);
                 }
-                *symbol
+                (*symbol, None)
             }
             EngineEvent::Order(OrderUpdate::Reject {
                 client_order_id, ..
@@ -834,7 +752,7 @@ impl Strategy for Quoter {
                 if order.reduce_only {
                     self.flatten_pending.remove(&order.symbol);
                 }
-                order.symbol
+                (order.symbol, None)
             }
             EngineEvent::IntentRefused {
                 symbol,
@@ -842,12 +760,12 @@ impl Strategy for Quoter {
                 ..
             } => {
                 self.flatten_pending.remove(symbol);
-                *symbol
+                (*symbol, None)
             }
             _ => return,
         };
         if self.mine(symbol) {
-            self.requote(symbol, ctx);
+            self.requote(symbol, signal, ctx);
         }
     }
 }
