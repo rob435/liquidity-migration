@@ -630,6 +630,7 @@ def test_model_commit_refuses_a_different_current_profile_blob(
             text=True,
             env=git_env,
         ).stdout.strip()
+        identity = _kernel_identity(commit, repo=repo)
 
     assert (caller_git / "config").read_bytes() == caller_before["config"]
     assert (caller_git / "HEAD").read_bytes() == caller_before["head"]
@@ -637,7 +638,6 @@ def test_model_commit_refuses_a_different_current_profile_blob(
     assert caller_ref_path.read_bytes() == caller_before["ref"]
     assert sentinel.read_bytes() == caller_before["sentinel"]
 
-    identity = _kernel_identity(commit, repo=repo)
     assert identity["matches_current_checkout"] is True
     assert identity["source_blobs"] == identity["current_source_blobs"]
 

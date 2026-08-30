@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +32,26 @@ T0 = 1_787_443_200_000
 def _write_jsonl(path: Path, rows: list[dict]) -> Path:
     path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     return path
+
+
+def test_git_head_ignores_foreign_repository_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = subprocess.run(
+        ["git", "-C", str(parity.REPO), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    foreign = tmp_path / "foreign"
+    subprocess.run(["git", "init", "-q", str(foreign)], check=True)
+
+    monkeypatch.setenv("GIT_DIR", str(foreign / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(foreign))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(foreign / ".git" / "index"))
+
+    assert parity._git_head() == expected
 
 
 MODEL_COLUMNS = [

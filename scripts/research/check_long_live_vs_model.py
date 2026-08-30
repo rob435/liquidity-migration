@@ -37,6 +37,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -49,6 +50,24 @@ sys.path.insert(0, str(REPO))
 
 MS_PER_HOUR = 3_600_000
 MS_PER_DAY = 86_400_000
+GIT_LOCAL_ENV_VARS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+}
 DEFAULT_DATA_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_HOLD_DAYS = 3
 MONEY_TOLERANCE_USDT = 1e-8
@@ -1508,6 +1527,9 @@ def _cycle_directory_identity(path: Path) -> dict[str, Any]:
 
 
 def _git_head() -> str | None:
+    env = os.environ.copy()
+    for name in GIT_LOCAL_ENV_VARS:
+        env.pop(name, None)
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -1515,6 +1537,7 @@ def _git_head() -> str | None:
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
     except (OSError, subprocess.CalledProcessError):
         return None

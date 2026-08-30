@@ -27,7 +27,9 @@ edit STATE.md to match.
   research inputs stay outside Git in a mode-0600 local evidence archive.
   The pre-push gate clears checkout-local Git environment before tests create
   throwaway repositories, so a linked-worktree run cannot write fixture
-  identity, refs, or index state into the caller's repository. The
+  identity, refs, or index state into the caller's repository. The parity and
+  tape checkers clear the same bindings before reading commit identity, so an
+  explicit foreign checkout cannot resolve against the caller instead. The
   operational rollout installs the commit carrying this entry and restarts the
   widened recorder with the rest of the managed fleet.
 

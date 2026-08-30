@@ -53,6 +53,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import statistics
 import subprocess
 import sys
@@ -68,6 +69,24 @@ from liquidity_migration.research.execution.quote_lab.book import BookMirror  # 
 from liquidity_migration.rules.long_native import long_v12_profile  # noqa: E402
 
 MS_PER_HOUR = 3_600_000
+GIT_LOCAL_ENV_VARS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+}
 REGISTERED_MODEL_TRADE = "registered_model_trade"
 TAPE_DERIVED_PROXY = "tape_derived_proxy"
 ARTIFICIAL_EXERCISE = "artificial_exercise"
@@ -225,6 +244,13 @@ def _file_identity(path: Path, *, with_hash: bool = True) -> dict[str, Any]:
     return result
 
 
+def _git_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in GIT_LOCAL_ENV_VARS:
+        env.pop(name, None)
+    return env
+
+
 def _git_worktree_blob(repo: Path, source_path: str) -> str:
     path = repo / source_path
     if not path.is_file():
@@ -234,6 +260,7 @@ def _git_worktree_blob(repo: Path, source_path: str) -> str:
         check=False,
         capture_output=True,
         text=True,
+        env=_git_subprocess_env(),
     )
     if result.returncode != 0:
         raise ValueError(f"cannot identify current checkout source {source_path}")
@@ -249,6 +276,7 @@ def _kernel_identity(commit: str | None, *, repo: Path | None = None) -> dict[st
         check=False,
         capture_output=True,
         text=True,
+        env=_git_subprocess_env(),
     )
     if resolved.returncode != 0:
         raise ValueError(f"--model-commit does not resolve to a commit: {commit}")
@@ -265,6 +293,7 @@ def _kernel_identity(commit: str | None, *, repo: Path | None = None) -> dict[st
             check=False,
             capture_output=True,
             text=True,
+            env=_git_subprocess_env(),
         )
         if result.returncode != 0:
             raise ValueError(f"model commit {full_commit} has no {source_path}")
