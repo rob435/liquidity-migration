@@ -119,9 +119,9 @@ symbols = ["SOLUSDT", "XRPUSDT"]
 [[strategy]]
 name = "target_book"
 sleeve = "exodus"
-# The funded CARRY producer writes this book when its v7 pre-settle exit
-# abandons a name. It stays after carry and long because strategy ids follow
-# file order and those existing ids must not move.
+# The independent funded Exodus daemon writes this book after consuming a v7
+# CARRY pre-settlement event. It stays after carry and long because strategy
+# ids follow file order and those existing ids must not move.
 book_path = "/var/lib/liquidity-migration/targets/exodus-mainnet.json"
 # Exodus entries are time-sensitive and their measured economics pay taker
 # fees. Covers also cross because the one-hour hold clock is the exit.
@@ -135,31 +135,30 @@ sleeve = "maker_canary"
 # the config. Quoting is disabled after the first forward sample; the block
 # pulls its own quotes and closes only inventory attributed to this sleeve.
 quote_enabled = false
-symbols = ["AGIUSDT"]
-
 # One venue-minimum-sized quote on each side. One fill brings inventory near
 # the ceiling, so the filled side stops accumulating and inventory skew makes
 # the reducing side easier to hit.
+# Conservative short-horizon price: L1 microprice, weighted L50 imbalance,
+# public aggressor flow, movement and queue value. These are execution inputs,
+# not a claim that the sleeve has forward profit evidence.
+# Aggressor notional is divided by displayed same-side dollars near the touch,
+# then held at two speeds. Buy aggression protects only the ask; sell
+# aggression protects only the bid. The seen-tape grid chose four basis points
+# per flow score and no hard pull. This is a forward trial, not a profit claim.
+# The economic fields below are rendered from the registered JSON rule.
+# BEGIN GENERATED MAKER CANARY RULE -- render_maker_canary_config.py
+symbols = ["AGIUSDT"]
 qty_usdt = 5.25
 max_position_usdt = 6.0
 half_spread_bps = 6.5
 requote_bps = 2.5
 skew_bps = 4.0
 stop_loss_fraction = 0.08
-
-# Conservative short-horizon price: L1 microprice, weighted L50 imbalance,
-# public aggressor flow, movement and queue value. These are execution inputs,
-# not a claim that the sleeve has forward profit evidence.
 maker_fee_bps = 4.0
 min_edge_bps = 4.0
 volatility_multiplier = 2.0
 book_lean_bps = 1.5
 signal_half_life_ms = 250.0
-
-# Aggressor notional is divided by displayed same-side dollars near the touch,
-# then held at two speeds. Buy aggression protects only the ask; sell
-# aggression protects only the bid. The seen-tape grid chose four basis points
-# per flow score and no hard pull. This is a forward trial, not a profit claim.
 flow_fast_half_life_ms = 250.0
 flow_slow_half_life_ms = 3000.0
 flow_fast_weight = 0.65
@@ -170,6 +169,7 @@ flow_depth_bps = 10.0
 flow_volatility_depth_multiplier = 2.0
 flow_max_score = 4.0
 queue_reprice_edge_bps = 1.5
+# END GENERATED MAKER CANARY RULE
 
 # NOTE ON THE SYMBOL LISTS ABOVE. They are a seed, not a universe. The engine
 # takes on any name a book asks for while it runs, so these only save the
