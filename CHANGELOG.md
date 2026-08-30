@@ -6,6 +6,15 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The first canonical-fleet rollout stops at LONG health.**
+  Prefetch and the complete managed stop succeeded, but the new demo LONG
+  producer passed the host's cache-staleness setting to a cycle function that
+  already reads that value from its typed effective config. Every cycle failed
+  at that Python call boundary, so activation withheld its completion receipt
+  and left the managed fleet stopped. The LONG daemon now removes that duplicate
+  host argument before calling the exact cycle signature, and a regression binds
+  the daemon-generated arguments to that real function.
+
 - **2026-08-30 — Strategy decisions and fleet identity gain one contract each.**
   Native LONG live and research planning now call the same pure typed reducer
   for signal, sizing, entry, stop and time exit; the contract has no

@@ -136,7 +136,9 @@ class LongNativeDemoDaemon(StrategyHostDaemon):
     def _cycle_call_kwargs(self, shared: dict[str, Any]) -> dict[str, Any]:
         """LONG's runner accepts only its one effective configuration."""
 
-        return {**shared, **self._extra_cycle_kwargs()}
+        cycle_kwargs = dict(shared)
+        cycle_kwargs.pop("state_cache_stale_seconds", None)
+        return {**cycle_kwargs, **self._extra_cycle_kwargs()}
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
         return format_long_demo_cycle_summary(payload)

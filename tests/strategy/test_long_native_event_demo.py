@@ -787,6 +787,11 @@ def test_long_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
 
 
 def test_long_daemon_cycle_call_uses_only_the_effective_config() -> None:
+    import inspect
+
+    from liquidity_migration.strategy.long_native_event_demo import (
+        run_long_native_demo_cycle,
+    )
     from liquidity_migration.strategy.long_native_event_demo_daemon import (
         LongNativeDemoDaemon,
     )
@@ -795,13 +800,119 @@ def test_long_daemon_cycle_call_uses_only_the_effective_config() -> None:
     effective = object()
     daemon._long_target_producer = True
     daemon._effective_config = effective  # type: ignore[assignment]
-    shared = {"now_ms": 1, "kline_store": None, "ticker_cache": None}
+    shared = {
+        "now_ms": 1,
+        "kline_store": None,
+        "ticker_cache": None,
+        "state_cache_stale_seconds": 120.0,
+    }
 
     kwargs = daemon._cycle_call_kwargs(shared)
 
-    assert kwargs == {**shared, "effective_config": effective}
+    assert kwargs == {
+        "now_ms": 1,
+        "kline_store": None,
+        "ticker_cache": None,
+        "effective_config": effective,
+    }
+    inspect.signature(run_long_native_demo_cycle).bind(**kwargs)
     assert "config" not in kwargs
     assert "demo_config" not in kwargs
+
+
+@pytest.mark.parametrize("environment", ["demo", "mainnet"])
+def test_long_daemon_dispatch_matches_cycle_runner_signature(
+    tmp_path: Path,
+    environment: str,
+) -> None:
+    from liquidity_migration.rules.engine_targets import render_target_book, write_target_book
+    from liquidity_migration.strategy.long_native_event_demo import LongRuntimeConfig
+    from liquidity_migration.strategy.long_native_event_demo_daemon import LongNativeDemoDaemon
+    from liquidity_migration.strategy.strategy_event_clock import StrategyEvent
+    from liquidity_migration.strategy.target_book_evidence import PublishedTargetCyclePayload
+
+    root = tmp_path / environment
+    book = root / "long.json"
+    write_target_book(
+        book,
+        render_target_book(
+            source=f"long-{environment}",
+            decision_ts_ms=1_000,
+            valid_until_ms=61_000,
+            targets=[],
+        ),
+    )
+    cycle = LongNativeDemoCycleConfig(execution_environment=environment)
+    effective = lnd.resolve_long_effective_config(
+        cycle,
+        runtime=LongRuntimeConfig(data_root=root, state_cache_stale_seconds=37.0),
+        strategy=_effective_long_config(),
+        exchange=ResearchConfig().exchange,
+        exchange_source="test",
+        operational_profile_source="test",
+        operational_profile_sha256="11" * 32,
+        target_book_path=book,
+        book_state_path=root / "state.json",
+        book_transitions_path=None,
+        engine_heartbeat_path=root / "heartbeat.json",
+        expected_account_user_id=f"{environment}-account",
+    )
+
+    class _KlineManager:
+        store_value = object()
+
+        def store(self) -> object:
+            return self.store_value
+
+    received: dict[str, object] = {}
+
+    def runner(
+        *,
+        effective_config: object,
+        now_ms: int,
+        kline_store: object,
+        ticker_cache: object,
+    ) -> PublishedTargetCyclePayload:
+        received.update(
+            effective_config=effective_config,
+            now_ms=now_ms,
+            kline_store=kline_store,
+            ticker_cache=ticker_cache,
+        )
+        return PublishedTargetCyclePayload(
+            {"cycle": {"cycle_id": f"{environment}-cycle"}},
+            target_book_path=book,
+        )
+
+    manager = _KlineManager()
+    daemon = LongNativeDemoDaemon(
+        effective_config=effective,
+        cycle_runner=runner,
+        kline_stream_manager=manager,
+    )
+    event = StrategyEvent(
+        event_ts_ns=1_000_000_000,
+        ingest_ts_ns=1_000_000_000,
+        source=f"long:{environment}",
+        source_sequence=1,
+        kind="startup",
+        payload={
+            "execution_environment": environment,
+            "strategy_profile": effective.strategy.profile_name,
+        },
+    )
+
+    payload = daemon._execute_cycle_event(event)
+
+    assert payload is not None
+    assert received == {
+        "effective_config": effective,
+        "now_ms": 1_000,
+        "kline_store": manager.store_value,
+        "ticker_cache": daemon._ticker_cache,
+    }
+    assert daemon._cycles_run == 1
+    assert daemon._cycle_errors == 0
 
 
 def test_long_daemon_refuses_a_missing_effective_config() -> None:
