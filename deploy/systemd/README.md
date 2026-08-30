@@ -11,7 +11,7 @@ unit shapes.
 
 ## Services
 
-Twenty unit files: fourteen services and six timers (two liveness, the LLM ledger, the trade notifier, the nightly backup, the weekly chaos drill).
+Twenty-two unit files: fifteen services and seven timers (two liveness, the LLM ledger, the trade notifier, the forward uploader, the nightly backup, the weekly chaos drill).
 
 | Unit | Role |
 | --- | --- |
@@ -26,6 +26,7 @@ Twenty unit files: fourteen services and six timers (two liveness, the LLM ledge
 | `liquidity-migration-llm-ledger.service` | LLM driver judgments on movers and trigger events, and the judged candidates file the demo LONG sleeve enters through — run by its hourly timer |
 | `liquidity-migration-trade-notify.service` | Sends every sleeve's entries and its exits with what they made to the owner's DM — run by its 5-minute timer |
 | `liquidity-migration-forward-capture.service` | Records public Bybit L50 books, trades, derivative tickers and liquidations into verified compressed segments; no account credentials or order path |
+| `liquidity-migration-forward-upload.service` | Copies only completed compressed segments to Google Drive, checks each new batch, and writes a Drive-side checksum list — run by its hourly timer |
 | `liquidity-migration-backup.service` | Nightly off-box copy of the WALs and trade files (the state git cannot rebuild) — run by its daily timer; a note and a clean exit until `/etc/liquidity-migration/backup.env` names a destination |
 | `liquidity-migration-chaos-drill.service` | Weekly crash-recovery rehearsal: kills the **demo** engine and reports on the alerts line whether it came back clean, latched, or not at all — run by its Sunday timer; never touches mainnet |
 
@@ -41,6 +42,14 @@ each `zstd` file and its checksum before deleting the raw segment, then retains
 at most 30 days or 60 GB while leaving at least 25 GB free. Its manifest records
 both compression and deletion. A queue overrun rebuilds the socket so the next
 book epoch begins with a fresh snapshot.
+
+The forward uploader reads that directory but selects only immutable `.zst`
+segments. It never sends `.partial` files, venue credentials, account WALs, or
+environment files. A local ledger advances only after `rclone check` passes,
+and each successful batch leaves a SHA-256 list under `_batches/` in Drive.
+Its root-only OAuth configuration is
+`/etc/liquidity-migration/rclone.conf`, beside the other host credentials that
+move with a VPS migration.
 
 ## Dependency edges
 

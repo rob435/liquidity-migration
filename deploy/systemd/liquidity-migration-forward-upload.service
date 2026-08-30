@@ -1,0 +1,33 @@
+[Unit]
+Description=Upload completed forward-market segments to Google Drive
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+Environment=FORWARD_CAPTURE_ROOT=/var/lib/liquidity-migration/forward-market
+Environment=FORWARD_CAPTURE_REMOTE=gdrive:LiquidityMigration/forward-market
+Environment=FORWARD_UPLOAD_STATE_DIR=/var/lib/liquidity-migration/forward-upload
+Environment=RCLONE_CONFIG=/etc/liquidity-migration/rclone.conf
+ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-forward-upload.service main
+KillMode=control-group
+TimeoutStartSec=1800
+
+StateDirectory=liquidity-migration/forward-upload
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/liquidity-migration/forward-upload
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=512M
+TasksMax=128
+Nice=15
+IOSchedulingClass=idle

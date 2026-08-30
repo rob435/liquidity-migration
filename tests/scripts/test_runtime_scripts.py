@@ -71,7 +71,7 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
 
 def test_manifest_contains_only_the_current_rust_owned_fleet() -> None:
     units = _units()
-    assert len(units) == 20
+    assert len(units) == 22
     assert "liquidity-migration-engine.service" in units
     assert "liquidity-migration-engine-mainnet.service" in units
     assert not any("account-execution" in name for name in units)

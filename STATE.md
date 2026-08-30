@@ -397,9 +397,10 @@ cleanly into disk, socket, leverage call, and venue legs.
 
 Eight daemons run continuously: the demo Rust engine (LIVE), the
 mainnet engine, demo LONG and CARRY producers, mainnet LONG and CARRY
-producers, the Telegram controls, and the public forward recorder. Four timers
-drive four oneshots beside them — demo liveness, mainnet liveness, the LLM
-ledger, and the trade notifier.
+producers, the Telegram controls, and the public forward recorder. Seven timers
+drive seven oneshots beside them — demo liveness, mainnet liveness, the LLM
+ledger, the trade notifier, the forward uploader, the nightly state backup,
+and the weekly demo recovery drill.
 The execution host at `208.84.103.4` carries exactly the unit files in
 `deploy/systemd/` and nothing else;
 [the inventory is that directory's README](deploy/systemd/README.md). Demo is
@@ -411,6 +412,10 @@ open interest and liquidations are written with local and venue times, verified
 into compressed segments, and retained for 30 days within a 60 GB / 25 GB-free
 disk boundary. L1 and L50 rows name their depth and keep separate sequence
 state while retaining the venue cross-sequence that orders them.
+Completed compressed segments are copied hourly to Google Drive. Each new batch
+is checked against the local files before its upload ledger advances and leaves
+a SHA-256 list beside the remote tape; partial segments and private account
+state never enter that path.
 Live L2 readiness and exact decision-book capture are also on.
 
 ## Risk envelope

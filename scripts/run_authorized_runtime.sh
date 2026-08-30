@@ -116,6 +116,9 @@ case "$UNIT:$ENTRYPOINT" in
             --min-free-disk-gb 25
         )
         ;;
+    liquidity-migration-forward-upload.service:main)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/upload_forward_capture.sh)
+        ;;
     *)
         echo "unregistered authorized runtime entrypoint: $UNIT:$ENTRYPOINT" >&2
         exit 2

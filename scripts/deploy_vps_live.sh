@@ -1467,6 +1467,9 @@ verify_topology() {
     if systemctl cat liquidity-migration-forward-capture.service >/dev/null 2>&1; then
         verify_unit on liquidity-migration-forward-capture.service "forward market capture is not active"
     fi
+    if systemctl cat liquidity-migration-forward-upload.timer >/dev/null 2>&1; then
+        verify_unit on liquidity-migration-forward-upload.timer "forward market upload timer is not active"
+    fi
     verify_unit on "$ENGINE_UNIT" "required demo Rust engine is not active"
     if [ ! -x "$ENGINE_BINARY" ] || [ ! -r "${ENGINE_BINARY}.release" ]; then
         verify_note "required commit-bound Rust engine artifact is missing"
@@ -3043,6 +3046,8 @@ activate_mode() {
         || fail "cannot start the trade notification timer"
     systemctl enable --now liquidity-migration-forward-capture.service \
         || fail "cannot start forward market capture"
+    systemctl enable --now liquidity-migration-forward-upload.timer \
+        || fail "cannot enable the forward market upload timer"
     systemctl enable --now liquidity-migration-backup.timer \
         || fail "cannot enable the nightly backup timer"
     systemctl enable --now liquidity-migration-chaos-drill.timer \
@@ -3376,6 +3381,8 @@ stop_mainnet_mode() {
 }
 
 ROLLOUT_DOWNSTREAM_UNITS=(
+    liquidity-migration-forward-upload.timer
+    liquidity-migration-forward-upload.service
     liquidity-migration-forward-capture.service
     liquidity-migration-demo-liveness.timer
     liquidity-migration-mainnet-liveness.timer

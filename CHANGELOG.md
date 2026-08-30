@@ -6,6 +6,13 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The forward tape has an off-box home.** An hourly uploader
+  sends only completed `.zst` segments to Google Drive, checks each new batch
+  before advancing its local ledger, and leaves a SHA-256 batch list beside
+  the remote files. Open `.partial` segments, account WALs, credentials and
+  environment files never enter this path. The first live object matched the
+  VPS copy in both size and MD5; the Drive account reported roughly 5 TB free.
+
 - **2026-08-30 — The fleet was reaching Singapore by way of another
   continent.** Bybit is served through CloudFront, which picks its edge from
   the resolver the query arrives on. The box resolved over IPv6, has no
