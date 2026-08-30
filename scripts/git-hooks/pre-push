@@ -9,6 +9,12 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 REPO_ROOT="$(pwd -P)"
 
+# Git exports checkout-local variables to hooks. Test fixtures create their own
+# repositories, so let each fixture's path select its own .git directory.
+while IFS= read -r name; do
+    unset "$name"
+done < <(git rev-parse --local-env-vars)
+
 PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
 if [[ ! -x "$PYTHON_BIN" ]]; then
     PYTHON_BIN="$(command -v python3 || command -v python)"

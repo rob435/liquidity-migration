@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,38 @@ pytestmark = pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd is no
 # 2027-01-15 08:00:00 UTC; tape day directories are named by the receive day.
 T0_MS = 1_800_000_000_000
 DAY = "2027-01-15"
+
+GIT_LOCAL_ENV_VARS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+}
+
+
+def git_fixture_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in GIT_LOCAL_ENV_VARS:
+        env.pop(name, None)
+    return env
+
+
+@pytest.fixture(autouse=True)
+def clear_parent_git_bindings(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in GIT_LOCAL_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 def book_row(
@@ -538,16 +571,26 @@ def test_model_commit_refuses_a_different_current_profile_blob(tmp_path: Path) -
     backtest.mkdir(parents=True)
     (rules / "long_native.py").write_text("PROFILE = 'v12'\n", encoding="utf-8")
     (backtest / "long_native.py").write_text("FILL = 'next_open'\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "tape@example.invalid"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Tape Test"], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "pin"], check=True)
+    git_env = git_fixture_env()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=git_env)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "tape@example.invalid"],
+        check=True,
+        env=git_env,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Tape Test"],
+        check=True,
+        env=git_env,
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "pin"], check=True, env=git_env)
     commit = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
+        env=git_env,
     ).stdout.strip()
 
     identity = _kernel_identity(commit, repo=repo)
@@ -557,3 +600,12 @@ def test_model_commit_refuses_a_different_current_profile_blob(tmp_path: Path) -
     (rules / "long_native.py").write_text("PROFILE = 'different'\n", encoding="utf-8")
     with pytest.raises(ValueError, match="does not match the current checkout"):
         _kernel_identity(commit, repo=repo)
+
+
+def test_git_fixture_env_drops_parent_repository_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in GIT_LOCAL_ENV_VARS:
+        monkeypatch.setenv(name, "caller-repository-value")
+
+    assert GIT_LOCAL_ENV_VARS.isdisjoint(git_fixture_env())

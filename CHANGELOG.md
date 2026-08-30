@@ -24,7 +24,10 @@ edit STATE.md to match.
   Binance carry replication at +10.1 bp/day over 1,756 seen days. Forward
   capture starts with 81 symbols: the existing maker/saved-L50 set plus LONG's
   top 50 by 90-day median daily turnover and a ten-rank buffer. Private
-  research inputs stay outside Git in a mode-0600 local evidence archive. The
+  research inputs stay outside Git in a mode-0600 local evidence archive.
+  The pre-push gate clears checkout-local Git environment before tests create
+  throwaway repositories, so a linked-worktree run cannot write fixture
+  identity, refs, or index state into the caller's repository. The
   operational rollout installs the commit carrying this entry and restarts the
   widened recorder with the rest of the managed fleet.
 
