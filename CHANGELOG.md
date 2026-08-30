@@ -22,7 +22,14 @@ edit STATE.md to match.
   close record could say which entries were the gate's, and this log is the
   durable split. A failed append warns and never stops the cycle. Six new
   tests, each proved to fail without its change. This commit is the veto's
-  change point.
+  change point. Deployed the same night via `ops.sh deploy rollout` at
+  `d673b578` (verify-ok, whole topology active): the demo engine's
+  `SuccessExitStatus=143` is loaded and a live restart logged `Deactivated
+  successfully`; forward-capture restarted onto the near CloudFront edge at
+  00:57 UTC; both heartbeats healthy with `may_open: true`. Three agents
+  were operating this repo and host concurrently that night — a competing
+  rollout was detected by its held maintenance lock and waited out, never
+  broken.
 
 - **2026-08-30 — The forward tape has an off-box home.** An hourly uploader
   sends only completed `.zst` segments to Google Drive, checks each new batch
