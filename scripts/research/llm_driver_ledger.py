@@ -79,6 +79,18 @@ NOMINEES_MAX = 12
 # spike, how often the name has fired before -- separated them.
 TRIGGER_TURNOVER_RANK_MAX = 10
 
+# The wide band (owner-directed forward A/B, change point 2026-08-30). Ranks
+# 11-30 are scanned, judged, and published like the core band but the event
+# carries band="wide" and the LONG producer labels those entries
+# llm_gate_wide, so the two cohorts grade apart. Mechanically the 11-30 pool
+# is a lottery -- 9% of its triggers graduate to top-10 within 3 days
+# (+1,805 bp/trade, 89% win) and the other 91% average -126 bp/trade
+# (research_findings 2026-08-30) -- so what this band tests is precisely
+# whether the judgment separates them. HNTUSDT 2026-08-30 is the motivating
+# case: scored 7 at rank 11 at 01:05, enterable only at rank 9 at 09:05,
+# +47% later.
+TRIGGER_WIDE_RANK_MAX = 30
+
 # The rubric the model executes. Every number in the priors step is this
 # repo's own measurement, not folklore: the depth figure from the daily v13
 # program, the rest graded on 5.5 years of these hourly triggers. The one
@@ -524,7 +536,9 @@ WOULD_ENTER_SCORE = 6
 # Nothing below 4h: graded on 5.5 years of hourly bars, the 1h and 2h windows
 # each have a significantly negative year and 12h has none.
 TRIGGER_WINDOWS_H = (4, 12, 24)
-TRIGGER_ROWS_MAX = 10
+# Bounds LLM spend per run, not admission. Raised 10 -> 20 with the wide
+# band so a hot hour cannot starve ranks 11-30 out of the journal.
+TRIGGER_ROWS_MAX = 20
 
 
 def _completed_hourly(symbol: str, limit: int = 26) -> list[list[Any]]:
@@ -587,7 +601,7 @@ def cmd_triggers(ledger_dir: Path) -> None:
     fired = 0
     judged_events: list[dict[str, Any]] = []
     with path.open("a") as fh:
-        for rank, t in enumerate(usdt[:TRIGGER_TURNOVER_RANK_MAX], start=1):
+        for rank, t in enumerate(usdt[:TRIGGER_WIDE_RANK_MAX], start=1):
             symbol = str(t["symbol"])
             if symbol in recent:
                 continue
@@ -672,6 +686,7 @@ def cmd_triggers(ledger_dir: Path) -> None:
             would_enter = isinstance(score, (int, float)) and score >= WOULD_ENTER_SCORE
             prior_days = len(flag_days.get(symbol, ()))
             freshness_veto = prior_days >= GATE_FRESHNESS_VETO_PRIOR_DAYS
+            rank_band = "core" if rank <= TRIGGER_TURNOVER_RANK_MAX else "wide"
             row = {
                 "ts_utc": now.isoformat(timespec="seconds"),
                 "prompt_version": PROMPT_VERSION,
@@ -680,6 +695,7 @@ def cmd_triggers(ledger_dir: Path) -> None:
                 "would_enter_score_min": WOULD_ENTER_SCORE,
                 "freshness_veto": freshness_veto,
                 "prior_flag_days": prior_days,
+                "rank_band": rank_band,
                 "facts": facts,
                 "judgment": judgment,
             }
@@ -770,6 +786,7 @@ def publish_gate_candidates(
             {
                 "symbol": str(facts.get("symbol", "")).upper(),
                 "score": (ev.get("judgment") or {}).get("pump_quality_score"),
+                "band": str(ev.get("rank_band") or "core"),
                 "trigger_ts_ms": trigger_ts_ms,
                 "trigger_price": float(price),
                 "atr_pct": float(atr),
@@ -825,6 +842,8 @@ def cmd_grade(ledger_dir: Path) -> None:
         row_type = str(row.get("row_type", "mover"))
         if row.get("freshness_veto"):
             row_type += "[vetoed]"
+        if row.get("rank_band") == "wide":
+            row_type += "[wide]"
         kind = f"{row_type}:{judgment.get('driver_kind', 'unjudged')}"
         version = str(row.get("prompt_version", "?"))
         fwd = _forward_return(row["facts"]["symbol"], int(ts.timestamp() * 1000), 72)

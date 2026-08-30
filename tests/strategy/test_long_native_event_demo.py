@@ -1004,6 +1004,30 @@ def _llm_gate_candidates_for_test(events, *, strategy, now_ms):
     )
 
 
+class TestWideBandLabel:
+    """A band="wide" event (turnover rank 11-30) keeps its own pattern, so its
+    fills grade apart from the core gate's; anything else stays llm_gate."""
+
+    def test_a_wide_event_is_labeled_llm_gate_wide(self) -> None:
+        event = _gate_event("WIDEUSDT")
+        event["band"] = "wide"
+        candidates, _ = _llm_gate_candidates_for_test(
+            [event], strategy=long_v12_profile(), now_ms=1_700_000_100_000
+        )
+        (cand,) = candidates
+        assert cand["pattern"] == "llm_gate_wide"
+        assert "wide band" in cand["entry_rule"]
+
+    def test_a_core_or_bandless_event_stays_llm_gate(self) -> None:
+        core = _gate_event("COREUSDT")
+        core["band"] = "core"
+        bandless = _gate_event("OLDUSDT", trigger_ts_ms=1_700_000_000_001)
+        candidates, _ = _llm_gate_candidates_for_test(
+            [core, bandless], strategy=long_v12_profile(), now_ms=1_700_000_100_000
+        )
+        assert [c["pattern"] for c in candidates] == ["llm_gate", "llm_gate"]
+
+
 class TestReadLlmGateEvents:
     def test_no_path_configured_reads_as_no_signal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from liquidity_migration.strategy.long_native_event_demo import _read_llm_gate_events

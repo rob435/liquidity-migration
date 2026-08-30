@@ -1025,6 +1025,11 @@ def _llm_gate_candidates(
             skips["llm_gate_no_vol"] += 1
             continue
         seen.add(symbol)
+        # The wide band (turnover ranks 11-30, owner-directed forward A/B,
+        # 2026-08-30) enters through the same machinery but keeps its own
+        # pattern, so its fills grade apart from the core gate's.
+        band = str(event.get("band") or "core")
+        pattern = "llm_gate_wide" if band == "wide" else "llm_gate"
         realized_vol = sigma_daily * math.sqrt(365.0)
         notional_weight = strategy.gross_exposure / max(strategy.max_concurrent_positions, 1)
         position_weight = _vol_parity_weight(
@@ -1039,7 +1044,7 @@ def _llm_gate_candidates(
             "trade_id": long_trade_id(symbol=symbol, signal_ts_ms=trigger_ts_ms),
             "symbol": symbol,
             "side": "long",
-            "pattern": "llm_gate",
+            "pattern": pattern,
             "signal_ts_ms": trigger_ts_ms,
             "signal_close": _float(event.get("trigger_price")),
             "live_price": live_price,
@@ -1073,7 +1078,7 @@ def _llm_gate_candidates(
             "entry_quality_tier": f"score_{score:g}",
             "entry_rule": (
                 f"LLM gate pump_quality_score >= 6 "
-                f"(score {score:g}, {event.get('trigger_window_h') or '?'}h window)"
+                f"(score {score:g}, {event.get('trigger_window_h') or '?'}h window, {band} band)"
             ),
         }
         candidates.append(candidate)

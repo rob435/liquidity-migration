@@ -146,6 +146,34 @@ class TestFreshnessVeto:
         assert ledger._flag_days_by_symbol(tmp_path / "none.jsonl", NOW, window_days=4) == {}
 
 
+class TestWideBand:
+    """Ranks 11-30 are judged and published like the core band, but the event
+    carries band="wide" so the LONG producer can label those entries apart."""
+
+    def test_the_band_rides_through_publication(self, tmp_path: Path) -> None:
+        wide = _event("WIDEUSDT")
+        wide["rank_band"] = "wide"
+        core = _event("COREUSDT")
+        core["rank_band"] = "core"
+        published = _publish(tmp_path, [wide, core])
+        bands = {e["symbol"]: e["band"] for e in published}
+        assert bands == {"WIDEUSDT": "wide", "COREUSDT": "core"}
+
+    def test_a_row_without_a_band_publishes_as_core(self, tmp_path: Path) -> None:
+        (published,) = _publish(tmp_path, [_event("AAAUSDT")])
+        assert published["band"] == "core"
+
+    def test_the_veto_applies_to_the_wide_band_too(self, tmp_path: Path) -> None:
+        wide = _event("WIDEUSDT")
+        wide["rank_band"] = "wide"
+        wide["freshness_veto"] = True
+        assert _publish(tmp_path, [wide]) == []
+
+    def test_the_scan_depth_and_core_cut_are_the_measured_values(self) -> None:
+        assert ledger.TRIGGER_TURNOVER_RANK_MAX == 10
+        assert ledger.TRIGGER_WIDE_RANK_MAX == 30
+
+
 class TestTakerRatioDayMean:
     """The one order-flow fact that graded era-stable. It is a MEAN of the
     five-minute ratios, and the rubric's threshold is only meaningful against

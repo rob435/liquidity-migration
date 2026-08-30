@@ -6,6 +6,23 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The gate grows a wide band, labeled apart (owner
+  directive: "wire it in for demo and add its own label").** The trigger
+  scan now reads turnover ranks 1–30: ranks 11–30 are judged and published
+  under the same score ≥ 6 bar and freshness veto but carry `band: "wide"`,
+  and the LONG producer labels those entries `llm_gate_wide` in its state
+  and transitions log, so the cohort's fills grade apart from the core
+  rank ≤ 10 band. The measured motivation is the HNTUSDT case and the rank
+  barrier's price (research_findings §the rank barrier: the 11–30 pool is
+  9% graduating monsters, 91% junk averaging −126 bp/trade; entering HNT
+  waited 8 hours and +47% for rank 9). The wide band is the judged attempt
+  at that separation; its labeled forward record is the only evidence that
+  can move the core cut. `TRIGGER_ROWS_MAX` 10 → 20 so a hot hour cannot
+  starve the wide ranks out of the journal. Demo only — the mainnet unit
+  still carries no gate configuration. Six new tests; the four that pin new
+  behavior proved to fail without the change. This commit is the wide
+  band's change point.
+
 - **2026-08-30 — The whole-repository audit removes silent ambiguity at the
   inputs, order path, account edge, and deploy edge.** Market numbers now
   reject NaN, infinity, non-positive prices and invalid sizes at one shared

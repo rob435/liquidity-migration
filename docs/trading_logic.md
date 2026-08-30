@@ -387,6 +387,18 @@ flagged is a chase, not a fresh pump, and chasing is the gate's one measured
 loss class. `--grade` buckets vetoed rows separately, so the ledger carries
 its own forward A/B of what the veto refused against what it let through.
 
+**The wide band.** The trigger scan reads turnover ranks 1–30. Ranks 1–10
+are the core band; ranks 11–30 are judged and published under the same
+score bar and veto but carry `band: "wide"`, and the producer labels those
+entries **`llm_gate_wide`** so their fills grade apart. What this band
+tests: mechanically the 11–30 pool is a lottery — 9% of its triggers
+graduate into the top-10 within 3 days (+1,805 bp/trade, 89% winners) and
+the other 91% average −126 bp/trade — and nothing in the panel separates
+them in advance ([record](research/research_findings.md) §the rank
+barrier). The wide band is the judged attempt at that separation, and its
+own labeled forward record is the only evidence that can move the core
+cut. Demo only, like the rest of the gate.
+
 The window set and the rank depth are graded, on 5.5 years of hourly bars
 against the sleeve's own exit geometry
 ([record](research/research_findings.md)): the 1h and 2h
