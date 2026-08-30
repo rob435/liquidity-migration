@@ -17,6 +17,7 @@ SUDOERS=/etc/sudoers.d/liquidity-migration-controls
 BOT=/opt/liquidity-migration/liquidity_migration/ops/telegram_controls.py
 SLEEVES_LIBRARY=/opt/liquidity-migration/deploy/lib_sleeves.sh
 SLEEVES_DEFAULT=/opt/liquidity-migration/deploy/sleeves.env
+FLEET_MANIFEST=/opt/liquidity-migration/deploy/fleet_manifest.tsv
 ACTIVATION_RECEIPT=/opt/liquidity-migration-engine/bin/activation.complete
 HOST_SLEEVES=/etc/liquidity-migration/sleeves.env
 RESOLVED_SLEEVES=/etc/liquidity-migration/sleeves.resolved.env
@@ -46,7 +47,7 @@ if [ "${1:-}" != --worker ]; then
     [ "$#" -eq 1 ] || refuse "expected one fixed action"
     ACTION="$1"
     case "$ACTION" in
-        pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-demo) ;;
+        pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-fleet) ;;
         *) refuse "unsupported action" ;;
     esac
     [ "${SUDO_USER:-}" = "$CALLER" ] \
@@ -77,7 +78,7 @@ fi
     || refuse "invalid privileged worker invocation"
 ACTION="$2"
 case "$ACTION" in
-    pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-demo) ;;
+    pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-fleet) ;;
     *) refuse "unsupported privileged worker action" ;;
 esac
 [ -z "${SUDO_USER:-}" ] && [ -z "${BASH_ENV:-}" ] && [ -z "${ENV:-}" ] \
@@ -92,7 +93,7 @@ esac
     || refuse "trusted checkout metadata is missing, linked, or not root-owned"
 
 for path in "$ENGINE" "$LAUNCHER" "$MARKER" "$HELPER" "$SUDOERS" "$BOT" \
-    "$SLEEVES_LIBRARY" "$SLEEVES_DEFAULT"; do
+    "$SLEEVES_LIBRARY" "$SLEEVES_DEFAULT" "$FLEET_MANIFEST"; do
     [ -f "$path" ] && [ ! -L "$path" ] \
         && [ "$(stat -c %u "$path")" -eq 0 ] \
         || refuse "trusted input is missing, linked, or not root-owned: $path"
@@ -104,6 +105,7 @@ done
     && [ "$(stat -c %a "$BOT")" = 644 ] \
     && [ "$(stat -c %a "$SLEEVES_LIBRARY")" = 644 ] \
     && [ "$(stat -c %a "$SLEEVES_DEFAULT")" = 644 ] \
+    && [ "$(stat -c %a "$FLEET_MANIFEST")" = 644 ] \
     || refuse "tracked control inputs have unsafe modes"
 
 awk '
@@ -154,7 +156,7 @@ checkout_commit="$(
     -c "safe.directory=$REPOSITORY" -c core.fsmonitor=false \
     -c core.hooksPath=/dev/null diff-index --quiet "$marker_commit" -- \
     || refuse "tracked checkout differs from the installed generation"
-for relative in deploy/lib_sleeves.sh deploy/sleeves.env; do
+for relative in deploy/lib_sleeves.sh deploy/sleeves.env deploy/fleet_manifest.tsv; do
     committed="$(
         /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
             GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
@@ -187,12 +189,18 @@ else
 fi
 LM_HOST_SLEEVES_ENV="$HOST_SLEEVES"
 LM_RESOLVED_SLEEVES_ENV="$RESOLVED_SLEEVES"
+LM_FLEET_MANIFEST="$FLEET_MANIFEST"
 LM_SYSTEMD_UNIT_DIR=/etc/systemd/system
 LM_RUNTIME_SYSTEMD_UNIT_DIR=/run/systemd/system
-export LM_HOST_SLEEVES_ENV LM_RESOLVED_SLEEVES_ENV \
+export LM_HOST_SLEEVES_ENV LM_RESOLVED_SLEEVES_ENV LM_FLEET_MANIFEST \
     LM_SYSTEMD_UNIT_DIR LM_RUNTIME_SYSTEMD_UNIT_DIR
 # shellcheck source=lib_sleeves.sh
 source "$SLEEVES_LIBRARY"
+lm_validate_fleet_manifest || refuse "fleet manifest is invalid"
+DEMO_OWNER_UNIT="$(lm_owner_unit demo)" \
+    || refuse "fleet manifest has no demo account owner"
+MAINNET_OWNER_UNIT="$(lm_owner_unit mainnet)" \
+    || refuse "fleet manifest has no funded account owner"
 
 validate_private_state_file() {
     local path="$1"
@@ -281,15 +289,23 @@ write_resolved() {
     sync
 }
 
-quarantine_pair() {
-    local first="$1" second="$2" unit enabled failed=0
-    /usr/bin/systemctl --quiet disable --now "$first" "$second" \
-        2>/dev/null || true
-    for unit in "$first" "$second"; do
+collect_target_units() {
+    local realm="$1" direction="$2" long="$3" carry="$4" mainnet="$5" unit
+    TARGET_UNITS=()
+    while IFS= read -r unit; do
+        [ -n "$unit" ] && TARGET_UNITS+=("$unit")
+    done < <(lm_target_producer_units "$realm" "$direction" "$long" "$carry" "$mainnet")
+}
+
+quarantine_units() {
+    local unit enabled failed=0
+    [ "$#" -gt 0 ] || refuse "fleet manifest selected no target producers"
+    /usr/bin/systemctl --quiet disable --now "$@" 2>/dev/null || true
+    for unit in "$@"; do
         /usr/bin/systemctl --quiet disable "$unit" 2>/dev/null || true
         /usr/bin/systemctl --quiet stop "$unit" 2>/dev/null || true
     done
-    for unit in "$first" "$second"; do
+    for unit in "$@"; do
         if /usr/bin/systemctl is-active --quiet "$unit"; then
             failed=1
         fi
@@ -305,10 +321,9 @@ quarantine_pair() {
 
 pause_demo() {
     save_original_once
-    quarantine_pair \
-        liquidity-migration-bybit-long-demo.service \
-        liquidity-migration-bybit-carry-demo.service \
-        || refuse "demo pause could not quarantine both producers"
+    collect_target_units demo stop on on off
+    quarantine_units "${TARGET_UNITS[@]}" \
+        || refuse "demo pause could not quarantine every target producer"
     atomic_install_text "$HOST_SLEEVES" \
         $'# paused by telegram-control-helper\nLONG_SLEEVE=off\nCARRY_SLEEVE=off\n'
     write_resolved
@@ -319,7 +334,7 @@ resume_demo() {
     local temporary start_status=0
     activation_complete \
         || refuse "demo resume requires this generation's completed activation receipt"
-    /usr/bin/systemctl is-active --quiet liquidity-migration-engine.service \
+    /usr/bin/systemctl is-active --quiet "$DEMO_OWNER_UNIT" \
         || refuse "demo resume requires the account owner to be active"
     validate_private_state_file "$SAVED_SLEEVES" \
         || refuse "no validated pre-pause sleeve state exists"
@@ -335,29 +350,21 @@ resume_demo() {
             || refuse "cannot atomically restore sleeve state"
     fi
     write_resolved
-    if sleeve_on "$LONG_SLEEVE"; then
-        /usr/bin/systemctl --quiet enable --now \
-            liquidity-migration-bybit-long-demo.service || start_status=$?
-    fi
-    if [ "$start_status" -eq 0 ] && sleeve_on "$CARRY_SLEEVE"; then
-        /usr/bin/systemctl --quiet enable --now \
-            liquidity-migration-bybit-carry-demo.service || start_status=$?
-    fi
-    if [ "$start_status" -eq 0 ] && sleeve_on "$LONG_SLEEVE" \
-        && ! /usr/bin/systemctl is-active --quiet \
-            liquidity-migration-bybit-long-demo.service; then
-        start_status=1
-    fi
-    if [ "$start_status" -eq 0 ] && sleeve_on "$CARRY_SLEEVE" \
-        && ! /usr/bin/systemctl is-active --quiet \
-            liquidity-migration-bybit-carry-demo.service; then
-        start_status=1
-    fi
+    collect_target_units demo start "$LONG_SLEEVE" "$CARRY_SLEEVE" off
+    for unit in "${TARGET_UNITS[@]}"; do
+        [ "$start_status" -eq 0 ] || break
+        /usr/bin/systemctl --quiet enable --now "$unit" || start_status=$?
+    done
+    for unit in "${TARGET_UNITS[@]}"; do
+        if [ "$start_status" -eq 0 ] \
+            && ! /usr/bin/systemctl is-active --quiet "$unit"; then
+            start_status=1
+        fi
+    done
     if [ "$start_status" -ne 0 ]; then
-        quarantine_pair \
-            liquidity-migration-bybit-long-demo.service \
-            liquidity-migration-bybit-carry-demo.service 2>/dev/null || true
-        refuse "demo resume failed; both producers were re-quarantined"
+        collect_target_units demo stop on on off
+        quarantine_units "${TARGET_UNITS[@]}" 2>/dev/null || true
+        refuse "demo resume failed; every target producer was re-quarantined"
     fi
     rm -f -- "$SAVED_SLEEVES"
     sync
@@ -365,10 +372,9 @@ resume_demo() {
 }
 
 pause_mainnet() {
-    quarantine_pair \
-        liquidity-migration-bybit-long-mainnet.service \
-        liquidity-migration-bybit-carry-mainnet.service \
-        || refuse "mainnet pause could not quarantine both funded producers"
+    collect_target_units mainnet stop off off on
+    quarantine_units "${TARGET_UNITS[@]}" \
+        || refuse "mainnet pause could not quarantine every funded target producer"
     echo "paused=mainnet"
 }
 
@@ -379,41 +385,50 @@ resume_mainnet() {
     local unit start_status=0
     activation_complete \
         || refuse "funded resume requires this generation's completed activation receipt"
-    /usr/bin/systemctl is-active --quiet liquidity-migration-engine-mainnet.service \
+    /usr/bin/systemctl is-active --quiet "$MAINNET_OWNER_UNIT" \
         || refuse "funded resume requires the funded account owner to be active"
-    /usr/bin/systemctl --quiet enable --now \
-        liquidity-migration-bybit-carry-mainnet.service || start_status=$?
-    if [ "$start_status" -eq 0 ]; then
-        /usr/bin/systemctl --quiet enable --now \
-            liquidity-migration-bybit-long-mainnet.service || start_status=$?
-    fi
-    for unit in liquidity-migration-bybit-carry-mainnet.service \
-        liquidity-migration-bybit-long-mainnet.service; do
+    collect_target_units mainnet start off off on
+    for unit in "${TARGET_UNITS[@]}"; do
+        [ "$start_status" -eq 0 ] || break
+        /usr/bin/systemctl --quiet enable --now "$unit" || start_status=$?
+    done
+    for unit in "${TARGET_UNITS[@]}"; do
         if [ "$start_status" -eq 0 ] \
             && ! /usr/bin/systemctl is-active --quiet "$unit"; then
             start_status=1
         fi
     done
     if [ "$start_status" -ne 0 ]; then
-        quarantine_pair \
-            liquidity-migration-bybit-long-mainnet.service \
-            liquidity-migration-bybit-carry-mainnet.service 2>/dev/null || true
-        refuse "funded resume failed; both funded producers were re-quarantined"
+        collect_target_units mainnet stop off off on
+        quarantine_units "${TARGET_UNITS[@]}" 2>/dev/null || true
+        refuse "funded resume failed; every funded target producer was re-quarantined"
     fi
     sync
     printf 'resumed=mainnet\n'
 }
 
-status_demo() {
+status_fleet() {
+    local paused=false row unit realm role sleeve active
     lm_load_sleeve_toggles || refuse "cannot resolve demo sleeve state"
     if [ -e "$SAVED_SLEEVES" ]; then
         validate_private_state_file "$SAVED_SLEEVES" \
             || refuse "saved sleeve state is invalid"
-        echo "paused=true"
-    else
-        echo "paused=false"
+        paused=true
     fi
-    printf 'LONG_SLEEVE=%s\nCARRY_SLEEVE=%s\n' "$LONG_SLEEVE" "$CARRY_SLEEVE"
+    printf 'fleet-status-v1\n'
+    printf 'demo-control|paused|%s\n' "$paused"
+    printf 'sleeve|long|%s\n' "$LONG_SLEEVE"
+    printf 'sleeve|carry|%s\n' "$CARRY_SLEEVE"
+    while IFS='|' read -r unit realm role sleeve; do
+        [ -n "$unit" ] || continue
+        active="$(/usr/bin/systemctl is-active "$unit" 2>/dev/null || true)"
+        case "$active" in
+            active|reloading|inactive|failed|activating|deactivating|maintenance|refreshing|unknown) ;;
+            *) active=unknown ;;
+        esac
+        printf 'unit|%s|%s|%s|%s|%s\n' \
+            "$realm" "$role" "$sleeve" "$unit" "$active"
+    done < <(lm_operator_status_rows)
 }
 
 case "$ACTION" in
@@ -421,5 +436,5 @@ case "$ACTION" in
     resume-demo) resume_demo ;;
     pause-mainnet) pause_mainnet ;;
     resume-mainnet) resume_mainnet ;;
-    status-demo) status_demo ;;
+    status-fleet) status_fleet ;;
 esac

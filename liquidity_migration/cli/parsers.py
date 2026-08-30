@@ -163,24 +163,20 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     """CLI for the long sleeve target-production cycle.
 
     `--strategy-profile` selects the registered profile: `v11a`
-    (LongV11aDivWeekendVol) or `v12` (LongV12WideStop; v11a with the stop
-    opened to 3x ATR and decayed back to 1.5x after 48h). Per-position notional
-    defaults to 1x research sizing; levered sizing must be passed explicitly and
-    satisfy the projected initial-margin cap. Desired targets go to the account
-    owner through the configured inbox.
+    (LongV11aDivWeekendVol) or `v12` (LongV12WideStop). The required operational
+    profile supplies all live sizing and leverage. Desired targets go to the
+    Rust account owner through the resolved target book.
     """
     from liquidity_migration.rules.long_native import LONG_STRATEGY_PROFILE_CHOICES
-    from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig
 
     long_demo = subparsers.add_parser(
         "long-native-event-demo-cycle",
         help="Run one forward-testing cycle for the long sleeve (profile via --strategy-profile).",
     )
-    demo_defaults = LongNativeDemoCycleConfig()
     long_demo.add_argument(
         "--strategy-profile",
         choices=LONG_STRATEGY_PROFILE_CHOICES,
-        default="v11a",
+        required=True,
         help=(
             "Registered LONG strategy profile. Each maps to its own persisted "
             "execution identity (journal key); v12 adds the 48h decayed-stop "
@@ -190,48 +186,29 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     long_demo.add_argument(
         "--universe-superset-size",
         type=int,
-        default=demo_defaults.universe_superset_size,
+        default=None,
         help="Public-data pool size; the active strategy fixes its ranked universe at 50.",
     )
     long_demo.add_argument(
         "--lookback-days",
         type=int,
-        default=demo_defaults.lookback_days,
-        help="1h kline lookback in days. ≥60 so 30d returns and 30d vol populate.",
+        default=None,
+        help="1h kline lookback in days. ≥95 so the longest registered feature window populates.",
     )
     long_demo.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Cycle worker threads. Direct CLI default matches the wrapper; systemd pins 2 on the VPS.",
-    )
-    long_demo.add_argument(
-        "--notional-multiplier",
-        type=float,
-        default=demo_defaults.notional_multiplier,
-        help="Per-position notional multiplier vs the base gross/max_concurrent. "
-        "Default 1×; levered demo sizing is explicit opt-in.",
+        default=None,
+        help="Cycle worker threads. Omit to use the typed producer default.",
     )
     long_demo.add_argument(
         "--operational-profile-file",
-        default="",
+        required=True,
         help=(
-            "Strict shared producer/account operational profile. When supplied, "
-            "its LONG sizing fields override the individual sizing flags."
+            "Required shared producer/account operational profile. Its LONG "
+            "block is the only live source for size, leverage and entry throttle."
         ),
     )
-    long_demo.add_argument("--entry-leverage", type=float, default=demo_defaults.entry_leverage)
-    long_demo.add_argument(
-        "--order-notional-pct-equity",
-        type=float,
-        default=demo_defaults.order_notional_pct_equity,
-        help=(
-            "SETS each entry's size as a fraction of equity, replacing the whole "
-            "derived sizing chain. Default 0 = keep the strategy's own derivation."
-        ),
-    )
-    long_demo.add_argument("--wallet-balance-fraction", type=float, default=demo_defaults.wallet_balance_fraction)
-    long_demo.add_argument("--max-new-entries-per-cycle", type=int, default=demo_defaults.max_new_entries_per_cycle)
     long_demo.add_argument(
         "--execution-environment",
         required=True,
@@ -240,24 +217,59 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     )
     long_demo.add_argument(
         "--candidate-universe-file",
-        default="",
+        default=None,
         help="Optional frozen operational candidate-universe artifact.",
     )
-    long_demo.add_argument("--data-name", default=demo_defaults.data_name)
-    long_demo.add_argument(
+    long_demo.add_argument("--data-name", default=None)
+    daemon_mode = long_demo.add_mutually_exclusive_group()
+    daemon_mode.add_argument(
         "--daemon",
+        dest="daemon",
         action="store_true",
         help="Run the long-lived public-market-data signal and account-target producer.",
     )
+    daemon_mode.add_argument(
+        "--single-cycle",
+        dest="daemon",
+        action="store_false",
+        help="Run exactly one producer cycle.",
+    )
+    long_demo.set_defaults(daemon=None)
     long_demo.add_argument(
-        "--interval-seconds", type=float, default=60.0, help="Seconds between cycles in --daemon mode."
+        "--interval-seconds", type=float, default=None, help="Seconds between cycles in --daemon mode."
+    )
+    event_mode = long_demo.add_mutually_exclusive_group()
+    event_mode.add_argument(
+        "--event-driven-cycle",
+        dest="event_driven_cycle",
+        action="store_true",
+        help="Wake on confirmed bars, prices, deadlines and engine state.",
+    )
+    event_mode.add_argument(
+        "--no-event-driven-cycle",
+        dest="event_driven_cycle",
+        action="store_false",
+        help="Kill-switch: use the fixed-interval timer instead of WS confirmed-bar "
+        "event triggering. Default: event-driven.",
+    )
+    long_demo.set_defaults(event_driven_cycle=None)
+    long_demo.add_argument(
+        "--min-cycle-interval-seconds",
+        type=float,
+        default=None,
+        help="Minimum debounce between event-driven cycles.",
     )
     long_demo.add_argument(
-        "--no-event-driven-cycle",
-        dest="no_event_driven_cycle",
-        action="store_true",
-        help="Kill-switch: revert to the fixed-interval timer instead of WS confirmed-bar "
-        "event triggering. Default: event-driven.",
+        "--ticker-reconcile-interval-seconds",
+        type=float,
+        default=None,
+        help="Seconds between ticker-cache REST reconciliations.",
+    )
+    long_demo.add_argument(
+        "--state-cache-stale-seconds",
+        type=float,
+        default=None,
+        help="Maximum age of a ticker-cache snapshot used by a cycle.",
     )
     long_demo.add_argument(
         "--strategy-target-capture-path",
@@ -276,21 +288,13 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         action="store_false",
         help="Use the REST-on-cycle kline fallback instead of the WS kline manager.",
     )
-    long_demo.set_defaults(ws_klines_enabled=demo_defaults.ws_klines_enabled)
-    long_demo.add_argument("--ws-klines-bootstrap-workers", type=int, default=demo_defaults.ws_klines_bootstrap_workers)
-    long_demo.add_argument("--ws-klines-lookback-days", type=int, default=demo_defaults.ws_klines_lookback_days)
-    long_demo.add_argument(
-        "--ws-klines-universe-refresh-seconds", type=float, default=demo_defaults.ws_klines_universe_refresh_seconds
-    )
-    long_demo.add_argument(
-        "--ws-klines-topics-per-connection", type=int, default=demo_defaults.ws_klines_topics_per_connection
-    )
-    long_demo.add_argument(
-        "--ws-klines-stale-warning-seconds", type=float, default=demo_defaults.ws_klines_stale_warning_seconds
-    )
-    long_demo.add_argument(
-        "--ws-klines-stale-reconnect-seconds", type=float, default=demo_defaults.ws_klines_stale_reconnect_seconds
-    )
+    long_demo.set_defaults(ws_klines_enabled=None)
+    long_demo.add_argument("--ws-klines-bootstrap-workers", type=int, default=None)
+    long_demo.add_argument("--ws-klines-lookback-days", type=int, default=None)
+    long_demo.add_argument("--ws-klines-universe-refresh-seconds", type=float, default=None)
+    long_demo.add_argument("--ws-klines-topics-per-connection", type=int, default=None)
+    long_demo.add_argument("--ws-klines-stale-warning-seconds", type=float, default=None)
+    long_demo.add_argument("--ws-klines-stale-reconnect-seconds", type=float, default=None)
 
 
 def _add_carry_demo_cycle_parser(subparsers) -> None:
@@ -315,8 +319,8 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         choices=CARRY_STRATEGY_PROFILE_CHOICES,
         default=d.strategy_profile,
         help=(
-            "Registered CARRY deployment (rule file + journaled profile name). "
-            "The journal filing id never versions; unknown values fail startup."
+            "Registered CARRY deployment. The profile selects its rule file and "
+            "execution clock; unknown values fail startup."
         ),
     )
     p.add_argument(
@@ -332,9 +336,9 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         action="store_true",
         default=d.early_exit_enabled,
         help=(
-            "Sell an exiting name at the settled print that ends it instead "
-            "of the next midnight (the registered exit test, applied at print "
-            "time; owner-directed 2026-08-19)."
+            "Apply the registered funding-normalization exit before the next midnight: v7 "
+            "uses the pre-settlement running rate with a settled-print fallback; "
+            "other profiles use the settled print."
         ),
     )
     early.add_argument(
@@ -390,6 +394,11 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         help="Optional frozen operational candidate-universe artifact.",
     )
     p.add_argument(
+        "--presettlement-event-tape",
+        required=True,
+        help="Absolute durable CARRY event tape consumed by Exodus.",
+    )
+    p.add_argument(
         "--daemon",
         action="store_true",
         help="Run the long-lived 60s diff loop (daily decision, idempotent "
@@ -400,4 +409,50 @@ def _add_carry_demo_cycle_parser(subparsers) -> None:
         "--strategy-target-capture-path",
         default=None,
         help=("Optional shared hash-chained post-callback target/scheduling capture."),
+    )
+
+
+def _add_exodus_cycle_parser(subparsers) -> None:
+    """CLI for the independent Exodus event consumer and target producer."""
+
+    from liquidity_migration.strategy.exodus_producer import (
+        DEFAULT_EXODUS_PROFILE,
+        EXODUS_PROFILE_CHOICES,
+    )
+
+    p = subparsers.add_parser(
+        "exodus-cycle",
+        help="Consume CARRY pre-settlement events and publish the Exodus book.",
+    )
+    p.add_argument(
+        "--strategy-profile",
+        choices=EXODUS_PROFILE_CHOICES,
+        default=DEFAULT_EXODUS_PROFILE,
+    )
+    p.add_argument("--event-tape", required=True, help="Absolute typed CARRY event tape.")
+    p.add_argument(
+        "--target-book",
+        required=True,
+        help="Absolute Exodus target book read by the Rust engine.",
+    )
+    p.add_argument(
+        "--operational-profile-file",
+        required=True,
+        help="Shared operational profile; its CARRY leverage is Exodus margin leverage.",
+    )
+    p.add_argument(
+        "--execution-environment",
+        required=True,
+        choices=EXECUTION_ENVIRONMENT_CHOICES,
+    )
+    p.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run the independent event-tape consumer and cover-clock loop.",
+    )
+    p.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=60.0,
+        help="Maximum idle seconds between tape checks; due cover clocks shorten it.",
     )

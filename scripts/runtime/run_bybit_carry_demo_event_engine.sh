@@ -46,18 +46,21 @@ case "${EXECUTION_ENVIRONMENT:-}" in
         ;;
 esac
 
-for required_name in CARRY_ENGINE_TARGET_BOOK_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID OPERATIONAL_PROFILE_FILE PRODUCER_REALM; do
+for required_name in CARRY_ENGINE_TARGET_BOOK_PATH CARRY_PRESETTLEMENT_EVENT_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID OPERATIONAL_PROFILE_FILE PRODUCER_REALM; do
     if [[ -z "${!required_name:-}" ]]; then
         echo "$required_name is required: this producer supports only Rust target-book execution." >&2
         exit 2
     fi
 done
+[ "$CARRY_PRESETTLEMENT_EVENT_PATH" != "${CARRY_PRESETTLEMENT_EVENT_PATH#/}" ] || {
+    echo "CARRY_PRESETTLEMENT_EVENT_PATH must be absolute." >&2
+    exit 2
+}
 [ "$PRODUCER_REALM" = "$EXECUTION_ENVIRONMENT" ] || {
     echo "PRODUCER_REALM must equal EXECUTION_ENVIRONMENT." >&2
     exit 2
 }
 export ENGINE_ACCOUNT_HEARTBEAT_FILE="$LIVENESS_ENGINE_HEARTBEAT_FILE"
-CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-carry-demo-event}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
 if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
@@ -101,7 +104,7 @@ fi
 
 target_route_args=(
     --execution-environment "$EXECUTION_ENVIRONMENT"
-
+    --presettlement-event-tape "$CARRY_PRESETTLEMENT_EVENT_PATH"
     --risk-policy-file "$OPERATIONAL_PROFILE_FILE"
 )
 if [[ -n "${STRATEGY_TARGET_CAPTURE_PATH:-}" ]]; then
@@ -123,7 +126,6 @@ else
 fi
 echo "carry target producer: execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS operational_profile=$OPERATIONAL_PROFILE_FILE strategy_profile=$CARRY_STRATEGY_PROFILE early_exit=$CARRY_EARLY_EXIT"
 exec "$PYTHON_BIN" -m liquidity_migration \
-    --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \
     carry-demo-cycle \
     --strategy-profile "$CARRY_STRATEGY_PROFILE" \

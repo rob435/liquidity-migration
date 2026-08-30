@@ -9,6 +9,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
+# The Python resolver records that its CLI values came through this deployed
+# environment-to-argument boundary, rather than claiming they were typed by an
+# operator at the process command line.
+export LONG_RUNTIME_CONFIG_SOURCE="scripts/runtime/run_bybit_long_demo_event_engine.sh"
 
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -38,7 +42,7 @@ case "${EXECUTION_ENVIRONMENT:-}" in
         ;;
 esac
 
-for required_name in LONG_ENGINE_TARGET_BOOK_PATH LONG_ENGINE_BOOK_STATE_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID OPERATIONAL_PROFILE_FILE PRODUCER_REALM; do
+for required_name in DATA_ROOT INTERVAL_SECONDS USE_DAEMON LONG_STRATEGY_PROFILE LONG_ENGINE_TARGET_BOOK_PATH LONG_ENGINE_BOOK_STATE_PATH LIVENESS_ENGINE_HEARTBEAT_FILE EXPECTED_ENGINE_ACCOUNT_USER_ID OPERATIONAL_PROFILE_FILE PRODUCER_REALM; do
     if [[ -z "${!required_name:-}" ]]; then
         echo "$required_name is required: this producer supports only Rust target-book execution." >&2
         exit 2
@@ -49,19 +53,12 @@ done
     exit 2
 }
 export ENGINE_ACCOUNT_HEARTBEAT_FILE="$LIVENESS_ENGINE_HEARTBEAT_FILE"
-CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
-DATA_ROOT="${DATA_ROOT:-data/bybit-long-demo-event}"
-INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
 if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "INTERVAL_SECONDS must be a non-negative integer number of seconds." >&2
     exit 2
 fi
-# The engine requires at least 95 days for its factor windows.
-LOOKBACK_DAYS="${LOOKBACK_DAYS:-100}"
-WORKERS="${WORKERS:-4}"
 # Registered strategy profile; each value is a distinct persisted execution
-# identity. Unset defaults to v11a; anything else must match a registered name.
-LONG_STRATEGY_PROFILE="${LONG_STRATEGY_PROFILE:-v11a}"
+# identity and must be selected explicitly by the service.
 case "$LONG_STRATEGY_PROFILE" in
     v11a|v12) ;;
     *)
@@ -73,26 +70,50 @@ if [[ -z "$OPERATIONAL_PROFILE_FILE" || ! -f "$OPERATIONAL_PROFILE_FILE" ]]; the
     echo "OPERATIONAL_PROFILE_FILE must name the shared operational profile." >&2
     exit 2
 fi
-WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
-WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
-WS_KLINES_LOOKBACK_DAYS="${WS_KLINES_LOOKBACK_DAYS:-100}"
-WS_KLINES_UNIVERSE_REFRESH_SECONDS="${WS_KLINES_UNIVERSE_REFRESH_SECONDS:-3600}"
-WS_KLINES_TOPICS_PER_CONNECTION="${WS_KLINES_TOPICS_PER_CONNECTION:-180}"
-WS_KLINES_STALE_WARNING_SECONDS="${WS_KLINES_STALE_WARNING_SECONDS:-60}"
-WS_KLINES_STALE_RECONNECT_SECONDS="${WS_KLINES_STALE_RECONNECT_SECONDS:-180}"
-
 ws_klines_args=()
-if [[ "$WS_KLINES_ENABLED" == "1" ]]; then
-    ws_klines_args+=(--ws-klines-enabled)
-else
-    ws_klines_args+=(--no-ws-klines)
+if [[ -n "${WS_KLINES_ENABLED:-}" ]]; then
+    case "$WS_KLINES_ENABLED" in
+        1) ws_klines_args+=(--ws-klines-enabled) ;;
+        0) ws_klines_args+=(--no-ws-klines) ;;
+        *) echo "WS_KLINES_ENABLED must be 0 or 1." >&2; exit 2 ;;
+    esac
 fi
-ws_klines_args+=(--ws-klines-bootstrap-workers "$WS_KLINES_BOOTSTRAP_WORKERS")
-ws_klines_args+=(--ws-klines-lookback-days "$WS_KLINES_LOOKBACK_DAYS")
-ws_klines_args+=(--ws-klines-universe-refresh-seconds "$WS_KLINES_UNIVERSE_REFRESH_SECONDS")
-ws_klines_args+=(--ws-klines-topics-per-connection "$WS_KLINES_TOPICS_PER_CONNECTION")
-ws_klines_args+=(--ws-klines-stale-warning-seconds "$WS_KLINES_STALE_WARNING_SECONDS")
-ws_klines_args+=(--ws-klines-stale-reconnect-seconds "$WS_KLINES_STALE_RECONNECT_SECONDS")
+for mapping in \
+    WS_KLINES_BOOTSTRAP_WORKERS:ws-klines-bootstrap-workers \
+    WS_KLINES_LOOKBACK_DAYS:ws-klines-lookback-days \
+    WS_KLINES_UNIVERSE_REFRESH_SECONDS:ws-klines-universe-refresh-seconds \
+    WS_KLINES_TOPICS_PER_CONNECTION:ws-klines-topics-per-connection \
+    WS_KLINES_STALE_WARNING_SECONDS:ws-klines-stale-warning-seconds \
+    WS_KLINES_STALE_RECONNECT_SECONDS:ws-klines-stale-reconnect-seconds; do
+    variable="${mapping%%:*}"
+    flag="${mapping#*:}"
+    if [[ -n "${!variable:-}" ]]; then
+        ws_klines_args+=("--$flag" "${!variable}")
+    fi
+done
+
+cycle_args=()
+for mapping in \
+    UNIVERSE_SUPERSET_SIZE:universe-superset-size \
+    LOOKBACK_DAYS:lookback-days \
+    WORKERS:workers \
+    DATA_NAME:data-name \
+    MIN_CYCLE_INTERVAL_SECONDS:min-cycle-interval-seconds \
+    TICKER_RECONCILE_INTERVAL_SECONDS:ticker-reconcile-interval-seconds \
+    STATE_CACHE_STALE_SECONDS:state-cache-stale-seconds; do
+    variable="${mapping%%:*}"
+    flag="${mapping#*:}"
+    if [[ -n "${!variable:-}" ]]; then
+        cycle_args+=("--$flag" "${!variable}")
+    fi
+done
+if [[ -n "${EVENT_DRIVEN_CYCLE:-}" ]]; then
+    case "$EVENT_DRIVEN_CYCLE" in
+        1) cycle_args+=(--event-driven-cycle) ;;
+        0) cycle_args+=(--no-event-driven-cycle) ;;
+        *) echo "EVENT_DRIVEN_CYCLE must be 0 or 1." >&2; exit 2 ;;
+    esac
+fi
 
 target_route_args=(
     --strategy-profile "$LONG_STRATEGY_PROFILE"
@@ -109,24 +130,26 @@ fi
 echo "long-native target producer starting"
 echo "repo=$REPO_ROOT"
 echo "strategy_profile=$LONG_STRATEGY_PROFILE"
-echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=${USE_DAEMON:-1}"
+echo "execution_environment=$EXECUTION_ENVIRONMENT data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS use_daemon=$USE_DAEMON"
 echo "sizing/account risk profile=$OPERATIONAL_PROFILE_FILE"
 
 mkdir -p "$DATA_ROOT/.locks"
 
 # USE_DAEMON=1 (default): long-running producer reusing one public market-data
 # plane. SIGTERM drains the current cycle, so `systemctl stop` is safe.
-if [[ "${USE_DAEMON:-1}" == "1" ]]; then
+if [[ "$USE_DAEMON" == "1" ]]; then
     echo "long-native demo engine: daemon mode"
     exec "$PYTHON_BIN" -m liquidity_migration \
-        --config "$CONFIG_PATH" \
         --data-root "$DATA_ROOT" \
         long-native-event-demo-cycle \
-        --lookback-days "$LOOKBACK_DAYS" \
-        --workers "$WORKERS" \
         --daemon --interval-seconds "$INTERVAL_SECONDS" \
         "${target_route_args[@]}" \
+        "${cycle_args[@]}" \
         "${ws_klines_args[@]}"
+fi
+if [[ "$USE_DAEMON" != "0" ]]; then
+    echo "USE_DAEMON must be 0 or 1." >&2
+    exit 2
 fi
 
 echo "long-native demo engine: single-cycle loop (USE_DAEMON=1 enables daemon)"
@@ -134,12 +157,11 @@ while true; do
     cycle_start_epoch="$(date +%s)"
     set +e
     "$PYTHON_BIN" -m liquidity_migration \
-        --config "$CONFIG_PATH" \
         --data-root "$DATA_ROOT" \
         long-native-event-demo-cycle \
-        --lookback-days "$LOOKBACK_DAYS" \
-        --workers "$WORKERS" \
+        --single-cycle --interval-seconds "$INTERVAL_SECONDS" \
         "${target_route_args[@]}" \
+        "${cycle_args[@]}" \
         "${ws_klines_args[@]}"
     status=$?
     set -e

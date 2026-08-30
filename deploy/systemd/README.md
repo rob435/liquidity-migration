@@ -11,19 +11,24 @@ unit shapes.
 
 ## Services
 
-Twenty-two unit files: fifteen services and seven timers (two liveness, the LLM ledger, the trade notifier, the forward uploader, the nightly backup, the weekly chaos drill).
+The current fleet manifest names twenty-four units: seventeen services and
+seven timers (two liveness, the LLM ledger, the trade notifier, the forward
+uploader, the nightly backup, and the weekly chaos drill).
 
 | Unit | Role |
 | --- | --- |
 | `liquidity-migration-engine.service` | The Rust execution engine — sole Bybit **demo** mutator, on the fleet's demo account (555899665, `bybit-demo.env`); holds that account's single-writer lease — see below |
 | `liquidity-migration-engine-mainnet.service` | The Rust engine on the **funded** account — runs only while `REAL_MONEY` is armed |
-| `liquidity-migration-bybit-long-demo.service` | LONG target producer |
+| `liquidity-migration-bybit-long-demo.service` | Native LONG target producer; every target comes from the shared pure `decide` contract |
 | `liquidity-migration-bybit-carry-demo.service` | CARRY target producer |
-| `liquidity-migration-bybit-{carry,long}-mainnet.service` | Real-money target producers; both start when `REAL_MONEY` is armed, sized by the installed risk profile |
+| `liquidity-migration-bybit-exodus-demo.service` | Exodus target producer; consumes the demo CARRY durable event tape and publishes its own target book |
+| `liquidity-migration-bybit-long-mainnet.service` | Real-money Native LONG target producer; every target comes from the shared pure `decide` contract and it starts when `REAL_MONEY` is armed |
+| `liquidity-migration-bybit-carry-mainnet.service` | Real-money CARRY target producer; starts when `REAL_MONEY` is armed and is sized by the installed risk profile |
+| `liquidity-migration-bybit-exodus-mainnet.service` | Real-money Exodus target producer; consumes the funded CARRY durable event tape and starts when `REAL_MONEY` is armed |
 | `liquidity-migration-demo-liveness.service` | Account/strategy watchdog and notification surface |
 | `liquidity-migration-mainnet-liveness.service` | Mainnet account/strategy watchdog and notification surface |
 | `liquidity-migration-telegram-controls.service` | Owner control buttons (pause/resume — there is no close button) — the sole `getUpdates` consumer |
-| `liquidity-migration-llm-ledger.service` | LLM driver judgments on movers and trigger events, and the judged candidates file the demo LONG sleeve enters through — run by its hourly timer |
+| `liquidity-migration-llm-ledger.service` | Research-only LLM driver judgments on movers and trigger events — run by its hourly timer; its output does not feed demo LONG or any target book |
 | `liquidity-migration-trade-notify.service` | Sends every sleeve's entries and its exits with what they made to the owner's DM — run by its 5-minute timer |
 | `liquidity-migration-forward-capture.service` | Records the public Bybit fast touch (L1), L50 books, trades, derivative tickers and liquidations into verified compressed segments; no account credentials or order path |
 | `liquidity-migration-forward-upload.service` | Copies only completed compressed segments to Google Drive, checks each new batch, and writes a Drive-side checksum list — run by its hourly timer |
@@ -53,8 +58,9 @@ move with a VPS migration.
 
 ## Dependency edges
 
-No unit can take the fleet down with it. Every unit's only lifecycle edges
-are `Wants=`/`After=` on `network-online.target` — nothing `Requires=`
+No unit can take the fleet down with it. Every current unit wants and orders
+after `network-online.target`. The two Exodus producers also order after their
+matching engines, but do not require or bind to them. Nothing `Requires=`
 anything else in the fleet.
 
 - **Producers** (demo and mainnet alike) publish target books to disk; the
@@ -149,7 +155,7 @@ The engines are installed by the exact systemd manifest and run under distinct
 unprivileged identities. Their root-only credential files are loaded by PID 1;
 producer and observer processes receive only non-secret projections.
 
-Every unit that runs repository Python able to reach Polars — the four target
+Every unit that runs repository Python able to reach Polars — the six target
 producers and both liveness observers — retains `ProtectProc=invisible` but
 does not set `ProcSubset=pid`. Polars reads `/proc/meminfo` when sizing its
 cgroup-aware memory manager; hiding non-process `/proc` files makes native

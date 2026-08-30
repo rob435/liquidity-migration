@@ -72,32 +72,54 @@ case "$MAX_HEARTBEAT_AGE_SECONDS" in
     0) echo "FLATTEN_MAX_HEARTBEAT_AGE_SECONDS must be positive" >&2; exit 2 ;;
 esac
 
+REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+LM_FLEET_MANIFEST="$REPOSITORY_ROOT/deploy/fleet_manifest.tsv"
+# shellcheck source=deploy/lib_sleeves.sh
+source "$REPOSITORY_ROOT/deploy/lib_sleeves.sh"
+lm_validate_fleet_manifest || {
+    echo "flatten refused: fleet manifest is invalid" >&2
+    exit 2
+}
+
 if [ "$ENVIRONMENT" = demo ]; then
     DEFAULT_HEARTBEAT=/var/lib/liquidity-migration-engine/heartbeat.json
     DEFAULT_ENGINE_ENV=/etc/liquidity-migration/engine.env
-    ENGINE_UNIT=liquidity-migration-engine.service
-    PRODUCERS=(
-        liquidity-migration-bybit-carry-demo.service
-        liquidity-migration-bybit-long-demo.service
-    )
-    BOOK_NAMES=(carry-demo.json long-demo.json exodus-demo.json)
+    PRODUCER_LONG=on
+    PRODUCER_CARRY=on
+    PRODUCER_MAINNET=off
 else
     DEFAULT_HEARTBEAT=/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
     DEFAULT_ENGINE_ENV=/etc/liquidity-migration/engine-mainnet.env
-    ENGINE_UNIT=liquidity-migration-engine-mainnet.service
-    PRODUCERS=(
-        liquidity-migration-bybit-carry-mainnet.service
-        liquidity-migration-bybit-long-mainnet.service
-    )
-    BOOK_NAMES=(carry-mainnet.json long-mainnet.json exodus-mainnet.json)
+    PRODUCER_LONG=off
+    PRODUCER_CARRY=off
+    PRODUCER_MAINNET=on
 fi
 
 HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-$DEFAULT_HEARTBEAT}"
 ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-$DEFAULT_ENGINE_ENV}"
 TARGET_ROOT="${FLATTEN_TARGET_ROOT:-/var/lib/liquidity-migration/targets}"
+ENGINE_UNIT="$(lm_owner_unit "$ENVIRONMENT")" || {
+    echo "flatten refused: fleet manifest has no $ENVIRONMENT account owner" >&2
+    exit 2
+}
+PRODUCERS=()
+while IFS= read -r unit; do
+    [ -n "$unit" ] && PRODUCERS+=("$unit")
+done < <(
+    lm_target_producer_units "$ENVIRONMENT" stop \
+        "$PRODUCER_LONG" "$PRODUCER_CARRY" "$PRODUCER_MAINNET"
+)
+[ "${#PRODUCERS[@]}" -gt 0 ] || {
+    echo "flatten refused: fleet manifest has no $ENVIRONMENT target producers" >&2
+    exit 2
+}
 BOOKS=()
-for name in "${BOOK_NAMES[@]}"; do
-    BOOKS+=("$TARGET_ROOT/$name")
+for unit in "${PRODUCERS[@]}"; do
+    artifact="$(lm_output_artifact_for_unit "$unit")" || {
+        echo "flatten refused: fleet manifest has no target book for $unit" >&2
+        exit 2
+    }
+    BOOKS+=("$TARGET_ROOT/$(basename "$artifact")")
 done
 
 heartbeat_state() {

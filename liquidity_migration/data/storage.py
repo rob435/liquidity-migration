@@ -105,6 +105,7 @@ DATASETS = {
     "continuous_fade_demo_cycles",
     "carry_hold_demo_cycles",
     "carry_hold_mainnet_cycles",
+    "exodus_cycles",
     "carry_funding_events",
     "binance_usdm_klines_1h",
     "binance_usdm_mark_price_1h",
@@ -132,6 +133,7 @@ DATASET_KEYS = {
     "continuous_fade_demo_cycles": ("cycle_id",),
     "carry_hold_demo_cycles": ("cycle_id",),
     "carry_hold_mainnet_cycles": ("cycle_id",),
+    "exodus_cycles": ("cycle_id",),
     # Keyed by settlement instant, so the carry sleeve's overlap-window
     # incremental appends are idempotent at the storage layer.
     "carry_funding_events": ("symbol", "funding_ts_ms"),
@@ -671,6 +673,7 @@ LEDGER_BUCKET_SOURCE: dict[str, str] = {
     "continuous_fade_demo_cycles": "ts_ms",
     "carry_hold_demo_cycles": "ts_ms",
     "carry_hold_mainnet_cycles": "ts_ms",
+    "exodus_cycles": "ts_ms",
     "long_native_demo_cycles": "ts_ms",
     "long_native_mainnet_cycles": "ts_ms",
 }

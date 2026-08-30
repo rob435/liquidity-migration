@@ -79,7 +79,7 @@ For LONG, these clocks are deliberately separate:
 | `entered_ts_ms` | First cycle observing a uniquely LONG-attributed venue holding; zero before that evidence |
 | `max_hold_duration_ms` | Duration frozen with the request |
 | `max_hold_deadline_ts_ms` | Attributed entry observation plus the frozen duration; zero before attribution |
-| target evidence `activated_at_ns` | Durable local activation of exact target bytes, never a fill clock |
+| target capture `event_ts_ns` | LONG daemon event time bound to exact target bytes, never a fill clock or publication timestamp |
 
 A request timestamp cannot start protection decay or maximum hold. An
 account-global, manual, inherited, or shared position cannot start a sleeve's
@@ -88,12 +88,16 @@ fill ledger has one owner and its signed quantity matches the venue quantity.
 
 ## Durable strategy artifacts
 
-Absolute target publication is:
+Every producer's absolute target publication is:
 
 1. render and strictly parse deterministic bytes;
 2. durably create `.target-book-objects/<sha256>.json`;
-3. atomically replace the engine-visible target path;
-4. append a hash-chained activation receipt for the same bytes.
+3. atomically replace the engine-visible target path.
+
+After LONG or CARRY publishes through the strategy host, the hosted evidence
+path appends a hash-chained target capture for the same bytes. Exodus uses its
+own daemon instead: it records the current path, immutable-object path, and
+content hash in its `exodus_cycles` row and writes no target-capture tape.
 
 No file means no new decision. An empty target array is an explicit flat
 sleeve. A stale or malformed account heartbeat blocks additions and resizes;
@@ -104,6 +108,54 @@ LONG requested-book state, CARRY sizing anchors, CARRY early-exit state, and
 Exodus open-short state use strict schemas and durable atomic replacement.
 Corrupt state is unknown state and fails closed without advancing the active
 book.
+
+CARRY's pre-settlement handoff is a typed, hash-chained JSONL event tape. Each
+event freezes the realm, source profile and config identity, decision/fire and
+settlement times, symbol, and running rate. When available, it also freezes the
+mark and exact CARRY-attributed side, quantity, and average entry; those fields
+are null when the fire lacks complete holding or mark evidence. Its semantic
+ID makes append idempotent. CARRY durably appends the event before it applies
+the exit mask. Venue/account parsing, pure planning, tape publication, state
+transition, and private-state persistence are separate phases. Exodus verifies
+the whole chain and owns a separate state root
+and book. Accepted, expired, and incomplete handoffs are terminally recorded
+once. Health, symbol-state, and compatibility blocks remain unconsumed and can
+be reconsidered by a later cycle. An incomplete holding or mark is consumed as
+blocked rather than guessed.
+
+The LONG cross-language replay fixture is recorded test input, not market
+evidence. Each hash-chained strategy event carries the typed decision input,
+prior state, effective-config identity, quote, instrument rule, and account
+snapshot. Python verifies the tape and produces the decision, live state, and
+exact target-book bytes. Rust verifies the same tape and produces the recorded
+planner, risk, and WAL events.
+
+The hourly LONG runner is diagnostic. The minute live-physics runner reads
+point-in-time hourly signals plus candidate-window `klines_1m` and
+`mark_price_1m`. Mark price drives the live-equivalent entry and stop tests and
+the position value charged at funding; traded price drives the crossing fill,
+position accounting, and target resize. Separate receipts report hashes and
+missing symbol-days/minutes for both minute streams. Because OHLC minutes do
+not reveal the path inside a minute, the report is an execution bound rather
+than tick or fill parity.
+Its PIT receipt grades the causal input window, not every partition stored in
+the root. For the current rule that window begins 90 calendar days before the
+signal start. Because each daily source bar is timestamped at the following
+midnight, it ends before `signal_end_exclusive - 1 day`. The same report keeps
+the whole-root coverage result as a separate informational receipt.
+Each run also writes `long_live_physics_source_snapshot.json`: the exact UTF-8
+source bytes reachable from the research runner and live LONG producer roots,
+plus the Python, Polars, and NumPy runtime versions. The report records that
+snapshot's file count and SHA-256, so a dirty worktree does not hide which code
+produced the artifact.
+
+Download a candidate-window mark tape through the same partition writer as the
+trade tape:
+
+```bash
+.venv/bin/python scripts/data/download_bybit_klines_1m.py \
+  --price-stream mark --windows-file WINDOWS.csv
+```
 
 ## Refresh workflow
 

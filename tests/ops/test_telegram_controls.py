@@ -242,15 +242,26 @@ def fleet_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     def fake_run(argv: list[str], *, timeout: float = 90.0) -> subprocess.CompletedProcess[str]:
         commands.append(argv)
-        if argv == [*tc.CONTROL_COMMANDS["status-demo"]]:
+        if argv == [*tc.CONTROL_COMMANDS["status-fleet"]]:
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout="paused=false\nLONG_SLEEVE=on\nCARRY_SLEEVE=on\n",
+                stdout=(
+                    "fleet-status-v1\n"
+                    "demo-control|paused|false\n"
+                    "sleeve|long|on\n"
+                    "sleeve|carry|on\n"
+                    "unit|demo|owner|-|liquidity-migration-engine.service|active\n"
+                    "unit|demo|producer|carry|liquidity-migration-bybit-carry-demo.service|active\n"
+                    "unit|demo|producer|exodus|liquidity-migration-bybit-exodus-demo.service|active\n"
+                    "unit|demo|producer|long|liquidity-migration-bybit-long-demo.service|active\n"
+                    "unit|mainnet|owner|-|liquidity-migration-engine-mainnet.service|active\n"
+                    "unit|mainnet|producer|carry|liquidity-migration-bybit-carry-mainnet.service|active\n"
+                    "unit|mainnet|producer|exodus|liquidity-migration-bybit-exodus-mainnet.service|active\n"
+                    "unit|mainnet|producer|long|liquidity-migration-bybit-long-mainnet.service|active\n"
+                ),
                 stderr="",
             )
-        if argv[:2] == ["systemctl", "is-active"]:
-            return subprocess.CompletedProcess(argv, 3, stdout="inactive\n", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(fleet, "_run", fake_run)
@@ -271,7 +282,7 @@ def test_demo_resume_uses_helper_then_reads_helper_status(fleet_env) -> None:
     assert "resumed" in note.lower()
     assert commands == [
         list(tc.CONTROL_COMMANDS["resume-demo"]),
-        list(tc.CONTROL_COMMANDS["status-demo"]),
+        list(tc.CONTROL_COMMANDS["status-fleet"]),
     ]
 
 
@@ -283,13 +294,25 @@ def test_helper_status_is_exactly_parsed_and_rejects_extra_fields(fleet_env, mon
         return subprocess.CompletedProcess(
             argv,
             0,
-            stdout="paused=false\nLONG_SLEEVE=on\nCARRY_SLEEVE=on\nPATH=/tmp\n",
+            stdout="fleet-status-v1\ndemo-control|paused|false\nsleeve|long|on\nPATH=/tmp\n",
             stderr="",
         )
 
     monkeypatch.setattr(fleet, "_run", malformed)
-    with pytest.raises(RuntimeError, match="unexpected status field"):
+    with pytest.raises(RuntimeError, match="malformed fleet row"):
         fleet.resolved_sleeves()
+
+
+def test_status_renders_manifest_owners_and_all_three_producers(fleet_env) -> None:
+    _config, fleet, commands = fleet_env
+    status = fleet.status_text()
+    assert "demo owner: active" in status
+    assert "demo exodus: unit active" in status
+    assert "real money: owner active" in status
+    assert "carry=active" in status
+    assert "exodus=active" in status
+    assert "long=active" in status
+    assert commands == [list(tc.CONTROL_COMMANDS["status-fleet"])]
 
 
 def test_mainnet_pause_and_resume_each_reach_exactly_their_own_action(fleet_env) -> None:
@@ -316,7 +339,7 @@ def test_control_action_allowlist_cannot_forward_paths_units_or_environment(flee
         "resume-demo",
         "pause-mainnet",
         "resume-mainnet",
-        "status-demo",
+        "status-fleet",
     }
     for action, command in tc.CONTROL_COMMANDS.items():
         assert command == ("/usr/bin/sudo", "-n", tc.CONTROL_HELPER, action)

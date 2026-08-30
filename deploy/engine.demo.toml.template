@@ -126,9 +126,9 @@ symbols = ["SOLUSDT", "XRPUSDT"]
 [[strategy]]
 name = "target_book"
 sleeve = "exodus"
-# Written by the CARRY producer, not a unit of its own: the sleeve's whole
-# trigger is carry's pre-settle exit fire, so it lives in that process
-# (lane2_exodus_short_v1). The book holds shorts for ~75 minutes at a time.
+# Written by the independent Exodus daemon after it consumes CARRY's durable
+# pre-settlement event tape. CARRY never owns Exodus state or target bytes.
+# The book holds shorts for about 75 minutes at a time.
 book_path = "/var/lib/liquidity-migration/targets/exodus-demo.json"
 # Entries cross: the ride is an hour and the measured economics already pay
 # the taker fee. Resting a dying name's entry misses the move it exists for.
@@ -136,4 +136,3 @@ rest_entries = false
 # Seed only; every real name arrives via the book. Must not overlap the
 # other sleeves' seeds (see above).
 symbols = ["DOGEUSDT"]
-

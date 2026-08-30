@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration Bybit carry-hold MAINNET target producer (v7 pre-settle exit clock on the lane2_carry_hold_v7 rule + exodus short)
+Description=liquidity-migration Bybit carry-hold MAINNET target producer (v7 pre-settle exit clock)
 Wants=network-online.target
 # This producer writes a target book; the Rust engine reads it and owns the
 # venue account. There is no process-ordering edge between them.
@@ -15,7 +15,6 @@ EnvironmentFile=/etc/liquidity-migration/producer-mainnet.env
 EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 Environment=DATA_ROOT=data/bybit-carry-mainnet-event
-Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=EXECUTION_ENVIRONMENT=mainnet
 Environment=INTERVAL_SECONDS=60
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -32,11 +31,9 @@ Environment=CARRY_EARLY_EXIT=1
 # the engine that reads it sends: REAL_MONEY in bybit-mainnet.env is the only
 # thing between this book and a real order.
 Environment=CARRY_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/carry-mainnet.json
-# The exodus short runs in this process because its only trigger is carry's
-# pre-settle exit fire. Its own engine sleeve crosses the funded entry, keeps
-# separate fill attribution, and covers on the registered one-hour clock.
-Environment=EXODUS_SHORT_PROFILE=v1
-Environment=EXODUS_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/exodus-mainnet.json
+# Durable typed handoff owned by CARRY and consumed by the separate Exodus
+# producer. This path matches Exodus's manifest input artifact.
+Environment=CARRY_PRESETTLEMENT_EVENT_PATH=/opt/liquidity-migration/data/bybit-carry-mainnet-event/carry_presettlement_events.jsonl
 # The carry engine replays 90 days of hourly history each cycle (REPLAY_DAYS).
 Environment=LOOKBACK_DAYS=90
 Environment=WORKERS=2

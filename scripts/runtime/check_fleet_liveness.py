@@ -31,6 +31,7 @@ an alert.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import subprocess
@@ -67,17 +68,131 @@ def _plain_name(label: str) -> str:
     name = name.removesuffix(".service").removesuffix(".timer")
     name = name.removeprefix("bybit-").removesuffix("-event")
     return name.replace("-", " ") or label
-_DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-engine.service"
-_MAINNET_ACCOUNT_OWNER_UNIT = "liquidity-migration-engine-mainnet.service"
+
+
+@dataclass(frozen=True)
+class FleetUnitSpec:
+    """The liveness fields read from the canonical fleet manifest."""
+
+    unit: str
+    state: str
+    kind: str
+    realm: str
+    lifecycle: str
+    stop_order: int
+    activation: str
+    health: str
+
+    @property
+    def cycle_probe(self) -> tuple[str, str, str] | None:
+        if not self.health.startswith("cycle:"):
+            return None
+        parts = self.health.split(":")
+        if len(parts) != 4 or any(not part for part in parts[1:]):
+            raise ValueError(f"invalid cycle health policy for {self.unit}")
+        return parts[1], parts[2], parts[3]
+
+
+def _load_fleet_manifest() -> tuple[FleetUnitSpec, ...]:
+    path = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    parsed = list(csv.reader(lines, delimiter="|"))
+    if not parsed or any(len(row) != 17 for row in parsed):
+        raise ValueError("fleet manifest row shape is invalid")
+    rows = tuple(
+        FleetUnitSpec(
+            unit=row[0],
+            state=row[1],
+            kind=row[2],
+            realm=row[3],
+            lifecycle=row[4],
+            stop_order=int(row[5]),
+            activation=row[6],
+            health=row[9],
+        )
+        for row in parsed
+    )
+    if len({row.unit for row in rows}) != len(rows):
+        raise ValueError("fleet manifest contains duplicate units")
+    return rows
+
+
+_FLEET_UNITS = _load_fleet_manifest()
+
+
+def _manifest_owner(realm: str) -> str:
+    matches = [
+        row.unit
+        for row in _FLEET_UNITS
+        if row.state == "current"
+        and row.kind == "service"
+        and row.realm == realm
+        and row.lifecycle == "owner"
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"fleet manifest must name one {realm} account owner")
+    return matches[0]
+
+
+def _manifest_cycle_unit(sleeve: str, realm: str) -> FleetUnitSpec:
+    matches = [
+        row
+        for row in _FLEET_UNITS
+        if row.state == "current"
+        and row.realm == realm
+        and row.cycle_probe is not None
+        and row.cycle_probe[0] == sleeve
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"fleet manifest must name one {realm} {sleeve} cycle producer"
+        )
+    return matches[0]
+
+
+_DEMO_ACCOUNT_OWNER_UNIT = _manifest_owner("demo")
+_MAINNET_ACCOUNT_OWNER_UNIT = _manifest_owner("mainnet")
 _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT,)
 _ACCOUNT_SCOPES = ("demo", "mainnet")
-_LONG_DEMO_UNIT = "liquidity-migration-bybit-long-demo.service"
-_LONG_MAINNET_UNIT = "liquidity-migration-bybit-long-mainnet.service"
-_CARRY_DEMO_UNIT = "liquidity-migration-bybit-carry-demo.service"
-_CARRY_MAINNET_UNIT = "liquidity-migration-bybit-carry-mainnet.service"
+_LONG_DEMO_UNIT = _manifest_cycle_unit("long", "demo").unit
+_LONG_MAINNET_UNIT = _manifest_cycle_unit("long", "mainnet").unit
+_CARRY_DEMO_UNIT = _manifest_cycle_unit("carry", "demo").unit
+_CARRY_MAINNET_UNIT = _manifest_cycle_unit("carry", "mainnet").unit
+_EXODUS_DEMO_UNIT = _manifest_cycle_unit("exodus", "demo").unit
+_EXODUS_MAINNET_UNIT = _manifest_cycle_unit("exodus", "mainnet").unit
+
+
+def _activation_expected(row: FleetUnitSpec, account_scope: str) -> bool:
+    if row.activation == "always":
+        return True
+    if row.activation == "mainnet":
+        return account_scope == "mainnet"
+    if row.activation == "long":
+        return account_scope == "demo" and _sleeve_on("LONG_SLEEVE")
+    if row.activation == "carry":
+        return account_scope == "demo" and _sleeve_on("CARRY_SLEEVE")
+    return False
+
+
 def _default_root(rel: str) -> str:
     """Anchor a default data root at the repo dir, not the CWD."""
     return str(_REPO_ROOT / rel)
+
+
+def _manifest_cycle_root(sleeve: str, realm: str) -> str:
+    probe = _manifest_cycle_unit(sleeve, realm).cycle_probe
+    assert probe is not None
+    return _default_root(probe[1])
+
+
+def _manifest_cycle_dataset(sleeve: str, realm: str) -> str:
+    probe = _manifest_cycle_unit(sleeve, realm).cycle_probe
+    assert probe is not None
+    return probe[2]
 
 
 def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
@@ -1100,10 +1215,19 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
 
 def _default_units_for_toggles() -> list[str]:
     units = list(_REQUIRED_ACCOUNT_OWNER_UNITS)
-    if _sleeve_on("LONG_SLEEVE"):
-        units.append(_LONG_DEMO_UNIT)
-    if _sleeve_on("CARRY_SLEEVE"):
-        units.append(_CARRY_DEMO_UNIT)
+    for row in sorted(
+        (
+            item
+            for item in _FLEET_UNITS
+            if item.state == "current"
+            and item.realm == "demo"
+            and item.cycle_probe is not None
+        ),
+        key=lambda item: item.stop_order,
+        reverse=True,
+    ):
+        if _activation_expected(row, "demo"):
+            units.append(row.unit)
     return units
 
 
@@ -1116,9 +1240,19 @@ def _default_units_for_scope(account_scope: str) -> list[str]:
     if account_scope not in _ACCOUNT_SCOPES:
         raise ValueError(f"unsupported account liveness scope: {account_scope}")
     if account_scope == "mainnet":
-        # An armed mainnet fleet always runs both registered producers; the
-        # installed risk profile, not a toggle, decides their shares.
-        return [_MAINNET_ACCOUNT_OWNER_UNIT, _CARRY_MAINNET_UNIT, _LONG_MAINNET_UNIT]
+        producers = sorted(
+            (
+                row
+                for row in _FLEET_UNITS
+                if row.state == "current"
+                and row.realm == "mainnet"
+                and row.cycle_probe is not None
+                and _activation_expected(row, "mainnet")
+            ),
+            key=lambda item: item.stop_order,
+            reverse=True,
+        )
+        return [_MAINNET_ACCOUNT_OWNER_UNIT, *(row.unit for row in producers)]
     return _default_units_for_toggles()
 
 
@@ -1162,6 +1296,7 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
 # watchdog's cost independent of how wide or old the cycle datasets grow.
 LONG_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "kline_store_max_ts_ms"]
 CARRY_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "decision_stale", "decision_error"]
+EXODUS_CYCLE_COLUMNS = ["cycle_id", "ts_ms"]
 
 
 def _read_cycles_columns(root: Path, cycles_dataset: str, columns: list[str]) -> pl.DataFrame:
@@ -1414,6 +1549,97 @@ def gather_carry_alerts(
     return alerts
 
 
+def gather_exodus_alerts(
+    *,
+    exodus_root: Path,
+    now_ms: int | None = None,
+    args: argparse.Namespace,
+    cycle_checks: bool = True,
+    cycles_dataset: str = "exodus_cycles",
+    environment: str = "demo",
+    unit_runtime: UnitRuntime | None = None,
+) -> list[Alert]:
+    """Check the independent Exodus consumer's completed-cycle receipt."""
+
+    if not cycle_checks:
+        return []
+    label = exodus_root.name
+    if not exodus_root.exists():
+        if _within_startup_grace(
+            unit_runtime,
+            max_age_minutes=args.max_startup_min,
+        ):
+            return []
+        return [
+            _unverified_generation_cycle_alert(
+                label=label,
+                detail=f"state root {exodus_root} does not exist",
+                active_minutes=(
+                    unit_runtime.active_age_minutes if unit_runtime is not None else None
+                ),
+                startup_bound_min=args.max_startup_min,
+            )
+        ]
+    row: dict[str, Any] | None
+    liveness_ts_ms: int | None
+    generation_bound = (
+        unit_runtime is not None and unit_runtime.invocation_id is not None
+    )
+    if generation_bound:
+        assert unit_runtime is not None
+        observation, detail = _observe_completed_cycle(
+            root=exodus_root,
+            cycles_dataset=cycles_dataset,
+            runtime=unit_runtime,
+            sleeve="exodus",
+            environment=environment,
+            columns=EXODUS_CYCLE_COLUMNS,
+        )
+        if observation is None:
+            if _within_startup_grace(
+                unit_runtime,
+                max_age_minutes=args.max_startup_min,
+            ):
+                return []
+            return [
+                _unverified_generation_cycle_alert(
+                    label=label,
+                    detail=detail,
+                    active_minutes=unit_runtime.active_age_minutes,
+                    startup_bound_min=args.max_startup_min,
+                )
+            ]
+        row = observation.row
+        liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
+    else:
+        try:
+            cycles = _read_cycles_columns(
+                exodus_root,
+                cycles_dataset,
+                EXODUS_CYCLE_COLUMNS,
+            )
+        except Exception:  # noqa: BLE001 - watchdog reports absence as liveness
+            cycles = pl.DataFrame()
+        row = (
+            cycles.sort("ts_ms").tail(1).to_dicts()[0]
+            if not cycles.is_empty() and "ts_ms" in cycles.columns
+            else None
+        )
+        liveness_ts_ms = (
+            int(row["ts_ms"])
+            if row is not None and row.get("ts_ms") is not None
+            else None
+        )
+    observed_now_ms = _now_ms() if now_ms is None else now_ms
+    alert = evaluate_cycle_liveness(
+        latest_cycle_ts_ms=liveness_ts_ms,
+        now_ms=observed_now_ms,
+        max_age_minutes=args.max_cycle_age_min,
+        label=label,
+    )
+    return [alert] if alert is not None else []
+
+
 # The 25-minute venue-snapshot bound is VENUE_SNAPSHOT_AGE_FLOOR_MINUTES,
 # defined once, above. A second definition here once shadowed it: function
 # defaults bound the first value at def time while the runtime clamps read the
@@ -1454,23 +1680,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Roots stay strings so the empty-string skip sentinel does not become Path('.').
     p.add_argument(
         "--long-root",
-        default=os.environ.get("LONG_DEMO_DATA_ROOT") or _default_root("data/bybit-long-demo-event"),
+        default=os.environ.get("LONG_DEMO_DATA_ROOT")
+        or _manifest_cycle_root("long", "demo"),
         help="long-native sleeve root for cycle/input freshness ('' to skip)",
     )
     p.add_argument(
         "--carry-root",
-        default=os.environ.get("CARRY_DEMO_DATA_ROOT") or _default_root("data/bybit-carry-demo-event"),
+        default=os.environ.get("CARRY_DEMO_DATA_ROOT")
+        or _manifest_cycle_root("carry", "demo"),
         help="carry-hold sleeve root for cycle/decision freshness ('' to skip)",
     )
     p.add_argument(
+        "--exodus-root",
+        default=os.environ.get("EXODUS_DEMO_DATA_ROOT")
+        or _manifest_cycle_root("exodus", "demo"),
+        help="Exodus sleeve root for event-consumer cycle freshness ('' to skip)",
+    )
+    p.add_argument(
         "--carry-mainnet-root",
-        default=os.environ.get("CARRY_MAINNET_DATA_ROOT") or _default_root("data/bybit-carry-mainnet-event"),
+        default=os.environ.get("CARRY_MAINNET_DATA_ROOT")
+        or _manifest_cycle_root("carry", "mainnet"),
         help="carry-hold mainnet root for cycle/decision freshness ('' to skip)",
     )
     p.add_argument(
         "--long-mainnet-root",
-        default=os.environ.get("LONG_MAINNET_DATA_ROOT") or _default_root("data/bybit-long-mainnet-event"),
+        default=os.environ.get("LONG_MAINNET_DATA_ROOT")
+        or _manifest_cycle_root("long", "mainnet"),
         help="long-native mainnet root for cycle/input freshness ('' to skip)",
+    )
+    p.add_argument(
+        "--exodus-mainnet-root",
+        default=os.environ.get("EXODUS_MAINNET_DATA_ROOT")
+        or _manifest_cycle_root("exodus", "mainnet"),
+        help="Exodus mainnet root for event-consumer cycle freshness ('' to skip)",
     )
     p.add_argument(
         "--max-account-health-age-min",
@@ -1596,8 +1838,14 @@ def main() -> int:
     )
     long_root = Path(args.long_root) if str(args.long_root).strip() else None
     carry_root = Path(args.carry_root) if str(args.carry_root).strip() else None
+    exodus_root = Path(args.exodus_root) if str(args.exodus_root).strip() else None
     carry_mainnet_root = Path(args.carry_mainnet_root) if str(args.carry_mainnet_root).strip() else None
     long_mainnet_root = Path(args.long_mainnet_root) if str(args.long_mainnet_root).strip() else None
+    exodus_mainnet_root = (
+        Path(args.exodus_mainnet_root)
+        if str(args.exodus_mainnet_root).strip()
+        else None
+    )
     # Repo-data anchoring for both scopes, so no sleeve root is recreated just
     # to hold this file. The two scopes share no alert keys, so they keep
     # separate file names.
@@ -1646,7 +1894,9 @@ def main() -> int:
             gather_long_alerts(
                 long_root=long_root,
                 args=args,
-                cycle_checks=_sleeve_on("LONG_SLEEVE"),
+                cycle_checks=_activation_expected(
+                    _manifest_cycle_unit("long", "demo"), args.account_scope
+                ),
                 environment="demo",
                 unit_runtime=unit_runtime.get(_LONG_DEMO_UNIT),
             )
@@ -1656,9 +1906,24 @@ def main() -> int:
             gather_carry_alerts(
                 carry_root=carry_root,
                 args=args,
-                cycle_checks=_sleeve_on("CARRY_SLEEVE"),
+                cycle_checks=_activation_expected(
+                    _manifest_cycle_unit("carry", "demo"), args.account_scope
+                ),
                 environment="demo",
                 unit_runtime=unit_runtime.get(_CARRY_DEMO_UNIT),
+            )
+        )
+    if not mainnet and exodus_root is not None:
+        alerts.extend(
+            gather_exodus_alerts(
+                exodus_root=exodus_root,
+                args=args,
+                cycle_checks=_activation_expected(
+                    _manifest_cycle_unit("exodus", "demo"), args.account_scope
+                ),
+                cycles_dataset=_manifest_cycle_dataset("exodus", "demo"),
+                environment="demo",
+                unit_runtime=unit_runtime.get(_EXODUS_DEMO_UNIT),
             )
         )
     if mainnet and carry_mainnet_root is not None:
@@ -1666,7 +1931,10 @@ def main() -> int:
             gather_carry_alerts(
                 carry_root=carry_mainnet_root,
                 args=args,
-                cycles_dataset="carry_hold_mainnet_cycles",
+                cycles_dataset=_manifest_cycle_dataset("carry", "mainnet"),
+                cycle_checks=_activation_expected(
+                    _manifest_cycle_unit("carry", "mainnet"), args.account_scope
+                ),
                 environment="mainnet",
                 unit_runtime=unit_runtime.get(_CARRY_MAINNET_UNIT),
             )
@@ -1676,9 +1944,25 @@ def main() -> int:
             gather_long_alerts(
                 long_root=long_mainnet_root,
                 args=args,
-                cycles_dataset="long_native_mainnet_cycles",
+                cycles_dataset=_manifest_cycle_dataset("long", "mainnet"),
+                cycle_checks=_activation_expected(
+                    _manifest_cycle_unit("long", "mainnet"), args.account_scope
+                ),
                 environment="mainnet",
                 unit_runtime=unit_runtime.get(_LONG_MAINNET_UNIT),
+            )
+        )
+    if mainnet and exodus_mainnet_root is not None:
+        alerts.extend(
+            gather_exodus_alerts(
+                exodus_root=exodus_mainnet_root,
+                args=args,
+                cycles_dataset=_manifest_cycle_dataset("exodus", "mainnet"),
+                cycle_checks=_activation_expected(
+                    _manifest_cycle_unit("exodus", "mainnet"), args.account_scope
+                ),
+                environment="mainnet",
+                unit_runtime=unit_runtime.get(_EXODUS_MAINNET_UNIT),
             )
         )
     disk_alert = evaluate_disk_space(path=str(_REPO_ROOT))

@@ -83,12 +83,6 @@ class HostedCycleConfig(Protocol):
     def execution_environment(self) -> str: ...
 
     @property
-    def notional_multiplier(self) -> float: ...
-
-    @property
-    def entry_leverage(self) -> float: ...
-
-    @property
     def ws_klines_enabled(self) -> bool: ...
 
 
@@ -105,6 +99,14 @@ class StrategyHostDaemon:
 
     def _strategy_profile_name(self) -> str:
         raise NotImplementedError("strategy plug must name its registered profile")
+
+    def _sizing_summary(self) -> tuple[float, float]:
+        """Return the already-resolved notional multiplier and leverage."""
+
+        return (
+            float(getattr(self.demo_config, "notional_multiplier")),
+            float(getattr(self.demo_config, "entry_leverage")),
+        )
 
     def __init__(
         self,
@@ -351,6 +353,7 @@ class StrategyHostDaemon:
         # Attach the package stderr handler before bootstrap so the operator
         # can see progress.
         ensure_default_log_handler()
+        notional_multiplier, entry_leverage = self._sizing_summary()
         _logger.info(
             "%s strategy host starting data_root=%s interval_seconds=%.1f "
             "execution_environment=%s profile=%s notional_x=%.1f leverage=%.1f",
@@ -359,8 +362,8 @@ class StrategyHostDaemon:
             self.interval_seconds,
             self.demo_config.execution_environment,
             self._strategy_profile_name(),
-            self.demo_config.notional_multiplier,
-            self.demo_config.entry_leverage,
+            notional_multiplier,
+            entry_leverage,
         )
         self._start_kline_stream_manager()
         # Wire the WS bar signal so the run loop fires on fresh data; if there's
@@ -450,6 +453,16 @@ class StrategyHostDaemon:
         """Extra kwargs a plug injects into the cycle runner."""
 
         return {}
+
+    def _cycle_call_kwargs(self, shared: dict[str, Any]) -> dict[str, Any]:
+        """Build the keyword contract for this plug's cycle runner."""
+
+        return {
+            "config": self.config,
+            "demo_config": self.demo_config,
+            **shared,
+            **self._extra_cycle_kwargs(),
+        }
 
     def _run_one_cycle(self) -> None:
         """Dispatch a live arrival through the shared replay/event-clock path."""
@@ -567,10 +580,7 @@ class StrategyHostDaemon:
         try:
             result = self._cycle_runner(
                 self.data_root,
-                config=self.config,
-                demo_config=self.demo_config,
-                **cycle_kwargs,
-                **self._extra_cycle_kwargs(),
+                **self._cycle_call_kwargs(cycle_kwargs),
             )
             if type(result) is not PublishedTargetCyclePayload:
                 raise TypeError("cycle runner must return PublishedTargetCyclePayload")
@@ -782,8 +792,7 @@ class StrategyHostDaemon:
 
     def _rebuild_born_silent_ticker_stream(self, silence_seconds: float, threshold: float) -> None:
         _logger.warning(
-            "%s ticker WS never delivered a frame %.0fs after subscribe "
-            "(threshold %.0fs); rebuilding the subscription",
+            "%s ticker WS never delivered a frame %.0fs after subscribe (threshold %.0fs); rebuilding the subscription",
             self._sleeve_label,
             silence_seconds,
             threshold,
@@ -1062,9 +1071,7 @@ class StrategyHostDaemon:
         # re-arms the wake.
         fired = self._price_wake_fired
         self._price_wake_fired = {
-            symbol: pair
-            for symbol, pair in fired.items()
-            if pair == (floors.get(symbol), ceilings.get(symbol))
+            symbol: pair for symbol, pair in fired.items() if pair == (floors.get(symbol), ceilings.get(symbol))
         }
 
     def _note_time_deadline(self, payload: Mapping[str, Any]) -> None:

@@ -119,9 +119,9 @@ symbols = ["SOLUSDT", "XRPUSDT"]
 [[strategy]]
 name = "target_book"
 sleeve = "exodus"
-# The funded CARRY producer writes this book when its v7 pre-settle exit
-# abandons a name. It stays after carry and long because strategy ids follow
-# file order and those existing ids must not move.
+# The independent funded Exodus daemon writes this book after it consumes
+# CARRY's durable pre-settlement event tape. It stays after carry and long
+# because strategy ids follow file order and those existing ids must not move.
 book_path = "/var/lib/liquidity-migration/targets/exodus-mainnet.json"
 # Exodus entries are time-sensitive and their measured economics pay taker
 # fees. Covers also cross because the one-hour hold clock is the exit.

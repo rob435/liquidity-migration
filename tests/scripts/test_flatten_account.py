@@ -158,8 +158,9 @@ def test_execute_stops_producers_even_when_already_flat(tmp_path: Path) -> None:
     assert result.returncode == 6, result.stderr
     calls = systemctl_log.read_text().splitlines()
     for unit in (
-        "liquidity-migration-bybit-carry-demo.service",
+        "liquidity-migration-bybit-exodus-demo.service",
         "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-carry-demo.service",
     ):
         assert f"stop {unit}" in calls
         assert f"show --property=ActiveState --value {unit}" in calls
@@ -234,8 +235,8 @@ def test_unknown_heartbeat_never_means_flat(
     assert "configured_positions_closed" not in result.stderr
     assert not target_root.exists()
     calls = systemctl_log.read_text().splitlines()
-    assert sum(line.startswith("stop ") for line in calls) == 2
-    assert sum(line.startswith("show ") for line in calls) == 2
+    assert sum(line.startswith("stop ") for line in calls) == 3
+    assert sum(line.startswith("show ") for line in calls) == 3
 
 
 def test_a_dry_run_with_unknown_heartbeat_changes_nothing(tmp_path: Path) -> None:

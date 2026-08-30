@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_TARGET="${SSH_TARGET:-root@208.84.103.4}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
+LM_FLEET_MANIFEST="$ROOT_DIR/deploy/fleet_manifest.tsv"
+. "$ROOT_DIR/deploy/lib_sleeves.sh"
 
 if [[ -n "${PYTHON:-}" ]]; then
   PYTHON_BIN="$PYTHON"
@@ -300,8 +302,14 @@ case "$command" in
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" verify "$@"
     ;;
   units)
-    remote_exec "systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager --plain
-systemctl list-timers 'liquidity-migration-*' --no-pager"
+    lm_validate_fleet_manifest || die_usage "fleet manifest is invalid"
+    FLEET_UNITS=()
+    while IFS= read -r unit; do
+      FLEET_UNITS+=("$unit")
+    done < <(lm_expected_systemd_units)
+    [[ "${#FLEET_UNITS[@]}" -gt 0 ]] || die_usage "fleet manifest has no current units"
+    remote_exec 'systemctl list-units "${REMOTE_ARGS[@]}" --all --no-legend --no-pager --plain
+systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     ;;
   logs)
     [[ "$#" -ge 1 ]] || die_usage "logs requires a unit name"
@@ -315,26 +323,25 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
       [[ "$unit" =~ ^liquidity-migration-[A-Za-z0-9_.@:-]+$ ]] \
         || die_usage "invalid systemd unit name '$unit'"
       if [[ "$command" != stop ]]; then
-        case "$unit" in
-          liquidity-migration-engine.service|\
-          liquidity-migration-bybit-long-demo.service|\
-          liquidity-migration-bybit-carry-demo.service|\
-          liquidity-migration-demo-liveness.service|\
-          liquidity-migration-demo-liveness.timer|\
-          liquidity-migration-telegram-controls.service|\
-          liquidity-migration-llm-ledger.service|\
-          liquidity-migration-llm-ledger.timer|\
-          liquidity-migration-trade-notify.service|\
-          liquidity-migration-trade-notify.timer|\
-          liquidity-migration-forward-capture.service|\
-          liquidity-migration-forward-upload.service|\
-          liquidity-migration-forward-upload.timer)
+        operator_policy="$(lm_manifest_operator_policy "$unit" 2>/dev/null || true)"
+        case "$operator_policy" in
+          direct)
             ;;
-          liquidity-migration-*mainnet*)
+          funded)
             die_usage "$command of funded units is forbidden; use deploy rollout --profile operational"
             ;;
-          *)
+          none)
             die_usage "$command is allowed only for an exact reviewed demo/observer unit"
+            ;;
+          *)
+            case "$unit" in
+              liquidity-migration-*mainnet*)
+                die_usage "$command of funded units is forbidden; use deploy rollout --profile operational"
+                ;;
+              *)
+                die_usage "$command is allowed only for an exact reviewed demo/observer unit"
+                ;;
+            esac
             ;;
         esac
       fi

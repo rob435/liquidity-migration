@@ -8,14 +8,14 @@ account and execution authority.
 
 | Package | Responsibility |
 | --- | --- |
-| `core/` | Business-neutral time, serialization, durable files, filesystem watches, logging, configuration, and venue-realm types |
+| `core/` | Business-neutral time, serialization, durable files, filesystem watches, logging, typed operational configuration, and venue-realm types |
 | `marketdata/` | Credential-free public REST and WebSocket feeds and caches |
 | `data/` | Point-in-time datasets, ingestion, manifests, histories, universes, and trade tapes |
-| `rules/` | Registered decision rules and the strict absolute target-book contract |
+| `rules/` | Registered decision rules, the pure typed LONG decision contract, and the strict absolute target-book contract |
 | `research/` | Historical replay, panels, measurement, charts, and evidence reports |
-| `strategy/` | LONG and CARRY producers, persistent sleeve state, scheduling, account-heartbeat projection, and target evidence |
+| `strategy/` | LONG and CARRY producers, the independent Exodus event consumer, durable pre-settlement tapes, persistent sleeve state, scheduling, account-heartbeat projection, and target evidence |
 | `venue/` | Read-only authenticated account observation used by operator diagnostics; never order mutation |
-| `policy/` | Execution environment, sizing profiles, and real-money arming checks |
+| `policy/` | Operational-profile rendering, execution environment, and real-money arming checks |
 | `ops/` | Notifications and read-only operator reporting |
 | `cli/` | `python -m liquidity_migration` research/data command surface |
 | `runtime/` | Cross-package runtime health views, including strict engine heartbeat parsing |
@@ -33,6 +33,7 @@ The live seam is deliberately narrow:
 
 ```text
 public data -> Python strategy -> durable absolute target book -> Rust engine
+CARRY -> typed hash-chained pre-settlement tape -> Exodus producer
 private venue state --------------------------------------------> Rust engine
 Rust engine -> exact-identity heartbeat -> Python sizing and exit gates
 ```

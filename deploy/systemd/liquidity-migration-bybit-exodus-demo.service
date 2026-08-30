@@ -1,0 +1,51 @@
+[Unit]
+Description=liquidity-migration Exodus demo target producer
+Wants=network-online.target
+# CARRY publishes the durable event tape. Exodus keeps its own state and may
+# continue consuming that tape if CARRY later stops.
+After=network-online.target liquidity-migration-engine.service
+
+[Service]
+Type=simple
+User=liquidity-producer
+Group=liquidity-migration
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
+EnvironmentFile=/etc/liquidity-migration/producer-demo.env
+EnvironmentFile=/etc/liquidity-migration/engine.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+Environment=DATA_ROOT=data/bybit-exodus-demo-event
+Environment=EXECUTION_ENVIRONMENT=demo
+Environment=EXODUS_SHORT_PROFILE=v1
+Environment=EXODUS_EVENT_TAPE=/opt/liquidity-migration/data/bybit-carry-demo-event/carry_presettlement_events.jsonl
+Environment=EXODUS_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/exodus-demo.json
+Environment=INTERVAL_SECONDS=60
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=POLARS_MAX_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=LM_CHILD_STOP_GRACE_SECONDS=60
+ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-exodus-demo.service main
+SuccessExitStatus=143
+Restart=always
+RestartPreventExitStatus=78
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=90
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectProc=invisible
+# Polars reads /proc/meminfo to size its cgroup-aware memory manager.
+ProtectSystem=strict
+ProtectHome=true
+UMask=0027
+ReadWritePaths=/opt/liquidity-migration/data /var/lib/liquidity-migration/targets
+MemoryMax=512M
+MemorySwapMax=192M
+
+[Install]
+WantedBy=multi-user.target

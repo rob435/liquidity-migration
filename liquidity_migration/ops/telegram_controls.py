@@ -37,6 +37,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -59,22 +60,11 @@ __all__ = [
     "sleeve_strip_rewrite",
 ]
 
-#: Sleeve toggle keys this module manages in the host override, and the demo
-#: producer unit each one publishes through.
-SLEEVE_UNITS: dict[str, str] = {
-    "LONG_SLEEVE": "liquidity-migration-bybit-long-demo.service",
-    "CARRY_SLEEVE": "liquidity-migration-bybit-carry-demo.service",
-}
-MAINNET_OWNER_UNIT = "liquidity-migration-engine-mainnet.service"
-MAINNET_PRODUCER_UNITS = (
-    "liquidity-migration-bybit-carry-mainnet.service",
-    "liquidity-migration-bybit-long-mainnet.service",
-)
-DEMO_OWNER_UNIT = "liquidity-migration-engine.service"
+_MANAGED_SLEEVE_KEYS = ("LONG_SLEEVE", "CARRY_SLEEVE")
 CONTROL_HELPER = "/opt/liquidity-migration-engine/bin/telegram-control-helper"
 CONTROL_COMMANDS: dict[str, tuple[str, ...]] = {
     action: ("/usr/bin/sudo", "-n", CONTROL_HELPER, action)
-    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-demo")
+    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-fleet")
 }
 CONTROLS_STATE_DIR = Path("/var/lib/liquidity-migration-telegram-controls")
 
@@ -132,7 +122,7 @@ def _strip_managed_lines(text: str) -> list[str]:
         if stripped == _PAUSE_MARKER:
             continue
         key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
-        if key in SLEEVE_UNITS:
+        if key in _MANAGED_SLEEVE_KEYS:
             continue
         kept.append(line)
     return kept
@@ -141,7 +131,7 @@ def _strip_managed_lines(text: str) -> list[str]:
 def sleeve_pause_rewrite(text: str | None) -> str:
     """Host override content with every managed sleeve set off, all else kept."""
     kept = _strip_managed_lines(text or "")
-    lines = [*kept, _PAUSE_MARKER, *(f"{key}=off" for key in SLEEVE_UNITS)]
+    lines = [*kept, _PAUSE_MARKER, *(f"{key}=off" for key in _MANAGED_SLEEVE_KEYS)]
     return "\n".join(lines).strip("\n") + "\n"
 
 
@@ -241,8 +231,96 @@ class TelegramApi:
 # Host actions (systemctl, sleeve resolve)
 
 
+@dataclass(frozen=True, slots=True)
+class _FleetUnitStatus:
+    unit: str
+    realm: str
+    role: str
+    sleeve: str
+    active: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FleetStatus:
+    demo_paused: bool
+    sleeves: Mapping[str, str]
+    units: tuple[_FleetUnitStatus, ...]
+
+    def owner(self, realm: str) -> _FleetUnitStatus:
+        return next(unit for unit in self.units if unit.realm == realm and unit.role == "owner")
+
+    def producers(self, realm: str) -> tuple[_FleetUnitStatus, ...]:
+        return tuple(unit for unit in self.units if unit.realm == realm and unit.role == "producer")
+
+
+def _parse_fleet_status(text: str) -> _FleetStatus:
+    lines = text.splitlines()
+    if not lines or lines[0] != "fleet-status-v1":
+        raise RuntimeError("privileged control helper returned an unsupported fleet status")
+
+    paused: bool | None = None
+    sleeves: dict[str, str] = {}
+    units: list[_FleetUnitStatus] = []
+    seen_units: set[str] = set()
+    seen_roles: set[tuple[str, str, str]] = set()
+    allowed_active = {
+        "active",
+        "reloading",
+        "inactive",
+        "failed",
+        "activating",
+        "deactivating",
+        "maintenance",
+        "refreshing",
+        "unknown",
+    }
+    for line in lines[1:]:
+        fields = line.split("|")
+        if fields[:2] == ["demo-control", "paused"] and len(fields) == 3:
+            if paused is not None or fields[2] not in {"true", "false"}:
+                raise RuntimeError("privileged control helper returned an invalid pause state")
+            paused = fields[2] == "true"
+            continue
+        if fields[:1] == ["sleeve"] and len(fields) == 3:
+            name, state = fields[1:]
+            if name in sleeves or not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
+                raise RuntimeError("privileged control helper returned an invalid sleeve row")
+            if state not in {"on", "off"}:
+                raise RuntimeError("privileged control helper returned an invalid sleeve state")
+            sleeves[name] = state
+            continue
+        if fields[:1] != ["unit"] or len(fields) != 6:
+            raise RuntimeError("privileged control helper returned a malformed fleet row")
+        realm, role, sleeve, unit, active = fields[1:]
+        if realm not in _ENVIRONMENTS or role not in {"owner", "producer"}:
+            raise RuntimeError("privileged control helper returned an invalid fleet role")
+        if role == "owner" and sleeve != "-":
+            raise RuntimeError("privileged control helper returned an invalid owner row")
+        if role == "producer" and not re.fullmatch(r"[a-z][a-z0-9_-]*", sleeve):
+            raise RuntimeError("privileged control helper returned an invalid producer row")
+        if not re.fullmatch(r"liquidity-migration-[A-Za-z0-9_.@-]+\.service", unit):
+            raise RuntimeError("privileged control helper returned an invalid unit name")
+        if active not in allowed_active:
+            raise RuntimeError("privileged control helper returned an invalid unit state")
+        role_key = (realm, role, sleeve)
+        if unit in seen_units or role_key in seen_roles:
+            raise RuntimeError("privileged control helper returned a duplicate fleet row")
+        seen_units.add(unit)
+        seen_roles.add(role_key)
+        units.append(_FleetUnitStatus(unit, realm, role, sleeve, active))
+
+    if paused is None or set(sleeves) != {"long", "carry"}:
+        raise RuntimeError("privileged control helper returned incomplete control state")
+    for realm in _ENVIRONMENTS:
+        owners = [unit for unit in units if unit.realm == realm and unit.role == "owner"]
+        producers = [unit for unit in units if unit.realm == realm and unit.role == "producer"]
+        if len(owners) != 1 or not producers:
+            raise RuntimeError("privileged control helper returned incomplete fleet inventory")
+    return _FleetStatus(paused, sleeves, tuple(units))
+
+
 class VpsFleet:
-    """Read unit state directly; route every mutation through the fixed helper."""
+    """Read and mutate the manifest fleet through the fixed trusted helper."""
 
     def __init__(self, config: ControlsConfig) -> None:
         self._config = config
@@ -260,40 +338,22 @@ class VpsFleet:
             raise RuntimeError(f"privileged control helper refused {action}: {detail or proc.returncode}")
         return proc.stdout.strip()
 
-    def _demo_status(self) -> tuple[bool, dict[str, str]]:
-        values: dict[str, str] = {}
-        for line in self._control("status-demo").splitlines():
-            if "=" not in line:
-                raise RuntimeError("privileged control helper returned malformed status")
-            key, value = line.split("=", 1)
-            if key in values or key not in {"paused", *SLEEVE_UNITS}:
-                raise RuntimeError("privileged control helper returned an unexpected status field")
-            values[key] = value
-        if set(values) != {"paused", *SLEEVE_UNITS}:
-            raise RuntimeError("privileged control helper returned incomplete status")
-        if values["paused"] not in {"true", "false"}:
-            raise RuntimeError("privileged control helper returned an invalid pause state")
-        toggles = {key: values[key] for key in SLEEVE_UNITS}
-        if any(value not in {"on", "off"} for value in toggles.values()):
-            raise RuntimeError("privileged control helper returned an invalid sleeve state")
-        return values["paused"] == "true", toggles
-
-    def unit_active(self, unit: str) -> str:
-        proc = self._run(["systemctl", "is-active", unit], timeout=15.0)
-        return (proc.stdout or proc.stderr).strip() or "unknown"
+    def _fleet_status(self) -> _FleetStatus:
+        return _parse_fleet_status(self._control("status-fleet"))
 
     def mainnet_present(self) -> bool:
-        return self.unit_active(MAINNET_OWNER_UNIT) == "active"
+        return self._fleet_status().owner("mainnet").active == "active"
 
     def paused(self, environment: str) -> bool:
+        status = self._fleet_status()
         if environment == "demo":
-            return self._demo_status()[0]
+            return status.demo_paused
         if environment == "mainnet":
-            return all(self.unit_active(unit) != "active" for unit in MAINNET_PRODUCER_UNITS)
+            return all(unit.active != "active" for unit in status.producers("mainnet"))
         raise ValueError(f"unsupported environment: {environment}")
 
     def resolved_sleeves(self) -> dict[str, str]:
-        return self._demo_status()[1]
+        return {f"{name.upper()}_SLEEVE": state for name, state in self._fleet_status().sleeves.items()}
 
     def pause(self, environment: str) -> str:
         action = {"demo": "pause-demo", "mainnet": "pause-mainnet"}.get(environment)
@@ -302,7 +362,7 @@ class VpsFleet:
         self._control(action)
         if environment == "mainnet":
             return (
-                "⏸ Real-money trading is paused: both mainnet producers are stopped.\n"
+                "⏸ Real-money trading is paused: all mainnet producers are stopped.\n"
                 "Open positions stay open and protected by the account owner."
             )
         return (
@@ -316,36 +376,30 @@ class VpsFleet:
         if environment == "mainnet":
             self._control("resume-mainnet")
             return (
-                "▶️ Real-money trading resumed: both funded producers are running.\n"
+                "▶️ Real-money trading resumed: all funded producers are running.\n"
                 "The helper proved this generation's activation receipt and that the funded "
-                "account owner is live before starting them, and re-quarantines both if "
-                "either fails to come up. Arming is unchanged — REAL_MONEY is not touched."
+                "account owner is live before starting them, and re-quarantines the set if "
+                "any fails to come up. Arming is unchanged — REAL_MONEY is not touched."
             )
         if environment != "demo":
             raise ValueError(f"unsupported environment: {environment}")
         self._control("resume-demo")
-        toggles = self.resolved_sleeves()
-        names = ", ".join(
-            unit.removeprefix("liquidity-migration-bybit-").removesuffix(".service")
-            for key, unit in SLEEVE_UNITS.items()
-            if toggles[key] == "on"
-        )
+        names = ", ".join(name for name, state in sorted(self._fleet_status().sleeves.items()) if state == "on")
         return f"▶️ Demo trading resumed: {names or 'no sleeve resolves on'}."
 
     def status_text(self) -> str:
         now = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
-        paused, toggles = self._demo_status()
+        status = self._fleet_status()
         lines = [f"📊 Fleet status · {now}"]
-        lines.append(f"demo owner: {self.unit_active(DEMO_OWNER_UNIT)}")
-        for key, unit in SLEEVE_UNITS.items():
-            sleeve = key.removesuffix("_SLEEVE").lower()
-            lines.append(f"demo {sleeve}: unit {self.unit_active(unit)}, sleeve {toggles[key]}")
-        lines.append("demo trading: PAUSED by controls" if paused else "demo trading: on")
-        if self.mainnet_present():
-            producer_states = ", ".join(
-                f"{unit.removeprefix('liquidity-migration-bybit-').removesuffix('.service')}={self.unit_active(unit)}"
-                for unit in MAINNET_PRODUCER_UNITS
-            )
+        lines.append(f"demo owner: {status.owner('demo').active}")
+        for unit in status.producers("demo"):
+            toggle = status.sleeves.get(unit.sleeve)
+            toggle_text = f", sleeve {toggle}" if toggle is not None else ""
+            lines.append(f"demo {unit.sleeve}: unit {unit.active}{toggle_text}")
+        lines.append("demo trading: PAUSED by controls" if status.demo_paused else "demo trading: on")
+        mainnet_owner = status.owner("mainnet")
+        if mainnet_owner.active == "active":
+            producer_states = ", ".join(f"{unit.sleeve}={unit.active}" for unit in status.producers("mainnet"))
             lines.append(f"real money: owner active; {producer_states}")
         else:
             lines.append("real money: not armed")

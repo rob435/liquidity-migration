@@ -6,6 +6,44 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — Strategy decisions and fleet identity gain one contract each.**
+  Native LONG live and research planning now call the same pure typed reducer
+  for signal, sizing, entry, stop and time exit; the contract has no
+  take-profit. One typed effective config records field-level provenance, and
+  operational profiles are the sole live sizing source. The hourly runner is
+  explicitly diagnostic, while the new one-minute live-physics runner adds
+  causal wakes, fill-anchored clocks, current target and capital-reference
+  deadbands, fees and funding and labels its result a minute execution bound.
+  Separate candidate-window mark-price and traded-price tapes preserve the
+  live trigger/fill split; funding value uses the settlement mark. Each minute
+  report freezes the exact local research/live source closure and
+  runtime versions behind a recorded SHA-256, so a dirty exploratory tree is
+  still identifiable. The LLM ledger is research-only and no longer feeds any
+  Native LONG target path. CARRY now
+  resolves its data root and private state/tape paths in the typed effective
+  config, and separates typed pre-settlement input, pure planning, durable
+  publication, state transition, and persistence. It durably appends each
+  hash-chained event before applying an exit;
+  independent Exodus producers consume those tapes and own their state and
+  books. A recorded cross-language tape fences exact Python decisions and
+  target-book bytes against the Rust planner, risk and WAL projection.
+  The cross-language fence is a self-contained, hash-chained strategy-event
+  tape rather than an out-of-band fixture clock. A durable per-sleeve target
+  latch now prevents a stale nonzero book from reopening a position that a
+  venue-native stop just flattened, across live callbacks, restart, and WAL
+  rotation; an explicit zero clears it. `deploy/fleet_manifest.tsv`
+  is the canonical inventory for lifecycle order, activation, timers, operator
+  policy, dependencies, health and runtime artifacts, including both engines,
+  backup and chaos drill.
+  LONG PIT taint now follows the exact causal input window: the signal start
+  minus the 90-day maximum feature lookback through the last daily source bar
+  admitted by the end-exclusive signal clock. Whole-root coverage remains a
+  separate receipt, so unrelated stored dates neither bless nor taint a scoped
+  replay.
+  The owner confirmed the August 4 withdrawals, dedicated the funded account
+  to the engine, and revoked the laptop-readable execution key in favor of the
+  rotated host key.
+
 - **2026-08-30 — Binance gains a fenced adapter, and the LONG evidence program
   stops overstating what it saw.** The Rust engine now compiles six venue
   families and ten exact realms. Binance USD-M has

@@ -33,6 +33,10 @@ from liquidity_migration.strategy.carry_demo import (
     carry_decision_ts_ms,
     format_carry_demo_cycle_summary,
     load_carry_config,
+    resolve_carry_effective_config,
+)
+from liquidity_migration.strategy.presettlement_events import (
+    load_carry_presettlement_events,
 )
 from liquidity_migration.core.config import ResearchConfig
 
@@ -63,30 +67,29 @@ def _synth_klines(symbols: list[str], *, start_ms: int, end_ms: int) -> pl.DataF
     bar's open). This shim used to claim and implement an exclusive end; that
     mirrored the production +1h window bug instead of catching it."""
 
-    opens = pl.DataFrame(
-        {"ts_ms": pl.int_range(start_ms, end_ms + MS_PER_HOUR, MS_PER_HOUR, eager=True)}
-    )
+    opens = pl.DataFrame({"ts_ms": pl.int_range(start_ms, end_ms + MS_PER_HOUR, MS_PER_HOUR, eager=True)})
     per_symbol = pl.DataFrame(
         {
             "symbol": list(symbols),
             "base": [_base_price(symbol) for symbol in symbols],
-            "turnover_quote": [
-                1_000_000.0 * (len(ALL_SYMBOLS) - ALL_SYMBOLS.index(symbol))
-                for symbol in symbols
-            ],
+            "turnover_quote": [1_000_000.0 * (len(ALL_SYMBOLS) - ALL_SYMBOLS.index(symbol)) for symbol in symbols],
         }
     )
     pattern_index = (pl.col("ts_ms") // MS_PER_DAY) % 3
-    return opens.join(per_symbol, how="cross").with_columns(
-        (
-            pl.col("base")
-            * pl.when(pattern_index == 0)
-            .then(PATTERN[0])
-            .when(pattern_index == 1)
-            .then(PATTERN[1])
-            .otherwise(PATTERN[2])
-        ).alias("close")
-    ).select("ts_ms", "symbol", "close", "turnover_quote")
+    return (
+        opens.join(per_symbol, how="cross")
+        .with_columns(
+            (
+                pl.col("base")
+                * pl.when(pattern_index == 0)
+                .then(PATTERN[0])
+                .when(pattern_index == 1)
+                .then(PATTERN[1])
+                .otherwise(PATTERN[2])
+            ).alias("close")
+        )
+        .select("ts_ms", "symbol", "close", "turnover_quote")
+    )
 
 
 def _funding_rate(symbol: str, ts_ms: int) -> float:
@@ -129,14 +132,6 @@ class _FakeCarryMarket:
         return _funding_rows(symbol, start, end)
 
 
-
-
-
-
-
-
-
-
 def _patch_demo_market_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Route the heavy kline path through the synthetic generator.
 
@@ -145,7 +140,9 @@ def _patch_demo_market_data(monkeypatch: pytest.MonkeyPatch) -> None:
     replay all run for real on top of it.
     """
 
-    def download(symbols: list[str], *, start_ms: int, end_ms: int, **_kwargs: Any) -> tuple[pl.DataFrame, dict[str, int]]:
+    def download(
+        symbols: list[str], *, start_ms: int, end_ms: int, **_kwargs: Any
+    ) -> tuple[pl.DataFrame, dict[str, int]]:
         frame = _synth_klines(symbols, start_ms=start_ms, end_ms=end_ms)
         return frame, {
             "cache_rows": 0,
@@ -175,7 +172,9 @@ def _patch_demo_market_data_ws_served(monkeypatch: pytest.MonkeyPatch) -> None:
     reports a REST build and must keep refusing to freeze ahead.
     """
 
-    def download(symbols: list[str], *, start_ms: int, end_ms: int, **_kwargs: Any) -> tuple[pl.DataFrame, dict[str, int]]:
+    def download(
+        symbols: list[str], *, start_ms: int, end_ms: int, **_kwargs: Any
+    ) -> tuple[pl.DataFrame, dict[str, int]]:
         frame = _synth_klines(symbols, start_ms=start_ms, end_ms=end_ms)
         return frame, {
             "cache_rows": frame.height,
@@ -221,9 +220,7 @@ def test_carry_venue_view_close_keys_bars_and_ages_funding_exactly() -> None:
         }
     )
 
-    view = _carry_venue_view(
-        klines, funding, window_start_ms=D0 - 2 * MS_PER_HOUR, max_bar_ts_ms=D0
-    )
+    view = _carry_venue_view(klines, funding, window_start_ms=D0 - 2 * MS_PER_HOUR, max_bar_ts_ms=D0)
 
     # A kline stamped with open T is only knowable at T+1h; the row keyed T
     # must therefore carry the PREVIOUS hour's close.
@@ -270,10 +267,7 @@ def test_view_health_guards_refuse_broken_funding_inputs() -> None:
         _validate_carry_view_health(all_null, decision_ts_ms=D0, standing_symbols=set())
 
     stale_standing = healthy.with_columns(
-        pl.when(pl.col("symbol") == "A")
-        .then(26.0)
-        .otherwise(pl.col("by_funding_age_h"))
-        .alias("by_funding_age_h")
+        pl.when(pl.col("symbol") == "A").then(26.0).otherwise(pl.col("by_funding_age_h")).alias("by_funding_age_h")
     )
     with pytest.raises(CarrySleeveError, match="stale funding"):
         _validate_carry_view_health(stale_standing, decision_ts_ms=D0, standing_symbols={"A"})
@@ -281,10 +275,7 @@ def test_view_health_guards_refuse_broken_funding_inputs() -> None:
     _validate_carry_view_health(stale_standing, decision_ts_ms=D0, standing_symbols={"B"})
 
     invalid_standing = healthy.with_columns(
-        pl.when(pl.col("symbol") == "A")
-        .then(float("nan"))
-        .otherwise(pl.col("by_funding"))
-        .alias("by_funding")
+        pl.when(pl.col("symbol") == "A").then(float("nan")).otherwise(pl.col("by_funding")).alias("by_funding")
     )
     with pytest.raises(CarrySleeveError, match="non-finite"):
         _validate_carry_view_health(
@@ -309,9 +300,7 @@ def test_normalized_funding_events_reject_non_finite_rates(bad_rate: float) -> N
 
 def test_funding_ingress_drops_non_finite_venue_rows(tmp_path: Path) -> None:
     class _NonFiniteMarket:
-        def get_funding_history(
-            self, symbol: str, start: int, end: int
-        ) -> list[dict[str, str]]:
+        def get_funding_history(self, symbol: str, start: int, end: int) -> list[dict[str, str]]:
             return [
                 {
                     "fundingRateTimestamp": str(D0),
@@ -330,12 +319,6 @@ def test_funding_ingress_drops_non_finite_venue_rows(tmp_path: Path) -> None:
     )
     assert funding.is_empty()
     assert stats["funding_rows_appended"] == 0
-
-
-
-
-
-
 
 
 class TestFrozenDailyDecision:
@@ -358,10 +341,11 @@ class TestFrozenDailyDecision:
         frozen = state.frozen_decision(D0)
 
         assert frozen is not None
-        decision, trail, eligible = frozen
+        decision, trail, eligible, evidence = frozen
         assert decision is first
         assert trail == {"AUSDT": -0.02}
         assert eligible == 103
+        assert evidence == {}
 
     def test_a_new_bar_is_not_served_the_previous_book(self) -> None:
         state = CarryCycleState()
@@ -388,20 +372,6 @@ class TestFrozenDailyDecision:
         frozen = state.frozen_decision(D0)
         assert frozen is not None
         assert frozen[1] == {"AUSDT": -0.02}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_summary_formatter_renders_flat_payload() -> None:
@@ -495,9 +465,7 @@ class _CountingKlineStore(KlineStore):
         return super().get_klines(symbols, start_ms=start_ms, end_ms=end_ms)
 
 
-def _bootstrapped_store(
-    symbols: tuple[str, ...], *, newest_open_ms: int, span_days: int
-) -> _CountingKlineStore:
+def _bootstrapped_store(symbols: tuple[str, ...], *, newest_open_ms: int, span_days: int) -> _CountingKlineStore:
     store = _CountingKlineStore(cache_root=None, retain_days=span_days + 14, flush_interval_seconds=0.0)
     first_open_ms = newest_open_ms - span_days * 24 * MS_PER_HOUR
     for symbol in symbols:
@@ -533,9 +501,7 @@ class _FakeTickerCache:
         return list(self.rows)
 
 
-def test_carry_market_build_uses_the_ws_store_and_ticker_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_carry_market_build_uses_the_ws_store_and_ticker_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from liquidity_migration.strategy.carry_demo import (
         CarryCycleState,
         _build_carry_demo_market_data,
@@ -593,6 +559,31 @@ def test_carry_market_build_uses_the_ws_store_and_ticker_cache(
     assert not funding.is_empty()
 
 
+def test_carry_daemon_cycle_call_uses_only_the_effective_config() -> None:
+    from liquidity_migration.strategy.carry_demo_daemon import CarryDemoDaemon
+
+    daemon = object.__new__(CarryDemoDaemon)
+    cycle_state = object()
+    market = object()
+    effective = object()
+    daemon._carry_cycle_state = cycle_state  # type: ignore[assignment]
+    daemon._cycle_market_client = market
+    daemon._effective_config = effective  # type: ignore[assignment]
+    daemon._pending_cycle_kind = "timer"
+    daemon._next_wake_deadline_ts_ms = None
+    shared = {"now_ms": 1, "kline_store": None, "ticker_cache": None}
+
+    kwargs = daemon._cycle_call_kwargs(shared)
+
+    assert kwargs == {
+        **shared,
+        "cycle_state": cycle_state,
+        "market_client": market,
+        "cycle_kind": "timer",
+        "effective_config": effective,
+    }
+    assert "config" not in kwargs
+    assert "demo_config" not in kwargs
 
 
 class TestCarryStrategyProfileDial:
@@ -616,9 +607,7 @@ class TestCarryStrategyProfileDial:
         assert module.CARRY_STRATEGY_PROFILE_CHOICES == ("v3", "v4", "v6", "v7")
         # All files load through the registered rule loader; the hysteresis
         # thresholds never moved across the family.
-        assert load_carry_config(v3.config_path).enter_bp == pytest.approx(
-            load_carry_config(v6.config_path).enter_bp
-        )
+        assert load_carry_config(v3.config_path).enter_bp == pytest.approx(load_carry_config(v6.config_path).enter_bp)
         # The whale halving is what makes v6 need the Binance feed.
         assert load_carry_config(v6.config_path).whale_cut is not None
         assert load_carry_config(v4.config_path).whale_cut is None
@@ -631,6 +620,71 @@ class TestCarryStrategyProfileDial:
         with pytest.raises(ValueError, match="unknown CARRY strategy profile"):
             _validate_carry_demo_config(config)
 
+    def test_effective_config_resolves_once_with_sizing_provenance(self, tmp_path: Path) -> None:
+        cycle = CarryDemoCycleConfig(
+            execution_environment="demo",
+            strategy_profile="v7",
+            notional_multiplier=3.0,
+            entry_leverage=5.0,
+            operational_profile_sha256="ab" * 32,
+        )
+        effective = resolve_carry_effective_config(
+            cycle,
+            exchange=ResearchConfig().exchange,
+            exchange_source="live_public_market_contract",
+            data_root=tmp_path / "data",
+            data_root_source="test",
+            target_book_path=(tmp_path / "carry.json").resolve(),
+            engine_heartbeat_path=(tmp_path / "heartbeat.json").resolve(),
+            expected_account_user_id="demo-user",
+            operational_profile_source="operational.demo.json",
+        )
+
+        assert effective.cycle == dataclasses.replace(
+            cycle,
+            presettlement_event_path=str((tmp_path / "data" / "carry_presettlement_events.jsonl").resolve()),
+        )
+        assert effective.data_root == (tmp_path / "data").resolve()
+        assert effective.sizing_anchor_path == (tmp_path / "data" / ".cache" / "carry_sizing_anchors.json").resolve()
+        assert effective.early_exit_state_path == (tmp_path / "data" / "carry_early_exits.json").resolve()
+        assert effective.profile.presettle_exit is True
+        assert effective.rule.config_id == load_carry_config(effective.profile.config_path).config_id
+        provenance = effective.provenance_by_field()
+        assert provenance["notional_multiplier"]["source"] == ("operational.demo.json")
+        assert provenance["strategy_profile"]["source"] == ("registered_profile:v7")
+        assert provenance["exchange"]["source"] == "live_public_market_contract"
+        assert provenance["data_root"]["source"] == "test"
+        assert provenance["presettlement_event_path"]["source"] == ("derived:data_root")
+        assert provenance["rule.config_id"]["detail"].endswith(
+            f"#{effective.provenance_by_field()['rule.enter_bp']['detail'].rsplit('#', 1)[1]}"
+        )
+        with pytest.raises(ValueError, match="data root disagrees"):
+            module.run_carry_demo_cycle(
+                tmp_path / "other-data-root",
+                effective_config=effective,
+                now_ms=NOW_MS,
+            )
+
+    @pytest.mark.parametrize("capital", [float("nan"), -1.0])
+    def test_effective_config_rejects_an_invalid_capital_reference(self, tmp_path: Path, capital: float) -> None:
+        cycle = CarryDemoCycleConfig(
+            execution_environment="demo",
+            capital_reference_usdt=capital,
+            operational_profile_sha256="ab" * 32,
+        )
+        with pytest.raises(ValueError, match="capital_reference_usdt"):
+            resolve_carry_effective_config(
+                cycle,
+                exchange=ResearchConfig().exchange,
+                exchange_source="live_public_market_contract",
+                data_root=tmp_path / "data",
+                data_root_source="test",
+                target_book_path=(tmp_path / "carry.json").resolve(),
+                engine_heartbeat_path=(tmp_path / "heartbeat.json").resolve(),
+                expected_account_user_id="demo-user",
+                operational_profile_source="test-profile.json",
+            )
+
 
 # --- freeze-ahead + deadline build-skip (the fast 00:20 boundary, 2026-08-13) ---
 
@@ -642,8 +696,6 @@ PREWARM_NOW = D0 + 19 * 60_000
 BOUNDARY_NOW = D0 + 20 * 60_000 + 1
 
 
-
-
 # --- wave-2 boundary anatomy: grouped exits, pre-inbox read elimination, and
 # --- the freeze-time equity anchor (2026-08-13) ---
 
@@ -652,28 +704,16 @@ BOUNDARY_NOW = D0 + 20 * 60_000 + 1
 REFRESH_NOW = D0 + 20 * 60_000 - 10_000
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # The engine target book: what research decided, written where the Rust engine
 # can follow it. Publication is required and failures stop the producer cycle.
 # ---------------------------------------------------------------------------
 
 
-def _write_book(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> Path:
+def _write_book(tmp_path: Path, **overrides: Any) -> Path:
     path = tmp_path / "carry_targets.json"
-    monkeypatch.setenv(module.ENGINE_TARGET_BOOK_PATH_ENV, str(path))
     kwargs: dict[str, Any] = {
+        "target_book_path": path,
         "desired": {"KAITOUSDT": 0.10, "COTIUSDT": 0.05},
         "decision_ts_ms": 1786665600000,
         "sizing_equity_usdt": 1000.0,
@@ -687,13 +727,9 @@ def _write_book(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: An
     return path
 
 
-def test_target_book_records_the_decided_notionals(tmp_path, monkeypatch) -> None:
-    book = json.loads(_write_book(tmp_path, monkeypatch).read_text(encoding="utf-8"))
-    entry_deadline = (
-        1786665600000
-        + module.SIGNAL_VALIDITY_MS
-        - module.ENTRY_PUBLISH_GUARD_MS
-    )
+def test_target_book_records_the_decided_notionals(tmp_path) -> None:
+    book = json.loads(_write_book(tmp_path).read_text(encoding="utf-8"))
+    entry_deadline = 1786665600000 + module.SIGNAL_VALIDITY_MS - module.ENTRY_PUBLISH_GUARD_MS
     assert book["version"] == 2
     assert book["source"] == "carry_hold_v4_live_v1"
     assert book["decision_ts_ms"] == 1786665600000
@@ -707,10 +743,10 @@ def test_target_book_records_the_decided_notionals(tmp_path, monkeypatch) -> Non
     assert by_symbol["COTIUSDT"]["entry_valid_until_ms"] == entry_deadline
 
 
-def test_no_path_means_no_book(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv(module.ENGINE_TARGET_BOOK_PATH_ENV, raising=False)
-    with pytest.raises(ValueError, match=module.ENGINE_TARGET_BOOK_PATH_ENV):
+def test_no_path_means_no_book(tmp_path) -> None:
+    with pytest.raises(ValueError, match="target_book_path"):
         module._write_engine_target_book(
+            target_book_path="",
             desired={"KAITOUSDT": 0.1},
             decision_ts_ms=1786665600000,
             sizing_equity_usdt=1000.0,
@@ -725,7 +761,7 @@ def test_no_path_means_no_book(tmp_path, monkeypatch) -> None:
 # NaN is not here on purpose: it never reached the file anyway, because the
 # finite-JSON writer refuses it. These two are the cases this guard decides.
 @pytest.mark.parametrize("equity", [0.0, -1.0])
-def test_an_unusable_equity_leaves_the_standing_book_alone(tmp_path, monkeypatch, equity) -> None:
+def test_an_unusable_equity_leaves_the_standing_book_alone(tmp_path, equity) -> None:
     # A failed owner-health read returns equity 0.0, and every notional would
     # then render 0.0 -- which the engine reads as an explicit exit, before any
     # validity window. Writing it would flatten the whole sleeve at market on a
@@ -733,23 +769,21 @@ def test_an_unusable_equity_leaves_the_standing_book_alone(tmp_path, monkeypatch
     path = tmp_path / "carry_targets.json"
     path.write_text('{"targets": "the standing book"}', encoding="utf-8")
     with pytest.raises(ValueError, match="positive sizing equity"):
-        _write_book(tmp_path, monkeypatch, sizing_equity_usdt=equity)
+        _write_book(tmp_path, sizing_equity_usdt=equity)
     assert path.read_text(encoding="utf-8") == '{"targets": "the standing book"}'
 
 
-def test_an_empty_decision_writes_an_empty_book(tmp_path, monkeypatch) -> None:
+def test_an_empty_decision_writes_an_empty_book(tmp_path) -> None:
     # Deciding cash is a decision and the engine must be able to act on it.
-    book = json.loads(_write_book(tmp_path, monkeypatch, desired={}).read_text(encoding="utf-8"))
+    book = json.loads(_write_book(tmp_path, desired={}).read_text(encoding="utf-8"))
     assert book["targets"] == []
 
 
 def test_a_book_that_cannot_be_written_fails_the_producer_cycle(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv(module.ENGINE_TARGET_BOOK_PATH_ENV, str(tmp_path / "x.json"))
-    monkeypatch.setattr(
-        module, "publish_target_book", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
-    )
+    monkeypatch.setattr(module, "publish_target_book", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError, match="disk full"):
         module._write_engine_target_book(
+            target_book_path=tmp_path / "x.json",
             desired={"KAITOUSDT": 0.1},
             decision_ts_ms=1786665600000,
             sizing_equity_usdt=1000.0,
@@ -807,9 +841,7 @@ class _FakeWhaleClient:
 
 
 def _flat_series(symbols: list[str], day_ends: list[int], value: float = 1.3) -> dict:
-    return {
-        sym: [(end - 5 * 60_000, value) for end in day_ends] for sym in symbols
-    }
+    return {sym: [(end - 5 * 60_000, value) for end in day_ends] for sym in symbols}
 
 
 class TestWhaleFeed:
@@ -823,7 +855,10 @@ class TestWhaleFeed:
         _FakeWhaleClient.calls = []
 
         events, stats = module._refresh_carry_whale_cache(
-            tmp_path, ["AUSDT", "BUSDT", "GONEUSDT"], now_ms=NOW_MS, state=state,
+            tmp_path,
+            ["AUSDT", "BUSDT", "GONEUSDT"],
+            now_ms=NOW_MS,
+            state=state,
             client_factory=lambda: fake,
         )
 
@@ -833,9 +868,7 @@ class TestWhaleFeed:
         # nulls in the store (so it is never refetched) and excluded here.
         assert events.height == 2 * module.WHALE_FEED_DAYS
         assert set(events.get_column("symbol").to_list()) == {"AUSDT", "BUSDT"}
-        newest_b = events.filter(
-            (pl.col("symbol") == "BUSDT") & (pl.col("_tt_ls_ts_ms") == ends[0])
-        )
+        newest_b = events.filter((pl.col("symbol") == "BUSDT") & (pl.col("_tt_ls_ts_ms") == ends[0]))
         assert newest_b.get_column("bn_tt_ls").to_list() == [1.0]
         assert module._whale_store_path(tmp_path).exists()
 
@@ -844,7 +877,10 @@ class TestWhaleFeed:
         _FakeWhaleClient.calls = []
         state.whale_last_attempt_ms = None
         events_again, stats_again = module._refresh_carry_whale_cache(
-            tmp_path, ["AUSDT", "BUSDT", "GONEUSDT"], now_ms=NOW_MS, state=state,
+            tmp_path,
+            ["AUSDT", "BUSDT", "GONEUSDT"],
+            now_ms=NOW_MS,
+            state=state,
             client_factory=lambda: fake,
         )
         assert _FakeWhaleClient.calls == []
@@ -855,26 +891,34 @@ class TestWhaleFeed:
         ends = _whale_day_ends(NOW_MS)
         fake = _FakeWhaleClient(_flat_series(["AUSDT"], ends))
         module._refresh_carry_whale_cache(
-            tmp_path, ["AUSDT"], now_ms=NOW_MS, state=CarryCycleState(),
+            tmp_path,
+            ["AUSDT"],
+            now_ms=NOW_MS,
+            state=CarryCycleState(),
             client_factory=lambda: fake,
         )
         # Fresh state (a producer restart): served from disk, no fetching.
         _FakeWhaleClient.calls = []
         events, _stats = module._refresh_carry_whale_cache(
-            tmp_path, ["AUSDT"], now_ms=NOW_MS, state=CarryCycleState(),
+            tmp_path,
+            ["AUSDT"],
+            now_ms=NOW_MS,
+            state=CarryCycleState(),
             client_factory=lambda: fake,
         )
         assert _FakeWhaleClient.calls == []
         assert events.height == module.WHALE_FEED_DAYS
 
-    def test_transient_failure_leaves_pair_missing_and_cooldown_gates_retry(
-        self, tmp_path: Path
-    ) -> None:
+    def test_transient_failure_leaves_pair_missing_and_cooldown_gates_retry(self, tmp_path: Path) -> None:
         state = CarryCycleState()
         fake = _FakeWhaleClient({}, transient={"AUSDT"})
         _FakeWhaleClient.calls = []
         events, stats = module._refresh_carry_whale_cache(
-            tmp_path, ["AUSDT"], now_ms=NOW_MS, state=state, client_factory=lambda: fake,
+            tmp_path,
+            ["AUSDT"],
+            now_ms=NOW_MS,
+            state=state,
+            client_factory=lambda: fake,
         )
         assert events.height == 0
         assert stats["whale_pairs_fetched"] == 0
@@ -884,7 +928,10 @@ class TestWhaleFeed:
 
         # Inside the cooldown: no new attempts.
         module._refresh_carry_whale_cache(
-            tmp_path, ["AUSDT"], now_ms=NOW_MS + 60_000, state=state,
+            tmp_path,
+            ["AUSDT"],
+            now_ms=NOW_MS + 60_000,
+            state=state,
             client_factory=lambda: fake,
         )
         assert len(_FakeWhaleClient.calls) == first_calls
@@ -926,12 +973,13 @@ class TestWhaleFeed:
             }
         )
         view = _carry_venue_view(
-            klines, funding, window_start_ms=D0 - MS_PER_HOUR, max_bar_ts_ms=D0,
+            klines,
+            funding,
+            window_start_ms=D0 - MS_PER_HOUR,
+            max_bar_ts_ms=D0,
             whale_events=events,
         )
-        rows = {
-            (row["symbol"], int(row["bar_ts_ms"])): row for row in view.to_dicts()
-        }
+        rows = {(row["symbol"], int(row["bar_ts_ms"])): row for row in view.to_dicts()}
         # Backward as-of: the D0-1h bar still reads yesterday's EOD (age 23h);
         # the D0 bar reads the value stamped at D0 with age exactly 0 — the
         # same shape the research panel attaches bn_tt_ls with.
@@ -944,18 +992,17 @@ class TestWhaleFeed:
         assert rows[("NOWHALEUSDT", D0)]["bn_tt_ls_age_h"] is None
 
         empty = _carry_venue_view(
-            klines, funding, window_start_ms=D0 - MS_PER_HOUR, max_bar_ts_ms=D0,
-            whale_events=pl.DataFrame(
-                schema={"symbol": pl.String, "_tt_ls_ts_ms": pl.Int64, "bn_tt_ls": pl.Float64}
-            ),
+            klines,
+            funding,
+            window_start_ms=D0 - MS_PER_HOUR,
+            max_bar_ts_ms=D0,
+            whale_events=pl.DataFrame(schema={"symbol": pl.String, "_tt_ls_ts_ms": pl.Int64, "bn_tt_ls": pl.Float64}),
         )
         assert empty.get_column("bn_tt_ls").null_count() == empty.height
         assert empty.get_column("bn_tt_ls_age_h").null_count() == empty.height
 
         # No whale leg (v1..v4): the view is bit-identical to before the feed.
-        plain = _carry_venue_view(
-            klines, funding, window_start_ms=D0 - MS_PER_HOUR, max_bar_ts_ms=D0
-        )
+        plain = _carry_venue_view(klines, funding, window_start_ms=D0 - MS_PER_HOUR, max_bar_ts_ms=D0)
         assert "bn_tt_ls" not in plain.columns
         assert "bn_tt_ls_age_h" not in plain.columns
 
@@ -973,8 +1020,7 @@ class TestV6DecidesLive:
         for stamp in stamps:
             # DEEP_B: 1.3 until the newest EOD drops to 1.0 -> 3d change -0.30
             # (below the -0.26 cut). DEEP_A: flat 1.3 -> change 0, full size.
-            rows.append({"symbol": DEEP_B, "_tt_ls_ts_ms": stamp,
-                         "bn_tt_ls": 1.0 if stamp == D0 else 1.3})
+            rows.append({"symbol": DEEP_B, "_tt_ls_ts_ms": stamp, "bn_tt_ls": 1.0 if stamp == D0 else 1.3})
             rows.append({"symbol": DEEP_A, "_tt_ls_ts_ms": stamp, "bn_tt_ls": 1.3})
         return pl.DataFrame(rows).sort(["_tt_ls_ts_ms", "symbol"])
 
@@ -983,16 +1029,11 @@ class TestV6DecidesLive:
         rows = []
         for symbol in ALL_SYMBOLS:
             for ts in range(self.START_MS, D0 + 1, grid):
-                rows.append(
-                    {"symbol": symbol, "funding_ts_ms": ts,
-                     "funding_rate": _funding_rate(symbol, ts)}
-                )
+                rows.append({"symbol": symbol, "funding_ts_ms": ts, "funding_rate": _funding_rate(symbol, ts)})
         return pl.DataFrame(rows)
 
     def test_decide_book_halves_the_whale_flagged_name_only(self) -> None:
-        klines = _synth_klines(
-            list(ALL_SYMBOLS), start_ms=self.START_MS - MS_PER_HOUR, end_ms=D0 - MS_PER_HOUR
-        )
+        klines = _synth_klines(list(ALL_SYMBOLS), start_ms=self.START_MS - MS_PER_HOUR, end_ms=D0 - MS_PER_HOUR)
         view = _carry_venue_view(
             klines,
             self._funding_frame(),
@@ -1010,10 +1051,7 @@ class TestV6DecidesLive:
         assert decision.weights[RESIZED] == pytest.approx(0.1 * 0.25 * 0.5)
         # DEEP_B trail -75 bp: (75/120)^1.5 above the floor, flow halves, and
         # the -0.30 whale change halves again.
-        assert decision.weights[DEEP_B] == pytest.approx(
-            0.1 * (75.0 / 120.0) ** 1.5 * 0.5 * 0.5
-        )
-
+        assert decision.weights[DEEP_B] == pytest.approx(0.1 * (75.0 / 120.0) ** 1.5 * 0.5 * 0.5)
 
 
 # --- early exit (owner-directed 2026-08-19): sell at the print that ends it ---
@@ -1040,7 +1078,7 @@ class TestEarlyExit:
 
     def test_fires_on_recovered_post_decision_print_and_masks(self, tmp_path: Path) -> None:
         state = CarryCycleState()
-        rule = load_carry_config()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
         # DEEP_A's 08:00 print recovered to +1 bp; DEEP_B still deep at -25 bp.
         funding = self._funding(
             [
@@ -1049,8 +1087,12 @@ class TestEarlyExit:
             ]
         )
         masked, fires = module._apply_early_exits(
-            decision=self._decision(), rule=rule, funding=funding,
-            state=state, root=tmp_path, now_ms=D0 + 9 * MS_PER_HOUR,
+            decision=self._decision(),
+            rule=rule,
+            funding=funding,
+            state=state,
+            state_path=module._early_exit_state_path(tmp_path),
+            now_ms=D0 + 9 * MS_PER_HOUR,
         )
         assert fires == [DEEP_A]
         assert DEEP_A not in masked.weights
@@ -1060,8 +1102,12 @@ class TestEarlyExit:
 
         # Next cycle: no new fire, the mask still applies (funding unchanged).
         masked2, fires2 = module._apply_early_exits(
-            decision=self._decision(), rule=rule, funding=funding,
-            state=state, root=tmp_path, now_ms=D0 + 10 * MS_PER_HOUR,
+            decision=self._decision(),
+            rule=rule,
+            funding=funding,
+            state=state,
+            state_path=module._early_exit_state_path(tmp_path),
+            now_ms=D0 + 10 * MS_PER_HOUR,
         )
         assert fires2 == []
         assert DEEP_A not in masked2.weights
@@ -1069,17 +1115,25 @@ class TestEarlyExit:
     def test_exit_boundary_matches_the_registered_state_machine(self, tmp_path: Path) -> None:
         # The registered test is `not (fv < -exit_)`: a print EXACTLY at
         # -3 bp exits, one strictly below it holds.
-        rule = load_carry_config()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
         at_boundary = self._funding([(DEEP_A, D0 + MS_PER_HOUR, -rule.exit_bp / 1e4)])
         _, fires = module._apply_early_exits(
-            decision=self._decision(), rule=rule, funding=at_boundary,
-            state=CarryCycleState(), root=tmp_path / "a", now_ms=D0 + 2 * MS_PER_HOUR,
+            decision=self._decision(),
+            rule=rule,
+            funding=at_boundary,
+            state=CarryCycleState(),
+            state_path=module._early_exit_state_path(tmp_path / "a"),
+            now_ms=D0 + 2 * MS_PER_HOUR,
         )
         assert fires == [DEEP_A]
         below = self._funding([(DEEP_A, D0 + MS_PER_HOUR, -rule.exit_bp / 1e4 - 1e-6)])
         _, fires = module._apply_early_exits(
-            decision=self._decision(), rule=rule, funding=below,
-            state=CarryCycleState(), root=tmp_path / "b", now_ms=D0 + 2 * MS_PER_HOUR,
+            decision=self._decision(),
+            rule=rule,
+            funding=below,
+            state=CarryCycleState(),
+            state_path=module._early_exit_state_path(tmp_path / "b"),
+            now_ms=D0 + 2 * MS_PER_HOUR,
         )
         assert fires == []
 
@@ -1089,22 +1143,34 @@ class TestEarlyExit:
         # recovered prints belong to a previous day's decision.
         funding = self._funding([(DEEP_A, D0, 0.0001), (DEEP_A, D0 - MS_PER_HOUR, 0.0001)])
         _, fires = module._apply_early_exits(
-            decision=self._decision(), rule=load_carry_config(), funding=funding,
-            state=CarryCycleState(), root=tmp_path, now_ms=D0 + MS_PER_HOUR,
+            decision=self._decision(),
+            rule=load_carry_config(module.CARRY_CONFIG_PATH),
+            funding=funding,
+            state=CarryCycleState(),
+            state_path=module._early_exit_state_path(tmp_path),
+            now_ms=D0 + MS_PER_HOUR,
         )
         assert fires == []
 
     def test_mask_survives_restart_and_expires_with_the_decision_day(self, tmp_path: Path) -> None:
-        rule = load_carry_config()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
         funding = self._funding([(DEEP_A, D0 + 8 * MS_PER_HOUR, 0.0001)])
         module._apply_early_exits(
-            decision=self._decision(), rule=rule, funding=funding,
-            state=CarryCycleState(), root=tmp_path, now_ms=D0 + 9 * MS_PER_HOUR,
+            decision=self._decision(),
+            rule=rule,
+            funding=funding,
+            state=CarryCycleState(),
+            state_path=module._early_exit_state_path(tmp_path),
+            now_ms=D0 + 9 * MS_PER_HOUR,
         )
         # Fresh state (a producer restart): the on-disk mask still applies.
         masked, fires = module._apply_early_exits(
-            decision=self._decision(), rule=rule, funding=None,
-            state=CarryCycleState(), root=tmp_path, now_ms=D0 + 10 * MS_PER_HOUR,
+            decision=self._decision(),
+            rule=rule,
+            funding=None,
+            state=CarryCycleState(),
+            state_path=module._early_exit_state_path(tmp_path),
+            now_ms=D0 + 10 * MS_PER_HOUR,
         )
         assert fires == []
         assert DEEP_A not in masked.weights
@@ -1112,14 +1178,16 @@ class TestEarlyExit:
         tomorrow = dataclasses.replace(self._decision(), decision_ts_ms=D0 + MS_PER_DAY)
         fresh_state = CarryCycleState()
         unmasked, fires = module._apply_early_exits(
-            decision=tomorrow, rule=rule, funding=None,
-            state=fresh_state, root=tmp_path, now_ms=D0 + MS_PER_DAY + MS_PER_HOUR,
+            decision=tomorrow,
+            rule=rule,
+            funding=None,
+            state=fresh_state,
+            state_path=module._early_exit_state_path(tmp_path),
+            now_ms=D0 + MS_PER_DAY + MS_PER_HOUR,
         )
         assert fires == []
         assert set(unmasked.weights) == {DEEP_A, DEEP_B, RESIZED}
         assert fresh_state.early_exits == {}
-
-
 
 
 # --- v7 pre-settlement exit (owner-directed 2026-08-19): sell before it pays ---
@@ -1152,85 +1220,365 @@ class TestPresettleExit:
         state.early_exits = {}
         return state
 
+    def _inputs(
+        self,
+        *,
+        now_ms: int,
+        tickers: dict[str, tuple[float, int, float | None]],
+        carry_holdings: dict[str, tuple[str, float, float]] | None = None,
+    ) -> tuple[module.CarryPresettlementInput, ...]:
+        typed = {
+            symbol: module.CarryPresettlementTicker(
+                symbol=symbol,
+                running_rate=rate,
+                settlement_ts_ms=settlement_ts_ms,
+                mark_px=mark_px,
+            )
+            for symbol, (rate, settlement_ts_ms, mark_px) in tickers.items()
+        }
+        return module.build_carry_presettlement_inputs(
+            tickers=typed,
+            observed_ts_ms=now_ms,
+            carry_holdings=carry_holdings or {},
+        )
+
+    def _apply(
+        self,
+        *,
+        root: Path,
+        decision: CarryDecision,
+        rule: Any,
+        state: CarryCycleState,
+        now_ms: int,
+        tickers: dict[str, tuple[float, int, float | None]],
+        carry_holdings: dict[str, tuple[str, float, float]] | None = None,
+    ) -> tuple[CarryDecision, list[str], list[Any]]:
+        return module._apply_presettle_exits(
+            decision=decision,
+            rule=rule,
+            state=state,
+            state_path=module._early_exit_state_path(root),
+            event_path=root / "carry_presettlement_events.jsonl",
+            inputs=self._inputs(
+                now_ms=now_ms,
+                tickers=tickers,
+                carry_holdings=carry_holdings,
+            ),
+            environment="demo",
+            source_profile="carry_hold_v7_live_v1",
+        )
+
     def test_fires_inside_the_window_and_masks(self, tmp_path: Path) -> None:
-        rule = load_carry_config()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
         state = self._state()
         now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
         tickers = {
             DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5),  # -1 bp, pays in 10 min
             DEEP_B: (-0.0025, D0 + 9 * MS_PER_HOUR, 8.0),  # still -25 bp deep
         }
-        masked, fires, details = module._apply_presettle_exits(
-            decision=self._decision(), rule=rule, state=state,
-            root=tmp_path, now_ms=now, tickers=tickers,
+        masked, fires, details = self._apply(
+            decision=self._decision(),
+            rule=rule,
+            state=state,
+            root=tmp_path,
+            now_ms=now,
+            tickers=tickers,
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)},
         )
         assert fires == [DEEP_A]
         assert set(masked.weights) == {DEEP_B, RESIZED}
         assert masked.gross == pytest.approx(0.0247 + 0.0125)
         # The exodus trigger rides the same fire, with the contemporaneous
         # mark and settlement captured before the mask deletes the name.
-        assert [
-            (d.symbol, d.settlement_ts_ms, d.mark_px) for d in details
-        ] == [(DEEP_A, D0 + 9 * MS_PER_HOUR, 12.5)]
+        assert [(d.symbol, d.settlement_ts_ms, d.mark_px) for d in details] == [(DEEP_A, D0 + 9 * MS_PER_HOUR, 12.5)]
+        (event,) = load_carry_presettlement_events(tmp_path / "carry_presettlement_events.jsonl")
+        assert event == details[0]
+        assert event.running_rate == -0.0001
+        assert event.carry_side == "long"
+        assert event.carry_qty == 3.25
+        assert event.carry_avg_entry_px == 8.0
         # The mask persists in the SAME file the settled-print path owns.
         assert module._early_exit_state_path(tmp_path).exists()
-        reloaded = module._load_early_exits(tmp_path)
+        reloaded = module._load_early_exits(module._early_exit_state_path(tmp_path))
         assert reloaded == {DEEP_A: D0}
 
-    @pytest.mark.parametrize("stamp", [str(D0), True, 1.5])
-    def test_early_exit_state_does_not_coerce_stamps(
-        self, tmp_path: Path, stamp: object
+        tape_path = tmp_path / "carry_presettlement_events.jsonl"
+        tape_before = tape_path.read_bytes()
+        masked_again, fires_again, details_again = self._apply(
+            decision=self._decision(),
+            rule=rule,
+            state=state,
+            root=tmp_path,
+            now_ms=now + 60_000,
+            tickers={DEEP_A: (0.0002, D0 + 9 * MS_PER_HOUR, 11.0)},
+        )
+        assert fires_again == []
+        assert details_again == []
+        assert DEEP_A not in masked_again.weights
+        assert tape_path.read_bytes() == tape_before
+
+    def test_event_must_be_durable_before_the_exit_mask(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        state = self._state()
+
+        def fail_append(*_args: object, **_kwargs: object) -> None:
+            raise OSError("event disk full")
+
+        monkeypatch.setattr(module, "append_carry_presettlement_event", fail_append)
+        with pytest.raises(OSError, match="event disk full"):
+            self._apply(
+                decision=self._decision(),
+                rule=load_carry_config(module.CARRY_CONFIG_PATH),
+                state=state,
+                root=tmp_path,
+                now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
+                tickers={DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5)},
+                carry_holdings={DEEP_A: ("long", 3.25, 8.0)},
+            )
+
+        assert state.early_exits == {}
+        assert not module._early_exit_state_path(tmp_path).exists()
+
+    def test_input_planning_publication_transition_and_persistence_are_separate(self, tmp_path: Path) -> None:
+        decision = self._decision()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
+        inputs = self._inputs(
+            now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
+            tickers={DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5)},
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)},
+        )
+
+        plan = module.plan_carry_presettlement_exits(
+            decision=decision,
+            rule=rule,
+            prior_fired={},
+            inputs=inputs,
+            durable_events=(),
+            environment="demo",
+            source_profile="carry_hold_v7_live_v1",
+        )
+        transition = module.transition_carry_presettlement_state(
+            decision=decision,
+            prior_fired={},
+            durable_events=plan.transition_events,
+        )
+
+        assert [event.symbol for event in plan.publication_events] == [DEEP_A]
+        assert DEEP_A not in transition.decision.weights
+        assert list(tmp_path.iterdir()) == []
+
+        event_path = tmp_path / "carry_presettlement_events.jsonl"
+        state_path = module._early_exit_state_path(tmp_path)
+        module.publish_carry_presettlement_plan(event_path, plan)
+        assert event_path.exists()
+        assert not state_path.exists()
+
+        module.persist_carry_presettlement_state(state_path, transition)
+        assert module._load_early_exits(state_path) == {DEEP_A: D0}
+
+    def test_torn_tape_tail_is_repaired_before_retry_transitions_state(self, tmp_path: Path) -> None:
+        decision = self._decision()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
+        inputs = self._inputs(
+            now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
+            tickers={DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5)},
+        )
+        plan = module.plan_carry_presettlement_exits(
+            decision=decision,
+            rule=rule,
+            prior_fired={},
+            inputs=inputs,
+            durable_events=(),
+            environment="demo",
+            source_profile="carry_hold_v7_live_v1",
+        )
+        event_path = tmp_path / "carry_presettlement_events.jsonl"
+        module.publish_carry_presettlement_plan(event_path, plan)
+        with event_path.open("ab") as handle:
+            handle.write(b'{"torn":')
+
+        state = self._state()
+        masked, fires, details = self._apply(
+            root=tmp_path,
+            decision=decision,
+            rule=rule,
+            state=state,
+            now_ms=D0 + 10 * MS_PER_HOUR,
+            tickers={},
+        )
+
+        assert fires == [DEEP_A]
+        assert [event.symbol for event in details] == [DEEP_A]
+        assert DEEP_A not in masked.weights
+        assert load_carry_presettlement_events(event_path) == plan.transition_events
+        assert event_path.read_bytes().endswith(b"\n")
+
+    def test_restart_reuses_the_first_durable_event_after_mask_write_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        first_now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
+
+        def fail_mask(*_args: object, **_kwargs: object) -> None:
+            raise OSError("mask disk full")
+
+        monkeypatch.setattr(module, "_save_early_exits", fail_mask)
+        _, first_fires, first_details = self._apply(
+            decision=self._decision(),
+            rule=load_carry_config(module.CARRY_CONFIG_PATH),
+            state=self._state(),
+            root=tmp_path,
+            now_ms=first_now,
+            tickers={DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5)},
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)},
+        )
+        assert first_fires == [DEEP_A]
+
+        monkeypatch.undo()
+        restarted = self._state()
+        _, retry_fires, retry_details = self._apply(
+            decision=self._decision(),
+            rule=load_carry_config(module.CARRY_CONFIG_PATH),
+            state=restarted,
+            root=tmp_path,
+            now_ms=first_now + 60_000,
+            tickers={DEEP_A: (-0.0002, D0 + 9 * MS_PER_HOUR, 13.0)},
+            carry_holdings={DEEP_A: ("long", 4.0, 9.0)},
+        )
+
+        assert retry_fires == [DEEP_A]
+        assert retry_details == first_details
+        assert load_carry_presettlement_events(tmp_path / "carry_presettlement_events.jsonl") == tuple(first_details)
+        assert restarted.early_exits == {DEEP_A: D0}
+
+    def test_restart_rebuilds_mask_after_the_ticker_window_has_passed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first_now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
+
+        monkeypatch.setattr(
+            module,
+            "_save_early_exits",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("mask disk full")),
+        )
+        self._apply(
+            decision=self._decision(),
+            rule=load_carry_config(module.CARRY_CONFIG_PATH),
+            state=self._state(),
+            root=tmp_path,
+            now_ms=first_now,
+            tickers={DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5)},
+            carry_holdings={DEEP_A: ("long", 3.25, 8.0)},
+        )
+
+        monkeypatch.undo()
+        restarted = self._state()
+        masked, fires, details = self._apply(
+            decision=self._decision(),
+            rule=load_carry_config(module.CARRY_CONFIG_PATH),
+            state=restarted,
+            root=tmp_path,
+            now_ms=D0 + 10 * MS_PER_HOUR,
+            tickers={},
+            carry_holdings={},
+        )
+
+        assert fires == [DEEP_A]
+        assert [event.symbol for event in details] == [DEEP_A]
+        assert DEEP_A not in masked.weights
+        assert restarted.early_exits == {DEEP_A: D0}
+
+    def test_same_tick_fires_use_the_event_clocks_total_order(self, tmp_path: Path) -> None:
+        state = self._state()
+        now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
+        settlement = D0 + 9 * MS_PER_HOUR
+
+        _masked, fires, details = self._apply(
+            decision=self._decision(),
+            rule=load_carry_config(module.CARRY_CONFIG_PATH),
+            state=state,
+            root=tmp_path,
+            now_ms=now,
+            tickers={
+                DEEP_A: (-0.0001, settlement, 12.5),
+                RESIZED: (-0.0002, settlement, 9.0),
+            },
+            carry_holdings={
+                DEEP_A: ("long", 3.25, 8.0),
+                RESIZED: ("long", 2.0, 7.0),
+            },
+        )
+
+        assert fires == [DEEP_A, RESIZED]
+        assert [row.symbol for row in details] == [DEEP_A, RESIZED]
+        loaded = load_carry_presettlement_events(tmp_path / "carry_presettlement_events.jsonl")
+        assert {row.symbol for row in loaded} == {DEEP_A, RESIZED}
+
+    @pytest.mark.parametrize("stamp", [str(D0), True, 1.5])
+    def test_early_exit_state_does_not_coerce_stamps(self, tmp_path: Path, stamp: object) -> None:
         path = module._early_exit_state_path(tmp_path)
         path.write_text(json.dumps({"fired": {DEEP_A: stamp}}))
 
         with pytest.raises(ValueError, match="invalid row"):
-            module._load_early_exits(tmp_path)
+            module._load_early_exits(path)
 
     def test_boundary_matches_the_registered_state_machine(self, tmp_path: Path) -> None:
         # Identical boundary to the settled-print path: a running rate
         # EXACTLY at -3 bp fires, one strictly below holds.
-        rule = load_carry_config()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
         pay = D0 + 9 * MS_PER_HOUR
         now = D0 + 8 * MS_PER_HOUR + 50 * 60_000
-        _, fires, _ = module._apply_presettle_exits(
-            decision=self._decision(), rule=rule, state=self._state(),
-            root=tmp_path / "a", now_ms=now,
+        _, fires, _ = self._apply(
+            decision=self._decision(),
+            rule=rule,
+            state=self._state(),
+            root=tmp_path / "a",
+            now_ms=now,
             tickers={DEEP_A: (-rule.exit_bp / 1e4, pay, 10.0)},
         )
         assert fires == [DEEP_A]
-        _, fires, _ = module._apply_presettle_exits(
-            decision=self._decision(), rule=rule, state=self._state(),
-            root=tmp_path / "b", now_ms=now,
+        _, fires, _ = self._apply(
+            decision=self._decision(),
+            rule=rule,
+            state=self._state(),
+            root=tmp_path / "b",
+            now_ms=now,
             tickers={DEEP_A: (-rule.exit_bp / 1e4 - 1e-6, pay, 10.0)},
         )
         assert fires == []
 
     def test_only_fires_with_a_settlement_genuinely_ahead(self, tmp_path: Path) -> None:
-        rule = load_carry_config()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
         pay = D0 + 9 * MS_PER_HOUR
         # 20 minutes ahead: outside the measured 15-minute window.
-        _, fires, _ = module._apply_presettle_exits(
-            decision=self._decision(), rule=rule, state=self._state(),
-            root=tmp_path / "a", now_ms=pay - 20 * 60_000,
+        _, fires, _ = self._apply(
+            decision=self._decision(),
+            rule=rule,
+            state=self._state(),
+            root=tmp_path / "a",
+            now_ms=pay - 20 * 60_000,
             tickers={DEEP_A: (0.0001, pay, 10.0)},
         )
         assert fires == []
         # Already paid (the ticker not yet rolled): never fire on lead <= 0.
-        _, fires, _ = module._apply_presettle_exits(
-            decision=self._decision(), rule=rule, state=self._state(),
-            root=tmp_path / "b", now_ms=pay,
+        _, fires, _ = self._apply(
+            decision=self._decision(),
+            rule=rule,
+            state=self._state(),
+            root=tmp_path / "b",
+            now_ms=pay,
             tickers={DEEP_A: (0.0001, pay, 10.0)},
         )
         assert fires == []
 
     def test_respects_the_standing_mask(self, tmp_path: Path) -> None:
-        rule = load_carry_config()
+        rule = load_carry_config(module.CARRY_CONFIG_PATH)
         state = self._state()
         state.early_exits = {DEEP_A: D0}
-        masked, fires, details = module._apply_presettle_exits(
-            decision=self._decision(), rule=rule, state=state,
-            root=tmp_path, now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
+        masked, fires, details = self._apply(
+            decision=self._decision(),
+            rule=rule,
+            state=state,
+            root=tmp_path,
+            now_ms=D0 + 8 * MS_PER_HOUR + 50 * 60_000,
             tickers={DEEP_A: (0.0001, D0 + 9 * MS_PER_HOUR, 10.0)},
         )
         assert fires == []
@@ -1246,19 +1594,27 @@ class TestPresettleExit:
 
         fake = _FakeTickerClient(
             [
-                {"symbol": DEEP_A, "fundingRate": "-0.0001",
-                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR), "markPrice": "12.5"},
+                {
+                    "symbol": DEEP_A,
+                    "fundingRate": "-0.0001",
+                    "nextFundingTime": str(D0 + 9 * MS_PER_HOUR),
+                    "markPrice": "12.5",
+                },
                 {"symbol": DEEP_B, "fundingRate": "", "nextFundingTime": "x"},
-                {"symbol": "UNHELDUSDT", "fundingRate": "0.0001",
-                 "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
+                {"symbol": "UNHELDUSDT", "fundingRate": "0.0001", "nextFundingTime": str(D0 + 9 * MS_PER_HOUR)},
             ]
         )
         tickers, error = module._fetch_presettle_tickers([DEEP_A, DEEP_B], lambda: fake)
         assert error == ""
         # Unparseable rows and unheld names drop; held good rows coerce.
-        assert tickers == {DEEP_A: (-0.0001, D0 + 9 * MS_PER_HOUR, 12.5)}
-
-
+        assert tickers == {
+            DEEP_A: module.CarryPresettlementTicker(
+                symbol=DEEP_A,
+                running_rate=-0.0001,
+                settlement_ts_ms=D0 + 9 * MS_PER_HOUR,
+                mark_px=12.5,
+            )
+        }
 
 
 # --- drop exit (part of the exit clock 2026-08-23): sell the zeroed before 00:20 ---
@@ -1274,9 +1630,7 @@ class TestDropExit:
             gross=0.0497,
         )
 
-    def _state_with_upcoming(
-        self, *, upcoming_weights: dict[str, float] | None = None
-    ) -> CarryCycleState:
+    def _state_with_upcoming(self, *, upcoming_weights: dict[str, float] | None = None) -> CarryCycleState:
         """Yesterday served, today frozen ahead: the drop-exit precondition."""
 
         state = CarryCycleState()
@@ -1288,11 +1642,7 @@ class TestDropExit:
         )
         upcoming = CarryDecision(
             decision_ts_ms=D0,
-            weights=(
-                {DEEP_B: 0.0247, RESIZED: 0.0125}
-                if upcoming_weights is None
-                else upcoming_weights
-            ),
+            weights=({DEEP_B: 0.0247, RESIZED: 0.0125} if upcoming_weights is None else upcoming_weights),
             universe_size=56,
             replay_days=60,
             gross=sum((upcoming_weights or {}).values()),
@@ -1333,9 +1683,7 @@ class TestDropExit:
     def test_no_frozen_upcoming_book_is_a_noop(self) -> None:
         state = CarryCycleState()
         decision = self._decision(D0 - MS_PER_DAY)
-        masked, dropped, count = module._apply_drop_exits(
-            decision=decision, state=state
-        )
+        masked, dropped, count = module._apply_drop_exits(decision=decision, state=state)
         assert dropped == []
         assert count == 0
         assert masked.weights == decision.weights
@@ -1354,223 +1702,3 @@ class TestDropExit:
                 return rows
 
         return _PersistGoneMarket()
-
-
-
-
-# --- the exodus short (owner-directed 2026-08-20): the fire flips to a short ---
-
-
-class TestExodusShort:
-    SETTLE = D0 + 9 * MS_PER_HOUR
-
-    def _fire(self) -> "module.PresettleFire":
-        return module.PresettleFire(
-            symbol=DEEP_A, settlement_ts_ms=self.SETTLE, mark_px=10.0
-        )
-
-    def _arm(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-        book = tmp_path / "targets" / "exodus-demo.json"
-        monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v1")
-        monkeypatch.setenv("EXODUS_ENGINE_TARGET_BOOK_PATH", str(book))
-        return book
-
-    def test_absent_env_means_absent_sleeve(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("EXODUS_SHORT_PROFILE", raising=False)
-        monkeypatch.delenv("EXODUS_ENGINE_TARGET_BOOK_PATH", raising=False)
-        receipt = module._run_exodus_short(
-            state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=2.0,
-            now_ms=self.SETTLE - 10 * 60_000,
-        )
-        assert receipt == {}
-        assert not module._exodus_state_path(tmp_path).exists()
-
-    def test_original_unversioned_empty_state_publishes_a_fresh_book(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        book_path = self._arm(monkeypatch, tmp_path)
-        module._exodus_state_path(tmp_path).write_text(
-            '{"open": []}\n', encoding="utf-8"
-        )
-        receipt = module._run_exodus_short(
-            state=CarryCycleState(),
-            root=tmp_path,
-            fires=[],
-            carry_holdings=None,
-            entry_leverage=2.0,
-            now_ms=self.SETTLE - 10 * 60_000,
-        )
-        assert receipt["exodus_error"] == ""
-        assert receipt["exodus_open_names"] == 0
-        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
-
-    def test_a_fire_opens_the_exact_abandoned_quantity_as_a_short(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        book_path = self._arm(monkeypatch, tmp_path)
-        state = CarryCycleState()
-        now = self.SETTLE - 10 * 60_000
-        receipt = module._run_exodus_short(
-            state=state, root=tmp_path, fires=[self._fire()],
-            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=5.0, now_ms=now,
-        )
-        assert receipt["exodus_opened"] == [DEEP_A]
-        assert receipt["exodus_open_names"] == 1
-        assert receipt["exodus_error"] == ""
-        # The cover clock is the wake accelerator the daemon adopts.
-        assert receipt["exodus_next_cover_ts_ms"] == self.SETTLE + 60 * 60_000
-        book = json.loads(book_path.read_text(encoding="utf-8"))
-        (target,) = book["targets"]
-        # The short IS carry's actual attributed quantity. Notional is marked
-        # from the same ticker sample; entry price and desired-weight math are
-        # deliberately irrelevant.
-        assert target["symbol"] == DEEP_A
-        assert target["notional_usdt"] == -32.5
-        assert target["target_qty"] == -3.25
-        assert target["stop_loss_fraction"] == 0.35
-        # Leverage is the operational profile's dial, not the registered
-        # file's constant (which stays 2.0): the deployment margin knob
-        # must reach the book without touching the evidence contract.
-        assert target["leverage"] == 5.0
-        assert book["valid_until_ms"] == self.SETTLE + 20 * 60_000
-        # Persisted: a restart re-renders the same book from disk.
-        stored = module._load_exodus_shorts(tmp_path)[0]
-        assert stored.notional_usdt == 32.5
-        assert stored.target_qty == 3.25
-        # The same fire again does not double the position.
-        receipt = module._run_exodus_short(
-            state=state, root=tmp_path, fires=[self._fire()],
-            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=2.0,
-            now_ms=now + 60_000,
-        )
-        assert receipt["exodus_opened"] == []
-        assert receipt["exodus_open_names"] == 1
-
-    def test_covers_on_the_clock_and_the_book_drains(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        book_path = self._arm(monkeypatch, tmp_path)
-        module._save_exodus_shorts(
-            tmp_path,
-            [module.ExodusShortRecord(DEEP_A, 50.0, self.SETTLE, self.SETTLE - 600_000)],
-        )
-        receipt = module._run_exodus_short(
-            state=CarryCycleState(), root=tmp_path, fires=[],
-            carry_holdings=None, entry_leverage=2.0,
-            now_ms=self.SETTLE + 60 * 60_000,
-            exodus_held_symbols=frozenset(),
-            exodus_working_entry_symbols=frozenset(),
-        )
-        assert receipt["exodus_covered"] == [DEEP_A]
-        assert receipt["exodus_open_names"] == 0
-        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"][0][
-            "notional_usdt"
-        ] == 0.0
-        assert module._load_exodus_shorts(tmp_path) == []
-
-    def test_dial_off_drains_to_flat(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        book_path = self._arm(monkeypatch, tmp_path)
-        monkeypatch.delenv("EXODUS_SHORT_PROFILE")
-        module._save_exodus_shorts(
-            tmp_path,
-            [module.ExodusShortRecord(DEEP_A, 50.0, self.SETTLE, self.SETTLE - 600_000)],
-        )
-        receipt = module._run_exodus_short(
-            state=CarryCycleState(), root=tmp_path, fires=[],
-            carry_holdings=None, entry_leverage=2.0,
-            # Well before the cover clock: off means flat NOW, not at S+60.
-            now_ms=self.SETTLE - 5 * 60_000,
-            exodus_held_symbols=frozenset(),
-            exodus_working_entry_symbols=frozenset(),
-        )
-        assert receipt["exodus_enabled"] is False
-        assert receipt["exodus_covered"] == [DEEP_A]
-        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"][0][
-            "notional_usdt"
-        ] == 0.0
-        assert module._load_exodus_shorts(tmp_path) == []
-
-    def test_no_actual_carry_holding_blocks_the_entry_for_good(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        book_path = self._arm(monkeypatch, tmp_path)
-        receipt = module._run_exodus_short(
-            state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            carry_holdings=None, entry_leverage=2.0,
-            now_ms=self.SETTLE - 10 * 60_000,
-        )
-        assert receipt["exodus_entry_blocked"] == [DEEP_A]
-        assert receipt["exodus_opened"] == []
-        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
-
-    @pytest.mark.parametrize(
-        "fire,holdings",
-        [
-            (
-                module.PresettleFire(
-                    symbol=DEEP_A,
-                    settlement_ts_ms=SETTLE,
-                    mark_px=None,
-                ),
-                {DEEP_A: ("long", 3.25, 8.0)},
-            ),
-            (
-                module.PresettleFire(
-                    symbol=DEEP_A,
-                    settlement_ts_ms=SETTLE,
-                    mark_px=10.0,
-                ),
-                {DEEP_A: ("short", 3.25, 8.0)},
-            ),
-        ],
-    )
-    def test_an_incomplete_or_non_long_handoff_is_blocked(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        fire: "module.PresettleFire",
-        holdings: dict[str, tuple[str, float, float]],
-    ) -> None:
-        book_path = self._arm(monkeypatch, tmp_path)
-        receipt = module._run_exodus_short(
-            state=CarryCycleState(),
-            root=tmp_path,
-            fires=[fire],
-            carry_holdings=holdings,
-            entry_leverage=2.0,
-            now_ms=self.SETTLE - 10 * 60_000,
-        )
-        assert receipt["exodus_entry_blocked"] == [DEEP_A]
-        assert json.loads(book_path.read_text(encoding="utf-8"))["targets"] == []
-
-    def test_bookkeeping_failure_never_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v1")
-        # The book path is a DIRECTORY: the write must fail, be receipted,
-        # and leave the carry cycle alone.
-        monkeypatch.setenv("EXODUS_ENGINE_TARGET_BOOK_PATH", str(tmp_path))
-        receipt = module._run_exodus_short(
-            state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=2.0,
-            now_ms=self.SETTLE - 10 * 60_000,
-        )
-        assert receipt["exodus_error"] != ""
-
-    def test_an_unknown_profile_is_inert_and_receipted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        book_path = self._arm(monkeypatch, tmp_path)
-        monkeypatch.setenv("EXODUS_SHORT_PROFILE", "v9")
-        receipt = module._run_exodus_short(
-            state=CarryCycleState(), root=tmp_path, fires=[self._fire()],
-            carry_holdings={DEEP_A: ("long", 3.25, 8.0)}, entry_leverage=2.0,
-            now_ms=self.SETTLE - 10 * 60_000,
-        )
-        assert "unknown exodus profile" in receipt["exodus_error"]
-        assert not book_path.exists()

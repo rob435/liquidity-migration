@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar, cast
 
 if TYPE_CHECKING:
-    from liquidity_migration.policy.operational_profile import OperationalProfile
+    from liquidity_migration.core.operational_profile import OperationalProfile
 
 from liquidity_migration.data.archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
 from liquidity_migration.data.archive_manifest import ArchiveHourlyKlineApiDownloadConfig
@@ -15,6 +16,7 @@ from liquidity_migration.data.archive_manifest import ArchiveManifestConfig, run
 from liquidity_migration.data.archive_manifest import _safe_name as _archive_safe_name
 from liquidity_migration.data.archive_manifest import run_archive_hourly_klines_api_download
 from liquidity_migration.core.config import (
+    ExchangeConfig,
     ResearchConfig,
     ensure_data_root_exists,
     load_config,
@@ -36,8 +38,19 @@ from liquidity_migration.cli.parsers import (  # argparse subcommand builders (e
     _add_coverage_parser,
     _add_download_binance_proxy_parser,
     _add_download_data_parser,
+    _add_exodus_cycle_parser,
     _add_long_native_event_demo_cycle_parser,
 )
+
+
+_LIVE_PUBLIC_EXCHANGE = ExchangeConfig(
+    name="bybit",
+    category="linear",
+    settle_coin="USDT",
+    testnet=False,
+)
+_LIVE_CROSSING_ROUND_TRIP_BPS = 15.56
+_ResolvedArgument = TypeVar("_ResolvedArgument")
 
 
 def _download_manifest_staleness_lines(data_root: str | Path) -> list[str]:
@@ -74,7 +87,14 @@ def _download_manifest_staleness_lines(data_root: str | Path) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bybit liquidity-migration CLI.")
-    parser.add_argument("--config", default=None, help="YAML config path. Defaults to built-in settings.")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "YAML config path for research and data commands. Live LONG, CARRY, "
+            "and Exodus producers ignore it and resolve their own typed config."
+        ),
+    )
     parser.add_argument("--data-root", default=None, help="Research data root. Overrides config data_root.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -85,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
     _add_carry_demo_cycle_parser(subparsers)
+    _add_exodus_cycle_parser(subparsers)
 
     return parser
 
@@ -102,6 +123,7 @@ _COMMANDS_THAT_OWN_DATA_ROOT = frozenset(
     {
         "long-native-event-demo-cycle",
         "carry-demo-cycle",
+        "exodus-cycle",
     }
 )
 
@@ -257,90 +279,292 @@ def _cmd_archive_download_klines_1h_api(args: argparse.Namespace, config: Resear
 
 
 def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data_root: Path) -> int:
+    from liquidity_migration.rules.long_contract import (
+        ConfigLayer,
+        FieldProvenance,
+        resolve_strategy_config,
+    )
     from liquidity_migration.rules.long_native import resolve_long_strategy_profile
     from liquidity_migration.strategy.long_native_event_demo import (
+        ENGINE_TARGET_BOOK_PATH_ENV,
         LongNativeDemoCycleConfig,
+        LongRuntimeConfig,
         format_long_demo_cycle_summary,
+        resolve_long_effective_config,
         run_long_native_demo_cycle,
     )
+    from liquidity_migration.strategy.long_book_state import (
+        LONG_BOOK_STATE_PATH_ENV,
+        LONG_BOOK_TRANSITIONS_PATH_ENV,
+    )
+    from liquidity_migration.runtime.engine_account_health import (
+        ENGINE_HEARTBEAT_PATH_ENV,
+        EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV,
+    )
 
-    long_strategy_config = resolve_long_strategy_profile(getattr(args, "strategy_profile", "v11a"))
-    candidate_universe_file = getattr(args, "candidate_universe_file", "")
-    strategy_target_capture_path = getattr(args, "strategy_target_capture_path", None)
-    operational_profile = None
-    if args.operational_profile_file:
-        from liquidity_migration.policy.operational_profile import load_operational_profile
+    if config.exchange != _LIVE_PUBLIC_EXCHANGE:
+        raise ValueError("LONG live public market projection is not canonical")
+    profile_name = str(args.strategy_profile)
+    long_strategy_config = resolve_long_strategy_profile(profile_name)
+    from liquidity_migration.core.operational_profile import load_operational_profile
 
-        operational_profile = load_operational_profile(args.operational_profile_file)
-    long_settings = operational_profile.long if operational_profile else None
-    # The env dial wins over the profile: it is the owner's one-line risk-on
-    # control and ships in the fleet env files beside the credentials.
-    from liquidity_migration.core.env_flags import env_positive_float
+    operational_profile = load_operational_profile(args.operational_profile_file)
+    long_settings = operational_profile.long
+    effective_layers: list[ConfigLayer] = [
+        ConfigLayer(
+            source="operational_profile",
+            detail=(
+                f"{operational_profile.source_path or args.operational_profile_file}"
+                f"#{operational_profile.source_sha256}"
+            ),
+            values={
+                "notional_multiplier": long_settings.notional_multiplier,
+                "entry_leverage": long_settings.entry_leverage,
+                "order_notional_pct_equity": long_settings.order_notional_pct_equity,
+                "max_new_entries_per_cycle": long_settings.max_new_entries_per_cycle,
+            },
+        )
+    ]
+    effective_layers.append(
+        ConfigLayer(
+            source="live_crossing_execution",
+            detail="measured 7.78 bp per side",
+            values={"round_trip_cost_bps": _LIVE_CROSSING_ROUND_TRIP_BPS},
+        )
+    )
+    effective_long_config = resolve_strategy_config(
+        profile_name,
+        rule=long_strategy_config,
+        layers=tuple(effective_layers),
+        rule_source=f"registered_profile:{profile_name}",
+    )
 
-    long_multiplier_dial = env_positive_float("LONG_NOTIONAL_MULTIPLIER")
+    cycle_defaults = LongNativeDemoCycleConfig()
+    runtime_defaults = LongRuntimeConfig(data_root=data_root.resolve())
+    cycle_provenance: dict[str, FieldProvenance] = {}
+    runtime_provenance: dict[str, FieldProvenance] = {}
+    wrapper_source = os.environ.get("LONG_RUNTIME_CONFIG_SOURCE", "").strip()
+    argument_source = "runtime_wrapper_environment" if wrapper_source else "command_line"
 
-    # ws_klines_* defaults read off a throwaway default instance: on a slots
-    # dataclass a class-level field access yields the member_descriptor, not
-    # the default.
-    _long_ws_defaults = LongNativeDemoCycleConfig()
-    long_demo_config = LongNativeDemoCycleConfig(
-        universe_superset_size=args.universe_superset_size,
-        lookback_days=args.lookback_days,
-        workers=args.workers,
-        notional_multiplier=(
-            long_multiplier_dial
-            if long_multiplier_dial is not None
-            else (
-                long_settings.notional_multiplier if long_settings else args.notional_multiplier
+    def argument_detail(flag: str) -> str:
+        if wrapper_source:
+            return f"{wrapper_source}:{flag}"
+        return flag
+
+    def resolved_argument(
+        name: str,
+        default: _ResolvedArgument,
+        *,
+        flag: str,
+        target: dict[str, FieldProvenance],
+        default_type: str,
+    ) -> _ResolvedArgument:
+        supplied = getattr(args, name, None)
+        if supplied is None:
+            target[name] = FieldProvenance(
+                name,
+                "typed_default",
+                f"{default_type}.{name}",
             )
+            return default
+        target[name] = FieldProvenance(name, argument_source, argument_detail(flag))
+        return cast(_ResolvedArgument, supplied)
+
+    long_demo_config = LongNativeDemoCycleConfig(
+        universe_superset_size=resolved_argument(
+            "universe_superset_size",
+            cycle_defaults.universe_superset_size,
+            flag="--universe-superset-size",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
-        entry_leverage=(long_settings.entry_leverage if long_settings else args.entry_leverage),
-        order_notional_pct_equity=(
-            long_settings.order_notional_pct_equity
-            if long_settings
-            else args.order_notional_pct_equity
+        lookback_days=resolved_argument(
+            "lookback_days",
+            cycle_defaults.lookback_days,
+            flag="--lookback-days",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
-        wallet_balance_fraction=args.wallet_balance_fraction,
-        max_new_entries_per_cycle=(
-            long_settings.max_new_entries_per_cycle
-            if long_settings
-            else args.max_new_entries_per_cycle
+        workers=resolved_argument(
+            "workers",
+            cycle_defaults.workers,
+            flag="--workers",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
-        operational_profile_sha256=(
-            operational_profile.source_sha256 if operational_profile else ""
+        execution_environment=resolved_argument(
+            "execution_environment",
+            cycle_defaults.execution_environment,
+            flag="--execution-environment",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
-        execution_environment=args.execution_environment,
-        candidate_universe_file=candidate_universe_file,
-        data_name=args.data_name,
-        ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
-        ws_klines_bootstrap_workers=getattr(
-            args, "ws_klines_bootstrap_workers", _long_ws_defaults.ws_klines_bootstrap_workers
+        candidate_universe_file=resolved_argument(
+            "candidate_universe_file",
+            cycle_defaults.candidate_universe_file,
+            flag="--candidate-universe-file",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
-        ws_klines_lookback_days=getattr(args, "ws_klines_lookback_days", _long_ws_defaults.ws_klines_lookback_days),
-        ws_klines_universe_refresh_seconds=getattr(
-            args, "ws_klines_universe_refresh_seconds", _long_ws_defaults.ws_klines_universe_refresh_seconds
+        data_name=resolved_argument(
+            "data_name",
+            cycle_defaults.data_name,
+            flag="--data-name",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
-        ws_klines_topics_per_connection=getattr(
-            args, "ws_klines_topics_per_connection", _long_ws_defaults.ws_klines_topics_per_connection
+        ws_klines_enabled=resolved_argument(
+            "ws_klines_enabled",
+            cycle_defaults.ws_klines_enabled,
+            flag="--ws-klines-enabled/--no-ws-klines",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
-        ws_klines_stale_warning_seconds=getattr(
-            args, "ws_klines_stale_warning_seconds", _long_ws_defaults.ws_klines_stale_warning_seconds
+        ws_klines_bootstrap_workers=resolved_argument(
+            "ws_klines_bootstrap_workers",
+            cycle_defaults.ws_klines_bootstrap_workers,
+            flag="--ws-klines-bootstrap-workers",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
-        ws_klines_stale_reconnect_seconds=getattr(
-            args, "ws_klines_stale_reconnect_seconds", _long_ws_defaults.ws_klines_stale_reconnect_seconds
+        ws_klines_lookback_days=resolved_argument(
+            "ws_klines_lookback_days",
+            cycle_defaults.ws_klines_lookback_days,
+            flag="--ws-klines-lookback-days",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
+        ),
+        ws_klines_universe_refresh_seconds=resolved_argument(
+            "ws_klines_universe_refresh_seconds",
+            cycle_defaults.ws_klines_universe_refresh_seconds,
+            flag="--ws-klines-universe-refresh-seconds",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
+        ),
+        ws_klines_topics_per_connection=resolved_argument(
+            "ws_klines_topics_per_connection",
+            cycle_defaults.ws_klines_topics_per_connection,
+            flag="--ws-klines-topics-per-connection",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
+        ),
+        ws_klines_stale_warning_seconds=resolved_argument(
+            "ws_klines_stale_warning_seconds",
+            cycle_defaults.ws_klines_stale_warning_seconds,
+            flag="--ws-klines-stale-warning-seconds",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
+        ),
+        ws_klines_stale_reconnect_seconds=resolved_argument(
+            "ws_klines_stale_reconnect_seconds",
+            cycle_defaults.ws_klines_stale_reconnect_seconds,
+            flag="--ws-klines-stale-reconnect-seconds",
+            target=cycle_provenance,
+            default_type="LongNativeDemoCycleConfig",
         ),
     )
-    if getattr(args, "daemon", False):
+    runtime_config = LongRuntimeConfig(
+        data_root=data_root.resolve(),
+        daemon=bool(
+            resolved_argument(
+                "daemon",
+                runtime_defaults.daemon,
+                flag="--daemon/--single-cycle",
+                target=runtime_provenance,
+                default_type="LongRuntimeConfig",
+            )
+        ),
+        interval_seconds=float(
+            resolved_argument(
+                "interval_seconds",
+                runtime_defaults.interval_seconds,
+                flag="--interval-seconds",
+                target=runtime_provenance,
+                default_type="LongRuntimeConfig",
+            )
+        ),
+        event_driven_cycle=bool(
+            resolved_argument(
+                "event_driven_cycle",
+                runtime_defaults.event_driven_cycle,
+                flag="--event-driven-cycle/--no-event-driven-cycle",
+                target=runtime_provenance,
+                default_type="LongRuntimeConfig",
+            )
+        ),
+        min_cycle_interval_seconds=float(
+            resolved_argument(
+                "min_cycle_interval_seconds",
+                runtime_defaults.min_cycle_interval_seconds,
+                flag="--min-cycle-interval-seconds",
+                target=runtime_provenance,
+                default_type="LongRuntimeConfig",
+            )
+        ),
+        ticker_reconcile_interval_seconds=float(
+            resolved_argument(
+                "ticker_reconcile_interval_seconds",
+                runtime_defaults.ticker_reconcile_interval_seconds,
+                flag="--ticker-reconcile-interval-seconds",
+                target=runtime_provenance,
+                default_type="LongRuntimeConfig",
+            )
+        ),
+        state_cache_stale_seconds=float(
+            resolved_argument(
+                "state_cache_stale_seconds",
+                runtime_defaults.state_cache_stale_seconds,
+                flag="--state-cache-stale-seconds",
+                target=runtime_provenance,
+                default_type="LongRuntimeConfig",
+            )
+        ),
+        engine_account_max_age_ns=runtime_defaults.engine_account_max_age_ns,
+        strategy_target_capture_path=resolved_argument(
+            "strategy_target_capture_path",
+            runtime_defaults.strategy_target_capture_path,
+            flag="--strategy-target-capture-path",
+            target=runtime_provenance,
+            default_type="LongRuntimeConfig",
+        ),
+    )
+    runtime_provenance["data_root"] = FieldProvenance(
+        "data_root",
+        argument_source,
+        argument_detail("--data-root"),
+    )
+    runtime_provenance["engine_account_max_age_ns"] = FieldProvenance(
+        "engine_account_max_age_ns",
+        "runtime_constant",
+        "TARGET_PRODUCER_HEALTH_MAX_AGE_NS",
+    )
+    effective_runtime_config = resolve_long_effective_config(
+        long_demo_config,
+        runtime=runtime_config,
+        strategy=effective_long_config,
+        exchange=config.exchange,
+        exchange_source="fixed_live_public_exchange",
+        operational_profile_source=str(operational_profile.source_path or args.operational_profile_file),
+        operational_profile_sha256=operational_profile.source_sha256,
+        target_book_path=os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, ""),
+        book_state_path=os.environ.get(LONG_BOOK_STATE_PATH_ENV, ""),
+        book_transitions_path=os.environ.get(LONG_BOOK_TRANSITIONS_PATH_ENV, ""),
+        engine_heartbeat_path=os.environ.get(ENGINE_HEARTBEAT_PATH_ENV, ""),
+        expected_account_user_id=os.environ.get(EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV, ""),
+        invocation_id=os.environ.get("INVOCATION_ID", ""),
+        strategy_profile_source=FieldProvenance(
+            "strategy.profile_name",
+            argument_source,
+            argument_detail("--strategy-profile"),
+        ),
+        cycle_provenance=cycle_provenance,
+        runtime_provenance=runtime_provenance,
+    )
+    if effective_runtime_config.runtime.daemon:
         from liquidity_migration.strategy.long_native_event_demo_daemon import LongNativeDemoDaemon
 
         long_daemon = LongNativeDemoDaemon(
-            data_root,
-            config=config,
-            demo_config=long_demo_config,
-            strategy_config=long_strategy_config,
-            interval_seconds=args.interval_seconds,
-            event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
-            strategy_target_capture_path=strategy_target_capture_path,
+            effective_config=effective_runtime_config,
         )
         long_daemon.install_signal_handlers()
         stats = long_daemon.run()
@@ -352,10 +576,7 @@ def _cmd_long_native_event_demo_cycle(args: argparse.Namespace, config: Research
         )
         return 0
     payload = run_long_native_demo_cycle(
-        data_root,
-        config=config,
-        demo_config=long_demo_config,
-        strategy_config=long_strategy_config,
+        effective_config=effective_runtime_config,
     )
     print(format_long_demo_cycle_summary(payload))
     return 0
@@ -366,9 +587,8 @@ def producer_capital_reference_usdt(operational_profile: OperationalProfile) -> 
 
     In ``account_equity`` mode the ceiling IS the wallet, so a fixed clamp has
     nothing to clamp to; the owner's equity-anchored caps bind the book and are
-    re-proved at every rebase. Named rather than inlined so the branch can be
-    evaluated on both shipped profiles — the test that guarded it used to grep
-    this file for the condition text and passed with the arms swapped.
+    re-proved at every rebase. The named branch is evaluated directly for both
+    shipped profiles.
     """
 
     if operational_profile.capital_reference.tracks_equity:
@@ -380,29 +600,24 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
     from liquidity_migration.strategy.carry_demo import (
         CarryDemoCycleConfig,
         format_carry_demo_cycle_summary,
+        resolve_carry_effective_config,
         run_carry_demo_cycle,
     )
-    from liquidity_migration.policy.operational_profile import load_operational_profile
+    from liquidity_migration.core.operational_profile import load_operational_profile
 
+    if config.exchange != _LIVE_PUBLIC_EXCHANGE:
+        raise ValueError("CARRY live public market projection is not canonical")
     # Rule parameters come from the registered Lane-2 config; the profile's
     # carry block is the only runtime sizing source, hence required here.
     operational_profile = load_operational_profile(args.risk_policy_file)
     carry_settings = operational_profile.carry
-    # The env dials win over the profile: they are the owner's one-line
-    # risk-on controls and ship in the fleet env files beside the credentials.
-    from liquidity_migration.core.env_flags import env_positive_float
-
-    carry_multiplier_dial = env_positive_float("CARRY_NOTIONAL_MULTIPLIER")
     carry_demo_config = CarryDemoCycleConfig(
         execution_environment=args.execution_environment,
         candidate_universe_file=getattr(args, "candidate_universe_file", ""),
+        presettlement_event_path=args.presettlement_event_tape,
         strategy_profile=args.strategy_profile,
         early_exit_enabled=getattr(args, "early_exit_enabled", False),
-        notional_multiplier=(
-            carry_multiplier_dial
-            if carry_multiplier_dial is not None
-            else carry_settings.notional_multiplier
-        ),
+        notional_multiplier=carry_settings.notional_multiplier,
         entry_leverage=carry_settings.entry_leverage,
         declared_stop_loss_fraction=carry_settings.declared_stop_loss_fraction,
         max_new_entries_per_cycle=carry_settings.max_new_entries_per_cycle,
@@ -415,13 +630,25 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
         # The store must span the cycle window whatever --replay-days says.
         ws_klines_lookback_days=int(args.replay_days) + 2,
     )
+    effective_carry_config = resolve_carry_effective_config(
+        carry_demo_config,
+        exchange=config.exchange,
+        exchange_source="live_public_market_contract",
+        data_root=data_root,
+        data_root_source="global_cli:--data-root",
+        target_book_path=os.environ.get("CARRY_ENGINE_TARGET_BOOK_PATH", ""),
+        engine_heartbeat_path=os.environ.get("ENGINE_ACCOUNT_HEARTBEAT_FILE", ""),
+        expected_account_user_id=os.environ.get("EXPECTED_ENGINE_ACCOUNT_USER_ID", ""),
+        invocation_id=os.environ.get("INVOCATION_ID", ""),
+        operational_profile_source=str(operational_profile.source_path or args.risk_policy_file),
+    )
     if getattr(args, "daemon", False):
         from liquidity_migration.strategy.carry_demo_daemon import CarryDemoDaemon
 
         carry_daemon = CarryDemoDaemon(
-            data_root,
+            effective_carry_config.data_root,
             config=config,
-            demo_config=carry_demo_config,
+            effective_config=effective_carry_config,
             interval_seconds=args.interval_seconds,
             strategy_target_capture_path=getattr(args, "strategy_target_capture_path", None),
         )
@@ -433,8 +660,60 @@ def _cmd_carry_demo_cycle(args: argparse.Namespace, config: ResearchConfig, data
             flush=True,
         )
         return 0
-    payload = run_carry_demo_cycle(data_root, config=config, demo_config=carry_demo_config)
+    payload = run_carry_demo_cycle(
+        effective_carry_config.data_root,
+        effective_config=effective_carry_config,
+    )
     print(format_carry_demo_cycle_summary(payload), flush=True)
+    return 0
+
+
+def _cmd_exodus_cycle(args: argparse.Namespace, config: ResearchConfig | None, data_root: Path) -> int:
+    del config
+    from liquidity_migration.core.operational_profile import load_operational_profile
+    from liquidity_migration.strategy.exodus_producer import (
+        format_exodus_cycle_summary,
+        resolve_exodus_effective_config,
+        run_exodus_cycle,
+    )
+    from liquidity_migration.runtime.engine_account_health import (
+        ENGINE_HEARTBEAT_PATH_ENV,
+        EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV,
+    )
+
+    operational = load_operational_profile(args.operational_profile_file)
+    effective = resolve_exodus_effective_config(
+        profile_name=args.strategy_profile,
+        environment=args.execution_environment,
+        event_path=args.event_tape,
+        target_book_path=args.target_book,
+        engine_heartbeat_path=os.environ.get(ENGINE_HEARTBEAT_PATH_ENV, ""),
+        expected_account_user_id=os.environ.get(EXPECTED_ENGINE_ACCOUNT_USER_ID_ENV, ""),
+        invocation_id=os.environ.get("INVOCATION_ID", ""),
+        entry_leverage=operational.carry.entry_leverage,
+        operational_profile_path=args.operational_profile_file,
+        operational_profile_sha256=operational.source_sha256,
+    )
+    if args.daemon:
+        from liquidity_migration.strategy.exodus_producer_daemon import (
+            ExodusProducerDaemon,
+        )
+
+        daemon = ExodusProducerDaemon(
+            data_root,
+            config=effective,
+            interval_seconds=args.interval_seconds,
+        )
+        daemon.install_signal_handlers()
+        stats = daemon.run()
+        print(
+            "exodus target producer daemon stopped "
+            f"cycles_run={stats['cycles_run']} cycle_errors={stats['cycle_errors']}",
+            flush=True,
+        )
+        return 0
+    payload = run_exodus_cycle(data_root, config=effective)
+    print(format_exodus_cycle_summary(payload), flush=True)
     return 0
 
 
@@ -446,11 +725,30 @@ _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace, "ResearchConfig", Pat
     "archive-download-klines-1h-api": _cmd_archive_download_klines_1h_api,
     "long-native-event-demo-cycle": _cmd_long_native_event_demo_cycle,
     "carry-demo-cycle": _cmd_carry_demo_cycle,
+    "exodus-cycle": _cmd_exodus_cycle,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "exodus-cycle":
+        if args.data_root is None:
+            parser.error("exodus-cycle requires an explicit --data-root")
+        data_root = _resolve_data_root(args.command, args.data_root)
+        return _cmd_exodus_cycle(args, None, data_root)
+    if args.command in {"long-native-event-demo-cycle", "carry-demo-cycle"}:
+        if args.data_root is None:
+            parser.error(f"{args.command} requires an explicit --data-root")
+        data_root = _resolve_data_root(args.command, args.data_root)
+        # Live producers have one fixed public venue adapter. The generic
+        # research YAML is intentionally not loaded and cannot alter live
+        # market identity or execution costs.
+        live_projection = ResearchConfig(
+            exchange=_LIVE_PUBLIC_EXCHANGE,
+            data_root=data_root,
+        )
+        return _COMMAND_HANDLERS[args.command](args, live_projection, data_root)
     config = load_config(args.config, data_root=args.data_root)
     data_root = _resolve_data_root(args.command, config.data_root)
     handler = _COMMAND_HANDLERS.get(args.command)

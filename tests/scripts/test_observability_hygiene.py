@@ -22,7 +22,8 @@ def test_the_drill_is_hardwired_to_the_demo_engine() -> None:
     # the funded unit anywhere in the drill. A drill that can reach mainnet
     # is not a drill.
     text = DRILL.read_text(encoding="utf-8")
-    assert 'UNIT="liquidity-migration-engine.service"' in text
+    assert 'UNIT="$(lm_owner_unit demo)"' in text
+    assert "lm_validate_fleet_manifest" in text
     assert "mainnet" not in text.replace("never touches mainnet", "").lower().replace(
         "not for rehearsing", ""
     ), "the funded unit's name has no business in this file"

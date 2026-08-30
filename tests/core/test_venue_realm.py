@@ -23,9 +23,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def test_every_environment_has_an_account_id_and_a_defined_realm() -> None:
-    account_ids = {
-        member: account_id_for_environment(member) for member in ExecutionEnvironment
-    }
+    account_ids = {member: account_id_for_environment(member) for member in ExecutionEnvironment}
     assert len(set(account_ids.values())) == len(ExecutionEnvironment)
     assert account_ids[ExecutionEnvironment.MAINNET] == "bybit-mainnet-unified"
     assert candidate_universe_realm("demo") is VenueRealm.DEMO
@@ -56,6 +54,7 @@ def test_mainnet_is_a_choice_only_for_the_funded_sleeves_and_never_a_default() -
 
     partitioned = {
         "_add_carry_demo_cycle_parser",
+        "_add_exodus_cycle_parser",
         "_add_long_native_event_demo_cycle_parser",
     }
     source = (REPO / "liquidity_migration" / "cli" / "parsers.py").read_text(encoding="utf-8")
@@ -67,18 +66,13 @@ def test_mainnet_is_a_choice_only_for_the_funded_sleeves_and_never_a_default() -
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
-            if not any(
-                isinstance(arg, ast.Constant) and arg.value == "--execution-environment"
-                for arg in call.args
-            ):
+            if not any(isinstance(arg, ast.Constant) and arg.value == "--execution-environment" for arg in call.args):
                 continue
             for keyword in call.keywords:
                 if keyword.arg == "choices":
                     environment_choices.append((node.name, ast.unparse(keyword.value)))
                 if keyword.arg == "default":
-                    raise AssertionError(
-                        f"{node.name} gives --execution-environment a default"
-                    )
+                    raise AssertionError(f"{node.name} gives --execution-environment a default")
     assert environment_choices, "no producer exposes --execution-environment"
     assert partitioned <= {name for name, _ in environment_choices}
     for function_name, rendered in environment_choices:
@@ -86,5 +80,3 @@ def test_mainnet_is_a_choice_only_for_the_funded_sleeves_and_never_a_default() -
             assert rendered == "EXECUTION_ENVIRONMENT_CHOICES"
         else:
             assert rendered == "('demo',)", (function_name, rendered)
-
-

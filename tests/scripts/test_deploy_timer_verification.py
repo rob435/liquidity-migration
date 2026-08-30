@@ -288,37 +288,25 @@ def test_current_activation_in_progress_is_bounded_by_service_runtime() -> None:
     ) == ["job.service in-progress invocation is overdue"]
 
 
-@pytest.mark.parametrize(
-    ("name", "first_delay", "cadence", "accuracy", "runtime", "timer_lines"),
-    [
-        ("demo-liveness", 60, 180, 15, 120, ("OnActiveSec=1min", "OnUnitActiveSec=3min", "AccuracySec=15s")),
-        ("mainnet-liveness", 60, 180, 15, 120, ("OnActiveSec=1min", "OnUnitActiveSec=3min", "AccuracySec=15s")),
-        ("llm-ledger", 3600, 3600, 120, 600, ("OnCalendar=*-*-* *:05:00", "AccuracySec=2min")),
-        ("trade-notify", 300, 300, 30, 120, ("OnCalendar=*-*-* *:0/5:30", "AccuracySec=30s")),
-        ("backup", 86400, 86400, 300, 900, ("OnCalendar=*-*-* 03:17:00 UTC", "AccuracySec=5min")),
-        ("chaos-drill", 604800, 604800, 600, 300, ("OnCalendar=Sun *-*-* 09:13:00 UTC", "AccuracySec=10min")),
-        ("forward-upload", 3600, 3600, 60, 1800, ("OnCalendar=*-*-* *:23:00 UTC", "AccuracySec=1min")),
-    ],
-)
-def test_each_job_policy_matches_its_current_timer_and_service(
-    name: str,
-    first_delay: int,
-    cadence: int,
-    accuracy: int,
-    runtime: int,
-    timer_lines: tuple[str, ...],
-) -> None:
-    deploy = " ".join(DEPLOY.read_text(encoding="utf-8").replace("\\\n", "").split())
-    assert (
-        f"verify_timer_job liquidity-migration-{name}.timer "
-        f"liquidity-migration-{name}.service "
-        f"{first_delay} {cadence} {accuracy} {runtime}"
-    ) in deploy
+def test_each_job_policy_comes_from_the_fleet_manifest() -> None:
+    rows = [
+        line.split("|")
+        for line in (ROOT / "deploy" / "fleet_manifest.tsv")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line and not line.startswith("#")
+    ]
+    timers = [row for row in rows if row[1] == "current" and row[2] == "timer"]
+    assert timers
 
-    timer = (SYSTEMD / f"liquidity-migration-{name}.timer").read_text(encoding="utf-8")
-    assert all(line in timer for line in timer_lines)
-    service = (SYSTEMD / f"liquidity-migration-{name}.service").read_text(encoding="utf-8")
-    assert f"TimeoutStartSec={runtime}" in service
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    assert "lm_fleet_health_rows" in deploy
+    assert 'verify_timer_job "$unit" "$timer_service"' in deploy
+    for row in timers:
+        timer_name, service_name, runtime = row[0], row[11], row[15]
+        assert (SYSTEMD / timer_name).is_file()
+        service = (SYSTEMD / service_name).read_text(encoding="utf-8")
+        assert f"TimeoutStartSec={runtime}" in service
 
 
 def test_backup_health_is_its_successful_job_result_not_destination_configuration() -> None:

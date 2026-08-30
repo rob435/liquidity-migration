@@ -28,7 +28,7 @@ construct a sleeve-private execution stream, router, or cache.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
 from liquidity_migration.marketdata.kline_stream_manager import KlineStreamManager
@@ -38,14 +38,14 @@ from liquidity_migration.strategy.carry_demo import (
     FREEZE_AHEAD_WINDOW_MS,
     CarryCycleState,
     CarryDemoCycleConfig,
+    CarryEffectiveConfig,
     _validate_carry_demo_config,
     format_carry_demo_cycle_summary,
-    resolve_carry_strategy_profile,
     run_carry_demo_cycle,
 )
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.strategy.event_demo_data import top_turnover_kline_universe
-from liquidity_migration.strategy.strategy_host import StrategyHostDaemon, default_engine_change_wake_dir
+from liquidity_migration.strategy.strategy_host import StrategyHostDaemon
 from liquidity_migration.strategy.target_book_evidence import PublishedTargetCyclePayload
 
 
@@ -94,29 +94,38 @@ class CarryDemoDaemon(StrategyHostDaemon):
     _flat_cycle_payload = True
 
     def _strategy_profile_name(self) -> str:
-        profile = cast("CarryDemoCycleConfig", self.demo_config).strategy_profile
-        return resolve_carry_strategy_profile(profile).profile_name
+        return self._effective_config.profile.profile_name
 
     def __init__(
         self,
         data_root: str | Path,
         *,
         config: ResearchConfig,
+        effective_config: CarryEffectiveConfig,
         demo_config: CarryDemoCycleConfig | None = None,
         interval_seconds: float = 60.0,
         cycle_runner: Callable[..., PublishedTargetCyclePayload] = run_carry_demo_cycle,
         **kwargs: Any,
     ) -> None:
-        resolved = demo_config or CarryDemoCycleConfig()
+        if demo_config is not None and effective_config.cycle != demo_config:
+            raise ValueError("effective CARRY config disagrees with demo_config")
+        if config.exchange != effective_config.exchange:
+            raise ValueError("CARRY market projection disagrees with effective_config")
+        if Path(data_root).expanduser().resolve() != effective_config.data_root:
+            raise ValueError("CARRY daemon data root disagrees with effective_config")
+        resolved = effective_config.cycle
+        self._effective_config = effective_config
         # This must precede every cache, manager, or thread construction.
         _validate_carry_daemon_startup(resolved)
         # With ws_klines_enabled the host builds a kline manager from the
         # factory below (carry's top-N universe, not LONG's).
         kwargs.setdefault("kline_stream_manager_factory", _default_carry_kline_stream_manager_factory)
-        default_engine_change_wake_dir(kwargs, resolved)
+        kwargs.setdefault("engine_change_wake_dir", effective_config.engine_heartbeat_path.parent)
+        if effective_config.invocation_id:
+            kwargs.setdefault("strategy_invocation_id", effective_config.invocation_id)
         kwargs.setdefault("event_driven_cycle", True)
         super().__init__(
-            data_root,
+            effective_config.data_root,
             config=config,
             demo_config=resolved,
             interval_seconds=interval_seconds,
@@ -127,8 +136,8 @@ class CarryDemoDaemon(StrategyHostDaemon):
         # One REST session for the daemon's cycles instead of a fresh TLS
         # handshake per cycle. Used only from the cycle loop thread.
         self._cycle_market_client = BybitMarketData(
-            category=config.exchange.category,
-            testnet=config.exchange.testnet,
+            category=effective_config.exchange.category,
+            testnet=effective_config.exchange.testnet,
         )
 
     def run(self) -> dict[str, Any]:
@@ -139,8 +148,7 @@ class CarryDemoDaemon(StrategyHostDaemon):
         return super().run()
 
     def _extra_cycle_kwargs(self) -> dict[str, Any]:
-        # REPLACES the base kwargs rather than extending: CARRY's cycle runner
-        # takes no ``journal_cursor`` -- its cursor lives in the cycle state.
+        # CARRY's cursor lives in the daemon-owned cycle state.
         kwargs: dict[str, Any] = {
             "cycle_state": self._carry_cycle_state,
             "market_client": self._cycle_market_client,
@@ -149,6 +157,7 @@ class CarryDemoDaemon(StrategyHostDaemon):
             # data build and publishes in tens of milliseconds.
             "cycle_kind": self._pending_cycle_kind,
         }
+        kwargs["effective_config"] = self._effective_config
         deadline_ts_ms = self._next_wake_deadline_ts_ms
         deadline_wait = self._seconds_until_time_deadline()
         if (
@@ -160,6 +169,11 @@ class CarryDemoDaemon(StrategyHostDaemon):
             # freeze the upcoming day's book so the deadline wake finds it.
             kwargs["freeze_ahead_decision_ts_ms"] = deadline_ts_ms - DECISION_KLINE_LAG_MS
         return kwargs
+
+    def _cycle_call_kwargs(self, shared: dict[str, Any]) -> dict[str, Any]:
+        """CARRY's runner accepts only its one effective configuration."""
+
+        return {**shared, **self._extra_cycle_kwargs()}
 
     def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
         # CARRY payloads are flat; the inherited formatter expects a nested

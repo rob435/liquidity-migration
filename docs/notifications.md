@@ -31,7 +31,7 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 | `mainnet-liveness` | on | watchdog alerts, mainnet scope, plus one daily engine digest | alerts |
 | `telegram-controls` | on | control panel + action results; **also listens** | main |
 | `engine` / `engine-mainnet` | off — the unit strips the token | nothing; the engine's live signal is its heartbeat file, which the watchdog reads | — |
-| `llm-ledger` | off — the unit reads no Telegram env | nothing; its judged candidates are read by the LONG producer, and the trades they become page as LONG entries/exits | — |
+| `llm-ledger` | off — the unit reads no Telegram env | nothing; its judged-candidate artifact is research-only and no target producer consumes it | — |
 | `trade-notify` | on | both accounts' entries (from the books) and exits with their P&L (from the engines), plus one daily summary; runs every 5 minutes | main |
 | `chaos-drill` | on | the weekly demo crash-drill verdict: recovered clean, came back latched, or did not come back | alerts |
 | `backup` | off — no Telegram env | nothing; its receipt is the stamp file the watchdog reads the age of | — |
@@ -146,11 +146,12 @@ nothing else may poll `getUpdates` on this token. Send `/controls` in the main c
   a sleeve is the kind of thing somebody presses to see what it does.
 
 Real-money rows appear only while the mainnet engine unit is active — i.e. after your own arming act.
-Pausing mainnet stops its two producer units directly (mainnet has no sleeve toggles), and resuming
-starts them again. The funded resume carries the same two proofs the demo one does — this generation's
-completed activation receipt, and the funded account owner already running — and puts both producers
-back in quarantine if either fails to come up. It never opens the credential file, so it cannot arm a
-disarmed account: with `REAL_MONEY` off the funded owner is not running and the resume refuses.
+Pausing mainnet stops every manifest-selected funded producer directly (mainnet has no sleeve toggles).
+The panel does not expose funded resume; an operational rollout is the operator path back to a running
+funded fleet. The fixed helper's internal resume action requires this generation's completed activation
+receipt and the funded account owner already running, and puts the whole manifest-selected producer set
+back in quarantine if any unit fails to come up. It never opens the credential file, so it cannot arm a
+disarmed account: with `REAL_MONEY` off the funded owner is not running and the action refuses.
 
 Who may press: only the configured main chat is read at all, and a press must come from the chat's own
 private-chat owner. If the main chat is a group, set `TELEGRAM_CONTROL_USER_IDS` (comma-separated

@@ -137,6 +137,61 @@ if [ "$("${LOCAL_GIT[@]}" cat-file -t "$EXPECTED_COMMIT" 2>/dev/null || true)" !
     echo "EXPECTED_COMMIT is not a local commit object: $EXPECTED_COMMIT" >&2
     exit 1
 fi
+if [ "$MODE" = rollout ]; then
+    LOCAL_HEAD="$("${LOCAL_GIT[@]}" rev-parse --verify 'HEAD^{commit}')" || {
+        echo "cannot resolve the rollout controller checkout HEAD" >&2
+        exit 1
+    }
+    [ "$LOCAL_HEAD" = "$EXPECTED_COMMIT" ] || {
+        echo "rollout controller HEAD $LOCAL_HEAD is not EXPECTED_COMMIT $EXPECTED_COMMIT" >&2
+        exit 1
+    }
+    if ! LOCAL_DIRTY="$("${LOCAL_GIT[@]}" status --porcelain=v1 --untracked-files=all)"; then
+        echo "cannot inspect the rollout controller checkout" >&2
+        exit 1
+    fi
+    [ -z "$LOCAL_DIRTY" ] || {
+        echo "rollout controller checkout is dirty; use a clean full clone at EXPECTED_COMMIT" >&2
+        exit 1
+    }
+fi
+
+LM_FLEET_MANIFEST="$LOCAL_REPOSITORY/deploy/fleet_manifest.tsv"
+. "$LOCAL_REPOSITORY/deploy/lib_sleeves.sh"
+lm_validate_fleet_manifest
+LOCAL_ROLLOUT_DOWNSTREAM_UNITS=()
+LOCAL_ROLLOUT_OWNER_UNITS=()
+LOCAL_MAINNET_QUARANTINE_UNITS=()
+while IFS= read -r unit; do
+    LOCAL_ROLLOUT_DOWNSTREAM_UNITS+=("$unit")
+done < <(lm_rollout_units downstream)
+while IFS= read -r unit; do
+    LOCAL_ROLLOUT_OWNER_UNITS+=("$unit")
+done < <(lm_rollout_units owner)
+while IFS= read -r unit; do
+    LOCAL_MAINNET_QUARANTINE_UNITS+=("$unit")
+done < <(lm_realm_units mainnet)
+LOCAL_ENGINE_UNIT="$(lm_owner_unit demo)"
+LOCAL_MAINNET_OWNER_UNIT="$(lm_owner_unit mainnet)"
+LOCAL_LONG_DEMO_UNIT="$(
+    lm_unit_for_output_artifact /var/lib/liquidity-migration/targets/long-demo.json
+)"
+LOCAL_CARRY_DEMO_UNIT="$(
+    lm_unit_for_output_artifact /var/lib/liquidity-migration/targets/carry-demo.json
+)"
+LOCAL_EXODUS_DEMO_UNIT="$(
+    lm_unit_for_output_artifact /var/lib/liquidity-migration/targets/exodus-demo.json
+)"
+LOCAL_LONG_MAINNET_UNIT="$(
+    lm_unit_for_output_artifact /var/lib/liquidity-migration/targets/long-mainnet.json
+)"
+LOCAL_CARRY_MAINNET_UNIT="$(
+    lm_unit_for_output_artifact /var/lib/liquidity-migration/targets/carry-mainnet.json
+)"
+LOCAL_EXODUS_MAINNET_UNIT="$(
+    lm_unit_for_output_artifact /var/lib/liquidity-migration/targets/exodus-mainnet.json
+)"
+
 read -r -a SSH_ARGS <<< "$SSH_OPTS"
 {
     printf 'MODE=%q\n' "$MODE"
@@ -149,6 +204,23 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
     printf 'STOP_FIRST=%q\n' "$STOP_FIRST"
+	printf 'ROLLOUT_DOWNSTREAM_UNITS=('
+	for unit in "${LOCAL_ROLLOUT_DOWNSTREAM_UNITS[@]}"; do printf ' %q' "$unit"; done
+	printf ' )\n'
+	printf 'ROLLOUT_OWNER_UNITS=('
+	for unit in "${LOCAL_ROLLOUT_OWNER_UNITS[@]}"; do printf ' %q' "$unit"; done
+	printf ' )\n'
+	printf 'MAINNET_QUARANTINE_UNITS=('
+	for unit in "${LOCAL_MAINNET_QUARANTINE_UNITS[@]}"; do printf ' %q' "$unit"; done
+	printf ' )\n'
+	printf 'ENGINE_UNIT=%q\n' "$LOCAL_ENGINE_UNIT"
+	printf 'MAINNET_OWNER_UNIT=%q\n' "$LOCAL_MAINNET_OWNER_UNIT"
+	printf 'LONG_DEMO_UNIT=%q\n' "$LOCAL_LONG_DEMO_UNIT"
+	printf 'CARRY_DEMO_UNIT=%q\n' "$LOCAL_CARRY_DEMO_UNIT"
+	printf 'EXODUS_DEMO_UNIT=%q\n' "$LOCAL_EXODUS_DEMO_UNIT"
+	printf 'LONG_MAINNET_UNIT=%q\n' "$LOCAL_LONG_MAINNET_UNIT"
+	printf 'CARRY_MAINNET_UNIT=%q\n' "$LOCAL_CARRY_MAINNET_UNIT"
+	printf 'EXODUS_MAINNET_UNIT=%q\n' "$LOCAL_EXODUS_MAINNET_UNIT"
 	cat <<'REMOTE_SCRIPT'
 # `-E` propagates the ERR trap into shell functions so a strict phase can still
 # report which phase died; see run_strict_phase below.
@@ -328,8 +400,10 @@ RETIRED_PAPER_CONFIG_DIR=/etc/liquidity-migration/account-paper-execution
 RETIRED_PAPER_ENVIRONMENT=/etc/liquidity-migration/account-paper-execution.env
 LONG_DEMO_ROOT=/opt/liquidity-migration/data/bybit-long-demo-event
 CARRY_DEMO_ROOT=/opt/liquidity-migration/data/bybit-carry-demo-event
+EXODUS_DEMO_ROOT=/opt/liquidity-migration/data/bybit-exodus-demo-event
 LONG_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-long-mainnet-event
 CARRY_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-carry-mainnet-event
+EXODUS_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-exodus-mainnet-event
 
 RUNTIME_GROUP=liquidity-migration
 ENGINE_BUILDER_GROUP=liquidity-builder
@@ -392,8 +466,10 @@ normalize_runtime_state_access() {
         "$MAINNET_ENGINE_USER" /var/lib/liquidity-migration-engine-mainnet \
         "$PRODUCER_USER" "$LONG_DEMO_ROOT" \
         "$PRODUCER_USER" "$CARRY_DEMO_ROOT" \
+        "$PRODUCER_USER" "$EXODUS_DEMO_ROOT" \
         "$PRODUCER_USER" "$LONG_MAINNET_ROOT" \
         "$PRODUCER_USER" "$CARRY_MAINNET_ROOT" \
+        "$PRODUCER_USER" "$EXODUS_MAINNET_ROOT" \
         "$LLM_USER" "$LLM_STATE_ROOT" <<'PY'
 import grp
 import os
@@ -674,9 +750,7 @@ from liquidity_migration.policy.systemd_environment import load_private_systemd_
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
 allowed = {
-    "CANDIDATE_UNIVERSE_FILE", "CARRY_NOTIONAL_MULTIPLIER",
-    "LONG_NOTIONAL_MULTIPLIER",
-    "OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM",
+    "CANDIDATE_UNIVERSE_FILE", "OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM",
 }
 values = load_private_systemd_environment(source)
 forbidden = {
@@ -933,7 +1007,7 @@ prepare_demo_runtime_config() {
         || fail "missing tracked operational profile: $operational_profile_source"
     "$PYTHON" - "$operational_profile_source" <<'PY'
 import sys
-from liquidity_migration.policy.operational_profile import load_operational_profile
+from liquidity_migration.core.operational_profile import load_operational_profile
 
 load_operational_profile(sys.argv[1])
 PY
@@ -947,7 +1021,7 @@ PY
     retire_paper_host_config
 
     [ ! -L "$REPO_DIR/data" ] || fail "demo runtime data directory must not be a symlink"
-    for root in "$LONG_DEMO_ROOT" "$CARRY_DEMO_ROOT"; do
+    for root in "$LONG_DEMO_ROOT" "$CARRY_DEMO_ROOT" "$EXODUS_DEMO_ROOT"; do
         case "$root" in
             "$REPO_DIR"/data/*) ;;
             *) fail "demo runtime root escapes the checkout data directory: $root" ;;
@@ -1255,7 +1329,6 @@ unit_off() {
 # engine, and an armed topology also requires the separately credentialed
 # funded engine. Missing binaries/configuration are fatal rather than an
 # implicit opt-out.
-ENGINE_UNIT=liquidity-migration-engine.service
 # Built in a clone of its own, never the deployed checkout: cargo writes a
 # target/ tree beside the source, and the deployed checkout is proved clean
 # against the exact commit at several points in this script.
@@ -1667,56 +1740,52 @@ verify_timer_job() {
     fi
 }
 
-verify_topology() {
-    local activation_policy="${1:-complete}"
-    case "$activation_policy" in
-        complete|activation-in-progress) ;;
-        *) fail "invalid topology activation policy: $activation_policy" ;;
-    esac
-    VERIFY_UNIT_ROWS=()
-    VERIFY_MISMATCHES=()
+verify_unmanifested_fleet() {
+    local long_expectation="$1" carry_expectation="$2" mainnet_expectation="$3" unit
 
-    # Rust is the only account owner. Every deployed topology requires the demo
-    # engine, and an armed topology additionally requires the funded engine.
-    if sleeve_on "$LONG_SLEEVE"; then
-        verify_unit on liquidity-migration-bybit-long-demo.service "LONG demo producer is not active"
-    else
-        verify_unit off liquidity-migration-bybit-long-demo.service "LONG demo producer is not off"
-    fi
-    if sleeve_on "$CARRY_SLEEVE"; then
-        verify_unit on liquidity-migration-bybit-carry-demo.service "carry demo producer is not active"
-    else
-        verify_unit off liquidity-migration-bybit-carry-demo.service "carry demo producer is not off"
-    fi
-    # Disarmed, a running mainnet unit must not hide behind a green demo
-    # verification; armed, the funded fleet is verified exactly like the
-    # others.
-    if mainnet_armed; then
+    verify_unit "$long_expectation" \
+        liquidity-migration-bybit-long-demo.service \
+        "LONG demo producer does not match the installed topology"
+    verify_unit "$carry_expectation" \
+        liquidity-migration-bybit-carry-demo.service \
+        "carry demo producer does not match the installed topology"
+    if [ "$mainnet_expectation" = on ]; then
         verify_unit on "$MAINNET_OWNER_UNIT" "funded Rust engine is not active"
-        verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
-        verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
-        verify_unit on liquidity-migration-mainnet-liveness.timer "mainnet liveness timer is not active"
+        verify_unit on liquidity-migration-bybit-carry-mainnet.service \
+            "carry mainnet producer is not active"
+        verify_unit on liquidity-migration-bybit-long-mainnet.service \
+            "LONG mainnet producer is not active"
+        verify_unit on liquidity-migration-mainnet-liveness.timer \
+            "mainnet liveness timer is not active"
         verify_timer_job \
             liquidity-migration-mainnet-liveness.timer \
             liquidity-migration-mainnet-liveness.service \
             60 180 15 120
     else
-        for mainnet_unit in \
+        for unit in \
             liquidity-migration-engine-mainnet.service \
             liquidity-migration-bybit-carry-mainnet.service \
             liquidity-migration-bybit-long-mainnet.service \
             liquidity-migration-mainnet-liveness.timer; do
-            verify_unit off "$mainnet_unit" "$mainnet_unit is active under demo authorization"
+            verify_unit off "$unit" "$unit is active under demo authorization"
         done
     fi
-    verify_unit on liquidity-migration-demo-liveness.timer "liveness timer is not active"
-    verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
-    verify_unit on liquidity-migration-llm-ledger.timer "LLM ledger timer is not active"
-    verify_unit on liquidity-migration-trade-notify.timer "trade notify timer is not active"
-    verify_unit on liquidity-migration-backup.timer "nightly backup timer is not active"
-    verify_unit on liquidity-migration-chaos-drill.timer "weekly chaos drill timer is not active"
-    verify_unit on liquidity-migration-forward-capture.service "forward market capture is not active"
-    verify_unit on liquidity-migration-forward-upload.timer "forward market upload timer is not active"
+    verify_unit on liquidity-migration-demo-liveness.timer \
+        "liveness timer is not active"
+    verify_unit on liquidity-migration-telegram-controls.service \
+        "telegram controls daemon is not active"
+    verify_unit on liquidity-migration-llm-ledger.timer \
+        "LLM ledger timer is not active"
+    verify_unit on liquidity-migration-trade-notify.timer \
+        "trade notify timer is not active"
+    verify_unit on liquidity-migration-backup.timer \
+        "nightly backup timer is not active"
+    verify_unit on liquidity-migration-chaos-drill.timer \
+        "weekly chaos drill timer is not active"
+    verify_unit on liquidity-migration-forward-capture.service \
+        "forward market capture is not active"
+    verify_unit on liquidity-migration-forward-upload.timer \
+        "forward market upload timer is not active"
     verify_timer_job \
         liquidity-migration-demo-liveness.timer \
         liquidity-migration-demo-liveness.service \
@@ -1742,6 +1811,50 @@ verify_topology() {
         liquidity-migration-forward-upload.service \
         3600 3600 60 1800
     verify_unit on "$ENGINE_UNIT" "required demo Rust engine is not active"
+}
+
+verify_fleet_units() {
+    local long_expectation=off carry_expectation=off mainnet_expectation=off
+    local unit expectation health artifact timer_service
+    local first_delay cadence accuracy runtime
+
+    if sleeve_on "$LONG_SLEEVE"; then long_expectation=on; fi
+    if sleeve_on "$CARRY_SLEEVE"; then carry_expectation=on; fi
+    if mainnet_armed; then mainnet_expectation=on; fi
+
+    if [ ! -f deploy/fleet_manifest.tsv ]; then
+        verify_unmanifested_fleet \
+            "$long_expectation" "$carry_expectation" "$mainnet_expectation"
+        return
+    fi
+    command -v lm_validate_fleet_manifest >/dev/null 2>&1 \
+        || fail "installed fleet manifest has no validation helper"
+    command -v lm_fleet_health_rows >/dev/null 2>&1 \
+        || fail "installed fleet manifest has no health-row helper"
+    lm_validate_fleet_manifest || fail "fleet manifest validation failed"
+    while IFS='|' read -r unit expectation health artifact timer_service \
+        first_delay cadence accuracy runtime; do
+        verify_unit "$expectation" "$unit" "$unit does not match fleet manifest state $expectation"
+        if [ "$expectation" = on ] && [ "$health" = timer ]; then
+            verify_timer_job "$unit" "$timer_service" \
+                "$first_delay" "$cadence" "$accuracy" "$runtime"
+        fi
+    done < <(
+        lm_fleet_health_rows \
+            "$long_expectation" "$carry_expectation" "$mainnet_expectation"
+    )
+}
+
+verify_topology() {
+    local activation_policy="${1:-complete}"
+    case "$activation_policy" in
+        complete|activation-in-progress) ;;
+        *) fail "invalid topology activation policy: $activation_policy" ;;
+    esac
+    VERIFY_UNIT_ROWS=()
+    VERIFY_MISMATCHES=()
+
+    verify_fleet_units
     if [ ! -x "$ENGINE_BINARY" ] || [ ! -r "${ENGINE_BINARY}.release" ]; then
         verify_note "required commit-bound Rust engine artifact is missing"
     else
@@ -2492,11 +2605,14 @@ PY
         || fail "cannot remove the replaced Python environment generation"
 }
 
-# Prove the dedicated bot identity has exactly the four reviewed commands and
+# Prove the dedicated bot identity has exactly the five reviewed commands and
 # no stale/broader sudo grant. Whitespace is presentation-only in `sudo -l`;
 # command paths and argv remain exact after normalization.
 verify_controls_sudo_policy() {
-    local actual expected
+    local actual expected status_action=status-fleet
+    if [ ! -f deploy/fleet_manifest.tsv ]; then
+        status_action=status-demo
+    fi
     actual="$(
         LC_ALL=C COLUMNS=4096 /usr/bin/sudo -l -U "$CONTROLS_USER" 2>/dev/null \
             | awk '/^[[:space:]]*\(/ { print }' \
@@ -2509,7 +2625,7 @@ verify_controls_sudo_policy() {
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper pause-mainnet' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper resume-demo' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper resume-mainnet' \
-            '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper status-demo' \
+            "(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper $status_action" \
             | LC_ALL=C sed 's/[[:space:]]//g' \
             | LC_ALL=C sort
     )"
@@ -3258,6 +3374,62 @@ PY
     fail "$unit did not publish a valid book from its current service generation"
 }
 
+activate_target_producers() {
+    local realm="$1" long_state="$2" carry_state="$3" mainnet_state="$4" started_ns="$5"
+    local unit artifact health kind sleeve relative_root dataset root
+    local units=()
+    while IFS= read -r unit; do
+        [ -n "$unit" ] && units+=("$unit")
+    done < <(
+        lm_target_producer_units \
+            "$realm" start "$long_state" "$carry_state" "$mainnet_state"
+    )
+    [ "${#units[@]}" -gt 0 ] || fail "$realm manifest selected no target producers"
+
+    for unit in "${units[@]}"; do
+        systemctl enable --now "$unit" \
+            || fail "cannot start $realm target producer $unit"
+    done
+    for unit in "${units[@]}"; do
+        artifact="$(lm_output_artifact_for_unit "$unit")" \
+            || fail "manifest has no output artifact for $unit"
+        health="$(
+            lm_fleet_manifest_rows | awk -F '|' -v selected="$unit" \
+                '$1 == selected && $2 == "current" { print $10 }'
+        )" || fail "cannot read manifest health policy for $unit"
+        IFS=: read -r kind sleeve relative_root dataset <<< "$health"
+        [ "$kind" = cycle ] && [ -n "$sleeve" ] && [ -n "$dataset" ] \
+            || fail "manifest health policy for $unit is not a producer cycle"
+        case "$relative_root" in
+            data/*) ;;
+            *) fail "manifest health root for $unit is outside data/: $relative_root" ;;
+        esac
+        root="$REPO_DIR/$relative_root"
+        wait_fresh_producer_book "$unit" "$root" "$artifact" "$realm" "$started_ns"
+    done
+}
+
+activate_manifest_units() {
+    local realm="$1" unit immediate_jobs
+    immediate_jobs=" $(lm_immediate_timer_jobs "$realm" | tr '\n' ' ') "
+    while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        case "$immediate_jobs" in
+            *" $unit "*)
+                systemctl start "$unit" \
+                    || fail "the immediate $realm timer job $unit failed to start"
+                if systemctl is-failed --quiet "$unit"; then
+                    fail "the immediate $realm timer job $unit failed"
+                fi
+                ;;
+            *)
+                systemctl enable --now "$unit" \
+                    || fail "cannot activate $realm fleet unit $unit"
+                ;;
+        esac
+    done < <(lm_activation_units "$realm" start)
+}
+
 start_required_engine() {
     local unit="$1" env_file="$2" realm="$3"
     verify_engine_release launcher-required
@@ -3282,40 +3454,10 @@ activate_mode() {
     # then admits books from the service generations started below.
     start_required_engine "$ENGINE_UNIT" "$ENGINE_ENVIRONMENT" demo
     producer_started_ns="$(date +%s%N)"
-    start_if "$LONG_SLEEVE" liquidity-migration-bybit-long-demo.service
-    start_if "$CARRY_SLEEVE" liquidity-migration-bybit-carry-demo.service
-    if sleeve_on "$LONG_SLEEVE"; then
-        wait_fresh_producer_book liquidity-migration-bybit-long-demo.service \
-            "$LONG_DEMO_ROOT" /var/lib/liquidity-migration/targets/long-demo.json \
-            demo "$producer_started_ns"
-    fi
-    if sleeve_on "$CARRY_SLEEVE"; then
-        wait_fresh_producer_book liquidity-migration-bybit-carry-demo.service \
-            "$CARRY_DEMO_ROOT" /var/lib/liquidity-migration/targets/carry-demo.json \
-            demo "$producer_started_ns"
-    fi
+    activate_target_producers \
+        demo "$LONG_SLEEVE" "$CARRY_SLEEVE" off "$producer_started_ns"
 
-    systemctl enable --now liquidity-migration-demo-liveness.timer \
-        || fail "cannot enable the demo watchdog timer"
-    systemctl start liquidity-migration-demo-liveness.service \
-        || fail "the immediate demo liveness pass failed to start"
-    if systemctl is-failed --quiet liquidity-migration-demo-liveness.service; then
-        fail "the immediate demo liveness pass failed"
-    fi
-    systemctl enable --now liquidity-migration-telegram-controls.service \
-        || fail "cannot start Telegram controls"
-    systemctl enable --now liquidity-migration-llm-ledger.timer \
-        || fail "cannot start the LLM ledger timer"
-    systemctl enable --now liquidity-migration-trade-notify.timer \
-        || fail "cannot start the trade notification timer"
-    systemctl enable --now liquidity-migration-forward-capture.service \
-        || fail "cannot start forward market capture"
-    systemctl enable --now liquidity-migration-forward-upload.timer \
-        || fail "cannot enable the forward market upload timer"
-    systemctl enable --now liquidity-migration-backup.timer \
-        || fail "cannot enable the nightly backup timer"
-    systemctl enable --now liquidity-migration-chaos-drill.timer \
-        || fail "cannot enable the weekly chaos drill timer"
+    activate_manifest_units demo
     if mainnet_armed; then
         start_mainnet_fleet
     fi
@@ -3327,10 +3469,6 @@ activate_mode() {
 # Naming the engine is not arming it. The mainnet gateway refuses to build
 # unless REAL_MONEY is set in the host credential file by the account owner,
 # so the worst this can do is start a process that reads and reports.
-MAINNET_OWNER_UNIT=liquidity-migration-engine-mainnet.service
-MAINNET_LIVENESS_TIMER=liquidity-migration-mainnet-liveness.timer
-MAINNET_LIVENESS_SERVICE=liquidity-migration-mainnet-liveness.service
-
 MAINNET_DEMO_TELEGRAM_ENV=/etc/liquidity-migration/bybit-demo.env
 
 # The owner writes one file: the credential env (key, secret, REAL_MONEY,
@@ -3391,29 +3529,12 @@ start_mainnet_fleet() {
     provision_mainnet_prerequisites
     require_mainnet_preflight
     install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
-        "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets
+        "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" "$EXODUS_MAINNET_ROOT" \
+        /var/lib/liquidity-migration/targets
     start_required_engine "$MAINNET_OWNER_UNIT" /etc/liquidity-migration/engine-mainnet.env mainnet
     producer_started_ns="$(date +%s%N)"
-    systemctl enable --now liquidity-migration-bybit-carry-mainnet.service \
-        || fail "cannot start the funded carry target producer"
-    systemctl enable --now liquidity-migration-bybit-long-mainnet.service \
-        || fail "cannot start the funded LONG target producer"
-    wait_fresh_producer_book liquidity-migration-bybit-carry-mainnet.service \
-        "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets/carry-mainnet.json \
-        mainnet "$producer_started_ns"
-    wait_fresh_producer_book liquidity-migration-bybit-carry-mainnet.service \
-        "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets/exodus-mainnet.json \
-        mainnet "$producer_started_ns"
-    wait_fresh_producer_book liquidity-migration-bybit-long-mainnet.service \
-        "$LONG_MAINNET_ROOT" /var/lib/liquidity-migration/targets/long-mainnet.json \
-        mainnet "$producer_started_ns"
-    systemctl enable --now "$MAINNET_LIVENESS_TIMER" \
-        || fail "cannot enable the funded liveness timer"
-    systemctl start "$MAINNET_LIVENESS_SERVICE" \
-        || fail "the immediate funded liveness pass failed to start"
-    if systemctl is-failed --quiet "$MAINNET_LIVENESS_SERVICE"; then
-        fail "the immediate funded liveness pass failed"
-    fi
+    activate_target_producers mainnet off off on "$producer_started_ns"
+    activate_manifest_units mainnet
 }
 resolve_fail_safe_python() {
     local interpreter mode directory
@@ -3445,15 +3566,8 @@ resolve_fail_safe_python() {
 # but a failed credential rewrite still leaves the funded fleet quarantined.
 quarantine_mainnet_units() {
     local unit load_state failures=0
-    local -a units=(
-        "$MAINNET_LIVENESS_TIMER"
-        "$MAINNET_LIVENESS_SERVICE"
-        liquidity-migration-bybit-carry-mainnet.service
-        liquidity-migration-bybit-long-mainnet.service
-        "$MAINNET_OWNER_UNIT"
-    )
     [ -x /usr/bin/systemctl ] || return 1
-    for unit in "${units[@]}"; do
+    for unit in "${MAINNET_QUARANTINE_UNITS[@]}"; do
         load_state="$(/usr/bin/systemctl show --property=LoadState --value "$unit" 2>/dev/null)" \
             || { printf 'stop-failed unit=%s reason=load-state-unavailable\n' "$unit" >&2; failures=1; continue; }
         if [ "$load_state" = not-found ]; then
@@ -3463,7 +3577,7 @@ quarantine_mainnet_units() {
         /usr/bin/systemctl disable --now "$unit" 2>/dev/null || true
     done
     /bin/sync || failures=1
-    for unit in "${units[@]}"; do
+    for unit in "${MAINNET_QUARANTINE_UNITS[@]}"; do
         load_state="$(/usr/bin/systemctl show --property=LoadState --value "$unit" 2>/dev/null)" \
             || { printf 'stop-failed unit=%s reason=verification-unavailable\n' "$unit" >&2; failures=1; continue; }
         [ "$load_state" = not-found ] && continue
@@ -3644,50 +3758,9 @@ stop_mainnet_mode() {
     echo "note: REAL_MONEY was not read; run disarm-mainnet to remove arming at the credential boundary."
 }
 
-ROLLOUT_DOWNSTREAM_UNITS=(
-    liquidity-migration-forward-upload.timer
-    liquidity-migration-forward-upload.service
-    liquidity-migration-backup.timer
-    liquidity-migration-backup.service
-    liquidity-migration-chaos-drill.timer
-    liquidity-migration-chaos-drill.service
-    liquidity-migration-forward-capture.service
-    liquidity-migration-demo-liveness.timer
-    liquidity-migration-mainnet-liveness.timer
-    liquidity-migration-llm-ledger.timer
-    liquidity-migration-llm-ledger.service
-    liquidity-migration-trade-notify.timer
-    liquidity-migration-trade-notify.service
-    liquidity-migration-bybit-long-demo.service
-    liquidity-migration-bybit-long-mainnet.service
-    liquidity-migration-bybit-carry-demo.service
-    liquidity-migration-bybit-carry-mainnet.service
-    liquidity-migration-demo-liveness.service
-    liquidity-migration-mainnet-liveness.service
-    liquidity-migration-telegram-controls.service
-    # Retired fleets stay in the stop list so the rollout that carries each
-    # retirement quiesces a host still running them; the manifest install
-    # then removes the unit files for good.
-    liquidity-migration-bybit-long-paper.service
-    liquidity-migration-bybit-continuous-paper.service
-    liquidity-migration-bybit-carry-paper.service
-    liquidity-migration-paper-target-mirror.service
-    liquidity-migration-continuous-hedge.timer
-    liquidity-migration-continuous-rmom-refresh.timer
-    liquidity-migration-bybit-continuous-demo.service
-    liquidity-migration-continuous-hedge.service
-    liquidity-migration-continuous-rmom-refresh.service
-)
-# Owners stop last and start first. The engines are the owners now: they hold
-# the account lease and carry the orders, and a producer publishing a book
-# nobody owns is the state this ordering exists to keep short. They are also
-# what `require_quiescent` needs named, since it refuses to install while any
-# liquidity-migration-* unit is running and stop-first only stops what these
-# lists name.
-ROLLOUT_OWNER_UNITS=(
-    liquidity-migration-engine.service
-    liquidity-migration-engine-mainnet.service
-)
+# The local side resolves these arrays from deploy/fleet_manifest.tsv before it
+# sends the remote program. This lets a new commit quiesce units absent from the
+# host's installed checkout while keeping stop order in one inventory.
 ROLLOUT_STOPPED=0
 ROLLOUT_IRREVERSIBLE=0
 ROLLOUT_COMPLETE=0

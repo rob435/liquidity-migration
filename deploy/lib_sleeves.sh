@@ -7,10 +7,373 @@ LM_HOST_SLEEVES_ENV="${LM_HOST_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.env
 LM_RESOLVED_SLEEVES_ENV="${LM_RESOLVED_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.resolved.env}"
 LM_SYSTEMD_UNIT_DIR="${LM_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}"
+_LM_DEPLOY_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LM_FLEET_MANIFEST="${LM_FLEET_MANIFEST:-$_LM_DEPLOY_DIRECTORY/fleet_manifest.tsv}"
 
-# These units keep their whole workload argv in run_authorized_runtime.sh, so a
-# drop-in or alternate fragment cannot replace it after the commit is reviewed.
-LM_AUTHORIZED_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-mainnet.service liquidity-migration-bybit-carry-demo.service liquidity-migration-bybit-carry-mainnet.service liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-telegram-controls.service liquidity-migration-llm-ledger.service liquidity-migration-trade-notify.service liquidity-migration-forward-capture.service liquidity-migration-forward-upload.service"
+lm_validate_fleet_manifest() {
+    [ -f "$LM_FLEET_MANIFEST" ] || {
+        echo "fleet manifest is missing: $LM_FLEET_MANIFEST" >&2
+        return 1
+    }
+    [ "$(sed -n '1p' "$LM_FLEET_MANIFEST")" = "# fleet-manifest-v1" ] || {
+        echo "fleet manifest has an unsupported schema: $LM_FLEET_MANIFEST" >&2
+        return 1
+    }
+    [ "$(sed -n '2p' "$LM_FLEET_MANIFEST")" = \
+        "# unit|state|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact" ] || {
+        echo "fleet manifest column contract is invalid: $LM_FLEET_MANIFEST" >&2
+        return 1
+    }
+    LC_ALL=C awk -F '|' '
+function fail_at(line, message) {
+    print "invalid fleet manifest at " FILENAME ":" line ": " message > "/dev/stderr"
+    failed = 1
+}
+function is_uint(value) { return value ~ /^[1-9][0-9]*$/ }
+BEGIN { expected_fields = 17 }
+/\r/ { fail_at(NR, "carriage returns are not allowed"); next }
+/^#/ { next }
+/^[[:space:]]*$/ { next }
+{
+    if (NF != expected_fields) {
+        fail_at(NR, "expected 17 fields, found " NF)
+        next
+    }
+    unit = $1
+    if (unit !~ /^liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer)$/) {
+        fail_at(NR, "invalid unit name " unit)
+    }
+    if (seen[unit]++) fail_at(NR, "duplicate unit " unit)
+    names[unit] = 1
+    row_line[unit] = NR
+    state[unit] = $2
+    kind[unit] = $3
+    realm[unit] = $4
+    phase[unit] = $5
+    order[unit] = $6
+    activation[unit] = $7
+    operator[unit] = $8
+    dependencies[unit] = $9
+    health[unit] = $10
+    artifact[unit] = $11
+    timer_service[unit] = $12
+
+    if ($2 !~ /^(current|retired)$/) fail_at(NR, "invalid state for " unit)
+    if ($3 !~ /^(service|timer)$/) fail_at(NR, "invalid kind for " unit)
+    if (unit !~ ("\\." $3 "$") ) fail_at(NR, "kind disagrees with unit suffix for " unit)
+    if ($4 !~ /^(demo|mainnet|shared)$/) fail_at(NR, "invalid realm for " unit)
+    if ($5 !~ /^(downstream|owner)$/) fail_at(NR, "invalid lifecycle phase for " unit)
+    if (!is_uint($6)) fail_at(NR, "invalid stop order for " unit)
+    order_key = $5 SUBSEP $6
+    if (order_seen[order_key]++) fail_at(NR, "duplicate stop order in " $5 ": " $6)
+    if ($7 !~ /^(always|mainnet|long|carry|job|job-now|never)$/) fail_at(NR, "invalid activation for " unit)
+    if ($8 !~ /^(direct|funded|none)$/) fail_at(NR, "invalid operator policy for " unit)
+    if ($9 != "-" && $9 !~ /^liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer)(,liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer))*$/) {
+        fail_at(NR, "invalid dependency list for " unit)
+    }
+    if ($10 !~ /^(active|timer|none|cycle:(long|carry|exodus):data\/bybit-[a-z-]+-event:[a-z0-9_]+)$/) {
+        fail_at(NR, "invalid health policy for " unit)
+    }
+    if ($11 != "-" && $11 !~ /^\//) fail_at(NR, "output artifact must be an absolute path for " unit)
+    if ($11 != "-" && output_artifact_seen[$11]++) {
+        fail_at(NR, "duplicate output artifact " $11)
+    }
+    if ($17 != "-" && $17 !~ /^\//) fail_at(NR, "input artifact must be an absolute path for " unit)
+    if ($17 != "-" && ($3 != "service" || $9 == "-")) {
+        fail_at(NR, "input artifact requires a dependent service: " unit)
+    }
+
+    if ($2 == "retired") {
+        if ($5 != "downstream" || $7 != "never" || $8 != "none" || $9 != "-" ||
+            $10 != "none" || $11 != "-" || $12 != "-" || $13 != "-" ||
+            $14 != "-" || $15 != "-" || $16 != "-" || $17 != "-") {
+            fail_at(NR, "retired unit carries live policy: " unit)
+        }
+        next
+    }
+
+    current[unit] = 1
+    if ($7 == "never") fail_at(NR, "current unit cannot use never activation: " unit)
+    if ($8 == "funded" && $4 != "mainnet") fail_at(NR, "funded operator policy requires mainnet realm: " unit)
+    if ($7 == "mainnet" && $4 != "mainnet") fail_at(NR, "mainnet activation requires mainnet realm: " unit)
+    if (($7 == "long" || $7 == "carry") && $4 != "demo") fail_at(NR, "sleeve activation requires demo realm: " unit)
+
+    if ($3 == "timer") {
+        if ($5 != "downstream" || $7 == "job" || $7 == "job-now" || $10 != "timer" || $11 != "-" || $12 == "-") {
+            fail_at(NR, "timer policy is incomplete for " unit)
+        }
+        if (!is_uint($13) || !is_uint($14) || !is_uint($15) || !is_uint($16)) {
+            fail_at(NR, "timer bounds must be positive integers for " unit)
+        }
+        referenced_jobs[$12]++
+    } else {
+        if ($12 != "-" || $13 != "-" || $14 != "-" || $15 != "-" || $16 != "-") {
+            fail_at(NR, "service carries timer-only fields: " unit)
+        }
+        if ($7 == "job" || $7 == "job-now") {
+            timer_jobs[unit] = 1
+            if ($10 != "none") fail_at(NR, "timer job must be checked through its timer: " unit)
+        } else if ($10 != "active" && $10 !~ /^cycle:/) {
+            fail_at(NR, "active service lacks an active health check: " unit)
+        }
+        if ($10 ~ /^cycle:/) {
+            health_count = split($10, health_parts, ":")
+            health_sleeve = health_parts[2]
+            health_root = health_parts[3]
+            health_dataset = health_parts[4]
+            expected_health_root = "data/bybit-" health_sleeve "-" $4 "-event"
+            if (health_count != 4 || unit != "liquidity-migration-bybit-" health_sleeve "-" $4 ".service") {
+                fail_at(NR, "cycle health sleeve disagrees with unit identity: " unit)
+            }
+            if (health_root != expected_health_root) {
+                fail_at(NR, "cycle health root disagrees with unit identity: " unit)
+            }
+            if (health_dataset == "") fail_at(NR, "cycle health dataset is empty: " unit)
+            if ($11 == "-") fail_at(NR, "cycle health service lacks an output artifact: " unit)
+        }
+    }
+    if ($5 == "owner") {
+        if ($3 != "service" || ($4 != "demo" && $4 != "mainnet")) {
+            fail_at(NR, "account owner must be a realm service: " unit)
+        }
+        owner_count[$4]++
+    }
+}
+END {
+    if (length(names) == 0) fail_at(1, "manifest has no units")
+    for (unit in dependencies) {
+        if (dependencies[unit] == "-") continue
+        count = split(dependencies[unit], values, ",")
+        for (dep_index = 1; dep_index <= count; dep_index++) {
+            dependency = values[dep_index]
+            if (!(dependency in names)) {
+                fail_at(row_line[unit], unit " depends on unknown unit " dependency)
+                continue
+            }
+            if (state[unit] == "current" && !(dependency in current)) {
+                fail_at(row_line[unit], unit " depends on retired unit " dependency)
+            }
+            if (phase[unit] == "owner" && phase[dependency] == "downstream") {
+                fail_at(row_line[unit], "owner depends on downstream unit: " unit)
+            }
+            if (phase[unit] == phase[dependency] && order[unit] >= order[dependency]) {
+                fail_at(row_line[unit], unit " must stop before dependency " dependency)
+            }
+        }
+    }
+    for (job in referenced_jobs) {
+        if (!(job in current) || kind[job] != "service" ||
+            (activation[job] != "job" && activation[job] != "job-now")) {
+            fail_at(1, "timer references a non-job service " job)
+        }
+        if (referenced_jobs[job] != 1) fail_at(row_line[job], "job has more than one timer " job)
+    }
+    for (job in timer_jobs) {
+        if (!(job in referenced_jobs)) fail_at(row_line[job], "job has no timer " job)
+    }
+    if (owner_count["demo"] != 1) fail_at(1, "manifest must have one demo owner")
+    if (owner_count["mainnet"] != 1) fail_at(1, "manifest must have one mainnet owner")
+    exit failed ? 1 : 0
+}
+' "$LM_FLEET_MANIFEST"
+}
+
+lm_fleet_manifest_rows() {
+    LC_ALL=C awk -F '|' '!/^#/ && !/^[[:space:]]*$/ { print }' "$LM_FLEET_MANIFEST"
+}
+
+lm_rollout_units() {
+    _lru_phase="$1"
+    case "$_lru_phase" in downstream|owner) ;; *) return 2 ;; esac
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows \
+        | awk -F '|' -v phase="$_lru_phase" '$5 == phase { print $6 "|" $1 }' \
+        | sort -t '|' -k1,1n \
+        | cut -d '|' -f2
+}
+
+lm_realm_units() {
+    _lru_realm="$1"
+    case "$_lru_realm" in demo|mainnet|shared) ;; *) return 2 ;; esac
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows \
+        | awk -F '|' -v realm="$_lru_realm" '
+            $2 == "current" && $4 == realm {
+                phase = ($5 == "downstream" ? 0 : 1)
+                print phase "|" $6 "|" $1
+            }
+        ' \
+        | sort -t '|' -k1,1n -k2,2n \
+        | cut -d '|' -f3
+}
+
+lm_activation_units() {
+    _lau_realm="$1"
+    _lau_direction="$2"
+    case "$_lau_realm" in demo|mainnet) ;; *) return 2 ;; esac
+    case "$_lau_direction" in
+        start) _lau_sort=-k1,1nr ;;
+        stop) _lau_sort=-k1,1n ;;
+        *) return 2 ;;
+    esac
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows | awk -F '|' \
+        -v realm="$_lau_realm" '
+        $2 != "current" || $5 != "downstream" || $11 != "-" { next }
+        realm == "demo" &&
+            (($7 == "always" && ($4 == "demo" || $4 == "shared")) ||
+             ($7 == "job-now" && $4 == "demo")) {
+            print $6 "|" $1
+        }
+        realm == "mainnet" &&
+            ($7 == "mainnet" || $7 == "job-now") && $4 == "mainnet" {
+            print $6 "|" $1
+        }
+    ' | sort -t '|' "$_lau_sort" | cut -d '|' -f2
+}
+
+lm_immediate_timer_jobs() {
+    _litj_realm="$1"
+    case "$_litj_realm" in demo|mainnet) ;; *) return 2 ;; esac
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows \
+        | awk -F '|' -v realm="$_litj_realm" '
+            $2 == "current" && $3 == "service" && $4 == realm &&
+                $5 == "downstream" && $7 == "job-now" { print $6 "|" $1 }
+        ' \
+        | sort -t '|' -k1,1nr \
+        | cut -d '|' -f2
+}
+
+lm_owner_unit() {
+    _lou_realm="$1"
+    case "$_lou_realm" in demo|mainnet) ;; *) return 2 ;; esac
+    lm_validate_fleet_manifest || return 1
+    _lou_unit="$(
+        lm_fleet_manifest_rows | awk -F '|' -v realm="$_lou_realm" '
+            $2 == "current" && $3 == "service" && $4 == realm && $5 == "owner" {
+                print $1
+            }
+        '
+    )"
+    [ -n "$_lou_unit" ] || return 1
+    printf '%s\n' "$_lou_unit"
+}
+
+lm_target_producer_units() {
+    _ltpu_realm="$1"
+    _ltpu_direction="$2"
+    _ltpu_long="$3"
+    _ltpu_carry="$4"
+    _ltpu_mainnet="$5"
+    case "$_ltpu_realm" in demo|mainnet) ;; *) return 2 ;; esac
+    case "$_ltpu_direction" in
+        start) _ltpu_sort=-k1,1nr ;;
+        stop) _ltpu_sort=-k1,1n ;;
+        *) return 2 ;;
+    esac
+    for _ltpu_value in "$_ltpu_long" "$_ltpu_carry" "$_ltpu_mainnet"; do
+        case "$_ltpu_value" in on|off) ;; *) return 2 ;; esac
+    done
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows | awk -F '|' \
+        -v realm="$_ltpu_realm" -v long="$_ltpu_long" \
+        -v carry="$_ltpu_carry" -v mainnet="$_ltpu_mainnet" '
+        $2 != "current" || $3 != "service" || $4 != realm ||
+            $5 != "downstream" || ($10 != "active" && $10 !~ /^cycle:/) ||
+            $11 == "-" { next }
+        {
+            expected = "off"
+            if ($7 == "always") expected = "on"
+            else if ($7 == "long") expected = long
+            else if ($7 == "carry") expected = carry
+            else if ($7 == "mainnet") expected = mainnet
+            if (expected == "on") print $6 "|" $1
+        }
+    ' | sort -t '|' "$_ltpu_sort" | cut -d '|' -f2
+}
+
+lm_operator_status_rows() {
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows | awk -F '|' '
+        $2 != "current" || $3 != "service" || ($4 != "demo" && $4 != "mainnet") ||
+            ($5 != "owner" && ($10 !~ /^cycle:/ || $11 == "-")) { next }
+        {
+            role = ($5 == "owner" ? "owner" : "producer")
+            sleeve = "-"
+            if (role == "producer") {
+                split($10, health_parts, ":")
+                sleeve = health_parts[2]
+            }
+            realm_order = ($4 == "demo" ? 0 : 1)
+            role_order = (role == "owner" ? 0 : 1)
+            print realm_order "|" role_order "|" sleeve "|" \
+                $1 "|" $4 "|" role "|" sleeve
+        }
+    ' | sort -t '|' -k1,1n -k2,2n -k3,3 -k4,4 | cut -d '|' -f4-
+}
+
+lm_unit_for_output_artifact() {
+    _lufoa_artifact="$1"
+    case "$_lufoa_artifact" in /*) ;; *) return 2 ;; esac
+    lm_validate_fleet_manifest || return 1
+    _lufoa_unit="$(
+        lm_fleet_manifest_rows | awk -F '|' -v artifact="$_lufoa_artifact" '
+            $2 == "current" && $11 == artifact { print $1 }
+        '
+    )"
+    [ -n "$_lufoa_unit" ] && [ "${_lufoa_unit#*$'\n'}" = "$_lufoa_unit" ] || return 1
+    printf '%s\n' "$_lufoa_unit"
+}
+
+lm_output_artifact_for_unit() {
+    _loafu_unit="$1"
+    lm_validate_fleet_manifest || return 1
+    _loafu_artifact="$(
+        lm_fleet_manifest_rows | awk -F '|' -v unit="$_loafu_unit" '
+            $1 == unit && $2 == "current" && $11 != "-" { print $11 }
+        '
+    )"
+    [ -n "$_loafu_artifact" ] || return 1
+    printf '%s\n' "$_loafu_artifact"
+}
+
+lm_guarded_units() {
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows | awk -F '|' '$2 == "current" && $3 == "service" { print $1 }'
+}
+
+lm_manifest_operator_policy() {
+    _lmop_unit="$1"
+    lm_validate_fleet_manifest || return 1
+    _lmop_policy="$(
+        lm_fleet_manifest_rows | awk -F '|' -v unit="$_lmop_unit" '$1 == unit && $2 == "current" { print $8 }'
+    )"
+    [ -n "$_lmop_policy" ] || return 1
+    printf '%s\n' "$_lmop_policy"
+}
+
+lm_fleet_health_rows() {
+    _lfhr_long="$1"
+    _lfhr_carry="$2"
+    _lfhr_mainnet="$3"
+    for _lfhr_value in "$_lfhr_long" "$_lfhr_carry" "$_lfhr_mainnet"; do
+        case "$_lfhr_value" in on|off) ;; *) return 2 ;; esac
+    done
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows | awk -F '|' \
+        -v long="$_lfhr_long" -v carry="$_lfhr_carry" -v mainnet="$_lfhr_mainnet" '
+        $2 != "current" || $10 == "none" { next }
+        {
+            expected = "off"
+            if ($7 == "always") expected = "on"
+            else if ($7 == "long") expected = long
+            else if ($7 == "carry") expected = carry
+            else if ($7 == "mainnet") expected = mainnet
+            print $1 "|" expected "|" $10 "|" $11 "|" $12 "|" $13 "|" $14 "|" $15 "|" $16
+        }
+    '
+}
 
 lm_parse_sleeve_environment() {
     _lpe_file="$1"
@@ -134,9 +497,30 @@ lm_verify_resolved_sleeve_toggles() {
 }
 
 lm_expected_systemd_units() {
-    _lesu_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    for _lesu_path in "$_lesu_dir"/systemd/liquidity-migration-*.service "$_lesu_dir"/systemd/liquidity-migration-*.timer; do
-        [ -e "$_lesu_path" ] && basename "$_lesu_path"
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows | awk -F '|' '$2 == "current" { print $1 }'
+}
+
+lm_verify_source_systemd_manifest() {
+    _lvssm_expected=" $(lm_expected_systemd_units | tr '\n' ' ') " || return 1
+    for _lvssm_unit in $(lm_expected_systemd_units); do
+        [ -f "$_LM_DEPLOY_DIRECTORY/systemd/$_lvssm_unit" ] || {
+            echo "fleet manifest names a missing systemd unit: $_lvssm_unit" >&2
+            return 1
+        }
+    done
+    for _lvssm_path in \
+        "$_LM_DEPLOY_DIRECTORY"/systemd/liquidity-migration-*.service \
+        "$_LM_DEPLOY_DIRECTORY"/systemd/liquidity-migration-*.timer; do
+        [ -e "$_lvssm_path" ] || continue
+        _lvssm_unit="$(basename "$_lvssm_path")"
+        case "$_lvssm_expected" in
+            *" $_lvssm_unit "*) ;;
+            *)
+                echo "systemd unit is absent from the fleet manifest: $_lvssm_unit" >&2
+                return 1
+                ;;
+        esac
     done
 }
 
@@ -212,7 +596,8 @@ lm_verify_no_unknown_liqmig_units() {
 # operator work; deployment stops and names the conflicting path instead.
 lm_verify_guarded_unit_surfaces() {
     _lvgus_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    for _lvgus_unit in $LM_AUTHORIZED_UNITS; do
+    lm_validate_fleet_manifest || return 1
+    for _lvgus_unit in $(lm_guarded_units); do
         _lvgus_source="$_lvgus_dir/systemd/$_lvgus_unit"
         _lvgus_installed="$LM_SYSTEMD_UNIT_DIR/$_lvgus_unit"
         if [ ! -f "$_lvgus_source" ] || [ ! -f "$_lvgus_installed" ]; then
@@ -259,16 +644,10 @@ lm_verify_guarded_unit_surfaces() {
 # order mutator cannot survive alongside the single-owner topology.
 lm_install_current_systemd_units() {
     _licsu_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [ ! -f "$_licsu_dir/systemd/liquidity-migration-engine.service" ]; then
-        echo "install failed: required account owner unit is absent from manifest: liquidity-migration-engine.service" >&2
-        return 1
-    fi
+    lm_verify_source_systemd_manifest || return 1
     mkdir -p "$LM_SYSTEMD_UNIT_DIR"
-    for _licsu_path in \
-        "$_licsu_dir"/systemd/liquidity-migration-*.service \
-        "$_licsu_dir"/systemd/liquidity-migration-*.timer; do
-        [ -e "$_licsu_path" ] || continue
-        cp "$_licsu_path" "$LM_SYSTEMD_UNIT_DIR/$(basename "$_licsu_path")"
+    for _licsu_unit in $(lm_expected_systemd_units); do
+        cp "$_licsu_dir/systemd/$_licsu_unit" "$LM_SYSTEMD_UNIT_DIR/$_licsu_unit"
     done
 
     systemctl daemon-reload

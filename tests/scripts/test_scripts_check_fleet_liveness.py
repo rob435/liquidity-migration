@@ -470,6 +470,108 @@ def test_gather_carry_alerts_skips_when_root_absent(tmp_path) -> None:
     )
 
 
+def test_gather_exodus_alerts_uses_its_independent_cycle_receipt(tmp_path) -> None:
+    import argparse
+
+    import polars as pl
+
+    from liquidity_migration.data.storage import write_dataset
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10, max_startup_min=120.0)
+    root = tmp_path / "bybit-exodus-demo-event"
+    root.mkdir()
+    write_dataset(
+        pl.DataFrame([{"cycle_id": "exodus-c1", "ts_ms": now - 60 * MIN}]),
+        root,
+        "exodus_cycles",
+        partition_by=(),
+    )
+
+    alerts = M.gather_exodus_alerts(
+        exodus_root=root,
+        now_ms=now,
+        args=args,
+    )
+
+    assert [row.key for row in alerts] == [f"liveness:{root.name}"]
+
+
+def test_gather_exodus_alerts_binds_current_service_generation(tmp_path) -> None:
+    import polars as pl
+
+    from liquidity_migration.data.storage import write_dataset
+    from liquidity_migration.strategy.strategy_cycle_health import (
+        StrategyCycleHealth,
+        write_strategy_cycle_health,
+    )
+
+    now = 1_000 * HOUR
+    root = tmp_path / "bybit-exodus-mainnet-event"
+    root.mkdir()
+    write_dataset(
+        pl.DataFrame([{"cycle_id": "exodus-c1", "ts_ms": now - MIN}]),
+        root,
+        "exodus_cycles",
+        partition_by=(),
+    )
+    write_strategy_cycle_health(
+        root,
+        StrategyCycleHealth(
+            sleeve="exodus",
+            environment="mainnet",
+            cycle_id="exodus-c1",
+            cycle_ts_ms=now - MIN,
+            completed_ts_ns=(now - MIN) * 1_000_000,
+            invocation_id=CURRENT_INVOCATION_ID,
+            ws_kline_store_rows=0,
+        ),
+    )
+
+    alerts = M.gather_exodus_alerts(
+        exodus_root=root,
+        now_ms=now,
+        args=SimpleNamespace(max_cycle_age_min=10, max_startup_min=120.0),
+        environment="mainnet",
+        unit_runtime=M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=3.0,
+        ),
+    )
+
+    assert alerts == []
+
+
+def test_gather_exodus_alerts_pages_when_current_generation_never_creates_state(
+    tmp_path,
+) -> None:
+    root = tmp_path / "bybit-exodus-demo-event"
+    args = SimpleNamespace(max_cycle_age_min=10, max_startup_min=120.0)
+
+    warming = M.gather_exodus_alerts(
+        exodus_root=root,
+        now_ms=1_000 * HOUR,
+        args=args,
+        unit_runtime=M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=119.0,
+        ),
+    )
+    stuck = M.gather_exodus_alerts(
+        exodus_root=root,
+        now_ms=1_000 * HOUR,
+        args=args,
+        unit_runtime=M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=121.0,
+        ),
+    )
+
+    assert warming == []
+    assert [alert.key for alert in stuck] == [f"liveness:{root.name}"]
+    assert "does not exist" in stuck[0].message
+
+
 def test_current_generation_completion_outranks_a_newer_in_flight_cycle_row(
     tmp_path,
 ) -> None:
@@ -855,13 +957,51 @@ def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
     assert "liquidity-migration-bybit-long-demo.service" in units
     assert "liquidity-migration-bybit-carry-demo.service" in units
+    assert "liquidity-migration-bybit-exodus-demo.service" in units
 
     monkeypatch.setenv("CARRY_SLEEVE", "off")
     units = M._default_units_for_toggles()
     assert "liquidity-migration-bybit-carry-demo.service" not in units
+    assert "liquidity-migration-bybit-exodus-demo.service" in units
     monkeypatch.setenv("LONG_SLEEVE", "off")
     units = M._default_units_for_toggles()
     assert "liquidity-migration-bybit-long-demo.service" not in units
+
+
+def test_exodus_cycle_check_follows_its_always_on_manifest_row(tmp_path, monkeypatch) -> None:
+    _stub_account_authority(monkeypatch)
+    monkeypatch.setenv("LONG_SLEEVE", "off")
+    monkeypatch.setenv("CARRY_SLEEVE", "off")
+    monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
+    monkeypatch.setattr(M, "_unit_enabled_states", lambda units: {})
+    monkeypatch.setattr(M, "_unit_runtime_metadata", lambda units: {})
+    monkeypatch.setattr(M, "evaluate_disk_space", lambda path: None)
+    observed: list[bool] = []
+    monkeypatch.setattr(
+        M,
+        "gather_exodus_alerts",
+        lambda **kwargs: observed.append(kwargs["cycle_checks"]) or [],
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_fleet_liveness.py",
+            "--account-scope",
+            "demo",
+            "--long-root",
+            "",
+            "--carry-root",
+            "",
+            "--exodus-root",
+            str(tmp_path / "exodus"),
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--no-daily-digest",
+        ],
+    )
+
+    assert M.main() == 0
+    assert observed == [True]
 
 
 def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
@@ -943,7 +1083,7 @@ def test_unknown_account_scope_is_rejected() -> None:
 
 
 def test_mainnet_account_scope_monitors_the_whole_registered_fleet(monkeypatch) -> None:
-    """An armed mainnet fleet always runs both registered producers; the watchdog
+    """An armed mainnet fleet runs every registered producer; the watchdog
     inventory is unconditional and no demo unit may leak in.
     """
 
@@ -951,7 +1091,12 @@ def test_mainnet_account_scope_monitors_the_whole_registered_fleet(monkeypatch) 
         monkeypatch.setenv(toggle, "on")
 
     units = M._default_units_for_scope("mainnet")
-    assert units == [M._MAINNET_ACCOUNT_OWNER_UNIT, M._CARRY_MAINNET_UNIT, M._LONG_MAINNET_UNIT]
+    assert units == [
+        M._MAINNET_ACCOUNT_OWNER_UNIT,
+        M._CARRY_MAINNET_UNIT,
+        M._LONG_MAINNET_UNIT,
+        M._EXODUS_MAINNET_UNIT,
+    ]
     assert not [unit for unit in units if "demo" in unit]
 
 
@@ -1195,8 +1340,10 @@ def test_root_defaults_anchored_at_repo_not_cwd() -> None:
     for attr in (
         "long_root",
         "carry_root",
+        "exodus_root",
         "carry_mainnet_root",
         "long_mainnet_root",
+        "exodus_mainnet_root",
     ):
         value = Path(getattr(args, attr))
         assert value.is_absolute(), f"{attr} default must be absolute, got {value}"
@@ -1209,6 +1356,7 @@ def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
     roots = {
         "LONG_DEMO_DATA_ROOT": "/fresh/long-demo",
         "CARRY_DEMO_DATA_ROOT": "/fresh/carry-demo",
+        "EXODUS_DEMO_DATA_ROOT": "/fresh/exodus-demo",
     }
     for key, value in roots.items():
         monkeypatch.setenv(key, value)
@@ -1217,6 +1365,7 @@ def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
 
     assert args.long_root == roots["LONG_DEMO_DATA_ROOT"]
     assert args.carry_root == roots["CARRY_DEMO_DATA_ROOT"]
+    assert args.exodus_root == roots["EXODUS_DEMO_DATA_ROOT"]
 
 
 def test_timer_not_active_debounced_warning_then_critical() -> None:
@@ -1309,6 +1458,8 @@ def test_main_deploy_window_timer_blip_warns_then_self_resolves(tmp_path, monkey
         "--telegram",
         "--long-root",
         "",
+        "--exodus-root",
+        "",
         "--state-file",
         str(state_file),
     ]
@@ -1351,6 +1502,8 @@ def test_main_routes_alerts_and_cleared_notes_to_the_alerts_channel(tmp_path, mo
         "--telegram",
         "--long-root",
         "",
+        "--exodus-root",
+        "",
         "--state-file",
         str(state_file),
     ]
@@ -1380,6 +1533,8 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
         "check_fleet_liveness.py",
         "--telegram",
         "--long-root",
+        "",
+        "--exodus-root",
         "",
         "--state-file",
         str(state_file),
@@ -1419,6 +1574,8 @@ def _heartbeat_argv(state_file, heartbeat_url: str) -> list[str]:
         "check_fleet_liveness.py",
         "--telegram",
         "--long-root",
+        "",
+        "--exodus-root",
         "",
         "--state-file",
         str(state_file),
@@ -1720,6 +1877,8 @@ def _engine_main_argv(tmp_path, state_name: str, *extra: str) -> list[str]:
         "",
         "--carry-root",
         "",
+        "--exodus-root",
+        "",
         "--state-file",
         str(tmp_path / state_name),
         *extra,
@@ -1967,6 +2126,8 @@ def _digest_argv(state_file) -> list[str]:
         "check_fleet_liveness.py",
         "--telegram",
         "--long-root",
+        "",
+        "--exodus-root",
         "",
         "--state-file",
         str(state_file),
@@ -2281,6 +2442,8 @@ def test_the_digest_goes_out_once_a_day_and_a_failed_send_retries(tmp_path, monk
             "",
             "--carry-root",
             "",
+            "--exodus-root",
+            "",
             "--engine-heartbeat-file",
             str(beat),
             "--state-file",
@@ -2310,6 +2473,8 @@ def test_the_digest_goes_out_once_a_day_and_a_failed_send_retries(tmp_path, monk
             "--long-root",
             "",
             "--carry-root",
+            "",
+            "--exodus-root",
             "",
             "--engine-heartbeat-file",
             str(beat),
@@ -2351,6 +2516,8 @@ def test_no_daily_digest_flag_turns_it_off(tmp_path, monkeypatch) -> None:
             "--long-root",
             "",
             "--carry-root",
+            "",
+            "--exodus-root",
             "",
             "--engine-heartbeat-file",
             str(beat),

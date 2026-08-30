@@ -12,21 +12,30 @@ file.
 
 ### The fleet
 
-- **AUTOMATED TRADING IS ON, on both fleets.** Both engines, all four
-  producers, the Telegram controls and every timer are active and enabled, and
+- **AUTOMATED TRADING IS ON, on both fleets.** The installed commit is
+  `4ab842c082adceda226d3f0ab2279da6c5c87b3e`. Its eight continuous daemons
+  and seven timers are active and enabled: both engines, all four producers,
+  the Telegram controls, the forward recorder and the seven scheduled jobs.
+  Those are the 15 managed units checked by `scripts/ops.sh status`, and
   `REAL_MONEY` is armed. `deploy/sleeves.env` carries `LONG_SLEEVE=on` and
   `CARRY_SLEEVE=on`, and no host override at
   `/etc/liquidity-migration/sleeves.env` narrows them, so a deploy brings the
   whole fleet up. That host file is how a sleeve is held down — it can only
   turn one off, never on — and the Telegram pause button writes it.
 
-  The funded account has roughly 150 USDT equity and currently carries the
-  engine's ONGUSDT carry position. The demo account carries the larger practice
-  book. Exact live truth is `scripts/ops.sh status`, never this prose.
+  The funded engine heartbeat reports roughly 149.52 USDT equity and no open
+  positions. The independent mainnet attestor credential is not installed, so
+  this is the engine's signed account view rather than a second credential's
+  venue-wide flatness proof. The demo account carries the practice book. Exact
+  live truth is `scripts/ops.sh status`, never this prose.
 
-  The fleet runs on `208.84.103.4` at the repository's current `main`. The funded key
-  declares that address as primary and `116.202.15.128` as its deliberate
-  backup; the backup host runs no fleet units.
+  The fleet runs on `208.84.103.4`. The funded key declares that address as
+  primary and `116.202.15.128` as its deliberate backup; the backup host runs
+  no fleet units.
+
+  The integration candidate's independent Exodus producers and six producer
+  books are not installed. On the host, each CARRY producer still writes its
+  realm's Exodus book, and the hourly LLM ledger still feeds demo LONG.
 
 - **A third sleeve, the EXODUS SHORT, runs on demo and the funded topology.**
   When carry's v7 pre-settle exit fires, the carry producer publishes the
@@ -84,7 +93,7 @@ file.
   that identical artifact. The sizing is
   a forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** It runs the
-  current `main` release, with carry_hold **v7** on both CARRY producers: the v7 execution
+  installed `4ab842c` release, with carry_hold **v7** on both CARRY producers: the v7 execution
   clock, `strategy_profile=v7 early_exit=1` — the early exit fires on the
   venue's running rate up to 15 minutes before a dying print pays; settled-print
   fallback kept. The drop exit is part of the producers' exit clock (no dial):
@@ -138,11 +147,11 @@ file.
 
   What is not done, plainly:
 
-  - **The funded engine trades.** The funded account (552445993) is flat under
-    the current empty books; a later valid book can open under the mainnet
-    profile, with reference tracking equity and gross at five times it. What it
-    has not yet had is a graded stretch: the forward record on real fills is
-    days old, not weeks.
+  - **The funded engine trades.** Its account view reports the funded account
+    (552445993) flat under the current empty books; a later valid book can open
+    under the mainnet profile, with reference tracking equity and gross at five
+    times it. What it has not yet had is a graded stretch: the forward record
+    on real fills is days old, not weeks.
 
   - **There is no hourly Telegram digest of what is held.** Every position that
     closes is reported as it closes, with its P&L after fees, and a daily
@@ -176,27 +185,26 @@ file.
 
 ### The funded account
 
-- **It holds 150.42 USDT equity and an engine-owned ONGUSDT carry long of 182
-  at 0.1237.** The position runs at 5× leverage and the venue holds its exact
-  Full, mark-price, reduce-only close stop at 0.08041. No other derivative
-  position or open order appeared in the signed account scan. The mainnet
-  producers size their books from this same account. Money in the account
-  changes what they publish and, through the tracked reference, every cap with
-  it.
+- **The funded engine heartbeat reports 149.52 USDT equity and no open
+  positions.** Its account reading is fresh and the mainnet producers size
+  their books from the same account. The independent mainnet attestor
+  credential is not installed, so no second credential has proved venue-wide
+  flatness. Money in the account changes what the producers publish and,
+  through the tracked reference, every cap with it.
 - **There is no account daily-loss circuit breaker.** Operational-profile
   schema v2 removed the field and the engine no longer restores, evaluates, or
   writes daily-loss anchors. Historical WAL anchor and verdict shapes remain
   decodable only; boot ignores them and the next rotation drops them.
-- **Real money is armed on the installed fleet, and the owner has used the same
-  venue account outside the engine.** The audited generation requires
+- **Real money is armed on the installed fleet, and the owner confirms the
+  venue account is engine-exclusive.** The audited generation requires
   `BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID` to equal the authenticated funded
   UID. That value is an operator acknowledgement that the UID is dedicated to
   this engine: no hand trading, venue bots, copy trading, or other trading API
   keys. Bybit does not expose an account-wide list for every bot family, so
   this is a reviewed operating contract, not a machine proof. Funded startup
   and flat attestation refuse a missing or mismatched acknowledgement. The
-  owner must make the account exclusive before the audited generation can take
-  funded authority.
+  account loses funded authority if that exclusive-owner contract stops being
+  true.
 - **Outside activity is not a second trusted book.** The engine does not claim or
   cancel foreign orders and does not count unowned fills as its exposure. A
   foreign fill, unexplained position quantity, or foreign working order in a
@@ -240,17 +248,14 @@ file.
 - **No copy of the funded execution key remains on the laptop.**
   `/etc/liquidity-migration/bybit-mainnet.env` on the host is the only copy and
   the only trading authority (`REAL_MONEY=true` and the carry stop 0.35). The
-  key was
-  readable in plaintext on the Desktop from 2026-08-05 to 2026-08-08, so
-  **rotation is still owed and is the owner's act, but key age does not block
-  startup.** Funded Bybit identity refuses a key that is not UTA, is read-only,
+  revoked laptop-readable key has no authority; the only active execution key
+  is the rotated host key. Funded Bybit identity refuses a key that is not UTA, is read-only,
   is not allowlisted only to the exact host-IP set declared by
   `BYBIT_REAL_API_KEY_IP` and optional `BYBIT_REAL_API_KEY_BACKUP_IP`, lacks
   ContractTrade Order and Position permissions, or carries Wallet Withdraw
   permission. Missing, wildcard, all-network, and undeclared IP entries fail.
-  The current key can pass startup once the exact host-IP set and dedicated
-  account ID are present in its environment. The owner
-  must still rotate it at Bybit and revoke the old key. Optional operator
+  Startup also requires the exact host-IP set and dedicated account ID in the
+  host environment. Optional operator
   inventory controls use a physically separate, globally read-only query key
   from the operator-owned root:root mode-0600
   `/etc/liquidity-migration/bybit-mainnet-attestor.env`; they never receive the
@@ -418,10 +423,11 @@ producers, the Telegram controls, and the public forward recorder. Seven timers
 drive seven oneshots beside them — demo liveness, mainnet liveness, the LLM
 ledger, the trade notifier, the forward uploader, the nightly state backup,
 and the weekly demo recovery drill.
-The execution host at `208.84.103.4` carries exactly the unit files in
-`deploy/systemd/` and nothing else;
-[the inventory is that directory's README](deploy/systemd/README.md). Demo is
-the only practice book.
+The 15 active managed units are the topology at installed commit
+`4ab842c082adceda226d3f0ab2279da6c5c87b3e`. The execution host at
+`208.84.103.4` carries exactly that commit's unit files and nothing else;
+its `deploy/systemd/README.md` is the installed inventory. Demo is the only
+practice book.
 
 Private account-market persistence is off. Public forward persistence is on:
 the 10 ms L1 touch, L50, trades, mark/index price, the crowd fee (funding),
@@ -619,7 +625,6 @@ ones is indistinguishable from them.
 
 | Item | State |
 | --- | --- |
-| 2026-08-04 withdrawals await owner confirmation | The venue's own transaction log shows the money leaving through the account login (the API key holds no transfer/withdraw permission — probed, refused), so this was by hand. **If these withdrawals are not the owner's, treat the venue login as compromised immediately** |
 | Nothing bounds convergence toward a stale accepted target while producers are down | Deliberately not built — a liveness-coupled trading halt needing owner design |
 | Kline bootstrap logs `failed=N` on restart with an intact store | It re-fetches a window it already holds and counts zero new inserts as failure; bounded ~40–50 s per restart. Tracked follow-up |
 | Reported P&L is provisional | Figures are fill-reconstructed, not venue-confirmed (most `pnl` events carry `funding_status=pending_venue_reconciliation`). No closed-loop accounting check yet, which real money needs |

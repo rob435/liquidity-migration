@@ -6,6 +6,7 @@ import os
 import pytest
 
 from liquidity_migration.core.deterministic_runtime import VirtualClock
+import liquidity_migration.strategy.strategy_event_clock as module
 from liquidity_migration.strategy.strategy_event_clock import (
     DeterministicEventClock,
     JsonlStrategyEventTape,
@@ -84,6 +85,53 @@ def test_jsonl_tape_round_trips_and_detects_tampering(tmp_path) -> None:
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     with pytest.raises(ValueError, match="id|hash"):
         load_strategy_event_tape(path)
+
+
+def test_first_tape_row_uses_the_directory_durable_create(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "nested" / "strategy-events.jsonl"
+    real_create = module.durable_create
+    created: list[object] = []
+
+    def observed_create(*args, **kwargs):
+        created.append(args[0])
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(module, "durable_create", observed_create)
+    tape = JsonlStrategyEventTape(path)
+    tape.append(_events()[0])
+    tape.append(_events()[1])
+
+    assert created == [path]
+    assert load_strategy_event_tape(path)[0] == _events()[:2]
+
+
+def test_torn_final_append_preserves_prefix_and_semantic_retry(tmp_path) -> None:
+    path = tmp_path / "strategy-events.jsonl"
+    tape = JsonlStrategyEventTape(path)
+    first, second = _events()[:2]
+    tape.append(first)
+    prior_hash = tape.tape_hash
+    second_hash = module._next_tape_hash(prior_hash, second)
+    complete_row = module.canonical_json(
+        {
+            "schema_version": 1,
+            "prior_tape_hash": prior_hash,
+            "tape_hash": second_hash,
+            "event": second.to_dict(),
+        }
+    ) + b"\n"
+    path.write_bytes(path.read_bytes() + complete_row[:-17])
+
+    assert load_strategy_event_tape(path) == ((first,), prior_hash)
+
+    reopened = JsonlStrategyEventTape(path)
+    assert reopened.prior_events == (first,)
+    assert path.read_bytes().endswith(b"\n")
+    reopened.append(second)
+
+    assert load_strategy_event_tape(path) == ((first, second), second_hash)
 
 
 def test_retained_journal_wake_chain_accepts_new_engine_wakes(tmp_path) -> None:

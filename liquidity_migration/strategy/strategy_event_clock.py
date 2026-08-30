@@ -19,6 +19,7 @@ from typing import Any, Callable, Generic, Mapping, Protocol, Sequence, TypeVar
 from liquidity_migration.core.artifact_snapshot import read_stable_file
 from liquidity_migration.core.deterministic_runtime import Clock, VirtualClock
 from liquidity_migration.core.deterministic_serialization import canonical_json, json_safe
+from liquidity_migration.core.durable_file import durable_create
 
 
 _GENESIS_HASH = hashlib.sha256(b"liquidity-migration-strategy-event-tape-v1").hexdigest()
@@ -37,6 +38,10 @@ _PHASES = {
     # A watched price level was hit and woke the producer — a data arrival
     # like the rest.
     "price_touch": 10,
+    # A CARRY pre-settlement exit handed to the independent Exodus producer.
+    # It is durable before CARRY publishes the exit, so replay can reproduce
+    # the sleeve transfer without sharing process state.
+    "presettlement_exit": 15,
     "timer": 20,
 }
 
@@ -129,15 +134,94 @@ def _next_tape_hash(prior_hash: str, event: StrategyEvent) -> str:
     ).hexdigest()
 
 
+def _fsync_parent(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(
+        str(path.parent),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _sync_private_file(path: Path) -> None:
+    """Force a tape and its directory after an uncertain prior append."""
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor = os.open(str(path), flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _fsync_parent(path)
+
+
+def _complete_line_prefix(data: bytes) -> tuple[bytes, bool]:
+    """Return every newline-terminated row and whether a torn tail followed."""
+
+    if not data or data.endswith(b"\n"):
+        return data, False
+    last_newline = data.rfind(b"\n")
+    return data[: last_newline + 1], True
+
+
+def _repair_private_torn_tail(path: Path) -> None:
+    """Drop only an unterminated final append after verifying its full prefix."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    snapshot = read_stable_file(
+        path,
+        label="strategy event tape",
+    )
+    prefix, torn = _complete_line_prefix(snapshot.data)
+    if not torn:
+        return
+    load_strategy_event_tape_bytes(prefix)
+    flags = (
+        os.O_WRONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor = os.open(str(path), flags)
+    try:
+        os.ftruncate(descriptor, len(prefix))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _fsync_parent(path)
+
+
 def _append_private_line(path: Path, data: bytes) -> None:
     """Append one durable evidence row and force owner-only permissions."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(
-        str(path),
-        os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_BINARY", 0),
-        0o600,
+    flags = (
+        os.O_APPEND
+        | os.O_WRONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
     )
+    try:
+        descriptor = os.open(str(path), flags)
+    except FileNotFoundError:
+        try:
+            durable_create(path, data, mode=0o600, label="strategy event tape")
+            return
+        except FileExistsError:
+            descriptor = os.open(str(path), flags)
     try:
         os.fchmod(descriptor, 0o600)
         view = memoryview(data)
@@ -150,6 +234,7 @@ def _append_private_line(path: Path, data: bytes) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_parent(path)
 
 
 class StrategyEventRecorder(Protocol):
@@ -188,6 +273,7 @@ class JsonlStrategyEventTape:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        _repair_private_torn_tail(self.path)
         loaded, self._tape_hash = load_strategy_event_tape(self.path)
         # A list appends in O(1); the tuple rebuild made every append O(tape
         # age), quadratic over a long-lived daemon.
@@ -214,6 +300,11 @@ class JsonlStrategyEventTape:
         self._events.append(event)
         self._tape_hash = tape_hash
         return tape_hash
+
+    def ensure_durable(self) -> None:
+        """Repair an append whose bytes are visible but durability was uncertain."""
+
+        _sync_private_file(self.path)
 
 
 def load_strategy_event_tape_bytes(data: bytes) -> tuple[tuple[StrategyEvent, ...], str]:
@@ -260,7 +351,7 @@ def load_strategy_event_tape_bytes(data: bytes) -> tuple[tuple[StrategyEvent, ..
 
 
 def load_strategy_event_tape(path: str | Path) -> tuple[tuple[StrategyEvent, ...], str]:
-    """Read and fully verify a strategy event tape; corruption fails closed."""
+    """Verify every complete row and ignore only an unterminated crash tail."""
 
     resolved = Path(path)
     if not resolved.exists():
@@ -269,7 +360,8 @@ def load_strategy_event_tape(path: str | Path) -> tuple[tuple[StrategyEvent, ...
         resolved,
         label="strategy event tape",
     )
-    return load_strategy_event_tape_bytes(snapshot.data)
+    prefix, _torn = _complete_line_prefix(snapshot.data)
+    return load_strategy_event_tape_bytes(prefix)
 
 
 T = TypeVar("T")

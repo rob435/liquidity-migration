@@ -204,13 +204,13 @@ def test_carry_producer_reads_the_artifact_of_its_own_environment(tmp_path: Path
         candidate_universe_file=str(mainnet),
         realm=candidate_universe_realm("mainnet"),
         standing_symbols=set(),
-    ) == (["AAAUSDT"], 1)
+    )[:2] == (["AAAUSDT"], 1)
     assert _candidate_filtered_universe(
         ["AAAUSDT", "ZZZUSDT"],
         candidate_universe_file=str(demo),
         realm=candidate_universe_realm("demo"),
         standing_symbols=set(),
-    ) == (["AAAUSDT"], 1)
+    )[:2] == (["AAAUSDT"], 1)
     with pytest.raises(ValueError, match="is for realm 'demo', not 'mainnet'"):
         _candidate_filtered_universe(
             ["AAAUSDT"],
@@ -252,7 +252,7 @@ def test_carry_trades_the_whole_instrument_set_not_its_own_profile(
         candidate_universe_file=str(path),
         realm=candidate_universe_realm("demo"),
         standing_symbols=set(),
-    ) == (["AAAUSDT", "NEWUSDT"], 1)
+    )[:2] == (["AAAUSDT", "NEWUSDT"], 1)
 
 
 def test_carry_refuses_an_artifact_whose_carry_profile_drifted(tmp_path: Path) -> None:

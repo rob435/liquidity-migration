@@ -44,6 +44,15 @@ empty book means *hold nothing*, which is a decision and does get acted on.
 Those two are deliberately different, because confusing them flattens a live
 book on a data outage.
 
+A venue-native stop or other blank-client-id close can flatten a position
+between two target-follower callbacks. When that position has one unambiguous
+target-book owner, the engine appends a per-sleeve target latch before it
+processes the foreign-fill barrier and restores the latch immediately in the
+running follower. The stale nonzero target cannot reopen the symbol, including
+after restart or WAL rotation. An explicit zero target clears the latch; a
+later nonzero target is then a new decision. The close remains foreign and is
+never rewritten as a sleeve-owned fill.
+
 ### Writing a new one
 
 Copy [`engine-strategies/src/template/`](../engine/engine-strategies/src/template.rs).
@@ -116,24 +125,24 @@ release build, Apple silicon; 20,000 quotes in, 1,000 orders out):
 | Segment | median | p99 | worst |
 | --- | --- | --- | --- |
 | market message in → decision made | 84 ns | 125 ns | 209 ns |
-| decision → order durable in the log | 3.8 ms | 4.8 ms | 10.5 ms |
-| **message → durable → local submit result** | **3.9 ms** | **5.0 ms** | **10.8 ms** |
+| decision → `write it down` ledger mark | 3.8 ms | 4.8 ms | 10.5 ms |
+| **message → local submit result** | **3.9 ms** | **5.0 ms** | **10.8 ms** |
 
-The durable step is the platform's price, and the order path no longer waits
-for it. The bytes reach the operating system before the order is sent; the disk
-barrier runs beside the flight to the venue rather than in front of it, and
-what waits for the barrier is the first news that the order traded. A venue is
-milliseconds away and a barrier is milliseconds long, so the barrier finishes
-during the flight and the wait is nothing — `still waiting on the disk`
-measures the residue, and a number there is the disk winning that race.
+The durable step is the platform's price, and the send path runs beside it.
+The WAL bytes reach the operating system before venue dispatch; the
+disk barrier starts before dispatch and runs beside the flight rather than in
+front of it. Private order updates and the next placement group settle that
+barrier before they advance. A venue is milliseconds away and a barrier is
+milliseconds long, so the barrier normally finishes during the flight —
+`still waiting on the disk` measures the residue, and a number there is the
+disk winning that race.
 
 **What this gives up, plainly.** A machine that dies inside the barrier can
 leave an order at the venue that the log does not name. Boot reconciliation
 reads the venue's working orders, finds one it cannot account for, and latches
 opening off — the same answer it gives for any order it cannot explain. Process
-death is unaffected: the bytes are already with the operating system, which is
-what `flush` has always meant here. Nothing is ever *acted on* before its order
-is durable; what moved is when the path stops waiting, not what it waits for.
+death is unaffected: the bytes are already with the operating system. This is
+an overlap contract, not a claim that venue dispatch waits for durable storage.
 
 Measured on this box with `engine bench --venue-delay-ms 4`, which holds the
 pretend venue at a real venue's distance (three runs each, the same binary with
@@ -143,11 +152,11 @@ one line changed):
 | --- | --- | --- |
 | decision → order path stops waiting for the disk | 3.68 ms | 0.12 ms |
 | still waiting on the disk | 3.56 ms | 2.0 µs |
-| **message → durable → local submit result (p50)** | **9.59 ms** | **6.01 ms** |
+| **message → local submit result (p50)** | **9.59 ms** | **6.01 ms** |
 | the same, p99 | 13.69 ms | 6.31 ms |
 
-The tail moves further than the median because a slow barrier used to stack on
-top of the round trip and now hides inside it.
+The tail moves further than the median because a barrier in front stacks on top
+of the round trip, while a concurrent barrier can finish inside it.
 
 What a barrier itself costs, which is what the overlap hides:
 on macOS, Rust's `sync_data` is a full drive-cache flush (~3.2 ms/barrier
@@ -171,14 +180,16 @@ value across all three runs:
 | Segment | median | p99 | worst |
 | --- | --- | --- | --- |
 | market message in → decision made | 80 ns | 199 ns | 25.0 µs |
-| decision → order durable in the log | 1.06 ms | 2.75 ms | 6.77 ms |
+| decision → `write it down` ledger mark | 1.06 ms | 2.75 ms | 6.77 ms |
 | local API round trip | 164.1 µs | 921.1 µs | 1.62 ms |
-| **message → durable → local submit result** | **1.26 ms** | **3.16 ms** | **7.52 ms** |
+| **message → local submit result** | **1.26 ms** | **3.16 ms** | **7.52 ms** |
 
-The disk flush still dominates the chain. Stop protection is indexed by
+Starting the WAL barrier dominates this local measurement; disk confirmation
+runs beside the venue request and any residue appears in `still waiting on the
+disk`. Stop protection is indexed by
 symbol and side: a decision reads one tightest live level per active key
 instead of rescanning order history. With the WAL on memory-backed storage,
-the durability median remains 14.6 µs at 10,000 outstanding orders; the
+the `write it down` median remains 14.6 µs at 10,000 outstanding orders; the
 pre-index path reached 265 µs. This isolates the in-process scaling cost from
 `fdatasync` noise.
 
@@ -186,9 +197,11 @@ pre-index path reached 265 µs. This isolates the in-process scaling cost from
 
 One decision can emit several adjacent placements. The engine validates and
 reserves them in deterministic request order, appends every accepted order,
-and uses one durability barrier for the group. Only then does it enqueue the
-group to the venue task. The core loop keeps reading market, order and control
-events while the venue waits. Bybit mainnet uses native trade-WebSocket batches
+starts one durability barrier for the group, and immediately enqueues the group
+to the venue task while the barrier runs. A later placement group and every
+private order update settle the outstanding barrier first. The core loop keeps
+reading market, order and control events while the venue waits. Bybit mainnet
+uses native trade-WebSocket batches
 for independent symbols and sends same-symbol opening siblings serially; demo
 and adapters without that endpoint keep their documented fallback. A cancel,
 amend, or stop change flushes the placement group first. Create, cancel,
@@ -481,8 +494,8 @@ were not:
 - **`hold_decision_price = true`** — the first rest sits at the mid the order
   was decided against rather than at the touch, and the order never moves to a
   worse price than that. Nothing is bought above, or sold below, the price the
-  strategy decided on. It pays for that in fill rate: a market that walks away
-  is no longer followed, and the order simply sits.
+  strategy decided on. It pays for that in fill rate: when the market walks
+  away, the order stays where it is.
 - **`give_up_instead_of_crossing = true`** — when patience runs out, at the
   window's end or because the drift already proved waiting more expensive than
   the spread, the order is taken down instead of crossing for what is left.
@@ -622,19 +635,22 @@ spanning symbols cannot add a quantity of BTC to a quantity of DOGE.
 One append-only log (`engine.wal`) is the engine's memory. Every record is a
 length-prefixed, checksummed frame with a monotonic sequence number. The
 order lifecycle is written as it happens: intent → risk verdict → order sent
-(made durable *before* the bytes leave, so a crash can never forget an
-in-flight order) → venue ack or reject → fills. On boot the engine replays
-the log, truncates a torn tail at the crash point, and reconstructs what was
-in flight before touching the venue. The log's own id table (`Names`) is
+(appended before venue dispatch while its disk barrier races that dispatch) →
+venue ack or reject → fills. A process crash leaves the appended bytes in the
+operating system's cache. A machine crash inside the barrier can leave a venue
+order absent from the durable log. On boot the engine replays the log,
+truncates a torn tail at the crash point, and reconstructs what was durably in
+flight before touching the venue. The log's own id table (`Names`) is
 re-interned first, ahead of the config's subscriptions: ids are interning
 positions and every replayed record names the old run's numbers, so a symbol
 a book admitted at runtime keeps its id — and a position in it stays visible
 to reconciliation and the stop discipline — across a restart.
 
-Then it asks the venue. The log is a perfect record of what this engine did;
-it is not a record of what happened to the account, because the venue keeps
-trading while the engine is stopped and other hands reach the same account.
-Boot is the one moment the two pictures can be compared:
+Then it asks the venue. The durable log is the engine's local record; it is not
+a complete account record because a machine can die during a placement
+barrier, the venue keeps trading while the engine is stopped, and other hands
+can reach the same account. Boot is the one moment the two pictures can be
+compared:
 
 - An order both agree is working is adopted and keeps being charged to the
   strategy that placed it.
@@ -844,9 +860,10 @@ it had been given something else.
   `production-blocked`.
 - **Binance has a practice realm, but neither realm has a live lifecycle
   receipt here.** Both `binance_testnet` and `binance_mainnet` stay
-  `production-blocked`. No authenticated testnet run proves the flat-entry,
-  close-position stop, fill, cancel, and restart sequence. Offline request
-  shapes cannot settle that venue behavior.
+  `production-blocked`. The current Algo endpoint does not document a
+  good-until-position-close lifetime for `STOP_MARKET`, and no authenticated
+  testnet run proves the flat-entry, close-position stop, fill, cancel, and
+  restart sequence. Offline request shapes cannot settle that venue behavior.
 - **Binance account identity is the authenticated account alias.** Startup
   requires every `/fapi/v3/balance` row to carry the same non-empty
   `accountAlias`, separately proves one-way position mode, and refuses
@@ -960,7 +977,7 @@ Six steps, five in `engine-venue` and one next door:
 | One account, more than one sleeve | Done. Each sleeve names its own book path and that book reaches that sleeve only |
 | Stating leverage at the venue | Done. The leverage a decision was sized at travels with it, and an order whose leverage cannot be set is not sent. Entries only |
 | Resting entry quoting (place at touch, reprice, escalate, cross) | Done. Off unless a strategy asks: the follower takes `rest_entries = true`. Exits and trims never rest |
-| Non-blocking order management | Done. Durable mutations enter a bounded venue task; market data continues while acknowledgements are outstanding, and per-symbol coalescing removes superseded amend/cancel work before it reaches the wire |
+| Non-blocking order management | Done. WAL-appended mutations enter a bounded venue task; a placement barrier races its send while market data continues, and per-symbol coalescing removes superseded amend/cancel work before it reaches the wire |
 | Persistent Bybit order transport | Implemented on mainnet. Create/cancel/amend and their native batches use one authenticated trade WebSocket when its startup authentication succeeds. The official hostname is resolved normally and the trade dialer selects the fleet's allowlisted IPv4, avoiding the provider IPv6 route that Bybit rejects before authentication. A genuine warm-up failure still selects signed REST for the run. A venue rejection is an answer rather than a broken pipe and keeps the socket, so an order the venue declines does not cost the next one a reconnect and a re-authentication; a transport or decode failure still drops it. Demo keeps REST because Bybit does not offer the trade socket there |
 | L50 and aggressor-flow quoting | Done for Bybit. The public feed reconstructs 50 levels from snapshot/delta sequence, aggregates trade bursts by aggressor, and the quoter combines microprice, weighted book pressure, short movement, trade pressure, inventory and queue value. It takes the price it quotes around from the top-of-book topic, which publishes about twice as often as the deep book, and the book and queue terms from the deep book, which is the only thing that carries them. After a fill, the old opposite opening quote is cancelled before replacement; the inventory-reducing quote is reduce-only and cannot sell or buy through flat. `quote_enabled = false` pulls its book and drains only its attributed inventory |
 | Directional toxic-flow response | Done for the Bybit quoter. Public trades are scaled by the same-side displayed dollars within a volatility-expanded price band, then held in 250 ms and 3 s decays. Aggressive buyers widen or pull only the ask; aggressive sellers protect only the bid. Every maker fill records both flow states, their score, depth, spread, volatility and estimated queue beside the execution id for forward grading |
@@ -986,19 +1003,23 @@ account or order API. A capability that has not been exercised against its
 venue is a claim, not production proof.
 
 **The engine is the account owner, in the repository and on the host.** It
-reads the venue, writes `account_equity_usdt` into its heartbeat, both
-producers size from that equity, both write an absolute target book, and the
-engine reads each book, routes it to its own sleeve, and takes on symbols the
-books name that no config listed. It is **live on the demo account** and holds
-that account's single-writer lease. Funded status is read from
+reads the venue and writes `account_equity_usdt` into its heartbeat. LONG and
+CARRY size from that equity. CARRY also writes the typed handoff tape that the
+independent Exodus daemon consumes, and LONG, CARRY, and Exodus write separate
+absolute target books. The engine reads each book, routes it to its own sleeve,
+and takes on symbols the books name that no config listed. It is **live on the
+demo account** and holds that account's single-writer lease. Funded status is read from
 `scripts/ops.sh status`; `STATE.md` records the current operational snapshot.
 
-- **The producers size from the engine.** They read `account_equity_usdt` and
-  `account_observed_wall_ts_ms` out of the heartbeat and plan every entry as
-  blocked when that reading is missing or stale. A host that takes this code
-  with no engine running has a fleet that publishes exits and never opens a
-  position. It fails closed and says so per cycle, but it says so in a cycle
-  field, not in a page. Install, enable and watch the engine beat first.
+- **LONG and CARRY size from the engine.** They read `account_equity_usdt` and
+  `account_observed_wall_ts_ms` out of the heartbeat. A missing or stale reading
+  aborts LONG before it plans or publishes, leaving its last book in place.
+  CARRY blocks additions and resizes but may publish removals from a previously
+  verified book. Install, enable and watch the engine beat first.
+
+  Exodus also requires a recent heartbeat before it consumes an entry event.
+  A complete event supplies CARRY's exact frozen quantity; an incomplete event
+  opens nothing.
 
   The heartbeat sends an **age**, and the renderer turns it into a wall stamp
   beside its own. The engine's other clocks are monotonic and count from an

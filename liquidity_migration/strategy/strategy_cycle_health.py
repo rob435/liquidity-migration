@@ -42,8 +42,14 @@ class StrategyCycleHealth:
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != STRATEGY_CYCLE_HEALTH_SCHEMA_VERSION:
             raise ValueError(f"unsupported strategy-cycle health schema {self.schema_version}")
-        if type(self.sleeve) is not str or self.sleeve not in {"long", "carry"}:
-            raise ValueError("strategy-cycle health sleeve must be 'long' or 'carry'")
+        if type(self.sleeve) is not str or self.sleeve not in {
+            "long",
+            "carry",
+            "exodus",
+        }:
+            raise ValueError(
+                "strategy-cycle health sleeve must be 'long', 'carry', or 'exodus'"
+            )
         if type(self.environment) is not str or self.environment not in EXECUTION_ENVIRONMENT_VALUES:
             raise ValueError("strategy-cycle health environment must be a registered execution environment")
         if type(self.cycle_id) is not str or not self.cycle_id or len(self.cycle_id) > 500:

@@ -1,13 +1,15 @@
 # Trading logic
 
 What each sleeve trades, how it sizes, how it exits, and where its evidence stops. Code is
-the authority: [`long_native_event_demo.py`](../liquidity_migration/strategy/long_native_event_demo.py)
-and [`rules/long_native.py`](../liquidity_migration/rules/long_native.py),
+the authority: the shared LONG reducer in
+[`rules/long_contract.py`](../liquidity_migration/rules/long_contract.py), its live caller
+[`long_native_event_demo.py`](../liquidity_migration/strategy/long_native_event_demo.py),
+and its registered rules in [`rules/long_native.py`](../liquidity_migration/rules/long_native.py),
 [`carry_demo.py`](../liquidity_migration/strategy/carry_demo.py) and
 [`rules/carry_hold.py`](../liquidity_migration/rules/carry_hold.py) (scored by
 [`financed_longs.py`](../liquidity_migration/research/backtest/financed_longs.py)),
-[`rules/exodus_short.py`](../liquidity_migration/rules/exodus_short.py) for the exodus
-short (wired inside `carry_demo.py`).
+and the independent [`exodus_producer.py`](../liquidity_migration/strategy/exodus_producer.py)
+with [`rules/exodus_short.py`](../liquidity_migration/rules/exodus_short.py).
 
 ## On today
 
@@ -17,7 +19,7 @@ Publication switches live in [`deploy/sleeves.env`](../deploy/sleeves.env).
 | --- | --- | --- | --- |
 | LONG | Long a fresh volume pump, bought on a shallow retrace | on | gated by `REAL_MONEY` |
 | CARRY | Long coins whose shorts pay a deep crowd fee | on | gated by `REAL_MONEY` |
-| EXODUS | Short the name carry just abandoned, through the post-settlement fall | on | not published |
+| EXODUS | Short the name CARRY just abandoned, through the post-settlement fall | always on; consumes the tape independently | gated by `REAL_MONEY` |
 
 ## LONG — `LongV12WideStop`
 
@@ -33,11 +35,19 @@ daily bars:
 | Pump trigger | 1d/3d/7d log return ≥ 2.5σ (30d daily σ); σ unavailable → 15% 1d |
 | Close location | ≥ 0.70 (1d trigger), ≥ 0.60 (3d/7d) |
 | Volatility ceiling | 14d ATR ≤ 12% of price |
-| Signal freshness | ≤ 24h |
+| Signal freshness | < 24h |
 
-Entry fires when price touches `signal_close × 0.99` (`sniper_retrace`), or falls through
-at the 6-hour deadline while the signal is still fresh (`sniper_deadline_fallthru`). Ten
+The first entry check is one hour after the signal. Entry fires when price touches
+`signal_close × 0.99` (`sniper_retrace`), or falls through at the 6-hour deadline while
+the signal is still fresh (`sniper_deadline_fallthru`). Ten
 concurrent positions, 7-day per-symbol cooldown.
+
+**One decision contract.** Live and research call the pure typed reducer
+`decide(DecisionInput, PriorState, StrategyConfig) -> DecisionOutput`. It owns
+signal admission, sizing, entry timing, stop geometry and exit timing. The
+producer owns inputs, durable state transitions, publication and reporting;
+the historical runners own event ordering and accounting, not a second copy of
+the rule.
 
 The regime gate reads BTC and ETH daily closes. Both anchor frames are always fetched for
 the join even when the frozen candidate artifact excludes the names — with either missing,
@@ -51,13 +61,16 @@ profile's `notional_multiplier`, times the BTC-vol scalar `clip(0.60 / btc_rv, 0
 times the vol-parity weight `max(min(0.30/vol_used, 3.0), 0.25)` (30d realized vol, 30%
 annual floor, 30% position-weight cap), times 1.5 on weekend entries. Entry leverage 5
 changes margin only, never quantity. Five new entries per cycle maximum; how large a
-multiplier runs is the owner's dial in the operational profile.
+multiplier runs is the owner's dial in the operational profile. The producer
+resolves one typed effective config before planning and records field-level
+source provenance. A supplied operational profile is the sole live sizing
+source; the live command accepts no per-field sizing flags.
 
 ### `LongV12WideStop`
 
-Same signal, same universe, same sizing, same entry. One thing changes against v11a: the
-stop starts at **3× the typical daily swing instead of 1.5×**, and tightens back to 1.5×
-once a position is **48 hours old** (`long_v12_profile()`, `fc_atr_stop_mult` /
+This profile uses the signal, universe, sizing, and entry described above. The
+stop starts at **3× the typical daily swing** and tightens to 1.5× once a
+position is **48 hours old** (`long_v12_profile()`, `fc_atr_stop_mult` /
 `fc_stop_time_decay_hours` / `fc_stop_time_decay_atr_mult`).
 
 Why the tight stop is wrong: ATR-14d is a two-week average and this signal only fires when a
@@ -65,18 +78,10 @@ coin moved 2.5σ *today*, so a 1.5× stop sits inside the noise of the very move
 the entry — 67 of 294 trades stopped out. v12 gives the trade room through that move and takes
 it back after two flat days.
 
-Every other v11a rule was ablated on the real engine and kept — volume rank, the BTC-and-ETH
-regime gate, the 2.5σ trigger family, the 7-day cooldown, the 3-day hold, the 4×ATR target,
-the 1%/6h retrace, the top-50 universe all lose Sharpe when loosened. Measured over
-2021-04 → 2026-07 against v11a: total **38.5% → 51.6%**, daily Sharpe **1.24 → 1.49**,
-worst dip **−4.4% → −3.9%**, stop-outs 67 → 50, paired daily difference **+0.48 bp/day
-(t 3.27, n 1927)**, better or equal in all six calendar years, and less concentrated
-(best 20 trades carry 62% of P&L against 78%). Render it with
-`bash scripts/research/equity_curves.sh --sleeves long --long-profile v12`.
-
-Lane-1 evidence: simulated on the data that also chose the rule. Its identity
-`long_native_v12_wide_stop` is separate from v11a's because that string is a persisted
-target-book and execution-attribution key.
+The registered identity is `long_native_v12_wide_stop`; that string is a
+persisted target-book and execution-attribution key. The deployed contract has
+no take-profit; results from a runner with different exits do not describe
+this rule.
 
 **How v12 publishes.** The wide initial stop is the entry's `stop_loss_fraction` in the
 book, which the engine turns into a venue-native stop attached to the position. Each entry
@@ -95,13 +100,14 @@ claiming the tighter level and boot puts *that* back. Worth **+13 to +19 bp a tr
 measured across 26 of 30 era-and-window cells
 ([record](research/research_findings.md)).
 
-`_plan_time_stop_exits` still publishes a zero target (journal reason `decayed_stop_loss`)
-when the producer sees the breach first on its 60s cycle — whichever of the two acts first
-ends the trade, and the venue's own stop is the one that survives the producer dying.
+The shared reducer publishes an exit when the producer observes the stop breach
+on an event-driven wake, subject to the configured debounce and periodic
+reconciliation. Whichever of the two acts first ends the trade, and the venue's
+own stop is the one that survives the producer dying.
 Profile selection is
 `LONG_STRATEGY_PROFILE` (`v11a`/`v12`) in the unit environment → `--strategy-profile`; the
 planner plans exits across **both** registered identities, so components opened under v11a
-keep their published stop/TP/hold terms and drain normally (3-day max hold) while new entries
+keep their frozen stop and hold terms and drain normally (3-day max hold) while new entries
 publish under `long_native_v12_wide_stop`.
 
 `order_notional_pct_equity` (0.0 in
@@ -110,14 +116,14 @@ size as a fraction of equity when positive, replacing the derived slot; 0 keeps 
 strategy's own chain (`gross_exposure / max_concurrent_positions × notional_multiplier`).
 It is a setter, not a cap — the name says so — and the loader accepts [0, 10].
 
-**One entry runs from 2.25% to 56.25% of equity.** The chain is the 10% base slot × the
-3.0 multiplier × a BTC-volatility scale in [0.30, 1.25] × a per-name vol-parity weight in
+**Under the current 6.0 operational multiplier, the raw sizing chain runs from
+4.5% to 112.5% of equity per entry.** The chain is the 10% base slot × the
+6.0 multiplier × a BTC-volatility scale in [0.30, 1.25] × a per-name vol-parity weight in
 [0.25, 1.0] × 1.5 on a weekend.
 
 **Nothing caps a single name.** The account has no per-symbol ceiling: one name may hold a
 sleeve's whole gross share. What bounds one position is its own venue-native stop; what
-bounds the book is the account gross cap, the account margin cap, and — on the funded
-profile only — each sleeve's share.
+bounds the book is the account gross cap and account margin cap.
 
 **On demo the account caps meet nothing either.** `operational.demo.json` declares no
 `capital_reference` block, so the envelope does not track equity: the reference stays pinned
@@ -126,10 +132,10 @@ producer sizes off *observed* equity, so those caps sit orders of magnitude abov
 it can ask for and never bind. On demo the venue-native stop is the only bound that acts.
 
 On the funded profile the reference tracks the wallet, so the ratios are real there: a full
-ten-slot book would be 562% gross against a 500% cap. The cap is account-wide — there is no
+ten-slot book can exceed the 500% gross cap. The cap is account-wide — there is no
 per-sleeve share, so one sleeve can spend the lot. Nothing resizes to fit — the engine
 refuses each entry that would breach.
-Runtime profile bytes override any number here.
+The installed typed profile defines the live number.
 
 **The engine works each standing position toward its ask.** The book's notional is frozen
 at entry, but the position is valued at mark: past the engine's 5%/$1 dead band it trims
@@ -167,22 +173,34 @@ narrows. Time stop at 3 days publishes a zero target. **No take-profit**: graded
 years of hourly triggers it is negative at every multiple tested, so nothing on the live
 path carries one ([record](research/research_findings.md)).
 
-**Limits.** The forward record is demo-only. The retained internal backtest result depends
-materially on take-profit winners — **and the live path takes no take-profit**, so the
-graded rule and the running one differ in the term the result leans on. On the gate's
-hourly triggers a take-profit is measurably negative at every multiple, which is why the
-live path has none; whether the daily rule's dependence survives the same test is not
-established. The research runner also does not abort when PIT membership
-is incomplete — only an untainted run whose artifacts establish the population supports a
-historical-universe claim ([`data.md`](data.md)). The scoped run label carries a
-funding-coverage dimension as well as a PIT one, and funding downgrades it independently:
-`pit_required_missing_manifest`, `pit_membership_filtered_current_universe`,
-`full_pit_universe_funding_missing`, `full_pit_universe_funding_coverage_low`,
-`full_pit_universe_funding_partial`, `full_pit_universe` (`research/backtest/long_native.py`,
-`_run_label` — not the `rules/long_native.py` the header links), plus a methodology label
-`invalid` / `biased_benchmark` / `exploratory` from taint and manifest state
-(`_methodology_run_label`, same file). `full_pit_universe_pass=true` beside a
-`full_pit_universe_funding_coverage_low` label is not a historical-universe claim.
+**Replay boundary.** `research/backtest/long_native.py` is the hourly
+diagnostic. It calls the shared reducer, but its next-hour-open fills cannot
+reconstruct the live ticker wake, minute entry path, Rust fill, or target
+dead-band resizes. `research/backtest/long_live_physics.py` is the stricter
+rebuild: it uses point-in-time hourly signals and one-minute execution windows,
+calls the same reducer, carries the stable entry deadline, starts hold/decay at
+the modeled fill, applies the current 5%-of-standing/$1/venue-minimum resize
+deadband, and charges declared fees, slippage and funding with no take-profit.
+The entry and stop comparisons use Bybit mark-price minutes, as the live ticker
+and venue stop do. Crossing fills, position accounting, and resize checks use
+the contemporaneous traded-price minutes. Funding uses the mark price at the
+exact settlement minute.
+From the same typed operational-profile read it derives a normalized 5× gross /
+1× initial-margin account envelope for entries and risk-increasing resizes,
+including immediate contraction and the configured expansion dead band on the
+capital reference.
+One-minute OHLC does not reveal tick order, queue position, order-book depth, or
+historical quantity-step/minimum changes; it also lacks other-sleeve
+reservations. The report is therefore a minute execution bound, not exact
+live-fill parity. Only an untainted run whose artifacts establish membership,
+trade-price, mark-price, and funding coverage supports a historical-universe claim
+([`data.md`](data.md)).
+The membership verdict covers the dates that can change that run: it starts at
+the signal start minus the rule's longest feature window (90 calendar days)
+and ends before the source day whose daily bar would be stamped at the
+end-exclusive signal boundary. The report keeps whole-root coverage separate;
+a gap outside those causal inputs does not taint the scoped result, while any
+gap inside them still does.
 
 ## CARRY — the v7 pre-settle execution clock
 
@@ -192,9 +210,9 @@ a config: it executes the registered rule `lane2_carry_hold_v7` (the file it
 reads, `configs/lane2_carry_hold_v7.json`) byte-identical and moves **when** the
 exit test is evaluated (see **Exit**). Selection is `CARRY_STRATEGY_PROFILE`
 (`v3`/`v4`/`v6`/`v7`) in the unit environment → `--strategy-profile`, the same
-dial shape as LONG's. The journal filing id is the version-free `carry_hold`
-and never changes with the profile (components filed under the older
-`carry_hold_v3` id drain under it). The forward grade for the v6/v7 rule
+dial shape as LONG's. The stable cycle strategy id is `carry_hold`; persisted
+profile-specific components such as `carry_hold_v3` remain eligible to drain.
+The forward grade for the v6/v7 rule
 continues under one config id. The v7−v5 capital-normalised paired
 differential is the registered forward experiment (see **Registered forward
 experiment** below).
@@ -226,11 +244,15 @@ blocking a decision.
 ratio); the v4 persistence step is 1.0 above the 10% cut and 0.0 at or below it (a
 name with fewer than 20 settlements of history fails open at full size); flow and whale are
 the ×0.5 halvings above — gross capped at 1.0, then
-`weight × sizing_equity × CARRY_NOTIONAL_MULTIPLIER` (3.0 — a name at full weight takes 30%
-of the sizing equity at 5x entry leverage; the dial overrides the profile's own value). Sizing equity is anchored to the decision, not
+`weight × sizing_equity × notional_multiplier`. The current operational profiles
+supply 3.0, so a name at full weight takes 30% of sizing equity at 5x entry
+leverage. CARRY resolves one typed effective configuration with field-level
+provenance before planning; the operational profile is the live sizing source,
+and the resolved data root owns the sizing-anchor and early-exit state paths.
+Sizing equity is anchored to the decision, not
 the live mark: sizing off the live mark makes the day's target a function of the book's own
 unrealized P&L, and the book churns itself. A 5%-of-standing / $1 dead-band is the
-backstop; entries below $10 notional are skipped.
+backstop; entries below $6 notional are skipped.
 
 **Exit — the v7 clock.** Exits and resizes are a diff against the Rust engine's
 accepted reservations, published exit-first. Entry intents expire 6h after the
@@ -250,6 +272,15 @@ is at most 15 minutes away and that running rate is at or above −3 bp, the nam
 sells immediately — before the payment and the farmer exodus instead of one
 minute into it. The settled-print path is the fallback, so a failed or missed
 read degrades v7 to the ordinary clock.
+
+The producer parses the venue and attributed holding snapshot into a typed
+input, calls a pure exit planner, and durably appends every planned event before
+transitioning its in-memory exit mask or persisting that private state. The
+hash-chained event freezes the
+realm, CARRY profile/config identity, fire and settlement clocks, running rate,
+and, when available, the mark and exact CARRY-attributed side, quantity, and
+average entry. Missing holding or mark fields remain empty. Exodus consumes
+that record independently; CARRY does not write Exodus state or target bytes.
 
 **Drop exit.** A held name the upcoming midnight decision zeroes — universe
 rank, persistence cut, suspend — sells at the first cycle after the data is
@@ -287,11 +318,12 @@ The same construction on Binance funding and prices does not replicate (t 0.4, S
 selected the rule; only the forward record grades it.
 
 **Registered forward experiment.** The v7−v5 capital-normalised paired daily differential on
-shared days is the graded claim. The rule registered 2026-08-19 as
-`lane2_carry_hold_v6` and was renamed to `lane2_carry_hold_v7` on 2026-08-26 — the same
-rule, one id change; the graded rows accrued under v6 through 2026-08-21. It had **0 scored
-forward days at promotion**; the ledger accrues to 2026-08-21 (2 forward days). The earlier
-"+0.63 bp/day, t +2.86" figure was a seen-data reconstruction on the midnight grid —
+shared days is the graded claim. Its registration boundary is 2026-08-19. The
+graded rows through 2026-08-21 carry `lane2_carry_hold_v6`; the current config
+identity is `lane2_carry_hold_v7`. Those ids refer to the same rule surface.
+It had **0 scored forward days at promotion**; the ledger accrues to 2026-08-21
+(2 forward days). The "+0.63 bp/day, t +2.86" figure is a seen-data
+reconstruction on the midnight grid —
 positive in 24 of 24 hourly clock phases at a mean of +0.43 bp/day — not forward evidence.
 Quote the mean, not the midnight cell. At its own capital the pair is a wash by construction,
 so the claim is capital released, not return gained.
@@ -313,47 +345,61 @@ conservatively scored at 7.78 bp/side), partial fills, borrow, margin cost, venu
 
 ## EXODUS — `lane2_exodus_short_v1`
 
-A standalone sleeve at each engine — its own `[[strategy]]` block, realm book
-file (`exodus-demo.json` or `exodus-mainnet.json`), capital attribution, and
-kill dial — produced from inside the matching carry process because its whole
-trigger is carry's v7 pre-settle exit fire.
+A standalone sleeve and producer in each realm — its own `[[strategy]]` block,
+state root, cycle receipts, realm book (`exodus-demo.json` or
+`exodus-mainnet.json`), capital attribution, and systemd unit. The producer
+reads CARRY's typed durable event tape; it never reconstructs CARRY's trigger.
 Registered config: [`lane2_exodus_short_v1.json`](../configs/lane2_exodus_short_v1.json);
+producer: [`exodus_producer.py`](../liquidity_migration/strategy/exodus_producer.py);
 rules module: [`rules/exodus_short.py`](../liquidity_migration/rules/exodus_short.py).
 
-**Signal.** None of its own. When the carry sleeve's pre-settle exit fires — the running
+**Signal.** None of its own. When the CARRY sleeve's pre-settle exit fires — the running
 rate says a held name's deep funding print is dying — the name's price keeps falling for
 about an hour past the settlement (measured bottom S+60: −104 bp all-era, −127 bp 2025-26
-vs S+1, on all 1,112 historical fires). The sleeve takes over the exact position carry
-abandons, as a short.
+vs S+1, on all 1,112 historical fires). For a complete handoff, the sleeve takes over the
+frozen CARRY-attributed quantity as a short; an incomplete handoff opens nothing.
 
-**Entry.** At the fire, immediately; the engine crosses. Book validity ends 20 minutes
-after the settlement, and the engine closes entries 15 minutes before expiry, so no fill
-happens later than S+5. The venue holds one net position per symbol, so the short cannot
-open until carry's exit fill lands — the engine leaves foreign-held names alone and
-retries; the seconds-scale delay is inside the measured entry tolerance.
+**Entry.** On the independent consumer's next cycle after the fire; the engine
+crosses. Book validity ends 20 minutes after the settlement, and the engine
+closes entries 15 minutes before expiry, so no fill happens later than S+5. The
+venue holds one net position per symbol, so the short cannot open until CARRY's
+exit fill lands — the engine leaves foreign-held names alone and retries; the
+seconds-scale delay is inside the measured entry tolerance.
 
-**Sizing.** The exact carry-attributed venue quantity in the fresh engine reading is
-copied at the fire. Its audit notional is frozen from that quantity and the same Bybit
-mark sample that triggered the exit; the signed quantity remains authoritative in the
-engine, so partial fills and later price movement cannot resize the handoff. No entry
-without that owner-health reading and mark; an incomplete fire is skipped for good and
-receipted (`exodus_entry_blocked`).
+**Sizing.** When CARRY's fresh attributed holding is a valid long, its exact venue
+quantity is frozen in the event. The audit notional uses that quantity and the
+fire-time Bybit mark when it is available; the signed quantity remains
+authoritative in the engine, so partial fills and later price movement cannot
+resize the handoff. No entry without a complete long holding and mark; an
+incomplete fire is skipped for good and recorded in the Exodus cycle row's
+`blocked_events` field with reason `no_exact_carry_long`.
 
-**Exit.** A hard clock: cover 60 minutes after the settlement — the name simply leaves the
-book, and the engine reads absence as the exit. Time-boxed, never price-boxed. The
-declared 0.35 stop is a disaster fence, not an exit: every strategy-level stop tested
+**Exit.** A hard clock: 60 minutes after settlement the producer publishes an
+explicit zero for the name, which the engine reads as the exit. Time-boxed,
+never price-boxed. The declared 0.35 stop is a disaster fence, not an exit:
+every strategy-level stop tested
 (+30 bp to +1500 bp on 1m wicks, all 1,130 event windows) lost more on clean-event
 whipsaw than it saved on the tail — these names wick violently while dying. Covers ride
 the producer's 60s idle-floor contract; the cover time also becomes the daemon's next
 wake deadline.
 
-**Kill switches.** Unset `EXODUS_SHORT_PROFILE` on either carry unit: no new
-entries, and that realm's book drains flat immediately (open records are
-covered on the next cycle, not at S+60). `CARRY_EARLY_EXIT=0` silences the fires
-(so also all new exodus entries) while open records still cover on their clock.
-A lost or torn state file is unknown state: the producer reports the error and
-leaves the last engine-visible target untouched instead of silently flattening
-or inventing a replacement decision.
+**State and activation.** The producer resolves its registered profile and
+rule, execution environment, event, target-book and heartbeat paths, account
+identity, service invocation, and operational-profile leverage once into a
+typed effective config with field-level provenance. Accepted, expired, and
+incomplete handoffs become terminal consumed IDs; an incomplete event is
+recorded with `no_exact_carry_long`, so it cannot be invented or retried as a
+different decision. Health, symbol-state, and compatibility blocks remain
+unconsumed for later cycles. New exposure and newly consumed IDs become durable
+before publication. At the cover clock it publishes an explicit zero and
+removes the open record only after the engine conclusively reports the position
+and working entry absent. Unknown engine state retains the record.
+The fleet manifest keeps demo Exodus active independently of the CARRY toggle
+and activates funded Exodus with the funded realm. `CARRY_EARLY_EXIT=0` stops
+new fires while existing Exodus records
+continue to their cover clocks. A lost or torn state file is unknown state:
+the producer reports the error and leaves the last engine-visible target
+untouched instead of silently flattening or inventing a replacement decision.
 
 **Limits.** The edge is a regime trade on the 2025-26 farmer crowd: overlay +6.1 bp/day
 pooled, but 2023 +0.2, **2024 −0.8 (a losing year)**, 2025 +7.8, 2026 +18.2. The premature
@@ -363,85 +409,12 @@ stop. Entries and covers are priced at 1m kline opens — no fill model yet; the
 weeks exist to measure that gap. The all-name generalization (shorting settlement deaths
 carry never held) is measured-but-unrun and NOT part of this config.
 
-## LLM GATE — judged entries inside the LONG sleeve
+## LLM ledger — research only
 
-The hourly `liquidity-migration-llm-ledger.service` judges fresh 4/12/24h
-trigger events and publishes every **score ≥ 6** judgment to the LONG sleeve's
-candidates file; the LONG producer takes those names as entries through its
-own sizing, exits, and venue-native stops. One strategy, one book
-(`long-demo.json`), one engine sleeve (`long`) — the ledger holds no venue
-credentials and writes nothing but the candidates file and its own ledger.
-
-**Signal.** The hourly trigger scan: a **top-10**-turnover name whose rolling
-4/12/24h move clears its vol-scaled bar (the daily 2.5σ trigger × √time) with
-range location ≥ 0.70, BTC-and-ETH regime on, ATR-14d ≤ 12%. Each event is
-judged by a language model walking the fixed step-rubric over enriched public
-facts; **a pump_quality_score ≥ 6 is an entry candidate**, at the trigger-hour
-price. Everything below 6 stays ledger-only.
-
-**The freshness veto.** A trigger whose name the ledger already flagged (as a
-mover or a trigger) on **two or more distinct earlier UTC days within the
-last four** is journaled in full — judgment, score, `freshness_veto: true`,
-`prior_flag_days` — and never published: a move in its third day of being
-flagged is a chase, not a fresh pump, and chasing is the gate's one measured
-loss class. `--grade` buckets vetoed rows separately, so the ledger carries
-its own forward A/B of what the veto refused against what it let through.
-
-**The wide band.** The trigger scan reads turnover ranks 1–30. Ranks 1–10
-are the core band; ranks 11–30 are judged and published under the same
-score bar and veto but carry `band: "wide"`, and the producer labels those
-entries **`llm_gate_wide`** so their fills grade apart. What this band
-tests: mechanically the 11–30 pool is a lottery — 9% of its triggers
-graduate into the top-10 within 3 days (+1,805 bp/trade, 89% winners) and
-the other 91% average −126 bp/trade — and nothing in the panel separates
-them in advance ([record](research/research_findings.md) §the rank
-barrier). The wide band is the judged attempt at that separation, and its
-own labeled forward record is the only evidence that can move the core
-cut. Demo only, like the rest of the gate.
-
-The window set and the rank depth are graded, on 5.5 years of hourly bars
-against the sleeve's own exit geometry
-([record](research/research_findings.md)): the 1h and 2h
-windows each have a significantly negative year and are not run; turnover rank
-is the strongest thing measured about these triggers, and depth 10 roughly
-doubles the edge per trade against depth 30 in every year. The judged gate
-itself has no lane-1 evidence — the model's contribution over the mechanical
-trigger is what the forward record is testing.
-
-**Entry path.** The LONG producer reads the candidates file each 60s cycle
-(`LONG_ENGINE_LLM_GATE_CANDIDATES_PATH` + `LONG_ENGINE_LLM_GATE_ENABLED=1`
-on the demo unit; mainnet sets neither, so the gate is inert there). A fresh
-judged event becomes a candidate in exactly the native shape: stop
-`fc_atr_stop_mult`×ATR (v12: 3×), decayed stop `1.5×`ATR after 48h, 3-day
-hold, and the same vol-parity position weight the
-FC path computes — the judgment is the trigger and nothing else. From there
-the candidate shares every cut the native candidates face: per-cycle pacing,
-free slots, owner-health gate, 7-day per-symbol cooldown, fill-anchored
-sizing at the profile's LONG multiplier, and the engine's admission. A
-missing, stale, or malformed candidates file reads as "no signal"; a dead
-ledger service stops new gate entries within the hour, and no signal is acted
-on more than an hour after the bar that made it — three clocks (file age,
-declared validity, trigger age) all held to the same hour.
-
-One asymmetry stands: the native FC path selects only from the frozen
-candidate population, while the gate builds candidates from the events file
-against the live ticker snapshot without that filter — so the gate can enter
-a listing that postdates the freeze, which the native path cannot touch until
-a re-freeze.
-
-**Kill switches.** `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit:
-no gate entries, native entries and all exits unaffected. Stopping
-`llm-ledger.timer`: the candidates file ages out and gate entries stop on
-their own. Every judgment and publication is journaled in the driver ledger
-(`row_type` trigger).
-
-**Attribution.** Both LONG producers append one JSON line per name entering
-or leaving their book (`LONG_ENGINE_BOOK_TRANSITIONS_PATH`, demo
-`targets/long-demo-transitions.jsonl`), carrying the entry's `pattern` —
-`llm_gate` for judged entries, `fomo_chase` for native ones. The held row's
-pattern dies with the row when a position closes and every close record
-downstream is pattern-blind, so this log is what splits gate fills from
-native fills when grading. A failed append warns and never stops the cycle.
+The hourly `liquidity-migration-llm-ledger.service` records judged public-data
+triggers for research. It has no venue credentials, no target-book path, and no
+input seam into LONG. Native LONG targets come only from the shared typed LONG
+decision contract.
 
 ## Shared machinery
 
@@ -466,7 +439,7 @@ different stops, the producer's book, not the engine, would have to resolve them
 producers publish one target per symbol per sleeve, so nothing exercises that.
 
 **Profile load refusals** (all in
-[`operational_profile.py`](../liquidity_migration/policy/operational_profile.py); cited by
+[`operational_profile.py`](../liquidity_migration/core/operational_profile.py); cited by
 function, not line): unknown or missing fields in any block (`_object`); any producer
 `entry_leverage` above `account_risk.max_leverage`; an account gross cap above
 `capital_reference_usdt × max_leverage`; an initial-margin cap above

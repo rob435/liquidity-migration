@@ -16,7 +16,6 @@ EnvironmentFile=/etc/liquidity-migration/producer-demo.env
 EnvironmentFile=/etc/liquidity-migration/engine.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 Environment=DATA_ROOT=data/bybit-long-demo-event
-Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=EXECUTION_ENVIRONMENT=demo
 Environment=TELEGRAM_ENABLED=0
 Environment=INTERVAL_SECONDS=60
@@ -43,17 +42,8 @@ Environment=LONG_STRATEGY_PROFILE=v12
 # exact-commit step.
 Environment=LONG_ENGINE_TARGET_BOOK_PATH=/var/lib/liquidity-migration/targets/long-demo.json
 Environment=LONG_ENGINE_BOOK_STATE_PATH=/var/lib/liquidity-migration/targets/long-demo-state.json
-# Append-only enter/leave attribution log. The state row's entry source
-# ("llm_gate" vs the native "fomo_chase") dies with the row when a position
-# closes, and every close record downstream is pattern-blind -- this log is
-# what lets a close be attributed to its entry source afterwards.
+# Append-only enter/leave attribution log for native LONG decisions.
 Environment=LONG_ENGINE_BOOK_TRANSITIONS_PATH=/var/lib/liquidity-migration/targets/long-demo-transitions.jsonl
-# The LLM gate's judged candidates (written hourly by the llm-ledger service)
-# enter through THIS sleeve: same book, same sizing, same exits. Both lines
-# are the kill switch -- set ENABLED=0 (or stop the llm-ledger timer) and the
-# gate stops contributing entries while everything else runs on.
-Environment=LONG_ENGINE_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json
-Environment=LONG_ENGINE_LLM_GATE_ENABLED=1
 Environment=LM_CHILD_STOP_GRACE_SECONDS=80
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-bybit-long-demo.service main
 # The trusted supervisor records 143 only when the child finishes inside its

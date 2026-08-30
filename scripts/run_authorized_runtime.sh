@@ -21,6 +21,10 @@ case "$UNIT:$ENTRYPOINT" in
     liquidity-migration-bybit-carry-mainnet.service:main)
         COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_carry_demo_event_engine.sh)
         ;;
+    liquidity-migration-bybit-exodus-demo.service:main | \
+    liquidity-migration-bybit-exodus-mainnet.service:main)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_exodus_event_engine.sh)
+        ;;
     liquidity-migration-telegram-controls.service:main)
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
@@ -70,8 +74,6 @@ case "$UNIT:$ENTRYPOINT" in
             /opt/liquidity-migration/.venv/bin/python
             scripts/runtime/check_fleet_liveness.py
             --account-scope mainnet
-            --carry-mainnet-root /opt/liquidity-migration/data/bybit-carry-mainnet-event
-            --long-mainnet-root /opt/liquidity-migration/data/bybit-long-mainnet-event
             --max-cycle-age-min 10
             --cooldown-min 60
             --telegram

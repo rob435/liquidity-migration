@@ -37,7 +37,7 @@ the only generation-changing activation path. Fail-safe stop,
 
 The remote `stop-mainnet` and `disarm-mainnet` implementations do not execute
 the deployed checkout or its virtual environment. Both first stop, disable,
-sync, and verify the fixed funded-unit allowlist. Stop never opens the funded
+sync, and verify the funded units selected by the canonical fleet manifest. Stop never opens the funded
 credential. Disarm then resolves and verifies the root-owned system Python,
 runs it with an empty environment and isolated/no-site flags, and uses an
 embedded strict parser to stably read and atomically replace the mode-`0600`
@@ -49,6 +49,15 @@ for the compiled venue realms, evidence gates, and strategy plugs.
 
 ## Fleet boundary
 
+[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv) is the one fleet
+inventory. It declares every unit's state, realm, lifecycle and stop order,
+activation rule, operator policy, dependencies, health check, timer contract,
+and runtime input/output artifacts. `ops.sh`, rollout, runtime dispatch, and
+tests derive their managed sets from it; adding a unit only to a shell list or
+systemd directory is invalid. Activation starts rows in reverse stop order.
+Timer services marked `job-now` run once during activation without being
+enabled; their timers remain the durable schedule.
+
 Each realm has one engine process, one Rust state directory, one exact venue
 account ID, and one account lease. The engine owns private REST/WS, orders,
 fills, positions, stops, reconciliation, risk, and WAL recovery. LONG, CARRY,
@@ -58,6 +67,7 @@ Producer units require:
 
 - their engine-visible target-book path;
 - LONG's durable requested-book state path where applicable;
+- CARRY's durable pre-settlement event output or Exodus's matching tape input;
 - the engine heartbeat path;
 - the exact expected venue account user ID;
 - a non-secret operational profile and candidate universe where configured.
@@ -117,13 +127,12 @@ pins third-party action revisions.
 The atomically installed virtual environment is root-owned mode `0755` and is
 smoke-tested through the CLI import as each unprivileged Python service user;
 the two producer launchers never fall back to an unpinned system interpreter.
-While the fleet is stopped, installation also reassigns the engine and all four
+While the fleet is stopped, installation also reassigns the engine and all six
 producer state trees in place through descriptor-relative traversal. Existing
 empty LONG v1 state is upgraded to v2 without dropping cooldown history; a v1
 record with a holding is not guessed because its v2 request clocks do not
-exist. LLM gate candidates live below the LLM service's state directory and
-are group-readable by LONG, so that service has no write path into the engine
-target-book directory.
+exist. The research-only LLM ledger owns its state directory and has no path
+into any producer or engine target-book directory.
 Release qualification also requires the configured Ubuntu workflow's Python
 checks, locked Rust tests, bounded optimized account-state soak, build, and
 binary smoke test to pass on the exact pushed commit; local Windows
@@ -389,6 +398,7 @@ a green build or deploy.
   truth and the WAL, and clear any resulting reconciliation latch only after
   the discrepancy is understood.
 
-Systemd topology, users, environment files, and credential projections are
-listed in [`deploy/systemd/README.md`](../deploy/systemd/README.md). Engine
+Fleet identity, lifecycle, timers, operator commands, dependencies, health
+checks, and artifact seams are defined by
+[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv). Engine
 recovery and risk contracts are in [`engine.md`](engine.md).

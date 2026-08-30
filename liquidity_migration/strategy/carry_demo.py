@@ -1,57 +1,30 @@
-"""CARRY sleeve decision engine: the crowd-fee collector.
+"""CARRY target producer: the crowd-fee collector.
 
-Computes the daily target book for the deployed carry sleeve by replaying
-the registered rule (``resolve_carry_strategy_profile``; v7 by default) over
-a rolling window of Bybit hourly data. The strategy logic is NOT reimplemented here: the
-engine calls the exact registered-scorer functions
-(:func:`liquidity_migration.rules.carry_hold.carry_hold_weights` and friends)
-on the live frame (:func:`~liquidity_migration.rules.carry_hold.prepare_decision`),
-so deployed decisions and the Lane-2 forward scorer can only diverge where
-the registered frame caveat says they must: the decision bar itself, which
-the research frame drops because it requires a forward 24h return no live
-decision can see.
+The daily book replays the selected registered rule over a rolling window of
+Bybit hourly data. It calls the same scorer functions used by Lane-2 research;
+the live frame omits research's forward-return field at the decision bar.
 
-Stateless: the replay recomputes hysteresis state from scratch each cycle over
-``REPLAY_DAYS`` of history. The longest state spell in the 2021-2026 record is
-19 days, so a 90-day window carries ~4.7x margin, and a spell that outlived the
-window is re-captured on any bar where its funding print re-crosses the entry
-threshold (entry implies hold). There is no state file, so recovery from
-downtime of any length is a plain restart.
+The rule replay recomputes its hysteresis from ``REPLAY_DAYS`` on every full
+build. The producer separately persists the state that must survive a restart:
+per-decision sizing equity, settled-print exit masks, and the hash-chained
+pre-settlement handoff consumed by the independent Exodus daemon.
 
-The registered config file is loaded only so the deployed parameters are
-byte-identical to the registered ones. Version selection is the
-``CARRY_STRATEGY_PROFILE`` env dial → ``--strategy-profile`` (v3 → v4 promoted
-2026-08-03: the toxic band's high edge moves to 0% and a crowding-persistence
-size multiplier zeroes names whose recent settlements were rarely deep; v4 →
-v6 promoted 2026-08-19: the flow and whale size halvings from v5 plus the
-bent depth ladder, all in the shared registered scorer, so a version is a
-config file plus a profile name — never a code edit. Exception again for
-v7, promoted later the same day: it trades v6's registered membership file
-unchanged and its first deploy carried the pre-settlement exit read below,
-an execution-clock change, not a rule change).
+``CARRY_STRATEGY_PROFILE`` selects the profile resolved by
+``resolve_carry_strategy_profile``. Profiles v3 and v4 select their own rule
+files. Profiles v6 and v7 select ``lane2_carry_hold_v7``; v7 also enables the
+pre-settlement running-rate clock, while v6 uses the settled-print clock. A
+missed pre-settlement read leaves the settled-print fallback in force.
 
-v7's pre-settlement exit: the venue locks the upcoming crowd-fee rate just
-under a minute before it pays, so inside the final minutes the public
-ticker's running rate is the settled print, visible early. When a held
-name's next settlement is at most 15 minutes away and that running rate is
-at or above the registered −3 bp exit line, the name is sold immediately —
-before the payment and the crowd's exit — instead of one minute after the
-print sweeps in. The settled-print path remains as the fallback, so a
-failed or missed read degrades v7 to exactly the v6 exit clock.
-
-v5/v6's whale halving reads a SECOND venue: Binance's top-trader position
-long/short ratio, the one non-Bybit input in the book. The producer keeps a
-tiny per-symbol-day cache of end-of-day ratio values (the same series the
-research panel attaches as ``bn_tt_ls``) and refreshes it from Binance's
-public data endpoint — no key, no account, no orders. Every failure of that
-feed fails OPEN per the registered rule's 48h freshness clause: a name with
-no fresh ratio keeps full size, and a dead feed degrades v6 toward v6-minus-
-whale rather than blocking a decision.
+Rules with the whale leg read Binance's public top-trader position long/short
+ratio. The producer caches end-of-day values per symbol and applies the rule's
+48-hour freshness clause. Missing or stale values fail open to full size; this
+public feed has no key, account read, or order path.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import math
@@ -71,11 +44,11 @@ from liquidity_migration.core.deterministic_serialization import canonical_json
 from liquidity_migration.core.durable_file import durable_atomic_replace
 from liquidity_migration.rules.engine_targets import (
     EngineTarget,
+    ParsedTargetBook,
     PublishedTargetBook,
     publish_target_book,
     read_target_book,
     render_target_book,
-    write_target_book,
 )
 from liquidity_migration.strategy.account_candidate_universe import (
     carry_profile_universe_inputs,
@@ -84,7 +57,7 @@ from liquidity_migration.strategy.account_candidate_universe import (
 )
 from liquidity_migration.marketdata.binance import BinanceDataError, BinanceUSDMData
 from liquidity_migration.marketdata.bybit_market_data import BybitMarketData
-from liquidity_migration.core.config import ResearchConfig
+from liquidity_migration.core.config import ExchangeConfig, ResearchConfig
 from liquidity_migration.strategy.event_demo_data import (
     _demo_instruments,
     _download_recent_1h_klines,
@@ -106,14 +79,10 @@ from liquidity_migration.rules.carry_hold import (
     prepare_decision,
     top_n_universe,
 )
-from liquidity_migration.rules.exodus_short import (
-    ExodusShortConfig,
-    ExodusShortRecord,
-    next_cover_deadline_ts_ms,
-    records_from_payload,
-    records_to_payload,
-    render_exodus_book,
-    split_due_covers,
+from liquidity_migration.strategy.presettlement_events import (
+    CarryPresettlementEvent,
+    append_carry_presettlement_event,
+    load_carry_presettlement_events,
 )
 from liquidity_migration.data.storage import (
     exclusive_file_lock,
@@ -161,12 +130,9 @@ DEFAULT_CARRY_STRATEGY_PROFILE = "v7"
 class CarryStrategyProfile:
     """One registered CARRY deployment: journaled profile name + rule file.
 
-    ``presettle_exit`` is an EXECUTION-CLOCK switch, not a rule change: v7
-    reads the rule file unchanged (its forward grading continues unbroken)
-    and only moves the early-exit sell from the settled print to the venue's
-    pre-settlement running rate. The rule file is now ``lane2_carry_hold_v7``
-    (renamed from v6 on 2026-08-26); both the settled-print and pre-settle
-    clocks read it, differing only in the clock switch.
+    ``presettle_exit`` changes only the execution clock. Profiles v6 and v7
+    both read ``lane2_carry_hold_v7``; v6 uses the settled-print clock and v7
+    also reads the venue's pre-settlement running rate.
     """
 
     profile_name: str
@@ -192,8 +158,7 @@ def resolve_carry_strategy_profile(name: str) -> CarryStrategyProfile:
         return _CARRY_STRATEGY_PROFILES[name]
     except KeyError:
         raise ValueError(
-            f"unknown CARRY strategy profile {name!r}; "
-            f"supported: {', '.join(CARRY_STRATEGY_PROFILE_CHOICES)}"
+            f"unknown CARRY strategy profile {name!r}; supported: {', '.join(CARRY_STRATEGY_PROFILE_CHOICES)}"
         ) from None
 
 
@@ -201,9 +166,9 @@ class CarrySleeveError(RuntimeError):
     """Raised when the carry decision cannot be produced safely."""
 
 
-def load_carry_config(path: Path | None = None) -> CarryHoldConfig:
+def load_carry_config(path: Path) -> CarryHoldConfig:
     """The registered rule parameters, byte-identical to the Lane-2 file."""
-    return CarryHoldConfig.from_json(str(path or CARRY_CONFIG_PATH))
+    return CarryHoldConfig.from_json(str(path))
 
 
 #: Per-process registered-rule memo for the cycle path; see ``_registered_rule``.
@@ -215,9 +180,8 @@ def _registered_rule(config_path: Path) -> CarryHoldConfig:
 
     Never invalidated on purpose: registered rule files are immutable once
     committed, and changing the deployed rule already requires a producer
-    restart operationally (the profile dial is read at startup), so a disk
-    re-parse every 60-second cycle bought nothing. ``CarryHoldConfig`` is a
-    frozen dataclass, so sharing one instance across cycles is safe.
+    restart operationally because the profile dial is read at startup. A
+    60-second cycle therefore reuses the frozen ``CarryHoldConfig`` instance.
     """
 
     key = str(config_path)
@@ -226,6 +190,194 @@ def _registered_rule(config_path: Path) -> CarryHoldConfig:
         rule = load_carry_config(config_path)
         _REGISTERED_RULE_CACHE[key] = rule
     return rule
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CarryConfigProvenance:
+    """The winning source for one effective CARRY field."""
+
+    field: str
+    source: str
+    detail: str = ""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CarryEffectiveConfig:
+    """One fully resolved CARRY config, reused by every daemon cycle."""
+
+    cycle: "CarryDemoCycleConfig"
+    profile: CarryStrategyProfile
+    rule: CarryHoldConfig
+    exchange: ExchangeConfig
+    data_root: Path
+    sizing_anchor_path: Path
+    early_exit_state_path: Path
+    presettlement_event_path: Path
+    cycles_dataset: str
+    target_book_path: Path
+    engine_heartbeat_path: Path
+    expected_account_user_id: str
+    invocation_id: str
+    provenance: tuple[CarryConfigProvenance, ...]
+
+    def provenance_by_field(self) -> dict[str, dict[str, str]]:
+        return {row.field: {"source": row.source, "detail": row.detail} for row in self.provenance}
+
+
+def resolve_carry_effective_config(
+    cycle: "CarryDemoCycleConfig",
+    *,
+    exchange: ExchangeConfig,
+    exchange_source: str,
+    data_root: str | Path,
+    data_root_source: str,
+    target_book_path: str | Path,
+    engine_heartbeat_path: str | Path,
+    expected_account_user_id: str,
+    invocation_id: str = "",
+    operational_profile_source: str,
+) -> CarryEffectiveConfig:
+    """Resolve every process-wide CARRY input once with field provenance."""
+
+    _validate_carry_demo_config(cycle)
+    if len(cycle.operational_profile_sha256) != 64 or any(
+        ch not in "0123456789abcdef" for ch in cycle.operational_profile_sha256
+    ):
+        raise ValueError("CARRY operational_profile_sha256 must be 64 lowercase hex characters")
+    profile = resolve_carry_strategy_profile(cycle.strategy_profile)
+    rule = _registered_rule(profile.config_path)
+    rule_sha256 = hashlib.sha256(profile.config_path.read_bytes()).hexdigest()
+    operational = str(operational_profile_source).strip()
+    if not operational:
+        raise ValueError("CARRY operational profile provenance source is required")
+    if not exchange_source.strip():
+        raise ValueError("CARRY exchange provenance source is required")
+    if not data_root_source.strip():
+        raise ValueError("CARRY data-root provenance source is required")
+    raw_data_root = Path(data_root).expanduser()
+    if not str(data_root).strip():
+        raise ValueError("CARRY data root is required")
+    resolved_data_root = raw_data_root.resolve()
+    raw_candidate_path = str(cycle.candidate_universe_file).strip()
+    resolved_candidate_path = Path(raw_candidate_path).expanduser().resolve() if raw_candidate_path else None
+    raw_event_path = str(cycle.presettlement_event_path).strip()
+    resolved_event_path = (
+        Path(raw_event_path).expanduser().resolve()
+        if raw_event_path
+        else resolved_data_root / "carry_presettlement_events.jsonl"
+    )
+    resolved_cycle = dataclasses.replace(
+        cycle,
+        candidate_universe_file=(str(resolved_candidate_path) if resolved_candidate_path is not None else ""),
+        presettlement_event_path=str(resolved_event_path),
+    )
+    raw_target_path = Path(target_book_path).expanduser()
+    raw_heartbeat_path = Path(engine_heartbeat_path).expanduser()
+    if not str(target_book_path).strip() or not raw_target_path.is_absolute():
+        raise ValueError("CARRY target book path must be absolute")
+    if not str(engine_heartbeat_path).strip() or not raw_heartbeat_path.is_absolute():
+        raise ValueError("CARRY engine heartbeat path must be absolute")
+    resolved_target_path = raw_target_path.resolve()
+    resolved_heartbeat_path = raw_heartbeat_path.resolve()
+    expected_user_id = str(expected_account_user_id).strip()
+    if not expected_user_id:
+        raise ValueError("CARRY expected engine account user id is required")
+    exchange_detail = json.dumps(dataclasses.asdict(exchange), sort_keys=True, separators=(",", ":"))
+    provenance = (
+        CarryConfigProvenance(
+            "strategy_profile",
+            f"registered_profile:{cycle.strategy_profile}",
+            f"{profile.config_path.resolve()}#{rule_sha256}",
+        ),
+        CarryConfigProvenance("execution_environment", "cycle_input"),
+        CarryConfigProvenance(
+            "candidate_universe_file",
+            "cycle_input" if resolved_candidate_path is not None else "disabled",
+            str(resolved_candidate_path or ""),
+        ),
+        CarryConfigProvenance(
+            "presettlement_event_path",
+            "cycle_input" if raw_event_path else "derived:data_root",
+            str(resolved_event_path),
+        ),
+        CarryConfigProvenance("early_exit_enabled", "cycle_input"),
+        CarryConfigProvenance("notional_multiplier", operational),
+        CarryConfigProvenance("entry_leverage", operational),
+        CarryConfigProvenance("declared_stop_loss_fraction", operational),
+        CarryConfigProvenance("max_new_entries_per_cycle", operational),
+        CarryConfigProvenance("capital_reference_usdt", operational),
+        CarryConfigProvenance("operational_profile_sha256", operational),
+        CarryConfigProvenance("replay_days", "cycle_input"),
+        CarryConfigProvenance("workers", "cycle_input"),
+        CarryConfigProvenance("ws_klines_enabled", "cycle_input"),
+        CarryConfigProvenance("ws_klines_bootstrap_workers", "cycle_input"),
+        CarryConfigProvenance("ws_klines_lookback_days", "cycle_input"),
+        CarryConfigProvenance("ws_klines_universe_refresh_seconds", "cycle_input"),
+        CarryConfigProvenance("ws_klines_topics_per_connection", "cycle_input"),
+        CarryConfigProvenance("ws_klines_stale_warning_seconds", "cycle_input"),
+        CarryConfigProvenance("ws_klines_stale_reconnect_seconds", "cycle_input"),
+        CarryConfigProvenance("exchange", exchange_source, exchange_detail),
+        CarryConfigProvenance("data_root", data_root_source, str(resolved_data_root)),
+        CarryConfigProvenance(
+            "sizing_anchor_path",
+            "derived:data_root",
+            str(resolved_data_root / ".cache" / "carry_sizing_anchors.json"),
+        ),
+        CarryConfigProvenance(
+            "early_exit_state_path",
+            "derived:data_root",
+            str(resolved_data_root / _EARLY_EXIT_STATE_NAME),
+        ),
+        CarryConfigProvenance(
+            "cycles_dataset",
+            "derived:execution_environment",
+            carry_cycles_dataset(resolved_cycle),
+        ),
+        CarryConfigProvenance("target_book_path", "runtime_environment", str(resolved_target_path)),
+        CarryConfigProvenance("engine_heartbeat_path", "runtime_environment", str(resolved_heartbeat_path)),
+        CarryConfigProvenance("expected_account_user_id", "runtime_environment", expected_user_id),
+        CarryConfigProvenance("invocation_id", "service_manager", str(invocation_id)),
+        *(
+            CarryConfigProvenance(
+                f"rule.{field.name}",
+                f"registered_profile:{cycle.strategy_profile}",
+                f"{profile.config_path.resolve()}#{rule_sha256}",
+            )
+            for field in dataclasses.fields(CarryHoldConfig)
+        ),
+    )
+    expected = {
+        *(field.name for field in dataclasses.fields(CarryDemoCycleConfig)),
+        "exchange",
+        "data_root",
+        "sizing_anchor_path",
+        "early_exit_state_path",
+        "cycles_dataset",
+        "target_book_path",
+        "engine_heartbeat_path",
+        "expected_account_user_id",
+        "invocation_id",
+        *(f"rule.{field.name}" for field in dataclasses.fields(CarryHoldConfig)),
+    }
+    actual = [row.field for row in provenance]
+    if len(actual) != len(expected) or set(actual) != expected:
+        raise ValueError("CARRY effective config provenance is incomplete")
+    return CarryEffectiveConfig(
+        cycle=resolved_cycle,
+        profile=profile,
+        rule=rule,
+        exchange=exchange,
+        data_root=resolved_data_root,
+        sizing_anchor_path=(resolved_data_root / ".cache" / "carry_sizing_anchors.json"),
+        early_exit_state_path=resolved_data_root / _EARLY_EXIT_STATE_NAME,
+        presettlement_event_path=resolved_event_path,
+        cycles_dataset=carry_cycles_dataset(resolved_cycle),
+        target_book_path=resolved_target_path,
+        engine_heartbeat_path=resolved_heartbeat_path,
+        expected_account_user_id=expected_user_id,
+        invocation_id=str(invocation_id),
+        provenance=provenance,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -271,14 +423,11 @@ def decide_book(
         )
     if last_ts < decision_ts_ms:
         raise CarrySleeveError(
-            f"window ends {(decision_ts_ms - last_ts) // HOUR_MS}h before the "
-            "decision bar; data build is stale"
+            f"window ends {(decision_ts_ms - last_ts) // HOUR_MS}h before the decision bar; data build is stale"
         )
     replay_days = (decision_ts_ms - first_ts) // DAY_MS
     if replay_days < MIN_REPLAY_DAYS:
-        raise CarrySleeveError(
-            f"replay window {replay_days}d is below the {MIN_REPLAY_DAYS}d floor"
-        )
+        raise CarrySleeveError(f"replay window {replay_days}d is below the {MIN_REPLAY_DAYS}d floor")
 
     grid = daily_grid(prepare_decision(view.filter(pl.col("bar_ts_ms") <= decision_ts_ms)))
     universe = top_n_universe(grid, cfg.universe_top_n)
@@ -313,7 +462,6 @@ _logger = logging.getLogger(__name__)
 #: Stable source id. The version lives in the registered strategy profile.
 CARRY_STRATEGY_ID = "carry_hold"
 ENGINE_CARRY_SLEEVE = "carry"
-ENGINE_EXODUS_SLEEVE = "exodus"
 CARRY_CYCLES_DATASET = "carry_hold_demo_cycles"
 CARRY_MAINNET_CYCLES_DATASET = "carry_hold_mainnet_cycles"
 CARRY_FUNDING_DATASET = "carry_funding_events"
@@ -411,7 +559,6 @@ class CarryCycleState:
         "sizing_anchor_path",
         "early_exits",
         "drop_exits_logged",
-        "exodus_shorts",
         "whale_last_attempt_ms",
         "whale_store",
     )
@@ -421,7 +568,7 @@ class CarryCycleState:
         # freeze-ahead path pins TOMORROW's book while cycles before the
         # boundary still serve TODAY's. A single slot made those two freezes
         # evict each other, recomputing both once a minute.
-        self.frozen_decisions: dict[int, tuple[CarryDecision, dict[str, float], int]] = {}
+        self.frozen_decisions: dict[int, tuple[CarryDecision, dict[str, float], int, dict[str, str]]] = {}
         self.frozen_ahead_bar_ts_ms: int | None = None
         self.funding_swept_hour_ts: int | None = None
         self.last_successful_decision_ts_ms: int | None = None
@@ -433,7 +580,7 @@ class CarryCycleState:
         self.sizing_equity_usdt: float | None = None
         self.sizing_equity_decision_ts_ms: int | None = None
         self.sizing_anchor_path: Path | None = None
-        # Whale-ratio cache (v5/v6 rules only): the in-memory copy of the
+        # Whale-ratio cache for rules with that leg: the in-memory copy of the
         # on-disk per-symbol-day store, and the last refresh attempt so a
         # Binance outage retries on a cooldown instead of every 60s cycle.
         self.whale_store: pl.DataFrame | None = None
@@ -446,14 +593,10 @@ class CarryCycleState:
         # re-derived every cycle from the two frozen books, so losing this
         # only repeats a log line.
         self.drop_exits_logged: frozenset[str] = frozenset()
-        # Open exodus shorts. None until first use, then mirrors the on-disk
-        # state file; losing it re-loads from disk, and a lost FILE covers
-        # every open short (absence from the book is the exit).
-        self.exodus_shorts: list[ExodusShortRecord] | None = None
 
     def frozen_decision(
         self, decision_ts_ms: int
-    ) -> tuple[CarryDecision, dict[str, float], int] | None:
+    ) -> tuple[CarryDecision, dict[str, float], int, dict[str, str]] | None:
         """This bar's already-computed book, if there is one.
 
         The registered rule decides ONCE per 00:00 UTC bar and holds for the
@@ -472,6 +615,7 @@ class CarryCycleState:
         decision: CarryDecision,
         trail_by_symbol: dict[str, float],
         universe_eligible: int,
+        input_evidence: Mapping[str, str] | None = None,
         frozen_ahead: bool = False,
     ) -> None:
         """Pin this bar's book. Older bars age out two freezes later."""
@@ -480,6 +624,7 @@ class CarryCycleState:
             decision,
             dict(trail_by_symbol),
             int(universe_eligible),
+            dict(input_evidence or {}),
         )
         while len(self.frozen_decisions) > 2:
             del self.frozen_decisions[min(self.frozen_decisions)]
@@ -525,13 +670,14 @@ class CarryCycleState:
         self.sizing_equity_usdt = float(anchored)
         return float(anchored)
 
-    def bind_sizing_anchors(self, root: Path) -> None:
+    def bind_sizing_anchors(self, path: Path) -> None:
         """Load the durable per-decision sizing anchors once per daemon."""
 
-        path = root / ".cache" / "carry_sizing_anchors.json"
+        if not path.is_absolute():
+            raise ValueError("CARRY sizing-anchor path must be absolute")
         if self.sizing_anchor_path is not None:
             if self.sizing_anchor_path != path:
-                raise RuntimeError("CarryCycleState cannot span two data roots")
+                raise RuntimeError("CarryCycleState cannot span two sizing-anchor paths")
             return
         self.sizing_anchor_path = path
         try:
@@ -611,6 +757,10 @@ class CarryDemoCycleConfig:
     # --- environment / wiring ---
     execution_environment: str = ""
     candidate_universe_file: str = ""
+    #: Durable typed handoff consumed by the independent Exodus producer.
+    #: Fleet callers pass an absolute path; direct-call tests may leave this
+    #: empty to keep the tape under their isolated data root.
+    presettlement_event_path: str = ""
     #: Registered deployment version (``resolve_carry_strategy_profile``).
     strategy_profile: str = DEFAULT_CARRY_STRATEGY_PROFILE
     #: Sell an exiting name at the settled print that ends it instead of the
@@ -650,8 +800,8 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
 
     execution_environment(config.execution_environment)
     resolve_carry_strategy_profile(config.strategy_profile)
-    if not os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip():
-        raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust engine target book")
+    if config.presettlement_event_path and not Path(config.presettlement_event_path).expanduser().is_absolute():
+        raise ValueError("presettlement_event_path must be absolute when supplied")
     if bool(getattr(config, "telegram", False)):
         raise ValueError("strategy producers do not own Telegram controls")
     if not math.isfinite(config.notional_multiplier) or config.notional_multiplier <= 0.0:
@@ -662,6 +812,8 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
         raise ValueError("declared_stop_loss_fraction must be a fraction in (0, 1)")
     if config.max_new_entries_per_cycle < 1:
         raise ValueError("max_new_entries_per_cycle must be >= 1")
+    if not math.isfinite(config.capital_reference_usdt) or config.capital_reference_usdt < 0.0:
+        raise ValueError("capital_reference_usdt must be finite and non-negative")
     if config.replay_days < MIN_REPLAY_DAYS:
         raise ValueError(f"replay_days must be >= {MIN_REPLAY_DAYS} (engine floor)")
     if config.workers < 1:
@@ -669,9 +821,7 @@ def _validate_carry_demo_config(config: CarryDemoCycleConfig) -> None:
     if config.ws_klines_enabled and config.ws_klines_lookback_days < config.replay_days + 1:
         # A store narrower than the cycle window means the reader's fast path
         # can never engage and every cycle silently pays the slow disk scan.
-        raise ValueError(
-            "ws_klines_lookback_days must cover replay_days + 1 when the WS kline plane is on"
-        )
+        raise ValueError("ws_klines_lookback_days must cover replay_days + 1 when the WS kline plane is on")
 
 
 def carry_cycles_dataset(config: CarryDemoCycleConfig) -> str:
@@ -717,7 +867,7 @@ def next_carry_decision_deadline_ts_ms(now_ms: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Whale-ratio feed (v5/v6 rules only): Binance top-trader position long/short
+# Whale-ratio feed for rules with that leg: Binance top-trader position long/short
 # end-of-day values, the live twin of the research panel's ``bn_tt_ls``. Reads
 # a public no-key endpoint; every failure fails OPEN under the registered 48h
 # freshness clause, so a dead feed thins the whale halving instead of blocking
@@ -767,22 +917,16 @@ def _load_whale_store(root: Path) -> pl.DataFrame:
     return pl.DataFrame(schema=_WHALE_STORE_SCHEMA)
 
 
-def _whale_missing_pairs(
-    store: pl.DataFrame, symbols: list[str], now_ms: int
-) -> list[tuple[str, int]]:
+def _whale_missing_pairs(store: pl.DataFrame, symbols: list[str], now_ms: int) -> list[tuple[str, int]]:
     newest_end = (int(now_ms) // DAY_MS) * DAY_MS
     wanted_ends = [newest_end - k * DAY_MS for k in range(WHALE_FEED_DAYS)]
     have: set[tuple[str, int]] = set()
     if store.height:
-        have = set(
-            zip(store["symbol"].to_list(), store["day_end_ms"].to_list(), strict=True)
-        )
+        have = set(zip(store["symbol"].to_list(), store["day_end_ms"].to_list(), strict=True))
     return [(s, e) for s in symbols for e in wanted_ends if (s, e) not in have]
 
 
-def _fetch_whale_pair(
-    symbol: str, day_end_ms: int, client_factory: Any
-) -> tuple[str, int, float | None] | None:
+def _fetch_whale_pair(symbol: str, day_end_ms: int, client_factory: Any) -> tuple[str, int, float | None] | None:
     """One (symbol, day) EOD read: the last 5-minute ratio print of the day,
     the same value ``refresh_binance_metrics.py`` collapses to ``tt_ls_eod``.
 
@@ -791,9 +935,7 @@ def _fetch_whale_pair(
     """
     client = client_factory()
     try:
-        rows = client.get_top_trader_ls_position_ratio(
-            symbol, "5m", int(day_end_ms) - 6 * HOUR_MS, int(day_end_ms)
-        )
+        rows = client.get_top_trader_ls_position_ratio(symbol, "5m", int(day_end_ms) - 6 * HOUR_MS, int(day_end_ms))
     except BinanceDataError as exc:
         if getattr(exc, "permanent", False):
             return (symbol, int(day_end_ms), None)
@@ -847,9 +989,7 @@ def _refresh_carry_whale_cache(
             state.whale_last_attempt_ms = int(now_ms)
             rows: list[dict[str, Any]] = []
             pool = ThreadPoolExecutor(max_workers=_WHALE_FETCH_WORKERS)
-            futures = [
-                pool.submit(_fetch_whale_pair, sym, end, factory) for sym, end in missing
-            ]
+            futures = [pool.submit(_fetch_whale_pair, sym, end, factory) for sym, end in missing]
             try:
                 for fut in as_completed(futures, timeout=_WHALE_FETCH_DEADLINE_S):
                     res = fut.result()
@@ -927,8 +1067,9 @@ def _early_exit_state_path(root: Path) -> Path:
     return root / _EARLY_EXIT_STATE_NAME
 
 
-def _load_early_exits(root: Path) -> dict[str, int]:
-    path = _early_exit_state_path(root)
+def _load_early_exits(path: Path) -> dict[str, int]:
+    if not path.is_absolute():
+        raise ValueError("CARRY early-exit state path must be absolute")
     try:
         path.lstat()
     except FileNotFoundError:
@@ -959,8 +1100,9 @@ def _load_early_exits(root: Path) -> dict[str, int]:
     return fired
 
 
-def _save_early_exits(root: Path, fired: dict[str, int]) -> None:
-    path = _early_exit_state_path(root)
+def _save_early_exits(path: Path, fired: Mapping[str, int]) -> None:
+    if not path.is_absolute():
+        raise ValueError("CARRY early-exit state path must be absolute")
     durable_atomic_replace(
         path,
         canonical_json({"fired": dict(sorted(fired.items()))}) + b"\n",
@@ -974,7 +1116,7 @@ def _apply_early_exits(
     rule: CarryHoldConfig,
     funding: pl.DataFrame | None,
     state: CarryCycleState,
-    root: Path,
+    state_path: Path,
     now_ms: int,
 ) -> tuple[CarryDecision, list[str]]:
     """Mask early-exited names out of the desired book; detect new fires.
@@ -988,11 +1130,9 @@ def _apply_early_exits(
     """
 
     if state.early_exits is None:
-        state.early_exits = _load_early_exits(root)
+        state.early_exits = _load_early_exits(state_path)
     # Masks from older decision bars expire with their day.
-    fired = {
-        s: ts for s, ts in state.early_exits.items() if ts == decision.decision_ts_ms
-    }
+    fired = {s: ts for s, ts in state.early_exits.items() if ts == decision.decision_ts_ms}
     new_fires: list[str] = []
     if funding is not None and not funding.is_empty() and decision.weights:
         exit_thr = -(rule.exit_bp / 1e4)
@@ -1015,15 +1155,13 @@ def _apply_early_exits(
                 fired[sym] = decision.decision_ts_ms
                 new_fires.append(sym)
     if fired != state.early_exits:
-        _save_early_exits(root, fired)
+        _save_early_exits(state_path, fired)
         state.early_exits = fired
     if not fired:
         return decision, new_fires
     masked = {s: w for s, w in decision.weights.items() if s not in fired}
     return (
-        dataclasses.replace(
-            decision, weights=masked, gross=sum(masked.values())
-        ),
+        dataclasses.replace(decision, weights=masked, gross=sum(masked.values())),
         new_fires,
     )
 
@@ -1034,13 +1172,81 @@ def _apply_early_exits(
 # running rate IS the print, visible early. v7 fires the same registered exit
 # test on that read up to 15 minutes ahead and sells before the post-payment
 # dump instead of one minute into it. Window and margin (15 min, none) are the
-# measured optimum; the settled-print path stays as the fallback, so a missed
-# or failed read costs nothing against the v6 clock.
+# measured optimum. The settled-print path stays active when this read is
+# missing or fails.
 
 _PRESETTLE_WINDOW_MS = 15 * 60_000
 #: Fetch gate slack: every Bybit settlement sits on an hour boundary, so the
 #: batch read only runs when one is at most window+slack away.
 _PRESETTLE_FETCH_SLACK_MS = 90_000
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CarryPresettlementTicker:
+    """One parsed venue ticker used to build a pre-settlement input."""
+
+    symbol: str
+    running_rate: float
+    settlement_ts_ms: int
+    mark_px: float | None
+
+    def __post_init__(self) -> None:
+        if not self.symbol or self.symbol != self.symbol.upper() or not self.symbol.isalnum():
+            raise ValueError("CARRY pre-settlement ticker symbol is invalid")
+        if not math.isfinite(self.running_rate):
+            raise ValueError("CARRY pre-settlement ticker rate must be finite")
+        if type(self.settlement_ts_ms) is not int or self.settlement_ts_ms <= 0:
+            raise ValueError("CARRY pre-settlement settlement time must be positive")
+        if self.mark_px is not None and (not math.isfinite(self.mark_px) or self.mark_px <= 0.0):
+            raise ValueError("CARRY pre-settlement mark must be null or positive")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CarryPresettlementInput:
+    """One complete, typed input to the pure pre-settlement planner."""
+
+    ticker: CarryPresettlementTicker
+    observed_ts_ms: int
+    carry_side: str | None
+    carry_qty: float | None
+    carry_avg_entry_px: float | None
+
+    def __post_init__(self) -> None:
+        if type(self.observed_ts_ms) is not int or self.observed_ts_ms <= 0:
+            raise ValueError("CARRY pre-settlement observation time must be positive")
+        if self.carry_side not in {None, "long", "short"}:
+            raise ValueError("CARRY pre-settlement holding side is invalid")
+        if self.carry_side is None and (self.carry_qty is not None or self.carry_avg_entry_px is not None):
+            raise ValueError("CARRY pre-settlement input has an incomplete holding")
+        if self.carry_side is not None and (self.carry_qty is None or self.carry_avg_entry_px is None):
+            raise ValueError("CARRY pre-settlement input has an incomplete holding")
+        for name, value in (
+            ("quantity", self.carry_qty),
+            ("average entry", self.carry_avg_entry_px),
+        ):
+            if value is not None and (not math.isfinite(value) or value <= 0.0):
+                raise ValueError(f"CARRY pre-settlement holding {name} must be positive")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CarryPresettlementPlan:
+    """Pure result: events to durably publish, then apply to CARRY state."""
+
+    publication_events: tuple[CarryPresettlementEvent, ...]
+    transition_events: tuple[CarryPresettlementEvent, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CarryPresettlementTransition:
+    """Pure state transition after every planned event is durable."""
+
+    decision: CarryDecision
+    fired: tuple[tuple[str, int], ...]
+    new_fires: tuple[str, ...]
+    fire_details: tuple[CarryPresettlementEvent, ...]
+
+    def fired_by_symbol(self) -> dict[str, int]:
+        return dict(self.fired)
 
 
 def _presettle_ticker_factory() -> BybitMarketData:
@@ -1051,8 +1257,8 @@ def _presettle_ticker_factory() -> BybitMarketData:
 def _fetch_presettle_tickers(
     symbols: list[str],
     client_factory: Any = None,
-) -> tuple[dict[str, tuple[float, int, float | None]], str]:
-    """One batch ticker read: symbol -> (rate, next pay time ms, mark price).
+) -> tuple[dict[str, CarryPresettlementTicker], str]:
+    """Fetch and type one batch of venue pre-settlement tickers.
 
     Never raises; a failed read returns an empty map plus the error text and
     the cycle falls back to the settled-print clock.
@@ -1063,7 +1269,7 @@ def _fetch_presettle_tickers(
     except Exception as exc:  # noqa: BLE001 - fail open to the settled-print clock
         return {}, str(exc)[:200]
     want = set(symbols)
-    out: dict[str, tuple[float, int, float | None]] = {}
+    out: dict[str, CarryPresettlementTicker] = {}
     for row in rows:
         sym = str(row.get("symbol", ""))
         if sym not in want:
@@ -1076,24 +1282,169 @@ def _fetch_presettle_tickers(
         mark_px: float | None
         try:
             parsed_mark_px = float(row["markPrice"])
-            mark_px = (
-                parsed_mark_px
-                if math.isfinite(parsed_mark_px) and parsed_mark_px > 0.0
-                else None
-            )
+            mark_px = parsed_mark_px if math.isfinite(parsed_mark_px) and parsed_mark_px > 0.0 else None
         except (KeyError, TypeError, ValueError):
             mark_px = None
-        out[sym] = (rate, next_pay_ms, mark_px)
+        try:
+            out[sym] = CarryPresettlementTicker(
+                symbol=sym,
+                running_rate=rate,
+                settlement_ts_ms=next_pay_ms,
+                mark_px=mark_px,
+            )
+        except ValueError:
+            continue
     return out, ""
 
 
-@dataclasses.dataclass(frozen=True)
-class PresettleFire:
-    """One fire and its contemporaneous mark, captured before masking."""
+def build_carry_presettlement_inputs(
+    *,
+    tickers: Mapping[str, CarryPresettlementTicker],
+    observed_ts_ms: int,
+    carry_holdings: Mapping[str, tuple[str, float, float]],
+) -> tuple[CarryPresettlementInput, ...]:
+    """Join typed venue reads to the exact CARRY-attributed account snapshot."""
 
-    symbol: str
-    settlement_ts_ms: int
-    mark_px: float | None
+    inputs: list[CarryPresettlementInput] = []
+    for symbol in sorted(tickers):
+        ticker = tickers[symbol]
+        if ticker.symbol != symbol:
+            raise ValueError("CARRY pre-settlement ticker key disagrees with its symbol")
+        carry_side: str | None = None
+        carry_qty: float | None = None
+        carry_avg_entry_px: float | None = None
+        holding = carry_holdings.get(symbol)
+        if holding is not None:
+            raw_side, raw_qty, raw_entry_px = holding
+            side = str(raw_side).lower()
+            qty = float(raw_qty)
+            entry_px = float(raw_entry_px)
+            if (
+                side in {"long", "short"}
+                and math.isfinite(qty)
+                and qty > 0.0
+                and math.isfinite(entry_px)
+                and entry_px > 0.0
+            ):
+                carry_side = side
+                carry_qty = qty
+                carry_avg_entry_px = entry_px
+        inputs.append(
+            CarryPresettlementInput(
+                ticker=ticker,
+                observed_ts_ms=observed_ts_ms,
+                carry_side=carry_side,
+                carry_qty=carry_qty,
+                carry_avg_entry_px=carry_avg_entry_px,
+            )
+        )
+    return tuple(inputs)
+
+
+def plan_carry_presettlement_exits(
+    *,
+    decision: CarryDecision,
+    rule: CarryHoldConfig,
+    prior_fired: Mapping[str, int],
+    inputs: tuple[CarryPresettlementInput, ...],
+    durable_events: tuple[CarryPresettlementEvent, ...],
+    environment: str,
+    source_profile: str,
+) -> CarryPresettlementPlan:
+    """Purely decide which durable handoffs this observation must commit.
+
+    A prior durable handoff wins over a later ticker/account read. This lets a
+    restart finish the state transition after a mask-write failure without
+    changing the fire-time rate, mark, or attributed quantity.
+    """
+
+    fired = dict(prior_fired)
+    exit_thr = -(rule.exit_bp / 1e4)
+    durable_by_id = {event.event_id: event for event in durable_events}
+    durable_for_decision: dict[str, CarryPresettlementEvent] = {}
+    for event in durable_by_id.values():
+        if (
+            event.environment == environment
+            and event.source_config_id == rule.config_id
+            and event.decision_ts_ms == decision.decision_ts_ms
+            and event.symbol in decision.weights
+            and event.symbol not in fired
+        ):
+            durable_for_decision.setdefault(event.symbol, event)
+    candidates: list[CarryPresettlementEvent] = list(durable_for_decision.values())
+    inputs_by_symbol = {row.ticker.symbol: row for row in inputs}
+    if len(inputs_by_symbol) != len(inputs):
+        raise ValueError("CARRY pre-settlement inputs contain duplicate symbols")
+    for sym in sorted(decision.weights):
+        if sym in fired or sym in durable_for_decision:
+            continue
+        row = inputs_by_symbol.get(sym)
+        if row is None:
+            continue
+        ticker = row.ticker
+        lead_ms = ticker.settlement_ts_ms - row.observed_ts_ms
+        if not (0 < lead_ms <= _PRESETTLE_WINDOW_MS):
+            continue
+        if not (ticker.running_rate < exit_thr):
+            event = CarryPresettlementEvent(
+                environment=environment,
+                source_profile=source_profile,
+                source_config_id=rule.config_id,
+                decision_ts_ms=decision.decision_ts_ms,
+                fired_ts_ms=row.observed_ts_ms,
+                settlement_ts_ms=ticker.settlement_ts_ms,
+                symbol=sym,
+                running_rate=ticker.running_rate,
+                mark_px=ticker.mark_px,
+                carry_side=row.carry_side,
+                carry_qty=row.carry_qty,
+                carry_avg_entry_px=row.carry_avg_entry_px,
+            )
+            candidates.append(durable_by_id.get(event.event_id, event))
+
+    return CarryPresettlementPlan(
+        publication_events=tuple(sorted(candidates, key=lambda row: row.to_strategy_event().order_key)),
+        transition_events=tuple(candidates),
+    )
+
+
+def publish_carry_presettlement_plan(path: Path, plan: CarryPresettlementPlan) -> None:
+    """Durably append every planned handoff before CARRY state may change."""
+
+    if not path.is_absolute():
+        raise ValueError("CARRY pre-settlement event path must be absolute")
+    for event in plan.publication_events:
+        append_carry_presettlement_event(path, event)
+
+
+def transition_carry_presettlement_state(
+    *,
+    decision: CarryDecision,
+    prior_fired: Mapping[str, int],
+    durable_events: tuple[CarryPresettlementEvent, ...],
+) -> CarryPresettlementTransition:
+    """Purely apply events whose publication has already completed."""
+
+    fired = dict(prior_fired)
+    new_fires: list[str] = []
+    for event in durable_events:
+        if event.decision_ts_ms != decision.decision_ts_ms or event.symbol not in decision.weights:
+            raise ValueError("CARRY pre-settlement transition event is out of scope")
+        fired[event.symbol] = decision.decision_ts_ms
+        new_fires.append(event.symbol)
+    masked = {symbol: weight for symbol, weight in decision.weights.items() if symbol not in fired}
+    return CarryPresettlementTransition(
+        decision=dataclasses.replace(decision, weights=masked, gross=sum(masked.values())),
+        fired=tuple(sorted(fired.items())),
+        new_fires=tuple(new_fires),
+        fire_details=durable_events,
+    )
+
+
+def persist_carry_presettlement_state(path: Path, transition: CarryPresettlementTransition) -> None:
+    """Persist the already-published transition to CARRY's private mask."""
+
+    _save_early_exits(path, transition.fired_by_symbol())
 
 
 def _apply_presettle_exits(
@@ -1101,55 +1452,42 @@ def _apply_presettle_exits(
     decision: CarryDecision,
     rule: CarryHoldConfig,
     state: CarryCycleState,
-    root: Path,
-    now_ms: int,
-    tickers: Mapping[str, tuple[float, int, float | None]],
-) -> tuple[CarryDecision, list[str], list[PresettleFire]]:
-    """Fire the registered exit test on the pre-settlement running rate.
+    state_path: Path,
+    event_path: Path,
+    inputs: tuple[CarryPresettlementInput, ...],
+    environment: str,
+    source_profile: str,
+) -> tuple[CarryDecision, list[str], list[CarryPresettlementEvent]]:
+    """Orchestrate input replay, publication, transition, and persistence."""
 
-    Runs after :func:`_apply_early_exits` (which loads and day-filters the
-    shared mask). A name fires when its next settlement is inside the window
-    and the running rate is at or above ``-exit_bp`` — the identical boundary
-    the settled-print path uses, read minutes before the print exists.
-    """
-
-    fired = dict(state.early_exits or {})
-    new_fires: list[str] = []
-    fire_details: list[PresettleFire] = []
-    exit_thr = -(rule.exit_bp / 1e4)
-    for sym in sorted(decision.weights):
-        if sym in fired:
-            continue
-        info = tickers.get(sym)
-        if info is None:
-            continue
-        rate, next_pay_ms, mark_px = info
-        lead_ms = int(next_pay_ms) - int(now_ms)
-        if not (0 < lead_ms <= _PRESETTLE_WINDOW_MS):
-            continue
-        if not (float(rate) < exit_thr):
-            fired[sym] = decision.decision_ts_ms
-            new_fires.append(sym)
-            fire_details.append(
-                PresettleFire(
-                    symbol=sym,
-                    settlement_ts_ms=int(next_pay_ms),
-                    mark_px=mark_px,
-                )
-            )
-    if new_fires:
-        state.early_exits = fired
+    if state.early_exits is None:
+        state.early_exits = _load_early_exits(state_path)
+    prior_fired = dict(state.early_exits)
+    plan = plan_carry_presettlement_exits(
+        decision=decision,
+        rule=rule,
+        prior_fired=prior_fired,
+        inputs=inputs,
+        durable_events=load_carry_presettlement_events(event_path),
+        environment=environment,
+        source_profile=source_profile,
+    )
+    publish_carry_presettlement_plan(event_path, plan)
+    transition = transition_carry_presettlement_state(
+        decision=decision,
+        prior_fired=prior_fired,
+        durable_events=plan.transition_events,
+    )
+    if transition.new_fires:
+        state.early_exits = transition.fired_by_symbol()
         try:
-            _save_early_exits(root, fired)
-        except Exception:  # noqa: BLE001 - a lost mask re-buys once at worst
-            _logger.warning("early-exit state not persisted; mask is memory-only")
-    if not fired:
-        return decision, new_fires, fire_details
-    masked = {s: w for s, w in decision.weights.items() if s not in fired}
+            persist_carry_presettlement_state(state_path, transition)
+        except Exception:  # noqa: BLE001 - the durable event rebuilds this mask
+            _logger.warning("early-exit state not persisted; the durable handoff will rebuild it")
     return (
-        dataclasses.replace(decision, weights=masked, gross=sum(masked.values())),
-        new_fires,
-        fire_details,
+        transition.decision,
+        list(transition.new_fires),
+        list(transition.fire_details),
     )
 
 
@@ -1176,9 +1514,7 @@ def _apply_drop_exits(
     dropped = sorted(s for s in decision.weights if s not in upcoming_weights)
     if not dropped:
         return decision, [], 0
-    masked = {
-        s: w for s, w in decision.weights.items() if s in upcoming_weights
-    }
+    masked = {s: w for s, w in decision.weights.items() if s in upcoming_weights}
     return (
         dataclasses.replace(decision, weights=masked, gross=sum(masked.values())),
         dropped,
@@ -1186,213 +1522,12 @@ def _apply_drop_exits(
     )
 
 
-# --- the exodus short (lane2_exodus_short_v1) -------------------------------
-# A standalone sleeve at the engine (its own [[strategy]] block, book file,
-# and fill attribution) produced from inside this process, because its whole
-# trigger is the fire above: when carry abandons a dying name, take the same
-# position over as a short and cover 60 minutes after the settlement. The
-# rules module owns the decision surface; this section owns wiring only.
-
-_EXODUS_STATE_NAME = "exodus_shorts.json"
-#: Book file the engine's exodus follower reads. Absent = this unit does not
-#: publish the sleeve; same convention as CARRY_ENGINE_TARGET_BOOK_PATH.
-EXODUS_TARGET_BOOK_PATH_ENV = "EXODUS_ENGINE_TARGET_BOOK_PATH"
-#: Registered exodus config dial. Absent or empty = the sleeve is OFF: no new
-#: entries, and any state drains to a flat book. Same env->registry shape as
-#: CARRY_STRATEGY_PROFILE, read here because the sleeve lives in this process.
-EXODUS_PROFILE_ENV = "EXODUS_SHORT_PROFILE"
-_EXODUS_PROFILES: dict[str, Path] = {
-    "v1": _CONFIGS_DIR / "lane2_exodus_short_v1.json",
-}
-_EXODUS_BOOK_SOURCE = "exodus_short"
-_exodus_rule_cache: dict[str, ExodusShortConfig] = {}
-
-
-def _registered_exodus_rule(profile_name: str) -> ExodusShortConfig:
-    # Parsed once per process, like the carry rule: registered files are
-    # immutable once committed.
-    cached = _exodus_rule_cache.get(profile_name)
-    if cached is None:
-        cached = ExodusShortConfig.from_json(_EXODUS_PROFILES[profile_name])
-        _exodus_rule_cache[profile_name] = cached
-    return cached
-
-
-def _exodus_state_path(root: Path) -> Path:
-    return root / _EXODUS_STATE_NAME
-
-
-def _load_exodus_shorts(root: Path) -> list[ExodusShortRecord]:
-    path = _exodus_state_path(root)
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return []
-    snapshot = read_stable_file(
-        path,
-        label="exodus-short state",
-        reject_empty=True,
-        require_single_link=True,
-        max_bytes=1024 * 1024,
-    )
-    return records_from_payload(json.loads(snapshot.data))
-
-
-def _save_exodus_shorts(root: Path, records: list[ExodusShortRecord]) -> None:
-    path = _exodus_state_path(root)
-    durable_atomic_replace(
-        path,
-        canonical_json(records_to_payload(records)) + b"\n",
-        label="exodus-short state",
-    )
-
-
-def _run_exodus_short(
-    *,
-    state: CarryCycleState,
-    root: Path,
-    fires: list[PresettleFire],
-    carry_holdings: Mapping[str, tuple[str, float, float]] | None,
-    entry_leverage: float,
-    now_ms: int,
-    exodus_held_symbols: frozenset[str] | None = None,
-    exodus_working_entry_symbols: frozenset[str] | None = None,
-) -> dict[str, Any]:
-    """One exodus pass per carry cycle: open on this cycle's fires, cover on
-    the clock, publish the book. Runs on EVERY cycle — covers must drain even
-    when the carry decision is unavailable, so nothing here depends on it.
-
-    ``carry_holdings`` is the fresh engine account reading taken after the
-    fire. A fire without a positive carry-attributed quantity and a valid
-    contemporaneous mark is blocked rather than inventing a target.
-
-    The two Exodus symbol readings come from the engine. Unknown holdings or
-    unfinished entries retain due state and keep publishing the named cover.
-    """
-
-    profile_name = os.environ.get(EXODUS_PROFILE_ENV, "").strip()
-    book_path_text = os.environ.get(EXODUS_TARGET_BOOK_PATH_ENV, "").strip()
-    if not profile_name and not book_path_text:
-        return {}
-    receipt: dict[str, Any] = {
-        "exodus_enabled": bool(profile_name),
-        "exodus_opened": [],
-        "exodus_covered": [],
-        "exodus_entry_blocked": [],
-        "exodus_open_names": 0,
-        "exodus_error": "",
-    }
-    try:
-        if profile_name and profile_name not in _EXODUS_PROFILES:
-            receipt["exodus_error"] = f"unknown exodus profile {profile_name!r}"
-            _logger.error("unknown %s=%r; exodus sleeve inert", EXODUS_PROFILE_ENV, profile_name)
-            return receipt
-        if state.exodus_shorts is None:
-            state.exodus_shorts = _load_exodus_shorts(root)
-        records = list(state.exodus_shorts)
-        if not profile_name:
-            active: list[ExodusShortRecord] = []
-            covered = records
-            cfg = None
-        else:
-            cfg = _registered_exodus_rule(profile_name)
-            active, covered = split_due_covers(records, now_ms=now_ms, cfg=cfg)
-            open_symbols = {r.symbol for r in records}
-            for fire in fires:
-                if fire.symbol in open_symbols:
-                    continue
-                holding = carry_holdings.get(fire.symbol) if carry_holdings is not None else None
-                if holding is None:
-                    receipt["exodus_entry_blocked"].append(fire.symbol)
-                    continue
-                side, qty, _entry_px = holding
-                if (
-                    str(side).lower() != "long"
-                    or not math.isfinite(float(qty))
-                    or float(qty) <= 0.0
-                    or fire.mark_px is None
-                    or not math.isfinite(float(fire.mark_px))
-                    or float(fire.mark_px) <= 0.0
-                ):
-                    receipt["exodus_entry_blocked"].append(fire.symbol)
-                    continue
-                target_qty = abs(float(qty))
-                notional = target_qty * float(fire.mark_px)
-                active.append(
-                    ExodusShortRecord(
-                        symbol=fire.symbol,
-                        notional_usdt=notional,
-                        settlement_ts_ms=fire.settlement_ts_ms,
-                        fired_ts_ms=now_ms,
-                        target_qty=target_qty,
-                    )
-                )
-                open_symbols.add(fire.symbol)
-                receipt["exodus_opened"].append(fire.symbol)
-        receipt["exodus_covered"] = sorted(r.symbol for r in covered)
-        receipt["exodus_open_names"] = len(active)
-
-        # New exposure reaches durable state before the engine can see it.
-        # Cover state moves in the opposite order: its explicit zero target is
-        # published first, then a flat engine reading permits deletion.
-        opened = [r for r in active if r not in records]
-        durable_records = records
-        if opened:
-            durable_records = sorted(records + opened, key=lambda record: record.symbol)
-            _save_exodus_shorts(root, durable_records)
-            state.exodus_shorts = durable_records
-        if receipt["exodus_opened"]:
-            _logger.info(
-                "exodus short OPENED: %s (cover %d min after settlement)",
-                ",".join(receipt["exodus_opened"]),
-                cfg.cover_minutes_after_settlement if cfg else 0,
-            )
-        if receipt["exodus_covered"]:
-            _logger.info("exodus short covering: %s", ",".join(receipt["exodus_covered"]))
-        if book_path_text:
-            render_cfg = cfg or _registered_exodus_rule("v1")
-            text = render_exodus_book(
-                active,
-                cfg=render_cfg,
-                now_ms=now_ms,
-                source=_EXODUS_BOOK_SOURCE,
-                entry_leverage=entry_leverage,
-                cover_records=covered,
-            )
-            write_target_book(Path(book_path_text), text)
-
-            pending_covers = [
-                record
-                for record in covered
-                if exodus_held_symbols is None
-                or exodus_working_entry_symbols is None
-                or record.symbol in exodus_held_symbols
-                or record.symbol in exodus_working_entry_symbols
-            ]
-            final_records = sorted(
-                active + pending_covers, key=lambda record: record.symbol
-            )
-            if final_records != durable_records:
-                _save_exodus_shorts(root, final_records)
-            state.exodus_shorts = final_records
-        if cfg is not None and active:
-            deadline = next_cover_deadline_ts_ms(active, cfg)
-            if deadline is not None:
-                receipt["exodus_next_cover_ts_ms"] = deadline
-    except Exception as exc:  # noqa: BLE001 - bookkeeping must never stop the carry sleeve
-        receipt["exodus_error"] = f"{type(exc).__name__}: {exc}"[:300]
-        _logger.exception("exodus short pass failed; carry cycle continues")
-    return receipt
-
-
-def _attach_whale_columns(
-    view: pl.DataFrame, whale_events: pl.DataFrame | None
-) -> pl.DataFrame:
+def _attach_whale_columns(view: pl.DataFrame, whale_events: pl.DataFrame | None) -> pl.DataFrame:
     """Attach ``bn_tt_ls`` / ``bn_tt_ls_age_h`` exactly the way the research
     panel does — backward as-of of day-end EOD events per symbol, age in
     float hours — so the registered rule computes the whale change from the
-    same shape live. ``None`` (a rule with no whale leg) leaves the frame
-    untouched: the v1..v4 view stays bit-identical to before the feed existed.
+    same shape live. ``None`` leaves the input frame unchanged for a rule with
+    no whale leg.
     """
     if whale_events is None:
         return view
@@ -1417,11 +1552,7 @@ def _attach_whale_columns(
             # join above; polars cannot verify it once `by` groups are given.
             check_sortedness=False,
         )
-        .with_columns(
-            ((pl.col("bar_ts_ms") - pl.col("_tt_ls_ts_ms")) / HOUR_MS).alias(
-                "bn_tt_ls_age_h"
-            )
-        )
+        .with_columns(((pl.col("bar_ts_ms") - pl.col("_tt_ls_ts_ms")) / HOUR_MS).alias("bn_tt_ls_age_h"))
         .drop("_tt_ls_ts_ms")
     )
 
@@ -1478,9 +1609,7 @@ def _carry_venue_view(
             pl.col("close").cast(pl.Float64).alias("by_close"),
             pl.col("turnover_quote").cast(pl.Float64).alias("by_turnover_quote"),
         )
-        .filter(
-            pl.col("bar_ts_ms").is_between(int(window_start_ms), int(max_bar_ts_ms))
-        )
+        .filter(pl.col("bar_ts_ms").is_between(int(window_start_ms), int(max_bar_ts_ms)))
         .sort(["bar_ts_ms", "symbol"])
     )
     if keyed.is_empty():
@@ -1511,11 +1640,7 @@ def _carry_venue_view(
         # order; polars cannot verify sortedness once `by` groups are given
         # (same assertion the research panel makes for the same join).
         check_sortedness=False,
-    ).with_columns(
-        ((pl.col("bar_ts_ms") - pl.col("funding_ts_ms")) / HOUR_MS).alias(
-            "by_funding_age_h"
-        )
-    )
+    ).with_columns(((pl.col("bar_ts_ms") - pl.col("funding_ts_ms")) / HOUR_MS).alias("by_funding_age_h"))
     view = view.drop("funding_ts_ms")
     return _attach_whale_columns(view, whale_events).sort(["symbol", "bar_ts_ms"])
 
@@ -1545,12 +1670,7 @@ def _validate_carry_view_health(
     if at_bar.is_empty():
         # decide_book raises its own, more precise staleness error.
         return
-    covered = int(
-        at_bar.get_column("by_funding")
-        .is_finite()
-        .fill_null(False)
-        .sum()
-    )
+    covered = int(at_bar.get_column("by_funding").is_finite().fill_null(False).sum())
     coverage = covered / at_bar.height
     if coverage < MIN_DECISION_FUNDING_COVERAGE:
         raise CarrySleeveError(
@@ -1593,8 +1713,7 @@ def _trailing_settled_funding(
     if funding.is_empty():
         return {}
     window = funding.filter(
-        (pl.col("funding_ts_ms") > int(decision_ts_ms) - DAY_MS)
-        & (pl.col("funding_ts_ms") <= int(decision_ts_ms))
+        (pl.col("funding_ts_ms") > int(decision_ts_ms) - DAY_MS) & (pl.col("funding_ts_ms") <= int(decision_ts_ms))
     )
     if window.is_empty():
         return {}
@@ -1663,12 +1782,8 @@ def _freeze_decision_ahead(
         if first_ts % DAY_MS != 0:
             aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
             view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
-        universe_eligible = (
-            int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
-        )
-        _validate_carry_view_health(
-            view, decision_ts_ms=ahead_ts_ms, standing_symbols=standing_symbols
-        )
+        universe_eligible = int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
+        _validate_carry_view_health(view, decision_ts_ms=ahead_ts_ms, standing_symbols=standing_symbols)
         trail_by_symbol = _trailing_settled_funding(funding, decision_ts_ms=ahead_ts_ms)
         decision = decide_book(view, rule, ahead_ts_ms)
     except Exception as exc:  # noqa: BLE001 - warm-up only; the deadline retries from scratch
@@ -1679,6 +1794,10 @@ def _freeze_decision_ahead(
         decision=decision,
         trail_by_symbol=trail_by_symbol,
         universe_eligible=universe_eligible,
+        input_evidence={
+            "candidate_universe_artifact_sha256": str(build_stats.get("candidate_universe_artifact_sha256", "")),
+            "candidate_universe_file_sha256": str(build_stats.get("candidate_universe_file_sha256", "")),
+        },
         frozen_ahead=True,
     )
     _logger.info(
@@ -1709,6 +1828,14 @@ class CarryTargetPlan:
     target_book_object_path: str
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class CarryPlanningOutput:
+    """Pure planner result; publication has not touched the filesystem."""
+
+    plan: CarryTargetPlan
+    target_book_text: str | None
+
+
 def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
     return CarryTargetPlan(
         desired_book_size=0,
@@ -1728,6 +1855,7 @@ def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
 
 def _write_engine_target_book(
     *,
+    target_book_path: str | Path,
     desired: Mapping[str, float],
     decision_ts_ms: int,
     sizing_equity_usdt: float,
@@ -1744,14 +1872,38 @@ def _write_engine_target_book(
     latter lets a late-day restart publish a valid hold/reduction book without
     re-authorizing an old entry.
     """
-    path_text = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
+    path_text = str(target_book_path).strip()
     if not path_text:
-        raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust target book")
-    if not sizing_equity_usdt > 0.0:
-        raise ValueError("cannot write a target book without positive sizing equity")
-    entry_valid_until_ms = (
-        decision_ts_ms + SIGNAL_VALIDITY_MS - ENTRY_PUBLISH_GUARD_MS
+        raise ValueError("target_book_path must name the Rust target book")
+    return publish_target_book(
+        Path(path_text),
+        render_carry_target_book(
+            desired=desired,
+            decision_ts_ms=decision_ts_ms,
+            sizing_equity_usdt=sizing_equity_usdt,
+            notional_multiplier=notional_multiplier,
+            stop_loss_fraction=stop_loss_fraction,
+            entry_leverage=entry_leverage,
+            strategy_profile=strategy_profile,
+        ),
     )
+
+
+def render_carry_target_book(
+    *,
+    desired: Mapping[str, float],
+    decision_ts_ms: int,
+    sizing_equity_usdt: float,
+    notional_multiplier: float,
+    stop_loss_fraction: float,
+    entry_leverage: float,
+    strategy_profile: str,
+) -> str:
+    """Pure serialization of one decided absolute CARRY book."""
+
+    if not sizing_equity_usdt > 0.0:
+        raise ValueError("cannot render a target book without positive sizing equity")
+    entry_valid_until_ms = decision_ts_ms + SIGNAL_VALIDITY_MS - ENTRY_PUBLISH_GUARD_MS
     targets = [
         EngineTarget(
             symbol=symbol,
@@ -1762,14 +1914,163 @@ def _write_engine_target_book(
         )
         for symbol, weight in sorted(desired.items())
     ]
-    return publish_target_book(
-        Path(path_text),
-        render_target_book(
-            source=strategy_profile,
-            decision_ts_ms=decision_ts_ms,
-            valid_until_ms=decision_ts_ms + DECISION_STALE_MS,
-            targets=targets,
+    return render_target_book(
+        source=strategy_profile,
+        decision_ts_ms=decision_ts_ms,
+        valid_until_ms=decision_ts_ms + DECISION_STALE_MS,
+        targets=targets,
+    )
+
+
+def plan_carry_targets(
+    *,
+    decision: CarryDecision | None,
+    standing_rows: Mapping[str, tuple[str, float, float]],
+    trail_by_symbol: Mapping[str, float],
+    demo: CarryDemoCycleConfig,
+    sizing_equity_usdt: float | None,
+    engine_account_health_error: str,
+    previous_book: ParsedTargetBook | None,
+    entry_blockers: Mapping[str, str] | None = None,
+    cycle_now_ms: int,
+    strategy_profile: str,
+) -> CarryPlanningOutput:
+    """Pure admission plan and exact target bytes for one CARRY decision."""
+
+    book_source = str(strategy_profile).strip()
+    if not book_source:
+        raise ValueError("strategy_profile must name the resolved CARRY profile")
+    if decision is None:
+        return CarryPlanningOutput(_empty_carry_plan(entry_blocked_reason="decision_unavailable"), None)
+    desired = decision.weights
+
+    def blocked_plan(*, planned_exits: int, reason: str) -> CarryTargetPlan:
+        return CarryTargetPlan(
+            desired_book_size=len(desired),
+            desired_gross_weight=float(decision.gross),
+            planned_exits=planned_exits,
+            planned_entries=0,
+            planned_resizes=0,
+            entry_cap_deferrals=0,
+            entry_validity_expired_skips=0,
+            entry_dust_skips=0,
+            engine_blocked_entries=0,
+            entry_blocked_reason=reason,
+            book_written=False,
+            target_book_object_path="",
+        )
+
+    entry_health_ok = not engine_account_health_error and sizing_equity_usdt is not None and sizing_equity_usdt > 0.0
+    if not entry_health_ok:
+        reason = "engine_account_health_unavailable"
+        if previous_book is None:
+            return CarryPlanningOutput(
+                blocked_plan(planned_exits=0, reason=reason),
+                None,
+            )
+        if previous_book.source not in {book_source, str(demo.strategy_profile)}:
+            raise ValueError(
+                f"active target book source {previous_book.source!r} does not match CARRY profile {book_source!r}"
+            )
+        retained = [target for target in previous_book.targets if target.symbol in desired]
+        planned_exits = len(previous_book.targets) - len(retained)
+        text = (
+            render_target_book(
+                source=book_source,
+                decision_ts_ms=max(1, cycle_now_ms - 1),
+                valid_until_ms=max(2, cycle_now_ms),
+                targets=retained,
+            )
+            if planned_exits > 0
+            else None
+        )
+        return CarryPlanningOutput(
+            blocked_plan(planned_exits=planned_exits, reason=reason),
+            text,
+        )
+
+    assert sizing_equity_usdt is not None
+    decision_ts_ms = decision.decision_ts_ms
+    standing_notional = {
+        symbol: (-1.0 if side.lower() == "short" else 1.0) * abs(qty) * entry_px
+        for symbol, (side, qty, entry_px) in standing_rows.items()
+        if qty != 0.0 and entry_px > 0.0
+    }
+    standing_symbols = set(standing_notional)
+    book_desired = {symbol: float(weight) for symbol, weight in desired.items() if symbol in standing_symbols}
+    entry_symbols = sorted(
+        (symbol for symbol in desired if symbol not in standing_symbols),
+        key=lambda symbol: (trail_by_symbol.get(symbol, 0.0), symbol),
+    )
+    blockers = entry_blockers or {}
+    engine_blocked_entries = sum(1 for symbol in entry_symbols if symbol in blockers)
+    entry_symbols = [symbol for symbol in entry_symbols if symbol not in blockers]
+    entry_validity_expired_skips = 0
+    if cycle_now_ms >= decision_ts_ms + SIGNAL_VALIDITY_MS - ENTRY_PUBLISH_GUARD_MS:
+        entry_validity_expired_skips = len(entry_symbols)
+        entry_symbols = []
+    planned_entries = 0
+    entry_cap_deferrals = 0
+    entry_dust_skips = 0
+    for symbol in entry_symbols:
+        target_notional = float(desired[symbol]) * sizing_equity_usdt * demo.notional_multiplier
+        if abs(target_notional) < ENTRY_MIN_NOTIONAL_USDT:
+            entry_dust_skips += 1
+            continue
+        if planned_entries >= demo.max_new_entries_per_cycle:
+            entry_cap_deferrals += 1
+            continue
+        book_desired[symbol] = float(desired[symbol])
+        planned_entries += 1
+
+    planned_resizes = 0
+    for symbol in sorted(set(book_desired) & standing_symbols):
+        target_notional = book_desired[symbol] * sizing_equity_usdt * demo.notional_multiplier
+        threshold = max(
+            RESIZE_MIN_NOTIONAL_USDT,
+            RESIZE_MIN_FRACTION_OF_STANDING * abs(standing_notional[symbol]),
+        )
+        if abs(target_notional - standing_notional[symbol]) > threshold:
+            planned_resizes += 1
+
+    text = render_carry_target_book(
+        desired=book_desired,
+        decision_ts_ms=decision_ts_ms,
+        sizing_equity_usdt=sizing_equity_usdt,
+        notional_multiplier=float(demo.notional_multiplier),
+        stop_loss_fraction=float(demo.declared_stop_loss_fraction),
+        entry_leverage=float(demo.entry_leverage),
+        strategy_profile=book_source,
+    )
+    return CarryPlanningOutput(
+        CarryTargetPlan(
+            desired_book_size=len(desired),
+            desired_gross_weight=float(decision.gross),
+            planned_exits=len(standing_symbols - set(book_desired)),
+            planned_entries=planned_entries,
+            planned_resizes=planned_resizes,
+            entry_cap_deferrals=entry_cap_deferrals,
+            entry_validity_expired_skips=entry_validity_expired_skips,
+            entry_dust_skips=entry_dust_skips,
+            engine_blocked_entries=engine_blocked_entries,
+            entry_blocked_reason="",
+            book_written=False,
+            target_book_object_path="",
         ),
+        text,
+    )
+
+
+def publish_carry_plan(path: str | Path, output: CarryPlanningOutput) -> CarryTargetPlan:
+    """Publish one pure planner result and attach the durable receipt."""
+
+    if output.target_book_text is None:
+        return output.plan
+    publication = publish_target_book(Path(path), output.target_book_text)
+    return dataclasses.replace(
+        output.plan,
+        book_written=True,
+        target_book_object_path=str(publication.object_path),
     )
 
 
@@ -1783,171 +2084,42 @@ def _carry_target_plan(
     engine_account_health_error: str,
     entry_blockers: Mapping[str, str] | None = None,
     cycle_now_ms: int,
-    cycle_state: CarryCycleState | None = None,
+    target_book_path: str | Path,
+    cycle_state: CarryCycleState,
+    strategy_profile: str,
 ) -> CarryTargetPlan:
-    """Build and publish the paced absolute book for one decision."""
+    """Transition sizing state, call the pure planner, then publish."""
 
-    if decision is None:
-        return _empty_carry_plan(entry_blocked_reason="decision_unavailable")
-
-    decision_ts_ms = decision.decision_ts_ms
-    desired = decision.weights
-    entry_health_ok = not engine_account_health_error and equity_usdt > 0.0
-    entry_blocked_reason = "" if entry_health_ok else "engine_account_health_unavailable"
-    if not entry_health_ok:
-        path_text = os.environ.get(ENGINE_TARGET_BOOK_PATH_ENV, "").strip()
-        if not path_text:
-            raise ValueError(f"{ENGINE_TARGET_BOOK_PATH_ENV} must name the Rust target book")
+    path_text = str(target_book_path).strip()
+    if not path_text:
+        raise ValueError("target_book_path must name the Rust target book")
+    sizing_equity: float | None = None
+    previous: ParsedTargetBook | None = None
+    if decision is not None and not engine_account_health_error and equity_usdt > 0.0:
+        sizing_equity = cycle_state.sizing_equity(
+            decision_ts_ms=decision.decision_ts_ms,
+            equity_usdt=equity_usdt,
+        )
+        if demo.capital_reference_usdt > 0.0:
+            sizing_equity = min(sizing_equity, float(demo.capital_reference_usdt))
+    elif decision is not None:
         try:
             previous = read_target_book(path_text)
         except (OSError, RuntimeError, ValueError):
-            return CarryTargetPlan(
-                desired_book_size=len(desired),
-                desired_gross_weight=float(decision.gross),
-                planned_exits=0,
-                planned_entries=0,
-                planned_resizes=0,
-                entry_cap_deferrals=0,
-                entry_validity_expired_skips=0,
-                entry_dust_skips=0,
-                engine_blocked_entries=0,
-                entry_blocked_reason=entry_blocked_reason,
-                book_written=False,
-                target_book_object_path="",
-            )
-        if previous.source != str(demo.strategy_profile):
-            raise ValueError(
-                f"active target book source {previous.source!r} does not match "
-                f"CARRY profile {demo.strategy_profile!r}"
-            )
-        retained = [target for target in previous.targets if target.symbol in desired]
-        planned_exits = len(previous.targets) - len(retained)
-        if planned_exits <= 0:
-            return CarryTargetPlan(
-                desired_book_size=len(desired),
-                desired_gross_weight=float(decision.gross),
-                planned_exits=0,
-                planned_entries=0,
-                planned_resizes=0,
-                entry_cap_deferrals=0,
-                entry_validity_expired_skips=0,
-                entry_dust_skips=0,
-                engine_blocked_entries=0,
-                entry_blocked_reason=entry_blocked_reason,
-                book_written=False,
-                target_book_object_path="",
-            )
-        # Expired on publication: the follower may remove exposure and cancel
-        # old entries, but it cannot open or resize any retained name.
-        publication = publish_target_book(
-            Path(path_text),
-            render_target_book(
-                source=str(demo.strategy_profile),
-                decision_ts_ms=max(1, cycle_now_ms - 1),
-                valid_until_ms=max(2, cycle_now_ms),
-                targets=list(retained),
-            ),
-        )
-        return CarryTargetPlan(
-            desired_book_size=len(desired),
-            desired_gross_weight=float(decision.gross),
-            planned_exits=planned_exits,
-            planned_entries=0,
-            planned_resizes=0,
-            entry_cap_deferrals=0,
-            entry_validity_expired_skips=0,
-            entry_dust_skips=0,
-            engine_blocked_entries=0,
-            entry_blocked_reason=entry_blocked_reason,
-            book_written=True,
-            target_book_object_path=str(publication.object_path),
-        )
-    sizing_equity_usdt = (
-        cycle_state.sizing_equity(decision_ts_ms=decision_ts_ms, equity_usdt=equity_usdt)
-        if cycle_state is not None
-        else equity_usdt
+            previous = None
+    output = plan_carry_targets(
+        decision=decision,
+        standing_rows=standing_rows,
+        trail_by_symbol=trail_by_symbol,
+        demo=demo,
+        sizing_equity_usdt=sizing_equity,
+        engine_account_health_error=engine_account_health_error,
+        previous_book=previous,
+        entry_blockers=entry_blockers,
+        cycle_now_ms=cycle_now_ms,
+        strategy_profile=strategy_profile,
     )
-    # Clamp to the profile's capital reference, after the decision anchor so a
-    # profitable day cannot ratchet the book up. Never applied upward: a smaller
-    # account still sizes off its own equity.
-    if demo.capital_reference_usdt > 0.0:
-        sizing_equity_usdt = min(sizing_equity_usdt, float(demo.capital_reference_usdt))
-
-    standing_notional = {
-        symbol: (-1.0 if side.lower() == "short" else 1.0) * abs(qty) * entry_px
-        for symbol, (side, qty, entry_px) in standing_rows.items()
-        if qty != 0.0 and entry_px > 0.0
-    }
-    standing_symbols = set(standing_notional)
-    book_desired = {
-        symbol: float(weight)
-        for symbol, weight in desired.items()
-        if symbol in standing_symbols
-    }
-    entry_cap_deferrals = 0
-    entry_validity_expired_skips = 0
-    entry_dust_skips = 0
-    entry_symbols = sorted(
-        (symbol for symbol in desired if symbol not in standing_symbols),
-        key=lambda symbol: (trail_by_symbol.get(symbol, 0.0), symbol),
-    )
-    blockers = entry_blockers or {}
-    engine_blocked_entries = sum(1 for symbol in entry_symbols if symbol in blockers)
-    entry_symbols = [symbol for symbol in entry_symbols if symbol not in blockers]
-    if cycle_now_ms >= decision_ts_ms + SIGNAL_VALIDITY_MS - ENTRY_PUBLISH_GUARD_MS:
-        entry_validity_expired_skips = len(entry_symbols)
-        entry_symbols = []
-    planned_entries = 0
-    for symbol in entry_symbols:
-        target_notional = (
-            float(desired[symbol]) * sizing_equity_usdt * demo.notional_multiplier
-        )
-        if abs(target_notional) < ENTRY_MIN_NOTIONAL_USDT:
-            entry_dust_skips += 1
-            continue
-        if planned_entries >= demo.max_new_entries_per_cycle:
-            entry_cap_deferrals += 1
-            continue
-        book_desired[symbol] = float(desired[symbol])
-        planned_entries += 1
-
-    planned_resizes = 0
-    for symbol in sorted(set(book_desired) & standing_symbols):
-        target_notional = (
-            book_desired[symbol] * sizing_equity_usdt * demo.notional_multiplier
-        )
-        standing = standing_notional[symbol]
-        threshold = max(
-            RESIZE_MIN_NOTIONAL_USDT,
-            RESIZE_MIN_FRACTION_OF_STANDING * abs(standing),
-        )
-        if abs(target_notional - standing) > threshold:
-            planned_resizes += 1
-
-    published_target_book = _write_engine_target_book(
-        desired=book_desired,
-        decision_ts_ms=decision_ts_ms,
-        sizing_equity_usdt=sizing_equity_usdt,
-        notional_multiplier=float(demo.notional_multiplier),
-        stop_loss_fraction=float(demo.declared_stop_loss_fraction),
-        entry_leverage=float(demo.entry_leverage),
-        strategy_profile=str(demo.strategy_profile),
-    )
-
-    return CarryTargetPlan(
-        desired_book_size=len(desired),
-        desired_gross_weight=float(decision.gross),
-        planned_exits=len(standing_symbols - set(book_desired)),
-        planned_entries=planned_entries,
-        planned_resizes=planned_resizes,
-        entry_cap_deferrals=entry_cap_deferrals,
-        entry_validity_expired_skips=entry_validity_expired_skips,
-        entry_dust_skips=entry_dust_skips,
-        engine_blocked_entries=engine_blocked_entries,
-        entry_blocked_reason=entry_blocked_reason,
-        book_written=True,
-        target_book_object_path=str(published_target_book.object_path),
-    )
+    return publish_carry_plan(path_text, output)
 
 
 def _empty_funding_events() -> pl.DataFrame:
@@ -1968,14 +2140,9 @@ def _normalized_funding_events(frame: pl.DataFrame) -> pl.DataFrame:
         pl.col("funding_ts_ms").cast(pl.Int64),
         pl.col("funding_rate").cast(pl.Float64),
     )
-    invalid = normalized.filter(
-        pl.col("funding_rate").is_null()
-        | ~pl.col("funding_rate").is_finite().fill_null(False)
-    )
+    invalid = normalized.filter(pl.col("funding_rate").is_null() | ~pl.col("funding_rate").is_finite().fill_null(False))
     if invalid.height:
-        raise CarrySleeveError(
-            f"carry funding events contain {invalid.height} null or non-finite rates"
-        )
+        raise CarrySleeveError(f"carry funding events contain {invalid.height} null or non-finite rates")
     return normalized.unique(subset=["symbol", "funding_ts_ms"], keep="last")
 
 
@@ -2030,9 +2197,7 @@ def _refresh_carry_funding_cache(
                 return market.get_funding_history(symbol, fetch_start, int(now_ms))
             except Exception as exc:  # noqa: BLE001 - loud, retried once, never cycle-fatal
                 if attempt == 0:
-                    _logger.warning(
-                        "carry funding fetch failed for %s (retrying once): %s", symbol, exc
-                    )
+                    _logger.warning("carry funding fetch failed for %s (retrying once): %s", symbol, exc)
                 else:
                     _logger.error(
                         "carry funding fetch failed for %s after retry; the symbol keeps "
@@ -2097,9 +2262,7 @@ def _refresh_carry_funding_cache(
     stats["funding_fetch_failures"] = len(failed_symbols)
     stats["funding_failed_symbols"] = ",".join(sorted(failed_symbols))
     combined = (
-        pl.concat([cached, fresh], how="vertical").unique(
-            subset=["symbol", "funding_ts_ms"], keep="last"
-        )
+        pl.concat([cached, fresh], how="vertical").unique(subset=["symbol", "funding_ts_ms"], keep="last")
         if not fresh.is_empty()
         else cached
     )
@@ -2112,7 +2275,7 @@ def _candidate_filtered_universe(
     candidate_universe_file: str,
     realm: VenueRealm,
     standing_symbols: set[str],
-) -> tuple[list[str], int]:
+) -> tuple[list[str], int, dict[str, str]]:
     """Intersect the turnover universe with the frozen candidate epoch.
 
     Standing symbols are added back AFTER the intersection: a held name must
@@ -2122,14 +2285,19 @@ def _candidate_filtered_universe(
 
     skipped = 0
     kept = list(top_symbols)
+    evidence = {
+        "candidate_universe_artifact_sha256": "",
+        "candidate_universe_file_sha256": "",
+    }
     if candidate_universe_file:
         frozen = load_candidate_universe(candidate_universe_file, realm=realm)
-        # CARRY's own profile is registered and checked here, but it does NOT
-        # narrow what CARRY trades: the sleeve trades the whole frozen
-        # instrument set. Binding to the carry profile instead would cut the
-        # tradable population from every listed perpetual (510 on demo, 512 on
-        # mainnet as of the 2026-08-13 freeze) to the carry top-150 — a
-        # strategy change, not a rename.
+        evidence = {
+            "candidate_universe_artifact_sha256": frozen.artifact_sha256,
+            "candidate_universe_file_sha256": frozen.file_sha256,
+        }
+        # CARRY's profile is checked here but does not narrow membership: the
+        # sleeve trades the whole frozen strategy instrument set. Binding to
+        # the profile subset would change the strategy's tradable population.
         require_profile_binding(
             frozen,
             profile="carry",
@@ -2138,7 +2306,7 @@ def _candidate_filtered_universe(
         allowed = set(frozen.strategy_instruments)
         kept = [symbol for symbol in top_symbols if symbol in allowed]
         skipped = len(top_symbols) - len(kept)
-    return sorted(set(kept) | set(standing_symbols)), skipped
+    return sorted(set(kept) | set(standing_symbols)), skipped, evidence
 
 
 def _build_carry_demo_market_data(
@@ -2170,20 +2338,16 @@ def _build_carry_demo_market_data(
         _logger.warning("carry ticker snapshot failed; universe degrades to standing symbols: %s", exc)
         ticker_rows, ticker_source = [], "unavailable"
     top_symbols = rank_top_turnover_symbols(ticker_rows, top_n=CARRY_FETCH_UNIVERSE_TOP_N)
-    fetch_symbols, candidate_skipped = _candidate_filtered_universe(
+    fetch_symbols, candidate_skipped, candidate_evidence = _candidate_filtered_universe(
         top_symbols,
         candidate_universe_file=demo.candidate_universe_file,
         realm=candidate_universe_realm(demo.execution_environment),
         standing_symbols=standing_symbols,
     )
     if not fetch_symbols:
-        raise CarrySleeveError(
-            "carry fetch universe is empty (ticker fetch failed and nothing standing)"
-        )
+        raise CarrySleeveError("carry fetch universe is empty (ticker fetch failed and nothing standing)")
     try:
-        launch_times = _launch_time_ms_by_symbol(
-            _demo_instruments(market, cache_root=root, now_ms=now_ms)
-        )
+        launch_times = _launch_time_ms_by_symbol(_demo_instruments(market, cache_root=root, now_ms=now_ms))
     except Exception as exc:  # noqa: BLE001 - listing ages only avoid head refetches
         _logger.warning("carry instruments fetch failed; head-completeness checks degrade: %s", exc)
         launch_times = {}
@@ -2225,15 +2389,14 @@ def _build_carry_demo_market_data(
         "ticker_source": ticker_source,
         "universe_fetched": len(fetch_symbols),
         "candidate_skipped_symbols": candidate_skipped,
+        **candidate_evidence,
         "kline_cache_rows": int(kline_stats.get("cache_rows", 0)),
         "kline_fetched_rows": int(kline_stats.get("fetched_rows", 0)),
         "kline_output_rows": int(kline_stats.get("output_rows", 0)),
         "kline_fetch_symbols": int(kline_stats.get("fetch_symbols", 0)),
         "kline_store_rows": int(kline_stats.get("store_rows", 0)),
         "funding_cache_rows": funding.height,
-        "funding_max_ts_ms": (
-            coerce_int(funding.get_column("funding_ts_ms").max()) if not funding.is_empty() else 0
-        ),
+        "funding_max_ts_ms": (coerce_int(funding.get_column("funding_ts_ms").max()) if not funding.is_empty() else 0),
         **funding_stats,
     }
     return klines, funding, stats
@@ -2271,8 +2434,7 @@ def _last_successful_decision_ts_ms(root: Path, *, cycles_dataset: str) -> int |
 def run_carry_demo_cycle(
     data_root: str | Path,
     *,
-    config: ResearchConfig,
-    demo_config: CarryDemoCycleConfig | None = None,
+    effective_config: CarryEffectiveConfig,
     market_client: Any | None = None,
     now_ms: int | None = None,
     kline_store: Any | None = None,
@@ -2305,26 +2467,35 @@ def run_carry_demo_cycle(
     from its own build (:func:`_freeze_decision_ahead`).
     """
 
-    demo = demo_config or CarryDemoCycleConfig()
+    demo = effective_config.cycle
     _validate_carry_demo_config(demo)
     environment = execution_environment(demo.execution_environment).value
-    root = Path(data_root).expanduser()
-    engine_book_path = Path(os.environ[ENGINE_TARGET_BOOK_PATH_ENV]).expanduser()
+    supplied_root = Path(data_root).expanduser().resolve()
+    root = effective_config.data_root
+    if supplied_root != root:
+        raise ValueError("CARRY cycle data root disagrees with its effective configuration")
+    market_projection = ResearchConfig(
+        exchange=effective_config.exchange,
+        data_root=root,
+    )
+    engine_book_path = effective_config.target_book_path
     root.mkdir(parents=True, exist_ok=True)
     cycle_now_ms = int(now_ms if now_ms is not None else _utc_now_ms())
     decision_ts_ms = carry_decision_ts_ms(cycle_now_ms)
     cycle_id = f"carry-target-{CARRY_STRATEGY_ID}-{cycle_now_ms}"
-    cycles_dataset = carry_cycles_dataset(demo)
+    cycles_dataset = effective_config.cycles_dataset
     state = cycle_state if cycle_state is not None else CarryCycleState()
 
     with exclusive_file_lock(root / ".locks" / "carry_demo_cycle.lock", stale_seconds=900):
-        state.bind_sizing_anchors(root)
+        state.bind_sizing_anchors(effective_config.sizing_anchor_path)
         engine_reading: EngineAccountReading | None = None
         try:
             engine_reading = require_recent_engine_account(
                 environment,
                 max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
                 now_ns=cycle_now_ms * 1_000_000,
+                path=effective_config.engine_heartbeat_path,
+                expected_account_user_id=effective_config.expected_account_user_id,
             )
             equity_usdt = float(engine_reading.equity_usdt)
             engine_account_health_error = ""
@@ -2332,18 +2503,14 @@ def run_carry_demo_cycle(
             equity_usdt = 0.0
             engine_account_health_error = str(exc)
             _logger.warning("CARRY engine account reading unavailable; book held: %s", exc)
-        standing_rows = (
-            engine_reading.holdings_for_strategy(ENGINE_CARRY_SLEEVE)
-            if engine_reading is not None
-            else {}
-        )
+        standing_rows = engine_reading.holdings_for_strategy(ENGINE_CARRY_SLEEVE) if engine_reading is not None else {}
         standing_symbols = set(standing_rows)
 
         decision: CarryDecision | None = None
         decision_error: str | None = None
         decision_frozen = False
-        strategy_profile = resolve_carry_strategy_profile(demo.strategy_profile)
-        rule = _registered_rule(strategy_profile.config_path)
+        strategy_profile = effective_config.profile
+        rule = effective_config.rule
         trail_by_symbol: dict[str, float] = {}
         build_stats: dict[str, Any] = {}
         universe_eligible = 0
@@ -2371,18 +2538,22 @@ def run_carry_demo_cycle(
         prewarmed = state.frozen_decision(decision_ts_ms) if skip_build else None
         data_build_skipped = prewarmed is not None
         if prewarmed is not None:
-            decision, trail_by_symbol, universe_eligible = prewarmed
+            decision, trail_by_symbol, universe_eligible, frozen_input_evidence = prewarmed
             decision_frozen = True
-            build_stats = {"data_source": "build_skipped", "ticker_source": "skipped"}
+            build_stats = {
+                "data_source": "build_skipped",
+                "ticker_source": "skipped",
+                **frozen_input_evidence,
+            }
         else:
             try:
                 market = market_client or BybitMarketData(
-                    category=config.exchange.category,
-                    testnet=config.exchange.testnet,
+                    category=effective_config.exchange.category,
+                    testnet=effective_config.exchange.testnet,
                 )
                 klines, funding, build_stats = _build_carry_demo_market_data(
                     root=root,
-                    config=config,
+                    config=market_projection,
                     demo=demo,
                     market=market,
                     now_ms=cycle_now_ms,
@@ -2397,11 +2568,7 @@ def run_carry_demo_cycle(
                     # The whale halving reads Binance EODs; refresh the tiny
                     # cache for exactly the symbols this build fetched. Never
                     # raises — a dead feed fails open per the registered rule.
-                    whale_symbols = (
-                        sorted(set(klines.get_column("symbol").to_list()))
-                        if not klines.is_empty()
-                        else []
-                    )
+                    whale_symbols = sorted(set(klines.get_column("symbol").to_list())) if not klines.is_empty() else []
                     whale_events, whale_stats = _refresh_carry_whale_cache(
                         root, whale_symbols, now_ms=cycle_now_ms, state=state
                     )
@@ -2412,7 +2579,13 @@ def run_carry_demo_cycle(
                 # funding sweep and the kline caches are still maintained.
                 frozen = state.frozen_decision(decision_ts_ms)
                 if frozen is not None:
-                    decision, trail_by_symbol, universe_eligible = frozen
+                    (
+                        decision,
+                        trail_by_symbol,
+                        universe_eligible,
+                        frozen_input_evidence,
+                    ) = frozen
+                    build_stats.update(frozen_input_evidence)
                     decision_frozen = True
                 else:
                     window_start_ms = decision_ts_ms - demo.replay_days * DAY_MS
@@ -2432,23 +2605,27 @@ def run_carry_demo_cycle(
                         if first_ts % DAY_MS != 0:
                             aligned_start = ((first_ts // DAY_MS) + 1) * DAY_MS
                             view = view.filter(pl.col("bar_ts_ms") >= aligned_start)
-                    universe_eligible = (
-                        int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
-                    )
+                    universe_eligible = int(view.get_column("symbol").n_unique()) if not view.is_empty() else 0
                     _validate_carry_view_health(
                         view,
                         decision_ts_ms=decision_ts_ms,
                         standing_symbols=standing_symbols,
                     )
-                    trail_by_symbol = _trailing_settled_funding(
-                        funding, decision_ts_ms=decision_ts_ms
-                    )
+                    trail_by_symbol = _trailing_settled_funding(funding, decision_ts_ms=decision_ts_ms)
                     decision = decide_book(view, rule, decision_ts_ms)
                     state.freeze_decision(
                         decision_ts_ms=decision_ts_ms,
                         decision=decision,
                         trail_by_symbol=trail_by_symbol,
                         universe_eligible=universe_eligible,
+                        input_evidence={
+                            "candidate_universe_artifact_sha256": str(
+                                build_stats.get("candidate_universe_artifact_sha256", "")
+                            ),
+                            "candidate_universe_file_sha256": str(
+                                build_stats.get("candidate_universe_file_sha256", "")
+                            ),
+                        },
                     )
             except Exception as exc:  # noqa: BLE001 - hold-steady: a data hiccup must never flatten
                 decision_error = f"{type(exc).__name__}: {exc}"[:500]
@@ -2475,7 +2652,7 @@ def run_carry_demo_cycle(
             # names' exits then publish ~00:02 while entries still wait for
             # the 00:20 clock. Same function, same gates, same refusal
             # semantics as the deadline freeze: a repair-pending build pins
-            # nothing and the day degrades to the old clock.
+            # nothing and the day falls back to the settled-print clock.
             drop_day_ts = (cycle_now_ms // DAY_MS) * DAY_MS
             if drop_day_ts > decision_ts_ms and state.frozen_decision(drop_day_ts) is None:
                 drop_exit_frozen = _freeze_decision_ahead(
@@ -2522,94 +2699,16 @@ def run_carry_demo_cycle(
                     cycle_now_ms,
                 )
 
-        early_exit_fires: list[str] = []
-        if decision is not None and demo.early_exit_enabled:
-            # Mask AFTER freezing: the frozen tuple keeps the registered
-            # decision; the mask is re-applied every cycle from its own state.
-            decision, early_exit_fires = _apply_early_exits(
-                decision=decision,
-                rule=rule,
-                funding=built_funding,
-                state=state,
-                root=root,
-                now_ms=cycle_now_ms,
-            )
-            if early_exit_fires:
-                _logger.info(
-                    "early exit fired: %s (settled print at/above %.1f bp)",
-                    ",".join(early_exit_fires),
-                    -rule.exit_bp,
-                )
-
-        presettle_fires: list[str] = []
-        presettle_fire_details: list[PresettleFire] = []
-        presettle_error = ""
-        if (
-            decision is not None
-            and demo.early_exit_enabled
-            and strategy_profile.presettle_exit
-            and decision.weights
-        ):
-            # Every settlement sits on an hour boundary; fetch only when one
-            # is close enough for a fire to be possible.
-            to_boundary_ms = HOUR_MS - (cycle_now_ms % HOUR_MS)
-            if to_boundary_ms <= _PRESETTLE_WINDOW_MS + _PRESETTLE_FETCH_SLACK_MS:
-                tickers, presettle_error = _fetch_presettle_tickers(
-                    sorted(decision.weights)
-                )
-                if tickers:
-                    decision, presettle_fires, presettle_fire_details = (
-                        _apply_presettle_exits(
-                            decision=decision,
-                            rule=rule,
-                            state=state,
-                            root=root,
-                            now_ms=cycle_now_ms,
-                            tickers=tickers,
-                        )
-                    )
-                if presettle_fires:
-                    _logger.info(
-                        "pre-settle exit fired: %s (running rate at/above %.1f bp "
-                        "before the print pays)",
-                        ",".join(presettle_fires),
-                        -rule.exit_bp,
-                    )
-                if presettle_error:
-                    _logger.warning(
-                        "pre-settle ticker read failed; settled-print clock "
-                        "stands: %s",
-                        presettle_error,
-                    )
-
-        # The drop exit: mask the
-        # names the UPCOMING frozen decision zeroes out of the served
-        # (old-day) book, so their removals publish this cycle — ~00:02,
-        # before the post-settlement drift the 00:20 clock sells into.
-        drop_exit_fires: list[str] = []
-        drop_exit_masked = 0
-        if decision is not None and decision.decision_ts_ms % DAY_MS == 0:
-            decision, dropped_now, drop_exit_masked = _apply_drop_exits(
-                decision=decision, state=state
-            )
-            if dropped_now:
-                if frozenset(dropped_now) != state.drop_exits_logged:
-                    _logger.info(
-                        "drop exit fired: %s (the upcoming decision zeroes "
-                        "them; selling ahead of the 00:20 clock)",
-                        ",".join(dropped_now),
-                    )
-                    drop_exit_fires = dropped_now
-                state.drop_exits_logged = frozenset(dropped_now)
-
-        # The exodus pass runs on EVERY cycle: covers must drain even when
-        # the carry decision is unavailable. Entries additionally need the
-        # exact carry-attributed holding and contemporaneous mark.
+        # Refresh the account immediately before any pre-settlement handoff.
+        # A full market-data build can take long enough that the cycle-start
+        # quantity is no longer the position CARRY is actually abandoning.
         try:
             engine_reading = require_recent_engine_account(
                 environment,
                 max_age_ns=TARGET_PRODUCER_HEALTH_MAX_AGE_NS,
                 now_ns=time.time_ns(),
+                path=effective_config.engine_heartbeat_path,
+                expected_account_user_id=effective_config.expected_account_user_id,
             )
             equity_usdt = float(engine_reading.equity_usdt)
             engine_account_health_error = ""
@@ -2625,28 +2724,85 @@ def run_carry_demo_cycle(
                 "CARRY commit-time engine account reading unavailable; additions and resizes blocked: %s",
                 exc,
             )
-        exodus_receipt = _run_exodus_short(
-            state=state,
-            root=root,
-            fires=presettle_fire_details,
-            carry_holdings=(standing_rows if engine_reading is not None else None),
-            entry_leverage=float(demo.entry_leverage),
-            now_ms=cycle_now_ms,
-            exodus_held_symbols=(
-                frozenset(
-                    engine_reading.holdings_for_strategy(ENGINE_EXODUS_SLEEVE)
+
+        early_exit_fires: list[str] = []
+        if decision is not None and demo.early_exit_enabled:
+            # Mask AFTER freezing: the frozen tuple keeps the registered
+            # decision; the mask is re-applied every cycle from its own state.
+            decision, early_exit_fires = _apply_early_exits(
+                decision=decision,
+                rule=rule,
+                funding=built_funding,
+                state=state,
+                state_path=effective_config.early_exit_state_path,
+                now_ms=cycle_now_ms,
+            )
+            if early_exit_fires:
+                _logger.info(
+                    "early exit fired: %s (settled print at/above %.1f bp)",
+                    ",".join(early_exit_fires),
+                    -rule.exit_bp,
                 )
-                if engine_reading is not None
-                and ENGINE_EXODUS_SLEEVE in engine_reading.strategies
-                else None
-            ),
-            exodus_working_entry_symbols=(
-                engine_reading.working_entries_for_strategy(ENGINE_EXODUS_SLEEVE)
-                if engine_reading is not None
-                and ENGINE_EXODUS_SLEEVE in engine_reading.strategies
-                else None
-            ),
-        )
+
+        presettle_fires: list[str] = []
+        presettle_fire_details: list[CarryPresettlementEvent] = []
+        presettle_error = ""
+        if decision is not None and demo.early_exit_enabled and strategy_profile.presettle_exit and decision.weights:
+            tickers: dict[str, CarryPresettlementTicker] = {}
+            # Every settlement sits on an hour boundary; fetch only when one
+            # is close enough for a fire to be possible.
+            presettle_fetch_ms = cycle_now_ms if now_ms is not None else _utc_now_ms()
+            to_boundary_ms = HOUR_MS - (presettle_fetch_ms % HOUR_MS)
+            if to_boundary_ms <= _PRESETTLE_WINDOW_MS + _PRESETTLE_FETCH_SLACK_MS:
+                tickers, presettle_error = _fetch_presettle_tickers(sorted(decision.weights))
+            # The event owns the time at which the complete venue sample is
+            # available, not the cycle-start time before account and market
+            # reads. A slow fetch that crosses settlement must not create an
+            # event for a print that has already paid.
+            presettle_observed_ms = cycle_now_ms if now_ms is not None else _utc_now_ms()
+            presettle_inputs = build_carry_presettlement_inputs(
+                tickers=tickers,
+                observed_ts_ms=presettle_observed_ms,
+                carry_holdings=standing_rows,
+            )
+            decision, presettle_fires, presettle_fire_details = _apply_presettle_exits(
+                decision=decision,
+                rule=rule,
+                state=state,
+                state_path=effective_config.early_exit_state_path,
+                event_path=effective_config.presettlement_event_path,
+                inputs=presettle_inputs,
+                environment=environment,
+                source_profile=strategy_profile.profile_name,
+            )
+            if presettle_fires:
+                _logger.info(
+                    "pre-settle exit fired: %s (running rate at/above %.1f bp before the print pays)",
+                    ",".join(presettle_fires),
+                    -rule.exit_bp,
+                )
+            if presettle_error:
+                _logger.warning(
+                    "pre-settle ticker read failed; settled-print clock stands: %s",
+                    presettle_error,
+                )
+
+        # The drop exit: mask the
+        # names the UPCOMING frozen decision zeroes out of the currently
+        # served book, so their removals publish this cycle — ~00:02,
+        # before the post-settlement drift the 00:20 clock sells into.
+        drop_exit_fires: list[str] = []
+        drop_exit_masked = 0
+        if decision is not None and decision.decision_ts_ms % DAY_MS == 0:
+            decision, dropped_now, drop_exit_masked = _apply_drop_exits(decision=decision, state=state)
+            if dropped_now:
+                if frozenset(dropped_now) != state.drop_exits_logged:
+                    _logger.info(
+                        "drop exit fired: %s (the upcoming decision zeroes them; selling ahead of the 00:20 clock)",
+                        ",".join(dropped_now),
+                    )
+                    drop_exit_fires = dropped_now
+                state.drop_exits_logged = frozenset(dropped_now)
 
         plan = _carry_target_plan(
             decision=decision,
@@ -2656,12 +2812,12 @@ def run_carry_demo_cycle(
             equity_usdt=equity_usdt,
             engine_account_health_error=engine_account_health_error,
             entry_blockers=(
-                engine_reading.entry_blockers_for_strategy(ENGINE_CARRY_SLEEVE)
-                if engine_reading is not None
-                else {}
+                engine_reading.entry_blockers_for_strategy(ENGINE_CARRY_SLEEVE) if engine_reading is not None else {}
             ),
             cycle_now_ms=cycle_now_ms,
             cycle_state=state,
+            target_book_path=effective_config.target_book_path,
+            strategy_profile=strategy_profile.profile_name,
         )
         payload: dict[str, Any] = {
             "cycle_id": cycle_id,
@@ -2671,6 +2827,11 @@ def run_carry_demo_cycle(
             "environment": environment,
             "strategy_id": CARRY_STRATEGY_ID,
             "strategy_profile": strategy_profile.profile_name,
+            "effective_config_provenance": json.dumps(
+                effective_config.provenance_by_field(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             "operational_profile_sha256": demo.operational_profile_sha256,
             "replay_days": demo.replay_days,
             "notional_multiplier": demo.notional_multiplier,
@@ -2686,9 +2847,7 @@ def run_carry_demo_cycle(
             # the decision it served was frozen ahead of the deadline, and
             # whether this cycle itself froze the upcoming day.
             "data_build_skipped": data_build_skipped,
-            "decision_frozen_ahead": bool(
-                decision_frozen and state.frozen_ahead_bar_ts_ms == decision_ts_ms
-            ),
+            "decision_frozen_ahead": bool(decision_frozen and state.frozen_ahead_bar_ts_ms == decision_ts_ms),
             "freeze_ahead_frozen": freeze_ahead_frozen,
             "decision_universe_size": decision.universe_size if decision is not None else 0,
             "decision_replay_days": decision.replay_days if decision is not None else 0,
@@ -2697,9 +2856,11 @@ def run_carry_demo_cycle(
             "universe_fetched": int(build_stats.get("universe_fetched", 0)),
             "universe_eligible": universe_eligible,
             "candidate_skipped_symbols": int(build_stats.get("candidate_skipped_symbols", 0)),
-            # Whale-feed receipt (v6+): how many Binance EOD symbol-days were
-            # fetched/missing this cycle and how many known values fed the
-            # view. Absent keys mean the rule has no whale leg (v3/v4).
+            "candidate_universe_artifact_sha256": str(build_stats.get("candidate_universe_artifact_sha256", "")),
+            "candidate_universe_file_sha256": str(build_stats.get("candidate_universe_file_sha256", "")),
+            # Whale-feed receipt: how many Binance EOD symbol-days were
+            # fetched or missing and how many known values fed the view.
+            # Absent keys mean the selected rule has no whale leg.
             "whale_pairs_fetched": build_stats.get("whale_pairs_fetched"),
             "whale_pairs_missing": build_stats.get("whale_pairs_missing"),
             "whale_event_rows": build_stats.get("whale_event_rows"),
@@ -2709,10 +2870,10 @@ def run_carry_demo_cycle(
             "early_exit_enabled": demo.early_exit_enabled,
             "early_exit_fired": early_exit_fires,
             "early_exit_masked": len(state.early_exits or {}),
-            "presettle_exit_enabled": bool(
-                demo.early_exit_enabled and strategy_profile.presettle_exit
-            ),
+            "presettle_exit_enabled": bool(demo.early_exit_enabled and strategy_profile.presettle_exit),
             "presettle_fired": presettle_fires,
+            "presettlement_event_ids": [event.event_id for event in presettle_fire_details],
+            "presettlement_event_tape": str(effective_config.presettlement_event_path),
             "presettle_error": presettle_error,
             # Drop-exit receipt: names the upcoming decision zeroed and this
             # cycle announced, plus whether this cycle froze that upcoming
@@ -2720,14 +2881,6 @@ def run_carry_demo_cycle(
             "drop_exit_fired": drop_exit_fires,
             "drop_exit_masked": drop_exit_masked,
             "drop_exit_froze_ahead": drop_exit_frozen,
-            # Exodus-short receipt (lane2_exodus_short_v1): what the sleeve
-            # did this cycle. Absent keys mean the unit does not publish it.
-            "exodus_enabled": exodus_receipt.get("exodus_enabled"),
-            "exodus_opened": exodus_receipt.get("exodus_opened"),
-            "exodus_covered": exodus_receipt.get("exodus_covered"),
-            "exodus_entry_blocked": exodus_receipt.get("exodus_entry_blocked"),
-            "exodus_open_names": exodus_receipt.get("exodus_open_names"),
-            "exodus_error": exodus_receipt.get("exodus_error"),
             "open_positions": len(standing_symbols),
             "standing_symbols": len(standing_symbols),
             "planned_exits": plan.planned_exits,
@@ -2776,13 +2929,7 @@ def run_carry_demo_cycle(
         # For the daemon only, added after the dataset write above so the
         # persisted cycle schema does not change: the next instant a new
         # daily decision exists, where the daemon cuts its timer wait short.
-        # An exodus cover due sooner wins the slot; the 60s idle floor is the
-        # correctness backstop either way, this is the accelerator.
-        next_deadline_ts_ms = next_carry_decision_deadline_ts_ms(cycle_now_ms)
-        exodus_cover_ts_ms = exodus_receipt.get("exodus_next_cover_ts_ms")
-        if type(exodus_cover_ts_ms) is int and exodus_cover_ts_ms > 0:
-            next_deadline_ts_ms = min(next_deadline_ts_ms, exodus_cover_ts_ms)
-        payload["next_time_deadline_ts_ms"] = next_deadline_ts_ms
+        payload["next_time_deadline_ts_ms"] = next_carry_decision_deadline_ts_ms(cycle_now_ms)
     return PublishedTargetCyclePayload(
         payload,
         target_book_path=engine_book_path,

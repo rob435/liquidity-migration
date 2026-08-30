@@ -8,8 +8,8 @@ Bybit.
 [`engine/`](engine) is a Rust workspace that trades: one process, one thread,
 one loop from market message to signed order. It **is the account owner,
 deployed and live on the demo account** — it holds that account's
-single-writer lease, it is the only order path, and both producers size from
-its heartbeat. A second engine unit runs on the funded account, and only while
+single-writer lease, it is the only order path, and the LONG and CARRY
+producers size from its heartbeat. A second engine unit runs on the funded account, and only while
 `REAL_MONEY` is armed in the host credential file.
 
 Measured by `cd engine && cargo run --release -- bench`, with real signing and
@@ -21,7 +21,7 @@ slower — 84 ns and 3.9 ms; both tables are in
 [docs/engine.md](docs/engine.md).) Live
 decision-to-acknowledgement is about 179 ms median, dominated by geography.
 
-Each of the five venues may write its hostnames in exactly one file, its own
+Each of the six venue families may write its hostnames in exactly one file, its own
 `realm.rs`, and the funded gateway refuses to build unless `REAL_MONEY` is
 armed in the host credential file. Design, crates and safety posture:
 [docs/engine.md](docs/engine.md). Live truth: [STATE.md](STATE.md).
@@ -30,9 +30,9 @@ armed in the host credential file. Design, crates and safety posture:
 
 | Sleeve | Profile | Toggle |
 | --- | --- | --- |
-| LONG | `LongV12WideStop` | `LONG_SLEEVE` |
+| LONG | `LongV12WideStop` — one shared signal, sizing, entry, and exit reducer for live and research; no take-profit | `LONG_SLEEVE` |
 | CARRY | `carry_hold_v7_live_v1` — the v7 execution clock, which trades the registered `lane2_carry_hold_v7` rule | `CARRY_SLEEVE` |
-| EXODUS SHORT | `lane2_exodus_short_v1` — shorts what v7's pre-settle exit abandons | `EXODUS_SHORT_PROFILE` on each carry unit; unset drains that realm's book flat |
+| EXODUS SHORT | `lane2_exodus_short_v1` — an independent producer consuming CARRY's durable pre-settlement events | always on in demo; independent of the CARRY toggle |
 | LONG / CARRY / EXODUS, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
 
 Which demo toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not
@@ -49,7 +49,7 @@ Demo is the only practice book. What each sleeve trades is in
 | [`liquidity_migration/`](liquidity_migration/README.md) | the Python research, public-data, strategy, policy, and read-only operations plane; it has no order path |
 | [`engine/`](engine) | the Rust execution engine workspace — seven crates, from the shared types to the loop |
 | [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
-| [`deploy/`](deploy) | `sleeves.env`, systemd units, environment handling |
+| [`deploy/`](deploy) | the canonical fleet manifest, `sleeves.env`, systemd units, and environment handling |
 | [`configs/`](configs) | Lane-2 strategy registrations and operational profiles |
 | `data/` | per-sleeve event stores and reconciliation captures (runtime, not tracked) |
 | `reports/` | research-run outputs (runtime, not tracked) |

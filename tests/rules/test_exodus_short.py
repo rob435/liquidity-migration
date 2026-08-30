@@ -49,10 +49,11 @@ class TestRegisteredConfig:
         self, cfg: ExodusShortConfig
     ) -> None:
         assert cfg.config_id == "lane2_exodus_short_v1"
+        assert cfg.accepted_source_profile == "carry_hold_v7_live_v1"
+        assert cfg.accepted_source_config_id == "lane2_carry_hold_v7"
         assert cfg.cover_minutes_after_settlement == 60
         assert cfg.entry_valid_minutes_after_settlement == 20
         assert cfg.stop_loss_fraction == 0.35
-        assert cfg.entry_leverage == 2.0
         payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         assert payload["rule"]["sizing"]["basis"] == "carry_position_at_fire"
 
@@ -104,14 +105,18 @@ class TestBookShape:
         self, cfg: ExodusShortConfig
     ) -> None:
         text = render_exodus_book(
-            [_record()], cfg=cfg, now_ms=S - 10 * MIN_MS, source="exodus_short"
+            [_record()],
+            cfg=cfg,
+            now_ms=S - 10 * MIN_MS,
+            source="exodus_short",
+            entry_leverage=2.0,
         )
         book = json.loads(text)
         (target,) = book["targets"]
         assert target["notional_usdt"] == -54.0
         assert target["target_qty"] == -3.2
         assert target["stop_loss_fraction"] == 0.35
-        assert target["leverage"] == cfg.entry_leverage
+        assert target["leverage"] == 2.0
 
     def test_validity_closes_entries_at_settlement_plus_the_window(
         self, cfg: ExodusShortConfig
@@ -119,7 +124,11 @@ class TestBookShape:
         # The engine closes entries 15 minutes before a book expires, so
         # validity of S+20 means no fill later than S+5.
         text = render_exodus_book(
-            [_record()], cfg=cfg, now_ms=S - 10 * MIN_MS, source="exodus_short"
+            [_record()],
+            cfg=cfg,
+            now_ms=S - 10 * MIN_MS,
+            source="exodus_short",
+            entry_leverage=2.0,
         )
         assert json.loads(text)["valid_until_ms"] == (
             S + cfg.entry_valid_minutes_after_settlement * MIN_MS
@@ -133,6 +142,7 @@ class TestBookShape:
             cfg=cfg,
             now_ms=S - 10 * MIN_MS,
             source="exodus_short",
+            entry_leverage=2.0,
         )
         book = json.loads(text)
         targets = {row["symbol"]: row for row in book["targets"]}
@@ -150,6 +160,7 @@ class TestBookShape:
                 cfg=cfg,
                 now_ms=S + 60 * MIN_MS,
                 source="exodus_short",
+                entry_leverage=2.0,
                 cover_records=[record],
             )
         )
@@ -163,7 +174,9 @@ class TestBookShape:
         ]
 
     def test_an_empty_book_is_cash_not_silence(self, cfg: ExodusShortConfig) -> None:
-        text = render_exodus_book([], cfg=cfg, now_ms=S, source="exodus_short")
+        text = render_exodus_book(
+            [], cfg=cfg, now_ms=S, source="exodus_short", entry_leverage=2.0
+        )
         book = json.loads(text)
         assert book["targets"] == []
         assert book["valid_until_ms"] > S
@@ -214,6 +227,7 @@ class TestStateFile:
                 cfg=cfg,
                 now_ms=S - 10 * MIN_MS,
                 source="exodus_short",
+                entry_leverage=2.0,
             )
         )["targets"][0]
         assert target["notional_usdt"] == -54.0

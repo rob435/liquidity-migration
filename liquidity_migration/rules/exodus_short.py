@@ -1,23 +1,8 @@
-"""The exodus short: ride the fall AFTER a dying crowd-fee print settles.
+"""Registered Exodus-short rule, record codec, timing, and book rendering.
 
-Measured 2026-08-20 (docs/research/research_findings.md §the exodus short):
-when the carry sleeve's pre-settlement exit fires — the running rate says
-the deep funding print is dying — the name's price keeps falling for about
-an hour past the settlement. Shorting the exact position carry abandons,
-at the fire, and covering 60 minutes after the settlement earned +95 bp
-mean (+50 median) per event net of the 15.6 bp round trip, on all 1,112
-historical book fires, with the 18 real premature fires (the rule fired
-but the print stayed deep; a short pays that print, and the worst squeezed
--945 bp) charged at their measured walk-forward rate. The edge lives in
-2025-26; 2024 loses slightly and 2021-23 is a wash — a regime trade on the
-modern farmer crowd, priced as such in the registered config.
-
-This module owns the sleeve's whole decision surface: a record per fired
-name (exact carry quantity and marked notional frozen at fire, settlement time), the cover clock, and the
-rendered book the engine follows. The carry producer opens records at its
-own fire site — the trigger IS carry's fire, so there is no second signal
-machine. Entries cross the spread; the venue stop is a disaster fence
-(0.35, the same posture as carry's declared stop), never a strategy exit:
+The independent Exodus producer consumes CARRY's durable typed pre-settlement
+events and owns its state transitions and publication. Entries cross the
+spread; the venue stop is a disaster fence, never a strategy exit:
 every stop level tested from +30 bp to +1500 bp lost money against the
 time-boxed cover, because these names wick violently while dying.
 """
@@ -54,13 +39,14 @@ class ExodusShortConfig:
     """Committed exodus-short rule. Field names mirror the JSON."""
 
     config_id: str
+    accepted_source_profile: str
+    accepted_source_config_id: str
     cover_minutes_after_settlement: int
     #: Book validity past the settlement. The engine closes entries 15 min
     #: before a book expires, so 20 here means no fill later than S+5 —
     #: past that the ride left is not worth the round trip.
     entry_valid_minutes_after_settlement: int
     stop_loss_fraction: float
-    entry_leverage: float
 
     @classmethod
     def from_json(cls, path: str | Path) -> "ExodusShortConfig":
@@ -72,6 +58,12 @@ class ExodusShortConfig:
                 f"unsupported trigger basis {trigger.get('basis')!r}; "
                 "only 'carry_presettle_exit_fire' is implemented"
             )
+        accepted_source_profile = trigger.get("source_profile")
+        accepted_source_config_id = trigger.get("source_config_id")
+        if not isinstance(accepted_source_profile, str) or not accepted_source_profile:
+            raise ExodusShortError("trigger source_profile must be a non-empty string")
+        if not isinstance(accepted_source_config_id, str) or not accepted_source_config_id:
+            raise ExodusShortError("trigger source_config_id must be a non-empty string")
         sizing = rule["sizing"]
         if sizing.get("basis") != "carry_position_at_fire":
             raise ExodusShortError(
@@ -82,12 +74,13 @@ class ExodusShortConfig:
         stop = rule["stop"]
         return cls(
             config_id=payload["config_id"],
+            accepted_source_profile=accepted_source_profile,
+            accepted_source_config_id=accepted_source_config_id,
             cover_minutes_after_settlement=int(cover["minutes_after_settlement"]),
             entry_valid_minutes_after_settlement=int(
                 rule["entry"]["valid_minutes_after_settlement"]
             ),
             stop_loss_fraction=float(stop["stop_loss_fraction"]),
-            entry_leverage=float(rule["entry"]["leverage"]),
         )
 
 
@@ -235,8 +228,9 @@ def render_exodus_book(
     cfg: ExodusShortConfig,
     now_ms: int,
     source: str,
-    entry_leverage: float | None = None,
+    entry_leverage: float,
     cover_records: list[ExodusShortRecord] | None = None,
+    entry_closed_ts_ms_by_symbol: Mapping[str, int] | None = None,
 ) -> str:
     """The absolute short book: every open record, negative, with the fence
     stop. Book validity runs to the latest settlement while each target has
@@ -246,20 +240,22 @@ def render_exodus_book(
     ``cover_records`` are explicit zero targets. Naming a due dynamic symbol
     lets a fresh follower find and close it after an engine restart.
 
-    ``entry_leverage`` is a deployment dial (the operational profile's,
-    same as carry's own book) and overrides the registered file's value;
-    leverage changes margin usage, never the measured economics."""
-    leverage = cfg.entry_leverage if entry_leverage is None else entry_leverage
+    ``entry_leverage`` is the resolved deployment dial from the operational
+    profile. Leverage changes margin usage, never the measured economics."""
+    closed_entries = dict(entry_closed_ts_ms_by_symbol or {})
     targets = [
         EngineTarget(
             symbol=r.symbol,
             notional_usdt=-abs(r.notional_usdt),
             stop_loss_fraction=cfg.stop_loss_fraction,
-            leverage=leverage,
+            leverage=entry_leverage,
             entry_valid_until_ms=(
-                r.settlement_ts_ms
-                + cfg.entry_valid_minutes_after_settlement * MIN_MS
-                - _ENGINE_ENTRY_CUTOFF_MS
+                min(
+                    r.settlement_ts_ms
+                    + cfg.entry_valid_minutes_after_settlement * MIN_MS
+                    - _ENGINE_ENTRY_CUTOFF_MS,
+                    closed_entries.get(r.symbol, 2**63 - 1),
+                )
             ),
             target_qty=(-abs(r.target_qty) if r.target_qty is not None else None),
         )
@@ -270,7 +266,7 @@ def render_exodus_book(
             symbol=r.symbol,
             notional_usdt=0.0,
             stop_loss_fraction=cfg.stop_loss_fraction,
-            leverage=leverage,
+            leverage=entry_leverage,
         )
         for r in (cover_records or [])
     )

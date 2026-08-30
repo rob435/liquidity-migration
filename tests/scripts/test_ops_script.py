@@ -32,6 +32,8 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
     for relative in (
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
+        Path("deploy/lib_sleeves.sh"),
+        Path("deploy/fleet_manifest.tsv"),
     ):
         target = checkout / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -210,8 +212,17 @@ def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> Non
 
     assert _run("units", env=environment).returncode == 0
     payload = capture.read_text(encoding="utf-8")
-    assert "systemctl list-units 'liquidity-migration-*'" in payload
-    assert "systemctl list-timers 'liquidity-migration-*'" in payload
+    assert 'systemctl list-units "${REMOTE_ARGS[@]}"' in payload
+    assert 'systemctl list-timers "${REMOTE_ARGS[@]}"' in payload
+    for unit in (
+        "liquidity-migration-engine.service",
+        "liquidity-migration-engine-mainnet.service",
+        "liquidity-migration-backup.timer",
+        "liquidity-migration-chaos-drill.timer",
+        "liquidity-migration-bybit-exodus-demo.service",
+        "liquidity-migration-bybit-exodus-mainnet.service",
+    ):
+        assert unit in payload
 
     assert _run("logs", "bybit-carry-demo.service", env=environment).returncode == 0
     payload = capture.read_text(encoding="utf-8")
