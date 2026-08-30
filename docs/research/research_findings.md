@@ -44,9 +44,31 @@ triggered on ≥2 distinct earlier days within 4: +95 bp/trade (t 1.3, n
 cohort, agreeing in four of six years; 2024 inverts (stale +245 beat fresh
 +166). Right-sized as the ledger's forward A/B rather than a conviction.
 
+**The rank barrier, priced (the HNTUSDT question).** HNT 2026-08-30 is the
+case: judged a 7 as a rank-11 mover at 01:05 UTC (0.4215) but the trigger
+scan stops at rank 10, so entry came at 09:05, rank 9, 0.6204 — the barrier
+cost 8 hours and +47%, on a name already +265% off its 08-16 base (a
+12-day grind at $0.1–2M daily turnover that no 90-day-turnover universe
+can see, then $56M arrived in one day). Lowering the barrier mechanically
+does not pay: rank 11–30 triggers under the live cooldown earn +58
+bp/trade (t 2.0, win 44%, 2026 −32), and the pool decomposes into a
+lottery — **9% graduate to top-10 within 3 days (+1,805 bp/trade, 89%
+win); the other 91% average −126 bp/trade (40% win)**. Conditioning on
+graduation is hindsight; nothing in the panel separates the 9% in advance.
+Two more cohort facts: in the top-10 set, entries after a >100% 7-day
+run-up average **−155 bp/trade (35% win)** — HNT's entry cohort is
+mechanically the worst one — and below rank 10 quality drops by roughly
+two-thirds at every run-up level. Both say the same thing: what would make
+a wider or later funnel work is judgment, not a looser rule. The zero-risk
+next step, if wanted: extend the trigger scan's *journaling* to rank ≤ 30
+(publication kept at ≤ 10) so the ledger accrues a judged rank-11–30
+forward record before any entry barrier moves.
+
 **Boundary.** Lane-1 on seen data; next-open entries, flat costs, no book
 interaction; the turnover rank is rebuilt from kline turnover rather than
-venue tickers. Trade counts are events, not fills.
+venue tickers. Trade counts are events, not fills. The graduating-cohort
+split conditions on the future by construction and is a diagnostic, never
+an entry rule.
 
 ## 2026-08-30 — v13 exit hunt, round two: three new data sources, nothing binds
 
