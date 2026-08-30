@@ -88,6 +88,10 @@ pub struct Facts<'a> {
     /// Private-stream resets since boot, including the initial subscription;
     /// each one is a recovered gap.
     pub stream_resets: u64,
+    /// Seconds this engine has been running. The counters around it are all
+    /// since-boot, and "fills 0" means something different two minutes after
+    /// a deploy than it does at the end of a day.
+    pub uptime_s: u64,
     /// Venue clock minus this box's clock, in milliseconds, off the freshest
     /// quote. Null before the first quote. A box that drifts makes every
     /// venue-stamp comparison quietly wrong.
@@ -371,6 +375,7 @@ impl Heartbeat {
                 facts.amends_pulled_unconfirmed.to_string(),
             ),
             ("stream_resets", facts.stream_resets.to_string()),
+            ("uptime_s", facts.uptime_s.to_string()),
             (
                 "venue_clock_offset_ms",
                 or_null(facts.venue_clock_offset_ms.map(|ms| ms.to_string())),
@@ -542,7 +547,7 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 45] = [
+    const KEYS: [&str; 46] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -580,6 +585,7 @@ mod tests {
         "realm",
         "strategies",
         "stream_resets",
+        "uptime_s",
         "venue",
         "venue_clock_offset_ms",
         "venue_task_p50_ns",
@@ -650,6 +656,7 @@ mod tests {
             amends_confirmed: 4,
             amends_pulled_unconfirmed: 1,
             stream_resets: 2,
+            uptime_s: 7_460,
             venue_clock_offset_ms: Some(-12),
             equity_usdt: 10_250.5,
             available_usdt: 4_100.25,
@@ -674,6 +681,7 @@ mod tests {
         assert_eq!(parsed["amends_confirmed"], 4);
         assert_eq!(parsed["amends_pulled_unconfirmed"], 1);
         assert_eq!(parsed["stream_resets"], 2);
+        assert_eq!(parsed["uptime_s"], 7_460);
         assert_eq!(parsed["venue_clock_offset_ms"], -12);
         assert_eq!(parsed["quota_hold_p99_ns"], 90_000_000);
         assert_eq!(parsed["barrier_wait_p99_ns"], 1_600_000);
@@ -1146,6 +1154,7 @@ mod fill_cost_tests {
             amends_confirmed: 0,
             amends_pulled_unconfirmed: 0,
             stream_resets: 0,
+            uptime_s: 0,
             venue_clock_offset_ms: None,
             equity_usdt: 100.0,
             available_usdt: 100.0,

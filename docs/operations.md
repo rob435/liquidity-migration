@@ -69,6 +69,39 @@ profile and candidate-universe projections are root-owned, runtime-group
 readable mode `0640`; the producer can verify those stable files but cannot
 rewrite the reviewed inputs.
 
+## Host network
+
+Bybit is served through CloudFront, and CloudFront chooses which edge answers
+from the resolver the DNS query arrives on. The box has no working IPv6
+egress, so a query sent over IPv6 is placed on another continent and comes
+back naming an edge about 206 ms away. The same resolver asked over IPv4
+returns the Singapore edge, about 2 ms away. The box sits in Johor, minutes
+from that edge.
+
+The box therefore resolves over IPv4 only and prefers IPv4 addresses:
+
+- `/etc/netplan/50-cloud-init.yaml` lists IPv4 nameservers for `eth0` and no
+  IPv6 ones. Netplan merges the `nameservers` list across files rather than
+  letting a later file replace it, so an IPv6 resolver has to be absent here;
+  adding an IPv4-only file beside it leaves the IPv6 entries in place.
+- `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` stops cloud-init
+  writing that file again, which would restore them.
+- `/etc/netplan/99-dns-ipv4-only.yaml` adds the IPv4 fallback resolvers.
+- `/etc/gai.conf` gives IPv4-mapped addresses precedence.
+
+`netplan generate` writes the merged result to `/run/systemd/network/`, so
+`grep -h ^DNS= /run/systemd/network/*.network` is what the box will actually
+use after a reboot — check that, not the netplan files.
+
+A process keeps whatever edge it resolved when it connected, so anything
+started before those files were in place holds the far edge until it is
+restarted.
+
+`venue_clock_offset_ms` in the engine heartbeat is how this is read back. It
+is how far a quote's venue stamp sits from this box's clock at the moment the
+quote is read off the socket, so it carries the one-way path: single or low
+tens of milliseconds is the near edge, two hundred is the far one.
+
 ## Release verification
 
 Install and rollout bind the checkout commit, release marker, binary SHA-256,

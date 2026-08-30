@@ -1,0 +1,30 @@
+[Unit]
+Description=liquidity-migration off-box backup: the WALs and trade files to another machine
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+KillMode=control-group
+# One rsync over a WAN; a nightly run that hangs must not stack behind itself.
+TimeoutStartSec=900
+# Root, because the sources are two engines' state directories with two
+# different owners, and the SSH identity for the destination is root's.
+User=root
+WorkingDirectory=/opt/liquidity-migration
+# Destination, sources and stamp all ride in one optional env file; absent
+# means the script notes "not configured" and exits 0. The venue credentials
+# are never loaded here at all — this unit touches files, not the account.
+EnvironmentFile=-/etc/liquidity-migration/backup.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=512M
+# A copy job must not preempt anything that trades.
+Nice=15
+IOSchedulingClass=idle
+ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-backup.service main
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal

@@ -163,15 +163,22 @@ def _within_startup_grace(
     return age is not None and 0.0 <= age <= max_age_minutes
 
 
-def _unverified_generation_cycle_alert(*, label: str, detail: str) -> Alert:
+def _unverified_generation_cycle_alert(
+    *, label: str, detail: str, active_minutes: float | None, startup_bound_min: float
+) -> Alert:
+    age = "unknown time" if active_minutes is None else f"{active_minutes:.0f} min"
     return Alert(
         key=f"liveness:{label}",
         severity=CRITICAL,
         message=(
-            f"{label}: DAEMON DOWN/HUNG — no verified completed cycle for the "
-            f"current service generation ({detail[:300]})."
+            f"{label}: DAEMON HUNG — up {age} in the current service generation with no "
+            f"verified completed cycle, past the {startup_bound_min:.0f} min startup budget "
+            f"that covers the boot kline backfill ({detail[:300]})."
         ),
-        headline=f"{_plain_name(label)}: producer restarted but has not completed a checkable cycle.",
+        headline=(
+            f"{_plain_name(label)}: producer up {age} without completing a cycle — "
+            "past the startup budget, so this is a hang, not a warmup."
+        ),
     )
 
 
@@ -739,6 +746,14 @@ def build_daily_digest(payload: dict[str, Any], *, scope_name: str, ts: str) -> 
         value = num(key)
         return "—" if value is None else f"{int(value)}"
 
+    def pretty_uptime(seconds: Any) -> str:
+        if not isinstance(seconds, int | float) or isinstance(seconds, bool) or seconds < 0:
+            return "up —"
+        total = int(seconds)
+        if total < 3_600:
+            return f"up {total // 60}m"
+        return f"up {total // 3_600}h {(total % 3_600) // 60:02d}m"
+
     equity = num("account_equity_usdt")
     positions = payload.get("positions")
     held = len(positions) if isinstance(positions, list) else None
@@ -760,6 +775,7 @@ def build_daily_digest(payload: dict[str, Any], *, scope_name: str, ts: str) -> 
         " · ".join(
             [
                 standing,
+                pretty_uptime(num("uptime_s")),
                 "equity —" if equity is None else f"equity ${equity:,.0f}",
                 "positions —" if held is None else f"{held} position(s)",
                 f"orders sent {count('orders_sent')}",
@@ -1240,10 +1256,17 @@ def gather_long_alerts(
             if observation is None:
                 if _within_startup_grace(
                     unit_runtime,
-                    max_age_minutes=args.max_cycle_age_min,
+                    max_age_minutes=args.max_startup_min,
                 ):
                     return alerts
-                alerts.append(_unverified_generation_cycle_alert(label=label, detail=detail))
+                alerts.append(
+                    _unverified_generation_cycle_alert(
+                        label=label,
+                        detail=detail,
+                        active_minutes=unit_runtime.active_age_minutes,
+                        startup_bound_min=args.max_startup_min,
+                    )
+                )
                 return alerts
             row = observation.row
             liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
@@ -1321,10 +1344,17 @@ def gather_carry_alerts(
             if observation is None:
                 if _within_startup_grace(
                     unit_runtime,
-                    max_age_minutes=args.max_cycle_age_min,
+                    max_age_minutes=args.max_startup_min,
                 ):
                     return alerts
-                alerts.append(_unverified_generation_cycle_alert(label=label, detail=detail))
+                alerts.append(
+                    _unverified_generation_cycle_alert(
+                        label=label,
+                        detail=detail,
+                        active_minutes=unit_runtime.active_age_minutes,
+                        startup_bound_min=args.max_startup_min,
+                    )
+                )
                 return alerts
             row = observation.row
             liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
@@ -1407,6 +1437,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
+    p.add_argument(
+        "--max-startup-min",
+        type=float,
+        default=120.0,
+        help=(
+            "how long a just-restarted producer may run before its first completed cycle pages. "
+            "Boot pays a kline backfill budgeted at 20 minutes and contended across every "
+            "producer on the box — observed near 100 minutes after a full-fleet deploy — so this "
+            "is different physics from --max-cycle-age-min's steady state. A dead or failed unit "
+            "still pages within minutes through the unit-state checks; only the hung-but-active "
+            "case waits this long"
+        ),
+    )
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
     # Roots stay strings so the empty-string skip sentinel does not become Path('.').
     p.add_argument(

@@ -55,7 +55,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from liquidity_migration.core.durable_file import durable_atomic_replace
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT))
+
+from liquidity_migration.core.durable_file import durable_atomic_replace  # noqa: E402
 
 BYBIT_PUBLIC = "https://api.bybit.com"
 #: Binance publishes who was aggressive; Bybit does not. Public, no key.

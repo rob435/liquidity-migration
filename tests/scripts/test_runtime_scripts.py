@@ -71,7 +71,7 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
 
 def test_manifest_contains_only_the_current_rust_owned_fleet() -> None:
     units = _units()
-    assert len(units) == 16
+    assert len(units) == 20
     assert "liquidity-migration-engine.service" in units
     assert "liquidity-migration-engine-mainnet.service" in units
     assert not any("account-execution" in name for name in units)
@@ -2588,3 +2588,25 @@ def test_ops_surface_has_no_python_execution_owner_commands() -> None:
     assert "create-state-roots" not in body
     assert "wedged-command" not in body
     assert "venue-accounting" not in body
+
+
+def test_dispatched_scripts_can_import_the_package_when_run_as_a_file() -> None:
+    # The wrapper runs each script by path, so Python puts the script's own
+    # directory on the import path and not the repo root, and the package is
+    # not installed into the venv. A script that imports it therefore has to
+    # put the root on the path itself, before the first such import.
+    wrapper = _read("scripts/run_authorized_runtime.sh")
+    dispatched = sorted(set(re.findall(r"(scripts/[\w/]+\.py)", wrapper)))
+    assert dispatched, "no python entrypoints found in the wrapper"
+
+    for relative in dispatched:
+        source = _read(relative)
+        imports = [
+            match.start()
+            for match in re.finditer(r"^\s*(?:from|import) liquidity_migration", source, re.M)
+        ]
+        if not imports:
+            continue
+        bootstrap = source.find("sys.path.insert")
+        assert bootstrap != -1, f"{relative} imports the package but never puts the root on the path"
+        assert bootstrap < min(imports), f"{relative} imports the package before the path is set"

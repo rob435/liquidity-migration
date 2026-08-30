@@ -6,6 +6,46 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-30 — The fleet was reaching Singapore by way of another
+  continent.** Bybit is served through CloudFront, which picks its edge from
+  the resolver the query arrives on. The box resolved over IPv6, has no
+  working IPv6 egress, and was handed an edge 206 ms away; the same resolver
+  asked over IPv4 named the Singapore edge 2 ms away, minutes from the box.
+  Every REST call, every market message and every order had been paying that
+  detour. The box now resolves over IPv4 only
+  (`/etc/netplan/99-dns-ipv4-only.yaml`) and prefers IPv4 addresses
+  (`/etc/gai.conf`), and the whole fleet was restarted onto the near edge.
+  Measured on the box, before against after: edge ping 206.4 ms against
+  2.0 ms; a full API call including the TLS handshake 858 ms against 26 ms;
+  the trade socket's connect-to-authenticated round trip 429 ms against
+  3.2 ms; a producer's restart-to-first-completed-cycle 30-100 minutes
+  against 11 seconds. Both engines ran on this box at the same moment on
+  either side of the change, which reads the difference directly:
+  `venue_clock_offset_ms` -227 on the far edge against -21 on the near one.
+  `forward-capture` was left running and still holds a far-edge socket.
+
+- **2026-08-30 — The LLM driver ledger can import its own package.** The
+  wrapper runs each script by path, so Python puts the script's directory on
+  the import path rather than the repo root, and the package is not installed
+  into the venv. `llm_driver_ledger.py` imported `liquidity_migration` without
+  first putting the root on the path, so the unit had been failing at import
+  and collecting nothing. It now bootstraps the path the way the other
+  dispatched scripts do, and a test holds every script the wrapper can
+  dispatch to that rule.
+
+- **2026-08-30 — A systemd stop is a stop, and a stuck strategy writes one
+  note.** The engine waited on SIGINT for its shutdown, and systemd stops
+  services with SIGTERM, so every deploy killed it: the log's buffered tail
+  never reached the OS, the account lease was dropped by process death rather
+  than by hand, and systemd recorded the clean stop as `Failed with result
+  'exit-code'` on status 143, which paged the alerts line. It now waits on
+  both signals and exits zero. Separately, a refusal wrote a WARN and a WAL
+  note every time, so a position whose protection refused each new entry wrote
+  one per quote — 3110 of them in a single episode on 2026-08-29, into the log
+  the fill and latency reports read. An unchanged refusal is now recorded
+  once a minute with a count of what it stood for; what the engine refuses is
+  unchanged.
+
 - **2026-08-30 — The forward tape records the fast touch.** The recorder now
   keeps Bybit's 10 ms L1 snapshots beside its L50 book, trades, ticker and
   liquidation feeds. Every book row names its depth; L1 and L50 keep separate
@@ -35,6 +75,60 @@ edit STATE.md to match.
   plain digest per UTC day from these fields and retries until delivery; its
   day marker is reserved watchdog state, not an alert cooldown. Optional host
   clock and off-box-backup-stamp checks remain off until configured.
+
+- **2026-08-30 — Deploys stop paging the alerts line.** The night's traffic —
+  ten of twelve messages — was one alert churning: "producer restarted but has
+  not completed a checkable cycle", CRITICAL, on every producer after every
+  deploy, clearing itself 30–100 minutes later. The diagnosis: a producer's
+  first completed cycle after restart pays the boot kline backfill
+  (`bootstrap_timeout_seconds` budgets 20 minutes, and four producers on one
+  box contend for the same REST budget — near 100 minutes observed after a
+  full-fleet deploy), while the watchdog's startup grace reused the 10-minute
+  steady-state freshness dial. Warming up read as hung. The fix gives startup
+  its own physics: `--max-startup-min` (default 120) covers a producer that is
+  verifiably active in its current systemd generation, silently; past it the
+  page now says "up N min without completing a cycle — past the startup
+  budget, so this is a hang, not a warmup". A dead or failed unit never gets
+  the grace — unit-state checks page those within minutes, which is what makes
+  the long budget safe. The regression test encodes last night's exact spam
+  shape (45 and 100 minutes into boot, current generation, no receipt → no
+  alert) and fails under the old grace.
+
+  The daily digest also gains the engine's uptime, because every counter in it
+  is since-boot and "fills 0" two minutes after a deploy was reading like a
+  dead day.
+
+- **2026-08-30 — The debugging channel gets one engine-health line a day, and
+  the small hygiene lands.** Built and tested; the next deploy enables it.
+
+  The heartbeat now carries the numbers this week's execution work created:
+  how long the order path actually waited for the disk (`barrier_wait_p99_ns`)
+  and for the request quota (`quota_hold_p99_ns`, a new ledger segment recorded
+  at every order/cancel/amend completion), amends priced by the venue against
+  amends pulled unanswered, private-stream resets, and the venue clock offset
+  measured off the freshest quote with both clocks sampled together. The
+  heartbeat's exact-keys test pins all six.
+
+  Each liveness unit posts one plain-text digest per UTC day on the alerts
+  line, built from that heartbeat: standing, equity, fills with maker share
+  and slip and markout, submit and round-trip times, the two pacing numbers,
+  the amend outcomes, and the clock offset. Absent fields print as dashes,
+  never as confident zeros. The day advances only on a delivered message, so
+  a failed send retries next run; a broken gate in either direction is pinned
+  by a main-loop test proved to fail both ways. The hourly digest stays dead —
+  this is daily, and `--no-daily-digest` turns it off per scope.
+
+  The hygiene: the demo watchdog passes `--host-clock-check` and pages when
+  `timedatectl` says the clock is undisciplined (one scope per box, so one
+  cause pages once); `backup_state.sh` plus a nightly timer rsync the WALs and
+  trade files off-box and touch a stamp whose age the watchdog alarms on —
+  armed only once `backup.env` and `LIVENESS_BACKUP_STAMP_FILE` are configured,
+  so nobody is paged about a backup they never set up; and `chaos_drill.sh`
+  plus a Sunday timer kill the demo engine weekly and report clean/latched/
+  did-not-return on the alerts line. The drill is hardwired to the demo unit,
+  a test forbids the funded unit's name from appearing in it, and its timer is
+  deliberately not Persistent — a box booting after a real outage has just had
+  its recovery exercised and does not need a rehearsal on top.
 
 - **2026-08-29 — The maker protects only the side aggressive flow is attacking.**
   Public trade notional is divided by displayed same-side dollars within a

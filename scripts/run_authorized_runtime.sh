@@ -61,6 +61,7 @@ case "$UNIT:$ENTRYPOINT" in
             --account-scope demo
             --max-cycle-age-min 10
             --cooldown-min 60
+            --host-clock-check
             --telegram
         )
         ;;
@@ -75,6 +76,12 @@ case "$UNIT:$ENTRYPOINT" in
             --cooldown-min 60
             --telegram
         )
+        ;;
+    liquidity-migration-backup.service:main)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/backup_state.sh)
+        ;;
+    liquidity-migration-chaos-drill.service:main)
+        COMMAND=(/opt/liquidity-migration/scripts/runtime/chaos_drill.sh)
         ;;
     liquidity-migration-trade-notify.service:main)
         # Read-only book differ; sends trade updates to the owner's DM.

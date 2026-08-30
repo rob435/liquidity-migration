@@ -1,0 +1,26 @@
+[Unit]
+Description=liquidity-migration chaos drill: kill the DEMO engine and watch it recover
+
+[Service]
+Type=oneshot
+KillMode=control-group
+# The drill itself waits up to 180s for recovery; give it slack, never a stack.
+TimeoutStartSec=300
+# Root, for the kill: the engine runs as its own user.
+User=root
+WorkingDirectory=/opt/liquidity-migration
+# The engine env carries LIVENESS_ENGINE_HEARTBEAT_FILE; bybit-demo.env
+# carries the Telegram token for the result line. The account credentials are
+# stripped straight back out — a drill kills a process, never talks to the
+# venue.
+EnvironmentFile=/etc/liquidity-migration/engine.env
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
+Environment=TELEGRAM_ENABLED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=256M
+ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-chaos-drill.service main
+StandardOutput=journal
+StandardError=journal

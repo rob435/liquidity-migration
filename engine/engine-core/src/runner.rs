@@ -123,12 +123,38 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     }
 
     let outcome = engine
-        .run(&mut market_feed, &mut order_feed, async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .run(&mut market_feed, &mut order_feed, stop_signal())
         .await?;
     tracing::info!(?outcome, "stopped");
     Ok(())
+}
+
+/// Wait for whichever stop this engine is given.
+///
+/// systemd stops a service with SIGTERM; a terminal sends SIGINT. Both mean
+/// the same thing here — finish the current write, drop the account lease,
+/// exit zero. Answering only SIGINT makes every deploy a kill: the log's
+/// buffered tail never reaches the OS, and systemd records the clean stop as
+/// a failure, which pages.
+///
+/// The handler is registered when this is called, not when it is first
+/// polled, so it is in place before the engine begins running.
+fn stop_signal() -> impl std::future::Future<Output = ()> {
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+    async move {
+        match terminate {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no SIGTERM handler: this run stops on SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
 }
 
 /// What the run claimed before the engine booted: the account lock, when this
@@ -177,5 +203,21 @@ async fn single_writer(venue: &mut Venue) -> Result<Claim, Box<dyn Error>> {
             Err(Box::new(LeaseError::AlreadyHeld { path, holder }))
         }
         Err(e) => Err(Box::new(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_systemd_stop_reaches_the_shutdown_path() {
+        // The handler is registered by the call below, before the raise:
+        // an unregistered SIGTERM would kill this test binary outright.
+        let stop = super::stop_signal();
+        unsafe { libc::raise(libc::SIGTERM) };
+        tokio::time::timeout(Duration::from_secs(5), stop)
+            .await
+            .expect("systemd stops with SIGTERM, and it has to end the run");
     }
 }

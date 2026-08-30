@@ -398,6 +398,34 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
 }
 
 #[tokio::test]
+async fn a_doomed_order_re_proposed_on_every_quote_is_recorded_once() {
+    // The same refusal, quote after quote, is what a stuck position produces
+    // live: the strategy keeps asking, the engine keeps saying no. Refusing
+    // is unchanged; what must not happen is a note per quote in the log the
+    // fill and latency reports read.
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.0004);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 12, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let kinds = appends(&h.tape);
+    assert_eq!(kinds.iter().filter(|k| *k == "intent").count(), 12);
+    // Boot writes one note; the twelve refusals write one between them.
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "note").count(),
+        2,
+        "twelve identical refusals must not write twelve notes: {kinds:?}"
+    );
+}
+
+#[tokio::test]
 async fn retired_control_anchors_are_ignored_and_cannot_halt_entries() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let replayed = vec![

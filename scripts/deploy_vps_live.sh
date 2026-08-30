@@ -1458,6 +1458,12 @@ verify_topology() {
     if systemctl cat liquidity-migration-trade-notify.timer >/dev/null 2>&1; then
         verify_unit on liquidity-migration-trade-notify.timer "trade notify timer is not active"
     fi
+    if systemctl cat liquidity-migration-backup.timer >/dev/null 2>&1; then
+        verify_unit on liquidity-migration-backup.timer "nightly backup timer is not active"
+    fi
+    if systemctl cat liquidity-migration-chaos-drill.timer >/dev/null 2>&1; then
+        verify_unit on liquidity-migration-chaos-drill.timer "weekly chaos drill timer is not active"
+    fi
     if systemctl cat liquidity-migration-forward-capture.service >/dev/null 2>&1; then
         verify_unit on liquidity-migration-forward-capture.service "forward market capture is not active"
     fi
@@ -3037,6 +3043,10 @@ activate_mode() {
         || fail "cannot start the trade notification timer"
     systemctl enable --now liquidity-migration-forward-capture.service \
         || fail "cannot start forward market capture"
+    systemctl enable --now liquidity-migration-backup.timer \
+        || fail "cannot enable the nightly backup timer"
+    systemctl enable --now liquidity-migration-chaos-drill.timer \
+        || fail "cannot enable the weekly chaos drill timer"
     if mainnet_armed; then
         start_mainnet_fleet
     fi

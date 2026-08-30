@@ -4,9 +4,10 @@ Two chat lines, two reporters, one listener. The liveness watchdog pages when th
 healthy, and its view of the engine is the heartbeat file the engine rewrites every few seconds;
 `trade-notify` sends every sleeve's entries and exits to the owner's DM, and an exit carries what the
 position made (§The trading story). The engines send nothing themselves (both units strip the bot
-token) — they write files, and `trade-notify` is what reaches a phone. There is no hourly digest
-(§The hourly digest). The listener is the control panel (§Owner control buttons): the one component
-that reads the chat, and it posts the panel and its action results.
+token) — they write files, and `trade-notify` is what reaches a phone. The watchdog also posts one
+engine-health line per fleet per day on the alerts line (§The daily digest) — that is the only
+periodic message; there is no hourly anything. The listener is the control panel (§Owner control
+buttons): the one component that reads the chat, and it posts the panel and its action results.
 
 **The main line** (`TELEGRAM_CHAT_ID`) carries the control panel and its action results. **The alerts
 line** (`TELEGRAM_ALERT_CHAT_ID`) carries
@@ -26,12 +27,14 @@ returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`
 
 | Unit | Telegram | Sends | Line |
 | --- | --- | --- | --- |
-| `demo-liveness` | on | watchdog alerts, demo scope | alerts |
-| `mainnet-liveness` | on | watchdog alerts, mainnet scope | alerts |
+| `demo-liveness` | on | watchdog alerts, demo scope, plus one daily engine digest | alerts |
+| `mainnet-liveness` | on | watchdog alerts, mainnet scope, plus one daily engine digest | alerts |
 | `telegram-controls` | on | control panel + action results; **also listens** | main |
 | `engine` / `engine-mainnet` | off — the unit strips the token | nothing; the engine's live signal is its heartbeat file, which the watchdog reads | — |
 | `llm-ledger` | off — the unit reads no Telegram env | nothing; its judged candidates are read by the LONG producer, and the trades they become page as LONG entries/exits | — |
 | `trade-notify` | on | both accounts' entries (from the books) and exits with their P&L (from the engines), plus one daily summary; runs every 5 minutes | main |
+| `chaos-drill` | on | the weekly demo crash-drill verdict: recovered clean, came back latched, or did not come back | alerts |
+| `backup` | off — no Telegram env | nothing; its receipt is the stamp file the watchdog reads the age of | — |
 | every producer | off or unset | nothing | — |
 
 Producers publish targets and never notify; the phone's trading story comes
@@ -218,6 +221,30 @@ unrecognised word is refused rather than guessed at. The account number, the lea
 id are optional: an engine that has not yet reached the venue may carry none of them. Anything else the
 engine writes is ignored.
 
+### The daily digest
+
+Once per UTC day, on the alerts line, each liveness unit posts one plain-text engine-health message
+built from the heartbeat it already reads: whether the engine may open, how long it has been up (every
+counter beside it is since-boot), equity and positions, the
+fills with their maker share, slip and one-minute markout, the order path's submit and round-trip
+times, how long it actually waited for the disk and for the request quota, amends priced by the venue
+against amends pulled unanswered, stream resets, and the venue clock offset. A field an older engine
+build does not write prints as a dash — never as a confident zero. Sent on the first watchdog run of
+the day; an undelivered digest retries next run, like an alert, and only a delivered one advances the
+day. An unreadable heartbeat sends nothing — the unreadable-heartbeat alert is already paging, and a
+digest of dashes would only pad it. `--no-daily-digest` turns it off per scope.
+
+### A restarted producer is a warmup, not a hang
+
+A producer's first completed cycle after a restart pays the boot kline backfill — budgeted at 20
+minutes and contended across every producer on the box, observed near 100 minutes after a
+full-fleet deploy. That is different physics from the steady state, where a healthy producer cycles
+inside `--max-cycle-age-min` (10 minutes). So the two have different dials: a producer that is
+verifiably active in its current service generation gets `--max-startup-min` (120 minutes) to
+complete its first checkable cycle, in silence. Past that it pages as a hang, and the page says how
+long it actually waited. A producer that is dead, failed, or in no known generation never gets the
+grace — the unit-state checks page those within minutes, which is what makes the long budget safe.
+
 ### What is not watched
 
 **Nothing watches venue and our records disagreeing.** Freshness is covered —
@@ -225,7 +252,10 @@ engine writes is ignored.
 and publishes no mismatch. That is a real gap, not a tidy-up. Closing it requires the engine to publish
 reconciliation evidence; the retired Python account journal is not an authority and must not be revived.
 
-Nothing watches a digest arriving either, deliberately: there is no digest.
+**The host's clock and the off-box backup are watched only where they are switched on.** The demo
+liveness unit passes `--host-clock-check`, so an unsynchronised clock pages once per box rather than
+once per scope; the backup check arms only when `LIVENESS_BACKUP_STAMP_FILE` is set beside a
+configured `backup.env`, so an owner who has not set backups up is not paged about them.
 
 ### How an alert behaves
 

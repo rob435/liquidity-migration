@@ -715,20 +715,26 @@ def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> N
         "carry_hold_demo_cycles",
         partition_by=(),
     )
-    args = SimpleNamespace(max_cycle_age_min=10)
+    args = SimpleNamespace(max_cycle_age_min=10, max_startup_min=120.0)
 
-    assert (
-        M.gather_carry_alerts(
-            carry_root=root,
-            now_ms=now,
-            args=args,
-            unit_runtime=M.UnitRuntime(
-                invocation_id=CURRENT_INVOCATION_ID,
-                active_age_minutes=8.0,
-            ),
-        )
-        == []
-    )
+    # The shape of the 2026-08-29 alert spam: a producer 45 minutes into its
+    # boot kline backfill, verifiably active in the current generation, with
+    # no completed cycle yet. That is a warmup, not a hang, and it pages
+    # nothing — the old 10-minute grace turned every deploy into a CRITICAL
+    # that cleared itself an hour later.
+    for warming_minutes in (8.0, 45.0, 100.0):
+        assert (
+            M.gather_carry_alerts(
+                carry_root=root,
+                now_ms=now,
+                args=args,
+                unit_runtime=M.UnitRuntime(
+                    invocation_id=CURRENT_INVOCATION_ID,
+                    active_age_minutes=warming_minutes,
+                ),
+            )
+            == []
+        ), f"{warming_minutes} min into boot is inside the startup budget"
 
     expired = M.gather_carry_alerts(
         carry_root=root,
@@ -736,11 +742,12 @@ def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> N
         args=args,
         unit_runtime=M.UnitRuntime(
             invocation_id=CURRENT_INVOCATION_ID,
-            active_age_minutes=10.01,
+            active_age_minutes=120.01,
         ),
     )
     assert [alert.key for alert in expired] == [f"liveness:{root.name}"]
-    assert "current service generation" in expired[0].message
+    assert "startup budget" in expired[0].message
+    assert "up 120 min" in expired[0].message, "the page says how long it actually waited"
 
 
 def test_prior_generation_or_stale_completion_cannot_mask_hung_daemon(
@@ -784,10 +791,10 @@ def test_prior_generation_or_stale_completion_cannot_mask_hung_daemon(
             ws_kline_store_rows=100,
         ),
     )
-    args = SimpleNamespace(max_cycle_age_min=10, max_ws_lag_hours=6)
+    args = SimpleNamespace(max_cycle_age_min=10, max_ws_lag_hours=6, max_startup_min=120.0)
     runtime = M.UnitRuntime(
         invocation_id=CURRENT_INVOCATION_ID,
-        active_age_minutes=20.0,
+        active_age_minutes=121.0,
     )
 
     prior = M.gather_long_alerts(
@@ -2108,6 +2115,7 @@ def test_mainnet_liveness_refuses_an_unbound_engine(monkeypatch) -> None:
 def _health_payload() -> dict:
     return {
         "may_open": True,
+        "uptime_s": 7_460,
         "account_equity_usdt": 10250.5,
         "positions": [{"symbol": "AGIUSDT"}, {"symbol": "ETHUSDT"}],
         "orders_sent": 41,
@@ -2131,6 +2139,9 @@ def test_daily_digest_reads_as_the_engines_own_numbers() -> None:
     text = M.build_daily_digest(_health_payload(), scope_name="mainnet", ts="2026-08-30 00:02 UTC")
     assert text.startswith("MAINNET engine daily health · 2026-08-30")
     assert "may open" in text
+    # Every counter beside it is since-boot; the uptime is what makes
+    # "fills 17" readable as a rate rather than a day.
+    assert "up 2h 04m" in text
     assert "equity $10,250" in text
     assert "2 position(s)" in text
     assert "fills 17 · maker 76%" in text
@@ -2152,6 +2163,7 @@ def test_daily_digest_prints_a_dash_for_what_an_older_engine_never_wrote() -> No
     # and it was nothing", which is the opposite of absent.
     text = M.build_daily_digest({"may_open": False}, scope_name="demo", ts="x")
     assert "NOT OPENING" in text
+    assert "up —" in text
     assert "equity —" in text
     assert "maker —" in text
     assert "disk wait p99 —" in text

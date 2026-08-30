@@ -261,6 +261,18 @@ struct AwaitingAmend {
     deadline_ns: u64,
 }
 
+/// What was last written about a repeating refusal, and how many identical
+/// ones have happened since.
+struct Refusal {
+    why: String,
+    at_ns: u64,
+    suppressed: u64,
+}
+
+/// How long an unchanged refusal stays collapsed before it is written again,
+/// so a condition that never clears still leaves a periodic trace.
+const REFUSAL_REPEAT_NS: u64 = 60_000_000_000;
+
 pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     pub wal: W,
     pub risk: R,
@@ -268,6 +280,11 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     venue_completions: tokio::sync::mpsc::Receiver<MutationCompletion>,
     pending_mutations: HashMap<u64, PendingMutation>,
     busy_symbols: HashMap<SymbolId, usize>,
+    /// The last refusal recorded for each strategy, symbol and tag. A
+    /// strategy that re-proposes a doomed order on every quote refuses just
+    /// the same; only the record of it is collapsed, so one stuck position
+    /// cannot bury the log the fill and latency reports read.
+    refusals: HashMap<(StrategyId, SymbolId, String), Refusal>,
     deferred_actions: HashMap<SymbolId, VecDeque<(Action, u64)>>,
     /// Actions released by a completed symbol mutation, retaining the market
     /// wake that produced each one. The per-wake flood budget and latency
@@ -793,6 +810,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let now = clock::now_ns();
         let (venue, venue_completions) = VenueClient::spawn(venue);
         let mut engine = Engine {
+            refusals: HashMap::new(),
             wal,
             risk,
             venue,
@@ -2310,6 +2328,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 amends_confirmed: *amends_confirmed,
                 amends_pulled_unconfirmed: *amends_pulled_unconfirmed,
                 stream_resets: *stream_resets,
+                // The monotonic clock's origin is this process's first tick,
+                // so "now" on it is the age of the run.
+                uptime_s: now_ns / 1_000_000_000,
                 venue_clock_offset_ms,
                 equity_usdt: account.equity_usdt,
                 available_usdt: account.available_usdt,
@@ -4544,10 +4565,39 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         intent: &Intent,
         why: &str,
     ) -> Result<(), EngineError> {
-        tracing::warn!(id = client_order_id, tag = %intent.tag, why, "order not sent");
+        let key = (intent.strategy, intent.symbol, intent.tag.clone());
+        let now_ns = clock::now_ns();
+        let repeated = self.refusals.get(&key).is_some_and(|last| {
+            last.why == why && now_ns.saturating_sub(last.at_ns) < REFUSAL_REPEAT_NS
+        });
+        if repeated {
+            if let Some(last) = self.refusals.get_mut(&key) {
+                last.suppressed += 1;
+            }
+            self.tell_refused(intent, why);
+            return Ok(());
+        }
+        let suppressed = self
+            .refusals
+            .insert(
+                key,
+                Refusal {
+                    why: why.to_string(),
+                    at_ns: now_ns,
+                    suppressed: 0,
+                },
+            )
+            .map(|last| last.suppressed)
+            .unwrap_or(0);
+        let also = if suppressed > 0 {
+            format!(" (and {suppressed} more like it)")
+        } else {
+            String::new()
+        };
+        tracing::warn!(id = client_order_id, tag = %intent.tag, why, suppressed, "order not sent");
         self.wal.append(&WalRecord::Note {
             source: "engine".into(),
-            text: format!("{client_order_id} not sent ({}): {why}", intent.tag),
+            text: format!("{client_order_id} not sent ({}): {why}{also}", intent.tag),
         })?;
         self.tell_refused(intent, why);
         Ok(())

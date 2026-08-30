@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly crash-recovery rehearsal on the DEMO engine
+
+[Timer]
+# Sunday morning UTC, when the owner is most likely awake for a latched
+# verdict. Deliberately NOT Persistent: a box booting after an outage has
+# just had its recovery exercised for real, and the first thing it needs is
+# not another crash.
+OnCalendar=Sun *-*-* 09:13:00 UTC
+AccuracySec=10min
+
+[Install]
+WantedBy=timers.target
