@@ -57,12 +57,6 @@ def git_fixture_env() -> dict[str, str]:
     return env
 
 
-@pytest.fixture(autouse=True)
-def clear_parent_git_bindings(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in GIT_LOCAL_ENV_VARS:
-        monkeypatch.delenv(name, raising=False)
-
-
 def book_row(
     symbol: str,
     ts_ms: int,
@@ -563,7 +557,44 @@ def test_model_rows_without_explicit_evidence_kind_fail_closed(
     assert "must declare evidence_kind" in capsys.readouterr().err
 
 
-def test_model_commit_refuses_a_different_current_profile_blob(tmp_path: Path) -> None:
+def test_model_commit_refuses_a_different_current_profile_blob(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clean_git_env = git_fixture_env()
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (caller / "tracked.txt").write_text("caller\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(caller)], check=True, env=clean_git_env)
+    subprocess.run(
+        ["git", "-C", str(caller), "config", "user.email", "caller@example.invalid"],
+        check=True,
+        env=clean_git_env,
+    )
+    subprocess.run(
+        ["git", "-C", str(caller), "config", "user.name", "Caller Test"],
+        check=True,
+        env=clean_git_env,
+    )
+    subprocess.run(["git", "-C", str(caller), "add", "."], check=True, env=clean_git_env)
+    subprocess.run(
+        ["git", "-C", str(caller), "commit", "-qm", "caller"],
+        check=True,
+        env=clean_git_env,
+    )
+    sentinel = caller / "untracked-sentinel.txt"
+    sentinel.write_text("leave me alone\n", encoding="utf-8")
+    caller_git = caller / ".git"
+    caller_head = (caller_git / "HEAD").read_bytes()
+    caller_ref_path = caller_git / caller_head.decode().removeprefix("ref: ").strip()
+    caller_before = {
+        "config": (caller_git / "config").read_bytes(),
+        "head": caller_head,
+        "index": (caller_git / "index").read_bytes(),
+        "ref": caller_ref_path.read_bytes(),
+        "sentinel": sentinel.read_bytes(),
+    }
+
     repo = tmp_path / "repo"
     rules = repo / "liquidity_migration/rules"
     backtest = repo / "liquidity_migration/research/backtest"
@@ -571,27 +602,40 @@ def test_model_commit_refuses_a_different_current_profile_blob(tmp_path: Path) -
     backtest.mkdir(parents=True)
     (rules / "long_native.py").write_text("PROFILE = 'v12'\n", encoding="utf-8")
     (backtest / "long_native.py").write_text("FILL = 'next_open'\n", encoding="utf-8")
-    git_env = git_fixture_env()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=git_env)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.email", "tape@example.invalid"],
-        check=True,
-        env=git_env,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.name", "Tape Test"],
-        check=True,
-        env=git_env,
-    )
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=git_env)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "pin"], check=True, env=git_env)
-    commit = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=git_env,
-    ).stdout.strip()
+    with monkeypatch.context() as caller_bindings:
+        caller_bindings.setenv("GIT_DIR", str(caller_git))
+        caller_bindings.setenv("GIT_WORK_TREE", str(caller))
+        git_env = git_fixture_env()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, env=git_env)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "tape@example.invalid"],
+            check=True,
+            env=git_env,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.name", "Tape Test"],
+            check=True,
+            env=git_env,
+        )
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=git_env)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-qm", "pin"],
+            check=True,
+            env=git_env,
+        )
+        commit = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        ).stdout.strip()
+
+    assert (caller_git / "config").read_bytes() == caller_before["config"]
+    assert (caller_git / "HEAD").read_bytes() == caller_before["head"]
+    assert (caller_git / "index").read_bytes() == caller_before["index"]
+    assert caller_ref_path.read_bytes() == caller_before["ref"]
+    assert sentinel.read_bytes() == caller_before["sentinel"]
 
     identity = _kernel_identity(commit, repo=repo)
     assert identity["matches_current_checkout"] is True
@@ -600,12 +644,3 @@ def test_model_commit_refuses_a_different_current_profile_blob(tmp_path: Path) -
     (rules / "long_native.py").write_text("PROFILE = 'different'\n", encoding="utf-8")
     with pytest.raises(ValueError, match="does not match the current checkout"):
         _kernel_identity(commit, repo=repo)
-
-
-def test_git_fixture_env_drops_parent_repository_bindings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for name in GIT_LOCAL_ENV_VARS:
-        monkeypatch.setenv(name, "caller-repository-value")
-
-    assert GIT_LOCAL_ENV_VARS.isdisjoint(git_fixture_env())

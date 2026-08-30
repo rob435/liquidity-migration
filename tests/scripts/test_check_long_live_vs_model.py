@@ -878,6 +878,8 @@ def test_main_end_to_end_writes_csv_report_and_summary(tmp_path: Path, capsys) -
             str(transitions),
             "--trades",
             str(engine),
+            "--data-root",
+            str(tmp_path / "data"),
             "--out",
             str(out),
         ]
