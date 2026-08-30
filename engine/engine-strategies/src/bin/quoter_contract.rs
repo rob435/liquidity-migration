@@ -350,10 +350,14 @@ fn executable_quote_px(side: Side, wanted: f64, bid: f64, ask: f64, tick: f64) -
     if !passive.is_finite() || !tick.is_finite() || tick <= 0.0 {
         return passive;
     }
-    let steps = engine_types::quantize::steps(passive, tick);
-    let snapped = match side {
-        Side::Buy => steps.floor(),
-        Side::Sell => steps.ceil(),
-    };
-    engine_types::quantize::round_clean(snapped * tick, tick)
+    engine_types::quantize::quantize_px(
+        passive,
+        side,
+        &InstrumentRule {
+            tick_size: tick,
+            qty_step: 0.0,
+            min_qty: 0.0,
+            min_notional: 0.0,
+        },
+    )
 }
