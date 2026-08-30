@@ -12,12 +12,14 @@ file.
 
 ### The fleet
 
-- **AUTOMATED TRADING IS ON, on both fleets.** The installed commit is
-  `4ab842c082adceda226d3f0ab2279da6c5c87b3e`. Its eight continuous daemons
-  and seven timers are active and enabled: both engines, all four producers,
-  the Telegram controls, the forward recorder and the seven scheduled jobs.
-  Those are the 15 managed units checked by `scripts/ops.sh status`, and
-  `REAL_MONEY` is armed. `deploy/sleeves.env` carries `LONG_SLEEVE=on` and
+- **AUTOMATED TRADING IS ON, on both fleets.** The canonical manifest contains
+  24 current units: ten continuous daemons, seven timers, and their seven
+  timer-backed oneshots. The daemons are both engines, all six producers, the
+  Telegram controls, and the forward recorder. Continuous daemons and timers
+  are active and enabled; oneshots are normally inactive between scheduled
+  runs. `scripts/ops.sh status` checks that inventory and reports the exact
+  installed commit. `REAL_MONEY` is armed. `deploy/sleeves.env` carries
+  `LONG_SLEEVE=on` and
   `CARRY_SLEEVE=on`, and no host override at
   `/etc/liquidity-migration/sleeves.env` narrows them, so a deploy brings the
   whole fleet up. That host file is how a sleeve is held down — it can only
@@ -33,35 +35,26 @@ file.
   primary and `116.202.15.128` as its deliberate backup; the backup host runs
   no fleet units.
 
-  The integration candidate's independent Exodus producers and six producer
-  books are not installed. On the host, each CARRY producer still writes its
-  realm's Exodus book, and the hourly LLM ledger still feeds demo LONG.
-
 - **A third sleeve, the EXODUS SHORT, runs on demo and the funded topology.**
-  When carry's v7 pre-settle exit fires, the carry producer publishes the
-  abandoned position as a SHORT to the engine's `exodus` sleeve (its own
-  appended `[[strategy]]` block, realm-specific book, and fill attribution),
-  then covers 60 minutes after settlement. Registered config
-  `configs/lane2_exodus_short_v1.json`; both carry units set
-  `EXODUS_SHORT_PROFILE=v1` and write `exodus-demo.json` or
-  `exodus-mainnet.json`. Unsetting it drains that realm's book flat. The
+  Each independent Exodus producer consumes its realm's hash-chained CARRY
+  pre-settlement event tape. When carry's v7 pre-settle exit fires, Exodus
+  publishes the abandoned filled quantity as a SHORT to the engine's
+  `exodus` sleeve through its own state and target book, then covers 60 minutes
+  after settlement. Registered config
+  `configs/lane2_exodus_short_v1.json`; the Exodus units write
+  `exodus-demo.json` and `exodus-mainnet.json`. The
   declared 0.35 stop is a disaster fence (every measured stop level loses; the
   cover clock is the exit). No funded Exodus fill has been observed yet; the
   sleeve waits for a v7 fire and no test order is forced.
   Evidence and the honest 2024-negative era shape:
   `docs/research/research_findings.md` (the exodus short row); promotion
   note in `docs/research/governance.md`.
-- **The LLM GATE is an entry source inside the LONG sleeve (owner decision,
-  live on demo).** The hourly ledger service judges fresh 4/12/24h trigger
-  events on top-10-turnover names and publishes score ≥ 6 names to the LONG
-  candidates file
-  (`/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json`);
-  the LONG producer takes them as ordinary LONG
-  entries — same book (`long-demo.json`), same engine sleeve (`long`), same
-  vol-scaled sizing at the profile multiplier, same v12 exits and venue-native
-  stops. The ledger holds no venue credentials. Kill switches:
-  `LONG_ENGINE_LLM_GATE_ENABLED=0` on the demo LONG unit, or stop
-  `llm-ledger.timer`. Detail: `docs/trading_logic.md` §LLM GATE.
+- **The LLM ledger is research-only.** Its hourly service records judged public
+  trigger events under
+  `/var/lib/liquidity-migration/llm-driver-ledger/`. It has no venue
+  credentials, target-book path, or input seam into LONG. Native LONG targets
+  come only from the shared typed LONG decision contract. Detail:
+  `docs/trading_logic.md` §LLM ledger.
 
 - **The fourth registered sleeve, `maker_canary`, is installed but quoting is
   off.** Its first minimum-size AGIUSDT forward sample stopped after 10 new
@@ -93,7 +86,7 @@ file.
   that identical artifact. The sizing is
   a forward-record change point for all fill receipts.
 - **The engine owns the demo account, and the sleeves feed it.** It runs the
-  installed `4ab842c` release, with carry_hold **v7** on both CARRY producers: the v7 execution
+  installed Rust release, with carry_hold **v7** on both CARRY producers: the v7 execution
   clock, `strategy_profile=v7 early_exit=1` — the early exit fires on the
   venue's running rate up to 15 minutes before a dying print pays; settled-print
   fallback kept. The drop exit is part of the producers' exit clock (no dial):
@@ -125,10 +118,13 @@ file.
 
   - the engine reads the venue and writes `account_equity_usdt` into its
     heartbeat;
-  - both producers size from that equity;
-  - both write an absolute target book —
-    `/var/lib/liquidity-migration/targets/{carry,long}-demo.json`;
-  - the engine reads each book, routes it to its own sleeve, and takes on
+  - the LONG and CARRY producers size from that equity;
+  - the Exodus producer copies the exact filled quantity CARRY abandons from
+    its durable pre-settlement event tape;
+  - all six producers write independent absolute books under
+    `/var/lib/liquidity-migration/targets/` — `{long,carry,exodus}` for demo and
+    mainnet;
+  - each engine reads its three books, routes each to its own sleeve, and takes on
     symbols the books name that no config listed.
 
   A book within the 5% dead band of what is held moves nothing, which is why a
@@ -417,17 +413,16 @@ cleanly into disk, socket, leverage call, and venue legs.
 
 ## Topology
 
-Eight daemons run continuously: the demo Rust engine (LIVE), the
-mainnet engine, demo LONG and CARRY producers, mainnet LONG and CARRY
-producers, the Telegram controls, and the public forward recorder. Seven timers
-drive seven oneshots beside them — demo liveness, mainnet liveness, the LLM
-ledger, the trade notifier, the forward uploader, the nightly state backup,
-and the weekly demo recovery drill.
-The 15 active managed units are the topology at installed commit
-`4ab842c082adceda226d3f0ab2279da6c5c87b3e`. The execution host at
-`208.84.103.4` carries exactly that commit's unit files and nothing else;
-its `deploy/systemd/README.md` is the installed inventory. Demo is the only
-practice book.
+Ten daemons run continuously: the demo and mainnet Rust engines, independent
+LONG, CARRY, and Exodus producers for each realm, the Telegram controls, and
+the public forward recorder. Seven timers drive seven oneshots beside them —
+demo liveness, mainnet liveness, the LLM ledger, the trade notifier, the
+forward uploader, the nightly state backup, and the weekly demo recovery
+drill. Those 24 current units are the canonical topology in
+`deploy/fleet_manifest.tsv`. The execution host at `208.84.103.4` carries the
+exact commit and unit inventory reported by `scripts/ops.sh status`; its
+`deploy/systemd/README.md` describes the installed inventory. Demo is the only
+practice realm.
 
 Private account-market persistence is off. Public forward persistence is on:
 the 10 ms L1 touch, L50, trades, mark/index price, the crowd fee (funding),
@@ -565,18 +560,9 @@ exit (a held name the upcoming decision zeroes sells ~00:02 instead of 00:20,
 entries unchanged; no dial, the rollback is a revert and redeploy), LONG v12
 wide-stop, and the entry execution recipes (quote-first entries, touch-sized
 windows, and the replay-selected resting recipe). Sizing is the fixed
-multipliers on both sleeves (carry 3.0, LONG 6.0), and the LLM gate's judged
-  entries sit inside the LONG sleeve — same book and identity, so their fills
-  grade under LONG v12's config id beside the native entries; the producers'
-  enter/leave attribution log (`targets/long-{demo,mainnet}-transitions.jsonl`,
-  one line per book transition with the entry's pattern) is what separates
-  the two cohorts when reading that record. The gate also carries a freshness
-  veto: a name its ledger already flagged on ≥2 distinct earlier UTC days in
-  the last 4 is judged and journaled but never published, and a wide band:
-  turnover ranks 11–30 are judged and enterable under the same bar but
-  labeled `llm_gate_wide`, so their forward record grades apart from the
-  core rank ≤10 band (`docs/trading_logic.md` §LLM GATE, change points
-  2026-08-30). Sizing uses two
+multipliers on both sleeves (carry 3.0, LONG 6.0). The LLM ledger records its
+judged cohorts for research but publishes no target and contributes no LONG
+fills. Sizing uses two
   env dials on both fleets; Exodus copies carry's actual handed-off quantity.
   Mainnet's rendered account document keeps entry leverage 5. The v6 whale
   halving makes the carry producers read one
