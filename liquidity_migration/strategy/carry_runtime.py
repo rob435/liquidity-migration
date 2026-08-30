@@ -9,6 +9,7 @@ the immutable content-addressed object before replacing the active path.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -51,6 +52,28 @@ class CarryCommitResult:
     target_book: PublishedTargetBook | None
 
 
+def carry_reducer_clock_ms(
+    *,
+    cycle_started_ms: int,
+    after_inputs_ms: int,
+    presettlement: tuple[PresettlementObservation, ...],
+) -> int:
+    """Use the post-read clock and reject observations dated beyond it."""
+
+    reducer_now_ms = max(int(cycle_started_ms), int(after_inputs_ms))
+    future = sorted(
+        row.symbol
+        for row in presettlement
+        if row.observed_ts_ms > reducer_now_ms
+    )
+    if future:
+        raise ValueError(
+            "CARRY pre-settlement observations are later than the post-read clock: "
+            + ",".join(future)
+        )
+    return reducer_now_ms
+
+
 def carry_strategy_config(
     *,
     profile_name: str,
@@ -82,9 +105,18 @@ def carry_strategy_config(
 
 def carry_holdings(
     standing_rows: dict[str, tuple[str, float, float]],
+    *,
+    mark_px_by_symbol: Mapping[str, float] | None = None,
 ) -> tuple[Holding, ...]:
+    marks = mark_px_by_symbol or {}
     return tuple(
-        Holding(symbol=symbol, side=str(side).lower(), qty=abs(float(qty)), entry_px=float(entry_px))
+        Holding(
+            symbol=symbol,
+            side=str(side).lower(),
+            qty=abs(float(qty)),
+            entry_px=float(entry_px),
+            mark_px=(float(marks[symbol]) if symbol in marks else None),
+        )
         for symbol, (side, qty, entry_px) in sorted(standing_rows.items())
         if float(qty) != 0.0 and float(entry_px) > 0.0
     )

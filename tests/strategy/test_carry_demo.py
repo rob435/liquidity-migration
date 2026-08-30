@@ -512,7 +512,11 @@ def test_carry_market_build_uses_the_ws_store_and_ticker_cache(tmp_path: Path, m
     # tickers_fail=True: a REST ticker call would raise, proving the cache served.
     market = _FakeCarryMarket(tickers_fail=True)
     cache_rows = [
-        {"symbol": symbol, "turnover24h": str(1_000_000.0 * (len(ALL_SYMBOLS) - index) * 24)}
+        {
+            "symbol": symbol,
+            "turnover24h": str(1_000_000.0 * (len(ALL_SYMBOLS) - index) * 24),
+            "markPrice": str(10.0 + index),
+        }
         for index, symbol in enumerate(ALL_SYMBOLS)
     ]
     now_ms = 1_760_000_000_000 - (1_760_000_000_000 % MS_PER_HOUR) + 25 * 60 * 1000
@@ -528,7 +532,7 @@ def test_carry_market_build_uses_the_ws_store_and_ticker_cache(tmp_path: Path, m
         workers=2,
     )
 
-    klines, funding, stats = _build_carry_demo_market_data(
+    klines, funding, stats, mark_prices = _build_carry_demo_market_data(
         root=tmp_path / "carry-root",
         config=config,
         demo=demo,
@@ -542,6 +546,7 @@ def test_carry_market_build_uses_the_ws_store_and_ticker_cache(tmp_path: Path, m
     )
 
     assert stats["ticker_source"] == "ws_cache"
+    assert mark_prices[ALL_SYMBOLS[0]] == 10.0
     assert stats["data_source"] == "ws_store"
     assert store.get_klines_calls == 1
     assert int(stats["kline_fetched_rows"]) == 0

@@ -53,6 +53,27 @@ class CarryPresettlementInput:
                 raise ValueError(f"CARRY pre-settlement holding {name} must be positive")
 
 
+def carry_mark_prices(
+    rows: list[dict[str, Any]],
+    *,
+    symbols: set[str] | None = None,
+) -> dict[str, float]:
+    """Return finite current marks for the requested CARRY holdings."""
+
+    marks: dict[str, float] = {}
+    for row in rows:
+        symbol = str(row.get("symbol", ""))
+        if symbols is not None and symbol not in symbols:
+            continue
+        try:
+            mark_px = float(row["markPrice"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(mark_px) and mark_px > 0.0:
+            marks[symbol] = mark_px
+    return marks
+
+
 def _presettle_ticker_factory() -> BybitMarketData:
     return BybitMarketData(category="linear", retries=2, retry_sleep_seconds=0.25)
 

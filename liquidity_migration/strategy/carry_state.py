@@ -1,8 +1,9 @@
 """Durable and in-memory state for the CARRY producer.
 
 The pure lifecycle reducer lives in :mod:`liquidity_migration.rules.carry_contract`.
-This module is the only adapter that translates its canonical state to the two
-existing CARRY state files and the daemon's decision/data caches.
+This module imports the two legacy CARRY state files and writes one canonical
+atomic reducer checkpoint. The exit-mask path remains a compatibility mirror;
+the combined checkpoint is the authority after its first successful write.
 """
 
 from __future__ import annotations
@@ -79,6 +80,7 @@ class CarryCycleState:
         "sizing_equity_usdt",
         "sizing_equity_decision_ts_ms",
         "sizing_anchor_path",
+        "canonical_reducer_state",
         "early_exits",
         "drop_exits_logged",
         "whale_last_attempt_ms",
@@ -97,6 +99,7 @@ class CarryCycleState:
         self.sizing_equity_usdt: float | None = None
         self.sizing_equity_decision_ts_ms: int | None = None
         self.sizing_anchor_path: Path | None = None
+        self.canonical_reducer_state = False
         self.whale_store: pl.DataFrame | None = None
         self.whale_last_attempt_ms: int | None = None
         self.early_exits: dict[str, int] | None = None
@@ -154,13 +157,20 @@ class CarryCycleState:
             payload = json.loads(snapshot.data)
         except json.JSONDecodeError as exc:
             raise ValueError(f"CARRY sizing anchors are not JSON: {exc}") from exc
-        if not isinstance(payload, dict) or set(payload) != {"schema_version", "anchors"}:
+        if not isinstance(payload, dict):
             raise ValueError("CARRY sizing anchors have invalid fields")
-        if (
-            type(payload["schema_version"]) is not int
-            or payload["schema_version"] != 1
-            or not isinstance(payload["anchors"], dict)
-        ):
+        schema_version = payload.get("schema_version")
+        if type(schema_version) is not int:
+            raise ValueError("CARRY sizing anchors have an unsupported schema")
+        if schema_version == 1:
+            if set(payload) != {"schema_version", "anchors"}:
+                raise ValueError("CARRY sizing anchors have invalid fields")
+        elif schema_version == 2:
+            if set(payload) != {"schema_version", "anchors", "fired"}:
+                raise ValueError("CARRY reducer checkpoint has invalid fields")
+        else:
+            raise ValueError("CARRY sizing anchors have an unsupported schema")
+        if not isinstance(payload["anchors"], dict):
             raise ValueError("CARRY sizing anchors have an unsupported schema")
         loaded: dict[int, float] = {}
         for raw_key, raw_value in payload["anchors"].items():
@@ -181,6 +191,24 @@ class CarryCycleState:
         if len(loaded) > 2:
             raise ValueError("CARRY sizing anchors retain more than two decisions")
         self.sizing_equity_by_decision = loaded
+        if schema_version == 2:
+            if not isinstance(payload["fired"], dict):
+                raise ValueError("CARRY reducer checkpoint fired exits must be an object")
+            fired: dict[str, int] = {}
+            for symbol, stamp in payload["fired"].items():
+                if (
+                    not isinstance(symbol, str)
+                    or not symbol
+                    or symbol != symbol.upper()
+                    or not symbol.isalnum()
+                    or isinstance(stamp, bool)
+                    or not isinstance(stamp, int)
+                    or stamp <= 0
+                ):
+                    raise ValueError("CARRY reducer checkpoint contains an invalid fired exit")
+                fired[symbol] = stamp
+            self.early_exits = fired
+            self.canonical_reducer_state = True
 
     def bind_exit_state(self, path: Path) -> None:
         """Load the durable exit mask once per process state."""
@@ -201,11 +229,22 @@ class CarryCycleState:
         """Persist a reducer transition before its target book is published."""
 
         next_fired = state.fired_by_symbol()
+        next_anchors = state.anchor_by_decision()
+        if self.sizing_anchor_path is not None:
+            if (
+                not self.canonical_reducer_state
+                or next_fired != (self.early_exits or {})
+                or next_anchors != self.sizing_equity_by_decision
+            ):
+                self._persist_reducer_checkpoint(state)
+                self.canonical_reducer_state = True
+                self.early_exits = next_fired
+                self.sizing_equity_by_decision = next_anchors
+            if next_fired != load_carry_exit_state(exit_state_path):
+                persist_carry_exit_state(exit_state_path, next_fired)
+            return
         if next_fired != (self.early_exits or {}):
             persist_carry_exit_state(exit_state_path, next_fired)
-        next_anchors = state.anchor_by_decision()
-        if next_anchors != self.sizing_equity_by_decision:
-            self._persist_sizing_anchors(next_anchors)
         self.early_exits = next_fired
         self.sizing_equity_by_decision = next_anchors
 
@@ -230,7 +269,14 @@ class CarryCycleState:
             return equity_usdt
         next_anchors = next_state.anchor_by_decision()
         if next_anchors != self.sizing_equity_by_decision:
-            self._persist_sizing_anchors(next_anchors)
+            if self.sizing_anchor_path is not None:
+                self._persist_reducer_checkpoint(
+                    PriorState(
+                        tuple(sorted(next_anchors.items())),
+                        tuple(sorted((self.early_exits or {}).items())),
+                    )
+                )
+                self.canonical_reducer_state = True
             self.sizing_equity_by_decision = next_anchors
         self.sizing_equity_decision_ts_ms = int(decision_ts_ms)
         self.sizing_equity_usdt = float(anchor)
@@ -242,7 +288,7 @@ class CarryCycleState:
         self.sizing_equity_decision_ts_ms = int(decision_ts_ms)
         self.sizing_equity_usdt = float(sizing_equity_usdt)
 
-    def _persist_sizing_anchors(self, anchors: Mapping[int, float]) -> None:
+    def _persist_reducer_checkpoint(self, state: PriorState) -> None:
         path = self.sizing_anchor_path
         if path is None:
             return
@@ -250,10 +296,14 @@ class CarryCycleState:
             path,
             canonical_json(
                 {
-                    "schema_version": 1,
-                    "anchors": {str(key): value for key, value in sorted(anchors.items())},
+                    "schema_version": 2,
+                    "anchors": {
+                        str(key): value
+                        for key, value in state.sizing_anchors
+                    },
+                    "fired": dict(state.fired_exits),
                 }
             )
             + b"\n",
-            label="CARRY sizing anchors",
+            label="CARRY reducer checkpoint",
         )

@@ -7,6 +7,7 @@ each is pinned on deterministic synthetic frames.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -14,12 +15,15 @@ import polars as pl
 import pytest
 
 from liquidity_migration.research.backtest.financed_longs import (
+    CarryReplaySettings,
     daily_scores,
+    live_contract_scores,
     prepare,
     score_carry_hold,
     venue_view,
     volatility_scale,
 )
+from liquidity_migration.strategy.presettlement_events import CarryPresettlementEvent
 from liquidity_migration.rules.carry_hold import (
     HOUR_MS,
     CarryHoldConfig,
@@ -30,6 +34,7 @@ from liquidity_migration.rules.carry_hold import (
 )
 
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
+POSITIVE_TS_OFFSET = 20_000 * 24 * HOUR_MS
 
 
 @pytest.fixture
@@ -76,6 +81,23 @@ def _panel(
 
 def _universe(panel: pl.DataFrame, top_n: int = 100) -> pl.DataFrame:
     return top_n_universe(daily_grid(prepare(panel)), top_n)
+
+
+def _positive_panel(**kwargs: object) -> pl.DataFrame:
+    return _panel(**kwargs).with_columns(
+        (pl.col("bar_ts_ms") + POSITIVE_TS_OFFSET).alias("bar_ts_ms")
+    )
+
+
+def _replay_settings(*, max_entries: int = 10) -> CarryReplaySettings:
+    return CarryReplaySettings(
+        environment="mainnet",
+        source_profile="carry_hold_v7_live_v1",
+        notional_multiplier=3.0,
+        entry_leverage=5.0,
+        stop_loss_fraction=0.35,
+        max_new_entries_per_cycle=max_entries,
+    )
 
 
 class TestResearchEquityChart:
@@ -125,6 +147,106 @@ class TestResearchEquityChart:
                 _json.dump({"config_id": "ghost", "rule": {shape: {}}}, f)
             with pytest.raises(FinancedLongsError, match="unrecognized"):
                 config_scores(panel, f.name)
+
+
+class TestLiveContractReplay:
+    def test_replays_cap_trail_drop_anchor_and_typed_presettlement_identity(
+        self,
+        carry_cfg: CarryHoldConfig,
+    ) -> None:
+        deep = {symbol: [-15.0] for symbol in ["BTCUSDT", *[f"S{i:02d}USDT" for i in range(1, 14)]]}
+        panel = _positive_panel(funding_bp=deep)
+        universe = _universe(panel)
+        decision_times = sorted(int(value) for value in universe["bar_ts_ms"].unique().to_list())
+        first, second = decision_times[:2]
+        weights = pl.DataFrame(
+            {
+                "bar_ts_ms": [first, first, first, second, second],
+                "symbol": ["BTCUSDT", "S01USDT", "S02USDT", "BTCUSDT", "S02USDT"],
+                "w": [0.1, 0.1, 0.1, 0.1, 0.1],
+            }
+        )
+        event = CarryPresettlementEvent(
+            environment="mainnet",
+            source_profile="carry_hold_v7_live_v1",
+            source_config_id=carry_cfg.config_id,
+            decision_ts_ms=first,
+            fired_ts_ms=first + 7 * HOUR_MS + 50 * 60_000,
+            settlement_ts_ms=first + 8 * HOUR_MS,
+            symbol="BTCUSDT",
+            running_rate=0.0,
+            mark_px=100.0,
+            carry_side=None,
+            carry_qty=None,
+            carry_avg_entry_px=None,
+        )
+
+        scores, diagnostics = live_contract_scores(
+            weights,
+            universe,
+            panel,
+            carry_cfg,
+            replay_settings=_replay_settings(max_entries=2),
+            presettlement_events=(event,),
+        )
+
+        assert scores.height == len(decision_times)
+        assert diagnostics["pre_settlement_clock"] == "typed_event_replay"
+        assert diagnostics["presettlement_exit_fires"] == 1
+        assert int(diagnostics["drop_exit_fires"]) >= 1
+        assert int(diagnostics["sizing_anchor_requests"]) >= 1
+        assert int(diagnostics["entry_cap_deferrals"]) >= 1
+        assert diagnostics["max_active_names"] == 2
+        assert diagnostics["admission_trail"] == "trail_fund_24h"
+        assert diagnostics["resize_mark_missing_skips"] == 0
+
+    def test_rejects_a_presettlement_tape_from_another_decision_source(
+        self,
+        carry_cfg: CarryHoldConfig,
+    ) -> None:
+        panel = _positive_panel(funding_bp={"BTCUSDT": [-15.0]})
+        universe = _universe(panel)
+        weights = carry_hold_weights(universe, carry_cfg)
+        first = int(universe["bar_ts_ms"].min())
+        event = CarryPresettlementEvent(
+            environment="demo",
+            source_profile="carry_hold_v7_live_v1",
+            source_config_id=carry_cfg.config_id,
+            decision_ts_ms=first,
+            fired_ts_ms=first + 60_000,
+            settlement_ts_ms=first + 8 * HOUR_MS,
+            symbol="BTCUSDT",
+            running_rate=0.0,
+            mark_px=100.0,
+            carry_side=None,
+            carry_qty=None,
+            carry_avg_entry_px=None,
+        )
+
+        with pytest.raises(FinancedLongsError, match="environment"):
+            live_contract_scores(
+                weights,
+                universe,
+                panel,
+                carry_cfg,
+                replay_settings=_replay_settings(),
+                presettlement_events=(event,),
+            )
+
+        wrong_decision = dataclasses.replace(
+            event,
+            environment="mainnet",
+            decision_ts_ms=first - 24 * HOUR_MS,
+        )
+        with pytest.raises(FinancedLongsError, match="outside the replay"):
+            live_contract_scores(
+                weights,
+                universe,
+                panel,
+                carry_cfg,
+                replay_settings=_replay_settings(),
+                presettlement_events=(wrong_decision,),
+            )
 
 
 class TestAccounting:

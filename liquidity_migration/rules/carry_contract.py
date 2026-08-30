@@ -137,6 +137,7 @@ class Holding:
     side: str
     qty: float
     entry_px: float
+    mark_px: float | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol or self.symbol != self.symbol.upper() or not self.symbol.isalnum():
@@ -147,11 +148,17 @@ class Holding:
             raise ValueError("CARRY holding quantity must be positive")
         if not math.isfinite(self.entry_px) or self.entry_px <= 0.0:
             raise ValueError("CARRY holding entry price must be positive")
+        if self.mark_px is not None and (
+            not math.isfinite(self.mark_px) or self.mark_px <= 0.0
+        ):
+            raise ValueError("CARRY holding mark must be null or positive")
 
     @property
-    def signed_notional_usdt(self) -> float:
+    def signed_notional_usdt(self) -> float | None:
+        if self.mark_px is None:
+            return None
         sign = -1.0 if self.side == "short" else 1.0
-        return sign * self.qty * self.entry_px
+        return sign * self.qty * self.mark_px
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +290,18 @@ class PriorState:
 
 
 @dataclass(frozen=True, slots=True)
+class SizingAnchorRequest:
+    decision_ts_ms: int
+    equity_usdt: float
+
+    def __post_init__(self) -> None:
+        if type(self.decision_ts_ms) is not int or self.decision_ts_ms <= 0:
+            raise ValueError("CARRY sizing-anchor request has an invalid decision time")
+        if not math.isfinite(self.equity_usdt) or self.equity_usdt <= 0.0:
+            raise ValueError("CARRY sizing-anchor request equity must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyConfig:
     profile_name: str
     accepted_book_sources: tuple[str, ...]
@@ -341,6 +360,7 @@ class DecisionInput:
     entry_blockers: tuple[tuple[str, str], ...] = ()
     account_health_error: str = ""
     equity_usdt: float = 0.0
+    sizing_anchor_requests: tuple[SizingAnchorRequest, ...] = ()
     settled_funding: tuple[SettledFundingObservation, ...] = ()
     presettlement: tuple[PresettlementObservation, ...] = ()
     durable_presettlement_fires: tuple[PresettlementFire, ...] = ()
@@ -361,6 +381,9 @@ class DecisionInput:
             keys = [row[0] for row in rows]
             if len(keys) != len(set(keys)):
                 raise ValueError(f"CARRY reducer {name} contain duplicate symbols")
+        anchor_decisions = [row.decision_ts_ms for row in self.sizing_anchor_requests]
+        if len(anchor_decisions) != len(set(anchor_decisions)):
+            raise ValueError("CARRY reducer sizing-anchor requests contain duplicate decisions")
 
     def as_json_dict(self) -> dict[str, object]:
         return {
@@ -375,6 +398,7 @@ class DecisionInput:
             "entry_blockers": [list(row) for row in self.entry_blockers],
             "account_health_error": self.account_health_error,
             "equity_usdt": self.equity_usdt,
+            "sizing_anchor_requests": [asdict(row) for row in self.sizing_anchor_requests],
             "settled_funding": [asdict(row) for row in self.settled_funding],
             "presettlement": [asdict(row) for row in self.presettlement],
             "durable_presettlement_fires": [row.as_json_dict() for row in self.durable_presettlement_fires],
@@ -403,6 +427,7 @@ class PlanSummary:
     planned_exits: int = 0
     planned_entries: int = 0
     planned_resizes: int = 0
+    resize_mark_missing_skips: int = 0
     entry_cap_deferrals: int = 0
     entry_validity_expired_skips: int = 0
     entry_dust_skips: int = 0
@@ -481,18 +506,19 @@ def _masked_decision(
     settled_fires: list[str] = []
     if config.early_exit_enabled:
         latest: dict[str, SettledFundingObservation] = {}
-        for row in settled_funding:
+        for settled_row in settled_funding:
             if (
-                row.symbol in decision.weights
-                and decision.decision_ts_ms < row.settlement_ts_ms <= now_ms
+                settled_row.symbol in decision.weights
+                and decision.decision_ts_ms < settled_row.settlement_ts_ms <= now_ms
                 and (
-                    row.symbol not in latest
-                    or row.settlement_ts_ms > latest[row.symbol].settlement_ts_ms
+                    settled_row.symbol not in latest
+                    or settled_row.settlement_ts_ms
+                    > latest[settled_row.symbol].settlement_ts_ms
                 )
             ):
-                latest[row.symbol] = row
-        for symbol, row in sorted(latest.items()):
-            if symbol not in fired and not (row.rate < exit_threshold):
+                latest[settled_row.symbol] = settled_row
+        for symbol, latest_row in sorted(latest.items()):
+            if symbol not in fired and not (latest_row.rate < exit_threshold):
                 fired[symbol] = decision.decision_ts_ms
                 settled_fires.append(symbol)
 
@@ -508,25 +534,28 @@ def _masked_decision(
             ):
                 fired[event.symbol] = decision.decision_ts_ms
         seen_observations: set[str] = set()
-        for row in sorted(presettlement, key=lambda item: (item.symbol, item.observed_ts_ms)):
-            if row.symbol in seen_observations:
+        for observation in sorted(
+            presettlement,
+            key=lambda item: (item.symbol, item.observed_ts_ms),
+        ):
+            if observation.symbol in seen_observations:
                 raise ValueError("CARRY reducer pre-settlement observations contain duplicate symbols")
-            seen_observations.add(row.symbol)
+            seen_observations.add(observation.symbol)
             if (
-                row.symbol not in decision.weights
-                or row.symbol in fired
-                or not decision.decision_ts_ms <= row.observed_ts_ms <= now_ms
+                observation.symbol not in decision.weights
+                or observation.symbol in fired
+                or not decision.decision_ts_ms <= observation.observed_ts_ms <= now_ms
             ):
                 continue
-            lead_ms = row.settlement_ts_ms - row.observed_ts_ms
+            lead_ms = observation.settlement_ts_ms - observation.observed_ts_ms
             if 0 < lead_ms <= config.execution.presettlement_window_ms and not (
-                row.running_rate < exit_threshold
+                observation.running_rate < exit_threshold
             ):
                 fire = PresettlementFire.from_observation(
                     decision_ts_ms=decision.decision_ts_ms,
-                    observation=row,
+                    observation=observation,
                 )
-                fired[row.symbol] = decision.decision_ts_ms
+                fired[observation.symbol] = decision.decision_ts_ms
                 presettle_fires.append(fire)
 
     desired = {symbol: weight for symbol, weight in decision.weights.items() if symbol not in fired}
@@ -576,12 +605,23 @@ def decide(
 ) -> DecisionOutput:
     """Reduce one complete CARRY observation without touching external state."""
 
+    state = prior_state
+    for request in sorted(
+        decision_input.sizing_anchor_requests,
+        key=lambda row: row.decision_ts_ms,
+    ):
+        state, _anchor = anchor_sizing_state(
+            state,
+            decision_ts_ms=request.decision_ts_ms,
+            equity_usdt=request.equity_usdt,
+        )
+
     decision = decision_input.decision
     if decision is None:
         return DecisionOutput(
             action=PublicationAction.HOLD,
             target_book_text=None,
-            next_state=prior_state,
+            next_state=state,
             effective_decision=None,
             sizing_equity_usdt=None,
             summary=PlanSummary(entry_blocked_reason="decision_unavailable"),
@@ -590,14 +630,14 @@ def decide(
     effective, fired, settled_fires, presettle_fires, drop_fires = _masked_decision(
         decision,
         upcoming=decision_input.upcoming_decision,
-        prior_fired=prior_state.fired_by_symbol(),
+        prior_fired=state.fired_by_symbol(),
         settled_funding=decision_input.settled_funding,
         presettlement=decision_input.presettlement,
         durable_fires=decision_input.durable_presettlement_fires,
         now_ms=decision_input.now_ms,
         config=config,
     )
-    state = PriorState(prior_state.sizing_anchors, tuple(sorted(fired.items())))
+    state = PriorState(state.sizing_anchors, tuple(sorted(fired.items())))
     healthy = not decision_input.account_health_error and decision_input.equity_usdt > 0.0
     if not healthy:
         reason = "engine_account_health_unavailable"
@@ -698,9 +738,13 @@ def decide(
         planned_entries += 1
 
     planned_resizes = 0
+    resize_mark_missing_skips = 0
     for symbol in sorted(set(book_desired) & standing_symbols):
         target_notional = book_desired[symbol] * sizing_equity * config.notional_multiplier
         standing_notional = holdings[symbol].signed_notional_usdt
+        if standing_notional is None:
+            resize_mark_missing_skips += 1
+            continue
         threshold = max(
             config.execution.resize_floor_usdt,
             config.execution.resize_floor_fraction * abs(standing_notional),
@@ -726,6 +770,7 @@ def decide(
             planned_exits=len(standing_symbols - set(book_desired)),
             planned_entries=planned_entries,
             planned_resizes=planned_resizes,
+            resize_mark_missing_skips=resize_mark_missing_skips,
             entry_cap_deferrals=entry_cap_deferrals,
             entry_validity_expired_skips=entry_validity_expired_skips,
             entry_dust_skips=entry_dust_skips,

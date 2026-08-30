@@ -40,12 +40,10 @@ import polars as pl
 
 from liquidity_migration.core._common import coerce_int
 from liquidity_migration.rules.engine_targets import (
-    EngineTarget,
     ParsedTargetBook,
     PublishedTargetBook,
     publish_target_book,
     read_target_book,
-    render_target_book,
 )
 from liquidity_migration.strategy.account_candidate_universe import (
     carry_profile_universe_inputs,
@@ -76,13 +74,9 @@ from liquidity_migration.rules.carry_contract import (
     FLEET_EXECUTION_RULES,
     CarryDecision,
     DecisionInput as CarryDecisionInput,
-    DecisionOutput as CarryDecisionOutput,
-    Holding as CarryContractHolding,
-    PresettlementFire as CarryContractPresettlementFire,
     PresettlementObservation as CarryContractPresettlementObservation,
     PriorState as CarryContractPriorState,
-    PublicationAction as CarryPublicationAction,
-    SettledFundingObservation as CarrySettledFundingObservation,
+    SizingAnchorRequest as CarrySizingAnchorRequest,
     StrategyConfig as CarryContractConfig,
     decide as decide_carry,
     render_target_book_text as render_carry_contract_book,
@@ -95,6 +89,7 @@ from liquidity_migration.strategy.carry_state import (
 from liquidity_migration.strategy.carry_runtime import (
     carry_holdings,
     carry_presettlement_observation,
+    carry_reducer_clock_ms,
     carry_strategy_config,
     commit_carry_output,
     durable_presettlement_fire,
@@ -106,21 +101,18 @@ from liquidity_migration.strategy.carry_market_inputs import (
     CarryPresettlementInput,
     CarryPresettlementTicker,
     build_carry_presettlement_inputs,
+    carry_mark_prices,
     fetch_carry_presettlement_tickers as _fetch_presettle_tickers,
 )
 from liquidity_migration.strategy.carry_config import (
     CARRY_CONFIG_PATH,
-    CARRY_CYCLES_DATASET,
-    CARRY_MAINNET_CYCLES_DATASET,
-    CARRY_STRATEGY_PROFILE_CHOICES,
-    DEFAULT_CARRY_STRATEGY_PROFILE,
+    CARRY_STRATEGY_PROFILE_CHOICES,  # noqa: F401 - compatibility re-export
+    DEFAULT_CARRY_STRATEGY_PROFILE,  # noqa: F401 - compatibility re-export
     EARLY_EXIT_STATE_NAME,
     MIN_REPLAY_DAYS,
-    REPLAY_DAYS,
     CarryConfigProvenance,
     CarryDemoCycleConfig,
     CarryEffectiveConfig,
-    CarryStrategyProfile,
     carry_cycles_dataset,
     resolve_carry_strategy_profile,
     validate_carry_demo_config as _validate_carry_demo_config,
@@ -128,7 +120,6 @@ from liquidity_migration.strategy.carry_config import (
 from liquidity_migration.strategy.presettlement_events import (
     CarryPresettlementEvent,
     append_carry_presettlement_event,
-    load_carry_presettlement_events,
 )
 from liquidity_migration.data.storage import (
     exclusive_file_lock,
@@ -1284,6 +1275,7 @@ class CarryTargetPlan:
     planned_exits: int
     planned_entries: int
     planned_resizes: int
+    resize_mark_missing_skips: int
     entry_cap_deferrals: int
     entry_validity_expired_skips: int
     entry_dust_skips: int
@@ -1308,6 +1300,7 @@ def _empty_carry_plan(*, entry_blocked_reason: str = "") -> CarryTargetPlan:
         planned_exits=0,
         planned_entries=0,
         planned_resizes=0,
+        resize_mark_missing_skips=0,
         entry_cap_deferrals=0,
         entry_validity_expired_skips=0,
         entry_dust_skips=0,
@@ -1396,6 +1389,7 @@ def plan_carry_targets(
     engine_account_health_error: str,
     previous_book: ParsedTargetBook | None,
     entry_blockers: Mapping[str, str] | None = None,
+    mark_px_by_symbol: Mapping[str, float] | None = None,
     cycle_now_ms: int,
     strategy_profile: str,
 ) -> CarryPlanningOutput:
@@ -1419,7 +1413,10 @@ def plan_carry_targets(
         CarryDecisionInput(
             now_ms=int(cycle_now_ms),
             decision=decision,
-            holdings=carry_holdings(dict(standing_rows)),
+            holdings=carry_holdings(
+                dict(standing_rows),
+                mark_px_by_symbol=mark_px_by_symbol,
+            ),
             trail_by_symbol=tuple(sorted((str(key), float(value)) for key, value in trail_by_symbol.items())),
             entry_blockers=tuple(sorted((entry_blockers or {}).items())),
             account_health_error=health_error,
@@ -1448,6 +1445,7 @@ def plan_carry_targets(
             planned_exits=summary.planned_exits,
             planned_entries=summary.planned_entries,
             planned_resizes=summary.planned_resizes,
+            resize_mark_missing_skips=summary.resize_mark_missing_skips,
             entry_cap_deferrals=summary.entry_cap_deferrals,
             entry_validity_expired_skips=summary.entry_validity_expired_skips,
             entry_dust_skips=summary.entry_dust_skips,
@@ -1482,6 +1480,7 @@ def _carry_target_plan(
     equity_usdt: float,
     engine_account_health_error: str,
     entry_blockers: Mapping[str, str] | None = None,
+    mark_px_by_symbol: Mapping[str, float] | None = None,
     cycle_now_ms: int,
     target_book_path: str | Path,
     cycle_state: CarryCycleState,
@@ -1515,6 +1514,7 @@ def _carry_target_plan(
         engine_account_health_error=engine_account_health_error,
         previous_book=previous,
         entry_blockers=entry_blockers,
+        mark_px_by_symbol=mark_px_by_symbol,
         cycle_now_ms=cycle_now_ms,
         strategy_profile=strategy_profile,
     )
@@ -1720,7 +1720,7 @@ def _build_carry_demo_market_data(
     kline_store: Any | None = None,
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
-) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, Any]]:
+) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, Any], dict[str, float]]:
     """Carry data path: WS kline store and ticker cache first, REST fallback.
 
     Settled funding history has no stream on the venue, so the hourly funding
@@ -1798,7 +1798,7 @@ def _build_carry_demo_market_data(
         "funding_max_ts_ms": (coerce_int(funding.get_column("funding_ts_ms").max()) if not funding.is_empty() else 0),
         **funding_stats,
     }
-    return klines, funding, stats
+    return klines, funding, stats, carry_mark_prices(ticker_rows)
 
 
 def _last_successful_decision_ts_ms(root: Path, *, cycles_dataset: str) -> int | None:
@@ -1828,6 +1828,21 @@ def _last_successful_decision_ts_ms(root: Path, *, cycles_dataset: str) -> int |
         return None
     newest = frame.get_column("decision_ts_ms").max()
     return coerce_int(newest) if newest is not None else None
+
+
+def _carry_reducer_now_ms(
+    *,
+    cycle_started_ms: int,
+    injected_now: bool,
+    presettlement: tuple[CarryContractPresettlementObservation, ...],
+) -> int:
+    """Capture the production decision clock after every typed input read."""
+
+    return carry_reducer_clock_ms(
+        cycle_started_ms=cycle_started_ms,
+        after_inputs_ms=(cycle_started_ms if injected_now else _utc_now_ms()),
+        presettlement=presettlement,
+    )
 
 
 def run_carry_demo_cycle(
@@ -1917,6 +1932,8 @@ def run_carry_demo_cycle(
         drop_exit_frozen = False
         built_klines: pl.DataFrame | None = None
         built_funding: pl.DataFrame | None = None
+        current_mark_prices: dict[str, float] = {}
+        market: Any | None = market_client
         whale_events: pl.DataFrame | None = None
         # A deadline wake exists to publish the frozen day the instant it
         # becomes actionable; rebuilding caches first spends seconds on data
@@ -1946,11 +1963,12 @@ def run_carry_demo_cycle(
             }
         else:
             try:
-                market = market_client or BybitMarketData(
-                    category=effective_config.exchange.category,
-                    testnet=effective_config.exchange.testnet,
-                )
-                klines, funding, build_stats = _build_carry_demo_market_data(
+                if market is None:
+                    market = BybitMarketData(
+                        category=effective_config.exchange.category,
+                        testnet=effective_config.exchange.testnet,
+                    )
+                klines, funding, build_stats, current_mark_prices = _build_carry_demo_market_data(
                     root=root,
                     config=market_projection,
                     demo=demo,
@@ -2066,6 +2084,7 @@ def run_carry_demo_cycle(
                     standing_symbols=standing_symbols,
                     whale_events=whale_events,
                 )
+        sizing_anchor_requests: tuple[CarrySizingAnchorRequest, ...] = ()
         if (
             freeze_ahead_decision_ts_ms is not None
             and state.frozen_decision(int(freeze_ahead_decision_ts_ms)) is not None
@@ -2074,9 +2093,11 @@ def run_carry_demo_cycle(
         ):
             # Anchor tomorrow to the fresh engine account mark used to freeze
             # it, so the boundary pass cannot introduce P&L feedback.
-            state.anchor_frozen_decision(
-                decision_ts_ms=int(freeze_ahead_decision_ts_ms),
-                equity_usdt=float(equity_usdt),
+            sizing_anchor_requests = (
+                CarrySizingAnchorRequest(
+                    decision_ts_ms=int(freeze_ahead_decision_ts_ms),
+                    equity_usdt=float(equity_usdt),
+                ),
             )
 
         if decision is not None:
@@ -2123,6 +2144,23 @@ def run_carry_demo_cycle(
                 "CARRY commit-time engine account reading unavailable; additions and resizes blocked: %s",
                 exc,
             )
+
+        missing_mark_symbols = standing_symbols - set(current_mark_prices)
+        if missing_mark_symbols and market is not None:
+            try:
+                ticker_rows, _ticker_source = _resolve_ticker_snapshot(
+                    market,
+                    ticker_cache=ticker_cache,
+                    state_cache_stale_seconds=state_cache_stale_seconds,
+                )
+                current_mark_prices.update(
+                    carry_mark_prices(ticker_rows, symbols=missing_mark_symbols)
+                )
+            except Exception as exc:  # noqa: BLE001 - Rust still classifies from its own market
+                _logger.warning(
+                    "CARRY holding marks unavailable; resize receipt is unclassified: %s",
+                    exc,
+                )
 
         presettlement_observations: tuple[CarryContractPresettlementObservation, ...] = ()
         presettle_error = ""
@@ -2179,12 +2217,20 @@ def run_carry_demo_cycle(
                 previous_book = read_target_book(effective_config.target_book_path)
             except (OSError, RuntimeError, ValueError):
                 previous_book = None
+        reducer_now_ms = _carry_reducer_now_ms(
+            cycle_started_ms=cycle_now_ms,
+            injected_now=now_ms is not None,
+            presettlement=presettlement_observations,
+        )
         reducer_output = decide_carry(
             CarryDecisionInput(
-                now_ms=cycle_now_ms,
+                now_ms=reducer_now_ms,
                 decision=decision,
                 upcoming_decision=upcoming_frozen[0] if upcoming_frozen is not None else None,
-                holdings=carry_holdings(standing_rows),
+                holdings=carry_holdings(
+                    standing_rows,
+                    mark_px_by_symbol=current_mark_prices,
+                ),
                 trail_by_symbol=tuple(sorted(trail_by_symbol.items())),
                 entry_blockers=tuple(
                     sorted(
@@ -2197,11 +2243,12 @@ def run_carry_demo_cycle(
                 ),
                 account_health_error=engine_account_health_error,
                 equity_usdt=equity_usdt,
+                sizing_anchor_requests=sizing_anchor_requests,
                 settled_funding=(
                     settled_funding_observations(
                         built_funding,
                         decision_ts_ms=decision.decision_ts_ms,
-                        now_ms=cycle_now_ms,
+                        now_ms=reducer_now_ms,
                     )
                     if decision is not None
                     else ()
@@ -2270,6 +2317,7 @@ def run_carry_demo_cycle(
             planned_exits=summary.planned_exits,
             planned_entries=summary.planned_entries,
             planned_resizes=summary.planned_resizes,
+            resize_mark_missing_skips=summary.resize_mark_missing_skips,
             entry_cap_deferrals=summary.entry_cap_deferrals,
             entry_validity_expired_skips=summary.entry_validity_expired_skips,
             entry_dust_skips=summary.entry_dust_skips,
@@ -2345,6 +2393,7 @@ def run_carry_demo_cycle(
             "planned_exits": plan.planned_exits,
             "planned_entries": plan.planned_entries,
             "planned_resizes": plan.planned_resizes,
+            "resize_mark_missing_skips": plan.resize_mark_missing_skips,
             "entry_cap_deferrals": plan.entry_cap_deferrals,
             "entry_validity_expired_skips": plan.entry_validity_expired_skips,
             "entry_dust_skips": plan.entry_dust_skips,

@@ -94,13 +94,13 @@
       "gross": 0.154
     },
     "holdings": [
-      {"symbol": "ALPHAUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0},
-      {"symbol": "DROPUSDT", "side": "long", "qty": 3.0, "entry_px": 10.0},
-      {"symbol": "DURABLEUSDT", "side": "long", "qty": 2.0, "entry_px": 10.0},
-      {"symbol": "EXITUSDT", "side": "long", "qty": 4.0, "entry_px": 10.0},
-      {"symbol": "ORPHANUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0},
-      {"symbol": "PREUSDT", "side": "long", "qty": 2.5, "entry_px": 10.0},
-      {"symbol": "SMALLUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0}
+      {"symbol": "ALPHAUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0, "mark_px": 20.0},
+      {"symbol": "DROPUSDT", "side": "long", "qty": 3.0, "entry_px": 10.0, "mark_px": 10.0},
+      {"symbol": "DURABLEUSDT", "side": "long", "qty": 2.0, "entry_px": 10.0, "mark_px": 10.0},
+      {"symbol": "EXITUSDT", "side": "long", "qty": 4.0, "entry_px": 10.0, "mark_px": 10.0},
+      {"symbol": "ORPHANUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0, "mark_px": 10.0},
+      {"symbol": "PREUSDT", "side": "long", "qty": 2.5, "entry_px": 10.0, "mark_px": 10.0},
+      {"symbol": "SMALLUSDT", "side": "long", "qty": 1.0, "entry_px": 10.0, "mark_px": 10.0}
     ],
     "trail_by_symbol": [
       ["BLOCKUSDT", -5.0],
@@ -114,6 +114,9 @@
     ],
     "account_health_error": "",
     "equity_usdt": 1200.0,
+    "sizing_anchor_requests": [
+      {"decision_ts_ms": 1800086400000, "equity_usdt": 1300.0}
+    ],
     "settled_funding": [
       {"symbol": "EXITUSDT", "settlement_ts_ms": 1800001800000, "rate": -0.0003}
     ],
@@ -151,8 +154,8 @@
     "next_state": {
       "schema_version": 1,
       "sizing_anchors": [
-        [1799913600000, 900.0],
-        [1800000000000, 1000.0]
+        [1800000000000, 1000.0],
+        [1800086400000, 1300.0]
       ],
       "fired_exits": [
         ["DURABLEUSDT", 1800000000000],
@@ -182,7 +185,8 @@
       "desired_gross_weight": 0.084,
       "planned_exits": 5,
       "planned_entries": 2,
-      "planned_resizes": 1,
+      "planned_resizes": 0,
+      "resize_mark_missing_skips": 0,
       "entry_cap_deferrals": 1,
       "entry_validity_expired_skips": 0,
       "entry_dust_skips": 1,
@@ -219,7 +223,7 @@
       "SMALLUSDT"
     ],
     "prices": {
-      "ALPHAUSDT": 10.0,
+      "ALPHAUSDT": 20.0,
       "GAMMAUSDT": 2.0,
       "SMALLUSDT": 10.0
     },
@@ -230,7 +234,7 @@
       "min_notional": 5.0
     },
     "held": [
-      {"symbol": "ALPHAUSDT", "side": "buy", "qty": 1.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
+      {"symbol": "ALPHAUSDT", "side": "buy", "qty": 1.0, "px": 20.0, "entry_px": 10.0, "stop_px": 6.5},
       {"symbol": "DROPUSDT", "side": "buy", "qty": 3.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
       {"symbol": "DURABLEUSDT", "side": "buy", "qty": 2.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
       {"symbol": "EXITUSDT", "side": "buy", "qty": 4.0, "px": 10.0, "entry_px": 10.0, "stop_px": 6.5},
@@ -244,10 +248,10 @@
       {"kind": "exit", "symbol": "EXITUSDT", "side": "sell", "qty": 4.0},
       {"kind": "exit", "symbol": "ORPHANUSDT", "side": "sell", "qty": 1.0},
       {"kind": "exit", "symbol": "PREUSDT", "side": "sell", "qty": 2.5},
-      {"kind": "resize", "symbol": "ALPHAUSDT", "side": "buy", "qty": 1.0, "reduce_only": false, "stop_px": 6.5},
       {"kind": "enter", "symbol": "GAMMAUSDT", "side": "buy", "qty": 6.0, "stop_px": 1.3}
     ],
     "expected_planner_skips": [
+      {"kind": "too_small_to_bother", "symbol": "ALPHAUSDT", "delta_usdt": 0.0},
       {"kind": "no_price", "symbol": "NOPRICEUSDT"},
       {"kind": "too_small_to_bother", "symbol": "SMALLUSDT", "delta_usdt": 0.0}
     ],
