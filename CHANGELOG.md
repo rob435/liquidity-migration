@@ -18,7 +18,10 @@ edit STATE.md to match.
   unreadable opening stop as explicit unknown state. It refuses that unknown
   before loss arithmetic, preserves the widest known opening stop across
   partial reductions, and skips a stale held stop once a newer fill has fully
-  closed the position.
+  closed the position. An interrupted activation-authority inode check now
+  fails quietly instead of passing an empty `stat` result to shell arithmetic.
+  The short-lived rollout watchdog marks its commanded 143 exit as success and
+  does not query a transient unit after systemd has already collected it.
 
 - **2026-08-31 — The recurring LONG disconnect stall and fleet error floods
   are repaired at their sources.** Public Bybit streams have one reconnect

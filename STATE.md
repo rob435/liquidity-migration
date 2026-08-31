@@ -25,11 +25,12 @@ file.
   whole fleet up. That host file is how a sleeve is held down — it can only
   turn one off, never on — and the Telegram pause button writes it.
 
-  The funded engine heartbeat reports roughly 149.52 USDT equity and no open
-  positions. The independent mainnet attestor credential is not installed, so
-  this is the engine's signed account view rather than a second credential's
-  venue-wide flatness proof. The demo account carries the practice book. Exact
-  live truth is `scripts/ops.sh status`, never this prose.
+  The funded engine heartbeat reports roughly 147 USDT equity and two
+  carry-attributed long positions, SKRUSDT and HNTUSDT. It reports no
+  LONG-attributed position. The independent mainnet attestor credential is not
+  installed, so this is the engine's signed account view rather than a second
+  credential's venue-wide proof. The demo account carries the practice book.
+  Exact live truth is `scripts/ops.sh status`, never this prose.
 
   The fleet runs on `208.84.103.4`. The funded key declares that address as
   primary and `116.202.15.128` as its deliberate backup; the backup host runs
