@@ -118,7 +118,7 @@
     "environment": "demo",
     "profile_name": "v1",
     "registered_rule_path": "configs/lane2_exodus_short_v1.json",
-    "registered_rule_sha256": "b65a7101f8153a468f8cc0d6c7b08de8dc510b47d6cf8b0d08ee1a5e859c97ef"
+    "registered_rule_sha256": "bd3f5b4ac2951d00a2d3f7323e1fe742903e0a9f2f243750fbb269819191235a"
   },
   "initial_state": {
     "consumed_event_ids": [],

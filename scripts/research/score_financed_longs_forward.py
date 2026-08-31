@@ -32,6 +32,7 @@ import datetime as dt
 import json
 import sys
 from pathlib import Path
+from typing import cast
 
 import polars as pl
 
@@ -41,6 +42,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from liquidity_migration.research.backtest.financed_longs import config_scores  # noqa: E402
 from liquidity_migration.rules.carry_hold import FinancedLongsError  # noqa: E402
+from liquidity_migration.rules.rust_strategy_contract import RustStrategyContract  # noqa: E402
 
 DEFAULT_PANEL_ROOT = Path.home() / "SHARED_DATA" / "cross_venue_panel_v1"
 DEFAULT_LEDGER = (
@@ -100,10 +102,19 @@ def load_panel(root: Path) -> pl.DataFrame:
 
 
 def config_rows(
-    panel: pl.DataFrame, config_path: Path, *, end_date: str | None, scored_at: str
+    panel: pl.DataFrame,
+    config_path: Path,
+    *,
+    end_date: str | None,
+    scored_at: str,
+    strategy_contract: RustStrategyContract,
 ) -> pl.DataFrame:
     registered = str(json.loads(config_path.read_text(encoding="utf-8"))["registered"])
-    scores, _, config_id, venue = config_scores(panel, config_path)
+    scores, _, config_id, venue = config_scores(
+        panel,
+        config_path,
+        strategy_contract=strategy_contract,
+    )
     rows = scores.with_columns(
         pl.from_epoch("bar_ts_ms", time_unit="ms").dt.date().cast(pl.String).alias("date")
     )
@@ -177,16 +188,21 @@ def main(argv: list[str] | None = None) -> int:
     # score what can be scored, report the failure, exit nonzero.
     frames: list[pl.DataFrame] = []
     failed: list[str] = []
-    for name in args.config or list(DEFAULT_CONFIGS):
-        try:
-            frames.append(
-                config_rows(
-                    panel, args.config_dir / name, end_date=args.end_date, scored_at=scored_at
+    with RustStrategyContract() as strategy_contract:
+        for name in args.config or list(DEFAULT_CONFIGS):
+            try:
+                frames.append(
+                    config_rows(
+                        panel,
+                        args.config_dir / name,
+                        end_date=args.end_date,
+                        scored_at=scored_at,
+                        strategy_contract=strategy_contract,
+                    )
                 )
-            )
-        except FinancedLongsError as exc:
-            failed.append(name)
-            print(f"SKIPPED {name}: {exc}", file=sys.stderr)
+            except FinancedLongsError as exc:
+                failed.append(name)
+                print(f"SKIPPED {name}: {exc}", file=sys.stderr)
     if not frames:
         raise SystemExit("no config produced rows")
     fresh = pl.concat(frames, how="vertical")
@@ -206,10 +222,13 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"ledger: {args.ledger}  rows {merged.height} (+{keep.height} appended)")
     for (cid,), g in sorted(merged.group_by("config_id"), key=lambda kv: kv[0]):
+        config_id = cast(str, cid)
         f = g.filter(pl.col("forward_eligible"))
-        line = f"  {cid:28s} days {g.height:5d}  last {g['date'].max()}"
+        last_date = cast(str, g["date"].max())
+        line = f"  {config_id:28s} days {g.height:5d}  last {last_date}"
         if f.height:
-            line += f"  | FORWARD {f.height:4d} days, mean {f['net_bp'].mean():+7.2f} bp/day"
+            mean_net = cast(float, f["net_bp"].mean())
+            line += f"  | FORWARD {f.height:4d} days, mean {mean_net:+7.2f} bp/day"
         else:
             line += "  | no forward-eligible days yet"
         print(line)

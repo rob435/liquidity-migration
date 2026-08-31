@@ -5,6 +5,7 @@ set -euo pipefail
 
 REPOSITORY=/opt/liquidity-migration
 ENGINE=/opt/liquidity-migration-engine/bin/engine
+SIGNAL_WORKER=/opt/liquidity-migration-engine/bin/signal-worker
 LAUNCHER=/opt/liquidity-migration-engine/bin/run-authorized-runtime
 CONTROL_HELPER=/opt/liquidity-migration-engine/bin/telegram-control-helper
 TELEGRAM_BOT=/opt/liquidity-migration/liquidity_migration/ops/telegram_controls.py
@@ -41,7 +42,7 @@ process_start_ticks_match() {
 # /proc; unprivileged launchers merely consume its root-owned freshness record.
 watchdog_permit_matches() {
     local path="$ACTIVATION_PERMIT" line1 line2 line3 line4 line5 line6
-    local line7 line8 line9 line10 extra file_boot_id file_owner_pid
+    local line7 line8 line9 line10 line11 extra file_boot_id file_owner_pid
     local file_owner_start_ticks file_not_after current_epoch
     [ -f "$path" ] && [ ! -L "$path" ] \
         && [ "$(stat -c %u "$path")" -eq 0 ] \
@@ -59,23 +60,25 @@ watchdog_permit_matches() {
             && IFS= read -r line8 \
             && IFS= read -r line9 \
             && IFS= read -r line10 \
+            && IFS= read -r line11 \
             && ! IFS= read -r extra
     } < "$path" || return 1
     [ "$line1" = "commit=$WATCHDOG_MARKER_COMMIT" ] \
         && [ "$line2" = "sha256=$WATCHDOG_MARKER_DIGEST" ] \
-        && [ "$line3" = "launcher_sha256=$WATCHDOG_MARKER_LAUNCHER_DIGEST" ] \
-        && [ "$line4" = "control_helper_sha256=$WATCHDOG_MARKER_HELPER_DIGEST" ] \
-        && [ "$line5" = "controls_sudoers_sha256=$WATCHDOG_MARKER_SUDOERS_DIGEST" ] \
-        && [ "$line6" = "telegram_bot_sha256=$WATCHDOG_MARKER_BOT_DIGEST" ] \
+        && [ "$line3" = "signal_worker_sha256=$WATCHDOG_MARKER_SIGNAL_WORKER_DIGEST" ] \
+        && [ "$line4" = "launcher_sha256=$WATCHDOG_MARKER_LAUNCHER_DIGEST" ] \
+        && [ "$line5" = "control_helper_sha256=$WATCHDOG_MARKER_HELPER_DIGEST" ] \
+        && [ "$line6" = "controls_sudoers_sha256=$WATCHDOG_MARKER_SUDOERS_DIGEST" ] \
+        && [ "$line7" = "telegram_bot_sha256=$WATCHDOG_MARKER_BOT_DIGEST" ] \
         || return 1
-    file_boot_id="${line7#boot_id=}"
-    file_owner_pid="${line8#owner_pid=}"
-    file_owner_start_ticks="${line9#owner_start_ticks=}"
-    file_not_after="${line10#not_after_epoch=}"
-    [ "$line7" = "boot_id=$file_boot_id" ] \
-        && [ "$line8" = "owner_pid=$file_owner_pid" ] \
-        && [ "$line9" = "owner_start_ticks=$file_owner_start_ticks" ] \
-        && [ "$line10" = "not_after_epoch=$file_not_after" ] \
+    file_boot_id="${line8#boot_id=}"
+    file_owner_pid="${line9#owner_pid=}"
+    file_owner_start_ticks="${line10#owner_start_ticks=}"
+    file_not_after="${line11#not_after_epoch=}"
+    [ "$line8" = "boot_id=$file_boot_id" ] \
+        && [ "$line9" = "owner_pid=$file_owner_pid" ] \
+        && [ "$line10" = "owner_start_ticks=$file_owner_start_ticks" ] \
+        && [ "$line11" = "not_after_epoch=$file_not_after" ] \
         && [ "$file_boot_id" = "$WATCHDOG_BOOT_ID" ] \
         && [ "$file_owner_pid" = "$WATCHDOG_OWNER_PID" ] \
         && [ "$file_owner_start_ticks" = "$WATCHDOG_OWNER_START_TICKS" ] \
@@ -125,8 +128,9 @@ watchdog_refresh_permit() {
     # either the prior complete lease or the next complete lease.
     if ! watchdog_open_permit_is_current \
         || ! watchdog_permit_matches \
-        || ! printf 'commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nboot_id=%s\nowner_pid=%s\nowner_start_ticks=%s\nnot_after_epoch=%s\n' \
+        || ! printf 'commit=%s\nsha256=%s\nsignal_worker_sha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nboot_id=%s\nowner_pid=%s\nowner_start_ticks=%s\nnot_after_epoch=%s\n' \
             "$WATCHDOG_MARKER_COMMIT" "$WATCHDOG_MARKER_DIGEST" \
+            "$WATCHDOG_MARKER_SIGNAL_WORKER_DIGEST" \
             "$WATCHDOG_MARKER_LAUNCHER_DIGEST" "$WATCHDOG_MARKER_HELPER_DIGEST" \
             "$WATCHDOG_MARKER_SUDOERS_DIGEST" "$WATCHDOG_MARKER_BOT_DIGEST" \
             "$WATCHDOG_BOOT_ID" "$WATCHDOG_OWNER_PID" \
@@ -163,6 +167,12 @@ activation_watchdog_mode() {
         && [ "$(stat -c %g "$MARKER")" -eq 0 ] \
         && [ "$(stat -c %a "$MARKER")" = 644 ] \
         || refuse "activation watchdog release marker boundary is invalid"
+    for rust_binary in "$ENGINE" "$SIGNAL_WORKER"; do
+        [ -f "$rust_binary" ] && [ ! -L "$rust_binary" ] \
+            && [ "$(stat -c %u "$rust_binary")" -eq 0 ] \
+            && [ "$(stat -c %a "$rust_binary")" = 755 ] \
+            || refuse "activation watchdog Rust binary boundary is invalid: $rust_binary"
+    done
     [ -d "${ACTIVATION_PERMIT%/*}" ] && [ ! -L "${ACTIVATION_PERMIT%/*}" ] \
         && [ "$(stat -c %u "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
         && [ "$(stat -c %g "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
@@ -171,27 +181,35 @@ activation_watchdog_mode() {
     awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
-NR == 7 && $0 == "rustc=1.90.0" { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
+NR == 8 && $0 == "rustc=1.90.0" { next }
 { exit 1 }
-END { if (NR != 7) exit 1 }
+END { if (NR != 8) exit 1 }
 ' "$MARKER" || refuse "activation watchdog release marker schema is invalid"
     WATCHDOG_MARKER_COMMIT="$(sed -n 's/^commit=//p' "$MARKER")"
     WATCHDOG_MARKER_DIGEST="$(sed -n 's/^sha256=//p' "$MARKER")"
+    WATCHDOG_MARKER_SIGNAL_WORKER_DIGEST="$(sed -n 's/^signal_worker_sha256=//p' "$MARKER")"
     WATCHDOG_MARKER_LAUNCHER_DIGEST="$(sed -n 's/^launcher_sha256=//p' "$MARKER")"
     WATCHDOG_MARKER_HELPER_DIGEST="$(sed -n 's/^control_helper_sha256=//p' "$MARKER")"
     WATCHDOG_MARKER_SUDOERS_DIGEST="$(sed -n 's/^controls_sudoers_sha256=//p' "$MARKER")"
     WATCHDOG_MARKER_BOT_DIGEST="$(sed -n 's/^telegram_bot_sha256=//p' "$MARKER")"
     [[ "$WATCHDOG_MARKER_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
         && [[ "$WATCHDOG_MARKER_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$WATCHDOG_MARKER_SIGNAL_WORKER_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$WATCHDOG_MARKER_LAUNCHER_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$WATCHDOG_MARKER_HELPER_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$WATCHDOG_MARKER_SUDOERS_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$WATCHDOG_MARKER_BOT_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
         || refuse "activation watchdog marker digests are invalid"
+    [ "$(sha256sum "$ENGINE" | awk '{print $1}')" = "$WATCHDOG_MARKER_DIGEST" ] \
+        || refuse "activation watchdog engine digest does not match the marker"
+    [ "$(sha256sum "$SIGNAL_WORKER" | awk '{print $1}')" \
+        = "$WATCHDOG_MARKER_SIGNAL_WORKER_DIGEST" ] \
+        || refuse "activation watchdog signal-worker digest does not match the marker"
     [ "$(sha256sum "$LAUNCHER" | awk '{print $1}')" \
         = "$WATCHDOG_MARKER_LAUNCHER_DIGEST" ] \
         || refuse "activation watchdog launcher digest does not match the marker"
@@ -266,7 +284,7 @@ for directory in "${REPOSITORY%/*}" "$REPOSITORY" "$REPOSITORY/scripts" \
     trusted_checkout_directory "$directory" \
         || refuse "trusted checkout ancestry is missing, linked, non-root-owned, or group/world-writable: $directory"
 done
-for path in "$ENGINE" "$LAUNCHER" "$CONTROL_HELPER" "$TELEGRAM_BOT" \
+for path in "$ENGINE" "$SIGNAL_WORKER" "$LAUNCHER" "$CONTROL_HELPER" "$TELEGRAM_BOT" \
     "$MARKER" "$CHECKOUT_WRAPPER"; do
     [ -f "$path" ] && [ ! -L "$path" ] \
         || refuse "release input is missing, linked, or not regular: $path"
@@ -274,6 +292,7 @@ for path in "$ENGINE" "$LAUNCHER" "$CONTROL_HELPER" "$TELEGRAM_BOT" \
         || refuse "release input is not root-owned: $path"
 done
 [ "$(stat -c %a "$ENGINE")" = 755 ] \
+    && [ "$(stat -c %a "$SIGNAL_WORKER")" = 755 ] \
     && [ "$(stat -c %a "$LAUNCHER")" = 755 ] \
     && [ "$(stat -c %a "$CONTROL_HELPER")" = 755 ] \
     && [ "$(stat -c %a "$TELEGRAM_BOT")" = 644 ] \
@@ -295,17 +314,19 @@ unsafe_git_metadata="$(
 awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
-NR == 7 && $0 == "rustc=1.90.0" { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
+NR == 8 && $0 == "rustc=1.90.0" { next }
 { exit 1 }
-END { if (NR != 7) exit 1 }
+END { if (NR != 8) exit 1 }
 ' "$MARKER" || refuse "release marker schema is invalid"
 
 marker_commit="$(sed -n 's/^commit=//p' "$MARKER")"
 marker_digest="$(sed -n 's/^sha256=//p' "$MARKER")"
+marker_signal_worker_digest="$(sed -n 's/^signal_worker_sha256=//p' "$MARKER")"
 marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "$MARKER")"
 marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "$MARKER")"
 marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "$MARKER")"
@@ -314,6 +335,8 @@ marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "$MARKER")"
     || refuse "release marker commit is invalid"
 [[ "$marker_digest" =~ ^[0-9a-f]{64}$ ]] \
     || refuse "release marker engine digest is invalid"
+[[ "$marker_signal_worker_digest" =~ ^[0-9a-f]{64}$ ]] \
+    || refuse "release marker signal-worker digest is invalid"
 [[ "$marker_launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
     || refuse "release marker launcher digest is invalid"
 [[ "$marker_helper_digest" =~ ^[0-9a-f]{64}$ ]] \
@@ -322,7 +345,8 @@ marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "$MARKER")"
     || refuse "release marker control boundary digests are invalid"
 
 activation_authority_matches_unlocked() {
-    local path="$1" kind="$2" file_commit file_digest file_launcher_digest
+    local path="$1" kind="$2" file_commit file_digest file_signal_worker_digest
+    local file_launcher_digest
     local file_helper_digest file_sudoers_digest file_bot_digest
     local file_boot_id file_owner_pid file_owner_start_ticks file_not_after current_epoch
     [ -f "$path" ] && [ ! -L "$path" ] \
@@ -332,12 +356,14 @@ activation_authority_matches_unlocked() {
         || return 1
     file_commit="$(sed -n 's/^commit=//p' "$path")"
     file_digest="$(sed -n 's/^sha256=//p' "$path")"
+    file_signal_worker_digest="$(sed -n 's/^signal_worker_sha256=//p' "$path")"
     file_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "$path")"
     file_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "$path")"
     file_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "$path")"
     file_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "$path")"
     [ "$file_commit" = "$marker_commit" ] \
         && [ "$file_digest" = "$marker_digest" ] \
+        && [ "$file_signal_worker_digest" = "$marker_signal_worker_digest" ] \
         && [ "$file_launcher_digest" = "$marker_launcher_digest" ] \
         && [ "$file_helper_digest" = "$marker_helper_digest" ] \
         && [ "$file_sudoers_digest" = "$marker_sudoers_digest" ] \
@@ -348,12 +374,13 @@ activation_authority_matches_unlocked() {
             awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
 { exit 1 }
-END { if (NR != 6) exit 1 }
+END { if (NR != 7) exit 1 }
 ' "$path" >/dev/null
             ;;
         permit)
@@ -369,16 +396,17 @@ END { if (NR != 6) exit 1 }
             awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
-NR == 7 && /^boot_id=/ { next }
-NR == 8 && /^owner_pid=/ { next }
-NR == 9 && /^owner_start_ticks=/ { next }
-NR == 10 && /^not_after_epoch=/ { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
+NR == 8 && /^boot_id=/ { next }
+NR == 9 && /^owner_pid=/ { next }
+NR == 10 && /^owner_start_ticks=/ { next }
+NR == 11 && /^not_after_epoch=/ { next }
 { exit 1 }
-END { if (NR != 10) exit 1 }
+END { if (NR != 11) exit 1 }
 ' "$path" >/dev/null || return 1
             file_boot_id="$(sed -n 's/^boot_id=//p' "$path")"
             file_owner_pid="$(sed -n 's/^owner_pid=//p' "$path")"
@@ -425,7 +453,7 @@ activation_authority_matches() {
 # each hot read atomic with the watchdog's in-place lease renewal.
 activation_authority_content_matches_unlocked() {
     local path="$1" kind="$2" line1 line2 line3 line4 line5 line6
-    local line7 line8 line9 line10 extra file_boot_id file_owner_pid
+    local line7 line8 line9 line10 line11 extra file_boot_id file_owner_pid
     local file_owner_start_ticks file_not_after current_epoch
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
     case "$kind" in
@@ -437,6 +465,7 @@ activation_authority_content_matches_unlocked() {
                     && IFS= read -r line4 \
                     && IFS= read -r line5 \
                     && IFS= read -r line6 \
+                    && IFS= read -r line7 \
                     && ! IFS= read -r extra
             } < "$path" || return 1
             ;;
@@ -452,6 +481,7 @@ activation_authority_content_matches_unlocked() {
                     && IFS= read -r line8 \
                     && IFS= read -r line9 \
                     && IFS= read -r line10 \
+                    && IFS= read -r line11 \
                     && ! IFS= read -r extra
             } < "$path" || return 1
             ;;
@@ -459,20 +489,21 @@ activation_authority_content_matches_unlocked() {
     esac
     [ "$line1" = "commit=$marker_commit" ] \
         && [ "$line2" = "sha256=$marker_digest" ] \
-        && [ "$line3" = "launcher_sha256=$marker_launcher_digest" ] \
-        && [ "$line4" = "control_helper_sha256=$marker_helper_digest" ] \
-        && [ "$line5" = "controls_sudoers_sha256=$marker_sudoers_digest" ] \
-        && [ "$line6" = "telegram_bot_sha256=$marker_bot_digest" ] \
+        && [ "$line3" = "signal_worker_sha256=$marker_signal_worker_digest" ] \
+        && [ "$line4" = "launcher_sha256=$marker_launcher_digest" ] \
+        && [ "$line5" = "control_helper_sha256=$marker_helper_digest" ] \
+        && [ "$line6" = "controls_sudoers_sha256=$marker_sudoers_digest" ] \
+        && [ "$line7" = "telegram_bot_sha256=$marker_bot_digest" ] \
         || return 1
     [ "$kind" = complete ] && return 0
-    file_boot_id="${line7#boot_id=}"
-    file_owner_pid="${line8#owner_pid=}"
-    file_owner_start_ticks="${line9#owner_start_ticks=}"
-    file_not_after="${line10#not_after_epoch=}"
-    [ "$line7" = "boot_id=$file_boot_id" ] \
-        && [ "$line8" = "owner_pid=$file_owner_pid" ] \
-        && [ "$line9" = "owner_start_ticks=$file_owner_start_ticks" ] \
-        && [ "$line10" = "not_after_epoch=$file_not_after" ] \
+    file_boot_id="${line8#boot_id=}"
+    file_owner_pid="${line9#owner_pid=}"
+    file_owner_start_ticks="${line10#owner_start_ticks=}"
+    file_not_after="${line11#not_after_epoch=}"
+    [ "$line8" = "boot_id=$file_boot_id" ] \
+        && [ "$line9" = "owner_pid=$file_owner_pid" ] \
+        && [ "$line10" = "owner_start_ticks=$file_owner_start_ticks" ] \
+        && [ "$line11" = "not_after_epoch=$file_not_after" ] \
         && [[ "$file_boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
         && [[ "$file_owner_pid" =~ ^[1-9][0-9]*$ ]] \
         && [[ "$file_owner_start_ticks" =~ ^[1-9][0-9]*$ ]] \
@@ -520,6 +551,8 @@ committed_wrapper_digest="$(
     || refuse "runtime dispatcher differs from its committed blob"
 [ "$(sha256sum "$ENGINE" | awk '{print $1}')" = "$marker_digest" ] \
     || refuse "engine digest does not match the release marker"
+[ "$(sha256sum "$SIGNAL_WORKER" | awk '{print $1}')" = "$marker_signal_worker_digest" ] \
+    || refuse "signal-worker digest does not match the release marker"
 [ "$(sha256sum "$LAUNCHER" | awk '{print $1}')" = "$marker_launcher_digest" ] \
     || refuse "launcher digest does not match the release marker"
 [ "$(sha256sum "$CONTROL_HELPER" | awk '{print $1}')" = "$marker_helper_digest" ] \
@@ -616,7 +649,7 @@ trap 'stop_for_signal 129 70' HUP
 child_pid=$!
 # The workload inherited the unit's reviewed priority. Demote only this
 # supervisor after the fork so its two-second timer and file reads cannot
-# preempt an execution engine or producer.
+# preempt an execution engine or signal worker.
 if ! /usr/bin/renice -n 19 -p "$$" >/dev/null; then
     terminate_child || true
     refuse "cannot demote the activation-authority supervisor"

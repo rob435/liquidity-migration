@@ -6,10 +6,6 @@ MODE="${1:-${DEPLOY_MODE:-verify}}"
 if [ "$#" -gt 0 ]; then shift; fi
 case "$MODE" in
     install|activate|verify|staged|rollout|stop-mainnet|disarm-mainnet) ;;
-    activate-mainnet)
-        echo "activate-mainnet retired 2026-08-03: the arming switch is REAL_MONEY=true in /etc/liquidity-migration/bybit-mainnet.env; a plain activate or rollout starts the mainnet fleet when it is armed" >&2
-        exit 2
-        ;;
     *) echo "invalid deploy mode: $MODE" >&2; exit 2 ;;
 esac
 
@@ -62,10 +58,6 @@ case "$MODE" in
     staged|rollout)
         case "$DEPLOY_PROFILE" in
             operational) ;;
-            demo-operational)
-                echo "profile demo-operational retired with paper trading (2026-08-03); use --profile operational" >&2
-                exit 2
-                ;;
             *) echo "$MODE requires --profile operational" >&2; exit 2 ;;
         esac
         ;;
@@ -137,6 +129,25 @@ if [ "$("${LOCAL_GIT[@]}" cat-file -t "$EXPECTED_COMMIT" 2>/dev/null || true)" !
     echo "EXPECTED_COMMIT is not a local commit object: $EXPECTED_COMMIT" >&2
     exit 1
 fi
+
+LM_FLEET_MANIFEST="$LOCAL_REPOSITORY/deploy/fleet_manifest.tsv"
+. "$LOCAL_REPOSITORY/deploy/lib_sleeves.sh"
+lm_validate_fleet_manifest
+LOCAL_ROLLOUT_DOWNSTREAM_UNITS=()
+LOCAL_ROLLOUT_OWNER_UNITS=()
+LOCAL_MAINNET_QUARANTINE_UNITS=()
+while IFS= read -r unit; do
+    LOCAL_ROLLOUT_DOWNSTREAM_UNITS+=("$unit")
+done < <(lm_rollout_units downstream)
+while IFS= read -r unit; do
+    LOCAL_ROLLOUT_OWNER_UNITS+=("$unit")
+done < <(lm_rollout_units owner)
+while IFS= read -r unit; do
+    LOCAL_MAINNET_QUARANTINE_UNITS+=("$unit")
+done < <(lm_realm_units mainnet)
+LOCAL_ENGINE_UNIT="$(lm_owner_unit demo)"
+LOCAL_MAINNET_OWNER_UNIT="$(lm_owner_unit mainnet)"
+
 read -r -a SSH_ARGS <<< "$SSH_OPTS"
 {
     printf 'MODE=%q\n' "$MODE"
@@ -149,6 +160,17 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
     printf 'DEPLOY_PROFILE=%q\n' "$DEPLOY_PROFILE"
     printf 'STOP_FIRST=%q\n' "$STOP_FIRST"
+	printf 'ROLLOUT_DOWNSTREAM_UNITS=('
+	for unit in "${LOCAL_ROLLOUT_DOWNSTREAM_UNITS[@]}"; do printf ' %q' "$unit"; done
+	printf ' )\n'
+	printf 'ROLLOUT_OWNER_UNITS=('
+	for unit in "${LOCAL_ROLLOUT_OWNER_UNITS[@]}"; do printf ' %q' "$unit"; done
+	printf ' )\n'
+	printf 'MAINNET_QUARANTINE_UNITS=('
+	for unit in "${LOCAL_MAINNET_QUARANTINE_UNITS[@]}"; do printf ' %q' "$unit"; done
+	printf ' )\n'
+	printf 'ENGINE_UNIT=%q\n' "$LOCAL_ENGINE_UNIT"
+	printf 'MAINNET_OWNER_UNIT=%q\n' "$LOCAL_MAINNET_OWNER_UNIT"
 	cat <<'REMOTE_SCRIPT'
 # `-E` propagates the ERR trap into shell functions so a strict phase can still
 # report which phase died; see run_strict_phase below.
@@ -286,15 +308,10 @@ acquire_maintenance_fd() {
 acquire_maintenance_locks() {
     local disarm_deadline=0
     local lock_dir=/run/liquidity-migration lock_path
-    # maintenance.lock is the canonical mutex; the two retired leaves stay
-    # nested so an old deploy or reset process is still excluded.
     command -v flock >/dev/null 2>&1 || fail "flock is required for deploy serialization"
     install -d -o root -g root -m 0755 "$lock_dir" \
         || fail "cannot prepare the maintenance lock directory"
-    for lock_path in \
-        "$lock_dir/maintenance.lock" \
-        "$lock_dir/deploy.lock" \
-        /run/lock/liquidity-migration-ledger-reset.lock; do
+    for lock_path in "$lock_dir/maintenance.lock"; do
         [ ! -L "$lock_path" ] || fail "maintenance lock path is a symlink: $lock_path"
         if [ ! -e "$lock_path" ]; then
             (umask 077; : > "$lock_path") \
@@ -308,35 +325,32 @@ acquire_maintenance_locks() {
     done
     exec 9<>"$lock_dir/maintenance.lock" \
         || fail "cannot open canonical maintenance lock without truncation"
-    exec 8<>"$lock_dir/deploy.lock" \
-        || fail "cannot open legacy deploy lock without truncation"
-    exec 7<>/run/lock/liquidity-migration-ledger-reset.lock \
-        || fail "cannot open legacy reset lock without truncation"
     if [ "$MODE" = disarm-mainnet ]; then
         disarm_deadline=$((SECONDS + DISARM_MAINTENANCE_LOCK_WAIT_SECONDS))
     fi
     acquire_maintenance_fd 9 maintenance.lock "$disarm_deadline"
-    acquire_maintenance_fd 8 legacy-deploy.lock "$disarm_deadline"
-    acquire_maintenance_fd 7 legacy-reset.lock "$disarm_deadline"
 }
 
 PROFILE_MARKER=/etc/liquidity-migration/profile
-# Retired paper-fleet artifacts, removed from any host that still carries them.
-# The runtime user/group stay if present (inert without units); state roots
-# stay on disk as historical record.
-RETIRED_PAPER_CONFIG_DIR=/etc/liquidity-migration/account-paper-execution
-RETIRED_PAPER_ENVIRONMENT=/etc/liquidity-migration/account-paper-execution.env
+# The stopped-state importer reads these sources only when the Rust WAL does
+# not yet contain complete native strategy checkpoints.
 LONG_DEMO_ROOT=/opt/liquidity-migration/data/bybit-long-demo-event
 CARRY_DEMO_ROOT=/opt/liquidity-migration/data/bybit-carry-demo-event
+EXODUS_DEMO_ROOT=/opt/liquidity-migration/data/bybit-exodus-demo-event
 LONG_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-long-mainnet-event
 CARRY_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-carry-mainnet-event
+EXODUS_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-exodus-mainnet-event
+SIGNAL_SPOOL_ROOT=/var/lib/liquidity-migration/signals
+CONTROL_SPOOL_ROOT=/var/lib/liquidity-migration/controls
+SIGNAL_WORKER_DEMO_ROOT=/var/lib/liquidity-migration-signal-worker-demo
+SIGNAL_WORKER_MAINNET_ROOT=/var/lib/liquidity-migration-signal-worker-mainnet
 
 RUNTIME_GROUP=liquidity-migration
 ENGINE_BUILDER_GROUP=liquidity-builder
 ENGINE_BUILDER_USER=liquidity-builder
 CONTROLS_GROUP=liquidity-controls
 CONTROLS_USER=liquidity-controls
-PRODUCER_USER=liquidity-producer
+SIGNAL_WORKER_USER=liquidity-signal-worker
 DEMO_ENGINE_USER=liquidity-engine-demo
 MAINNET_ENGINE_USER=liquidity-engine-mainnet
 OBSERVER_USER=liquidity-observer
@@ -345,11 +359,10 @@ LLM_STATE_ROOT=/var/lib/liquidity-migration/llm-driver-ledger
 CAPTURE_USER=liquidity-capture
 CAPTURE_STATE_ROOT=/var/lib/liquidity-migration/forward-market
 LLM_GATE_CANDIDATES_PATH="$LLM_STATE_ROOT/llm-gate-candidates.json"
-LEGACY_LLM_GATE_CANDIDATES_PATH=/var/lib/liquidity-migration/targets/llm-gate-candidates.json
-PRODUCER_DEMO_ENV=/etc/liquidity-migration/producer-demo.env
-PRODUCER_MAINNET_ENV=/etc/liquidity-migration/producer-mainnet.env
-PRODUCER_DEMO_SOURCE_ENV=/etc/liquidity-migration/producer-demo-source.env
-PRODUCER_MAINNET_SOURCE_ENV=/etc/liquidity-migration/producer-mainnet-source.env
+SIGNAL_WORKER_DEMO_ENV=/etc/liquidity-migration/signal-worker-demo.env
+SIGNAL_WORKER_MAINNET_ENV=/etc/liquidity-migration/signal-worker-mainnet.env
+DEMO_SIGNAL_SOURCE_ENV=/etc/liquidity-migration/signal-worker-demo-source.env
+MAINNET_SIGNAL_SOURCE_ENV=/etc/liquidity-migration/signal-worker-mainnet-source.env
 MAINNET_TELEGRAM_ENV=/etc/liquidity-migration/telegram-mainnet.env
 
 ensure_engine_builder_identity() {
@@ -387,13 +400,24 @@ normalize_account_lease_access() {
 }
 
 normalize_runtime_state_access() {
+    local signal_spool_root="${SIGNAL_SPOOL_ROOT:-/var/lib/liquidity-migration/signals}"
+    local control_spool_root="${CONTROL_SPOOL_ROOT:-/var/lib/liquidity-migration/controls}"
+    local signal_worker_demo_root="${SIGNAL_WORKER_DEMO_ROOT:-/var/lib/liquidity-migration-signal-worker-demo}"
+    local signal_worker_mainnet_root="${SIGNAL_WORKER_MAINNET_ROOT:-/var/lib/liquidity-migration-signal-worker-mainnet}"
     "$PYTHON" - "$RUNTIME_GROUP" \
         "$DEMO_ENGINE_USER" /var/lib/liquidity-migration-engine \
         "$MAINNET_ENGINE_USER" /var/lib/liquidity-migration-engine-mainnet \
-        "$PRODUCER_USER" "$LONG_DEMO_ROOT" \
-        "$PRODUCER_USER" "$CARRY_DEMO_ROOT" \
-        "$PRODUCER_USER" "$LONG_MAINNET_ROOT" \
-        "$PRODUCER_USER" "$CARRY_MAINNET_ROOT" \
+        "$SIGNAL_WORKER_USER" "$LONG_DEMO_ROOT" \
+        "$SIGNAL_WORKER_USER" "$CARRY_DEMO_ROOT" \
+        "$SIGNAL_WORKER_USER" "$EXODUS_DEMO_ROOT" \
+        "$SIGNAL_WORKER_USER" "$LONG_MAINNET_ROOT" \
+        "$SIGNAL_WORKER_USER" "$CARRY_MAINNET_ROOT" \
+        "$SIGNAL_WORKER_USER" "$EXODUS_MAINNET_ROOT" \
+        "$SIGNAL_WORKER_USER" "$signal_spool_root" \
+        "$SIGNAL_WORKER_USER" "$signal_worker_demo_root" \
+        "$SIGNAL_WORKER_USER" "$signal_worker_mainnet_root" \
+        "$DEMO_ENGINE_USER" "$control_spool_root/demo" \
+        "$MAINNET_ENGINE_USER" "$control_spool_root/mainnet" \
         "$LLM_USER" "$LLM_STATE_ROOT" <<'PY'
 import grp
 import os
@@ -545,25 +569,13 @@ PY
     [ "$?" -eq 0 ] || fail "cannot migrate runtime-state ownership"
 }
 
-migrate_legacy_llm_gate_candidates() {
-    local source="$LEGACY_LLM_GATE_CANDIDATES_PATH"
-    local target="$LLM_GATE_CANDIDATES_PATH"
-    [ ! -L "${source%/*}" ] && [ ! -L "${target%/*}" ] \
-        || fail "LLM candidate directory is linked"
-    if [ -e "$source" ] || [ -L "$source" ]; then
-        [ -f "$source" ] && [ ! -L "$source" ] \
-            && [ "$(stat -c %h "$source")" -eq 1 ] \
-            || fail "legacy LLM candidates are not a single regular file"
-        [ ! -e "$target" ] && [ ! -L "$target" ] \
-            || fail "both legacy and current LLM candidate files exist"
-        mv -T -- "$source" "$target" \
-            || fail "cannot move LLM candidates into their writer-owned state root"
-    fi
-}
-
 ensure_runtime_identities() {
-    [ -x /usr/bin/sudo ] && [ -x /usr/sbin/visudo ] \
-        || fail "sudo and visudo are required for the isolated Telegram control boundary"
+    local signal_spool_root="${SIGNAL_SPOOL_ROOT:-/var/lib/liquidity-migration/signals}"
+    local control_spool_root="${CONTROL_SPOOL_ROOT:-/var/lib/liquidity-migration/controls}"
+    local signal_worker_demo_root="${SIGNAL_WORKER_DEMO_ROOT:-/var/lib/liquidity-migration-signal-worker-demo}"
+    local signal_worker_mainnet_root="${SIGNAL_WORKER_MAINNET_ROOT:-/var/lib/liquidity-migration-signal-worker-mainnet}"
+    [ -x /usr/bin/sudo ] && [ -x /usr/sbin/visudo ] && [ -x /usr/bin/setpriv ] \
+        || fail "sudo, visudo, and setpriv are required for the isolated Telegram control boundary"
     getent group "$RUNTIME_GROUP" >/dev/null 2>&1 || groupadd --system "$RUNTIME_GROUP"
     ensure_engine_builder_identity
     getent group "$CONTROLS_GROUP" >/dev/null 2>&1 \
@@ -576,7 +588,7 @@ ensure_runtime_identities() {
         && [ "$(id -nG "$CONTROLS_USER")" = "$CONTROLS_GROUP" ] \
         || fail "$CONTROLS_USER is not isolated in its dedicated primary group"
     local user
-    for user in "$PRODUCER_USER" "$DEMO_ENGINE_USER" "$MAINNET_ENGINE_USER" "$OBSERVER_USER" "$LLM_USER" "$CAPTURE_USER"; do
+    for user in "$SIGNAL_WORKER_USER" "$DEMO_ENGINE_USER" "$MAINNET_ENGINE_USER" "$OBSERVER_USER" "$LLM_USER" "$CAPTURE_USER"; do
         if ! id -u "$user" >/dev/null 2>&1; then
             useradd --system --no-create-home --home-dir /nonexistent \
                 --shell /usr/sbin/nologin --gid "$RUNTIME_GROUP" "$user"
@@ -590,21 +602,46 @@ ensure_runtime_identities() {
     systemd-tmpfiles --create /etc/tmpfiles.d/liquidity-migration.conf \
         || fail "cannot create the runtime lock and engine lease boundaries"
     [ ! -L /var/lib/liquidity-migration/targets ] \
-        || fail "producer target root is linked"
-    install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        || fail "takeover source root is linked"
+    install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration/targets
+    for signal_path in \
+        "$signal_spool_root" "$signal_spool_root/demo" "$signal_spool_root/mainnet"; do
+        [ ! -L "$signal_path" ] || fail "signal spool path is linked: $signal_path"
+        install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0770 "$signal_path" \
+            || fail "cannot create shared signal spool path: $signal_path"
+    done
+    [ ! -L "$control_spool_root" ] || fail "runtime control spool root is linked"
+    install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$control_spool_root" \
+        || fail "cannot create runtime control spool root"
+    install -d -o "$DEMO_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        "$control_spool_root/demo" \
+        || fail "cannot create demo runtime control spool"
+    install -d -o "$MAINNET_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        "$control_spool_root/mainnet" \
+        || fail "cannot create funded runtime control spool"
+    for worker_root in "$signal_worker_demo_root" "$signal_worker_mainnet_root"; do
+        [ ! -L "$worker_root" ] || fail "signal-worker state root is linked: $worker_root"
+        install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 "$worker_root" \
+            || fail "cannot create signal-worker state root: $worker_root"
+    done
+    install -d -o "$DEMO_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        /var/lib/liquidity-migration-engine \
+        || fail "cannot create demo engine state root"
+    install -d -o "$MAINNET_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        /var/lib/liquidity-migration-engine-mainnet \
+        || fail "cannot create funded engine state root"
     [ ! -L "$LLM_STATE_ROOT" ] || fail "LLM state root is linked"
     install -d -o "$LLM_USER" -g "$RUNTIME_GROUP" -m 0750 "$LLM_STATE_ROOT"
     [ ! -L "$CAPTURE_STATE_ROOT" ] || fail "forward-capture state root is linked"
     install -d -o "$CAPTURE_USER" -g "$RUNTIME_GROUP" -m 0750 "$CAPTURE_STATE_ROOT"
-    migrate_legacy_llm_gate_candidates
     normalize_account_lease_access
     normalize_runtime_state_access
-    normalize_producer_book_state_access
+    normalize_takeover_source_access
 }
 
-normalize_producer_book_state_access() {
-    /usr/bin/python3 - "$PRODUCER_USER" "$RUNTIME_GROUP" \
+normalize_takeover_source_access() {
+    /usr/bin/python3 - "$SIGNAL_WORKER_USER" "$RUNTIME_GROUP" \
         /var/lib/liquidity-migration/targets \
         long-demo-state.json long-mainnet-state.json <<'PY'
 import grp
@@ -618,14 +655,14 @@ group = grp.getgrnam(sys.argv[2]).gr_gid
 root_path = sys.argv[3]
 root_before = os.lstat(root_path)
 if stat.S_ISLNK(root_before.st_mode) or not stat.S_ISDIR(root_before.st_mode):
-    raise SystemExit(f"producer target root is not a real directory: {root_path!r}")
+    raise SystemExit(f"takeover source root is not a real directory: {root_path!r}")
 root = os.open(
     root_path,
     os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
 )
 try:
     if not os.path.samestat(root_before, os.fstat(root)):
-        raise SystemExit(f"producer target root changed before migration: {root_path!r}")
+        raise SystemExit(f"takeover source root changed before migration: {root_path!r}")
     for name in sys.argv[4:]:
         path = os.path.join(root_path, name)
         try:
@@ -633,11 +670,11 @@ try:
         except FileNotFoundError:
             continue
         if not stat.S_ISREG(before.st_mode):
-            raise SystemExit(f"producer book state is not a regular file: {path!r}")
+            raise SystemExit(f"takeover state is not a regular file: {path!r}")
         if before.st_nlink != 1:
-            raise SystemExit(f"producer book state has multiple links: {path!r}")
+            raise SystemExit(f"takeover state has multiple links: {path!r}")
         if before.st_size > 16 * 1024 * 1024:
-            raise SystemExit(f"producer book state exceeds its reader limit: {path!r}")
+            raise SystemExit(f"takeover state exceeds its reader limit: {path!r}")
         descriptor = os.open(
             name,
             os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -646,23 +683,23 @@ try:
         try:
             opened = os.fstat(descriptor)
             if not os.path.samestat(before, opened):
-                raise SystemExit(f"producer book state changed before migration: {path!r}")
+                raise SystemExit(f"takeover state changed before migration: {path!r}")
             os.fchown(descriptor, owner, group)
             os.fchmod(descriptor, 0o640)
             current = os.stat(name, dir_fd=root, follow_symlinks=False)
             if not os.path.samestat(os.fstat(descriptor), current):
-                raise SystemExit(f"producer book state changed during migration: {path!r}")
+                raise SystemExit(f"takeover state changed during migration: {path!r}")
         finally:
             os.close(descriptor)
     if not os.path.samestat(os.fstat(root), os.lstat(root_path)):
-        raise SystemExit(f"producer target root changed during migration: {root_path!r}")
+        raise SystemExit(f"takeover source root changed during migration: {root_path!r}")
 finally:
     os.close(root)
 PY
-    [ "$?" -eq 0 ] || fail "cannot migrate producer book-state ownership"
+    [ "$?" -eq 0 ] || fail "cannot prepare takeover-state ownership"
 }
 
-write_producer_environment() {
+write_signal_worker_environment() {
     local source="$1" target="$2"
     "$PYTHON" - "$source" "$target" <<'PY'
 import os
@@ -674,9 +711,7 @@ from liquidity_migration.policy.systemd_environment import load_private_systemd_
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
 allowed = {
-    "CANDIDATE_UNIVERSE_FILE", "CARRY_NOTIONAL_MULTIPLIER",
-    "LONG_NOTIONAL_MULTIPLIER",
-    "OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM",
+    "CANDIDATE_UNIVERSE_FILE", "OPERATIONAL_PROFILE_FILE", "SIGNAL_WORKER_REALM",
 }
 values = load_private_systemd_environment(source)
 forbidden = {
@@ -688,10 +723,10 @@ forbidden = {
 }
 leaked = sorted(key for key in forbidden if str(values.get(key) or "").strip())
 if leaked:
-    raise SystemExit(f"{source}: producer source contains forbidden secret/control keys: {', '.join(leaked)}")
+    raise SystemExit(f"{source}: signal-worker source contains forbidden secret/control keys: {', '.join(leaked)}")
 filtered = {key: value for key, value in values.items() if key in allowed}
-if filtered.get("PRODUCER_REALM") not in {"demo", "mainnet"}:
-    raise SystemExit(f"{source}: PRODUCER_REALM must be demo or mainnet")
+if filtered.get("SIGNAL_WORKER_REALM") not in {"demo", "mainnet"}:
+    raise SystemExit(f"{source}: SIGNAL_WORKER_REALM must be demo or mainnet")
 for required in ("CANDIDATE_UNIVERSE_FILE", "OPERATIONAL_PROFILE_FILE"):
     value = str(filtered.get(required) or "")
     if not value or not Path(value).is_absolute():
@@ -716,29 +751,29 @@ except BaseException:
     raise
 PY
     chown root:"$RUNTIME_GROUP" "$target" && chmod 0640 "$target" \
-        || fail "cannot secure producer environment $target"
+        || fail "cannot secure signal-worker environment $target"
     unset OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
     lm_load_private_systemd_environment "$PYTHON" "$source" \
         OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
     local input
     for input in "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE"; do
         [ -f "$input" ] && [ ! -L "$input" ] \
-            || fail "producer input is missing or linked: $input"
+            || fail "signal-worker input is missing or linked: $input"
         chown root:"$RUNTIME_GROUP" "$input" && chmod 0640 "$input" \
-            || fail "cannot secure producer input: $input"
+            || fail "cannot secure signal-worker input: $input"
     done
-    # Grant producer traversal only along the declared inputs, never across every
+    # Grant signal-worker traversal only along the declared inputs, never across every
     # credential/config directory under /etc/liquidity-migration.
     local directory
     for input in "$target" "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE"; do
         directory="$(dirname "$input")"
         case "$directory" in
             /etc/liquidity-migration|/etc/liquidity-migration/*) ;;
-            *) fail "producer input must stay below /etc/liquidity-migration: $input" ;;
+            *) fail "signal-worker input must stay below /etc/liquidity-migration: $input" ;;
         esac
         while :; do
             chown root:"$RUNTIME_GROUP" "$directory" && chmod 0750 "$directory" \
-                || fail "cannot grant producer traversal: $directory"
+                || fail "cannot grant signal-worker traversal: $directory"
             [ "$directory" = /etc/liquidity-migration ] && break
             directory="$(dirname "$directory")"
         done
@@ -781,11 +816,6 @@ PY
     chown root:root "$MAINNET_TELEGRAM_ENV" && chmod 0600 "$MAINNET_TELEGRAM_ENV" \
         || fail "cannot secure funded notification environment"
 }
-retire_paper_host_config() {
-    rm -f "$RETIRED_PAPER_ENVIRONMENT"
-    rm -rf "$RETIRED_PAPER_CONFIG_DIR"
-}
-
 reconcile_demo_engine_environment() {
     local source="$REPO_DIR/deploy/engine.env.template"
     local target="$ENGINE_ENVIRONMENT"
@@ -908,32 +938,32 @@ prepare_demo_runtime_config() {
         || fail "systemd runtime paths require REPO_DIR=/opt/liquidity-migration"
     install -d -o root -g root -m 0700 /etc/liquidity-migration
     reconcile_demo_engine_environment
-    install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 /var/lib/liquidity-migration/targets
-    if [ ! -f "$PRODUCER_DEMO_SOURCE_ENV" ]; then
+    install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 /var/lib/liquidity-migration/targets
+    if [ ! -f "$DEMO_SIGNAL_SOURCE_ENV" ]; then
         install -o root -g root -m 0600 \
-            "$REPO_DIR/deploy/producer-demo-source.env.template" "$PRODUCER_DEMO_SOURCE_ENV" \
-            || fail "cannot install the demo producer source env"
+            "$REPO_DIR/deploy/signal-worker-demo.env.template" "$DEMO_SIGNAL_SOURCE_ENV" \
+            || fail "cannot install the demo signal-worker source env"
     fi
-    for path in "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env; do
+    for path in "$DEMO_SIGNAL_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env; do
         [ -f "$path" ] && [ ! -L "$path" ] || fail "missing real private config: $path"
         chown root:root "$path"
         chmod 0600 "$path"
     done
     lm_load_private_systemd_environment "$PYTHON" \
-        "$PRODUCER_DEMO_SOURCE_ENV" \
-        PRODUCER_REALM CANDIDATE_UNIVERSE_FILE OPERATIONAL_PROFILE_FILE
-    [ "$PRODUCER_REALM" = demo ] || fail "demo producer source must declare PRODUCER_REALM=demo"
+        "$DEMO_SIGNAL_SOURCE_ENV" \
+        SIGNAL_WORKER_REALM CANDIDATE_UNIVERSE_FILE OPERATIONAL_PROFILE_FILE
+    [ "$SIGNAL_WORKER_REALM" = demo ] || fail "demo signal-worker source must declare SIGNAL_WORKER_REALM=demo"
     demo_candidate="$CANDIDATE_UNIVERSE_FILE"
     demo_profile="$OPERATIONAL_PROFILE_FILE"
     for path in "$demo_candidate" "$demo_profile"; do
-        [ "${path#/}" != "$path" ] || fail "demo producer input must be absolute: $path"
+        [ "${path#/}" != "$path" ] || fail "demo signal-worker input must be absolute: $path"
     done
     operational_profile_source="$REPO_DIR/configs/operational.demo.json"
     [ -f "$operational_profile_source" ] && [ ! -L "$operational_profile_source" ] \
         || fail "missing tracked operational profile: $operational_profile_source"
     "$PYTHON" - "$operational_profile_source" <<'PY'
 import sys
-from liquidity_migration.policy.operational_profile import load_operational_profile
+from liquidity_migration.core.operational_profile import load_operational_profile
 
 load_operational_profile(sys.argv[1])
 PY
@@ -943,22 +973,20 @@ PY
         || fail "install a reviewed demo candidate universe: $demo_candidate"
     chown root:root /etc/liquidity-migration/sleeves.resolved.env
     chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
-    write_producer_environment "$PRODUCER_DEMO_SOURCE_ENV" "$PRODUCER_DEMO_ENV"
-    retire_paper_host_config
-
+    write_signal_worker_environment "$DEMO_SIGNAL_SOURCE_ENV" "$SIGNAL_WORKER_DEMO_ENV"
     [ ! -L "$REPO_DIR/data" ] || fail "demo runtime data directory must not be a symlink"
-    for root in "$LONG_DEMO_ROOT" "$CARRY_DEMO_ROOT"; do
+    for root in "$LONG_DEMO_ROOT" "$CARRY_DEMO_ROOT" "$EXODUS_DEMO_ROOT"; do
         case "$root" in
             "$REPO_DIR"/data/*) ;;
             *) fail "demo runtime root escapes the checkout data directory: $root" ;;
         esac
         [ ! -L "$root" ] || fail "demo runtime root must not be a symlink: $root"
-        install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 "$root" \
+        install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 "$root" \
             || fail "cannot create demo runtime root: $root"
         chmod 0750 "$root" || fail "cannot secure demo runtime root: $root"
     done
-    chown root:root "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
-    chmod 0600 "$PRODUCER_DEMO_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
+    chown root:root "$DEMO_SIGNAL_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
+    chmod 0600 "$DEMO_SIGNAL_SOURCE_ENV" /etc/liquidity-migration/bybit-demo.env
 }
 
 trusted_checkout_directory() {
@@ -1184,9 +1212,10 @@ install_mode() {
     # process wrote, which is the read that can actually disagree.
     lm_write_resolved_sleeve_toggles
     prepare_demo_runtime_config
-    run_phase install-mainnet-engine-config install_mainnet_engine_config
     require_clean_head
     run_phase engine-build build_engine
+    run_phase install-demo-native-engine-config install_demo_native_engine_config
+    run_phase import-demo-native-strategy-state import_native_strategy_state demo
     echo "install-ok commit=$EXPECTED_COMMIT units_started=0"
     echo "next: run activate to start the sleeves this checkout enables"
 }
@@ -1196,44 +1225,19 @@ load_authorization() {
     PYTHON=.venv/bin/python
     [ -x "$PYTHON" ] || fail "missing deployed Python environment"
     # Which profile is installed, read from the marker install wrote. An
-    # explicit --profile on this invocation wins. Since the 2026-08-03 paper
-    # retirement there is one profile; a demo-operational marker from an older
-    # install reads as the same authorization and self-heals on the next rollout.
+    # explicit --profile on this invocation wins.
     AUTH_PROFILE="${DEPLOY_PROFILE:-}"
     if [ -z "$AUTH_PROFILE" ] && [ -r "$PROFILE_MARKER" ]; then
         AUTH_PROFILE="$(cat "$PROFILE_MARKER")"
     fi
     [ -n "$AUTH_PROFILE" ] || AUTH_PROFILE=operational
-    case "$AUTH_PROFILE" in demo-operational|operational) ;; *) fail "unsupported profile $AUTH_PROFILE" ;; esac
+    [ "$AUTH_PROFILE" = operational ] || fail "unsupported profile $AUTH_PROFILE"
 
     . deploy/lib_sleeves.sh
     . deploy/lib_systemd_environment.sh
-    # A resolved file written before the paper retirement is 0640 with the
-    # retired runtime group; normalize so the strict private loader accepts it.
-    if [ -e /etc/liquidity-migration/sleeves.resolved.env ]; then
-        chown root:root /etc/liquidity-migration/sleeves.resolved.env
-        chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
-    fi
     lm_load_private_systemd_environment "$PYTHON" \
         /etc/liquidity-migration/sleeves.resolved.env \
-        LONG_SLEEVE CARRY_SLEEVE \
-        CONTINUOUS_SLEEVE CONTINUOUS_HEDGE_TIMER \
-        CONTINUOUS_PAPER_SLEEVE CARRY_PAPER_SLEEVE PAPER_TARGET_MIRROR
-    # The retired keys (paper trio, and since 2026-08-03 the continuous pair)
-    # are loaded solely for a retirement rollout's pre-install stage: there
-    # the host checkout still sources the PREVIOUS commit's lib_sleeves.sh,
-    # whose resolved-toggle verifier greps those keys against these
-    # variables. Nothing below reads them, and a post-retirement resolved
-    # file simply leaves them unset. The mainnet sleeve keys were retired
-    # 2026-08-03 (REAL_MONEY is the arming switch); a stale resolved file may
-    # still carry them, and the loader simply does not ask for them.
-    # A resolved file written by a pre-carry install lacks the carry keys;
-    # absent means never deployed, i.e. off. Bridges only the rollout that
-    # introduces them — the post-install verifier requires them present.
-    if [ -z "${CARRY_SLEEVE:-}" ]; then
-        echo "sleeves-resolved-transition carry-keys=absent treated-as=off reason=pre-carry-install"
-        CARRY_SLEEVE="${CARRY_SLEEVE:-off}"
-    fi
+        LONG_SLEEVE CARRY_SLEEVE
     for value in "$LONG_SLEEVE" "$CARRY_SLEEVE"; do
         case "$value" in on|off) ;; *) fail "invalid resolved sleeve value" ;; esac
     done
@@ -1255,7 +1259,6 @@ unit_off() {
 # engine, and an armed topology also requires the separately credentialed
 # funded engine. Missing binaries/configuration are fatal rather than an
 # implicit opt-out.
-ENGINE_UNIT=liquidity-migration-engine.service
 # Built in a clone of its own, never the deployed checkout: cargo writes a
 # target/ tree beside the source, and the deployed checkout is proved clean
 # against the exact commit at several points in this script.
@@ -1270,6 +1273,7 @@ PYTHON_WHEEL_CACHE="$ENGINE_BUILDER_STATE/python-wheels"
 DEPLOY_VENV_STAGING_ROOT="$REPO_DIR/venv"
 DEPLOY_VENV_STAGING=""
 ENGINE_BINARY=/opt/liquidity-migration-engine/bin/engine
+SIGNAL_WORKER_BINARY=/opt/liquidity-migration-engine/bin/signal-worker
 ENGINE_LAUNCHER=/opt/liquidity-migration-engine/bin/run-authorized-runtime
 ENGINE_CONTROL_HELPER=/opt/liquidity-migration-engine/bin/telegram-control-helper
 CONTROLS_SUDOERS=/etc/sudoers.d/liquidity-migration-controls
@@ -1279,11 +1283,14 @@ ACTIVATION_PERMIT=/run/liquidity-migration/activation.permit
 ACTIVATION_WATCHDOG_UNIT=liquidity-migration-activation-watchdog.service
 ACTIVATION_LEASE_SECONDS=6
 ENGINE_ENVIRONMENT=/etc/liquidity-migration/engine.env
+ENGINE_DEMO_CONFIG=/etc/liquidity-migration/engine.toml
 ENGINE_MAINNET_ENVIRONMENT=/etc/liquidity-migration/engine-mainnet.env
 ENGINE_MAINNET_CONFIG=/etc/liquidity-migration/engine-mainnet.toml
 ENGINE_CANDIDATE_BINARY="$ENGINE_BUILDER_TARGET_DIR/release/engine"
+SIGNAL_WORKER_CANDIDATE_BINARY="$ENGINE_BUILDER_TARGET_DIR/release/signal-worker"
 ENGINE_PREFETCHED_COMMIT=""
 ENGINE_PREFETCHED_DIGEST=""
+SIGNAL_WORKER_PREFETCHED_DIGEST=""
 PYTHON_PREFETCHED_LOCK_DIGEST=""
 PYTHON_PREFETCHED_WHEEL_DIGEST=""
 DEPLOY_PREFETCHED_COMMIT=""
@@ -1306,8 +1313,8 @@ funded_configuration_present() {
         "$MAINNET_ATTESTOR_ENV" \
         "$ENGINE_MAINNET_ENVIRONMENT" \
         /etc/liquidity-migration/engine-mainnet.toml \
-        "$PRODUCER_MAINNET_ENV" \
-        "$PRODUCER_MAINNET_SOURCE_ENV" \
+        "$SIGNAL_WORKER_MAINNET_ENV" \
+        "$MAINNET_SIGNAL_SOURCE_ENV" \
         "$MAINNET_TELEGRAM_ENV"; do
         if [ -e "$path" ] || [ -L "$path" ]; then
             return 0
@@ -1316,13 +1323,260 @@ funded_configuration_present() {
     return 1
 }
 
-install_mainnet_engine_config() {
-    funded_configuration_present || return 0
-    install -o root -g "$RUNTIME_GROUP" -m 0640 \
-        deploy/engine.mainnet.toml.template "${ENGINE_MAINNET_CONFIG}.new" \
-        || fail "cannot stage the committed mainnet engine config"
-    mv -f "${ENGINE_MAINNET_CONFIG}.new" "$ENGINE_MAINNET_CONFIG" \
-        || fail "cannot install the committed mainnet engine config"
+native_entries_switch() {
+    case "${1:-off}" in
+        on|ON|On|1|true|TRUE|yes|YES) printf 'true\n' ;;
+        *) printf 'false\n' ;;
+    esac
+}
+
+render_native_engine_config() {
+    local realm="$1" operational_config="$2" output="$3" action="${4:-install}"
+    local template signal_config long_entries carry_entries exodus_entries staged
+    local -a maker_args=()
+    case "$realm" in
+        demo)
+            template="$REPO_DIR/deploy/engine.demo.toml.template"
+            signal_config="$REPO_DIR/configs/signal-worker.demo.json"
+            long_entries="$(native_entries_switch "${LONG_SLEEVE:-off}")"
+            carry_entries="$(native_entries_switch "${CARRY_SLEEVE:-off}")"
+            exodus_entries=true
+            ;;
+        mainnet)
+            template="$REPO_DIR/deploy/engine.mainnet.toml.template"
+            signal_config="$REPO_DIR/configs/signal-worker.mainnet.json"
+            long_entries=true
+            carry_entries=true
+            exodus_entries=true
+            maker_args=(--maker-rule "$REPO_DIR/configs/lane2_toxic_flow_quoter_v1.json")
+            ;;
+        *) fail "unsupported native engine realm: $realm" ;;
+    esac
+    local source
+    for source in \
+        "$template" "$signal_config" \
+        "$REPO_DIR/configs/long_native_v12.json" \
+        "$REPO_DIR/configs/lane2_carry_hold_v7.json" \
+        "$REPO_DIR/configs/lane2_exodus_short_v1.json" \
+        "$operational_config"; do
+        [ -z "$source" ] && continue
+        [ -f "$source" ] && [ ! -L "$source" ] \
+            || fail "native engine config source is missing or linked: $source"
+    done
+    if [ "$realm" = mainnet ]; then
+        source="$REPO_DIR/configs/lane2_toxic_flow_quoter_v1.json"
+        [ -f "$source" ] && [ ! -L "$source" ] \
+            || fail "native engine config source is missing or linked: $source"
+    fi
+    [ -x "$ENGINE_BINARY" ] && [ ! -L "$ENGINE_BINARY" ] \
+        || fail "trusted engine binary is unavailable for native config rendering"
+    [ ! -L "$output" ] || fail "native engine config destination is linked: $output"
+    if [ "$action" = check ]; then
+        [ -f "$output" ] || fail "native engine config is missing: $output"
+        "$ENGINE_BINARY" render-native-config \
+            --realm "$realm" \
+            --signal-config "$signal_config" \
+            --long-rule "$REPO_DIR/configs/long_native_v12.json" \
+            --carry-rule "$REPO_DIR/configs/lane2_carry_hold_v7.json" \
+            --exodus-rule "$REPO_DIR/configs/lane2_exodus_short_v1.json" \
+            --operational-config "$operational_config" \
+            --long-entries-enabled "$long_entries" \
+            --carry-entries-enabled "$carry_entries" \
+            --exodus-entries-enabled "$exodus_entries" \
+            --template "$template" \
+            "${maker_args[@]}" \
+            --output "$output" --check \
+            || fail "installed $realm engine config differs from its Rust render"
+        return 0
+    fi
+    [ "$action" = install ] || fail "unsupported native config action: $action"
+    install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$(dirname "$output")" \
+        || fail "cannot prepare native engine config directory"
+    staged="$(mktemp "${output}.new.XXXXXX")" \
+        || fail "cannot create native engine config staging file"
+    if ! "$ENGINE_BINARY" render-native-config \
+        --realm "$realm" \
+        --signal-config "$signal_config" \
+        --long-rule "$REPO_DIR/configs/long_native_v12.json" \
+        --carry-rule "$REPO_DIR/configs/lane2_carry_hold_v7.json" \
+        --exodus-rule "$REPO_DIR/configs/lane2_exodus_short_v1.json" \
+        --operational-config "$operational_config" \
+        --long-entries-enabled "$long_entries" \
+        --carry-entries-enabled "$carry_entries" \
+        --exodus-entries-enabled "$exodus_entries" \
+        --template "$template" \
+        "${maker_args[@]}" \
+        --output "$staged"; then
+        rm -f -- "$staged"
+        fail "cannot render $realm native engine config"
+    fi
+    chown root:"$RUNTIME_GROUP" "$staged" && chmod 0640 "$staged" \
+        || { rm -f -- "$staged"; fail "cannot secure staged $realm engine config"; }
+    mv -f -- "$staged" "$output" \
+        || { rm -f -- "$staged"; fail "cannot atomically install $realm engine config"; }
+    sync -f "$output" || fail "cannot persist installed $realm engine config"
+    "$ENGINE_BINARY" render-native-config \
+        --realm "$realm" \
+        --signal-config "$signal_config" \
+        --long-rule "$REPO_DIR/configs/long_native_v12.json" \
+        --carry-rule "$REPO_DIR/configs/lane2_carry_hold_v7.json" \
+        --exodus-rule "$REPO_DIR/configs/lane2_exodus_short_v1.json" \
+        --operational-config "$operational_config" \
+        --long-entries-enabled "$long_entries" \
+        --carry-entries-enabled "$carry_entries" \
+        --exodus-entries-enabled "$exodus_entries" \
+        --template "$template" \
+        "${maker_args[@]}" \
+        --output "$output" --check \
+        || fail "installed $realm engine config differs from its Rust render"
+}
+
+install_demo_native_engine_config() {
+    local action="${1:-install}"
+    render_native_engine_config \
+        demo "$REPO_DIR/configs/operational.demo.json" "$ENGINE_DEMO_CONFIG" "$action"
+}
+
+install_mainnet_native_engine_config() {
+    local action="${1:-install}" operational_config
+    lm_load_private_systemd_environment "$PYTHON" "$MAINNET_SIGNAL_SOURCE_ENV" \
+        SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE
+    [ "$SIGNAL_WORKER_REALM" = mainnet ] \
+        || fail "funded signal-worker source must declare SIGNAL_WORKER_REALM=mainnet"
+    operational_config="$OPERATIONAL_PROFILE_FILE"
+    render_native_engine_config \
+        mainnet "$operational_config" "$ENGINE_MAINNET_CONFIG" "$action"
+}
+
+run_engine_takeover_command() {
+    local realm="$1" config="$2" runtime_user engine_env credential_env
+    shift 2
+    case "$realm" in
+        demo)
+            runtime_user="$DEMO_ENGINE_USER"
+            engine_env="$ENGINE_ENVIRONMENT"
+            credential_env=/etc/liquidity-migration/bybit-demo.env
+            ;;
+        mainnet)
+            runtime_user="$MAINNET_ENGINE_USER"
+            engine_env="$ENGINE_MAINNET_ENVIRONMENT"
+            credential_env="$MAINNET_ATTESTOR_ENV"
+            ;;
+        *) fail "unsupported strategy-state takeover realm: $realm" ;;
+    esac
+    [ -f "$config" ] && [ ! -L "$config" ] \
+        || fail "strategy-state takeover config is missing or linked: $config"
+    [ -f "$engine_env" ] && [ ! -L "$engine_env" ] \
+        || fail "strategy-state takeover engine environment is missing or linked: $engine_env"
+    [ -f "$credential_env" ] && [ ! -L "$credential_env" ] \
+        || fail "strategy-state takeover credential is missing or linked: $credential_env"
+    (
+        unset BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET \
+            BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET \
+            BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP \
+            BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP \
+            BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY \
+            EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM
+        case "$realm" in
+            demo)
+                lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
+                    BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
+                ;;
+            mainnet)
+                lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
+                    BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP
+                ;;
+        esac
+        lm_load_private_systemd_environment "$PYTHON" "$engine_env" \
+            EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM
+        [ -n "${EXPECTED_ENGINE_ACCOUNT_USER_ID:-}" ] \
+            || fail "$engine_env does not bind the exact account id"
+        [ "$EXPECTED_ENGINE_VENUE" = bybit ] && [ "$EXPECTED_ENGINE_REALM" = "$realm" ] \
+            || fail "$engine_env does not bind the $realm Bybit account"
+        exec /usr/bin/setpriv \
+            --reuid "$runtime_user" --regid "$RUNTIME_GROUP" --clear-groups \
+            "$ENGINE_BINARY" "$@" --config "$config"
+    )
+}
+
+import_native_strategy_state() {
+    local realm="$1" config wal long_root carry_root exodus_root
+    local long_state carry_checkpoint carry_book carry_events exodus_identity exodus_state
+    local present=0 source
+    case "$realm" in
+        demo)
+            config="$ENGINE_DEMO_CONFIG"
+            wal=/var/lib/liquidity-migration-engine/engine.wal
+            long_root="$LONG_DEMO_ROOT"
+            carry_root="$CARRY_DEMO_ROOT"
+            exodus_root="$EXODUS_DEMO_ROOT"
+            ;;
+        mainnet)
+            config="$ENGINE_MAINNET_CONFIG"
+            wal=/var/lib/liquidity-migration-engine-mainnet/engine.wal
+            long_root="$LONG_MAINNET_ROOT"
+            carry_root="$CARRY_MAINNET_ROOT"
+            exodus_root="$EXODUS_MAINNET_ROOT"
+            ;;
+        *) fail "unsupported strategy-state import realm: $realm" ;;
+    esac
+    long_state="/var/lib/liquidity-migration/targets/long-${realm}-state.json"
+    carry_checkpoint="$carry_root/.cache/carry_sizing_anchors.json"
+    carry_book="/var/lib/liquidity-migration/targets/carry-${realm}.json"
+    carry_events="$carry_root/carry_presettlement_events.jsonl"
+    exodus_identity="$exodus_root/exodus_state_identity.json"
+    exodus_state="$exodus_root/exodus_state.json"
+
+    # A completed native generation is authoritative. The stopped-state
+    # sources cannot overwrite a reducer that has advanced.
+    if run_engine_takeover_command "$realm" "$config" verify-native-strategy-state; then
+        echo "native-state-ok realm=$realm result=already-complete"
+        return 0
+    fi
+
+    for source in \
+        "$long_state" "$carry_checkpoint" "$carry_book" "$carry_events" \
+        "$exodus_identity" "$exodus_state"; do
+        [ ! -L "$source" ] || fail "strategy-state takeover source is linked: $source"
+        if [ -e "$source" ]; then
+            [ -f "$source" ] \
+                || fail "strategy-state takeover source is not a regular file: $source"
+            present=$((present + 1))
+        fi
+    done
+
+    if [ "$present" -eq 0 ] && [ ! -s "$wal" ]; then
+        run_engine_takeover_command "$realm" "$config" initialize-native-strategy-state \
+            || fail "cannot initialize empty native strategy state for $realm"
+        run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
+            || fail "initialized $realm native strategy state failed verification"
+        echo "native-state-ok realm=$realm result=initialized-empty"
+        return 0
+    fi
+    [ "$present" -eq 6 ] \
+        || fail "$realm strategy-state takeover is incomplete: found $present of 6 sources"
+
+    run_engine_takeover_command "$realm" "$config" import-strategy-state \
+        --strategy long \
+        --source-format long-book-state-v2 \
+        --source "state=$long_state" \
+        || fail "cannot import exact LONG state for $realm"
+    run_engine_takeover_command "$realm" "$config" import-strategy-state \
+        --strategy carry \
+        --source-format carry-reducer-v2-target-book-v1 \
+        --source "reducer_checkpoint=$carry_checkpoint" \
+        --source "target_book=$carry_book" \
+        || fail "cannot import exact CARRY state for $realm"
+    run_engine_takeover_command "$realm" "$config" import-strategy-state \
+        --strategy exodus \
+        --source-format exodus-state-v1-v4-event-tape-v1 \
+        --source "carry_events=$carry_events" \
+        --source "identity=$exodus_identity" \
+        --source "state=$exodus_state" \
+        || fail "cannot import exact Exodus state for $realm"
+    run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
+        || fail "imported $realm native strategy state failed verification"
+    echo "native-state-ok realm=$realm result=imported"
 }
 
 require_rollout_for_funded_generation_change() {
@@ -1667,6 +1921,33 @@ verify_timer_job() {
     fi
 }
 
+verify_fleet_units() {
+    local long_expectation=off carry_expectation=off mainnet_expectation=off
+    local unit expectation health artifact timer_service
+    local first_delay cadence accuracy runtime
+
+    if sleeve_on "$LONG_SLEEVE"; then long_expectation=on; fi
+    if sleeve_on "$CARRY_SLEEVE"; then carry_expectation=on; fi
+    if mainnet_armed; then mainnet_expectation=on; fi
+
+    command -v lm_validate_fleet_manifest >/dev/null 2>&1 \
+        || fail "installed fleet manifest has no validation helper"
+    command -v lm_fleet_health_rows >/dev/null 2>&1 \
+        || fail "installed fleet manifest has no health-row helper"
+    lm_validate_fleet_manifest || fail "fleet manifest validation failed"
+    while IFS='|' read -r unit expectation health artifact timer_service \
+        first_delay cadence accuracy runtime; do
+        verify_unit "$expectation" "$unit" "$unit does not match fleet manifest state $expectation"
+        if [ "$expectation" = on ] && [ "$health" = timer ]; then
+            verify_timer_job "$unit" "$timer_service" \
+                "$first_delay" "$cadence" "$accuracy" "$runtime"
+        fi
+    done < <(
+        lm_fleet_health_rows \
+            "$long_expectation" "$carry_expectation" "$mainnet_expectation"
+    )
+}
+
 verify_topology() {
     local activation_policy="${1:-complete}"
     case "$activation_policy" in
@@ -1676,90 +1957,32 @@ verify_topology() {
     VERIFY_UNIT_ROWS=()
     VERIFY_MISMATCHES=()
 
-    # Rust is the only account owner. Every deployed topology requires the demo
-    # engine, and an armed topology additionally requires the funded engine.
-    if sleeve_on "$LONG_SLEEVE"; then
-        verify_unit on liquidity-migration-bybit-long-demo.service "LONG demo producer is not active"
-    else
-        verify_unit off liquidity-migration-bybit-long-demo.service "LONG demo producer is not off"
-    fi
-    if sleeve_on "$CARRY_SLEEVE"; then
-        verify_unit on liquidity-migration-bybit-carry-demo.service "carry demo producer is not active"
-    else
-        verify_unit off liquidity-migration-bybit-carry-demo.service "carry demo producer is not off"
-    fi
-    # Disarmed, a running mainnet unit must not hide behind a green demo
-    # verification; armed, the funded fleet is verified exactly like the
-    # others.
-    if mainnet_armed; then
-        verify_unit on "$MAINNET_OWNER_UNIT" "funded Rust engine is not active"
-        verify_unit on liquidity-migration-bybit-carry-mainnet.service "carry mainnet producer is not active"
-        verify_unit on liquidity-migration-bybit-long-mainnet.service "LONG mainnet producer is not active"
-        verify_unit on liquidity-migration-mainnet-liveness.timer "mainnet liveness timer is not active"
-        verify_timer_job \
-            liquidity-migration-mainnet-liveness.timer \
-            liquidity-migration-mainnet-liveness.service \
-            60 180 15 120
-    else
-        for mainnet_unit in \
-            liquidity-migration-engine-mainnet.service \
-            liquidity-migration-bybit-carry-mainnet.service \
-            liquidity-migration-bybit-long-mainnet.service \
-            liquidity-migration-mainnet-liveness.timer; do
-            verify_unit off "$mainnet_unit" "$mainnet_unit is active under demo authorization"
-        done
-    fi
-    verify_unit on liquidity-migration-demo-liveness.timer "liveness timer is not active"
-    verify_unit on liquidity-migration-telegram-controls.service "telegram controls daemon is not active"
-    verify_unit on liquidity-migration-llm-ledger.timer "LLM ledger timer is not active"
-    verify_unit on liquidity-migration-trade-notify.timer "trade notify timer is not active"
-    verify_unit on liquidity-migration-backup.timer "nightly backup timer is not active"
-    verify_unit on liquidity-migration-chaos-drill.timer "weekly chaos drill timer is not active"
-    verify_unit on liquidity-migration-forward-capture.service "forward market capture is not active"
-    verify_unit on liquidity-migration-forward-upload.timer "forward market upload timer is not active"
-    verify_timer_job \
-        liquidity-migration-demo-liveness.timer \
-        liquidity-migration-demo-liveness.service \
-        60 180 15 120
-    verify_timer_job \
-        liquidity-migration-llm-ledger.timer \
-        liquidity-migration-llm-ledger.service \
-        3600 3600 120 600
-    verify_timer_job \
-        liquidity-migration-trade-notify.timer \
-        liquidity-migration-trade-notify.service \
-        300 300 30 120
-    verify_timer_job \
-        liquidity-migration-backup.timer \
-        liquidity-migration-backup.service \
-        86400 86400 300 900
-    verify_timer_job \
-        liquidity-migration-chaos-drill.timer \
-        liquidity-migration-chaos-drill.service \
-        604800 604800 600 300
-    verify_timer_job \
-        liquidity-migration-forward-upload.timer \
-        liquidity-migration-forward-upload.service \
-        3600 3600 60 1800
-    verify_unit on "$ENGINE_UNIT" "required demo Rust engine is not active"
-    if [ ! -x "$ENGINE_BINARY" ] || [ ! -r "${ENGINE_BINARY}.release" ]; then
-        verify_note "required commit-bound Rust engine artifact is missing"
+    verify_fleet_units
+    if [ ! -x "$ENGINE_BINARY" ] || [ ! -x "$SIGNAL_WORKER_BINARY" ] \
+        || [ ! -r "${ENGINE_BINARY}.release" ]; then
+        verify_note "required commit-bound Rust engine or signal-worker artifact is missing"
     else
         local marker_commit marker_digest marker_launcher_digest
-        local marker_helper_digest marker_sudoers_digest marker_bot_digest
-        local actual_digest actual_launcher_digest actual_helper_digest
+        local marker_signal_worker_digest marker_helper_digest marker_sudoers_digest
+        local marker_bot_digest actual_digest actual_signal_worker_digest
+        local actual_launcher_digest actual_helper_digest
         local actual_sudoers_digest actual_bot_digest
         marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
         marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+        marker_signal_worker_digest="$(sed -n 's/^signal_worker_sha256=//p' "${ENGINE_BINARY}.release")"
         marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
         marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
         marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
         marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "${ENGINE_BINARY}.release")"
         actual_digest="$(sha256sum "$ENGINE_BINARY" | awk '{print $1}' || true)"
+        actual_signal_worker_digest="$(sha256sum "$SIGNAL_WORKER_BINARY" | awk '{print $1}' || true)"
         [ "$marker_commit" = "$EXPECTED_COMMIT" ] \
             || verify_note "engine artifact is not bound to requested commit $EXPECTED_COMMIT"
         [ -n "$marker_digest" ] && [ "$marker_digest" = "$actual_digest" ] \
             || verify_note "engine artifact digest does not match its release marker"
+        [[ "$marker_signal_worker_digest" =~ ^[0-9a-f]{64}$ ]] \
+            && [ "$marker_signal_worker_digest" = "$actual_signal_worker_digest" ] \
+            || verify_note "signal-worker artifact digest does not match its release marker"
         if [ -n "$marker_launcher_digest" ]; then
             actual_launcher_digest="$(sha256sum "$ENGINE_LAUNCHER" 2>/dev/null | awk '{print $1}' || true)"
             [ "$marker_launcher_digest" = "$actual_launcher_digest" ] \
@@ -1898,7 +2121,7 @@ run_engine_builder_step() {
                 --property="PrivateNetwork=true"
                 --property="RestrictAddressFamilies=AF_UNIX"
             )
-            command='cd /opt/engine-build/engine && exec /usr/bin/nice -n 19 /opt/rust/cargo/bin/cargo build --release --locked --offline -j 1'
+            command='cd /opt/engine-build/engine && exec /usr/bin/nice -n 19 /opt/rust/cargo/bin/cargo build --release --locked --offline -j 1 --workspace --bins'
             ;;
         python-fetch)
             command='/usr/bin/python3 -m venv /var/lib/liquidity-migration-builder/python-prefetch-venv && exec /var/lib/liquidity-migration-builder/python-prefetch-venv/bin/python -m pip download --disable-pip-version-check --no-deps --no-cache-dir --only-binary=:all: --dest /var/lib/liquidity-migration-builder/python-wheels -r /opt/engine-build/requirements.lock'
@@ -1991,8 +2214,8 @@ prepare_disposable_engine_build_root() {
         || fail "engine build Git directory is group/other writable"
 }
 
-materialize_single_link_engine_candidate() {
-    local candidate="$ENGINE_CANDIDATE_BINARY" candidate_dir hardlink_count
+materialize_single_link_release_candidate() {
+    local candidate="$1" artifact="$2" candidate_dir hardlink_count
     local internal_links source_digest temporary temporary_digest
     candidate_dir="${candidate%/*}"
     [ "$candidate_dir" = "$ENGINE_BUILDER_TARGET_DIR/release" ] \
@@ -2001,49 +2224,51 @@ materialize_single_link_engine_candidate() {
         && [ "$(readlink -f "$ENGINE_BUILDER_TARGET_DIR")" = "$ENGINE_BUILDER_TARGET_DIR" ] \
         && [ "$(stat -c %U "$ENGINE_BUILDER_TARGET_DIR")" = "$ENGINE_BUILDER_USER" ] \
         && [ "$(stat -c %G "$ENGINE_BUILDER_TARGET_DIR")" = "$ENGINE_BUILDER_GROUP" ] \
-        || fail "engine target root or candidate path is unsafe"
+        || fail "engine target root or $artifact candidate path is unsafe"
     [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -x "$candidate" ] \
         && [ "$(readlink -f "$candidate")" = "$candidate" ] \
         && [ "$(stat -c %U "$candidate")" = "$ENGINE_BUILDER_USER" ] \
         && [ "$(stat -c %G "$candidate")" = "$ENGINE_BUILDER_GROUP" ] \
-        || fail "Cargo produced no safe regular engine binary"
+        || fail "Cargo produced no safe regular $artifact binary"
     hardlink_count="$(stat -c %h "$candidate")" \
-        || fail "cannot inspect Cargo engine hard links"
+        || fail "cannot inspect Cargo $artifact hard links"
     internal_links="$(
         find "$ENGINE_BUILDER_TARGET_DIR" -xdev -type f -samefile "$candidate" \
             -printf . | wc -c | tr -d '[:space:]'
-    )" || fail "cannot enumerate Cargo engine hard links"
+    )" || fail "cannot enumerate Cargo $artifact hard links"
     [[ "$hardlink_count" =~ ^[1-9][0-9]*$ ]] \
         && [[ "$internal_links" =~ ^[1-9][0-9]*$ ]] \
         && [ "$internal_links" -eq "$hardlink_count" ] \
-        || fail "Cargo engine binary has a hard-link alias outside its target root"
+        || fail "Cargo $artifact binary has a hard-link alias outside its target root"
     source_digest="$(sha256sum "$candidate" | awk '{print $1}')" \
-        || fail "cannot digest Cargo engine binary"
-    temporary="$(mktemp "$candidate_dir/.engine-candidate.XXXXXX")" \
-        || fail "cannot create single-link engine candidate staging file"
+        || fail "cannot digest Cargo $artifact binary"
+    temporary="$(mktemp "$candidate_dir/.$artifact-candidate.XXXXXX")" \
+        || fail "cannot create single-link $artifact candidate staging file"
     [ "${temporary%/*}" = "$candidate_dir" ] && [ ! -L "$temporary" ] \
         && [ "$(stat -c %h "$temporary")" -eq 1 ] \
-        || fail "engine candidate staging path escaped or is linked"
+        || fail "$artifact candidate staging path escaped or is linked"
     install -o "$ENGINE_BUILDER_USER" -g "$ENGINE_BUILDER_GROUP" -m 0700 \
         "$candidate" "$temporary" \
-        || fail "cannot materialize the single-link engine candidate"
+        || fail "cannot materialize the single-link $artifact candidate"
     temporary_digest="$(sha256sum "$temporary" | awk '{print $1}')" \
-        || fail "cannot digest staged single-link engine candidate"
+        || fail "cannot digest staged single-link $artifact candidate"
     [ "$temporary_digest" = "$source_digest" ] \
         && [ -f "$temporary" ] && [ ! -L "$temporary" ] \
         && [ "$(stat -c %h "$temporary")" -eq 1 ] \
         && [ "$(stat -c %U "$temporary")" = "$ENGINE_BUILDER_USER" ] \
         && [ "$(stat -c %G "$temporary")" = "$ENGINE_BUILDER_GROUP" ] \
-        || fail "single-link engine candidate differs from Cargo output"
+        || fail "single-link $artifact candidate differs from Cargo output"
     mv -fT -- "$temporary" "$candidate" \
-        || fail "cannot atomically select the single-link engine candidate"
+        || fail "cannot atomically select the single-link $artifact candidate"
 }
 
 compile_engine_commit() {
     local commit="$1"
-    local built dirty candidate_digest candidate_real expected_candidate_real status=0
+    local built dirty candidate_digest signal_worker_digest candidate_real
+    local expected_candidate_real signal_worker_real expected_signal_worker_real status=0
     ENGINE_PREFETCHED_COMMIT=""
     ENGINE_PREFETCHED_DIGEST=""
+    SIGNAL_WORKER_PREFETCHED_DIGEST=""
     ensure_engine_builder_identity
     require_pinned_engine_toolchain
     prepare_disposable_engine_build_root
@@ -2110,7 +2335,9 @@ compile_engine_commit() {
     # Cargo normally hard-links the promoted binary to its hashed deps entry.
     # Prove every alias is inside the disposable target, then atomically copy
     # the exact bytes onto a one-link handoff path for stopped installation.
-    materialize_single_link_engine_candidate
+    materialize_single_link_release_candidate "$ENGINE_CANDIDATE_BINARY" engine
+    materialize_single_link_release_candidate \
+        "$SIGNAL_WORKER_CANDIDATE_BINARY" signal-worker
     [ -f "$ENGINE_CANDIDATE_BINARY" ] && [ ! -L "$ENGINE_CANDIDATE_BINARY" ] \
         && [ -x "$ENGINE_CANDIDATE_BINARY" ] \
         || fail "locked release build produced no regular engine binary"
@@ -2126,19 +2353,40 @@ compile_engine_commit() {
         || fail "cannot digest the prefetched engine candidate"
     [[ "$candidate_digest" =~ ^[0-9a-f]{64}$ ]] \
         || fail "prefetched engine candidate digest is invalid"
+    [ -f "$SIGNAL_WORKER_CANDIDATE_BINARY" ] \
+        && [ ! -L "$SIGNAL_WORKER_CANDIDATE_BINARY" ] \
+        && [ -x "$SIGNAL_WORKER_CANDIDATE_BINARY" ] \
+        || fail "locked release build produced no regular signal-worker binary"
+    signal_worker_real="$(readlink -f "$SIGNAL_WORKER_CANDIDATE_BINARY")" \
+        || fail "cannot resolve signal-worker candidate"
+    expected_signal_worker_real="$ENGINE_BUILDER_TARGET_DIR/release/signal-worker"
+    [ "$signal_worker_real" = "$expected_signal_worker_real" ] \
+        && [ "$(stat -c %U "$SIGNAL_WORKER_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_USER" ] \
+        && [ "$(stat -c %G "$SIGNAL_WORKER_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_GROUP" ] \
+        && [ "$(stat -c %h "$SIGNAL_WORKER_CANDIDATE_BINARY")" -eq 1 ] \
+        || fail "signal-worker candidate is linked, outside its target root, or not builder-owned"
+    signal_worker_digest="$(sha256sum "$SIGNAL_WORKER_CANDIDATE_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest the prefetched signal-worker candidate"
+    [[ "$signal_worker_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "prefetched signal-worker candidate digest is invalid"
     ENGINE_PREFETCHED_COMMIT="$commit"
     ENGINE_PREFETCHED_DIGEST="$candidate_digest"
-    printf 'engine-prefetch-ok commit=%s sha256=%s binary=%s\n' \
-        "$commit" "$candidate_digest" "$ENGINE_CANDIDATE_BINARY"
+    SIGNAL_WORKER_PREFETCHED_DIGEST="$signal_worker_digest"
+    printf 'engine-prefetch-ok commit=%s sha256=%s signal_worker_sha256=%s binary=%s signal_worker_binary=%s\n' \
+        "$commit" "$candidate_digest" "$signal_worker_digest" \
+        "$ENGINE_CANDIDATE_BINARY" "$SIGNAL_WORKER_CANDIDATE_BINARY"
 }
 
 verify_prefetched_engine_candidate() {
     local commit="$1"
-    local actual_digest built candidate_real dirty expected_candidate_real
+    local actual_digest actual_signal_worker_digest built candidate_real dirty
+    local expected_candidate_real signal_worker_real expected_signal_worker_real
     [ "$ENGINE_PREFETCHED_COMMIT" = "$commit" ] \
         || fail "engine candidate was not prefetched for commit $commit"
     [[ "$ENGINE_PREFETCHED_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
         || fail "prefetched engine candidate has no valid digest binding"
+    [[ "$SIGNAL_WORKER_PREFETCHED_DIGEST" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "prefetched signal-worker candidate has no valid digest binding"
     built="$(engine_git rev-parse HEAD)" \
         || fail "cannot read prefetched engine source HEAD"
     [ "$built" = "$commit" ] \
@@ -2164,6 +2412,22 @@ verify_prefetched_engine_candidate() {
         || fail "cannot digest the prefetched engine candidate"
     [ "$actual_digest" = "$ENGINE_PREFETCHED_DIGEST" ] \
         || fail "prefetched engine candidate changed before stopped installation"
+    [ -f "$SIGNAL_WORKER_CANDIDATE_BINARY" ] \
+        && [ ! -L "$SIGNAL_WORKER_CANDIDATE_BINARY" ] \
+        && [ -x "$SIGNAL_WORKER_CANDIDATE_BINARY" ] \
+        || fail "prefetched signal-worker candidate is not a regular executable"
+    signal_worker_real="$(readlink -f "$SIGNAL_WORKER_CANDIDATE_BINARY")" \
+        || fail "cannot resolve prefetched signal-worker candidate"
+    expected_signal_worker_real="$ENGINE_BUILDER_TARGET_DIR/release/signal-worker"
+    [ "$signal_worker_real" = "$expected_signal_worker_real" ] \
+        && [ "$(stat -c %U "$SIGNAL_WORKER_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_USER" ] \
+        && [ "$(stat -c %G "$SIGNAL_WORKER_CANDIDATE_BINARY")" = "$ENGINE_BUILDER_GROUP" ] \
+        && [ "$(stat -c %h "$SIGNAL_WORKER_CANDIDATE_BINARY")" -eq 1 ] \
+        || fail "prefetched signal-worker candidate moved, linked, or changed owner"
+    actual_signal_worker_digest="$(sha256sum "$SIGNAL_WORKER_CANDIDATE_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest the prefetched signal-worker candidate"
+    [ "$actual_signal_worker_digest" = "$SIGNAL_WORKER_PREFETCHED_DIGEST" ] \
+        || fail "prefetched signal-worker candidate changed before stopped installation"
 }
 
 python_wheel_cache_digest() {
@@ -2307,12 +2571,12 @@ secure_venv_directory() {
 }
 
 verify_python_runtime_environment() {
-    local deployed="$REPO_DIR/.venv" runtime_user state_file
+    local deployed="$REPO_DIR/.venv" runtime_user
     [ -x /usr/bin/zstd ] || fail "zstd is required for forward market capture"
     [ "$(stat -c %a "$deployed")" = 755 ] \
         || fail "deployed Python environment is not traversable by runtime identities"
     for runtime_user in \
-        "$PRODUCER_USER" "$CONTROLS_USER" "$OBSERVER_USER" "$LLM_USER" "$CAPTURE_USER"; do
+        "$SIGNAL_WORKER_USER" "$CONTROLS_USER" "$OBSERVER_USER" "$LLM_USER" "$CAPTURE_USER"; do
         /usr/bin/sudo -u "$runtime_user" -- \
             /usr/bin/env PYTHONDONTWRITEBYTECODE=1 \
             "$deployed/bin/python" - "$deployed" <<'PY'
@@ -2331,25 +2595,6 @@ from liquidity_migration.cli.commands import main  # noqa: F401, E402
 PY
         [ "$?" -eq 0 ] \
             || fail "deployed Python environment is unusable by $runtime_user"
-    done
-    for state_file in \
-        /var/lib/liquidity-migration/targets/long-demo-state.json \
-        /var/lib/liquidity-migration/targets/long-mainnet-state.json; do
-        [ -e "$state_file" ] || continue
-        /usr/bin/sudo -u "$PRODUCER_USER" -- \
-            /usr/bin/env PYTHONDONTWRITEBYTECODE=1 \
-            "$deployed/bin/python" - "$state_file" <<'PY'
-import sys
-from liquidity_migration.strategy.long_book_state import (
-    migrate_empty_v1_book_state,
-    read_book_state,
-)
-
-migrate_empty_v1_book_state(sys.argv[1])
-read_book_state(sys.argv[1])
-PY
-        [ "$?" -eq 0 ] \
-            || fail "producer cannot restore durable book state: $state_file"
     done
 }
 
@@ -2492,11 +2737,14 @@ PY
         || fail "cannot remove the replaced Python environment generation"
 }
 
-# Prove the dedicated bot identity has exactly the four reviewed commands and
+# Prove the dedicated bot identity has exactly the five reviewed commands and
 # no stale/broader sudo grant. Whitespace is presentation-only in `sudo -l`;
 # command paths and argv remain exact after normalization.
 verify_controls_sudo_policy() {
-    local actual expected
+    local actual expected status_action=status-fleet
+    if [ ! -f deploy/fleet_manifest.tsv ]; then
+        status_action=status-demo
+    fi
     actual="$(
         LC_ALL=C COLUMNS=4096 /usr/bin/sudo -l -U "$CONTROLS_USER" 2>/dev/null \
             | awk '/^[[:space:]]*\(/ { print }' \
@@ -2509,7 +2757,7 @@ verify_controls_sudo_policy() {
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper pause-mainnet' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper resume-demo' \
             '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper resume-mainnet' \
-            '(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper status-demo' \
+            "(root:root)NOPASSWD:/opt/liquidity-migration-engine/bin/telegram-control-helper $status_action" \
             | LC_ALL=C sed 's/[[:space:]]//g' \
             | LC_ALL=C sort
     )"
@@ -2520,7 +2768,8 @@ verify_controls_sudo_policy() {
 # Atomically install the exact candidate compiled during prefetch. The stopped
 # window performs no Rust compilation or dependency fetch.
 build_engine() {
-    local commit candidate_digest candidate_after digest launcher_digest
+    local commit candidate_digest candidate_after digest signal_worker_digest
+    local signal_worker_candidate_digest signal_worker_candidate_after launcher_digest
     local helper_digest sudoers_digest bot_digest helper_source sudoers_source
     local helper_source_before helper_source_after sudoers_source_before
     local sudoers_source_after launcher_source marker_tmp
@@ -2553,7 +2802,7 @@ build_engine() {
         || fail "cannot create the engine binary directory"
     install -d -o root -g root -m 0755 "${CONTROLS_SUDOERS%/*}" \
         || fail "cannot create the sudoers fragment directory"
-    for source in "$ENGINE_BINARY.new" "$ENGINE_LAUNCHER.new" \
+    for source in "$ENGINE_BINARY.new" "$SIGNAL_WORKER_BINARY.new" "$ENGINE_LAUNCHER.new" \
         "$ENGINE_CONTROL_HELPER.new" "$CONTROLS_SUDOERS.new"; do
         [ ! -L "$source" ] || fail "release staging path is linked: $source"
         rm -f -- "$source" || fail "cannot clear release staging path: $source"
@@ -2562,6 +2811,7 @@ build_engine() {
         [ ! -L "$source" ] || fail "installed control boundary path is linked: $source"
     done
     candidate_digest="$ENGINE_PREFETCHED_DIGEST"
+    signal_worker_candidate_digest="$SIGNAL_WORKER_PREFETCHED_DIGEST"
     helper_source_before="$(sha256sum "$helper_source" | awk '{print $1}')" \
         || fail "cannot digest the Telegram control helper source"
     sudoers_source_before="$(sha256sum "$sudoers_source" | awk '{print $1}')" \
@@ -2569,6 +2819,9 @@ build_engine() {
     install -o root -g liquidity-migration -m 0755 \
         "$ENGINE_CANDIDATE_BINARY" "$ENGINE_BINARY.new" \
         || fail "cannot stage the release engine binary"
+    install -o root -g liquidity-migration -m 0755 \
+        "$SIGNAL_WORKER_CANDIDATE_BINARY" "$SIGNAL_WORKER_BINARY.new" \
+        || fail "cannot stage the release signal-worker binary"
     install -o root -g root -m 0755 \
         "$launcher_source" "$ENGINE_LAUNCHER.new" \
         || fail "cannot stage the trusted runtime launcher"
@@ -2582,10 +2835,17 @@ build_engine() {
         || fail "staged controls sudoers fragment is invalid"
     digest="$(sha256sum "$ENGINE_BINARY.new" | awk '{print $1}')" \
         || fail "cannot digest the staged engine binary"
+    signal_worker_digest="$(sha256sum "$SIGNAL_WORKER_BINARY.new" | awk '{print $1}')" \
+        || fail "cannot digest the staged signal-worker binary"
     candidate_after="$(sha256sum "$ENGINE_CANDIDATE_BINARY" | awk '{print $1}')" \
         || fail "cannot redigest the engine candidate after staging"
+    signal_worker_candidate_after="$(sha256sum "$SIGNAL_WORKER_CANDIDATE_BINARY" | awk '{print $1}')" \
+        || fail "cannot redigest the signal-worker candidate after staging"
     [ "$digest" = "$candidate_digest" ] && [ "$candidate_after" = "$candidate_digest" ] \
         || fail "engine candidate changed while it was staged"
+    [ "$signal_worker_digest" = "$signal_worker_candidate_digest" ] \
+        && [ "$signal_worker_candidate_after" = "$signal_worker_candidate_digest" ] \
+        || fail "signal-worker candidate changed while it was staged"
     launcher_digest="$(sha256sum "$ENGINE_LAUNCHER.new" | awk '{print $1}')" \
         || fail "cannot digest the staged trusted runtime launcher"
     helper_digest="$(sha256sum "$ENGINE_CONTROL_HELPER.new" | awk '{print $1}')" \
@@ -2604,14 +2864,15 @@ build_engine() {
         && [ "$sudoers_source_after" = "$sudoers_source_before" ] \
         || fail "control boundary source changed while it was staged"
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$signal_worker_digest" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$helper_digest" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$bot_digest" =~ ^[0-9a-f]{64}$ ]] \
         || fail "invalid staged release digest"
     marker_tmp="${ENGINE_BINARY}.release.tmp.$$"
-    printf 'commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nrustc=1.90.0\n' \
-        "$commit" "$digest" "$launcher_digest" "$helper_digest" \
+    printf 'commit=%s\nsha256=%s\nsignal_worker_sha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nrustc=1.90.0\n' \
+        "$commit" "$digest" "$signal_worker_digest" "$launcher_digest" "$helper_digest" \
         "$sudoers_digest" "$bot_digest" > "$marker_tmp" \
         || fail "cannot write engine release marker"
     chown root:root "$marker_tmp" && chmod 0644 "$marker_tmp" \
@@ -2621,6 +2882,8 @@ build_engine() {
     # rejects the mixed generation.
     mv -f "$ENGINE_BINARY.new" "$ENGINE_BINARY" \
         || fail "cannot atomically install the engine binary"
+    mv -f "$SIGNAL_WORKER_BINARY.new" "$SIGNAL_WORKER_BINARY" \
+        || fail "cannot atomically install the signal-worker binary"
     mv -f "$ENGINE_LAUNCHER.new" "$ENGINE_LAUNCHER" \
         || fail "cannot atomically install the trusted runtime launcher"
     mv -f "$ENGINE_CONTROL_HELPER.new" "$ENGINE_CONTROL_HELPER" \
@@ -2633,22 +2896,18 @@ build_engine() {
     mv -f "$marker_tmp" "${ENGINE_BINARY}.release" \
         || fail "cannot atomically install engine release marker"
     sync
-    verify_engine_release launcher-required
-    printf 'engine-build-ok commit=%s sha256=%s launcher_sha256=%s control_helper_sha256=%s controls_sudoers_sha256=%s telegram_bot_sha256=%s binary=%s\n' \
-        "$commit" "$digest" "$launcher_digest" "$helper_digest" \
-        "$sudoers_digest" "$bot_digest" "$ENGINE_BINARY"
+    verify_engine_release
+    printf 'engine-build-ok commit=%s sha256=%s signal_worker_sha256=%s launcher_sha256=%s control_helper_sha256=%s controls_sudoers_sha256=%s telegram_bot_sha256=%s binary=%s signal_worker_binary=%s\n' \
+        "$commit" "$digest" "$signal_worker_digest" "$launcher_digest" "$helper_digest" \
+        "$sudoers_digest" "$bot_digest" "$ENGINE_BINARY" "$SIGNAL_WORKER_BINARY"
 }
 
 verify_engine_release() {
-    local launcher_policy="${1:-launcher-optional}"
     local installed_head marker_commit marker_digest marker_launcher_digest
-    local marker_helper_digest marker_sudoers_digest marker_bot_digest
-    local actual_digest actual_launcher_digest actual_helper_digest
-    local actual_sudoers_digest actual_bot_digest marker_has_controls=0
-    case "$launcher_policy" in
-        launcher-optional|launcher-required) ;;
-        *) fail "invalid engine release launcher policy: $launcher_policy" ;;
-    esac
+    local marker_signal_worker_digest marker_helper_digest marker_sudoers_digest
+    local marker_bot_digest actual_digest actual_signal_worker_digest
+    local actual_launcher_digest actual_helper_digest
+    local actual_sudoers_digest actual_bot_digest
     [ -d "${ENGINE_BINARY%/*}" ] && [ ! -L "${ENGINE_BINARY%/*}" ] \
         && [ "$(readlink -f "${ENGINE_BINARY%/*}")" = "${ENGINE_BINARY%/*}" ] \
         && [ "$(stat -c %u "${ENGINE_BINARY%/*}")" -eq 0 ] \
@@ -2660,6 +2919,11 @@ verify_engine_release() {
         && [ "$(stat -c %u "$ENGINE_BINARY")" -eq 0 ] \
         && [ "$(stat -c %a "$ENGINE_BINARY")" = 755 ] \
         || fail "required engine binary is not a trusted root-owned regular executable: $ENGINE_BINARY"
+    [ -f "$SIGNAL_WORKER_BINARY" ] && [ ! -L "$SIGNAL_WORKER_BINARY" ] \
+        && [ -x "$SIGNAL_WORKER_BINARY" ] \
+        && [ "$(stat -c %u "$SIGNAL_WORKER_BINARY")" -eq 0 ] \
+        && [ "$(stat -c %a "$SIGNAL_WORKER_BINARY")" = 755 ] \
+        || fail "required signal-worker binary is not a trusted root-owned regular executable: $SIGNAL_WORKER_BINARY"
     [ -f "${ENGINE_BINARY}.release" ] && [ ! -L "${ENGINE_BINARY}.release" ] \
         && [ "$(stat -c %u "${ENGINE_BINARY}.release")" -eq 0 ] \
         && [ "$(stat -c %g "${ENGINE_BINARY}.release")" -eq 0 ] \
@@ -2668,10 +2932,24 @@ verify_engine_release() {
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
     marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
     marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_signal_worker_digest="$(sed -n 's/^signal_worker_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "${ENGINE_BINARY}.release")"
+    awk '
+NR == 1 && /^commit=/ { next }
+NR == 2 && /^sha256=/ { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
+NR == 8 && $0 == "rustc=1.90.0" { next }
+{ exit 1 }
+END { if (NR != 8) exit 1 }
+' "${ENGINE_BINARY}.release" \
+        || fail "engine release marker has an invalid schema"
     [[ "$marker_commit" =~ ^[0-9a-f]{40}$ ]] \
         && [ "$marker_commit" = "$installed_head" ] \
         || fail "engine release marker is not bound to installed commit $installed_head"
@@ -2681,91 +2959,53 @@ verify_engine_release() {
         || fail "cannot digest installed engine binary"
     [ "$marker_digest" = "$actual_digest" ] \
         || fail "installed engine digest does not match its release marker"
-    if [ -n "$marker_launcher_digest" ]; then
-        [[ "$marker_launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
-            || fail "engine release marker has an invalid launcher digest"
-        [ -f "$ENGINE_LAUNCHER" ] && [ ! -L "$ENGINE_LAUNCHER" ] \
-            && [ "$(stat -c %u "$ENGINE_LAUNCHER")" -eq 0 ] \
-            && [ "$(stat -c %g "$ENGINE_LAUNCHER")" -eq 0 ] \
-            && [ "$(stat -c %a "$ENGINE_LAUNCHER")" = 755 ] \
-            || fail "trusted runtime launcher is missing, linked, or not root:root mode 0755"
-        actual_launcher_digest="$(sha256sum "$ENGINE_LAUNCHER" | awk '{print $1}')" \
-            || fail "cannot digest the installed trusted runtime launcher"
-        [ "$actual_launcher_digest" = "$marker_launcher_digest" ] \
-            || fail "installed launcher digest does not match its release marker"
-        if [ -n "$marker_helper_digest$marker_sudoers_digest$marker_bot_digest" ]; then
-            [[ "$marker_helper_digest" =~ ^[0-9a-f]{64}$ ]] \
-                && [[ "$marker_sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
-                && [[ "$marker_bot_digest" =~ ^[0-9a-f]{64}$ ]] \
-                || fail "engine release marker has a partial or invalid control boundary"
-            awk '
-NR == 1 && /^commit=/ { next }
-NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
-NR == 7 && $0 == "rustc=1.90.0" { next }
-{ exit 1 }
-END { if (NR != 7) exit 1 }
-' "${ENGINE_BINARY}.release" \
-                || fail "engine release marker has an invalid control-bound schema"
-            [ -f "$ENGINE_CONTROL_HELPER" ] && [ ! -L "$ENGINE_CONTROL_HELPER" ] \
-                && [ "$(stat -c %u "$ENGINE_CONTROL_HELPER")" -eq 0 ] \
-                && [ "$(stat -c %g "$ENGINE_CONTROL_HELPER")" -eq 0 ] \
-                && [ "$(stat -c %a "$ENGINE_CONTROL_HELPER")" = 755 ] \
-                || fail "Telegram control helper is missing, linked, or not root:root mode 0755"
-            [ -f "$CONTROLS_SUDOERS" ] && [ ! -L "$CONTROLS_SUDOERS" ] \
-                && [ "$(stat -c %u "$CONTROLS_SUDOERS")" -eq 0 ] \
-                && [ "$(stat -c %g "$CONTROLS_SUDOERS")" -eq 0 ] \
-                && [ "$(stat -c %a "$CONTROLS_SUDOERS")" = 440 ] \
-                || fail "controls sudoers fragment is missing, linked, or not root:root mode 0440"
-            [ -f "$TELEGRAM_CONTROLS_BOT" ] && [ ! -L "$TELEGRAM_CONTROLS_BOT" ] \
-                && [ "$(stat -c %u "$TELEGRAM_CONTROLS_BOT")" -eq 0 ] \
-                && [ "$(stat -c %g "$TELEGRAM_CONTROLS_BOT")" -eq 0 ] \
-                && [ "$(stat -c %a "$TELEGRAM_CONTROLS_BOT")" = 644 ] \
-                || fail "Telegram controls bot is missing, linked, or not root:root mode 0644"
-            /usr/sbin/visudo -cf "$CONTROLS_SUDOERS" >/dev/null \
-                || fail "installed controls sudoers fragment is invalid"
-            verify_controls_sudo_policy
-            actual_helper_digest="$(sha256sum "$ENGINE_CONTROL_HELPER" | awk '{print $1}')" \
-                || fail "cannot digest the installed Telegram control helper"
-            actual_sudoers_digest="$(sha256sum "$CONTROLS_SUDOERS" | awk '{print $1}')" \
-                || fail "cannot digest the installed controls sudoers fragment"
-            actual_bot_digest="$(sha256sum "$TELEGRAM_CONTROLS_BOT" | awk '{print $1}')" \
-                || fail "cannot digest the installed Telegram controls bot"
-            [ "$actual_helper_digest" = "$marker_helper_digest" ] \
-                && [ "$actual_sudoers_digest" = "$marker_sudoers_digest" ] \
-                && [ "$actual_bot_digest" = "$marker_bot_digest" ] \
-                || fail "installed control boundary differs from its release marker"
-            marker_has_controls=1
-        else
-            awk '
-NR == 1 && /^commit=/ { next }
-NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && $0 == "rustc=1.90.0" { next }
-{ exit 1 }
-END { if (NR != 4) exit 1 }
-' "${ENGINE_BINARY}.release" \
-                || fail "legacy launcher release marker schema is invalid"
-        fi
-    else
-        [ -z "$marker_helper_digest$marker_sudoers_digest$marker_bot_digest" ] \
-            || fail "engine release marker has controls without a trusted launcher"
-        awk '
-NR == 1 && /^commit=/ { next }
-NR == 2 && /^sha256=/ { next }
-NR == 3 && $0 == "rustc=1.90.0" { next }
-{ exit 1 }
-END { if (NR != 3) exit 1 }
-' "${ENGINE_BINARY}.release" \
-            || fail "legacy engine release marker schema is invalid"
-    fi
-    if [ "$launcher_policy" = launcher-required ] \
-        && [ "$marker_has_controls" -ne 1 ]; then
-        fail "engine release marker predates the complete trusted runtime/control boundary"
-    fi
+    [[ "$marker_signal_worker_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "engine release marker has an invalid signal-worker digest"
+    actual_signal_worker_digest="$(sha256sum "$SIGNAL_WORKER_BINARY" | awk '{print $1}')" \
+        || fail "cannot digest installed signal-worker binary"
+    [ "$marker_signal_worker_digest" = "$actual_signal_worker_digest" ] \
+        || fail "installed signal-worker digest does not match its release marker"
+    [[ "$marker_launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$marker_helper_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$marker_sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$marker_bot_digest" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "engine release marker has an invalid trusted runtime/control digest"
+    [ -f "$ENGINE_LAUNCHER" ] && [ ! -L "$ENGINE_LAUNCHER" ] \
+        && [ "$(stat -c %u "$ENGINE_LAUNCHER")" -eq 0 ] \
+        && [ "$(stat -c %g "$ENGINE_LAUNCHER")" -eq 0 ] \
+        && [ "$(stat -c %a "$ENGINE_LAUNCHER")" = 755 ] \
+        || fail "trusted runtime launcher is missing, linked, or not root:root mode 0755"
+    [ -f "$ENGINE_CONTROL_HELPER" ] && [ ! -L "$ENGINE_CONTROL_HELPER" ] \
+        && [ "$(stat -c %u "$ENGINE_CONTROL_HELPER")" -eq 0 ] \
+        && [ "$(stat -c %g "$ENGINE_CONTROL_HELPER")" -eq 0 ] \
+        && [ "$(stat -c %a "$ENGINE_CONTROL_HELPER")" = 755 ] \
+        || fail "Telegram control helper is missing, linked, or not root:root mode 0755"
+    [ -f "$CONTROLS_SUDOERS" ] && [ ! -L "$CONTROLS_SUDOERS" ] \
+        && [ "$(stat -c %u "$CONTROLS_SUDOERS")" -eq 0 ] \
+        && [ "$(stat -c %g "$CONTROLS_SUDOERS")" -eq 0 ] \
+        && [ "$(stat -c %a "$CONTROLS_SUDOERS")" = 440 ] \
+        || fail "controls sudoers fragment is missing, linked, or not root:root mode 0440"
+    [ -f "$TELEGRAM_CONTROLS_BOT" ] && [ ! -L "$TELEGRAM_CONTROLS_BOT" ] \
+        && [ "$(stat -c %u "$TELEGRAM_CONTROLS_BOT")" -eq 0 ] \
+        && [ "$(stat -c %g "$TELEGRAM_CONTROLS_BOT")" -eq 0 ] \
+        && [ "$(stat -c %a "$TELEGRAM_CONTROLS_BOT")" = 644 ] \
+        || fail "Telegram controls bot is missing, linked, or not root:root mode 0644"
+    /usr/sbin/visudo -cf "$CONTROLS_SUDOERS" >/dev/null \
+        || fail "installed controls sudoers fragment is invalid"
+    verify_controls_sudo_policy
+    actual_launcher_digest="$(sha256sum "$ENGINE_LAUNCHER" | awk '{print $1}')" \
+        || fail "cannot digest the installed trusted runtime launcher"
+    actual_helper_digest="$(sha256sum "$ENGINE_CONTROL_HELPER" | awk '{print $1}')" \
+        || fail "cannot digest the installed Telegram control helper"
+    actual_sudoers_digest="$(sha256sum "$CONTROLS_SUDOERS" | awk '{print $1}')" \
+        || fail "cannot digest the installed controls sudoers fragment"
+    actual_bot_digest="$(sha256sum "$TELEGRAM_CONTROLS_BOT" | awk '{print $1}')" \
+        || fail "cannot digest the installed Telegram controls bot"
+    [ "$actual_launcher_digest" = "$marker_launcher_digest" ] \
+        && [ "$actual_helper_digest" = "$marker_helper_digest" ] \
+        && [ "$actual_sudoers_digest" = "$marker_sudoers_digest" ] \
+        && [ "$actual_bot_digest" = "$marker_bot_digest" ] \
+        || fail "installed trusted runtime/control boundary differs from its release marker"
 }
 
 # Persistent activation is a commit protocol separate from artifact install.
@@ -2828,8 +3068,9 @@ start_activation_watchdog() {
 
 activation_authority_matches_unlocked() {
     local path="$1" kind="$2" marker_commit marker_digest marker_launcher_digest
-    local marker_helper_digest marker_sudoers_digest marker_bot_digest
-    local file_commit file_digest file_launcher_digest file_helper_digest
+    local marker_signal_worker_digest marker_helper_digest marker_sudoers_digest
+    local marker_bot_digest file_commit file_digest file_signal_worker_digest
+    local file_launcher_digest file_helper_digest
     local file_sudoers_digest file_bot_digest file_boot_id file_owner_pid
     local file_owner_start_ticks file_owner_stat file_owner_tail file_not_after
     local current_epoch
@@ -2842,12 +3083,14 @@ activation_authority_matches_unlocked() {
         || return 1
     marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
     marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_signal_worker_digest="$(sed -n 's/^signal_worker_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_bot_digest="$(sed -n 's/^telegram_bot_sha256=//p' "${ENGINE_BINARY}.release")"
     [[ "$marker_commit" =~ ^[0-9a-f]{40}$ ]] \
         && [[ "$marker_digest" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ "$marker_signal_worker_digest" =~ ^[0-9a-f]{64}$ ]] \
         && [[ "$marker_launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
         || return 1
     if [ -n "$marker_helper_digest$marker_sudoers_digest$marker_bot_digest" ]; then
@@ -2859,9 +3102,11 @@ activation_authority_matches_unlocked() {
     fi
     file_commit="$(sed -n 's/^commit=//p' "$path")"
     file_digest="$(sed -n 's/^sha256=//p' "$path")"
+    file_signal_worker_digest="$(sed -n 's/^signal_worker_sha256=//p' "$path")"
     file_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "$path")"
     [ "$file_commit" = "$marker_commit" ] \
         && [ "$file_digest" = "$marker_digest" ] \
+        && [ "$file_signal_worker_digest" = "$marker_signal_worker_digest" ] \
         && [ "$file_launcher_digest" = "$marker_launcher_digest" ] \
         || return 1
     if [ "$control_bound" -eq 1 ]; then
@@ -2879,20 +3124,22 @@ activation_authority_matches_unlocked() {
                 awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
 { exit 1 }
-END { if (NR != 6) exit 1 }
+END { if (NR != 7) exit 1 }
 ' "$path" >/dev/null
             else
                 awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
 { exit 1 }
-END { if (NR != 3) exit 1 }
+END { if (NR != 4) exit 1 }
 ' "$path" >/dev/null
             fi
             ;;
@@ -2907,16 +3154,17 @@ END { if (NR != 3) exit 1 }
             awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
-NR == 7 && /^boot_id=/ { next }
-NR == 8 && /^owner_pid=/ { next }
-NR == 9 && /^owner_start_ticks=/ { next }
-NR == 10 && /^not_after_epoch=/ { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
+NR == 8 && /^boot_id=/ { next }
+NR == 9 && /^owner_pid=/ { next }
+NR == 10 && /^owner_start_ticks=/ { next }
+NR == 11 && /^not_after_epoch=/ { next }
 { exit 1 }
-END { if (NR != 10) exit 1 }
+END { if (NR != 11) exit 1 }
 ' "$path" >/dev/null || return 1
             file_boot_id="$(sed -n 's/^boot_id=//p' "$path")"
             file_owner_pid="$(sed -n 's/^owner_pid=//p' "$path")"
@@ -2979,13 +3227,15 @@ invalidate_activation_authority() {
 
 begin_activation_generation() {
     local marker_commit marker_digest marker_launcher_digest marker_helper_digest
-    local marker_sudoers_digest marker_bot_digest boot_id owner_pid owner_stat
+    local marker_signal_worker_digest marker_sudoers_digest marker_bot_digest
+    local boot_id owner_pid owner_stat
     local owner_tail owner_start_ticks not_after temporary
     local -a owner_fields=()
-    verify_engine_release launcher-required
+    verify_engine_release
     invalidate_activation_authority
     marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
     marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_signal_worker_digest="$(sed -n 's/^signal_worker_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
@@ -3012,8 +3262,8 @@ begin_activation_generation() {
     not_after="$(( $(date -u +%s) + ACTIVATION_LEASE_SECONDS ))"
     temporary="$(mktemp "${ACTIVATION_PERMIT}.tmp.XXXXXX")" \
         || fail "cannot stage the transient activation permit"
-    printf 'commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nboot_id=%s\nowner_pid=%s\nowner_start_ticks=%s\nnot_after_epoch=%s\n' \
-        "$marker_commit" "$marker_digest" "$marker_launcher_digest" \
+    printf 'commit=%s\nsha256=%s\nsignal_worker_sha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nboot_id=%s\nowner_pid=%s\nowner_start_ticks=%s\nnot_after_epoch=%s\n' \
+        "$marker_commit" "$marker_digest" "$marker_signal_worker_digest" "$marker_launcher_digest" \
         "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest" \
         "$boot_id" "$owner_pid" "$owner_start_ticks" "$not_after" > "$temporary" \
         || fail "cannot write the transient activation permit"
@@ -3029,12 +3279,13 @@ begin_activation_generation() {
 
 complete_activation_generation() {
     local marker_commit marker_digest marker_launcher_digest marker_helper_digest
-    local marker_sudoers_digest marker_bot_digest temporary
-    verify_engine_release launcher-required
+    local marker_signal_worker_digest marker_sudoers_digest marker_bot_digest temporary
+    verify_engine_release
     activation_authority_matches "$ACTIVATION_PERMIT" permit \
         || fail "activation permit expired or changed before completion"
     marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
     marker_digest="$(sed -n 's/^sha256=//p' "${ENGINE_BINARY}.release")"
+    marker_signal_worker_digest="$(sed -n 's/^signal_worker_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_launcher_digest="$(sed -n 's/^launcher_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_helper_digest="$(sed -n 's/^control_helper_sha256=//p' "${ENGINE_BINARY}.release")"
     marker_sudoers_digest="$(sed -n 's/^controls_sudoers_sha256=//p' "${ENGINE_BINARY}.release")"
@@ -3044,8 +3295,8 @@ complete_activation_generation() {
     sync
     temporary="$(mktemp "${ACTIVATION_RECEIPT}.tmp.XXXXXX")" \
         || fail "cannot stage the activation completion receipt"
-    printf 'commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\n' \
-        "$marker_commit" "$marker_digest" "$marker_launcher_digest" \
+    printf 'commit=%s\nsha256=%s\nsignal_worker_sha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\n' \
+        "$marker_commit" "$marker_digest" "$marker_signal_worker_digest" "$marker_launcher_digest" \
         "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest" \
         > "$temporary" \
         || fail "cannot write the activation completion receipt"
@@ -3063,8 +3314,8 @@ complete_activation_generation() {
     rm -f -- "$ACTIVATION_PERMIT" \
         || fail "cannot retire the transient activation permit"
     sync
-    printf 'activation-complete commit=%s sha256=%s launcher_sha256=%s control_helper_sha256=%s controls_sudoers_sha256=%s telegram_bot_sha256=%s\n' \
-        "$marker_commit" "$marker_digest" "$marker_launcher_digest" \
+    printf 'activation-complete commit=%s sha256=%s signal_worker_sha256=%s launcher_sha256=%s control_helper_sha256=%s controls_sudoers_sha256=%s telegram_bot_sha256=%s\n' \
+        "$marker_commit" "$marker_digest" "$marker_signal_worker_digest" "$marker_launcher_digest" \
         "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest"
 }
 
@@ -3114,48 +3365,44 @@ if engine.get("venue") != expected_venue:
     raise SystemExit(f"engine config venue is {engine.get('venue')!r}, expected {expected_venue!r}")
 if Path(str(engine.get("heartbeat_path") or "")) != expected_heartbeat:
     raise SystemExit("engine config heartbeat_path disagrees with LIVENESS_ENGINE_HEARTBEAT_FILE")
-expected_books = {
-    "demo": {
-        "carry": Path("/var/lib/liquidity-migration/targets/carry-demo.json"),
-        "long": Path("/var/lib/liquidity-migration/targets/long-demo.json"),
-        "exodus": Path("/var/lib/liquidity-migration/targets/exodus-demo.json"),
-    },
-    "mainnet": {
-        "carry": Path("/var/lib/liquidity-migration/targets/carry-mainnet.json"),
-        "long": Path("/var/lib/liquidity-migration/targets/long-mainnet.json"),
-        "exodus": Path("/var/lib/liquidity-migration/targets/exodus-mainnet.json"),
-    },
-}[realm]
-observed = {
-    str(row.get("sleeve")): Path(str(row.get("book_path") or ""))
-    for row in config.get("strategy", [])
-    if row.get("name") == "target_book"
-}
-for sleeve, expected in expected_books.items():
-    if observed.get(sleeve) != expected:
-        raise SystemExit(f"{sleeve} book_path is {observed.get(sleeve)!s}, expected {expected}")
+expected_signal = Path(f"/var/lib/liquidity-migration/signals/{realm}")
+expected_control = Path(f"/var/lib/liquidity-migration/controls/{realm}")
+if Path(str(engine.get("signal_spool_path") or "")) != expected_signal:
+    raise SystemExit("engine signal_spool_path disagrees with its realm")
+if Path(str(engine.get("control_spool_path") or "")) != expected_control:
+    raise SystemExit("engine control_spool_path disagrees with its realm")
+strategies = config.get("strategy", [])
+expected = [
+    ("carry_native", "carry"),
+    ("long_native", "long"),
+    ("exodus_native", "exodus"),
+]
+if realm == "mainnet":
+    expected.append(("quoter", "maker_canary"))
+observed = [(row.get("name"), row.get("sleeve")) for row in strategies]
+if observed != expected:
+    raise SystemExit(f"engine strategy order is {observed!r}, expected {expected!r}")
+for row in strategies[:3]:
+    if set(row) != {"name", "sleeve", "config_json"}:
+        raise SystemExit(f"native strategy {row.get('sleeve')!r} has an invalid TOML surface")
+    if "book_path" in row or "symbols" in row:
+        raise SystemExit("native directional strategy still carries target-book wiring")
 PY
+    case "$expected_realm" in
+        demo) install_demo_native_engine_config check ;;
+        mainnet) install_mainnet_native_engine_config check ;;
+    esac
     chown root:"$RUNTIME_GROUP" "$ENGINE_CONFIG_FILE" && chmod 0640 "$ENGINE_CONFIG_FILE" \
         || fail "cannot make engine config readable only to its runtime group"
 }
 
 quarantine_engine_inputs() {
-    local env_file="$1" realm="$2" archive stamp path
+    local env_file="$1" realm="$2" stamp
     validate_engine_environment "$env_file" "$realm"
     stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-    archive="/var/lib/liquidity-migration/targets/archive/$stamp-$realm"
-    install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$archive"
-    case "$realm" in
-        demo) set -- long-demo.json carry-demo.json exodus-demo.json ;;
-        mainnet) set -- long-mainnet.json carry-mainnet.json exodus-mainnet.json ;;
-    esac
-    for path in "$@"; do
-        if [ -e "/var/lib/liquidity-migration/targets/$path" ]; then
-            [ ! -L "/var/lib/liquidity-migration/targets/$path" ] \
-                || fail "refusing linked target book: $path"
-            mv "/var/lib/liquidity-migration/targets/$path" "$archive/$path"
-        fi
-    done
+    # Stopped-state target books are immutable takeover evidence. Activation
+    # neither reads nor moves them; the typed importer binds their exact hashes
+    # into the WAL.
     if [ -e "$LIVENESS_ENGINE_HEARTBEAT_FILE" ]; then
         [ ! -L "$LIVENESS_ENGINE_HEARTBEAT_FILE" ] \
             || fail "refusing linked engine heartbeat"
@@ -3210,64 +3457,146 @@ PY
     fail "$realm engine did not publish a fresh, may-open, exact-account heartbeat"
 }
 
-wait_fresh_producer_book() {
-    local unit="$1" root="$2" book="$3" realm="$4" started_ns="$5"
-    local invocation attempt
-    invocation="$(systemctl show "$unit" --property=InvocationID --value --no-pager)" \
-        || fail "cannot read $unit invocation id"
-    [ -n "$invocation" ] || fail "$unit has no systemd invocation id"
-    for attempt in $(seq 1 450); do
+wait_signal_worker_ready() {
+    local unit="$1" heartbeat="$2" realm="$3" started_ms="$4"
+    local signal_config="$5" long_rule="$6" carry_config="$7" operational_config="$8"
+    local engine_config="$9" universe="${10}" main_pid attempt
+    main_pid="$(systemctl show "$unit" --property=MainPID --value --no-pager)" \
+        || fail "cannot read $unit main process id"
+    [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || fail "$unit has no live main process id"
+    for attempt in $(seq 1 900); do
         systemctl is-active --quiet "$unit" \
-            || fail "$unit stopped before publishing a fresh target book"
-        if "$PYTHON" - "$root" "$book" "$realm" "$started_ns" "$invocation" <<'PY'
+            || fail "$unit stopped before publishing a ready signal heartbeat"
+        if "$PYTHON" - "$heartbeat" "$realm" "$started_ms" "$main_pid" \
+            "$signal_config" "$long_rule" "$carry_config" "$operational_config" \
+            "$engine_config" "$universe" <<'PY'
+import hashlib
 import json
 import sys
 import time
 from pathlib import Path
-root, book = Path(sys.argv[1]), Path(sys.argv[2])
-realm, started_ns, invocation = sys.argv[3], int(sys.argv[4]), sys.argv[5]
+
+heartbeat, realm, started_ms, main_pid = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+signal_config, long_rule, carry_config, operational_config, engine_config, universe = map(Path, sys.argv[5:11])
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
 try:
-    health_path = root / ".cache" / "strategy_cycle_health.json"
-    health = json.loads(health_path.read_bytes())
-    payload = json.loads(book.read_bytes())
-    stat = book.stat()
-except (OSError, ValueError):
-    raise SystemExit(1)
-if health.get("invocation_id") != invocation or health.get("environment") != realm:
-    raise SystemExit(1)
-if type(health.get("completed_ts_ns")) is not int or health["completed_ts_ns"] < started_ns:
-    raise SystemExit(1)
-if stat.st_mtime_ns < started_ns:
+    payload = json.loads(heartbeat.read_bytes())
+    universe_payload = json.loads(universe.read_bytes())
+    expected = {
+        "signal_config_sha256": digest(signal_config),
+        "long_rule_sha256": digest(long_rule),
+        "carry_config_sha256": digest(carry_config),
+        "operational_config_sha256": digest(operational_config),
+        "engine_config_sha256": digest(engine_config),
+        "universe_file_sha256": digest(universe),
+        "universe_artifact_sha256": universe_payload["artifact_sha256"],
+    }
+except (KeyError, OSError, TypeError, ValueError):
     raise SystemExit(1)
 now_ms = int(time.time() * 1000)
-decision = payload.get("decision_ts_ms")
-valid_until = payload.get("valid_until_ms")
-if type(decision) is not int or type(valid_until) is not int:
+if payload.get("schema_version") != 1 or payload.get("kind") != "liquidity_migration_signal_worker_heartbeat":
     raise SystemExit(1)
-if decision > now_ms + 5_000 or valid_until <= now_ms:
+if payload.get("status") != "ready" or payload.get("credential_free") is not True:
     raise SystemExit(1)
-if not isinstance(payload.get("targets"), list):
+if payload.get("pid") != main_pid or payload.get("public_market_realm") != "mainnet":
+    raise SystemExit(1)
+if payload.get("public_bybit_host") != "api.bybit.com":
+    raise SystemExit(1)
+updated = payload.get("updated_at_ms")
+if type(updated) is not int or updated < started_ms or not (0 <= now_ms - updated <= 15_000):
+    raise SystemExit(1)
+if any(payload.get(key) != value for key, value in expected.items()):
+    raise SystemExit(1)
+for key in ("last_input_sequence", "long_output_sequence", "carry_output_sequence"):
+    if type(payload.get(key)) is not int or payload[key] <= 0:
+        raise SystemExit(1)
+if type(payload.get("last_observed_ts_ms")) is not int or payload["last_observed_ts_ms"] <= 0:
     raise SystemExit(1)
 PY
         then
-            printf 'producer-book-ok unit=%s invocation=%s book=%s\n' "$unit" "$invocation" "$book"
+            printf 'signal-worker-ready unit=%s pid=%s heartbeat=%s\n' \
+                "$unit" "$main_pid" "$heartbeat"
             return 0
         fi
-        [ "$attempt" -eq 450 ] || sleep 2
+        [ "$attempt" -eq 900 ] || sleep 2
     done
-    fail "$unit did not publish a valid book from its current service generation"
+    fail "$unit did not finish its causal cold start within 30 minutes"
+}
+
+activate_signal_worker() {
+    local realm="$1" started_ms="$2" owner_unit="$3" owner_env="$4"
+    local unit heartbeat signal_env engine_env
+    local signal_config long_rule carry_config operational_config engine_config universe
+    unit="$(lm_signal_worker_unit "$realm")" \
+        || fail "$realm manifest does not name one directional signal worker"
+    heartbeat="$(lm_output_artifact_for_unit "$unit")" \
+        || fail "$realm signal worker has no heartbeat artifact"
+    signal_config="$REPO_DIR/configs/signal-worker.$realm.json"
+    long_rule="$REPO_DIR/configs/long_native_v12.json"
+    carry_config="$REPO_DIR/configs/lane2_carry_hold_v7.json"
+    if [ "$realm" = demo ]; then
+        signal_env="$SIGNAL_WORKER_DEMO_ENV"
+        engine_env="$ENGINE_ENVIRONMENT"
+    else
+        signal_env="$SIGNAL_WORKER_MAINNET_ENV"
+        engine_env=/etc/liquidity-migration/engine-mainnet.env
+    fi
+    unset OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE ENGINE_CONFIG_FILE
+    lm_load_private_systemd_environment "$PYTHON" "$signal_env" \
+        OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE \
+        || fail "cannot read $realm signal-worker inputs"
+    operational_config="$OPERATIONAL_PROFILE_FILE"
+    universe="$CANDIDATE_UNIVERSE_FILE"
+    lm_load_private_systemd_environment "$PYTHON" "$engine_env" ENGINE_CONFIG_FILE \
+        || fail "cannot read $realm engine config binding"
+    engine_config="$ENGINE_CONFIG_FILE"
+    for input in "$signal_config" "$long_rule" "$carry_config" "$operational_config" "$engine_config" "$universe"; do
+        [ -f "$input" ] && [ ! -L "$input" ] \
+            || fail "$realm signal-worker input is missing or linked: $input"
+    done
+    systemctl enable --now "$unit" \
+        || fail "cannot start $realm directional signal worker $unit"
+    # Bring the account owner back immediately. It can reconcile and exit from
+    # its WAL while the credential-free worker finishes a long cold data fill.
+    start_required_engine "$owner_unit" "$owner_env" "$realm"
+    wait_signal_worker_ready "$unit" "$heartbeat" "$realm" "$started_ms" \
+        "$signal_config" "$long_rule" "$carry_config" "$operational_config" "$engine_config" "$universe"
+}
+
+activate_manifest_units() {
+    local realm="$1" unit immediate_jobs
+    immediate_jobs=" $(lm_immediate_timer_jobs "$realm" | tr '\n' ' ') "
+    while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        case "$immediate_jobs" in
+            *" $unit "*)
+                systemctl start "$unit" \
+                    || fail "the immediate $realm timer job $unit failed to start"
+                if systemctl is-failed --quiet "$unit"; then
+                    fail "the immediate $realm timer job $unit failed"
+                fi
+                ;;
+            *)
+                systemctl enable --now "$unit" \
+                    || fail "cannot activate $realm fleet unit $unit"
+                ;;
+        esac
+    done < <(lm_activation_units "$realm" start)
 }
 
 start_required_engine() {
     local unit="$1" env_file="$2" realm="$3"
-    verify_engine_release launcher-required
+    verify_engine_release
     quarantine_engine_inputs "$env_file" "$realm"
     systemctl enable "$unit" || fail "cannot enable required Rust engine $unit"
     systemctl start "$unit" || fail "cannot start required Rust engine $unit"
     wait_engine_heartbeat "$env_file" "$realm"
 }
 activate_mode() {
-    local producer_started_ns
+    local signal_started_ms
     require_rollout_for_funded_generation_change activate
     load_authorization
     resolve_stop_first
@@ -3277,45 +3606,11 @@ activate_mode() {
     for unit in $(lm_expected_systemd_units); do
         systemctl disable --now "$unit" 2>/dev/null || true
     done
-    # Remove every previously valid book before the engine starts. It therefore
-    # boots holding/no-op, proves the exact account in a new heartbeat, and only
-    # then admits books from the service generations started below.
-    start_required_engine "$ENGINE_UNIT" "$ENGINE_ENVIRONMENT" demo
-    producer_started_ns="$(date +%s%N)"
-    start_if "$LONG_SLEEVE" liquidity-migration-bybit-long-demo.service
-    start_if "$CARRY_SLEEVE" liquidity-migration-bybit-carry-demo.service
-    if sleeve_on "$LONG_SLEEVE"; then
-        wait_fresh_producer_book liquidity-migration-bybit-long-demo.service \
-            "$LONG_DEMO_ROOT" /var/lib/liquidity-migration/targets/long-demo.json \
-            demo "$producer_started_ns"
-    fi
-    if sleeve_on "$CARRY_SLEEVE"; then
-        wait_fresh_producer_book liquidity-migration-bybit-carry-demo.service \
-            "$CARRY_DEMO_ROOT" /var/lib/liquidity-migration/targets/carry-demo.json \
-            demo "$producer_started_ns"
-    fi
+    signal_started_ms="$(date +%s%3N)"
+    activate_signal_worker \
+        demo "$signal_started_ms" "$ENGINE_UNIT" "$ENGINE_ENVIRONMENT"
 
-    systemctl enable --now liquidity-migration-demo-liveness.timer \
-        || fail "cannot enable the demo watchdog timer"
-    systemctl start liquidity-migration-demo-liveness.service \
-        || fail "the immediate demo liveness pass failed to start"
-    if systemctl is-failed --quiet liquidity-migration-demo-liveness.service; then
-        fail "the immediate demo liveness pass failed"
-    fi
-    systemctl enable --now liquidity-migration-telegram-controls.service \
-        || fail "cannot start Telegram controls"
-    systemctl enable --now liquidity-migration-llm-ledger.timer \
-        || fail "cannot start the LLM ledger timer"
-    systemctl enable --now liquidity-migration-trade-notify.timer \
-        || fail "cannot start the trade notification timer"
-    systemctl enable --now liquidity-migration-forward-capture.service \
-        || fail "cannot start forward market capture"
-    systemctl enable --now liquidity-migration-forward-upload.timer \
-        || fail "cannot enable the forward market upload timer"
-    systemctl enable --now liquidity-migration-backup.timer \
-        || fail "cannot enable the nightly backup timer"
-    systemctl enable --now liquidity-migration-chaos-drill.timer \
-        || fail "cannot enable the weekly chaos drill timer"
+    activate_manifest_units demo
     if mainnet_armed; then
         start_mainnet_fleet
     fi
@@ -3327,24 +3622,20 @@ activate_mode() {
 # Naming the engine is not arming it. The mainnet gateway refuses to build
 # unless REAL_MONEY is set in the host credential file by the account owner,
 # so the worst this can do is start a process that reads and reports.
-MAINNET_OWNER_UNIT=liquidity-migration-engine-mainnet.service
-MAINNET_LIVENESS_TIMER=liquidity-migration-mainnet-liveness.timer
-MAINNET_LIVENESS_SERVICE=liquidity-migration-mainnet-liveness.service
-
 MAINNET_DEMO_TELEGRAM_ENV=/etc/liquidity-migration/bybit-demo.env
 
 # The owner writes one file: the credential env (key, secret, REAL_MONEY,
 # optional dials). Everything else is derived here at activation, and
 # preflight still gates below.
 provision_mainnet_prerequisites() {
-    if [ ! -f "$PRODUCER_MAINNET_SOURCE_ENV" ]; then
+    if [ ! -f "$MAINNET_SIGNAL_SOURCE_ENV" ]; then
         install -o root -g root -m 600 \
-            "$REPO_DIR/deploy/producer-mainnet-source.env.template" "$PRODUCER_MAINNET_SOURCE_ENV" \
-            || fail "cannot install the mainnet producer source env"
-        echo "provision: installed $PRODUCER_MAINNET_SOURCE_ENV from the committed template"
+            "$REPO_DIR/deploy/signal-worker-mainnet.env.template" "$MAINNET_SIGNAL_SOURCE_ENV" \
+            || fail "cannot install the mainnet signal-worker source env"
+        echo "provision: installed $MAINNET_SIGNAL_SOURCE_ENV from the committed template"
     fi
-    chown root:root "$MAINNET_CREDENTIAL_ENV" "$PRODUCER_MAINNET_SOURCE_ENV" 2>/dev/null || true
-    chmod 600 "$MAINNET_CREDENTIAL_ENV" "$PRODUCER_MAINNET_SOURCE_ENV" 2>/dev/null || true
+    chown root:root "$MAINNET_CREDENTIAL_ENV" "$MAINNET_SIGNAL_SOURCE_ENV" 2>/dev/null || true
+    chmod 600 "$MAINNET_CREDENTIAL_ENV" "$MAINNET_SIGNAL_SOURCE_ENV" 2>/dev/null || true
     # A funded book that cannot page is a hazard: default a missing Telegram
     # pair from the demo file (existing values are never touched).
     "$PYTHON" -m liquidity_migration.policy.real_money_arming default-telegram \
@@ -3352,17 +3643,17 @@ provision_mainnet_prerequisites() {
         || fail "cannot default the mainnet Telegram pair"
     local risk_policy_file="" universe_file=""
 
-    lm_load_private_systemd_environment "$PYTHON" "$PRODUCER_MAINNET_SOURCE_ENV" \
-        PRODUCER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE \
-        || fail "cannot read producer inputs from $PRODUCER_MAINNET_SOURCE_ENV"
-    [ "$PRODUCER_REALM" = mainnet ] \
-        || fail "funded producer source must declare PRODUCER_REALM=mainnet"
+    lm_load_private_systemd_environment "$PYTHON" "$MAINNET_SIGNAL_SOURCE_ENV" \
+        SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE \
+        || fail "cannot read signal-worker inputs from $MAINNET_SIGNAL_SOURCE_ENV"
+    [ "$SIGNAL_WORKER_REALM" = mainnet ] \
+        || fail "funded signal-worker source must declare SIGNAL_WORKER_REALM=mainnet"
     risk_policy_file="$OPERATIONAL_PROFILE_FILE"
     universe_file="$CANDIDATE_UNIVERSE_FILE"
 
     install -d -o root -g "$RUNTIME_GROUP" -m 0750 \
         "$(dirname "$risk_policy_file")" \
-        || fail "cannot create the mainnet producer input directory"
+        || fail "cannot create the mainnet signal-worker input directory"
     # The installed profile is always the render of the current dials, so a
     # dial edit can never drift from what the kernel enforces.
     "$PYTHON" -m liquidity_migration.policy.real_money_arming render-profile \
@@ -3370,7 +3661,7 @@ provision_mainnet_prerequisites() {
         || fail "mainnet dials do not render a loadable profile"
     [ -f "$universe_file" ] && [ ! -L "$universe_file" ] \
         || fail "install a reviewed mainnet candidate-universe artifact before activation: $universe_file"
-    write_producer_environment "$PRODUCER_MAINNET_SOURCE_ENV" "$PRODUCER_MAINNET_ENV"
+    write_signal_worker_environment "$MAINNET_SIGNAL_SOURCE_ENV" "$SIGNAL_WORKER_MAINNET_ENV"
     project_mainnet_telegram_environment
 }
 
@@ -3387,33 +3678,18 @@ require_mainnet_preflight() {
 # decision; the preflight proves the profile is the render of the dials
 # before anything starts.
 start_mainnet_fleet() {
-    local producer_started_ns
+    local signal_started_ms
     provision_mainnet_prerequisites
     require_mainnet_preflight
-    install -d -o "$PRODUCER_USER" -g "$RUNTIME_GROUP" -m 0750 \
-        "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets
-    start_required_engine "$MAINNET_OWNER_UNIT" /etc/liquidity-migration/engine-mainnet.env mainnet
-    producer_started_ns="$(date +%s%N)"
-    systemctl enable --now liquidity-migration-bybit-carry-mainnet.service \
-        || fail "cannot start the funded carry target producer"
-    systemctl enable --now liquidity-migration-bybit-long-mainnet.service \
-        || fail "cannot start the funded LONG target producer"
-    wait_fresh_producer_book liquidity-migration-bybit-carry-mainnet.service \
-        "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets/carry-mainnet.json \
-        mainnet "$producer_started_ns"
-    wait_fresh_producer_book liquidity-migration-bybit-carry-mainnet.service \
-        "$CARRY_MAINNET_ROOT" /var/lib/liquidity-migration/targets/exodus-mainnet.json \
-        mainnet "$producer_started_ns"
-    wait_fresh_producer_book liquidity-migration-bybit-long-mainnet.service \
-        "$LONG_MAINNET_ROOT" /var/lib/liquidity-migration/targets/long-mainnet.json \
-        mainnet "$producer_started_ns"
-    systemctl enable --now "$MAINNET_LIVENESS_TIMER" \
-        || fail "cannot enable the funded liveness timer"
-    systemctl start "$MAINNET_LIVENESS_SERVICE" \
-        || fail "the immediate funded liveness pass failed to start"
-    if systemctl is-failed --quiet "$MAINNET_LIVENESS_SERVICE"; then
-        fail "the immediate funded liveness pass failed"
-    fi
+    install_mainnet_native_engine_config
+    import_native_strategy_state mainnet
+    install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" "$EXODUS_MAINNET_ROOT" \
+        /var/lib/liquidity-migration/targets
+    signal_started_ms="$(date +%s%3N)"
+    activate_signal_worker mainnet "$signal_started_ms" "$MAINNET_OWNER_UNIT" \
+        /etc/liquidity-migration/engine-mainnet.env
+    activate_manifest_units mainnet
 }
 resolve_fail_safe_python() {
     local interpreter mode directory
@@ -3445,15 +3721,8 @@ resolve_fail_safe_python() {
 # but a failed credential rewrite still leaves the funded fleet quarantined.
 quarantine_mainnet_units() {
     local unit load_state failures=0
-    local -a units=(
-        "$MAINNET_LIVENESS_TIMER"
-        "$MAINNET_LIVENESS_SERVICE"
-        liquidity-migration-bybit-carry-mainnet.service
-        liquidity-migration-bybit-long-mainnet.service
-        "$MAINNET_OWNER_UNIT"
-    )
     [ -x /usr/bin/systemctl ] || return 1
-    for unit in "${units[@]}"; do
+    for unit in "${MAINNET_QUARANTINE_UNITS[@]}"; do
         load_state="$(/usr/bin/systemctl show --property=LoadState --value "$unit" 2>/dev/null)" \
             || { printf 'stop-failed unit=%s reason=load-state-unavailable\n' "$unit" >&2; failures=1; continue; }
         if [ "$load_state" = not-found ]; then
@@ -3463,7 +3732,7 @@ quarantine_mainnet_units() {
         /usr/bin/systemctl disable --now "$unit" 2>/dev/null || true
     done
     /bin/sync || failures=1
-    for unit in "${units[@]}"; do
+    for unit in "${MAINNET_QUARANTINE_UNITS[@]}"; do
         load_state="$(/usr/bin/systemctl show --property=LoadState --value "$unit" 2>/dev/null)" \
             || { printf 'stop-failed unit=%s reason=verification-unavailable\n' "$unit" >&2; failures=1; continue; }
         [ "$load_state" = not-found ] && continue
@@ -3644,50 +3913,9 @@ stop_mainnet_mode() {
     echo "note: REAL_MONEY was not read; run disarm-mainnet to remove arming at the credential boundary."
 }
 
-ROLLOUT_DOWNSTREAM_UNITS=(
-    liquidity-migration-forward-upload.timer
-    liquidity-migration-forward-upload.service
-    liquidity-migration-backup.timer
-    liquidity-migration-backup.service
-    liquidity-migration-chaos-drill.timer
-    liquidity-migration-chaos-drill.service
-    liquidity-migration-forward-capture.service
-    liquidity-migration-demo-liveness.timer
-    liquidity-migration-mainnet-liveness.timer
-    liquidity-migration-llm-ledger.timer
-    liquidity-migration-llm-ledger.service
-    liquidity-migration-trade-notify.timer
-    liquidity-migration-trade-notify.service
-    liquidity-migration-bybit-long-demo.service
-    liquidity-migration-bybit-long-mainnet.service
-    liquidity-migration-bybit-carry-demo.service
-    liquidity-migration-bybit-carry-mainnet.service
-    liquidity-migration-demo-liveness.service
-    liquidity-migration-mainnet-liveness.service
-    liquidity-migration-telegram-controls.service
-    # Retired fleets stay in the stop list so the rollout that carries each
-    # retirement quiesces a host still running them; the manifest install
-    # then removes the unit files for good.
-    liquidity-migration-bybit-long-paper.service
-    liquidity-migration-bybit-continuous-paper.service
-    liquidity-migration-bybit-carry-paper.service
-    liquidity-migration-paper-target-mirror.service
-    liquidity-migration-continuous-hedge.timer
-    liquidity-migration-continuous-rmom-refresh.timer
-    liquidity-migration-bybit-continuous-demo.service
-    liquidity-migration-continuous-hedge.service
-    liquidity-migration-continuous-rmom-refresh.service
-)
-# Owners stop last and start first. The engines are the owners now: they hold
-# the account lease and carry the orders, and a producer publishing a book
-# nobody owns is the state this ordering exists to keep short. They are also
-# what `require_quiescent` needs named, since it refuses to install while any
-# liquidity-migration-* unit is running and stop-first only stops what these
-# lists name.
-ROLLOUT_OWNER_UNITS=(
-    liquidity-migration-engine.service
-    liquidity-migration-engine-mainnet.service
-)
+# The local side resolves these arrays from deploy/fleet_manifest.tsv before it
+# sends the remote program. This lets a new commit quiesce units absent from the
+# host's installed checkout while keeping stop order in one inventory.
 ROLLOUT_STOPPED=0
 ROLLOUT_IRREVERSIBLE=0
 ROLLOUT_COMPLETE=0
@@ -4053,7 +4281,7 @@ rollout_mode() {
     # bash skips the EXIT trap on an untrapped fatal signal, so an SSH client
     # death (HUP, then SIGPIPE) would leave the fleet half-stopped uncleaned.
 
-    # Stop every producer/timer before either owner. Activation quarantines
+    # Stop every downstream unit before either owner. Activation quarantines
     # every old book before admitting work from the new service generation.
     run_strict_phase stop-downstream-units \
         stop_rollout_units "${ROLLOUT_DOWNSTREAM_UNITS[@]}"

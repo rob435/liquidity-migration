@@ -66,6 +66,18 @@ engine — the execution loop
   engine strategies
       List every strategy plug that a [[strategy]] config block can load.
 
+  engine render-native-config --realm demo|mainnet
+             --signal-config PATH --long-rule PATH --carry-rule PATH
+             --exodus-rule PATH --operational-config PATH [--maker-rule PATH]
+             --long-entries-enabled true|false
+             --carry-entries-enabled true|false
+             --exodus-entries-enabled true|false
+             [--template PATH] --output PATH [--check]
+      Derive the native LONG, CARRY, and Exodus config blobs and stable
+      fingerprints from their machine authorities. With --template, replace
+      only its marked native-directional region. --check changes nothing and
+      fails when PATH does not contain the exact rendered bytes.
+
   engine attest-flat --config engine.toml
       Read every account position and open order surface known by the venue
       adapter. Succeeds only when the credential-wide inventory is fresh and
@@ -85,6 +97,34 @@ engine — the execution loop
       with --execute, restates the exposure ledger to the venue's positions
       and resets the latch, keeping the findings in the log as the receipt.
       The next boot still runs its own comparison.
+
+  engine import-strategy-state --config engine.toml --strategy SLEEVE
+                               --source-format FORMAT --source NAME=PATH
+                               [--source NAME=PATH ...]
+      Stop the engine, lock its WAL and venue account, verify the config's
+      strategy ids against WAL Names, ask that strategy's strict legacy codec
+      to translate the source, then append its canonical state.
+      An exact retry is a no-op; any different state or source proof is refused.
+
+  engine initialize-native-strategy-state --config engine.toml
+      On a truly empty WAL only, lock the WAL and configured venue account,
+      bind the authenticated user to EXPECTED_ENGINE_ACCOUNT_USER_ID, and
+      durably seed every native reducer's strict canonical empty checkpoint.
+
+  engine verify-native-strategy-state --config engine.toml
+      Lock and read the stopped engine WAL, then verify exact strategy names,
+      current checkpoint identities and payloads, and completed provenance.
+
+  engine set-strategy-entry-permission --config engine.toml --strategy SLEEVE
+             --entries-enabled true|false --request-id ID [--wait-ms MS]
+      Submit one idempotent live command to the engine and wait until its WAL
+      barrier and in-memory apply are complete. False blocks entries and
+      growing resizes only; signal delivery and exits continue.
+
+  engine flatten-strategy --config engine.toml --strategy SLEEVE
+             --request-id ID [--wait-ms MS]
+      Submit a durable replayable flatten wake. The same sleeve must first
+      have a durable entries-disabled runtime override.
 
 ";
 
@@ -212,6 +252,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
+        "render-native-config" => render_native_config(args),
         "attest-flat" => {
             let config = PathBuf::from(
                 value(args, "--config")
@@ -296,12 +337,228 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             let execute = args.iter().any(|a| a == "--execute");
             runtime()?.block_on(engine_core::clear::run(&config, &note, execute))
         }
+        "import-strategy-state" => {
+            let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+            let strategy =
+                value(args, "--strategy").ok_or("import-strategy-state needs --strategy SLEEVE")?;
+            let source_format = value(args, "--source-format")
+                .ok_or("import-strategy-state needs --source-format FORMAT")?;
+            let source_flags = args.iter().filter(|arg| arg.as_str() == "--source").count();
+            let source_values = values(args, "--source");
+            if source_values.len() != source_flags {
+                return Err("import-strategy-state has --source without NAME=PATH".into());
+            }
+            let sources: Vec<(String, PathBuf)> = source_values
+                .into_iter()
+                .map(|source| {
+                    let (name, path) = source
+                        .split_once('=')
+                        .ok_or("import-strategy-state --source must be NAME=PATH")?;
+                    if path.is_empty() {
+                        return Err("import-strategy-state --source path is empty");
+                    }
+                    Ok((name.to_string(), PathBuf::from(path)))
+                })
+                .collect::<Result<_, &str>>()?;
+            runtime()?.block_on(engine_core::takeover::run(
+                &config,
+                &strategy,
+                &source_format,
+                &sources,
+            ))?;
+            Ok(())
+        }
+        "initialize-native-strategy-state" => {
+            let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+            runtime()?.block_on(engine_core::takeover::initialize_native_strategy_state(
+                &config,
+            ))
+        }
+        "verify-native-strategy-state" => {
+            let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+            engine_core::takeover::verify_native_strategy_state(&config)
+        }
+        "set-strategy-entry-permission" => {
+            let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+            let strategy = value(args, "--strategy")
+                .ok_or("set-strategy-entry-permission needs --strategy SLEEVE")?;
+            let enabled = match value(args, "--entries-enabled").as_deref() {
+                Some("true") => true,
+                Some("false") => false,
+                _ => return Err("--entries-enabled must be true or false".into()),
+            };
+            let request_id = value(args, "--request-id")
+                .ok_or("set-strategy-entry-permission needs --request-id ID")?;
+            let wait_ms = value(args, "--wait-ms")
+                .unwrap_or("30000".into())
+                .parse::<u64>()?;
+            runtime()?.block_on(submit_runtime_control(
+                &config,
+                &strategy,
+                &request_id,
+                engine_types::RuntimeControlCommand::SetEntriesEnabled {
+                    entries_enabled: enabled,
+                },
+                wait_ms,
+            ))
+        }
+        "flatten-strategy" => {
+            let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+            let strategy =
+                value(args, "--strategy").ok_or("flatten-strategy needs --strategy SLEEVE")?;
+            let request_id =
+                value(args, "--request-id").ok_or("flatten-strategy needs --request-id ID")?;
+            let wait_ms = value(args, "--wait-ms")
+                .unwrap_or("30000".into())
+                .parse::<u64>()?;
+            runtime()?.block_on(submit_runtime_control(
+                &config,
+                &strategy,
+                &request_id,
+                engine_types::RuntimeControlCommand::FlattenDirectional,
+                wait_ms,
+            ))
+        }
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             Ok(())
         }
         other => Err(format!("unknown command {other}\n\n{USAGE}").into()),
     }
+}
+
+fn render_native_config(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let realm = value(args, "--realm").ok_or("render-native-config needs --realm")?;
+    let source_path = |flag: &str| -> Result<PathBuf, Box<dyn Error>> {
+        Ok(PathBuf::from(value(args, flag).ok_or_else(|| {
+            format!("render-native-config needs {flag} PATH")
+        })?))
+    };
+    let signal_path = source_path("--signal-config")?;
+    let long_path = source_path("--long-rule")?;
+    let carry_path = source_path("--carry-rule")?;
+    let exodus_path = source_path("--exodus-rule")?;
+    let operational_path = source_path("--operational-config")?;
+    let output_path = source_path("--output")?;
+    let parse_switch = |flag: &str| -> Result<bool, Box<dyn Error>> {
+        match value(args, flag).as_deref() {
+            Some("true") => Ok(true),
+            Some("false") => Ok(false),
+            _ => Err(format!("{flag} must be true or false").into()),
+        }
+    };
+    let signal = std::fs::read(&signal_path)?;
+    let long = std::fs::read(&long_path)?;
+    let carry = std::fs::read(&carry_path)?;
+    let exodus = std::fs::read(&exodus_path)?;
+    let operational = std::fs::read(&operational_path)?;
+    let rendered = engine_strategies::native_config::render_native_config(
+        engine_strategies::native_config::NativeConfigSources {
+            realm: &realm,
+            signal_config: &signal,
+            long_rule: &long,
+            carry_rule: &carry,
+            exodus_rule: &exodus,
+            operational_config: &operational,
+            long_entries_enabled: parse_switch("--long-entries-enabled")?,
+            carry_entries_enabled: parse_switch("--carry-entries-enabled")?,
+            exodus_entries_enabled: parse_switch("--exodus-entries-enabled")?,
+        },
+    )?;
+    let template_path = value(args, "--template");
+    if realm == "mainnet" && value(args, "--maker-rule").is_none() {
+        return Err("mainnet render-native-config needs --maker-rule PATH".into());
+    }
+    if value(args, "--maker-rule").is_some() && template_path.is_none() {
+        return Err("--maker-rule requires --template so the maker slot is preserved".into());
+    }
+    let mut output = if let Some(template_path) = template_path {
+        let template = std::fs::read_to_string(template_path)?;
+        engine_strategies::native_config::insert_native_blocks(&template, &rendered.toml_blocks)?
+    } else {
+        rendered.toml_blocks.clone()
+    };
+    if let Some(maker_path) = value(args, "--maker-rule") {
+        let maker = std::fs::read(maker_path)?;
+        let generated = engine_strategies::native_config::render_maker_rule(&maker)?;
+        output = engine_strategies::native_config::insert_maker_rule(&output, &generated)?;
+    }
+    if args.iter().any(|arg| arg == "--check") {
+        let existing = std::fs::read(&output_path)?;
+        if existing != output.as_bytes() {
+            return Err(format!(
+                "{} is not the exact rendered native config",
+                output_path.display()
+            )
+            .into());
+        }
+    } else {
+        std::fs::write(&output_path, output.as_bytes())?;
+    }
+    println!("output                         {}", output_path.display());
+    println!(
+        "long_decision_fingerprint      {}",
+        rendered.long_decision_fingerprint
+    );
+    println!(
+        "carry_decision_fingerprint     {}",
+        rendered.carry_decision_fingerprint
+    );
+    println!(
+        "exodus_decision_fingerprint    {}",
+        rendered.exodus_decision_fingerprint
+    );
+    Ok(())
+}
+
+async fn submit_runtime_control(
+    config_path: &Path,
+    strategy_name: &str,
+    request_id: &str,
+    command: engine_types::RuntimeControlCommand,
+    wait_ms: u64,
+) -> Result<(), Box<dyn Error>> {
+    let loaded = engine_core::config::load(config_path)?;
+    let matches: Vec<_> = loaded
+        .config
+        .strategies
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.sleeve_name() == strategy_name)
+        .collect();
+    let [(at, _)] = matches.as_slice() else {
+        return Err(
+            format!("strategy {strategy_name:?} must appear exactly once in this config").into(),
+        );
+    };
+    let spool = loaded
+        .config
+        .engine
+        .control_spool_path
+        .as_deref()
+        .ok_or("engine.control_spool_path is required for live runtime controls")?;
+    let mut request = engine_types::RuntimeControlRequest {
+        schema_version: engine_types::STRATEGY_ENTRY_PERMISSION_SCHEMA_VERSION,
+        strategy: engine_types::StrategyId(
+            u16::try_from(*at).map_err(|_| "more than 65535 configured strategies")?,
+        ),
+        strategy_name: strategy_name.to_string(),
+        request_id: request_id.to_string(),
+        command,
+        content_sha256: String::new(),
+    };
+    request.content_sha256 = engine_core::controls::content_sha256(&request);
+    engine_core::controls::submit_and_wait(
+        spool,
+        &request,
+        std::time::Duration::from_millis(wait_ms),
+    )
+    .await?;
+    println!("strategy   {} ({})", strategy_name, request.strategy.0);
+    println!("request    {}", request_id);
+    println!("command    {:?}", request.command);
+    println!("result     durable and applied");
+    Ok(())
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, Box<dyn Error>> {
@@ -313,4 +570,12 @@ fn runtime() -> Result<tokio::runtime::Runtime, Box<dyn Error>> {
 fn value(args: &[String], flag: &str) -> Option<String> {
     let at = args.iter().position(|a| a == flag)?;
     args.get(at + 1).cloned()
+}
+
+fn values(args: &[String], flag: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, value)| value.as_str() == flag)
+        .filter_map(|(at, _)| args.get(at + 1).cloned())
+        .collect()
 }

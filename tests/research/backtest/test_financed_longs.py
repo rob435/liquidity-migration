@@ -23,15 +23,17 @@ from liquidity_migration.research.backtest.financed_longs import (
     venue_view,
     volatility_scale,
 )
-from liquidity_migration.strategy.presettlement_events import CarryPresettlementEvent
 from liquidity_migration.rules.carry_hold import (
     HOUR_MS,
     CarryHoldConfig,
     FinancedLongsError,
-    carry_hold_weights,
     daily_grid,
     top_n_universe,
 )
+from liquidity_migration.rules.rust_strategy_contract import (
+    rust_carry_research_weights as carry_hold_weights,
+)
+from liquidity_migration.rules.carry_event_tape import CarryPresettlementEvent
 
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
 POSITIVE_TS_OFFSET = 20_000 * 24 * HOUR_MS
@@ -118,6 +120,7 @@ class TestResearchEquityChart:
         )
         assert payload["config_id"] == "lane2_carry_hold_v1"
         assert payload["run_label"] == "lane2_carry_hold_v1_research_seen_data_corrected_scorer"
+        assert payload["decision_authority"] == "rust_registered_rule"
         png = tmp_path / "lane2_carry_hold_v1_equity_btc.png"
         assert png.exists() and png.stat().st_size > 0
         assert payload["png"] == str(png)
@@ -150,6 +153,197 @@ class TestResearchEquityChart:
 
 
 class TestLiveContractReplay:
+    def test_standard_replay_uses_one_persistent_rust_process(
+        self,
+        carry_cfg: CarryHoldConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import liquidity_migration.research.backtest.financed_longs as financed_longs
+
+        real_contract = financed_longs.RustStrategyContract
+        instances: list[object] = []
+
+        class RecordingContract:
+            def __init__(self) -> None:
+                self.inner = real_contract()
+                self.requests = 0
+                self.entered = 0
+                self.exited = 0
+                instances.append(self)
+
+            def __enter__(self) -> RecordingContract:
+                self.inner.__enter__()
+                self.entered += 1
+                return self
+
+            def request(self, payload: dict[str, object]) -> dict[str, object]:
+                self.requests += 1
+                assert payload["operation"] == "carry_reduce"
+                return self.inner.request(payload)
+
+            def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+                self.exited += 1
+                self.inner.__exit__(exc_type, exc, traceback)
+
+        monkeypatch.setattr(financed_longs, "RustStrategyContract", RecordingContract)
+        panel = _positive_panel(symbols=1, funding_bp={"BTCUSDT": [-15.0]})
+        universe = _universe(panel)
+        scores, diagnostics = financed_longs.live_contract_scores(
+            carry_hold_weights(universe, carry_cfg),
+            universe,
+            panel,
+            carry_cfg,
+            replay_settings=_replay_settings(),
+        )
+
+        assert scores.height > 1
+        assert len(instances) == 1
+        instance = instances[0]
+        assert instance.entered == 1
+        assert instance.exited == 1
+        assert instance.requests > scores.height
+        assert diagnostics["decision_authority"] == "supplied_reference_fixture"
+        assert diagnostics["daily_scorer_authority"] == "supplied_reference_fixture"
+        assert diagnostics["contract_transport"] == "one_persistent_jsonl_process"
+
+    def test_standard_v7_route_refuses_python_daily_weights(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import liquidity_migration.research.backtest.financed_longs as financed_longs
+
+        def forbidden_python_scorer(*args: object, **kwargs: object) -> pl.DataFrame:
+            raise AssertionError("the standard v7 route called the Python CARRY scorer")
+
+        def native_contract_stub(
+            weights: pl.DataFrame | None,
+            signal_grid: pl.DataFrame,
+            hourly_view: pl.DataFrame,
+            cfg: CarryHoldConfig,
+            **kwargs: object,
+        ) -> tuple[pl.DataFrame, dict[str, object]]:
+            del hourly_view, cfg
+            assert weights is None
+            assert kwargs["decision_source"] == "rust_signal_batch"
+            times = sorted(int(value) for value in signal_grid["bar_ts_ms"].unique().to_list())
+            return (
+                pl.DataFrame(
+                    {
+                        "bar_ts_ms": times[:2],
+                        "gross_bp": [0.0, 0.0],
+                        "oneway": [0.0, 0.0],
+                        "cost_bp": [0.0, 0.0],
+                        "net_bp": [0.0, 0.0],
+                    }
+                ),
+                {"daily_scorer_authority": "rust_carry_native"},
+            )
+
+        monkeypatch.setattr(financed_longs, "carry_hold_weights", forbidden_python_scorer)
+        monkeypatch.setattr(financed_longs, "top_n_universe", forbidden_python_scorer)
+        monkeypatch.setattr(financed_longs, "live_contract_scores", native_contract_stub)
+        payload = financed_longs.research_equity_chart(
+            _panel(symbols=50),
+            CONFIG_DIR / "lane2_carry_hold_v7.json",
+            tmp_path,
+            start="1970-01-01",
+            end="1970-02-01",
+            replay_mode="live_contract",
+            replay_settings=_replay_settings(max_entries=100),
+        )
+
+        assert payload["contract_replay"] == {
+            "daily_scorer_authority": "rust_carry_native"
+        }
+
+    def test_native_v7_scores_the_daily_book_inside_rust(self) -> None:
+        import liquidity_migration.research.backtest.financed_longs as financed_longs
+
+        cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v7.json")
+        symbols = [f"S{index:03d}USDT" for index in range(110)]
+        signal_rows: list[dict[str, object]] = []
+        for day in range(92):
+            ts = POSITIVE_TS_OFFSET + day * 24 * HOUR_MS
+            for index, symbol in enumerate(symbols):
+                signal_rows.append(
+                    {
+                        "symbol": symbol,
+                        "bar_ts_ms": ts,
+                        "by_close": 100.0,
+                        "by_turnover_quote": float(1_000_000 - index),
+                        "by_funding": -0.002,
+                        "by_funding_age_h": 0.0,
+                        "adv24": float(1_000_000 - index),
+                        "trail_fund_24h": -0.012,
+                        "momentum": 0.1,
+                        "ret_3d": 0.1,
+                        "vol_30d_daily": 0.1,
+                        "dtrail_2d": 0.0,
+                        "crowd_persistence": 0.5,
+                        "turn_growth_3d": 1.0,
+                        "d_tt_ls_3d": 1.0,
+                    }
+                )
+        first_replay_ts = POSITIVE_TS_OFFSET + 90 * 24 * HOUR_MS
+        hourly_rows: list[dict[str, object]] = []
+        for hour in range(49):
+            ts = first_replay_ts + hour * HOUR_MS
+            for symbol in symbols:
+                hourly_rows.append(
+                    {
+                        "symbol": symbol,
+                        "bar_ts_ms": ts,
+                        "by_close": 100.0,
+                        "by_funding": -0.002,
+                        "by_funding_age_h": float(hour % 8),
+                    }
+                )
+
+        signal_batches: list[dict[str, object]] = []
+
+        class RecordingContract:
+            def __init__(self, inner: object) -> None:
+                self.inner = inner
+
+            def request(self, payload: dict[str, object]) -> dict[str, object]:
+                batch = payload["signal_batch"]
+                if isinstance(batch, dict):
+                    signal_batches.append(batch)
+                return self.inner.request(payload)  # type: ignore[attr-defined,no-any-return]
+
+        with financed_longs.RustStrategyContract() as inner:
+            scores, diagnostics = live_contract_scores(
+                None,
+                pl.DataFrame(signal_rows),
+                pl.DataFrame(hourly_rows),
+                cfg,
+                replay_settings=_replay_settings(max_entries=200),
+                strategy_contract=RecordingContract(inner),
+                decision_source="rust_signal_batch",
+            )
+
+        assert scores.height == 2
+        assert diagnostics["decision_authority"] == "rust_carry_native"
+        assert diagnostics["daily_scorer_authority"] == "rust_carry_native"
+        assert diagnostics["signal_replay_days"] == 90
+        assert diagnostics["last_effective_universe_size"] == 100
+        assert int(diagnostics["max_active_names"]) == 100
+        assert len(signal_batches) == 3
+        assert signal_batches[0]["decision_ts_ms"] == first_replay_ts
+        assert len(signal_batches[0]["rows"]) == 91 * len(symbols)  # type: ignore[arg-type]
+        assert signal_batches[0]["upcoming_rows"] == []
+        assert signal_batches[1]["decision_ts_ms"] == first_replay_ts
+        assert len(signal_batches[1]["upcoming_rows"]) == len(symbols)  # type: ignore[arg-type]
+        assert signal_batches[2]["decision_ts_ms"] == first_replay_ts + 24 * HOUR_MS
+        assert signal_batches[2]["upcoming_rows"] == []
+        first_batch_symbols = {
+            row["symbol"]
+            for row in signal_batches[0]["rows"]  # type: ignore[union-attr]
+            if row["bar_ts_ms"] == POSITIVE_TS_OFFSET
+        }
+        assert first_batch_symbols == set(symbols)
+
     def test_replays_cap_trail_drop_anchor_and_typed_presettlement_identity(
         self,
         carry_cfg: CarryHoldConfig,

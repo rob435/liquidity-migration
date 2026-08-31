@@ -12,7 +12,8 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use engine_types::{
     AccountView, Action, InstrumentRule, MarketState, PositionView, Quote, RestingOrder,
-    StrategyCtx, StrategyId, SymbolId, Ticker, TimerId,
+    StrategyAccountSummary, StrategyCheckpoint, StrategyCtx, StrategyEvent,
+    StrategyGlobalCheckpointState, StrategyId, StrategyPositionFacts, SymbolId, Ticker, TimerId,
 };
 
 use crate::attribution::Attribution;
@@ -102,6 +103,11 @@ pub struct Ctx<'a> {
     /// absorbed. The engine books and releases these; a strategy reads its
     /// own sum through `in_flight`.
     pub covers: &'a CoverBook,
+    pub checkpoints: &'a std::collections::BTreeMap<(u16, u16), StrategyCheckpoint>,
+    pub global_checkpoints: &'a std::collections::BTreeMap<u16, StrategyGlobalCheckpointState>,
+    pub strategy_events: &'a std::collections::BTreeMap<(u16, String), StrategyEvent>,
+    pub strategy_names: &'a [String],
+    pub runtime_entries_enabled: Option<bool>,
 }
 
 impl StrategyCtx for Ctx<'_> {
@@ -125,8 +131,24 @@ impl StrategyCtx for Ctx<'_> {
         self.market.table.get(name)
     }
 
+    fn symbol_name(&self, symbol: SymbolId) -> Option<&str> {
+        ((symbol.0 as usize) < self.market.table.len()).then(|| self.market.table.name(symbol))
+    }
+
     fn now_ns(&self) -> u64 {
         self.now_ns
+    }
+
+    fn entries_enabled(&self, config_default: bool) -> bool {
+        config_default && self.runtime_entries_enabled.unwrap_or(true)
+    }
+
+    fn account_summary(&self) -> StrategyAccountSummary {
+        StrategyAccountSummary {
+            equity_usdt: self.account.equity_usdt,
+            available_margin_usdt: self.account.available_usdt,
+            observed_ns: self.account.observed_ns,
+        }
     }
 
     fn position(&self, symbol: SymbolId) -> Option<PositionView> {
@@ -161,6 +183,34 @@ impl StrategyCtx for Ctx<'_> {
         self.covers.in_flight(self.strategy, symbol)
     }
 
+    fn my_position_facts(&self, symbol: SymbolId) -> Option<StrategyPositionFacts> {
+        let attributed_signed_qty = self.attribution.signed(self.strategy, symbol);
+        let in_flight_signed_qty = self.covers.in_flight(self.strategy, symbol);
+        if attributed_signed_qty == 0.0 && in_flight_signed_qty == 0.0 {
+            return None;
+        }
+        Some(StrategyPositionFacts {
+            symbol,
+            attributed_signed_qty,
+            venue: self.position(symbol),
+            in_flight_signed_qty,
+        })
+    }
+
+    fn my_positions(&self, out: &mut Vec<StrategyPositionFacts>) {
+        let mut symbols: std::collections::BTreeSet<u16> = self
+            .attribution
+            .symbols(self.strategy)
+            .map(|symbol| symbol.0)
+            .collect();
+        symbols.extend(self.covers.symbols(self.strategy).map(|symbol| symbol.0));
+        out.extend(
+            symbols
+                .into_iter()
+                .filter_map(|symbol| self.my_position_facts(SymbolId(symbol))),
+        );
+    }
+
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
         self.rules.get(symbol.0 as usize).copied().flatten()
     }
@@ -187,6 +237,45 @@ impl StrategyCtx for Ctx<'_> {
                 features.strategy = self.strategy;
                 Action::RecordQuoteFill { features }
             }
+            Action::SetStrategyCheckpoint {
+                symbol, checkpoint, ..
+            } => Action::SetStrategyCheckpoint {
+                strategy: self.strategy,
+                symbol,
+                checkpoint,
+            },
+            Action::SetStrategyGlobalCheckpoint { checkpoint, .. } => {
+                Action::SetStrategyGlobalCheckpoint {
+                    strategy: self.strategy,
+                    checkpoint,
+                }
+            }
+            Action::PublishStrategyEvent { mut event } => {
+                event.source = self.strategy;
+                Action::PublishStrategyEvent { event }
+            }
+            Action::ConsumeStrategyEvent {
+                source, event_id, ..
+            } => Action::ConsumeStrategyEvent {
+                source,
+                destination: self.strategy,
+                event_id,
+            },
+            Action::ConsumeSignalObservation {
+                source,
+                sequence,
+                observation_id,
+                ..
+            } => Action::ConsumeSignalObservation {
+                strategy: self.strategy,
+                source,
+                sequence,
+                observation_id,
+            },
+            Action::ConsumeRuntimeControl { request_id, .. } => Action::ConsumeRuntimeControl {
+                strategy: self.strategy,
+                request_id,
+            },
             other => other,
         };
         self.out.push_back(action);
@@ -234,6 +323,33 @@ impl StrategyCtx for Ctx<'_> {
             filled_qty: order.filled_qty,
             reduce_only: order.request.reduce_only,
         })
+    }
+
+    fn strategy_checkpoint(&self, symbol: SymbolId) -> Option<&StrategyCheckpoint> {
+        self.checkpoints.get(&(self.strategy.0, symbol.0))
+    }
+
+    fn strategy_global_checkpoint(&self) -> Option<&StrategyCheckpoint> {
+        self.global_checkpoints
+            .get(&self.strategy.0)
+            .map(|state| &state.checkpoint)
+    }
+
+    fn strategy_id(&self, name: &str) -> Option<StrategyId> {
+        self.strategy_names
+            .iter()
+            .position(|known| known == name)
+            .and_then(|at| u16::try_from(at).ok())
+            .map(StrategyId)
+    }
+
+    fn strategy_events(&self, out: &mut Vec<StrategyEvent>) {
+        out.extend(
+            self.strategy_events
+                .values()
+                .filter(|event| event.source == self.strategy || event.destination == self.strategy)
+                .cloned(),
+        );
     }
 }
 
@@ -292,6 +408,16 @@ mod tests {
         static FLAT: OnceLock<AccountView> = OnceLock::new();
         /// An empty cover book: nothing sent ahead of the reading.
         static NO_COVERS: OnceLock<CoverBook> = OnceLock::new();
+        static NO_CHECKPOINTS: OnceLock<
+            std::collections::BTreeMap<(u16, u16), StrategyCheckpoint>,
+        > = OnceLock::new();
+        static NO_GLOBAL_CHECKPOINTS: OnceLock<
+            std::collections::BTreeMap<u16, StrategyGlobalCheckpointState>,
+        > = OnceLock::new();
+        static NO_STRATEGY_EVENTS: OnceLock<
+            std::collections::BTreeMap<(u16, String), StrategyEvent>,
+        > = OnceLock::new();
+        static NO_STRATEGY_NAMES: OnceLock<Vec<String>> = OnceLock::new();
         Ctx {
             market,
             account: FLAT.get_or_init(flat_account),
@@ -304,6 +430,11 @@ mod tests {
             registry,
             attribution: NOBODY.get_or_init(Attribution::default),
             covers: NO_COVERS.get_or_init(CoverBook::default),
+            checkpoints: NO_CHECKPOINTS.get_or_init(Default::default),
+            global_checkpoints: NO_GLOBAL_CHECKPOINTS.get_or_init(Default::default),
+            strategy_events: NO_STRATEGY_EVENTS.get_or_init(Default::default),
+            strategy_names: NO_STRATEGY_NAMES.get_or_init(Vec::new),
+            runtime_entries_enabled: None,
         }
     }
 
@@ -491,6 +622,10 @@ mod tests {
         let rules = [None, Some(RULE)];
         let attribution = Attribution::default();
         let covers = CoverBook::default();
+        let checkpoints = std::collections::BTreeMap::new();
+        let global_checkpoints = std::collections::BTreeMap::new();
+        let strategy_events = std::collections::BTreeMap::new();
+        let strategy_names = Vec::new();
         let ctx = Ctx {
             market: &market,
             account: &account,
@@ -503,6 +638,11 @@ mod tests {
             registry: &registry,
             attribution: &attribution,
             covers: &covers,
+            checkpoints: &checkpoints,
+            global_checkpoints: &global_checkpoints,
+            strategy_events: &strategy_events,
+            strategy_names: &strategy_names,
+            runtime_entries_enabled: None,
         };
 
         assert_eq!(
@@ -560,6 +700,10 @@ mod tests {
         };
         let attribution = Attribution::default();
         let covers = CoverBook::default();
+        let checkpoints = std::collections::BTreeMap::new();
+        let global_checkpoints = std::collections::BTreeMap::new();
+        let strategy_events = std::collections::BTreeMap::new();
+        let strategy_names = Vec::new();
         let ctx = Ctx {
             market: &market,
             account: &account,
@@ -572,6 +716,11 @@ mod tests {
             registry: &registry,
             attribution: &attribution,
             covers: &covers,
+            checkpoints: &checkpoints,
+            global_checkpoints: &global_checkpoints,
+            strategy_events: &strategy_events,
+            strategy_names: &strategy_names,
+            runtime_entries_enabled: None,
         };
         assert_eq!(ctx.position(SymbolId(0)), None);
     }

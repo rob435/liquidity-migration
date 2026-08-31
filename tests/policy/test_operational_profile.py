@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.policy.operational_profile import load_operational_profile_bytes
+from liquidity_migration.core.operational_profile import load_operational_profile_bytes
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "configs" / "operational.demo.json"
@@ -42,23 +42,23 @@ def test_retired_daily_loss_field_is_refused() -> None:
         load_operational_profile_bytes(_bytes(payload))
 
 
-@pytest.mark.parametrize("producer", ("long", "carry", "hedge"))
-def test_profile_rejects_producer_leverage_above_owner_cap(producer: str) -> None:
+@pytest.mark.parametrize("sleeve", ("long", "carry", "hedge"))
+def test_profile_rejects_strategy_leverage_above_owner_cap(sleeve: str) -> None:
     payload = _payload()
-    section = payload[producer]
+    section = payload[sleeve]
     assert isinstance(section, dict)
     section["entry_leverage"] = 6.0
 
-    with pytest.raises(ValueError, match="producer leverage exceeds"):
+    with pytest.raises(ValueError, match="strategy leverage exceeds"):
         load_operational_profile_bytes(_bytes(payload))
 
 
-def test_a_10x_producer_exposure_envelope_loads_without_a_refusal() -> None:
+def test_a_10x_strategy_exposure_envelope_loads_without_a_refusal() -> None:
     """Book size is the owner's dial, not a load-time refusal.
 
     The multiplier scales the strategy's own weights; per-position risk is
     bounded by each position's venue-native stop, so no envelope projection
-    stands between the dial and the producer any more.
+    stands between the dial and the native reducer.
     """
 
     payload = _payload()

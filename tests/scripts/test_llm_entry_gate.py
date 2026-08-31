@@ -1,8 +1,7 @@
 """The candidates publisher's contract, tested pure.
 
-The ledger's whole output to the trading path is the LONG sleeve's candidates
-file: which judged pump events may be entered. Everything after that read
-belongs to the LONG producer and is tested there.
+The ledger writes a research candidates file containing judged pump events.
+The native LONG runtime does not consume it.
 """
 
 from __future__ import annotations
@@ -148,7 +147,7 @@ class TestFreshnessVeto:
 
 class TestWideBand:
     """Ranks 11-30 are judged and published like the core band, but the event
-    carries band="wide" so the LONG producer can label those entries apart."""
+    carries band="wide" so research can grade those entries apart."""
 
     def test_the_band_rides_through_publication(self, tmp_path: Path) -> None:
         wide = _event("WIDEUSDT")

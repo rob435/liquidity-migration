@@ -14,14 +14,6 @@ class BybitDataError(RuntimeError):
     pass
 
 
-class BybitRequestRejected(BybitDataError):
-    """The venue returned a definite negative response; no mutation was accepted."""
-
-
-class BybitSubmissionUncertain(BybitDataError):
-    """A state-changing request may have reached the venue, but its response was lost."""
-
-
 def _safe_int(value: Any) -> int:
     try:
         return int(value)
@@ -65,20 +57,6 @@ def _renders_ret_code(text: str, code: int) -> bool:
         or f"'retcode': '{code}'" in text
         or re.search(rf"(?<![\d.]){code}:\s", text) is not None
     )
-
-
-def renders_ret_code(value: Any, code: int) -> bool:
-    """Public form: does this payload or error name ``code`` as its ret code?
-
-    Callers that treat one specific code as a converged no-op need exactly this
-    and must not scan free text for the digits — a stop price of ``134040``
-    contains ``34040``, and reading a refused stop install as "already
-    installed" records an unprotected position as protected.
-    """
-
-    if isinstance(value, dict):
-        return _safe_int(value.get("retCode")) == code
-    return _renders_ret_code(str(value).lower(), code)
 
 
 #: Venue-side conditions that say "not now" rather than "no". Retrying the same

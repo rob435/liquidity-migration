@@ -1,14 +1,11 @@
 """Render the real-money operational profile.
 
-Entry sizing lives in the carry and LONG env dials the producers read directly.
-Exodus copies carry's actual filled quantity and has no independent size dial.
-The two dials sit in:
-``producer-demo.env`` on demo, ``producer-mainnet.env``
-on the funded fleet — never ``bybit-mainnet.env``, which no producer loads.
-This module only builds the account document: caps, partition, entry leverage,
-and each strategy's default multiplier. It is static — no dial math — so the
-committed ``configs/operational.mainnet.json`` is its exact output, held to that
-by a test.
+Entry sizing, leverage, cycle caps, and account caps come from the installed
+typed operational profile. LONG and CARRY resolve that file once at process
+start. Exodus copies CARRY's exact filled quantity and has no size dial. This
+module builds that account document; the committed
+``configs/operational.mainnet.json`` is its exact output, held to that by a
+test.
 
 The capital reference tracks observed venue equity, so every cap below is a
 ratio of the wallet and the declared 100 USDT scale is only a floor. The one
@@ -23,7 +20,7 @@ import math
 from dataclasses import dataclass, fields
 from typing import Any, Mapping
 
-from liquidity_migration.policy.operational_profile import (
+from liquidity_migration.core.operational_profile import (
     OPERATIONAL_PROFILE_KIND,
     OPERATIONAL_PROFILE_SCHEMA_VERSION,
     OperationalProfile,
@@ -77,17 +74,12 @@ def parse_real_money_dials(environment: Mapping[str, str]) -> RealMoneyDials:
     """
 
     known = {f"{REAL_MONEY_DIAL_PREFIX}{field.name.upper()}": field.name for field in fields(RealMoneyDials)}
-    retired = sorted(
-        key
-        for key in environment
-        if key.startswith(REAL_MONEY_DIAL_PREFIX) and key not in known
-    )
+    retired = sorted(key for key in environment if key.startswith(REAL_MONEY_DIAL_PREFIX) and key not in known)
     if retired:
         raise ValueError(
             "retired real-money dial(s) in the env file: "
             + ", ".join(retired)
-            + "; sizing is now CARRY_NOTIONAL_MULTIPLIER and LONG_NOTIONAL_MULTIPLIER "
-            "in the fleet env files - delete the old lines"
+            + "; sizing comes from the installed operational profile - delete the old lines"
         )
     values: dict[str, Any] = {}
     for key, name in known.items():
@@ -116,10 +108,9 @@ def render_real_money_profile_json(
     The declared number sizes the caps in the instant before the first equity
     read; at the floor those caps are the smallest the runtime can ever hold.
 
-    The multipliers below are defaults, not ceilings: the producers' env dials
-    override them per fleet without touching this file. The account caps are
-    what bounds the BOOK; a book the dials build past them is refused per
-    entry by the engine's runtime admission, never silently resized.
+    The multipliers below are the effective fleet values. The account caps
+    bound the book; a target past them is refused per entry by the engine's
+    runtime admission, never silently resized.
     """
 
     dials = RealMoneyDials() if dials is None else dials
@@ -177,8 +168,6 @@ def render_real_money_profile(
 ) -> tuple[bytes, OperationalProfile]:
     """Render, prove, and return the exact bytes to install."""
 
-    document = render_real_money_profile_json(
-        dials, capital_reference_usdt=capital_reference_usdt
-    )
+    document = render_real_money_profile_json(dials, capital_reference_usdt=capital_reference_usdt)
     data = (json.dumps(document, indent=2, sort_keys=False) + "\n").encode("utf-8")
     return data, load_operational_profile_bytes(data)

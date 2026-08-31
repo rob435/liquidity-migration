@@ -77,14 +77,9 @@ def _default_end() -> str:
 
 
 def _resolve_klines_dataset(root: Path, override: str | None) -> str:
-    """Select the research or WS-driven kline dataset present in this root."""
-    if override:
-        return override
-    if (root / "klines_1h").is_dir():
-        return "klines_1h"
-    if (root / "event_demo_klines_1h").is_dir():
-        return "event_demo_klines_1h"
-    return "klines_1h"  # default; an empty read is then reported by the EMPTY-panel branch
+    """Select the explicit research kline dataset, defaulting to canonical hourly bars."""
+    del root
+    return override or "klines_1h"
 
 
 def _ms_to_date_str(ts_ms: int) -> str:
@@ -339,7 +334,7 @@ def main() -> int:
     ap.add_argument(
         "--klines-dataset",
         default=None,
-        help="kline store name; default = sniff (klines_1h, else event_demo_klines_1h for live roots)",
+        help="kline store name; default = klines_1h",
     )
     ap.add_argument(
         "--full-rewrite",

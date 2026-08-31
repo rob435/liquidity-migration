@@ -13,13 +13,21 @@ UNIT="$1"
 ENTRYPOINT="$2"
 
 case "$UNIT:$ENTRYPOINT" in
-    liquidity-migration-bybit-long-demo.service:main | \
-    liquidity-migration-bybit-long-mainnet.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_long_demo_event_engine.sh)
-        ;;
-    liquidity-migration-bybit-carry-demo.service:main | \
-    liquidity-migration-bybit-carry-mainnet.service:main)
-        COMMAND=(/opt/liquidity-migration/scripts/runtime/run_bybit_carry_demo_event_engine.sh)
+    liquidity-migration-signal-worker-demo.service:main | \
+    liquidity-migration-signal-worker-mainnet.service:main)
+        COMMAND=(
+            /opt/liquidity-migration-engine/bin/signal-worker
+            live
+            --signal-config "${SIGNAL_WORKER_CONFIG_FILE:?SIGNAL_WORKER_CONFIG_FILE is required}"
+            --long-rule "${LONG_NATIVE_RULE_FILE:?LONG_NATIVE_RULE_FILE is required}"
+            --carry-config "${CARRY_SIGNAL_CONFIG_FILE:?CARRY_SIGNAL_CONFIG_FILE is required}"
+            --operational-config "${OPERATIONAL_PROFILE_FILE:?OPERATIONAL_PROFILE_FILE is required}"
+            --engine-config "${ENGINE_CONFIG_FILE:?ENGINE_CONFIG_FILE is required}"
+            --universe "${CANDIDATE_UNIVERSE_FILE:?CANDIDATE_UNIVERSE_FILE is required}"
+            --spool-dir "${SIGNAL_WORKER_SPOOL_DIR:?SIGNAL_WORKER_SPOOL_DIR is required}"
+            --state-dir "${SIGNAL_WORKER_STATE_DIR:?SIGNAL_WORKER_STATE_DIR is required}"
+            --heartbeat "${SIGNAL_WORKER_HEARTBEAT_FILE:?SIGNAL_WORKER_HEARTBEAT_FILE is required}"
+        )
         ;;
     liquidity-migration-telegram-controls.service:main)
         COMMAND=(
@@ -59,7 +67,6 @@ case "$UNIT:$ENTRYPOINT" in
             /opt/liquidity-migration/.venv/bin/python
             scripts/runtime/check_fleet_liveness.py
             --account-scope demo
-            --max-cycle-age-min 10
             --cooldown-min 60
             --host-clock-check
             --telegram
@@ -70,9 +77,6 @@ case "$UNIT:$ENTRYPOINT" in
             /opt/liquidity-migration/.venv/bin/python
             scripts/runtime/check_fleet_liveness.py
             --account-scope mainnet
-            --carry-mainnet-root /opt/liquidity-migration/data/bybit-carry-mainnet-event
-            --long-mainnet-root /opt/liquidity-migration/data/bybit-long-mainnet-event
-            --max-cycle-age-min 10
             --cooldown-min 60
             --telegram
         )
@@ -84,7 +88,7 @@ case "$UNIT:$ENTRYPOINT" in
         COMMAND=(/opt/liquidity-migration/scripts/runtime/chaos_drill.sh)
         ;;
     liquidity-migration-trade-notify.service:main)
-        # Read-only book differ; sends trade updates to the owner's DM.
+        # Read-only engine position/trade observer; sends updates to the owner's DM.
         COMMAND=(
             /opt/liquidity-migration/.venv/bin/python
             scripts/runtime/notify_book_changes.py

@@ -866,13 +866,19 @@ async fn each_strategy_reads_only_its_own_working_orders() {
 
     assert_eq!(
         *seen_one.lock().unwrap(),
-        vec![vec!["eng-1700000000000-1".to_string()]],
-        "its own working order, and nothing else the log knows about"
+        vec![
+            vec!["eng-1700000000000-1".to_string()],
+            vec!["eng-1700000000000-1".to_string()],
+        ],
+        "boot and market wakes both expose only its own working order"
     );
     assert_eq!(
         *seen_two.lock().unwrap(),
-        vec![vec!["eng-1700000000000-2".to_string()]],
-        "the other strategy's book is its own"
+        vec![
+            vec!["eng-1700000000000-2".to_string()],
+            vec!["eng-1700000000000-2".to_string()],
+        ],
+        "the other strategy sees only its own book on both wakes"
     );
 }
 

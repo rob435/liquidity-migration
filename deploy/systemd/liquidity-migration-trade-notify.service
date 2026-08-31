@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration trade updates: book entries and exits to the owner's DM
+Description=liquidity-migration attributed fills and closed trades to the owner's DM
 Wants=network-online.target
 After=network-online.target
 
@@ -24,10 +24,10 @@ ProtectProc=invisible
 ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
-StateDirectory=liquidity-migration/book-notify
-ReadWritePaths=/var/lib/liquidity-migration/book-notify
+StateDirectory=liquidity-migration/trade-notify
+ReadWritePaths=/var/lib/liquidity-migration/trade-notify
 MemoryMax=256M
-# An observer must not preempt the producers (Nice=5) or the owners (Nice=-5).
+# An observer must not preempt the signal workers (Nice=5) or owners (Nice=-5).
 Nice=10
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-trade-notify.service main
 SuccessExitStatus=0

@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Download Bybit 1-minute klines into the full-PIT root.
+"""Download Bybit 1-minute trade or mark-price klines into the full-PIT root.
 
-Writes ``<root>/klines_1m/date=YYYY-MM-DD/symbol=<SYM>/part.parquet`` with the
-same schema as ``klines_1h``, so the two are readable by one glob and one
-``pl.scan_parquet``.
-
-This is NOT the retired ``bybit_render_1m`` plan (removed 2026-07-21,
-``docs/data.md``). It is a dataset inside the existing ``bybit_full_pit`` root,
-fetched through the same ``BybitMarketData.get_klines`` path the 1h builder
-uses, with ``interval="1"``.
+Trade bars write under ``klines_1m``. Mark-price bars write under
+``mark_price_1m`` and are the trigger stream for Bybit position stops. Both use
+the same partition and OHLC schema; mark-price volume fields are null because
+the endpoint does not publish traded volume.
 
 Resumable at (symbol, date) granularity: existing partitions are never
 refetched, so an interrupted run continues where it stopped. Symbols are
@@ -19,6 +15,8 @@ Usage:
   .venv/bin/python scripts/data/download_bybit_klines_1m.py --symbols-file syms.txt
   .venv/bin/python scripts/data/download_bybit_klines_1m.py --symbols BTCUSDT,ETHUSDT \
       --start 2024-01-01 --end 2024-02-01
+  .venv/bin/python scripts/data/download_bybit_klines_1m.py --price-stream mark \
+      --windows-file candidate-windows.csv
 """
 
 from __future__ import annotations
@@ -29,6 +27,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, cast
 
 import polars as pl
 
@@ -42,7 +41,8 @@ MINUTE_MS = 60_000
 DAY_MS = 86_400_000
 #: Bybit v5 returns at most 1000 klines per request.
 PAGE_MINUTES = 1000
-SOURCE = "bybit_v5_market_kline_1m"
+TRADE_SOURCE = "bybit_v5_market_kline_1m"
+MARK_SOURCE = "bybit_v5_market_mark_price_kline_1m"
 SCHEMA = {
     "ts_ms": pl.Int64,
     "symbol": pl.String,
@@ -93,13 +93,51 @@ def _runs(days: list[dt.date]) -> list[tuple[dt.date, dt.date]]:
     return runs
 
 
-def _fetch_span(client: BybitMarketData, symbol: str, start_ms: int, end_ms: int) -> list[dict]:
+def _merge_jobs(
+    jobs: list[tuple[str, dt.date, dt.date]],
+) -> list[tuple[str, dt.date, dt.date]]:
+    """Merge overlapping date windows without changing symbol priority."""
+
+    symbol_order = list(dict.fromkeys(symbol for symbol, _, _ in jobs))
+    by_symbol: dict[str, list[tuple[dt.date, dt.date]]] = {symbol: [] for symbol in symbol_order}
+    for symbol, start, end in jobs:
+        by_symbol[symbol].append((start, end))
+    merged: list[tuple[str, dt.date, dt.date]] = []
+    for symbol in symbol_order:
+        spans: list[tuple[dt.date, dt.date]] = []
+        for start, end in sorted(by_symbol[symbol]):
+            if not spans or start > spans[-1][1]:
+                spans.append((start, end))
+            else:
+                spans[-1] = (spans[-1][0], max(spans[-1][1], end))
+        merged.extend((symbol, start, end) for start, end in spans)
+    return merged
+
+
+def _fetch_span(
+    client: BybitMarketData,
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    price_stream: str,
+) -> list[dict]:
     """Every 1m kline in ``[start_ms, end_ms)``, paged at 1000 bars."""
     rows: list[dict] = []
     cursor = start_ms
     while cursor < end_ms:
         stop = min(cursor + PAGE_MINUTES * MINUTE_MS, end_ms)
-        page = client.get_klines(symbol, "1", cursor, stop - 1)
+        if price_stream == "trade":
+            page = client.get_klines(symbol, "1", cursor, stop - 1)
+            source = TRADE_SOURCE
+        elif price_stream == "mark":
+            page = cast(
+                list[list[Any]],
+                client.get_mark_price_klines(symbol, "1", cursor, stop - 1),
+            )
+            source = MARK_SOURCE
+        else:
+            raise ValueError(f"unsupported price stream: {price_stream}")
         for item in page:
             ts = int(item[0])
             if ts < start_ms or ts >= end_ms:
@@ -112,9 +150,9 @@ def _fetch_span(client: BybitMarketData, symbol: str, start_ms: int, end_ms: int
                     "high": float(item[2]),
                     "low": float(item[3]),
                     "close": float(item[4]),
-                    "volume_base": float(item[5]),
-                    "turnover_quote": float(item[6]),
-                    "source": SOURCE,
+                    "volume_base": float(item[5]) if price_stream == "trade" else None,
+                    "turnover_quote": float(item[6]) if price_stream == "trade" else None,
+                    "source": source,
                 }
             )
         cursor = stop
@@ -129,9 +167,7 @@ def _write(root: Path, symbol: str, rows: list[dict], wanted: set[dt.date]) -> i
         pl.DataFrame(rows)
         .unique(subset=["ts_ms"], keep="first")
         .sort("ts_ms")
-        .with_columns(
-            pl.from_epoch("ts_ms", time_unit="ms").dt.date().cast(pl.String).alias("date")
-        )
+        .with_columns(pl.from_epoch("ts_ms", time_unit="ms").dt.date().cast(pl.String).alias("date"))
         .select(list(SCHEMA))
         .cast(SCHEMA)  # type: ignore[arg-type]
     )
@@ -153,7 +189,14 @@ CHUNK_DAYS = 14
 
 
 def _do_symbol(
-    root: Path, symbol: str, start: dt.date, end: dt.date, index: int, total: int
+    root: Path,
+    symbol: str,
+    start: dt.date,
+    end: dt.date,
+    index: int,
+    total: int,
+    *,
+    price_stream: str,
 ) -> tuple[str, int, int]:
     days = _dates(start, end)
     missing = _missing_dates(root, symbol, days)
@@ -168,7 +211,13 @@ def _do_symbol(
         while cursor <= hi:
             stop = min(cursor + dt.timedelta(days=CHUNK_DAYS - 1), hi)
             try:
-                rows = _fetch_span(client, symbol, _to_ms(cursor), _to_ms(stop) + DAY_MS)
+                rows = _fetch_span(
+                    client,
+                    symbol,
+                    _to_ms(cursor),
+                    _to_ms(stop) + DAY_MS,
+                    price_stream=price_stream,
+                )
                 written += _write(root, symbol, rows, wanted)
             except Exception as exc:  # noqa: BLE001 - one chunk must not kill the run
                 failures += 1
@@ -196,6 +245,12 @@ def main() -> int:
     ap.add_argument("--end", default=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit-symbols", type=int, default=0, help="0 = all")
+    ap.add_argument(
+        "--price-stream",
+        choices=("trade", "mark"),
+        default="trade",
+        help="trade writes klines_1m; mark writes mark_price_1m",
+    )
     args = ap.parse_args()
 
     start = dt.date.fromisoformat(args.start)
@@ -219,22 +274,35 @@ def main() -> int:
         jobs = [(s, start, end) for s in names]
     else:
         ap.error("one of --symbols, --symbols-file or --windows-file is required")
+    jobs = _merge_jobs(jobs)
     if args.limit_symbols:
-        jobs = jobs[: args.limit_symbols]
+        allowed = set(list(dict.fromkeys(symbol for symbol, _, _ in jobs))[: args.limit_symbols])
+        jobs = [job for job in jobs if job[0] in allowed]
 
-    root = Path(args.root).expanduser() / "klines_1m"
+    dataset = "klines_1m" if args.price_stream == "trade" else "mark_price_1m"
+    root = Path(args.root).expanduser() / dataset
     root.mkdir(parents=True, exist_ok=True)
 
     total = len(jobs)
+    total_symbols = len({symbol for symbol, _, _ in jobs})
     span_days = sum((hi - lo).days for _, lo, hi in jobs)
-    _log(f"1m klines -> {root}")
-    _log(f"{total} symbols, {span_days:,} symbol-days, {args.workers} workers")
+    _log(f"Bybit 1m {args.price_stream}-price klines -> {root}")
+    _log(f"{total_symbols} symbols, {total} windows, {span_days:,} symbol-days, {args.workers} workers")
 
     done = 0
     parts = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(_do_symbol, root, sym, lo, hi, i + 1, total): sym
+            pool.submit(
+                _do_symbol,
+                root,
+                sym,
+                lo,
+                hi,
+                i + 1,
+                total,
+                price_stream=args.price_stream,
+            ): sym
             for i, (sym, lo, hi) in enumerate(jobs)
         }
         for fut in as_completed(futures):
@@ -242,8 +310,8 @@ def main() -> int:
             done += 1
             parts += written
             if done % 25 == 0:
-                _log(f"== {done}/{total} symbols, {parts:,} partitions written ==")
-    _log(f"DONE: {done}/{total} symbols, {parts:,} partitions written")
+                _log(f"== {done}/{total} windows, {parts:,} partitions written ==")
+    _log(f"DONE: {done}/{total} windows across {total_symbols} symbols, {parts:,} partitions written")
     return 0
 
 

@@ -496,9 +496,8 @@ fn channel_for(feed: Feed) -> &'static str {
 
 /// `BTCUSDT` -> `BTC`, the same mapping the gateway uses.
 ///
-/// Upper-cased, because that is how a symbol reaches this crate — the Python
-/// fleet upper-cases every symbol in a target book, and the engine's tables
-/// keep that spelling. The venue's own name for a few assets is not upper-case
+/// Upper-cased, because every native decision and engine table keeps that
+/// spelling. The venue's own name for a few assets is not upper-case
 /// (`kPEPE`, `kBONK`, `kSHIB` and their kin), and the subscription names the
 /// coin, so those cannot be subscribed here: the venue refuses the channel and
 /// the feed redials rather than serving a wrong price. Trading them would need
@@ -568,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn a_book_symbol_and_the_venues_coin_map_both_ways() {
+    fn an_engine_symbol_and_the_venues_coin_map_both_ways() {
         assert_eq!(coin_of("BTCUSDT"), "BTC");
         assert_eq!(coin_of("kPEPEUSDT"), "KPEPE");
         assert_eq!(symbol_of("BTC"), "BTCUSDT");

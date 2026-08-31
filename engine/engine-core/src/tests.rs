@@ -12,9 +12,10 @@ use std::time::Duration;
 use engine_types::{
     AccountIdentity, AccountView, AmendSpec, DenyReason, EngineEvent, Feed, FeedError,
     InstrumentRule, Intent, MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest,
-    OrderUpdate, Quote, RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId,
-    Subscription, Symbol, SymbolId, TimeInForce, TimerId, VenueCaps, VenueError, VenueExecution,
-    VenueGateway, VenueOrder, Wal, WalError, WalRecord, WorkPolicy,
+    OrderUpdate, Quote, RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCheckpoint,
+    StrategyCheckpointIdentity, StrategyCtx, StrategyId, Subscription, Symbol, SymbolId,
+    TimeInForce, TimerId, VenueCaps, VenueError, VenueExecution, VenueGateway, VenueOrder, Wal,
+    WalError, WalRecord, WorkPolicy,
 };
 
 use crate::bench::{self, BenchOptions};
@@ -80,6 +81,15 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::ExecutionHistoryCheckpoint { .. } => "execution_history_checkpoint",
         WalRecord::LatchCleared { .. } => "latch_cleared",
         WalRecord::ClaimsDropped { .. } => "claims_dropped",
+        WalRecord::TargetBookLatch { .. } => "target_book_latch",
+        WalRecord::StrategyCheckpoint { .. } => "strategy_checkpoint",
+        WalRecord::StrategyGlobalCheckpoint { .. } => "strategy_global_checkpoint",
+        WalRecord::StrategyEventPublished { .. } => "strategy_event_published",
+        WalRecord::StrategyEventConsumed { .. } => "strategy_event_consumed",
+        WalRecord::SignalObservation { .. } => "signal_observation",
+        WalRecord::SignalObservationConsumed { .. } => "signal_observation_consumed",
+        WalRecord::RuntimeControlAccepted { .. } => "runtime_control_accepted",
+        WalRecord::RuntimeControlConsumed { .. } => "runtime_control_consumed",
     }
     .to_string()
 }
@@ -302,8 +312,6 @@ struct MockVenue {
     account_view_fails: Rc<RefCell<bool>>,
     /// Every leverage the engine actually told the venue about, in order.
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
-    /// Make set_leverage refuse, so a test can watch the order not go.
-    leverage_refuses: bool,
     /// What the venue's execution history reports. `None` makes the read fail.
     executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
 }
@@ -341,7 +349,6 @@ impl MockVenue {
                 account_readings: Rc::new(RefCell::new(VecDeque::new())),
                 account_view_fails: Rc::new(RefCell::new(false)),
                 leverages: Rc::new(RefCell::new(Vec::new())),
-                leverage_refuses: false,
                 executions: Rc::new(RefCell::new(Some(Vec::new()))),
             },
             sends,
@@ -449,12 +456,6 @@ impl VenueGateway for MockVenue {
 
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
         self.leverages.lock().unwrap().push((symbol, leverage));
-        if self.leverage_refuses {
-            return Err(VenueError::Rejected {
-                code: 110044,
-                message: "leverage limit exceeded".to_string(),
-            });
-        }
         Ok(())
     }
 
@@ -832,21 +833,14 @@ fn settings() -> EngineSection {
         // Wide enough that no scripted quote in these tests ever counts as
         // stale; the staleness tests tighten it themselves.
         max_quote_age_ms: 60_000,
-        // Shared is the default and what almost every test means; the sole-
-        // authority tests build their settings through `settings_sole`.
+        // Shared is the default used by this engine test bench.
         leverage_authority: crate::config::LeverageAuthority::Shared,
         // A test that wants a book, or a heartbeat, hands the engine one
         // itself.
-        target_book_path: None,
+        signal_spool_path: None,
+        control_spool_path: None,
         heartbeat_path: None,
         trades_path: None,
-    }
-}
-
-fn settings_sole() -> EngineSection {
-    EngineSection {
-        leverage_authority: crate::config::LeverageAuthority::Sole,
-        ..settings()
     }
 }
 
@@ -865,28 +859,6 @@ struct Harness {
     account_view_fails: Rc<RefCell<bool>>,
     /// The venue's execution history; see `MockVenue::executions`.
     executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
-}
-
-/// The same as `build_with`, with a venue that refuses every set_leverage.
-async fn build_with_refusing_leverage(
-    settings: &EngineSection,
-    verdict: RiskVerdict,
-    strategies: Vec<Box<dyn Strategy>>,
-    symbols: &[&str],
-) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
-    build_inner(
-        settings,
-        verdict,
-        strategies,
-        symbols,
-        &[],
-        Vec::new(),
-        BuildOptions {
-            leverage_refuses: true,
-            amend_verdict: None,
-        },
-    )
-    .await
 }
 
 async fn build(
@@ -946,7 +918,6 @@ async fn build_with_amend_verdict(
         replayed,
         working,
         BuildOptions {
-            leverage_refuses: false,
             amend_verdict: Some(amend_verdict),
         },
     )
@@ -1024,7 +995,6 @@ async fn build_with_venue_state_and_rule(
 
 #[derive(Default)]
 struct BuildOptions {
-    leverage_refuses: bool,
     amend_verdict: Option<RiskVerdict>,
 }
 
@@ -1041,7 +1011,6 @@ async fn build_inner(
     let (wal, records) = MockWal::new(tape.clone());
     let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
     venue.working = working;
-    venue.leverage_refuses = options.leverage_refuses;
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let stops = venue.stops.clone();
@@ -1154,6 +1123,7 @@ fn venue_clock_offset_is_venue_minus_the_local_receive_clock() {
 
 mod boot_rules;
 mod covers;
+mod durable_signals;
 mod fill_costs;
 mod gap_recovery;
 mod heartbeat;
@@ -1162,5 +1132,7 @@ mod quote_staleness;
 mod reconciliation;
 mod resting_orders;
 mod rotation;
-mod target_books;
+mod runtime_controls;
+mod strategy_checkpoints;
+mod strategy_events;
 mod worked_entries;

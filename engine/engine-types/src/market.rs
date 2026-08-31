@@ -106,7 +106,7 @@ pub struct TradeFlow {
 }
 
 /// A strategy's request for market data, collected at boot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
     pub symbol: String,
     pub feed: Feed,

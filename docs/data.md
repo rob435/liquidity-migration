@@ -1,14 +1,14 @@
 # Data and time boundaries
 
-Research datasets, live strategy state, and execution evidence are different
+Research datasets, Rust signal state, and execution evidence are different
 authorities. They must never be substituted for one another.
 
 ## Roots
 
-The configured `DATA_ROOT` contains public market inputs, cached feature
-material, strategy event tapes, cycle receipts, retirement registries, and
-durable sleeve state. It contains no venue credentials and is not position or
-P&L authority.
+The configured `DATA_ROOT` is the Python research root. It contains public
+market inputs, cached features, reports, and source-format fixtures used by
+replay or stopped-state takeover. It contains no venue credentials and is not
+a live reducer, position, or P&L authority.
 
 Research refreshes write run-scoped artifacts beneath
 `reports/research-refresh/<run-id>/`:
@@ -19,10 +19,13 @@ Research refreshes write run-scoped artifacts beneath
 - `summary.<sha-prefix>.json` is an immutable content-addressed result card;
 - `backtests/<venue>/` contains the selected sleeve reports.
 
-The Rust state directory contains the execution WAL, reconciliation state, and
-the account heartbeat. Only the Rust engine mutates that state or the venue.
-Python reads the heartbeat through a stable-file snapshot and never parses the
-WAL on a live decision path.
+Each Rust signal worker has its own state directory for normalized public
+history, its checkpoint, pending publication transaction, and heartbeat. It
+publishes immutable observations to the realm signal spool. Each Rust engine
+has a separate state directory for the execution WAL, reducer checkpoints and
+events, reconciliation state, account heartbeat, and closed trades. Python
+reads stable observer artifacts and never parses the WAL on a live decision
+path.
 
 ## Dataset families
 
@@ -60,26 +63,28 @@ membership and data coverage.
 
 ## Timestamps
 
-Python research and strategy timestamps are Unix milliseconds and end in
-`_ms`. A kline `ts_ms` is its open; its close becomes actionable only after the
-full interval. Funding `ts_ms` is the settlement instant and can be joined only
-backward as-of.
+Python research timestamps are Unix milliseconds and end in `_ms`. A kline
+`ts_ms` is its open; its close becomes actionable only after the full interval.
+Funding `ts_ms` is the settlement instant and can be joined only backward
+as-of.
 
 Rust monotonic clocks are nanoseconds and end in `_ns`; their origin is local
 to a process unless a field explicitly says `wall`. Venue timestamps and local
 receive timestamps in Rust WAL records are the execution-latency evidence.
 Target publication time and filesystem modification time are not.
 
-For LONG, these clocks are deliberately separate:
+The live signal and LONG clocks are deliberately separate:
 
 | Field | Meaning |
 | --- | --- |
-| `signal_ts_ms` | Closed market-data boundary that caused the decision |
-| request validity | Original interval in which the engine may enter; later cycles do not extend it |
-| `entered_ts_ms` | First cycle observing a uniquely LONG-attributed venue holding; zero before that evidence |
-| `max_hold_duration_ms` | Duration frozen with the request |
+| `observed_wall_ts_ms` | Public-data/source time represented by a normalized worker observation |
+| `available_wall_ts_ms` | First time the complete observation was available; never earlier than its observed time |
+| `feature_ts_ms` | Closed feature boundary carried in a LONG signal batch |
+| `decision_ts_ms` | Wall-clock decision time at which the native reducer applies the batch and lifecycle clocks |
+| `entry_valid_until_ms` | Original interval in which the engine may enter; later observations do not extend it |
+| `entry_ts_ms` | First engine observation of a uniquely LONG-attributed venue holding; zero before that evidence |
+| `max_hold_duration_ms` | Duration frozen with the accepted request |
 | `max_hold_deadline_ts_ms` | Attributed entry observation plus the frozen duration; zero before attribution |
-| target evidence `activated_at_ns` | Durable local activation of exact target bytes, never a fill clock |
 
 A request timestamp cannot start protection decay or maximum hold. An
 account-global, manual, inherited, or shared position cannot start a sleeve's
@@ -88,22 +93,68 @@ fill ledger has one owner and its signed quantity matches the venue quantity.
 
 ## Durable strategy artifacts
 
-Absolute target publication is:
+The signal worker commits normalized history, exact observation bytes, output
+sequences, and its next checkpoint as one local pending transaction. Restore
+finishes that transaction before acquisition resumes. The engine accepts only
+the immutable sequence-numbered observation envelope, writes it to the WAL,
+then wakes the addressed native reducer.
 
-1. render and strictly parse deterministic bytes;
-2. durably create `.target-book-objects/<sha256>.json`;
-3. atomically replace the engine-visible target path;
-4. append a hash-chained activation receipt for the same bytes.
+LONG, CARRY, and Exodus live state is strategy-owned checkpoint data in the
+engine WAL. CARRY hands a pre-settlement fire to Exodus as an engine-owned
+durable strategy event. The event freezes source and destination strategy IDs,
+its semantic ID, decision/fire/settlement times, symbol, rate, mark, and exact
+CARRY-attributed holding facts. The engine makes the event durable before it
+becomes visible to Exodus; replay and deduplication use that same record.
 
-No file means no new decision. An empty target array is an explicit flat
-sleeve. A stale or malformed account heartbeat blocks additions and resizes;
-CARRY may only remove already-expired requests from a previously verified
-book.
+Python reducer checkpoints and event tapes remain strict source formats for
+research fixtures and stopped-runtime takeover. Active native directional
+slots read only WAL-backed signals, events, and checkpoints.
 
-LONG requested-book state, CARRY sizing anchors, CARRY early-exit state, and
-Exodus open-short state use strict schemas and durable atomic replacement.
-Corrupt state is unknown state and fails closed without advancing the active
-book.
+The LONG and CARRY native replay fixtures are recorded test input, not market
+evidence. Their typed inputs and prior state are replayed through the native
+Rust reducers by the persistent `strategy_contract` adapter and compared with
+the recorded expected decisions. A mismatch is code drift, not a performance
+result.
+
+The Exodus fixture is consumed by the native Rust contract replay and reducer
+tests. It records prior, staged, and final state, fixed event ordering, and
+exact outputs over entry, restart, and cover cycles. It proves the decision
+contract only; it does not reconstruct the registration economics or prove an
+order filled.
+
+The standard historical CARRY panel can reconstruct settled funding prints but
+does not contain the venue ticker's pre-settlement running rate or its exact
+fire-time mark. Without separately supplied typed observations, the shared
+reducer therefore produces a settled-clock diagnostic and labels the
+pre-settlement clock missing. It never substitutes the next settled print or
+an hourly close and calls that live parity.
+
+The hourly LONG runner is diagnostic. The minute live-physics runner reads
+point-in-time hourly signals plus candidate-window `klines_1m` and
+`mark_price_1m`. Mark price drives the live-equivalent entry and stop tests and
+the position value charged at funding; traded price drives the crossing fill,
+position accounting, and target resize. Separate receipts report hashes and
+missing symbol-days/minutes for both minute streams. Because OHLC minutes do
+not reveal the path inside a minute, the report is an execution bound rather
+than tick or fill parity.
+Its PIT receipt grades the causal input window, not every partition stored in
+the root. For the current rule that window begins 90 calendar days before the
+signal start. Because each daily source bar is timestamped at the following
+midnight, it ends before `signal_end_exclusive - 1 day`. The same report keeps
+the whole-root coverage result as a separate informational receipt.
+Each run also writes `long_live_physics_source_snapshot.json`: the exact UTF-8
+source bytes reachable from the research runner and Python reference-model
+roots, plus the Python, Polars, and NumPy runtime versions. The report records
+that snapshot's file count and SHA-256, so a dirty worktree does not hide which
+code produced the artifact.
+
+Download a candidate-window mark tape through the same partition writer as the
+trade tape:
+
+```bash
+.venv/bin/python scripts/data/download_bybit_klines_1m.py \
+  --price-stream mark --windows-file WINDOWS.csv
+```
 
 ## Refresh workflow
 

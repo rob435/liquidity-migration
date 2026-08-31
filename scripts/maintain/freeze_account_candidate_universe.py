@@ -17,13 +17,12 @@ import hashlib
 import json
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from liquidity_migration.strategy.account_candidate_universe import (  # noqa: E402
+from liquidity_migration.data.candidate_universe import (  # noqa: E402
     build_candidate_universe_artifact,
     write_candidate_universe,
 )
@@ -32,7 +31,6 @@ from liquidity_migration.marketdata.bybit_market_data import (  # noqa: E402
     BybitRestRateLimiter,
 )
 from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
-from liquidity_migration.strategy.long_native_event_demo import LongNativeDemoCycleConfig  # noqa: E402
 from liquidity_migration.core.venue_realm import VenueRealm, venue_realm  # noqa: E402
 
 
@@ -59,10 +57,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-public-requests-per-second must be positive")
 
     realm = venue_realm(args.realm)
-    long_config = replace(
-        LongNativeDemoCycleConfig(),
-        universe_superset_size=args.long_universe_superset_size,
-    )
     limiter = BybitRestRateLimiter(
         max_requests=args.max_public_requests_per_second,
         per_seconds=1.0,
@@ -77,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         instrument_rows,
         ticker_rows,
         snapshot_ts_ns=completed_ts_ns,
-        long_config=long_config,
+        long_universe_superset_size=args.long_universe_superset_size,
         realm=realm,
     )
     # The two endpoint calls cannot be literally simultaneous. Bind their

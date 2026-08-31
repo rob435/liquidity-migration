@@ -1,12 +1,10 @@
 [Unit]
 Description=liquidity-migration Rust execution engine on the fleet's demo account
-Wants=network-online.target
-# No edge to the producers, in either direction. They write books on their own
-# clock and read this engine's heartbeat for the equity they size from; both
-# halves fail closed when the other is missing, and neither needs the other to
-# start. An edge would also let a stuck producer delay the process that carries
-# the orders, which is the wrong way round.
-After=network-online.target
+Wants=network-online.target liquidity-migration-signal-worker-demo.service
+# The worker publishes durable public observations before this account owner
+# consumes them. `Wants` starts it with the engine, but a later worker failure
+# never stops exits or reconciliation in the account owner.
+After=network-online.target liquidity-migration-signal-worker-demo.service
 
 [Service]
 Type=simple
@@ -19,11 +17,10 @@ Group=liquidity-migration
 # this directory before the engine starts.
 StateDirectory=liquidity-migration-engine
 WorkingDirectory=/var/lib/liquidity-migration-engine
-# The FLEET's demo account, 555899665 — the account the producers publish their
-# books to, so it has to be this one and not the engine's own second demo
+# The fleet's demo account, 555899665. Native directional reducers and order
+# ownership live in this process, so it must not use the separate quote-lab
 # account, 579580669 in bybit-quote-lab.env. Two writers on one venue account
-# wedge each other; the kernel lease is what stops that, and the engine refuses
-# to start rather than fight anything else that holds the account.
+# wedge each other; the kernel lease makes this owner refuse a competing writer.
 #
 # The Telegram tokens in this file are unset below. The engine sends no
 # messages, and a process that cannot reach the owner's chat cannot post to it
@@ -45,8 +42,8 @@ KillMode=control-group
 # The engine finishes its current write and drops its account lock on the way
 # out; nothing here waits on a venue round trip.
 TimeoutStopSec=30
-# Ahead of the producers (5), because this is now the process that carries the
-# orders on the demo account: a producer's minute-long cycle must not delay an
+# Ahead of the credential-free signal worker (5), because this process carries
+# orders on the demo account and an acquisition/backfill burst must not delay an
 # exit. Still behind the funded engine (-5) on a two-core box.
 Nice=0
 IOSchedulingClass=best-effort
@@ -58,7 +55,7 @@ ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
 UMask=0027
-ReadWritePaths=/run/lock/liquidity-migration /var/lib/liquidity-migration-engine
+ReadWritePaths=/run/lock/liquidity-migration /var/lib/liquidity-migration-engine /var/lib/liquidity-migration/signals/demo /var/lib/liquidity-migration/controls/demo
 MemoryMax=256M
 LimitNOFILE=65536
 TasksMax=256

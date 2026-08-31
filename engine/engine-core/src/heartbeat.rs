@@ -64,6 +64,12 @@ pub struct Facts<'a> {
     pub market_events: u64,
     pub orders_sent: u64,
     pub strategies: &'a [String],
+    /// Effective entry gate per configured strategy, after committed config
+    /// and the newest durable runtime override are both applied.
+    pub strategy_entries_enabled: &'a [(String, bool)],
+    /// Accepted directional flatten requests which the destination reducer
+    /// has not durably acknowledged yet.
+    pub pending_flatten_requests: &'a [(String, String)],
     /// The latency ledger's current window. A part nothing has been recorded
     /// into is written as null.
     pub decide: Quantiles,
@@ -97,48 +103,40 @@ pub struct Facts<'a> {
     /// venue-stamp comparison quietly wrong.
     pub venue_clock_offset_ms: Option<i64>,
     /// The account as the venue last described it, and how old that reading
-    /// is. This is not telemetry like the rest of this struct: the target
-    /// producers size their entries from the equity here. All three are
-    /// written as null when no reading has been taken yet, rather than as a
-    /// confident zero — a producer must be able to tell "no reading" from
-    /// "no money".
+    /// is. Native reducers receive the same account state directly in the
+    /// engine; the heartbeat is its read-only observer projection. All three
+    /// are written as null when no reading has been taken, rather than as a
+    /// confident zero.
     ///
     /// The **age** crosses, not the stamp. The engine's clock is monotonic: it
     /// counts from an arbitrary instant near boot, so `observed_ns` is a few
-    /// seconds after the engine started, and a producer comparing that against
-    /// the wall clock reads a healthy engine as tens of thousands of years
-    /// stale and blocks every entry. An age is the same number in both clocks,
-    /// so the renderer turns it into a wall stamp beside its own, and nothing
-    /// has to know which clock the other half keeps.
+    /// seconds after the engine started and cannot be compared with a wall
+    /// clock. An age is meaningful in either clock, so the renderer turns it
+    /// into a wall stamp beside its own for outside observers.
     pub equity_usdt: f64,
     pub available_usdt: f64,
     /// `None` when the engine has not read the venue yet.
     pub account_age_ns: Option<u64>,
     /// What the venue says is held, by name, from the same reading as the
-    /// equity above.
-    ///
-    /// Also not telemetry. A producer writes an **absolute** book -- it says
-    /// what it wants held -- so the one thing it cannot work out on its own is
-    /// whether a name it asked for is actually there. Without this, a venue
-    /// stop that fires is invisible to the producer: it goes on asking for the
-    /// name, the engine refuses to buy it back, and the slot stays occupied
-    /// until the producer's own deadline drops it, up to three days later.
+    /// equity above. Native reducers use this account truth for ownership,
+    /// sizing, stop recovery, and whether an earlier intent actually became a
+    /// position.
     ///
     /// The venue's own per-symbol reading is published, plus the configured
     /// strategy name only when the fill ledger proves that exactly one sleeve
     /// owns the symbol. An inherited, manual, or shared position is `null`:
-    /// assigning it by guess would let one producer close another sleeve's
+    /// assigning it by guess would let one reducer close another sleeve's
     /// holding. Attribution is rebuilt from the WAL before the first beat.
     pub holdings: &'a [(String, Side, f64, f64, Option<String>)],
     /// Why each asked-for name is not being opened right now, as
     /// (strategy, symbol, reason) rows gathered from the strategies.
     ///
-    /// Also read by the target producers, not telemetry: an ask the kernel
-    /// refused or a size below the entry floor never becomes a position, and
-    /// a producer that cannot tell that from "on its way" holds the slot for
-    /// its whole deadline. Empty is a real answer — everything asked for is
-    /// either held, being worked, or not blocked at all.
+    /// Empty is a real answer: every requested entry is held, being worked, or
+    /// not blocked at all.
     pub entry_blockers: &'a [(String, String, String)],
+    /// Current strategy-level faults as (strategy, error) rows. A reducer or
+    /// contract fault belongs here, never disguised as a symbol blocker.
+    pub strategy_errors: &'a [(String, String)],
     /// Unfinished opening orders as (strategy, symbol) rows. These include
     /// uncertain sends rebuilt from the WAL, not only venue-visible rests.
     pub working_entries: &'a [(String, String)],
@@ -276,6 +274,15 @@ impl Heartbeat {
                 figure(facts.durable.count, facts.durable.p99_ns),
             ),
             ("entry_blockers", blockers(facts.entry_blockers)),
+            ("strategy_errors", strategy_errors(facts.strategy_errors)),
+            (
+                "strategy_entries_enabled",
+                strategy_permissions(facts.strategy_entries_enabled),
+            ),
+            (
+                "pending_flatten_requests",
+                pending_flatten_requests(facts.pending_flatten_requests),
+            ),
             ("engine_version", quoted(ENGINE_VERSION)),
             ("fills", facts.costs.fills.to_string()),
             (
@@ -445,9 +452,8 @@ fn quoted(text: &str) -> String {
 }
 
 /// One JSON number from a venue amount. A reading that is not finite is
-/// written as null, because a producer sizes from this: NaN dressed as a
-/// number would be multiplied by a weight and become a position, whereas null
-/// is the same "no reading" every other absent field here says.
+/// written as null. NaN dressed as account evidence is unsafe for every
+/// observer; null states "no reading".
 fn amount(value: f64) -> String {
     if value.is_finite() {
         format!("{value}")
@@ -534,6 +540,54 @@ fn blockers(rows: &[(String, String, String)]) -> String {
     format!("[{}]", items.join(", "))
 }
 
+fn strategy_permissions(rows: &[(String, bool)]) -> String {
+    let items: Vec<String> = rows
+        .iter()
+        .map(|(strategy, entries_enabled)| {
+            format!(
+                "{{{}: {}, {}: {}}}",
+                quoted("strategy"),
+                quoted(strategy),
+                quoted("entries_enabled"),
+                entries_enabled
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
+fn strategy_errors(rows: &[(String, String)]) -> String {
+    let items: Vec<String> = rows
+        .iter()
+        .map(|(strategy, error)| {
+            format!(
+                "{{{}: {}, {}: {}}}",
+                quoted("strategy"),
+                quoted(strategy),
+                quoted("error"),
+                quoted(error),
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
+fn pending_flatten_requests(rows: &[(String, String)]) -> String {
+    let items: Vec<String> = rows
+        .iter()
+        .map(|(strategy, request_id)| {
+            format!(
+                "{{{}: {}, {}: {}}}",
+                quoted("strategy"),
+                quoted(strategy),
+                quoted("request_id"),
+                quoted(request_id),
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
 fn working_entries(rows: &[(String, String)]) -> String {
     let items: Vec<String> = rows
         .iter()
@@ -556,7 +610,7 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 47] = [
+    const KEYS: [&str; 50] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -589,11 +643,14 @@ mod tests {
         "may_open",
         "mode",
         "orders_sent",
+        "pending_flatten_requests",
         "pid",
         "positions",
         "quota_hold_p99_ns",
         "realm",
         "strategies",
+        "strategy_entries_enabled",
+        "strategy_errors",
         "stream_resets",
         "uptime_s",
         "venue",
@@ -646,13 +703,19 @@ mod tests {
         static NOTHING_YET: std::sync::OnceLock<Costs> = std::sync::OnceLock::new();
         static NO_BLOCKERS: std::sync::OnceLock<Vec<(String, String, String)>> =
             std::sync::OnceLock::new();
+        static NO_STRATEGY_ERRORS: std::sync::OnceLock<Vec<(String, String)>> =
+            std::sync::OnceLock::new();
         static NO_WORKING: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+        static ALL_ENABLED: std::sync::OnceLock<Vec<(String, bool)>> = std::sync::OnceLock::new();
         Facts {
             costs: NOTHING_YET.get_or_init(Costs::default),
             may_open: true,
             market_events: 1234,
             orders_sent: 7,
             strategies,
+            strategy_entries_enabled: ALL_ENABLED
+                .get_or_init(|| strategies.iter().map(|name| (name.clone(), true)).collect()),
+            pending_flatten_requests: &[],
             decide: measured(7, 83, 400),
             durable: measured(7, 10_000, 20_000),
             wire: measured(7, 2_600_000, 4_100_000),
@@ -674,6 +737,7 @@ mod tests {
             account_age_ns: Some(2_000_000_000),
             holdings: held,
             entry_blockers: NO_BLOCKERS.get_or_init(Vec::new),
+            strategy_errors: NO_STRATEGY_ERRORS.get_or_init(Vec::new),
             working_entries: NO_WORKING.get_or_init(Vec::new),
         }
     }
@@ -697,6 +761,25 @@ mod tests {
         assert_eq!(parsed["barrier_wait_p99_ns"], 1_600_000);
     }
 
+    #[test]
+    fn pending_flatten_acknowledgements_reach_the_beat() {
+        let strategies = vec!["long".to_string(), "carry".to_string()];
+        let held = Vec::new();
+        let pending = vec![("carry".to_string(), "flatten-carry-42".to_string())];
+        let mut facts = facts(&strategies, &held);
+        facts.pending_flatten_requests = &pending;
+        let beat = Heartbeat::new(std::env::temp_dir().join("beat-controls.json"), None, None)
+            .render(&facts, 1_756_500_000_000);
+        let parsed: serde_json::Value = serde_json::from_str(&beat).expect("one line of JSON");
+        assert_eq!(
+            parsed["pending_flatten_requests"],
+            serde_json::json!([{
+                "strategy": "carry",
+                "request_id": "flatten-carry-42",
+            }])
+        );
+    }
+
     /// One position, so the shape of the array is exercised rather than only
     /// the empty case.
     fn one_holding() -> Vec<(String, Side, f64, f64, Option<String>)> {
@@ -705,7 +788,7 @@ mod tests {
             Side::Buy,
             14_110.0,
             0.009_7,
-            Some("target_book_long".to_string()),
+            Some("long".to_string()),
         )]
     }
 
@@ -717,7 +800,7 @@ mod tests {
         // read a healthy engine as fifty-six thousand years stale and blocked
         // every entry, quietly, per cycle.
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec!["target_book".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let wall_ts_ms = 1_786_737_867_645_i64;
 
@@ -734,13 +817,11 @@ mod tests {
     }
 
     #[test]
-    fn what_is_held_is_published_by_name_for_the_producers_to_read() {
-        // A producer writes an absolute book, so the one thing it cannot work
-        // out for itself is whether a name it asked for is actually there. Not
-        // telemetry: without this a venue stop that fires is invisible to the
-        // producer, which goes on asking for the name until its own deadline.
+    fn what_is_held_is_published_by_name_for_observers_to_read() {
+        // Publish the account reading by symbol so operators can distinguish
+        // a requested entry from a position the venue actually holds.
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec!["target_book".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
 
         let fields = parsed(&beat.render(&facts(&names, &held), 1_755_000_000_000));
@@ -751,16 +832,13 @@ mod tests {
         assert_eq!(rows[0]["side"], "long");
         assert_eq!(rows[0]["qty"].as_f64(), Some(14_110.0));
         assert!(rows[0]["entry_px"].as_f64().is_some_and(|px| px > 0.0));
-        assert_eq!(rows[0]["strategy"], "target_book_long");
+        assert_eq!(rows[0]["strategy"], "long");
     }
 
     #[test]
     fn an_unattributed_account_position_does_not_guess_a_strategy() {
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec![
-            "target_book_long".to_string(),
-            "target_book_carry".to_string(),
-        ];
+        let names = vec!["long".to_string(), "carry".to_string()];
         let held = vec![("HOMEUSDT".to_string(), Side::Buy, 14_110.0, 0.009_7, None)];
 
         let fields = parsed(&beat.render(&facts(&names, &held), 1_755_000_000_000));
@@ -770,11 +848,9 @@ mod tests {
 
     #[test]
     fn holding_nothing_is_an_empty_array_and_not_a_missing_key() {
-        // The difference a producer has to be able to tell: an account that
-        // holds nothing, versus an engine too old to say what it holds. One
-        // means drop the book; the other means do not act on this at all.
+        // An empty account reading differs from a missing field in consumers.
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec!["target_book".to_string()];
+        let names = vec!["long".to_string()];
 
         let fields = parsed(&beat.render(&facts(&names, &[]), 1_755_000_000_000));
 
@@ -787,21 +863,19 @@ mod tests {
 
     #[test]
     fn a_blocked_entry_is_published_with_its_reason() {
-        // An ask the kernel refused never becomes a position, and a producer
-        // that cannot tell that from "on its way" holds the slot for its
-        // whole deadline. The reason crosses so the producer's log says why,
-        // not just that.
+        // A refused entry never becomes a position. The heartbeat carries the
+        // kernel's reason so it differs from an order still in flight.
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec!["target_book".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let blockers = vec![
             (
-                "target_book_long".to_string(),
+                "long".to_string(),
                 "KAITOUSDT".to_string(),
                 "below_entry_floor".to_string(),
             ),
             (
-                "target_book_long".to_string(),
+                "long".to_string(),
                 "SOMIUSDT".to_string(),
                 "AvailableMarginExhausted { additional_margin_usdt: 12.0, available_usdt: 0.5 }"
                     .to_string(),
@@ -814,7 +888,7 @@ mod tests {
 
         let rows = fields["entry_blockers"].as_array().expect("an array");
         assert_eq!(rows.len(), 2, "one reason per blocked name");
-        assert_eq!(rows[0]["strategy"], "target_book_long");
+        assert_eq!(rows[0]["strategy"], "long");
         assert_eq!(rows[0]["symbol"], "KAITOUSDT");
         assert_eq!(rows[0]["reason"], "below_entry_floor");
         assert_eq!(rows[1]["symbol"], "SOMIUSDT");
@@ -831,19 +905,16 @@ mod tests {
     #[test]
     fn same_symbol_blockers_keep_their_strategy_identity() {
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec![
-            "target_book_long".to_string(),
-            "target_book_carry".to_string(),
-        ];
+        let names = vec!["long".to_string(), "carry".to_string()];
         let held = one_holding();
         let blockers = vec![
             (
-                "target_book_long".to_string(),
+                "long".to_string(),
                 "KAITOUSDT".to_string(),
                 "below_entry_floor".to_string(),
             ),
             (
-                "target_book_carry".to_string(),
+                "carry".to_string(),
                 "KAITOUSDT".to_string(),
                 "available_margin_exhausted".to_string(),
             ),
@@ -857,14 +928,14 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["symbol"], "KAITOUSDT");
         assert_eq!(rows[1]["symbol"], "KAITOUSDT");
-        assert_eq!(rows[0]["strategy"], "target_book_long");
-        assert_eq!(rows[1]["strategy"], "target_book_carry");
+        assert_eq!(rows[0]["strategy"], "long");
+        assert_eq!(rows[1]["strategy"], "carry");
     }
 
     #[test]
     fn nothing_blocked_is_an_empty_array_and_not_a_missing_key() {
         let beat = on_the_demo_account(PathBuf::from("/does/not/matter"));
-        let names = vec!["target_book".to_string()];
+        let names = vec!["long".to_string()];
 
         let fields = parsed(&beat.render(&facts(&names, &[]), 1_755_000_000_000));
 
@@ -913,7 +984,7 @@ mod tests {
 
     #[test]
     fn the_heartbeat_says_who_and_what_this_engine_is() {
-        let names = vec!["touch_sniper".to_string(), "carry_follower".to_string()];
+        let names = vec!["long".to_string(), "carry".to_string()];
         let held = one_holding();
         let raw = on_the_demo_account("unused.json".into())
             .render(&facts(&names, &held), 1_755_000_000_000);
@@ -945,17 +1016,16 @@ mod tests {
         assert_eq!(fields["wall_ts_ms"], 1_755_000_000_000i64);
         assert_eq!(fields["pid"].as_u64(), Some(u64::from(std::process::id())));
         assert_eq!(fields["engine_version"], ENGINE_VERSION);
-        assert_eq!(fields["strategies"][0], "touch_sniper");
-        assert_eq!(fields["strategies"][1], "carry_follower");
+        assert_eq!(fields["strategies"][0], "long");
+        assert_eq!(fields["strategies"][1], "carry");
         assert_eq!(fields["decide_p50_ns"], 83);
         assert_eq!(fields["wire_p99_ns"], 4_100_000);
     }
 
     #[test]
     fn the_keys_read_in_order_in_the_file_itself() {
-        // Sorted the way Python's json.dumps(sort_keys=True) writes it, so a
-        // person diffing two heartbeats sees only what changed.
-        let names = vec!["touch_sniper".to_string()];
+        // Stable key order keeps a diff focused on values that changed.
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let raw = on_the_demo_account("unused.json".into())
             .render(&facts(&names, &held), 1_755_000_000_000);
@@ -971,7 +1041,7 @@ mod tests {
 
     #[test]
     fn it_always_says_live() {
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let beat = on_the_demo_account("unused.json".into());
 
@@ -985,7 +1055,7 @@ mod tests {
     fn an_engine_that_will_not_open_says_so() {
         // The reason this field is here at all: everything else about a
         // latched engine reads healthy.
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let mut latched = facts(&names, &held);
         latched.may_open = false;
@@ -995,7 +1065,7 @@ mod tests {
 
     #[test]
     fn a_latency_nobody_has_measured_is_null_and_not_zero() {
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let mut quiet = facts(&names, &held);
         quiet.decide = measured(0, 0, 0);
@@ -1018,7 +1088,7 @@ mod tests {
     fn what_this_run_does_not_know_is_null_rather_than_invented() {
         // A shadow run holds no lease, and one that cannot reach the venue
         // never learns the account number.
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let fields = parsed(
             &Heartbeat::new("unused.json".into(), None, None).render(&facts(&names, &held), 1),
@@ -1037,7 +1107,7 @@ mod tests {
         // place, the link keeps the old one — which is exactly why a reader
         // holding the file open never sees half of anything.
         let path = temp_path("heartbeat-replaced");
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let mut beat = on_the_demo_account(path.path().to_path_buf());
 
@@ -1072,7 +1142,7 @@ mod tests {
         // a temp file in /tmp would fail across a mount and there would be no
         // heartbeat at all.
         let path = temp_path("heartbeat-temp");
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let mut beat = on_the_demo_account(path.path().to_path_buf());
         assert_eq!(
@@ -1089,7 +1159,7 @@ mod tests {
     fn a_heartbeat_that_cannot_be_written_leaves_no_file_and_no_half_file() {
         let missing = temp_path("heartbeat-nowhere");
         let path = missing.path().join("no-such-directory").join("beat.json");
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let mut beat = Heartbeat::new(path.clone(), None, None);
         beat.write(1, &facts(&names, &held));
@@ -1106,7 +1176,7 @@ mod tests {
             None,
             Duration::from_secs(5),
         );
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
 
         // Due straight away: the first tick of a run writes one.
@@ -1129,7 +1199,7 @@ mod tests {
         // put a failing file write in front of the account refresh.
         let missing = temp_path("heartbeat-no-retry");
         let path = missing.path().join("no-such-directory").join("beat.json");
-        let names = vec!["touch_sniper".to_string()];
+        let names = vec!["long".to_string()];
         let held = one_holding();
         let mut beat = Heartbeat::with_every(path, None, None, Duration::from_secs(5));
         beat.write(1_000, &facts(&names, &held));
@@ -1151,6 +1221,8 @@ mod fill_cost_tests {
             market_events: 1,
             orders_sent: 1,
             strategies: &[],
+            strategy_entries_enabled: &[],
+            pending_flatten_requests: &[],
             decide: Quantiles::default(),
             durable: Quantiles::default(),
             wire: Quantiles::default(),
@@ -1171,6 +1243,7 @@ mod fill_cost_tests {
             account_age_ns: Some(1),
             holdings: &[],
             entry_blockers: &[],
+            strategy_errors: &[],
             working_entries: &[],
             costs,
         };

@@ -1,17 +1,13 @@
-"""Registered carry-hold decision rule and the live decision frame.
+"""Registered CARRY config parsing and causal feature construction.
 
-The committed ``lane2_carry_hold`` rule the CARRY sleeve replays: config
-parsing, the settlement-exact funding features, the hysteresis state machine,
-and the daily decision grid. The research scorers that grade this rule on a
-historical panel live in
-``liquidity_migration/research/backtest/financed_longs.py``.
+Rust owns the hysteresis and weight decisions. Python constructs the
+settlement-exact feature frame used by research replays.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -233,15 +229,13 @@ def _hour_roll(
 #: Crowding persistence is measured over this many of the symbol's own
 #: settlements. Fixed here rather than per-config because ``prepare`` and
 #: ``prepare_decision`` must attach the identical column for the research and
-#: live frames; a config asking for a different window is rejected in
-#: :func:`carry_hold_weights` rather than silently scored against the wrong
-#: feature.
+#: live frames. The Rust scorer rejects a rule asking for another window.
 PERSISTENCE_WINDOW = 20
 
 #: Depth that makes a settlement "deep" for the persistence count. Every
 #: registered carry-hold config enters below 10 bp, so persistence asks "how
 #: often has this name printed at entry depth", not a second free parameter.
-#: A config whose ``enter_bp`` differs is rejected in :func:`carry_hold_weights`.
+#: The Rust scorer rejects a persistence rule whose entry depth differs.
 DEFAULT_ENTER_BP = 10.0
 
 
@@ -394,155 +388,3 @@ def top_n_universe(grid: pl.DataFrame, top_n: int) -> pl.DataFrame:
         .filter(pl.col("_rk") <= top_n)
         .drop("_rk")
     )
-
-
-def _apply_gross_cap(weights: pl.DataFrame, gross_cap: float) -> pl.DataFrame:
-    if weights.height == 0:
-        return weights
-    g = weights.group_by("bar_ts_ms").agg(pl.col("w").abs().sum().alias("_g"))
-    return (
-        weights.join(g, on="bar_ts_ms", how="left")
-        .with_columns(
-            pl.when(pl.col("_g") > gross_cap)
-            .then(pl.col("w") * gross_cap / pl.col("_g"))
-            .otherwise(pl.col("w"))
-            .alias("w")
-        )
-        .select("bar_ts_ms", "symbol", "w")
-    )
-
-
-def carry_hold_weights(universe: pl.DataFrame, cfg: CarryHoldConfig) -> pl.DataFrame:
-    """Hysteresis long state per name; per-name cap (optionally depth-scaled),
-    total gross cap.
-
-    The loop is deliberately explicit: the state at bar ``i`` depends only on
-    settled funding at bars ``<= i``, which is the entire PIT argument. With
-    ``depth_ref_bp_per_day`` set (v2), a held name's weight is scaled by
-    ``clip((|trail_fund_24h| / ref) ** depth_exponent, depth_floor, 1.0)`` —
-    size follows the premium being paid, bent convex when the exponent is
-    above 1 (v6); a missing trailing value fails to the floor, never up.
-
-    With ``persistence_window`` set (v4) that weight is multiplied again by a
-    crowding-persistence step: names whose recent settlements have rarely been
-    deep are cut to ``persistence_lo``. Depth and persistence answer different
-    questions — how much is being paid now, versus whether this name pays
-    habitually — which is why they compose rather than replace each other.
-    """
-    enter, exit_ = cfg.enter_bp / 1e4, cfg.exit_bp / 1e4
-    sized = cfg.depth_ref_bp_per_day is not None
-    banded = cfg.toxic_band_ret3d is not None
-    volfloored = cfg.min_vol30_daily is not None
-    veled = cfg.trail_recovery_exit_bp_2d is not None
-    persisted = cfg.persistence_window is not None
-    if persisted:
-        if cfg.persistence_window != PERSISTENCE_WINDOW:
-            raise FinancedLongsError(
-                f"{cfg.config_id}: persistence window {cfg.persistence_window} but the "
-                f"prepared column is built over {PERSISTENCE_WINDOW} settlements"
-            )
-        if cfg.enter_bp != DEFAULT_ENTER_BP:
-            raise FinancedLongsError(
-                f"{cfg.config_id}: persistence counts settlements deeper than "
-                f"{DEFAULT_ENTER_BP} bp but this config enters at {cfg.enter_bp} bp"
-            )
-    flowed = cfg.flow_cut is not None
-    whaled = cfg.whale_cut is not None
-    need = (
-        ["trail_fund_24h"] * sized
-        + ["ret_3d"] * banded
-        + ["vol_30d_daily"] * volfloored
-        + ["dtrail_2d"] * veled
-        + ["crowd_persistence"] * persisted
-        + ["turn_growth_3d"] * flowed
-        + ["d_tt_ls_3d"] * whaled
-    )
-    missing = [c for c in dict.fromkeys(need) if c not in universe.columns]
-    if missing:
-        raise FinancedLongsError(
-            f"{cfg.config_id}: enabled features require prepared columns {missing}"
-        )
-    invalid_funding = universe.filter(
-        pl.col("by_funding").is_not_null()
-        & ~pl.col("by_funding").is_finite().fill_null(False)
-    )
-    if invalid_funding.height:
-        raise FinancedLongsError(
-            f"{cfg.config_id}: by_funding contains {invalid_funding.height} non-finite values"
-        )
-    cols = ["bar_ts_ms", "symbol", "by_funding", *dict.fromkeys(need)]
-    d = (
-        universe.select(cols)
-        .drop_nulls(subset=["by_funding"])
-        .sort(["symbol", "bar_ts_ms"])
-    )
-    ref = (cfg.depth_ref_bp_per_day or 0.0) / 1e4
-    band_lo, band_hi = cfg.toxic_band_ret3d or (0.0, 0.0)
-    vel_thr = (cfg.trail_recovery_exit_bp_2d or 0.0) / 1e4
-    rows: dict[str, list] = {"bar_ts_ms": [], "symbol": [], "w": []}
-    for (sym,), g in d.group_by("symbol", maintain_order=True):
-        fv = g["by_funding"].to_numpy()
-        tr = g["trail_fund_24h"].to_numpy() if sized else None
-        bd = g["ret_3d"].to_numpy() if banded else None
-        vf = g["vol_30d_daily"].to_numpy() if volfloored else None
-        vl = g["dtrail_2d"].to_numpy() if veled else None
-        pr = g["crowd_persistence"].to_numpy() if persisted else None
-        tg = g["turn_growth_3d"].to_numpy() if flowed else None
-        wh = g["d_tt_ls_3d"].to_numpy() if whaled else None
-        ts = g["bar_ts_ms"].to_numpy()
-        state = False
-        previous_ts: int | None = None
-        for i in range(len(ts)):
-            current_ts = int(ts[i])
-            if previous_ts is not None and current_ts != previous_ts + DAY_MS:
-                state = False
-            previous_ts = current_ts
-            exited = False
-            if state and not (fv[i] < -exit_):
-                state = False
-                exited = True
-            if state and veled and vl is not None and math.isfinite(vl[i]) and vl[i] > vel_thr:
-                state = False
-                exited = True
-            if not state and not exited and fv[i] < -enter:
-                # Filters block ENTRY only on known-bad values; a null
-                # conditioning value fails open (young history), documented in
-                # the v3 registration.
-                in_band = bd is not None and math.isfinite(bd[i]) and band_lo <= bd[i] < band_hi
-                dead = vf is not None and math.isfinite(vf[i]) and vf[i] < (cfg.min_vol30_daily or 0.0)
-                if not ((banded and in_band) or (volfloored and dead)):
-                    state = True
-            if state:
-                if banded and bd is not None and math.isfinite(bd[i]) and band_lo <= bd[i] < band_hi:
-                    continue  # hold suspends to zero weight while in the band
-                w = cfg.per_name_cap
-                if sized and tr is not None:
-                    depth = abs(tr[i]) if math.isfinite(tr[i]) else 0.0
-                    scale = depth / ref
-                    if cfg.depth_exponent != 1.0:
-                        scale **= cfg.depth_exponent
-                    w *= min(1.0, max(cfg.depth_floor, scale))
-                if persisted and pr is not None:
-                    # A null persistence — fewer than PERSISTENCE_WINDOW
-                    # settlements of history — fails OPEN at full size.
-                    # Downsizing it would make this a covert listing-age screen,
-                    # and listing age has produced two false positives in this
-                    # program. Measured on the registered book the branch never
-                    # fires: every held name-day has a full window.
-                    if math.isfinite(pr[i]) and pr[i] <= cfg.persistence_cut:
-                        w *= cfg.persistence_lo
-                if flowed and tg is not None:
-                    if math.isfinite(tg[i]) and tg[i] <= (cfg.flow_cut or 0.0):
-                        w *= cfg.flow_lo
-                if whaled and wh is not None:
-                    if math.isfinite(wh[i]) and wh[i] <= (cfg.whale_cut or 0.0):
-                        w *= cfg.whale_lo
-                if w <= 0.0:
-                    continue  # persistence cut this name to nothing today
-                rows["bar_ts_ms"].append(int(ts[i]))
-                rows["symbol"].append(str(sym))
-                rows["w"].append(w)
-    weights = pl.DataFrame(
-        rows, schema={"bar_ts_ms": pl.Int64, "symbol": pl.String, "w": pl.Float64}
-    )
-    return _apply_gross_cap(weights, cfg.gross_cap)

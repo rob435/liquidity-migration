@@ -53,13 +53,17 @@ _install_import_only_windows_fcntl_guard()
 
 from liquidity_migration.core._common import MS_PER_HOUR, exact_duration_ms, sha256_file  # noqa: E402
 from liquidity_migration.rules.long_native import (  # noqa: E402
-    _classify_entry,
     build_long_features,
-    long_pump_family,
     long_v11a_profile,
 )
+from liquidity_migration.rules.long_config import resolve_strategy_config  # noqa: E402
+from liquidity_migration.rules.rust_strategy_contract import (  # noqa: E402
+    LongResearchClassification,
+    RustLongResearchClassifier,
+    RustStrategyContract,
+)
 from liquidity_migration.data.volume_events_pit import filter_klines_to_pit_membership  # noqa: E402
-from liquidity_migration.strategy.strategy_funnel import (  # noqa: E402
+from liquidity_migration.research.strategy_funnel import (  # noqa: E402
     canonical_payload,
     finalize_funnel_row,
     gate_state,
@@ -234,14 +238,18 @@ def _manifest_maps(manifest: pl.DataFrame) -> tuple[set[tuple[str, str]], dict[t
     return keys, detail
 
 
-def _long_close_location_pass(row: dict[str, Any], pump: dict[str, Any], config: Any) -> bool:
+def _long_close_location_pass(
+    row: dict[str, Any],
+    classification: LongResearchClassification,
+    config: Any,
+) -> bool:
     values = (
         ("trigger_1d", "close_location", config.fc_min_close_location),
         ("trigger_3d", "close_loc_3d", config.fc_close_loc_multi_day),
         ("trigger_7d", "close_loc_7d", config.fc_close_loc_multi_day),
     )
     return any(
-        bool(pump[trigger])
+        bool(getattr(classification, trigger))
         and _finite(row.get(column)) is not None
         and float(row[column]) >= threshold
         for trigger, column, threshold in values
@@ -265,9 +273,14 @@ def _build_long_funnel(
     manifest_keys, manifest_detail = _manifest_maps(manifest)
     rows: list[dict[str, Any]] = []
     expected_keys: set[str] = set()
-    for source in features.to_dicts():
-        pump = long_pump_family(source, config)
-        if not bool(pump["trigger_any"]):
+    source_rows = features.to_dicts()
+    with RustStrategyContract() as contract:
+        classifications = RustLongResearchClassifier(
+            contract,
+            resolve_strategy_config("v11a", rule=config),
+        ).classify(source_rows)
+    for source, classification in zip(source_rows, classifications, strict=True):
+        if not classification.trigger_any:
             continue
         signal_ts_ms = int(source["ts_ms"])
         symbol = str(source["symbol"]).upper()
@@ -288,7 +301,7 @@ def _build_long_funnel(
         turnover_median = _finite(source.get("turnover_median_90d"))
         history_days = int(source.get("symbol_age_days") or 0)
         atr_pct = _finite(source.get("atr_14d_pct"))
-        pattern, _stop, _target, _hold = _classify_entry(source, config)
+        pattern = classification.pattern
         row = finalize_funnel_row(
             {
                 "sleeve": "long",
@@ -307,7 +320,7 @@ def _build_long_funnel(
                 "entry_price": entry_price,
                 "entry_missing_reason": anchor_missing,
                 "component_scope": "long_active_profile",
-                "source_strength": pump["source_strength"],
+                "source_strength": classification.source_strength,
                 "membership_date": membership_date,
                 "membership_source": membership.get("membership_source"),
                 "membership_inferred": membership.get("membership_inferred"),
@@ -318,12 +331,12 @@ def _build_long_funnel(
                 "log_return": _finite(source.get("log_return")),
                 "pump_3d_log": _finite(source.get("pump_3d_log")),
                 "pump_7d_log": _finite(source.get("pump_7d_log")),
-                "pump_threshold_1d": pump["threshold_1d"],
-                "pump_threshold_3d": pump["threshold_3d"],
-                "pump_threshold_7d": pump["threshold_7d"],
-                "pump_trigger_1d": pump["trigger_1d"],
-                "pump_trigger_3d": pump["trigger_3d"],
-                "pump_trigger_7d": pump["trigger_7d"],
+                "pump_threshold_1d": classification.threshold_1d,
+                "pump_threshold_3d": classification.threshold_3d,
+                "pump_threshold_7d": classification.threshold_7d,
+                "pump_trigger_1d": classification.trigger_1d,
+                "pump_trigger_3d": classification.trigger_3d,
+                "pump_trigger_7d": classification.trigger_7d,
                 "close_location": _finite(source.get("close_location")),
                 "close_loc_3d": _finite(source.get("close_loc_3d")),
                 "close_loc_7d": _finite(source.get("close_loc_7d")),
@@ -362,7 +375,7 @@ def _build_long_funnel(
                     and float(source["today_volume_rank"]) <= config.fc_top_volume_rank_max
                 ),
                 "gate_active_close_location": gate_state(
-                    _long_close_location_pass(source, pump, config)
+                    _long_close_location_pass(source, classification, config)
                 ),
                 "gate_active_atr": gate_state(
                     None if atr_pct is None else 0.0 < atr_pct <= config.fc_max_atr_pct

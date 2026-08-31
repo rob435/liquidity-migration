@@ -240,6 +240,15 @@ mod tests {
                 seen_ms: 10,
             }],
             execution_history_through_ms: Some(20),
+            target_book_latches: Vec::new(),
+            strategy_checkpoints: Vec::new(),
+            strategy_global_checkpoints: Vec::new(),
+            strategy_events: Vec::new(),
+            signal_observations: Vec::new(),
+            signal_cursors: Vec::new(),
+            signal_subscriptions: Vec::new(),
+            runtime_control_requests: Vec::new(),
+            runtime_control_consumed: Vec::new(),
             open_orders: Vec::new(),
         };
         let mut restored = ExecutionIds::from_records(&[record], 20).unwrap();

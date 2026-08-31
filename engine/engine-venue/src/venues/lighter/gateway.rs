@@ -379,7 +379,7 @@ impl VenueGateway for LighterGateway {
             // **This is what stops the venue trading today.** The engine
             // refuses an entry that names a leverage when it cannot set one —
             // the margin posted would not be the margin the position was sized
-            // at — and the target-book follower names one on every entry. So
+            // at — and native directional sleeves name one on every entry. So
             // an engine on Lighter reads the market, protects and exits what
             // it already holds, and opens nothing. Trading it means sending
             // the margin-fraction transaction, whose signed field list has to
@@ -826,8 +826,8 @@ mod tests {
     fn the_venue_cannot_take_an_entry_that_names_a_leverage() {
         // Stated here because it is the difference between "a venue the switch
         // offers" and "a venue a strategy can open on". The engine refuses an
-        // entry naming a leverage it cannot set, and the target-book follower
-        // names one on every entry.
+        // entry naming a leverage it cannot set, and native directional
+        // sleeves name one on every entry.
         assert!(!gateway().caps().set_leverage);
     }
 

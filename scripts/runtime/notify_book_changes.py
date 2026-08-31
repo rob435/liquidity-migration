@@ -1,12 +1,9 @@
-"""Trade updates for the phone: what each sleeve asked for, and what it made.
+"""Trade updates for the phone: what filled, and what it made.
 
-Two sources, because they answer different questions. The **target books**
-say what a sleeve decided — a new symbol with size is an entry, and that is
-news the moment it is decided, before anything fills. The **engine's
-closed-trade file** says what actually happened when a position ended: the
-prices, the fees, the time held, and the money. An exit is worth reading only
-with those numbers next to it, so exits come from the engine and entries from
-the books.
+The engine heartbeat says which attributed positions actually exist. A new
+LONG, CARRY, or Exodus row is an entry only after the account owner can see the
+fill. The engine's closed-trade file says what happened when a position ended:
+prices, fees, time held, and money. Only engine account evidence is authoritative.
 
 The look is deliberate and small. Every message is one monospace block, so
 columns line up and the whole thing can be copied in a tap. Two dots — 🟢
@@ -30,9 +27,9 @@ are printed to the log and kept out of every message and every total.
 Messages go to the main line (the owner's DM with the bot); the group is the
 alerting line and gets nothing from here.
 
-First run on an empty state baselines silently, and so does a book or a trade
-file seen for the first time. An unreadable book keeps its previous state — a
-producer mid-write must not read as a mass exit.
+First run on an empty state baselines silently, and so does a trade file seen
+for the first time. An unreadable, stale, or unattributed account snapshot
+keeps its previous state instead of inventing a position change.
 """
 
 from __future__ import annotations
@@ -50,8 +47,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from liquidity_migration.ops.telegram import as_block, send_telegram_message
 
-TARGETS = "/var/lib/liquidity-migration/targets"
-STATE_PATH = "/var/lib/liquidity-migration/book-notify/state.json"
+STATE_PATH = "/var/lib/liquidity-migration/trade-notify/state.json"
+HEARTBEAT_MAX_AGE_MS = 5 * 60_000
+DIRECTIONAL_SLEEVES = frozenset({"carry", "long", "exodus"})
 
 #: Sleeves that exist to exercise the machinery rather than to make money.
 #: Their trades reach the log and nothing else — not a message, not a total.
@@ -67,9 +65,10 @@ class Account:
     #: Prefixed to the sleeve in every message from this account. Empty for
     #: the one whose messages need no explaining.
     tag: str
-    books: dict[str, str]
-    #: Where the engine appends one JSON line per closed position. Absent
-    #: means no engine is reporting, and exits fall back to the books.
+    realm: str
+    heartbeat: str
+    #: Where the engine appends one JSON line per closed position. If it is
+    #: absent there is no closed-trade update; no other file substitutes.
     trades: str
 
 
@@ -84,21 +83,15 @@ ACCOUNTS = (
     Account(
         name="demo",
         tag="DEMO ",
-        books={
-            "CARRY": f"{TARGETS}/carry-demo.json",
-            "LONG": f"{TARGETS}/long-demo.json",
-            "EXODUS": f"{TARGETS}/exodus-demo.json",
-        },
+        realm="demo",
+        heartbeat="/var/lib/liquidity-migration-engine/heartbeat.json",
         trades="/var/lib/liquidity-migration-engine/trades.jsonl",
     ),
     Account(
         name="funded",
         tag="RM ",
-        books={
-            "CARRY": f"{TARGETS}/carry-mainnet.json",
-            "LONG": f"{TARGETS}/long-mainnet.json",
-            "EXODUS": f"{TARGETS}/exodus-mainnet.json",
-        },
+        realm="mainnet",
+        heartbeat="/var/lib/liquidity-migration-engine-mainnet/heartbeat.json",
         trades="/var/lib/liquidity-migration-engine-mainnet/trades.jsonl",
     ),
 )
@@ -109,19 +102,69 @@ ACCOUNTS = (
 # --------------------------------------------------------------------------
 
 
-def read_positive_targets(path: str) -> dict[str, float] | None:
-    """Symbol -> notional for rows with size, or None when unreadable."""
+@dataclass(frozen=True)
+class PositionRead:
+    positions: dict[str, dict[str, float]]
+    ambiguous_symbols: frozenset[str]
 
+
+def read_attributed_positions(
+    path: str,
+    *,
+    realm: str,
+    now_ms: int | None = None,
+) -> PositionRead | None:
+    """Directional sleeve -> symbol -> filled notional, or None when unsafe."""
+
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
     try:
         with open(path) as fh:
-            book = json.load(fh)
-        out: dict[str, float] = {}
-        for row in book.get("targets") or []:
-            notional = abs(float(row.get("notional_usdt", 0.0)))
-            if notional > 0.0:
-                out[str(row["symbol"])] = notional
-        return out
-    except Exception:
+            payload = json.load(fh)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("mode") != "live"
+            or payload.get("realm") != realm
+            or type(payload.get("wall_ts_ms")) is not int
+            or not 0 <= now_ms - payload["wall_ts_ms"] <= HEARTBEAT_MAX_AGE_MS
+            or not isinstance(payload.get("positions"), list)
+        ):
+            return None
+        positions = {sleeve.upper(): {} for sleeve in DIRECTIONAL_SLEEVES}
+        ambiguous: set[str] = set()
+        seen: set[str] = set()
+        for row in payload["positions"]:
+            if not isinstance(row, dict):
+                return None
+            symbol = row.get("symbol")
+            side = row.get("side")
+            strategy = row.get("strategy")
+            qty = row.get("qty")
+            entry_px = row.get("entry_px")
+            if (
+                not isinstance(symbol, str)
+                or not symbol
+                or symbol in seen
+                or side not in {"long", "short"}
+                or type(qty) not in {int, float}
+                or type(entry_px) not in {int, float}
+                or not math.isfinite(float(qty))
+                or not math.isfinite(float(entry_px))
+                or float(qty) <= 0.0
+                or float(entry_px) <= 0.0
+            ):
+                return None
+            seen.add(symbol)
+            if strategy is None:
+                ambiguous.add(symbol)
+                continue
+            if not isinstance(strategy, str):
+                return None
+            sleeve = strategy.lower()
+            if sleeve in DIRECTIONAL_SLEEVES:
+                positions[sleeve.upper()][symbol] = float(qty) * float(entry_px)
+        return PositionRead(positions, frozenset(ambiguous))
+    except (OSError, ValueError, TypeError):
         return None
 
 
@@ -293,25 +336,12 @@ def exit_message(trade: dict, tag: str) -> str:
 def entry_messages(
     sleeve: str, tag: str, before: dict[str, float], now: dict[str, float]
 ) -> list[str]:
-    """What a sleeve has decided to hold that it did not before."""
+    """Attributed filled positions present now and absent before."""
 
     verb = "shorts" if sleeve == "EXODUS" else "enters"
     return [
         f"{tag}{sleeve} {verb} {symbol} · {notional(now[symbol])}"
         for symbol in sorted(set(now) - set(before))
-    ]
-
-
-def book_exit_messages(
-    sleeve: str, tag: str, before: dict[str, float], now: dict[str, float]
-) -> list[str]:
-    """Exits with nothing to say about them, for an account whose engine is
-    not writing closed trades."""
-
-    verb = "covers" if sleeve == "EXODUS" else "exits"
-    return [
-        f"{tag}{sleeve} {verb} {symbol}"
-        for symbol in sorted(set(before) - set(now))
     ]
 
 
@@ -443,19 +473,17 @@ def main() -> int:
         state = json.loads(state_path.read_text())
     except Exception:
         state = {}
-    books_before = dict(state.get("books") or {})
+    positions_before = dict(state.get("positions") or {})
     offsets = dict(state.get("trade_offsets") or {})
 
     enabled = os.environ.get("TELEGRAM_ENABLED", "").strip() == "1"
     messages: list[str] = []
-    books_now: dict[str, dict[str, float]] = {}
+    positions_now: dict[str, dict[str, float]] = {}
     malformed_trades: list[tuple[str, int]] = []
 
     for account in ACCOUNTS:
-        new_trades = None
         read = read_new_trades(account.trades, int(offsets.get(account.trades, 0)))
         if read is not None:
-            new_trades = read.trades
             offset = read.next_offset
             if account.trades not in offsets:
                 # Everything already in the file happened before this reader
@@ -464,7 +492,7 @@ def main() -> int:
                 # boundary until it is repaired.
                 print(f"baselined {account.trades} at {offset} bytes")
             else:
-                for trade in new_trades:
+                for trade in read.trades:
                     if hidden(trade):
                         print(
                             f"not shown ({trade.get('sleeve')}):"
@@ -480,21 +508,23 @@ def main() -> int:
                     f" at byte {read.malformed_offset}"
                 )
 
-        for sleeve, path in account.books.items():
+        snapshot = read_attributed_positions(account.heartbeat, realm=account.realm)
+        if snapshot is None:
+            for sleeve in sorted(name.upper() for name in DIRECTIONAL_SLEEVES):
+                key = f"{account.name}/{sleeve}"
+                if key in positions_before:
+                    positions_now[key] = positions_before[key]
+            continue
+        for sleeve in sorted(name.upper() for name in DIRECTIONAL_SLEEVES):
             key = f"{account.name}/{sleeve}"
-            now = read_positive_targets(path)
-            if now is None:
-                # Mid-write, or gone. Keeping the old state is what stops a
-                # transient read looking like every position closing at once.
-                if key in books_before:
-                    books_now[key] = books_before[key]
-                continue
-            before = books_before.get(key)
+            now = dict(snapshot.positions[sleeve])
+            before = positions_before.get(key)
             if isinstance(before, dict):
+                for symbol in snapshot.ambiguous_symbols:
+                    if symbol in before and symbol not in now:
+                        now[symbol] = before[symbol]
                 messages += entry_messages(sleeve, account.tag, before, now)
-                if new_trades is None:
-                    messages += book_exit_messages(sleeve, account.tag, before, now)
-            books_now[key] = now
+            positions_now[key] = now
 
     # Once a day, on the first run after midnight UTC, over the day that just
     # ended. Stamped by the day it covers, so a run that could not send tries
@@ -512,7 +542,8 @@ def main() -> int:
     if not messages:
         print("nothing to say")
 
-    state["books"] = books_now
+    state.pop("books", None)
+    state["positions"] = positions_now
     state["trade_offsets"] = offsets
     write_state(state_path, state)
     return 1 if malformed_trades else 0

@@ -21,17 +21,17 @@ use engine_types::VenueError;
 /// the host credential file — never by the engine, and never by a config.
 pub const REAL_MONEY_ENV: &str = "REAL_MONEY";
 
-/// Values that mean yes. The Python fleet's `TRUE_ENV_VALUES`, exactly.
+/// Values that mean yes. Shared with the Python compatibility parser.
 const TRUE_VALUES: &[&str] = &["1", "true", "yes", "on"];
 
-/// Values that mean no. The Python fleet's `FALSE_ENV_VALUES`, exactly —
+/// Values that mean no. Shared with the Python compatibility parser —
 /// including the empty string, so `REAL_MONEY=` is a clear no rather than a
 /// typo.
 const FALSE_VALUES: &[&str] = &["", "0", "false", "no", "off"];
 
 /// Read a boolean environment variable, refusing anything ambiguous.
 ///
-/// The Python fleet splits this into `env_flag` (lenient) and
+/// The Python compatibility layer splits this into `env_flag` (lenient) and
 /// `reject_ambiguous_flag` (strict) and calls both at the safety-critical
 /// sites. Here it is one strict function, because every site in the engine
 /// that reads a flag is a safety-critical one.

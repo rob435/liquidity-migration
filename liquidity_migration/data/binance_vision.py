@@ -1229,7 +1229,6 @@ def _publish_staged_binance_datasets(
             locks.enter_context(
                 storage_module.exclusive_file_lock(
                     storage_module.dataset_lock_path(root, dataset),
-                    stale_seconds=21_600,
                     poll_seconds=0.01,
                 )
             )

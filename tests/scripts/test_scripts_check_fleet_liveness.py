@@ -39,25 +39,86 @@ def _stub_account_authority(monkeypatch) -> None:
         lambda _states, **_kwargs: [],
     )
     monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
+    monkeypatch.setattr(M, "gather_signal_worker_alerts", lambda **_kwargs: [])
 
 
-def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
-    now = 1_000 * HOUR
+def _ready_signal_heartbeat(now_ms: int, hashes: dict[str, str]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "liquidity_migration_signal_worker_heartbeat",
+        "status": "ready",
+        "pid": 441,
+        "updated_at_ms": now_ms - 1_000,
+        "public_market_realm": "mainnet",
+        "public_bybit_host": "api.bybit.com",
+        "credential_free": True,
+        "last_input_sequence": 17,
+        "long_output_sequence": 9,
+        "carry_output_sequence": 8,
+        "last_observed_ts_ms": now_ms - 2_000,
+        **hashes,
+    }
+
+
+def test_signal_worker_heartbeat_binds_process_inputs_and_public_source() -> None:
+    now_ms = 1_000_000
+    hashes = {f"input_{index}_sha256": f"{index:064x}" for index in range(6)}
+    payload = _ready_signal_heartbeat(now_ms, hashes)
+
     assert (
-        M.evaluate_cycle_liveness(latest_cycle_ts_ms=now - 2 * MIN, now_ms=now, max_age_minutes=10, label="demo")
+        M.evaluate_signal_worker_heartbeat(
+            payload,
+            now_ms=now_ms,
+            max_age_seconds=30,
+            expected_pid=441,
+            expected_hashes=hashes,
+            label="demo worker",
+        )
         is None
     )
-    stale = M.evaluate_cycle_liveness(latest_cycle_ts_ms=now - 30 * MIN, now_ms=now, max_age_minutes=10, label="demo")
-    assert stale is not None and stale.severity == M.CRITICAL and "DOWN" in stale.message
-    missing = M.evaluate_cycle_liveness(latest_cycle_ts_ms=None, now_ms=now, max_age_minutes=10, label="demo")
-    assert missing is not None and missing.severity == M.CRITICAL
-    future = M.evaluate_cycle_liveness(
-        latest_cycle_ts_ms=now + MIN,
-        now_ms=now,
-        max_age_minutes=10,
-        label="demo",
+
+    payload["pid"] = 442
+    payload["public_bybit_host"] = "api-demo.bybit.com"
+    payload["input_3_sha256"] = "f" * 64
+    alert = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes=hashes,
+        label="demo worker",
     )
-    assert future is not None and "future-dated" in future.message
+    assert alert is not None
+    assert "current systemd process" in alert.message
+    assert "mainnet api.bybit.com" in alert.message
+    assert "input_3_sha256" in alert.message
+
+
+def test_signal_worker_startup_grace_is_generation_bound(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    args = dict(
+        heartbeat_path=missing,
+        signal_config=missing,
+        long_rule=missing,
+        carry_config=missing,
+        operational_config=missing,
+        engine_config=missing,
+        universe=missing,
+        now_ms=10_000,
+        max_age_seconds=30,
+        startup_grace_minutes=30,
+        label="worker",
+    )
+    assert M.gather_signal_worker_alerts(
+        **args,
+        runtime=M.UnitRuntime(CURRENT_INVOCATION_ID, 5.0, 441),
+    ) == []
+    alerts = M.gather_signal_worker_alerts(
+        **args,
+        runtime=M.UnitRuntime(CURRENT_INVOCATION_ID, 31.0, 441),
+    )
+    assert [alert.key for alert in alerts] == ["signal-worker:worker"]
+    assert "unreadable" in alerts[0].message
 
 
 def test_unit_states_alert_only_on_terminal_failed_without_install_state() -> None:
@@ -78,15 +139,12 @@ def test_unit_states_alert_only_on_terminal_failed_without_install_state() -> No
 
 
 def test_enabled_but_inactive_service_alerts_and_escalates_after_one_interval() -> None:
-    """The 2026-08-01..03 outage's silent shape: a producer whose ``Requires=`` owner
-    failed is left ENABLED and INACTIVE, with no failure of its own. Failed-only
-    alerting saw nothing for two days while the whole fleet was down.
-    """
-    states = {"producer.service": "inactive"}
-    enabled = {"producer.service": "enabled"}
+    """An enabled service that becomes inactive must alert and then escalate."""
+    states = {"worker.service": "inactive"}
+    enabled = {"worker.service": "enabled"}
 
     first = M.evaluate_unit_states(states, unit_enabled_states=enabled)
-    assert [a.key for a in first] == ["unit:producer.service"]
+    assert [a.key for a in first] == ["unit:worker.service"]
     assert first[0].severity == M.WARNING
     assert "ENABLED but INACTIVE" in first[0].message
     assert "debouncing" in first[0].message
@@ -94,9 +152,9 @@ def test_enabled_but_inactive_service_alerts_and_escalates_after_one_interval() 
     second = M.evaluate_unit_states(
         states,
         unit_enabled_states=enabled,
-        prior_not_active_services={"producer.service"},
+        prior_not_active_services={"worker.service"},
     )
-    assert [a.key for a in second] == ["unit:producer.service"]
+    assert [a.key for a in second] == ["unit:worker.service"]
     assert second[0].severity == M.CRITICAL
     assert "debouncing" not in second[0].message
 
@@ -129,10 +187,10 @@ def test_failed_service_reports_the_failure_not_the_install_state() -> None:
     demoted to the debounced enabled-but-stopped WARNING.
     """
     alerts = M.evaluate_unit_states(
-        {"producer.service": "failed"},
-        unit_enabled_states={"producer.service": "enabled"},
+        {"worker.service": "failed"},
+        unit_enabled_states={"worker.service": "enabled"},
     )
-    assert [a.key for a in alerts] == ["unit:producer.service"]
+    assert [a.key for a in alerts] == ["unit:worker.service"]
     assert alerts[0].severity == M.CRITICAL
     assert "is FAILED" in alerts[0].message
 
@@ -174,10 +232,10 @@ def test_unit_runtime_metadata_uses_systemd_generation_and_boottime(
         ),
     )
 
-    runtime = M._unit_runtime_metadata(["producer.service", "ignored.timer"])
+    runtime = M._unit_runtime_metadata(["worker.service", "ignored.timer"])
 
     assert runtime == {
-        "producer.service": M.UnitRuntime(
+        "worker.service": M.UnitRuntime(
             invocation_id=CURRENT_INVOCATION_ID,
             active_age_minutes=5.0,
         )
@@ -218,13 +276,6 @@ def test_required_account_owners_must_be_active() -> None:
         )
         == []
     )
-
-
-def test_ws_staleness_threshold() -> None:
-    now = 1_000 * HOUR
-    assert M.evaluate_ws_staleness(store_max_ts_ms=now - 1 * HOUR, now_ms=now, max_lag_hours=6, label="demo") is None
-    stale = M.evaluate_ws_staleness(store_max_ts_ms=now - 8 * HOUR, now_ms=now, max_lag_hours=6, label="demo")
-    assert stale is not None and stale.severity == M.WARNING
 
 
 def test_cooldown_sends_new_suppresses_persisting_then_reresends_and_resolves() -> None:
@@ -276,595 +327,14 @@ def test_alert_cooldown_uses_exact_millisecond_boundary() -> None:
     assert state["liveness:demo"] == now + 30 * MIN
 
 
-def test_gather_long_alerts_covers_cycle_and_input_freshness(tmp_path) -> None:
-    """LONG liveness is strategy-only; account health owns positions/protection."""
-    import argparse
+def test_default_unit_monitoring_is_owner_plus_native_signal_worker() -> None:
+    assert M._default_units_for_scope("demo") == [
+        M._DEMO_ACCOUNT_OWNER_UNIT,
+        M._DEMO_SIGNAL_WORKER.unit,
+    ]
 
-    import polars as pl
 
-    from liquidity_migration.data.storage import write_dataset
-
-    now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    long_root = tmp_path / "bybit-long-demo-event"
-    long_root.mkdir()
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "c1",
-                    "ts_ms": now - 60 * MIN,
-                    "kline_store_max_ts_ms": now - 8 * HOUR,
-                }
-            ]
-        ),
-        long_root,
-        "long_native_demo_cycles",
-        partition_by=(),
-    )
-    keys = {a.key for a in M.gather_long_alerts(long_root=long_root, now_ms=now, args=args)}
-    assert keys == {
-        "liveness:bybit-long-demo-event",
-        "ws_stale:bybit-long-demo-event",
-    }
-
-
-def test_gather_long_alerts_reads_the_mainnet_cycle_dataset(tmp_path) -> None:
-    import argparse
-
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-
-    now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    long_root = tmp_path / "long-mainnet"
-    long_root.mkdir()
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "mainnet-c1",
-                    "ts_ms": now - 60 * MIN,
-                    "kline_store_max_ts_ms": now - 8 * HOUR,
-                }
-            ]
-        ),
-        long_root,
-        "long_native_mainnet_cycles",
-        partition_by=(),
-    )
-
-    keys = {
-        alert.key
-        for alert in M.gather_long_alerts(
-            long_root=long_root,
-            now_ms=now,
-            args=args,
-            cycles_dataset="long_native_mainnet_cycles",
-        )
-    }
-    assert keys == {"liveness:long-mainnet", "ws_stale:long-mainnet"}
-
-
-def test_gather_long_alerts_skips_when_root_absent(tmp_path) -> None:
-    import argparse
-
-    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    assert M.gather_long_alerts(long_root=tmp_path / "absent", now_ms=1_000 * HOUR, args=args) == []
-
-
-def test_gather_carry_alerts_covers_cycle_freshness_and_decision_staleness(tmp_path) -> None:
-    """CARRY liveness is strategy-only; a stale held-over decision must page."""
-    import argparse
-
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-
-    now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    carry_root = tmp_path / "bybit-carry-demo-event"
-    carry_root.mkdir()
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "c1",
-                    "ts_ms": now - 60 * MIN,
-                    "decision_stale": True,
-                    "decision_error": "panel build failed: empty decision bar",
-                }
-            ]
-        ),
-        carry_root,
-        "carry_hold_demo_cycles",
-        partition_by=(),
-    )
-    alerts = M.gather_carry_alerts(carry_root=carry_root, now_ms=now, args=args)
-    keys = {a.key for a in alerts}
-    assert keys == {
-        "liveness:bybit-carry-demo-event",
-        "carry_decision_stale:bybit-carry-demo-event",
-    }
-    stale = next(a for a in alerts if a.key.startswith("carry_decision_stale"))
-    assert stale.severity == M.CRITICAL
-    assert "PREVIOUS targets" in stale.message
-    assert "empty decision bar" in stale.message
-
-
-def test_gather_carry_alerts_fresh_healthy_cycle_is_clean(tmp_path) -> None:
-    import argparse
-
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-
-    now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    carry_root = tmp_path / "bybit-carry-demo-event"
-    carry_root.mkdir()
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "c1",
-                    "ts_ms": now - 2 * MIN,
-                    "decision_stale": False,
-                    "decision_error": "",
-                }
-            ]
-        ),
-        carry_root,
-        "carry_hold_demo_cycles",
-        partition_by=(),
-    )
-    assert M.gather_carry_alerts(carry_root=carry_root, now_ms=now, args=args) == []
-
-
-def test_gather_carry_alerts_reads_the_mainnet_cycle_dataset(tmp_path) -> None:
-    import argparse
-
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-
-    now = 1_000 * HOUR
-    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    carry_root = tmp_path / "carry-mainnet"
-    carry_root.mkdir()
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "mainnet-c1",
-                    "ts_ms": now - 60 * MIN,
-                    "decision_stale": False,
-                    "decision_error": "",
-                }
-            ]
-        ),
-        carry_root,
-        "carry_hold_mainnet_cycles",
-        partition_by=(),
-    )
-
-    keys = {
-        alert.key
-        for alert in M.gather_carry_alerts(
-            carry_root=carry_root,
-            now_ms=now,
-            args=args,
-            cycles_dataset="carry_hold_mainnet_cycles",
-        )
-    }
-    assert keys == {"liveness:carry-mainnet"}
-
-
-def test_gather_carry_alerts_skips_when_root_absent(tmp_path) -> None:
-    import argparse
-
-    args = argparse.Namespace(max_cycle_age_min=10, max_ws_lag_hours=6)
-    assert (
-        M.gather_carry_alerts(carry_root=tmp_path / "absent", now_ms=1_000 * HOUR, args=args) == []
-    )
-
-
-def test_current_generation_completion_outranks_a_newer_in_flight_cycle_row(
-    tmp_path,
-) -> None:
-    """Liveness comes from the receipt's completion time bound to its own cycle row.
-
-    A newer output may be durable while its capture/outcome append is still in
-    flight; taking the tail row instead of the receipt's row would read a cycle
-    nothing has finished yet as the proof the daemon is alive.
-    """
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-    from liquidity_migration.strategy.strategy_cycle_health import (
-        StrategyCycleHealth,
-        write_strategy_cycle_health,
-    )
-
-    now = 1_000 * HOUR
-    root = tmp_path / "bybit-carry-demo-event"
-    root.mkdir()
-    completed_cycle_ts = now - 20 * MIN
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "completed",
-                    "ts_ms": completed_cycle_ts,
-                    "decision_stale": False,
-                    "decision_error": "",
-                },
-                {
-                    "cycle_id": "evidence-in-flight",
-                    "ts_ms": now - MIN,
-                    "decision_stale": True,
-                    "decision_error": "half-written",
-                },
-            ]
-        ),
-        root,
-        "carry_hold_demo_cycles",
-        partition_by=(),
-    )
-    write_strategy_cycle_health(
-        root,
-        StrategyCycleHealth(
-            sleeve="carry",
-            environment="demo",
-            cycle_id="completed",
-            cycle_ts_ms=completed_cycle_ts,
-            completed_ts_ns=(now - MIN) * 1_000_000,
-            invocation_id=CURRENT_INVOCATION_ID,
-            ws_kline_store_rows=383_711,
-        ),
-    )
-
-    alerts = M.gather_carry_alerts(
-        carry_root=root,
-        now_ms=now,
-        args=SimpleNamespace(max_cycle_age_min=10),
-        unit_runtime=M.UnitRuntime(
-            invocation_id=CURRENT_INVOCATION_ID,
-            active_age_minutes=20.0,
-        ),
-    )
-
-    # The 20-minute-old cycle row is inside the window because the receipt says
-    # it completed a minute ago, and the in-flight row's staleness is not read.
-    assert alerts == []
-
-
-def test_current_generation_completion_time_is_sampled_after_receipt_read(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-    from liquidity_migration.strategy.strategy_cycle_health import (
-        StrategyCycleHealth,
-        write_strategy_cycle_health,
-    )
-
-    outer_now = 1_000 * HOUR
-    completed_ms = outer_now + 6_000
-    cycle_ts = outer_now - MIN
-    root = tmp_path / "bybit-carry-demo-event"
-    root.mkdir()
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "completed-during-watchdog-run",
-                    "ts_ms": cycle_ts,
-                    "decision_stale": False,
-                    "decision_error": "",
-                }
-            ]
-        ),
-        root,
-        "carry_hold_demo_cycles",
-        partition_by=(),
-    )
-    write_strategy_cycle_health(
-        root,
-        StrategyCycleHealth(
-            sleeve="carry",
-            environment="demo",
-            cycle_id="completed-during-watchdog-run",
-            cycle_ts_ms=cycle_ts,
-            completed_ts_ns=completed_ms * 1_000_000,
-            invocation_id=CURRENT_INVOCATION_ID,
-            ws_kline_store_rows=100,
-        ),
-    )
-    runtime = M.UnitRuntime(
-        invocation_id=CURRENT_INVOCATION_ID,
-        active_age_minutes=20.0,
-    )
-    args = SimpleNamespace(max_cycle_age_min=10)
-    monkeypatch.setattr(M, "_now_ms", lambda: completed_ms + 1)
-
-    assert (
-        M.gather_carry_alerts(
-            carry_root=root,
-            args=args,
-            unit_runtime=runtime,
-        )
-        == []
-    )
-
-    stale_outer_sample = M.gather_carry_alerts(
-        carry_root=root,
-        now_ms=outer_now,
-        args=args,
-        unit_runtime=runtime,
-    )
-    assert [alert.key for alert in stale_outer_sample] == [f"liveness:{root.name}"]
-    assert "0.1 min future-dated" in stale_outer_sample[0].message
-
-
-def test_completion_receipt_is_observed_before_cycle_dataset(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-    from liquidity_migration.strategy.strategy_cycle_health import (
-        StrategyCycleHealth,
-        write_strategy_cycle_health,
-    )
-
-    now = 1_000 * HOUR
-    old_cycle_ts = now - 2 * MIN
-    new_cycle_ts = now - MIN
-    root = tmp_path / "bybit-carry-demo-event"
-    root.mkdir()
-    old_row = {
-        "cycle_id": "already-completed",
-        "ts_ms": old_cycle_ts,
-        "decision_stale": False,
-        "decision_error": "",
-    }
-    new_row = {**old_row, "cycle_id": "concurrent-completion", "ts_ms": new_cycle_ts}
-    write_dataset(
-        pl.DataFrame([old_row]),
-        root,
-        "carry_hold_demo_cycles",
-        partition_by=(),
-    )
-    write_strategy_cycle_health(
-        root,
-        StrategyCycleHealth(
-            sleeve="carry",
-            environment="demo",
-            cycle_id="already-completed",
-            cycle_ts_ms=old_cycle_ts,
-            completed_ts_ns=(now - MIN) * 1_000_000,
-            invocation_id=CURRENT_INVOCATION_ID,
-            ws_kline_store_rows=100,
-        ),
-    )
-    original_read_dataset = M.read_dataset_columns
-
-    def read_while_next_cycle_completes(*args, **kwargs):
-        captured = original_read_dataset(*args, **kwargs)
-        write_dataset(
-            pl.DataFrame([old_row, new_row]),
-            root,
-            "carry_hold_demo_cycles",
-            partition_by=(),
-        )
-        write_strategy_cycle_health(
-            root,
-            StrategyCycleHealth(
-                sleeve="carry",
-                environment="demo",
-                cycle_id="concurrent-completion",
-                cycle_ts_ms=new_cycle_ts,
-                completed_ts_ns=now * 1_000_000,
-                invocation_id=CURRENT_INVOCATION_ID,
-                ws_kline_store_rows=100,
-            ),
-        )
-        return captured
-
-    monkeypatch.setattr(M, "read_dataset_columns", read_while_next_cycle_completes)
-
-    assert (
-        M.gather_carry_alerts(
-            carry_root=root,
-            now_ms=now,
-            args=SimpleNamespace(max_cycle_age_min=10),
-            unit_runtime=M.UnitRuntime(
-                invocation_id=CURRENT_INVOCATION_ID,
-                active_age_minutes=20.0,
-            ),
-        )
-        == []
-    )
-
-
-def test_current_generation_gets_bounded_startup_grace_then_pages(tmp_path) -> None:
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-
-    now = 1_000 * HOUR
-    root = tmp_path / "bybit-carry-demo-event"
-    root.mkdir()
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "prior-generation",
-                    "ts_ms": now - 60 * MIN,
-                    "decision_stale": False,
-                    "decision_error": "",
-                }
-            ]
-        ),
-        root,
-        "carry_hold_demo_cycles",
-        partition_by=(),
-    )
-    args = SimpleNamespace(max_cycle_age_min=10, max_startup_min=120.0)
-
-    # The shape of the 2026-08-29 alert spam: a producer 45 minutes into its
-    # boot kline backfill, verifiably active in the current generation, with
-    # no completed cycle yet. That is a warmup, not a hang, and it pages
-    # nothing — the old 10-minute grace turned every deploy into a CRITICAL
-    # that cleared itself an hour later.
-    for warming_minutes in (8.0, 45.0, 100.0):
-        assert (
-            M.gather_carry_alerts(
-                carry_root=root,
-                now_ms=now,
-                args=args,
-                unit_runtime=M.UnitRuntime(
-                    invocation_id=CURRENT_INVOCATION_ID,
-                    active_age_minutes=warming_minutes,
-                ),
-            )
-            == []
-        ), f"{warming_minutes} min into boot is inside the startup budget"
-
-    expired = M.gather_carry_alerts(
-        carry_root=root,
-        now_ms=now,
-        args=args,
-        unit_runtime=M.UnitRuntime(
-            invocation_id=CURRENT_INVOCATION_ID,
-            active_age_minutes=120.01,
-        ),
-    )
-    assert [alert.key for alert in expired] == [f"liveness:{root.name}"]
-    assert "startup budget" in expired[0].message
-    assert "up 120 min" in expired[0].message, "the page says how long it actually waited"
-
-
-def test_prior_generation_or_stale_completion_cannot_mask_hung_daemon(
-    tmp_path,
-) -> None:
-    import polars as pl
-
-    from liquidity_migration.data.storage import write_dataset
-    from liquidity_migration.strategy.strategy_cycle_health import (
-        StrategyCycleHealth,
-        write_strategy_cycle_health,
-    )
-
-    now = 1_000 * HOUR
-    root = tmp_path / "bybit-long-demo-event"
-    root.mkdir()
-    cycle_ts = now - 60 * MIN
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "cycle_id": "long-cycle",
-                    "ts_ms": cycle_ts,
-                    "kline_store_max_ts_ms": now - HOUR,
-                }
-            ]
-        ),
-        root,
-        "long_native_demo_cycles",
-        partition_by=(),
-    )
-    write_strategy_cycle_health(
-        root,
-        StrategyCycleHealth(
-            sleeve="long",
-            environment="demo",
-            cycle_id="long-cycle",
-            cycle_ts_ms=cycle_ts,
-            completed_ts_ns=(now - MIN) * 1_000_000,
-            invocation_id=PRIOR_INVOCATION_ID,
-            ws_kline_store_rows=100,
-        ),
-    )
-    args = SimpleNamespace(max_cycle_age_min=10, max_ws_lag_hours=6, max_startup_min=120.0)
-    runtime = M.UnitRuntime(
-        invocation_id=CURRENT_INVOCATION_ID,
-        active_age_minutes=121.0,
-    )
-
-    prior = M.gather_long_alerts(
-        long_root=root,
-        now_ms=now,
-        args=args,
-        unit_runtime=runtime,
-    )
-    assert [alert.key for alert in prior] == [f"liveness:{root.name}"]
-    assert "prior service generation" in prior[0].message
-
-    write_strategy_cycle_health(
-        root,
-        StrategyCycleHealth(
-            sleeve="long",
-            environment="demo",
-            cycle_id="long-cycle",
-            cycle_ts_ms=cycle_ts,
-            completed_ts_ns=(now - 11 * MIN) * 1_000_000,
-            invocation_id=CURRENT_INVOCATION_ID,
-            ws_kline_store_rows=100,
-        ),
-    )
-    stale = M.gather_long_alerts(
-        long_root=root,
-        now_ms=now,
-        args=args,
-        unit_runtime=runtime,
-    )
-    assert [alert.key for alert in stale] == [f"liveness:{root.name}"]
-    assert "11.0 min ago" in stale[0].message
-
-
-def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
-    """The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
-    unset default mirrors deploy/lib_sleeves.sh, where every sleeve fails safe to OFF
-    so a missing sleeves.env can never resurrect an order-submitting sleeve.
-    """
-    for off in ("off", "OFF", "false", "0", "no"):
-        monkeypatch.setenv("CARRY_SLEEVE", off)
-        assert M._sleeve_on("CARRY_SLEEVE", default="off") is False, off
-    for on in ("on", "ON", "1", "true", "yes"):
-        monkeypatch.setenv("CARRY_SLEEVE", on)
-        assert M._sleeve_on("CARRY_SLEEVE", default="off") is True, on
-    # Unset -> fail-safe default OFF for every sleeve.
-    monkeypatch.delenv("LONG_SLEEVE", raising=False)
-    assert M._sleeve_on("LONG_SLEEVE") is False
-    monkeypatch.delenv("CARRY_SLEEVE", raising=False)
-    assert M._sleeve_on("CARRY_SLEEVE") is False
-
-
-def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
-    monkeypatch.setenv("LONG_SLEEVE", "on")
-    monkeypatch.setenv("CARRY_SLEEVE", "on")
-
-    units = M._default_units_for_toggles()
-
-    assert M._DEMO_ACCOUNT_OWNER_UNIT in units
-    assert "liquidity-migration-bybit-long-demo.service" in units
-    assert "liquidity-migration-bybit-carry-demo.service" in units
-
-    monkeypatch.setenv("CARRY_SLEEVE", "off")
-    units = M._default_units_for_toggles()
-    assert "liquidity-migration-bybit-carry-demo.service" not in units
-    monkeypatch.setenv("LONG_SLEEVE", "off")
-    units = M._default_units_for_toggles()
-    assert "liquidity-migration-bybit-long-demo.service" not in units
-
-
-def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
+def test_explicit_unit_filter_cannot_disable_signal_worker_generation_binding(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -891,41 +361,21 @@ def test_explicit_unit_filter_cannot_disable_producer_generation_binding(
             "demo",
             "--unit",
             "operator-extra.timer",
-            "--long-root",
-            "",
             "--state-file",
             str(tmp_path / "state.json"),
         ],
     )
 
     assert M.main() == 0
-    assert M._CARRY_DEMO_UNIT in captured_runtime_units
+    assert M._DEMO_SIGNAL_WORKER.unit in captured_runtime_units
 
 
-def test_default_unit_monitoring_uses_the_rust_owner(monkeypatch) -> None:
-    monkeypatch.setenv("LONG_SLEEVE", "on")
-    monkeypatch.setenv("CARRY_SLEEVE", "on")
-
-    units = M._default_units_for_toggles()
-
-    assert M._DEMO_ACCOUNT_OWNER_UNIT in units
-    assert "liquidity-migration-bybit-long-demo.service" in units
-    assert "liquidity-migration-bybit-carry-demo.service" in units
-
-
-def test_demo_account_scope_returns_the_toggle_derived_demo_units(monkeypatch) -> None:
-    monkeypatch.setenv("LONG_SLEEVE", "on")
-    monkeypatch.setenv("CARRY_SLEEVE", "on")
-
+def test_demo_account_scope_returns_owner_and_signal_worker() -> None:
     units = M._default_units_for_scope("demo")
 
-    assert units == M._default_units_for_toggles()
     assert M._DEMO_ACCOUNT_OWNER_UNIT in units
     assert M._MAINNET_ACCOUNT_OWNER_UNIT not in units
-    assert "liquidity-migration-bybit-long-demo.service" in units
-    assert "liquidity-migration-bybit-carry-demo.service" in units
-    monkeypatch.setenv("CARRY_SLEEVE", "off")
-    assert "liquidity-migration-bybit-carry-demo.service" not in (M._default_units_for_scope("demo"))
+    assert M._DEMO_SIGNAL_WORKER.unit in units
 
 
 def test_account_scope_defaults_from_bound_environment(monkeypatch) -> None:
@@ -942,48 +392,32 @@ def test_unknown_account_scope_is_rejected() -> None:
         M._default_units_for_scope("mainnet-paper")
 
 
-def test_mainnet_account_scope_monitors_the_whole_registered_fleet(monkeypatch) -> None:
-    """An armed mainnet fleet always runs both registered producers; the watchdog
-    inventory is unconditional and no demo unit may leak in.
-    """
-
-    for toggle in ("LONG_SLEEVE", "CARRY_SLEEVE"):
-        monkeypatch.setenv(toggle, "on")
-
+def test_mainnet_account_scope_monitors_owner_and_signal_worker() -> None:
     units = M._default_units_for_scope("mainnet")
-    assert units == [M._MAINNET_ACCOUNT_OWNER_UNIT, M._CARRY_MAINNET_UNIT, M._LONG_MAINNET_UNIT]
+    assert units == [
+        M._MAINNET_ACCOUNT_OWNER_UNIT,
+        M._MAINNET_SIGNAL_WORKER.unit,
+    ]
     assert not [unit for unit in units if "demo" in unit]
 
 
-def test_mainnet_account_scope_gathers_only_mainnet_producers(tmp_path, monkeypatch) -> None:
-    """The mainnet watchdog must page on its own fleet only.
-
-    Several demo gathers are otherwise unconditional, and a mainnet run
-    that inherits them alerts forever about roots it does not own.
-    """
-    calls: list[tuple[str, str]] = []
+def test_mainnet_account_scope_gathers_only_mainnet_signal_worker(tmp_path, monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
     monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", "104729361")
     monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
     monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
-    monkeypatch.setenv("CARRY_MAINNET_SLEEVE", "on")
-    monkeypatch.setenv("LONG_MAINNET_SLEEVE", "on")
     monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
-    monkeypatch.setattr(M, "_unit_runtime_metadata", lambda _units: {})
-    # Each gather also reports the root it was handed: a mainnet-labelled call
-    # against a demo root is the silent failure this scope exists to avoid.
-    for name, root_kwarg in (
-        ("gather_carry_alerts", "carry_root"),
-        ("gather_long_alerts", "long_root"),
-    ):
-        monkeypatch.setattr(
-            M,
-            name,
-            lambda _name=name, _root=root_kwarg, **kwargs: calls.append(
-                (f"{_name}:{kwargs['environment']}", Path(kwargs[_root]).name)
-            )
-            or [],
-        )
+    monkeypatch.setattr(
+        M,
+        "_unit_runtime_metadata",
+        lambda _units: {M._MAINNET_SIGNAL_WORKER.unit: M.UnitRuntime("ab" * 16, 2.0, 123)},
+    )
+    monkeypatch.setattr(
+        M,
+        "gather_signal_worker_alerts",
+        lambda **kwargs: calls.append(kwargs) or [],
+    )
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -996,10 +430,12 @@ def test_mainnet_account_scope_gathers_only_mainnet_producers(tmp_path, monkeypa
     )
 
     assert M.main() == 0
-    assert calls == [
-        ("gather_carry_alerts:mainnet", "bybit-carry-mainnet-event"),
-        ("gather_long_alerts:mainnet", "bybit-long-mainnet-event"),
-    ]
+    assert len(calls) == 1
+    assert calls[0]["label"] == M._MAINNET_SIGNAL_WORKER.unit
+    assert calls[0]["heartbeat_path"] == Path(
+        "/var/lib/liquidity-migration-signal-worker-mainnet/heartbeat.json"
+    )
+    assert calls[0]["runtime"] == M.UnitRuntime("ab" * 16, 2.0, 123)
 
 
 def test_mainnet_scope_requires_only_the_mainnet_owner(tmp_path, monkeypatch) -> None:
@@ -1008,8 +444,6 @@ def test_mainnet_scope_requires_only_the_mainnet_owner(tmp_path, monkeypatch) ->
     monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
     monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
     _stub_account_authority(monkeypatch)
-    monkeypatch.setenv("CARRY_MAINNET_SLEEVE", "off")
-    monkeypatch.setenv("LONG_MAINNET_SLEEVE", "off")
     monkeypatch.setattr(M, "_unit_states", lambda units: {unit: "active" for unit in units})
     monkeypatch.setattr(
         M,
@@ -1032,8 +466,6 @@ def test_mainnet_scope_cooldowns_cannot_collide_with_the_demo_watchdog(tmp_path,
     monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
     monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
     _stub_account_authority(monkeypatch)
-    monkeypatch.setenv("CARRY_MAINNET_SLEEVE", "off")
-    monkeypatch.setenv("LONG_MAINNET_SLEEVE", "off")
     monkeypatch.setattr(M, "_REPO_ROOT", sandbox_repo)
     monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
@@ -1055,7 +487,7 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
     alert = M.Alert(key="unit:fake.service", severity=M.CRITICAL, message="fake unit failed")
     _stub_account_authority(monkeypatch)
 
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["fake.service"])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: ["fake.service"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"fake.service": "failed"})
     # main() passes the timer debounce set, the install states, and the service
     # debounce set; **kwargs keeps this stub from breaking on the next keyword.
@@ -1066,8 +498,6 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
         [
             "check_fleet_liveness.py",
             "--telegram",
-            "--long-root",
-            "",
             "--state-file",
             str(state_file),
         ],
@@ -1085,31 +515,15 @@ def test_failed_telegram_send_does_not_advance_cooldown(tmp_path, monkeypatch, c
 
 
 # ---- Cooldown state-file fallback anchored at the repo, not the CWD ---------
-def _run_both_roots_skipped(monkeypatch) -> None:
-    """Run ``main()`` with every root skipped and no explicit --state-file, so the
-    state-file path comes purely from the ``_state_root`` fallback.
-    """
-    # No optional units / roots: main() still computes + persists state.
+def _run_without_explicit_state_file(monkeypatch) -> None:
     _stub_account_authority(monkeypatch)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "check_fleet_liveness.py",
-            "--long-root",
-            "",
-        ],
-    )
+    monkeypatch.setattr("sys.argv", ["check_fleet_liveness.py"])
     assert M.main() == 0
 
 
 def test_state_file_fallback_anchored_at_repo_not_cwd(tmp_path, monkeypatch) -> None:
-    """With both sleeve roots skipped, the cooldown state file must land at
-    ``_REPO_ROOT/data/.cache/liveness_watchdog.json`` regardless of CWD. The test
-    points ``_REPO_ROOT`` at an isolated sandbox and runs ``main()`` from a different
-    CWD, so the state file must follow the anchored repo dir.
-    """
     sandbox_repo = tmp_path / "repo"
     sandbox_repo.mkdir()
     monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", "104729361")
@@ -1120,7 +534,7 @@ def test_state_file_fallback_anchored_at_repo_not_cwd(tmp_path, monkeypatch) -> 
 
     monkeypatch.setattr(M, "_REPO_ROOT", sandbox_repo)
     monkeypatch.chdir(run_cwd)
-    _run_both_roots_skipped(monkeypatch)
+    _run_without_explicit_state_file(monkeypatch)
 
     anchored = sandbox_repo / "data" / ".cache" / "liveness_watchdog.json"
     cwd_relative = run_cwd / "data" / ".cache" / "liveness_watchdog.json"
@@ -1133,14 +547,12 @@ def test_explicit_state_file_unchanged(tmp_path, monkeypatch) -> None:
     fallback is never consulted (the fix only touches the both-roots-skipped fallback)."""
     explicit = tmp_path / "custom" / "state.json"
     _stub_account_authority(monkeypatch)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
     monkeypatch.setattr(
         "sys.argv",
         [
             "check_fleet_liveness.py",
-            "--long-root",
-            "",
             "--state-file",
             str(explicit),
         ],
@@ -1149,74 +561,33 @@ def test_explicit_state_file_unchanged(tmp_path, monkeypatch) -> None:
     assert explicit.exists()
 
 
-def test_a_populated_sleeve_root_does_not_drive_the_state_dir(tmp_path, monkeypatch) -> None:
-    """A sleeve root never decides where the cooldown state lives any more.
-
-    The state file used to sit under the first sleeve root that was set, which
-    kept recreating a retired sleeve's directory just to hold it. Repo data is
-    the one anchor now, whether or not a sleeve root is given.
-    """
-    sandbox_repo = tmp_path / "repo"
-    sandbox_repo.mkdir()
-    monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", "104729361")
-    monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
-    monkeypatch.setenv("EXPECTED_ENGINE_REALM", "mainnet")
-    carry_root = tmp_path / "bybit-carry-demo-event"
-    carry_root.mkdir()
-    _stub_account_authority(monkeypatch)
-    monkeypatch.setattr(M, "_REPO_ROOT", sandbox_repo)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
-    monkeypatch.setattr(M, "_unit_states", lambda units: {})
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "check_fleet_liveness.py",
-            "--carry-root",
-            str(carry_root),
-            "--long-root",
-            "",
-        ],
-    )
-    assert M.main() == 0
-    assert (sandbox_repo / "data" / ".cache" / "liveness_watchdog.json").exists()
-    assert not (carry_root / ".cache").exists()
-
-
 # --------------------------------------------------------------------------- #
 # Watchdog / kill-switch / telegram alerting
 # --------------------------------------------------------------------------- #
-def test_root_defaults_anchored_at_repo_not_cwd() -> None:
-    """A manual or cron invocation from another CWD must not silently disable a safety
-    gather: every default root resolves against the repo dir, not the relative working
-    directory.
-    """
+def test_worker_defaults_anchored_at_repo_not_cwd() -> None:
     parser = M.build_arg_parser()
     args = parser.parse_args([])
-    for attr in (
-        "long_root",
-        "carry_root",
-        "carry_mainnet_root",
-        "long_mainnet_root",
-    ):
+    for attr in ("carry_config_file",):
         value = Path(getattr(args, attr))
         assert value.is_absolute(), f"{attr} default must be absolute, got {value}"
         assert value.is_relative_to(REPO_ROOT), f"{attr} must be under the repo dir, got {value}"
-    # The documented '' skip sentinel is untouched by the anchoring.
-    assert M._default_root("data/x") == str(REPO_ROOT / "data/x")
+    assert Path(M._manifest_signal_heartbeat("demo")).is_absolute()
 
 
-def test_strategy_root_defaults_follow_late_environment(monkeypatch) -> None:
-    roots = {
-        "LONG_DEMO_DATA_ROOT": "/fresh/long-demo",
-        "CARRY_DEMO_DATA_ROOT": "/fresh/carry-demo",
+def test_worker_input_defaults_follow_late_environment(monkeypatch) -> None:
+    inputs = {
+        "OPERATIONAL_PROFILE_FILE": "/fresh/operational.json",
+        "ENGINE_CONFIG_FILE": "/fresh/engine.toml",
+        "CANDIDATE_UNIVERSE_FILE": "/fresh/universe.json",
     }
-    for key, value in roots.items():
+    for key, value in inputs.items():
         monkeypatch.setenv(key, value)
 
     args = M.build_arg_parser().parse_args([])
 
-    assert args.long_root == roots["LONG_DEMO_DATA_ROOT"]
-    assert args.carry_root == roots["CARRY_DEMO_DATA_ROOT"]
+    assert args.operational_config_file == inputs["OPERATIONAL_PROFILE_FILE"]
+    assert args.worker_engine_config_file == inputs["ENGINE_CONFIG_FILE"]
+    assert args.candidate_universe_file == inputs["CANDIDATE_UNIVERSE_FILE"]
 
 
 def test_timer_not_active_debounced_warning_then_critical() -> None:
@@ -1301,14 +672,12 @@ def test_main_deploy_window_timer_blip_warns_then_self_resolves(tmp_path, monkey
     sent: list[str] = []
     _stub_account_authority(monkeypatch)
 
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["blip.timer"])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: ["blip.timer"])
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
 
     common_argv = [
         "check_fleet_liveness.py",
         "--telegram",
-        "--long-root",
-        "",
         "--state-file",
         str(state_file),
     ]
@@ -1340,7 +709,7 @@ def test_main_routes_alerts_and_cleared_notes_to_the_alerts_channel(tmp_path, mo
     sent: list[tuple[str, str]] = []
     _stub_account_authority(monkeypatch)
 
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["blip.timer"])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: ["blip.timer"])
     monkeypatch.setattr(
         M,
         "send_telegram_message",
@@ -1349,8 +718,6 @@ def test_main_routes_alerts_and_cleared_notes_to_the_alerts_channel(tmp_path, mo
     common_argv = [
         "check_fleet_liveness.py",
         "--telegram",
-        "--long-root",
-        "",
         "--state-file",
         str(state_file),
     ]
@@ -1372,15 +739,13 @@ def test_main_persistently_dead_timer_escalates_to_critical(tmp_path, monkeypatc
     state_file = tmp_path / "state.json"
     _stub_account_authority(monkeypatch)
 
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["dead.timer"])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: ["dead.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"dead.timer": "inactive"})
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: True)
 
     common_argv = [
         "check_fleet_liveness.py",
         "--telegram",
-        "--long-root",
-        "",
         "--state-file",
         str(state_file),
     ]
@@ -1418,8 +783,6 @@ def _heartbeat_argv(state_file, heartbeat_url: str) -> list[str]:
     return [
         "check_fleet_liveness.py",
         "--telegram",
-        "--long-root",
-        "",
         "--state-file",
         str(state_file),
         "--heartbeat-url",
@@ -1432,7 +795,7 @@ def test_main_pings_the_dead_mans_switch_on_a_healthy_run(tmp_path, monkeypatch)
     state_file = tmp_path / "state.json"
     pings: list[str] = []
     _stub_account_authority(monkeypatch)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["healthy.timer"])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: ["healthy.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"healthy.timer": "active"})
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: True)
     monkeypatch.setattr(M, "_ping_heartbeat", lambda url: pings.append(url))
@@ -1446,7 +809,7 @@ def test_main_suppresses_the_heartbeat_when_a_telegram_send_fails(tmp_path, monk
     state_file = tmp_path / "state.json"
     pings: list[str] = []
     _stub_account_authority(monkeypatch)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["blip.timer"])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: ["blip.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"blip.timer": "inactive"})
     # A dead notification channel must page externally, not look like "all quiet".
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: False)
@@ -1461,7 +824,7 @@ def test_main_suppresses_the_heartbeat_while_a_critical_alert_fires(tmp_path, mo
     state_file = tmp_path / "state.json"
     pings: list[str] = []
     _stub_account_authority(monkeypatch)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["dead.timer"])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: ["dead.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda units: {"dead.timer": "inactive"})
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: True)
     monkeypatch.setattr(M, "_ping_heartbeat", lambda url: pings.append(url))
@@ -1506,6 +869,7 @@ def _engine_heartbeat_payload(**overrides) -> dict:
         "realm": "mainnet",
         "venue": "bybit",
         "strategies": ["carry"],
+        "strategy_errors": [],
         "wall_ts_ms": ENGINE_NOW_MS - 2_000,
         "wire_p50_ns": 3_900_000,
         "wire_p99_ns": 5_100_000,
@@ -1540,6 +904,52 @@ def test_engine_heartbeat_fresh_and_healthy_is_silent(tmp_path) -> None:
     # Exactly at the configured age is still inside the bound.
     at_bound = _write_engine_heartbeat(tmp_path / "at_bound.json", wall_ts_ms=ENGINE_NOW_MS - 60_000)
     assert _engine_alerts(at_bound) == []
+
+
+def test_symbol_entry_blockers_do_not_page_but_strategy_errors_do(tmp_path) -> None:
+    blocked = _write_engine_heartbeat(
+        tmp_path / "blocked.json",
+        entry_blockers=[
+            {
+                "strategy": "carry",
+                "symbol": "BTCUSDT",
+                "reason": "outside entry window",
+            }
+        ],
+    )
+    assert _engine_alerts(blocked) == []
+
+    broken = _write_engine_heartbeat(
+        tmp_path / "broken.json",
+        strategy_errors=[
+            {"strategy": "carry", "error": "decision contract mismatch"},
+            {"strategy": "long", "error": "checkpoint refused"},
+        ],
+    )
+    alerts = _engine_alerts(broken)
+    assert [alert.key for alert in alerts] == ["engine_strategy_error"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "carry: decision contract mismatch" in alerts[0].message
+    assert "long: checkpoint refused" in alerts[0].message
+
+
+def test_malformed_strategy_errors_make_the_heartbeat_unreadable(tmp_path) -> None:
+    cases = [
+        "not-a-list",
+        ["not-an-object"],
+        [{"strategy": "carry", "error": ""}],
+        [
+            {"strategy": "carry", "error": "first"},
+            {"strategy": "carry", "error": "second"},
+        ],
+    ]
+    for index, strategy_errors in enumerate(cases):
+        path = _write_engine_heartbeat(
+            tmp_path / f"malformed-strategy-errors-{index}.json",
+            strategy_errors=strategy_errors,
+        )
+        alerts = _engine_alerts(path)
+        assert [alert.key for alert in alerts] == ["engine_heartbeat_unreadable"]
 
 
 def test_engine_heartbeat_needs_no_account_lease_or_pid(tmp_path) -> None:
@@ -1687,7 +1097,7 @@ def test_engine_heartbeat_malformed_alerts_instead_of_raising(tmp_path) -> None:
         "the file is empty": empty,
         "it is not valid JSON": truncated,
         "the top level is a list": not_an_object,
-        "these fields are missing or the wrong type: mode, engine_version, venue, realm, market_events": before_the_rename,
+        "these fields are missing or the wrong type: mode, engine_version, venue, realm, market_events, strategy_errors": before_the_rename,
     }
     for expected_reason, path in cases.items():
         alerts = _engine_alerts(path)
@@ -1716,10 +1126,6 @@ def test_engine_heartbeat_string_false_is_not_read_as_permission_to_open(tmp_pat
 def _engine_main_argv(tmp_path, state_name: str, *extra: str) -> list[str]:
     return [
         "check_fleet_liveness.py",
-        "--long-root",
-        "",
-        "--carry-root",
-        "",
         "--state-file",
         str(tmp_path / state_name),
         *extra,
@@ -1735,7 +1141,7 @@ def test_engine_heartbeat_unconfigured_reads_nothing_and_alerts_nothing(
     reads: list[Path] = []
     _stub_account_authority(monkeypatch)
     monkeypatch.delenv("LIVENESS_ENGINE_HEARTBEAT_FILE", raising=False)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
     monkeypatch.setattr(
         M,
@@ -1766,7 +1172,7 @@ def test_main_pages_every_broken_heartbeat_and_still_exits_zero(tmp_path, monkey
     shape of this file can stop the watchdog exiting 0.
     """
     _stub_account_authority(monkeypatch)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
 
     healthy = _write_engine_heartbeat(tmp_path / "healthy.json", wall_ts_ms=M._now_ms() - 2_000)
@@ -1917,7 +1323,7 @@ def test_engine_heartbeat_is_aged_against_a_clock_read_after_the_file(tmp_path, 
     cause, and leaves the future-dated alert meaning what it says.
     """
     _stub_account_authority(monkeypatch)
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: [])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: [])
     monkeypatch.setattr(M, "_unit_states", lambda units: {})
 
     started_ms = M._now_ms()
@@ -1966,8 +1372,6 @@ def _digest_argv(state_file) -> list[str]:
     return [
         "check_fleet_liveness.py",
         "--telegram",
-        "--long-root",
-        "",
         "--state-file",
         str(state_file),
     ]
@@ -1985,7 +1389,7 @@ def test_a_whole_run_is_one_message_not_one_per_alert(tmp_path, monkeypatch) -> 
     _stub_account_authority(monkeypatch)
 
     units = ["a.timer", "b.timer", "c.timer"]
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: units)
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: units)
     monkeypatch.setattr(M, "evaluate_disk_space", lambda path: None)
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
     monkeypatch.setattr("sys.argv", _digest_argv(state_file))
@@ -2015,7 +1419,7 @@ def test_a_quiet_run_sends_nothing_at_all(tmp_path, monkeypatch) -> None:
     sent: list[str] = []
     _stub_account_authority(monkeypatch)
 
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: ["ok.timer"])
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: ["ok.timer"])
     monkeypatch.setattr(M, "_unit_states", lambda _units: {"ok.timer": "active"})
     monkeypatch.setattr(M, "evaluate_disk_space", lambda path: None)
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: sent.append(line) or True)
@@ -2031,7 +1435,7 @@ def test_a_failed_digest_leaves_every_key_to_retry(tmp_path, monkeypatch) -> Non
     _stub_account_authority(monkeypatch)
 
     units = ["a.timer", "b.timer"]
-    monkeypatch.setattr(M, "_default_units_for_toggles", lambda: units)
+    monkeypatch.setattr(M, "_default_units_for_scope", lambda _scope: units)
     monkeypatch.setattr(M, "_unit_states", lambda _units: dict.fromkeys(units, "inactive"))
     monkeypatch.setattr(M, "send_telegram_message", lambda line, **kwargs: False)
     monkeypatch.setattr("sys.argv", _digest_argv(state_file))
@@ -2277,10 +1681,6 @@ def test_the_digest_goes_out_once_a_day_and_a_failed_send_retries(tmp_path, monk
             "check_fleet_liveness.py",
             "--account-scope",
             "demo",
-            "--long-root",
-            "",
-            "--carry-root",
-            "",
             "--engine-heartbeat-file",
             str(beat),
             "--state-file",
@@ -2307,10 +1707,6 @@ def test_the_digest_goes_out_once_a_day_and_a_failed_send_retries(tmp_path, monk
             "check_fleet_liveness.py",
             "--account-scope",
             "demo",
-            "--long-root",
-            "",
-            "--carry-root",
-            "",
             "--engine-heartbeat-file",
             str(beat),
             "--state-file",
@@ -2348,10 +1744,6 @@ def test_no_daily_digest_flag_turns_it_off(tmp_path, monkeypatch) -> None:
             "check_fleet_liveness.py",
             "--account-scope",
             "demo",
-            "--long-root",
-            "",
-            "--carry-root",
-            "",
             "--engine-heartbeat-file",
             str(beat),
             "--state-file",

@@ -22,11 +22,13 @@ from liquidity_migration.rules.carry_hold import (
     CarryHoldConfig,
     FinancedLongsError,
     _signal_frame,
-    carry_hold_weights,
     daily_grid,
     prepare_decision,
     settlement_exact_funding,
     top_n_universe,
+)
+from liquidity_migration.rules.rust_strategy_contract import (
+    rust_carry_research_weights as carry_hold_weights,
 )
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"

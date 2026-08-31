@@ -1061,6 +1061,15 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
         intended_stops: vec![],
         recent_execution_ids: vec![],
         execution_history_through_ms: Some(1),
+        target_book_latches: vec![],
+        strategy_checkpoints: vec![],
+        strategy_global_checkpoints: vec![],
+        strategy_events: vec![],
+        signal_observations: vec![],
+        signal_cursors: vec![],
+        signal_subscriptions: vec![],
+        runtime_control_requests: vec![],
+        runtime_control_consumed: vec![],
         open_orders: vec![],
     };
     fn order(id: &str) -> WalRecord {

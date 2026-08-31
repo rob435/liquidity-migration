@@ -98,14 +98,6 @@ DATASETS = {
     "premium_index_1h",
     "ticker_snapshots",
     "archive_trade_manifest",
-    "universe_current",
-    "event_demo_klines_1h",
-    "long_native_demo_cycles",
-    "long_native_mainnet_cycles",
-    "continuous_fade_demo_cycles",
-    "carry_hold_demo_cycles",
-    "carry_hold_mainnet_cycles",
-    "carry_funding_events",
     "binance_usdm_klines_1h",
     "binance_usdm_mark_price_1h",
     "binance_usdm_index_price_1h",
@@ -125,16 +117,6 @@ DATASET_KEYS = {
     "premium_index_1h": ("ts_ms", "symbol"),
     "ticker_snapshots": ("ts_ms", "symbol"),
     "archive_trade_manifest": ("symbol", "date", "url"),
-    "universe_current": ("snapshot_ts_ms", "symbol"),
-    "event_demo_klines_1h": ("ts_ms", "symbol"),
-    "long_native_demo_cycles": ("cycle_id",),
-    "long_native_mainnet_cycles": ("cycle_id",),
-    "continuous_fade_demo_cycles": ("cycle_id",),
-    "carry_hold_demo_cycles": ("cycle_id",),
-    "carry_hold_mainnet_cycles": ("cycle_id",),
-    # Keyed by settlement instant, so the carry sleeve's overlap-window
-    # incremental appends are idempotent at the storage layer.
-    "carry_funding_events": ("symbol", "funding_ts_ms"),
     "binance_usdm_klines_1h": ("ts_ms", "symbol"),
     "binance_usdm_mark_price_1h": ("ts_ms", "symbol"),
     "binance_usdm_index_price_1h": ("ts_ms", "symbol"),
@@ -202,7 +184,6 @@ def ensure_data_root(data_root: str | Path) -> Path:
 def exclusive_file_lock(
     path: str | Path,
     *,
-    stale_seconds: float = 600,
     poll_seconds: float = 0.05,
 ) -> Iterator[None]:
     """Serialize a critical section across threads and local POSIX processes.
@@ -210,15 +191,13 @@ def exclusive_file_lock(
     The lock leaf is persistent and never unlinked during normal operation.
     Kernel ``flock`` ownership ends automatically on descriptor close or process
     death, so recovery never infers liveness from a pathname, PID, payload, or
-    wall-clock age. ``stale_seconds`` remains a compatibility no-op;
-    ``poll_seconds`` still controls nonblocking wait cadence.
+    wall-clock age. ``poll_seconds`` controls retries only when the path changes
+    during acquisition.
 
-    This protocol requires a local flock-capable filesystem and a quiescent
-    migration from the retired create/unlink implementation. Explicitly forking
-    inside the yielded critical section is unsupported; fork/exec helpers and
-    forks from other threads are cleaned up by the module's at-fork handler.
+    This protocol requires a local flock-capable filesystem. Explicitly forking
+    inside the yielded critical section is unsupported; the at-fork handler
+    closes inherited descriptors and resets child mutexes.
     """
-    del stale_seconds
     lock_path = Path(path).expanduser()
     _ensure_lock_directory(lock_path)
     poll = max(float(poll_seconds), 0.0)
@@ -655,47 +634,6 @@ def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:
     )
 
 
-# Cycle heartbeats are wide and written once per 60s producer cycle, and every
-# append rewrites the whole part file it lands in (see _write_part). Day buckets
-# keep that rewrite at one day of rows (~1,440) instead of a whole month
-# (~43,200) or, for an unregistered dataset, the entire history.
-#
-# Every dataset a target producer appends a cycle row to belongs here. Being
-# absent is not a smaller bucket, it is no bucket at all: write_dataset falls
-# through to a single part.parquet that grows forever.
-_LEDGER_BUCKET_COL = "date"
-# Written by the older month scheme. Still dropped on read so parts from before
-# the day-bucket switch keep reading.
-_LEDGER_MONTH_COL = "_ledger_month"
-LEDGER_BUCKET_SOURCE: dict[str, str] = {
-    "continuous_fade_demo_cycles": "ts_ms",
-    "carry_hold_demo_cycles": "ts_ms",
-    "carry_hold_mainnet_cycles": "ts_ms",
-    "long_native_demo_cycles": "ts_ms",
-    "long_native_mainnet_cycles": "ts_ms",
-}
-
-
-def _with_ledger_date(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
-    """Set the YYYY-MM-DD ``date`` partition column for a bucketed ledger dataset
-    from its registered timestamp source. The registered source wins over any
-    date the caller put on the frame, so the bucket is always a pure function of
-    one column. Rows whose source ts is missing/null/<=0 go to ``date=unknown``:
-    a malformed row never crashes the write, and ``unknown`` sorts after any real
-    date so a since_date read never prunes it away. A no-op for datasets not in
-    LEDGER_BUCKET_SOURCE or when the source column is absent."""
-    src = LEDGER_BUCKET_SOURCE.get(dataset)
-    if src is None or src not in df.columns or df.is_empty():
-        return df
-    ts = pl.col(src).cast(pl.Int64, strict=False)
-    return df.with_columns(
-        pl.when(ts.is_null() | (ts <= 0))
-        .then(pl.lit("unknown"))
-        .otherwise(pl.from_epoch(ts, time_unit="ms").dt.strftime("%Y-%m-%d"))
-        .fill_null("unknown")
-        .alias(_LEDGER_BUCKET_COL)
-    )
-
 # How stale an orphaned `.*.tmp` part file must be before the sweep removes it.
 # A temp file only exists between write_parquet and the rename in _write_part, so
 # anything older came from a process killed mid-write.
@@ -766,7 +704,7 @@ def write_dataset(
     append: bool = True,
 ) -> Path:
     root = ensure_data_root(data_root)
-    with exclusive_file_lock(dataset_lock_path(root, dataset), stale_seconds=21_600, poll_seconds=0.01):
+    with exclusive_file_lock(dataset_lock_path(root, dataset), poll_seconds=0.01):
         return _write_dataset_unlocked(df, root, dataset, partition_by=partition_by, append=append)
 
 
@@ -791,7 +729,7 @@ def replace_dataset(
     token = f"{os.getpid()}-{os.urandom(8).hex()}"
     staging = path.parent / f".{path.name}.replacing-{token}"
     retired = path.parent / f".{path.name}.retired-{token}"
-    with exclusive_file_lock(dataset_lock_path(root, dataset), stale_seconds=21_600, poll_seconds=0.01):
+    with exclusive_file_lock(dataset_lock_path(root, dataset), poll_seconds=0.01):
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
         try:
@@ -846,14 +784,6 @@ def _write_dataset_unlocked(
     if "ts_ms" in df.columns:
         df = with_date_column(df)
     path.mkdir(parents=True, exist_ok=True)
-
-    # Day-bucket the cycle ledgers regardless of the caller's partition_by, so
-    # the hot-path write reads and rewrites one day of rows, not the whole month
-    # and not the whole history.
-    if dataset in LEDGER_BUCKET_SOURCE:
-        df = _with_ledger_date(df, dataset)
-        if _LEDGER_BUCKET_COL in df.columns:
-            partition_by = (_LEDGER_BUCKET_COL,)
 
     partition_cols = [col for col in partition_by if col in df.columns]
     if not partition_cols:
@@ -923,7 +853,7 @@ def read_dataset_columns(
     # The torn-read race is accepted there: it raises and the caller retries.
     lock_ctx = (
         exclusive_file_lock(
-            dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01
+            dataset_lock_path(data_root, dataset), poll_seconds=0.01
         )
         if lock
         else contextlib.nullcontext()
@@ -963,16 +893,13 @@ def _collect_files(
     *,
     columns: list[str] | None,
 ) -> pl.DataFrame:
-    """Union parquet parts and hide the internal month-partition column."""
+    """Union parquet parts while tolerating additive schema changes."""
     if not files:
         return pl.DataFrame()
     file_paths = [str(file) for file in files]
     try:
         lf = pl.scan_parquet(file_paths)
         names = lf.collect_schema().names()
-        if _LEDGER_MONTH_COL in names:
-            lf = lf.drop(_LEDGER_MONTH_COL)
-            names = [n for n in names if n != _LEDGER_MONTH_COL]
         if columns is not None:
             lf = lf.select([col for col in columns if col in names])
         out = lf.collect()
@@ -1041,9 +968,6 @@ def _collect_evolved_schema_files(
                     # back to the per-file path — 59s to 158s, no signal.
                     if known is None or known == pl.Null:
                         union[name] = dtype
-    # Left out of the declared schema and thereby ignored, matching the hidden
-    # month-partition column's treatment on the fast path.
-    union.pop(_LEDGER_MONTH_COL, None)
     projection = None if columns is None else [col for col in columns if col in union]
     if projection is not None:
         union = {name: dtype for name, dtype in union.items() if name in projection}
@@ -1062,8 +986,6 @@ def _collect_evolved_schema_files(
     except _SCHEMA_UNION_ERRORS:
         frames = [pl.read_parquet(file) for file in file_paths]
         out = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
-        if _LEDGER_MONTH_COL in out.columns:
-            out = out.drop(_LEDGER_MONTH_COL)
         if columns is not None and not out.is_empty():
             out = out.select([col for col in columns if col in out.columns])
         return out

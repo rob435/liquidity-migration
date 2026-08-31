@@ -1,7 +1,7 @@
 [Unit]
 Description=liquidity-migration Rust execution engine on the FUNDED account (runs only while REAL_MONEY is armed)
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target liquidity-migration-signal-worker-mainnet.service
+After=network-online.target liquidity-migration-signal-worker-mainnet.service
 
 # NO `Conflicts=` with anything, deliberately. What stops two processes trading
 # this account is the account's kernel lease, which this engine takes at boot.
@@ -51,7 +51,7 @@ KillMode=control-group
 # out; nothing here waits on a venue round trip.
 TimeoutStopSec=30
 
-# This process carries real orders; it does not yield CPU to a producer.
+# This process carries real orders; it does not yield CPU to the signal worker.
 Nice=-5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=4
@@ -63,7 +63,7 @@ ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
 UMask=0027
-ReadWritePaths=/run/lock/liquidity-migration /var/lib/liquidity-migration-engine-mainnet
+ReadWritePaths=/run/lock/liquidity-migration /var/lib/liquidity-migration-engine-mainnet /var/lib/liquidity-migration/signals/mainnet /var/lib/liquidity-migration/controls/mainnet
 MemoryMax=512M
 LimitNOFILE=65536
 TasksMax=256

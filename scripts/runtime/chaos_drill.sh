@@ -8,7 +8,12 @@
 # DEMO ONLY, hardcoded. The funded engine's crashes are not for rehearsing.
 set -euo pipefail
 
-UNIT="liquidity-migration-engine.service"
+REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+LM_FLEET_MANIFEST="$REPOSITORY_ROOT/deploy/fleet_manifest.tsv"
+# shellcheck source=deploy/lib_sleeves.sh
+source "$REPOSITORY_ROOT/deploy/lib_sleeves.sh"
+lm_validate_fleet_manifest
+UNIT="$(lm_owner_unit demo)"
 HEARTBEAT="${LIVENESS_ENGINE_HEARTBEAT_FILE:?LIVENESS_ENGINE_HEARTBEAT_FILE is required: recovery is judged by the heartbeat}"
 EXPECTED_ACCOUNT="${EXPECTED_ENGINE_ACCOUNT_USER_ID:?EXPECTED_ENGINE_ACCOUNT_USER_ID is required}"
 EXPECTED_VENUE="${EXPECTED_ENGINE_VENUE:?EXPECTED_ENGINE_VENUE is required}"

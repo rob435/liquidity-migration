@@ -5,6 +5,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 
 _FAKE_SYSTEMCTL = r"""#!/usr/bin/env bash
@@ -242,38 +244,25 @@ def test_parser_rejects_duplicate_carry_toggles(tmp_path: Path) -> None:
     assert "duplicate CARRY_SLEEVE" in proc.stderr
 
 
-def test_parser_ignores_retired_paper_toggles_but_rejects_unknown_keys(tmp_path: Path) -> None:
-    # A stale host override may still carry the retired paper keys. They toggle
-    # nothing and warn rather than brick the deploy; an unknown key fails hard.
-    retired = tmp_path / "retired-sleeves.env"
-    retired.write_text(
-        "CARRY_SLEEVE=on\n"
-        "CONTINUOUS_PAPER_SLEEVE=on\n"
-        "CARRY_PAPER_SLEEVE=on\n"
-        "PAPER_TARGET_MIRROR=on\n"
-        "CARRY_MAINNET_SLEEVE=on\n"
-        "LONG_MAINNET_SLEEVE=on\n",
-        encoding="utf-8",
-    )
+@pytest.mark.parametrize(
+    "key",
+    [
+        "CONTINUOUS_PAPER_SLEEVE",
+        "CARRY_PAPER_SLEEVE",
+        "PAPER_TARGET_MIRROR",
+        "CARRY_MAINNET_SLEEVE",
+        "LONG_MAINNET_SLEEVE",
+        "NEW_SLEEVE",
+    ],
+)
+def test_parser_rejects_every_unregistered_sleeve_toggle(tmp_path: Path, key: str) -> None:
+    env_file = tmp_path / "invalid-sleeves.env"
+    env_file.write_text(f"CARRY_SLEEVE=on\n{key}=on\n", encoding="utf-8")
     script = textwrap.dedent(f"""
         set -euo pipefail
         cd "{REPO}"
         . deploy/lib_sleeves.sh
-        lm_parse_sleeve_environment "{retired}"
-        echo "PARSED_OK"
-    """)
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-    assert proc.returncode == 0, proc.stderr
-    assert "PARSED_OK" in proc.stdout
-    assert proc.stderr.count("retired sleeve toggle ignored") == 5
-
-    unknown = tmp_path / "unknown-sleeves.env"
-    unknown.write_text("CARRY_SLEEVE=on\nNEW_SLEEVE=on\n", encoding="utf-8")
-    script = textwrap.dedent(f"""
-        set -euo pipefail
-        cd "{REPO}"
-        . deploy/lib_sleeves.sh
-        lm_parse_sleeve_environment "{unknown}"
+        lm_parse_sleeve_environment "{env_file}"
     """)
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     assert proc.returncode != 0

@@ -3,12 +3,17 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{StrategyId, SymbolId};
 use crate::orders::{AmendSpec, Intent, OrderRequest, OrderUpdate, QuoteFillFeatures, Side};
 use crate::risk::RiskVerdict;
+use crate::strategy::{
+    CheckpointProvenance, RuntimeControlRequest, SignalObservation, StrategyCheckpoint,
+    StrategyEvent,
+};
 
 /// One record in the append-only log. Serialized as tagged JSON inside a
 /// checksummed binary frame (framing is the WAL crate's concern). Kept
 /// human-readable on purpose: the log is the engine's audit trail.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum WalRecord {
     /// Engine start: code identity and config identity, so every later
     /// record is attributable.
@@ -298,6 +303,68 @@ pub enum WalRecord {
         /// Exactly the rows as they stood when dropped, as the receipt.
         rows: Vec<FilledTotal>,
     },
+    /// Retired target-book follower state. Read for WAL compatibility and
+    /// ignored by current runtimes.
+    TargetBookLatch {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        latched: bool,
+    },
+    /// Strategy-owned state made durable before the venue action it guards.
+    StrategyCheckpoint {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        checkpoint: StrategyCheckpoint,
+    },
+    /// Whole-sleeve state made durable before the later effect it guards.
+    StrategyGlobalCheckpoint {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        checkpoint: StrategyCheckpoint,
+        /// Present for a stopped-runtime takeover import; absent for live
+        /// reducer checkpoints.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<CheckpointProvenance>,
+    },
+    /// One immutable cross-sleeve event, durable before either strategy can
+    /// act on it.
+    StrategyEventPublished {
+        wall_ts_ms: i64,
+        event: StrategyEvent,
+    },
+    /// The addressed strategy durably consumed one cross-sleeve event.
+    StrategyEventConsumed {
+        wall_ts_ms: i64,
+        source: StrategyId,
+        destination: StrategyId,
+        event_id: String,
+    },
+    /// One normalized external observation, durable before reducer delivery.
+    SignalObservation {
+        wall_ts_ms: i64,
+        observation: SignalObservation,
+    },
+    /// The addressed strategy durably consumed one external observation.
+    SignalObservationConsumed {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        source: String,
+        sequence: u64,
+        observation_id: String,
+    },
+    /// One operator request, durable before its gate changes in memory.
+    RuntimeControlAccepted {
+        wall_ts_ms: i64,
+        request: RuntimeControlRequest,
+    },
+    /// A strategy finished applying a replayable runtime command.
+    RuntimeControlConsumed {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        request_id: String,
+    },
     /// The first record of every log segment after the first: everything boot
     /// replay needs from the segments before this one, restated, so replaying
     /// this one segment recovers the same engine as replaying them all.
@@ -351,6 +418,37 @@ pub enum WalRecord {
         /// rotation. Older segment bases have no such proof.
         #[serde(default)]
         execution_history_through_ms: Option<i64>,
+        /// Retired target-book latches kept in the segment schema so older
+        /// restatements remain readable. Current rotations leave this empty.
+        #[serde(default)]
+        target_book_latches: Vec<StrategySymbol>,
+        /// Newest strategy-owned state per strategy and symbol.
+        #[serde(default)]
+        strategy_checkpoints: Vec<StrategyCheckpointState>,
+        /// Newest whole-sleeve state per strategy.
+        #[serde(default)]
+        strategy_global_checkpoints: Vec<StrategyGlobalCheckpointState>,
+        /// Cross-sleeve events still waiting for their destination.
+        #[serde(default)]
+        strategy_events: Vec<StrategyEvent>,
+        /// External observations still waiting for their strategy.
+        #[serde(default)]
+        signal_observations: Vec<SignalObservation>,
+        /// Highest contiguous external sequence durably accepted per source.
+        #[serde(default)]
+        signal_cursors: Vec<SignalCursor>,
+        /// Monotonic requested feed union per external source and destination.
+        /// Consumption and later universe changes never remove held names.
+        #[serde(default)]
+        signal_subscriptions: Vec<SignalSubscriptionState>,
+        /// Accepted runtime entry requests in append order. The whole history
+        /// is retained so a retried old request id stays a no-op after
+        /// rotation instead of changing the current gate again.
+        #[serde(default)]
+        runtime_control_requests: Vec<RuntimeControlRequest>,
+        /// Durable acknowledgements for replayable runtime commands.
+        #[serde(default)]
+        runtime_control_consumed: Vec<(StrategyId, String)>,
         /// Every order still in flight, with the fields its own records
         /// carried.
         open_orders: Vec<OpenOrderState>,
@@ -377,6 +475,46 @@ pub struct FilledTotal {
 pub struct SymbolTotal {
     pub symbol: SymbolId,
     pub signed_qty: f64,
+}
+
+/// One strategy/symbol state key inside [`WalRecord::SegmentBase`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrategySymbol {
+    pub strategy: StrategyId,
+    pub symbol: SymbolId,
+}
+
+/// One strategy-owned checkpoint inside [`WalRecord::SegmentBase`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrategyCheckpointState {
+    pub strategy: StrategyId,
+    pub symbol: SymbolId,
+    pub checkpoint: StrategyCheckpoint,
+}
+
+/// One whole-sleeve checkpoint inside [`WalRecord::SegmentBase`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrategyGlobalCheckpointState {
+    pub strategy: StrategyId,
+    pub checkpoint: StrategyCheckpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<CheckpointProvenance>,
+}
+
+/// Highest contiguous external observation accepted from one source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalCursor {
+    pub source: String,
+    pub sequence: u64,
+    pub content_sha256: String,
+}
+
+/// Durable subscription union from one external source to one strategy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalSubscriptionState {
+    pub source: String,
+    pub destination: StrategyId,
+    pub subscriptions: Vec<crate::market::Subscription>,
 }
 
 /// One intended-stop row inside [`WalRecord::SegmentBase`].
@@ -643,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn old_segment_base_without_history_checkpoint_still_reads() {
+    fn old_segment_base_without_new_defaulted_fields_still_reads() {
         let base = WalRecord::SegmentBase {
             wall_ts_ms: 1,
             strategies: Vec::new(),
@@ -655,6 +793,15 @@ mod tests {
             intended_stops: Vec::new(),
             recent_execution_ids: Vec::new(),
             execution_history_through_ms: Some(123),
+            target_book_latches: Vec::new(),
+            strategy_checkpoints: Vec::new(),
+            strategy_global_checkpoints: Vec::new(),
+            strategy_events: Vec::new(),
+            signal_observations: Vec::new(),
+            signal_cursors: Vec::new(),
+            signal_subscriptions: Vec::new(),
+            runtime_control_requests: Vec::new(),
+            runtime_control_consumed: Vec::new(),
             open_orders: Vec::new(),
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
@@ -662,12 +809,31 @@ mod tests {
             .as_object_mut()
             .expect("tagged record is an object")
             .remove("execution_history_through_ms");
+        encoded
+            .as_object_mut()
+            .expect("tagged record is an object")
+            .remove("strategy_checkpoints");
+        for field in [
+            "strategy_global_checkpoints",
+            "strategy_events",
+            "signal_observations",
+            "signal_cursors",
+            "signal_subscriptions",
+            "runtime_control_requests",
+            "runtime_control_consumed",
+        ] {
+            encoded
+                .as_object_mut()
+                .expect("tagged record is an object")
+                .remove(field);
+        }
         assert!(matches!(
             serde_json::from_value::<WalRecord>(encoded).expect("legacy segment base reads"),
             WalRecord::SegmentBase {
                 execution_history_through_ms: None,
+                strategy_checkpoints,
                 ..
-            }
+            } if strategy_checkpoints.is_empty()
         ));
     }
 }

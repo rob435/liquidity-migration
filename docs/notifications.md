@@ -1,323 +1,184 @@
-# Notifications and alerting
+# Notifications and controls
 
-Two chat lines, two reporters, one listener. The liveness watchdog pages when the fleet stops looking
-healthy, and its view of the engine is the heartbeat file the engine rewrites every few seconds;
-`trade-notify` sends every sleeve's entries and exits to the owner's DM, and an exit carries what the
-position made (§The trading story). The engines send nothing themselves (both units strip the bot
-token) — they write files, and `trade-notify` is what reaches a phone. The watchdog also posts one
-engine-health line per fleet per day on the alerts line (§The daily digest) — that is the only
-periodic message; there is no hourly anything. The listener is the control panel (§Owner control
-buttons): the one component that reads the chat, and it posts the panel and its action results.
+Telegram carries three separate surfaces:
 
-**The main line** (`TELEGRAM_CHAT_ID`) carries the control panel and its action results. **The alerts
-line** (`TELEGRAM_ALERT_CHAT_ID`) carries
-watchdog pages and their cleared notes, one message per watchdog run however many checks tripped. Each
-alert in it is a plain one-line headline plus a stable `ref <key>`; paste the whole message to Claude to
-hand the problem over. The full technical detail stays in the watchdog's journal
-(`journalctl -u liquidity-migration-demo-liveness`).
-
-An empty `TELEGRAM_ALERT_CHAT_ID` sends alerts to the main chat instead — nothing goes silent while the
-second chat is not set up. To split the lines: create a Telegram group, add the bot to it, send any
-message there, then read the group's chat id from the bot's `getUpdates` API and put it in the host env
-file as `TELEGRAM_ALERT_CHAT_ID`.
-
-All senders read `TELEGRAM_BOT_TOKEN` plus the chat ids
-([`telegram.py`](../liquidity_migration/ops/telegram.py)). Missing token/chat is not an error: the send
-returns `False` and the caller decides. A unit opts in with `TELEGRAM_ENABLED=1`.
-
-| Unit | Telegram | Sends | Line |
+| Surface | Source | Destination | Authority |
 | --- | --- | --- | --- |
-| `demo-liveness` | on | watchdog alerts, demo scope, plus one daily engine digest | alerts |
-| `mainnet-liveness` | on | watchdog alerts, mainnet scope, plus one daily engine digest | alerts |
-| `telegram-controls` | on | control panel + action results; **also listens** | main |
-| `engine` / `engine-mainnet` | off — the unit strips the token | nothing; the engine's live signal is its heartbeat file, which the watchdog reads | — |
-| `llm-ledger` | off — the unit reads no Telegram env | nothing; its judged candidates are read by the LONG producer, and the trades they become page as LONG entries/exits | — |
-| `trade-notify` | on | both accounts' entries (from the books) and exits with their P&L (from the engines), plus one daily summary; runs every 5 minutes | main |
-| `chaos-drill` | on | the weekly demo crash-drill verdict: recovered clean, came back latched, or did not come back | alerts |
-| `backup` | off — no Telegram env | nothing; its receipt is the stamp file the watchdog reads the age of | — |
-| every producer | off or unset | nothing | — |
+| trade updates | engine heartbeat and attributed trade log | main chat | read-only |
+| health alerts | fleet liveness checks | alert chat, falling back to main | read-only |
+| control panel | Telegram poller through the root helper | main chat | durable entry controls only |
 
-Producers publish targets and never notify; the phone's trading story comes
-from the notifier units above, reading what the producers and the engines
-write. The main line is the owner's DM with the bot; the alerts line is the
-group, and it belongs to the watchdog. A producer that goes quiet is the
-watchdog's problem.
+The Rust engines and signal workers receive no Telegram variables. Observer
+units load the token and chat IDs, then explicitly unset every venue credential
+and `REAL_MONEY`.
 
-## The trading story
+## Trade updates
 
-[`scripts/runtime/notify_book_changes.py`](../scripts/runtime/notify_book_changes.py), on a 5-minute
-timer, reading two kinds of file for two different questions.
+`liquidity-migration-trade-notify.timer` runs every five minutes. Its oneshot
+service reads both realms:
 
-The vocabulary is two dots: 🟢 made money, 🔴 lost it — only on messages that carry a verdict; the
-rest are bare text. Every message names its account — RM is the funded account (real money), DEMO the
-demo. The verdict and the money are the first line, because a phone's notification preview shows one
-line and that line is the whole point.
-
-Every message is one monospace block: builders write plain text, and `as_block` in
-[`liquidity_migration/ops/telegram.py`](../liquidity_migration/ops/telegram.py) escapes it and wraps it
-once, at the send. So columns line up, the whole thing copies in a tap, and a `<` in a venue symbol
-cannot make Telegram reject the message. Nothing carries prose that explains itself.
-
-**Entries come from the target books.** A symbol appearing with size is a sleeve's decision, and that
-is news the moment it is decided, before anything fills.
-
-    DEMO CARRY enters ONGUSDT · $478
-    DEMO EXODUS shorts COTIUSDT · $536
-    RM LONG enters ETHUSDT · $25.74
-    RM EXODUS shorts MOVEUSDT · $31.20
-
-**Exits come from the engine**, out of the closed-trade file it appends a line to whenever a position
-goes flat (`trades_path` in `engine.toml`). An exit is worth reading only with its numbers beside it:
-
-    🟢 DEMO CARRY +$16.28 · ONGUSDT
-    long 8h 38m · 0.06846 → 0.07072 · +3.24%
-    $503 · fee $0.55 · maker 100% · slip paid 0.01%
-
-Line one is the verdict, line two the trade — ending in the position's percent gain, net of fees.
-Line three is what it cost: `maker` is the share of the traded notional that earned the spread instead
-of paying it; `slip` is how far the fills landed from the price on the screen when their orders left
-(arrival shortfall), as a percent of what traded — **paid** when they landed worse, **saved** when
-better. The verb carries the direction because the engine's own convention (positive when adverse)
-runs against the net beside it, where positive means made money; a chased resting order keeps its
-decision-time anchor, so chasing lands in slip rather than being hidden by re-anchoring. Both are
-`docs/architecture.md` §Trade diagnostics numbers, computed by the engine off its own log. Prices carry
-four significant figures, and every return reads as percent of the position — basis points stay in the
-engine's own reports.
-
-**Every net is after fees and nothing else.** The crowd fee (funding) is settled into the wallet on
-the venue's own eight-hourly clock and the engine is never told about it, so no number here carries it.
-For carry, whose expected edge *is* the crowd fee, that makes these numbers the price move and the
-costs — not the whole of what the sleeve earned. The messages do not say so; this doc does.
-
-A close the engine cannot price is marked, not claimed as a zero:
-
-    DEMO CARRY closed ONGUSDT · long · out 0.0886 · unpriced
-
-That happens when the fills that opened the position are in a log segment boot no longer replays. The
-quantity survives the rotation in the new segment's restatement and the prices do not, so the close is
-reported and the money is not.
-
-**One run is one message.** Everything a 5-minute run has to say goes out together, split only when it
-passes what Telegram will take.
-
-**One daily summary**, on the first run after midnight UTC, over the day that just ended. Its dot is
-the day's colour, and the per-sleeve lines are a monospace win–loss table:
-
-    🟢 Sun 23 Aug · 8 trips · 6 won · +$103.90
-
-    DEMO CARRY    3–0  +$62.40
-    DEMO EXODUS   3–2  +$41.50
-
-    best  +$34.05 · DEMO EXODUS COTIUSDT
-    worst -$2.26 · DEMO EXODUS COTIUSDT
-
-Rows are per account as well as per sleeve — real money and demo run the same sleeves, and one row
-adding both would put play money and the owner's own in a single figure.
-
-It is stamped by the day it covers, so a run that could not send retries rather than skipping it.
-
-**Sleeves that only exercise the machinery say nothing.** `HIDDEN_SLEEVES` in the notifier names them —
-`maker_canary` is one — and their closed trades reach stdout and journald and go no further: no
-message, no row, and no part of the day's trip count or total. They are order-path exercise, not a
-trading result, and a dozen of them in a day would otherwise bury the two trades that were.
-
-With no closed-trade file at all — an engine whose config names no `trades_path` — exits fall back to
-the books: `DEMO CARRY exits ONGUSDT`, `DEMO EXODUS covers ONGUSDT` — with nothing about what they
-made, which is the only thing the books can say.
-
-## Owner control buttons
-
-[`telegram_controls.py`](../liquidity_migration/ops/telegram_controls.py), an always-on daemon
-(`liquidity-migration-telegram-controls.service`) and the only consumer of the bot's incoming updates —
-nothing else may poll `getUpdates` on this token. Send `/controls` in the main chat to get the buttons;
-`/status` for a plain fleet summary.
-
-- **⏸ Pause trading** — stops new decisions. Writes the sleeve toggles off in the host override
-  (`/etc/liquidity-migration/sleeves.env`, keeping a verbatim copy of what was there), regenerates the
-  resolved toggles with the deploy's own library, and stops the producer units. The engine, its
-  stops, and the watchdog keep running; open positions stay open. Because this is the designed
-  host narrowing, the pause survives reboots **and deploys**, and the watchdog reads it as deliberate
-  rather than paging "producer down".
-- **▶️ Resume trading** — restores the saved override verbatim (a manual narrowing you had made by hand
-  survives the round trip), re-resolves, and starts whichever producers resolve on.
-- **There is no close button.** Closing the book is `scripts/ops.sh flatten --execute`, an operator
-  command on the engine's own path ([`operations.md`](operations.md) §Flatten) — the panel says so
-  itself. Left off the panel on purpose: flatten stops the producers, and a button that quietly stops
-  a sleeve is the kind of thing somebody presses to see what it does.
-
-Real-money rows appear only while the mainnet engine unit is active — i.e. after your own arming act.
-Pausing mainnet stops its two producer units directly (mainnet has no sleeve toggles), and resuming
-starts them again. The funded resume carries the same two proofs the demo one does — this generation's
-completed activation receipt, and the funded account owner already running — and puts both producers
-back in quarantine if either fails to come up. It never opens the credential file, so it cannot arm a
-disarmed account: with `REAL_MONEY` off the funded owner is not running and the resume refuses.
-
-Who may press: only the configured main chat is read at all, and a press must come from the chat's own
-private-chat owner. If the main chat is a group, set `TELEGRAM_CONTROL_USER_IDS` (comma-separated
-numeric user ids) in the host env file — with no allow-list, every press in a group is refused. Presses
-queued while the daemon was down are dropped at startup, so a stale button can never fire late; if the
-bot did not react, press again.
-
-## The liveness watchdog
-
-[`scripts/runtime/check_fleet_liveness.py`](../scripts/runtime/check_fleet_liveness.py), one oneshot per
-timer fire, every 3 minutes — the first run lands one minute after the timer is enabled.
-`--account-scope` selects `demo` or `mainnet`; the mainnet scope checks only the
-mainnet engine and producers. A unit restart opens a per-check startup grace, so
-routine restarts do not page.
-
-It **always exits 0**. A watchdog that crash-loops is a watchdog that is off, so a failure to verify
-degrades to an alert instead of a non-zero exit. The unit's `TimeoutStartSec=120` sits under the 3-minute
-timer so a hung run goes `failed` rather than silently never re-firing.
-
-What it checks: systemd unit states — including a service that is enabled but not active (debounced one
-interval, then CRITICAL); readiness and live-L2 capture freshness; per-sleeve producer cycle age; free
-disk; and the engine's own heartbeat file, including how old the engine's reading of the account is. It
-can also check host clock discipline and the age of an off-box-backup completion stamp when those are
-explicitly configured. It reads no execution WAL — see
-[§What is not watched](#what-is-not-watched).
-
-| Threshold | Default | Meaning |
+| Realm label | Position source | Exit source |
 | --- | --- | --- |
-| `--max-cycle-age-min` | 10 | no producer cycle within this many minutes |
-| `--max-account-health-age-min` | 1 | how far behind its own beat the engine's reading of the account may fall — **floored at 25 minutes**, so the 1-minute default never means one minute. The reading refreshes every few seconds; the bound is there to catch one that stopped arriving, not to grade venue latency |
-| `--max-account-capture-age-min` | 3 | canonical live L2 is older than this |
-| `--max-ws-lag-hours` | 6 | WS kline feed lag warning |
-| `--max-engine-heartbeat-age-sec` | 60 | the engine's heartbeat is older than this (only read when one is configured) |
-| `--host-clock-check` | off | page only when `timedatectl` explicitly reports that NTP is not synchronized; enable in one scope per host |
-| `--backup-stamp-file` | unset | completion stamp written by an off-box backup; unset means backups are not claimed or watched |
-| `--max-backup-age-hours` | 26 | configured backup stamp is older than one daily run plus slack |
-| `--cooldown-min` | 30 | re-alert interval; **deployed as 60 for both demo and mainnet** |
+| `DEMO` | `/var/lib/liquidity-migration-engine/heartbeat.json` | `/var/lib/liquidity-migration-engine/trades.jsonl` |
+| `RM` | `/var/lib/liquidity-migration-engine-mainnet/heartbeat.json` | `/var/lib/liquidity-migration-engine-mainnet/trades.jsonl` |
 
-### The engine's heartbeat
+An entry message is generated only when a fresh, exact-realm engine heartbeat
+contains a new attributed LONG, CARRY, or Exodus position. Notional is filled
+quantity times average entry price. Desired reducer state and migration target
+books are not position evidence.
 
-`--engine-heartbeat-file` (or `LIVENESS_ENGINE_HEARTBEAT_FILE`) points at the small JSON file the engine
-rewrites every few seconds. Unset, the file is never opened and nothing new can alert — which is right
-for a host with no engine on it. **Both fleets provision it today**, from `engine.env` and
-`engine-mainnet.env`. Given a path, four things page:
+An exit message comes only from a complete engine trade-log line. A priced
+round trip reports sleeve, symbol, side, entry and exit, hold time, net profit
+or loss after venue fees, return on position notional, maker share when known,
+and arrival shortfall when known. Funding is not included because the engine
+fill stream does not report the venue's wallet funding settlements.
 
-| Alert | Severity | Means |
-| --- | --- | --- |
-| `engine_heartbeat_stale` | CRITICAL | it stopped being written, so the engine is dead or stuck — or it is dated in the future, so its age cannot be judged at all |
-| `engine_account_view_stale` | CRITICAL | the engine is alive and writing beats but has stopped hearing what the account holds, so its idea of the position is guesswork. Also fires if the reading is stamped *after* the beat carrying it, which means the arithmetic is wrong rather than the account being old |
-| `engine_heartbeat_latched` | CRITICAL | the engine has latched itself out of opening new positions. It is alive, its heartbeat is healthy, every other check is green, and it opens nothing. Nothing else reports this — a person has to read the engine's log |
-| `engine_heartbeat_unreadable` | CRITICAL | missing, empty, half-written, missing a field this check reads, or in a mode this checker does not know. The engine's state is then unknown |
+`maker_canary` rows remain in the engine log but are hidden from phone messages
+and daily totals. They are execution-canary evidence, not directional trading
+updates.
 
-**Two ages, two clocks, and only one of them can race.** How old the *beat* is has to be measured
-against this box's clock, so the check reads the file and *then* asks the clock, in that order — the
-other order lets the engine rewrite the file mid-run, and the beat comes out dated in the future.
+The first observation of a trade file baselines at its current valid byte
+offset and does not replay history. A partial final line waits for the next
+run. A malformed complete line pins the offset and makes the run fail so it
+cannot be skipped. Notification state advances only after all messages send.
 
-How old the *account view* is needs no such care: the engine stamps both the beat and the reading it
-carries, off one clock in one process, so `account_observed_wall_ts_ms` subtracted from `wall_ts_ms` is
-the engine's own arithmetic and this box's clock never enters it.
+An unreadable, stale, future-dated, wrong-realm, malformed, or unattributed
+heartbeat retains the prior position snapshot. It cannot invent an entry or
+exit. The separate liveness service reports the unhealthy source.
 
-An absent account reading is not a fault: the engine has not asked yet in its first moments, and paging
-on that would make every boot an alert. It is reported as absent rather than filled in with a default, so
-it can never read as fresh.
+Once per UTC day, the notifier summarizes the completed prior day from both
+trade logs. Demo and real-money sleeves stay separate in every subtotal.
 
-With Telegram and an engine heartbeat configured, each scope also sends one
-plain execution-health digest per UTC day. It reports account standing, fills,
-maker share, arrival cost, one-minute markout, submit and API timing, disk-wait
-residue, request-quota hold, amend confirmations versus forced pulls,
-private-stream resets, and venue clock offset. A field an older engine lacks is
-shown as a dash, never a guessed zero. `--no-daily-digest` disables it. The day
-advances only after Telegram confirms delivery, so a failed send retries on the
-next watchdog run.
+## Liveness alerts
 
-Every message names the mode, which the engine always writes as `live`. The checker still accepts the
-older `shadow` too, because a beat written before a restart can outlive the run that wrote it, and an
-unrecognised word is refused rather than guessed at. The account number, the lease path and the process
-id are optional: an engine that has not yet reached the venue may carry none of them. Anything else the
-engine writes is ignored.
+Demo and mainnet liveness timers run their realm-specific checks. Alerts use
+`TELEGRAM_ALERT_CHAT_ID`; if it is absent, the main chat is used so a fault is
+not silently dropped.
 
-### The daily digest
+The check derives its expected owner and signal-worker artifacts from
+[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv). It evaluates the
+system as a joined contract, including:
 
-Once per UTC day, on the alerts line, each liveness unit posts one plain-text engine-health message
-built from the heartbeat it already reads: whether the engine may open, how long it has been up (every
-counter beside it is since-boot), equity and positions, the
-fills with their maker share, slip and one-minute markout, the order path's submit and round-trip
-times, how long it actually waited for the disk and for the request quota, amends priced by the venue
-against amends pulled unanswered, stream resets, and the venue clock offset. A field an older engine
-build does not write prints as a dash — never as a confident zero. Sent on the first watchdog run of
-the day; an undelivered digest retries next run, like an alert, and only a delivered one advances the
-day. An unreadable heartbeat sends nothing — the unreadable-heartbeat alert is already paging, and a
-digest of dashes would only pad it. `--no-daily-digest` turns it off per scope.
+- expected units, activation state, dependencies, and timer cadence;
+- exact engine account, venue, realm, release, lease, and heartbeat age;
+- account-view freshness, private-feed readiness, reconciliation latches,
+  pending controls, and position attribution;
+- signal-worker process identity, ready state, source hashes, rule and feature
+  hashes, universe hashes, sequence progress, and feature watermarks;
+- WAL and state storage health;
+- host clock state and public-data freshness; and
+- backup, upload, and forward-capture jobs where configured.
 
-### A restarted producer is a warmup, not a hang
+One systemd process being `active` does not suppress a stale heartbeat or a
+latched engine. A worker that is active but no longer advances observations is
+also unhealthy.
 
-A producer's first completed cycle after a restart pays the boot kline backfill — budgeted at 20
-minutes and contended across every producer on the box, observed near 100 minutes after a
-full-fleet deploy. That is different physics from the steady state, where a healthy producer cycles
-inside `--max-cycle-age-min` (10 minutes). So the two have different dials: a producer that is
-verifiably active in its current service generation gets `--max-startup-min` (120 minutes) to
-complete its first checkable cycle, in silence. Past that it pages as a hang, and the page says how
-long it actually waited. A producer that is dead, failed, or in no known generation never gets the
-grace — the unit-state checks page those within minutes, which is what makes the long budget safe.
+Alerts are keyed and persisted. A new condition sends immediately, a continuing
+condition re-alerts after its cooldown, and a cleared condition sends one
+resolved note. Notification delivery failure makes the oneshot fail so the
+next timer run retries rather than recording an unsent alert as delivered.
 
-### What is not watched
+An optional external heartbeat URL is pinged only after the local checks and
+Telegram sends succeed.
 
-**Nothing watches venue and our records disagreeing.** Freshness is covered —
-`engine_account_view_stale`, off the engine's heartbeat — but agreement is not: the engine reconciles
-and publishes no mismatch. That is a real gap, not a tidy-up. Closing it requires the engine to publish
-reconciliation evidence; the retired Python account journal is not an authority and must not be revived.
+## Control panel
 
-**The host's clock and the off-box backup are watched only where they are switched on.** The demo
-liveness unit passes `--host-clock-check`, so an unsynchronised clock pages once per box rather than
-once per scope; the backup check arms only when `LIVENESS_BACKUP_STAMP_FILE` is set beside a
-configured `backup.env`, so an owner who has not set backups up is not paged about them.
+`liquidity-migration-telegram-controls.service` long-polls the Telegram bot.
+It understands `/controls`, `/panel`, `/start`, and `/status`. Updates queued
+while the service was down are discarded before polling begins; a stale press
+cannot execute later.
 
-### How an alert behaves
+The panel exposes:
 
-A new condition alerts immediately. A persisting one re-alerts at most once per cooldown. A cleared one
-is named in a resolved note. An escalation from `WARNING` to `CRITICAL` **bypasses the cooldown** —
-severity going up is new information.
+- fleet status;
+- pause demo;
+- resume demo; and
+- pause real money while the funded owner is active.
 
-**One run is one message.** A fleet going down trips several checks at once and clears them all
-together, so the run's alerts and its cleared keys go out as a single message — every key still carrying
-its own severity and its own `ref`. The header takes the worst severity in the batch and counts the
-alerts when there is more than one. A batch too long for Telegram is split, each part headed the same
-way. Nothing is sent at all on a run with neither an alert nor a clear.
+There is no close button and no funded-resume button. Flatten is a deliberate
+operator command through [`scripts/ops.sh`](../scripts/ops.sh).
 
-An undelivered message advances nothing: every cooldown stamp and last-sent severity in it is reverted
-and every cleared key is marked for another attempt, so the next run retries the whole run, escalation
-intact. Cooldown state is saved after the send for exactly this reason.
+A press is accepted only from the configured chat. In a private chat, the
+sender ID must equal that chat ID unless `TELEGRAM_CONTROL_USER_IDS` names an
+allow-list. In a group, an allow-list is required. The unprivileged bot can run
+only an exact action from the sudo policy; it cannot pass paths, units,
+environment variables, or extra arguments.
 
-### The dead-man's switch
+The root-owned helper is bound to the installed release marker and checkout.
+It takes the maintenance lock and submits immutable controls to the engine as
+the realm runtime user.
 
-`--heartbeat-url` (or `LIVENESS_HEARTBEAT_URL`) is pinged on a healthy run — and only when there are no
-CRITICAL alerts **and** every Telegram send this run delivered. A dead notification channel pages
-externally instead of reading as all-quiet. An on-box watchdog cannot report that the box died, so
-without a URL a total host loss is silent.
+### Pause
 
-Both liveness units read `/etc/liquidity-migration/liveness.env` if it exists. PID 1 reads it before
-dropping privileges, so it stays root-only mode `0600` like the other private environments, and
-provisioning the switch is one line:
+Pause sends `entries_enabled=false` to LONG, CARRY, and Exodus and waits for a
+fresh engine heartbeat to report all three false. The engine and signal worker
+stay active. Open positions, exits, covers, stop repair, observations, and
+checkpoints continue.
 
-```
-LIVENESS_HEARTBEAT_URL=https://hc-ping.com/<uuid>
+Demo pause also saves the exact pre-pause LONG/CARRY owner switches, writes
+their resolved off state, and keeps that state across reboot and deployment.
+
+Funded pause changes no arming credential. It is available only when the funded
+owner is already active.
+
+### Resume
+
+Demo resume requires the current generation's activation receipt and a live
+demo owner. It restores the saved LONG/CARRY switches, submits the matching
+entry permissions, enables Exodus when its committed config permits it, and
+waits for heartbeat acknowledgement.
+
+The trusted helper has an explicit `resume-mainnet` recovery action, but the
+phone panel does not expose it. That action requires the current activation
+receipt and an already running funded owner. It does not read or write
+`REAL_MONEY`, so it cannot arm a disarmed account.
+
+## Fleet status
+
+The status response is machine-derived. It reports:
+
+- demo and mainnet owner unit state;
+- demo and mainnet signal-worker state;
+- effective LONG, CARRY, and Exodus entry permissions in each engine
+  heartbeat; and
+- the demo LONG/CARRY configured owner switches.
+
+The parser requires one owner, one signal worker, and all three exact entry
+rows per realm. Missing, duplicate, unknown, or contradictory rows make status
+fail instead of presenting a partial fleet as healthy.
+
+## Configuration
+
+Core variables:
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+TELEGRAM_ALERT_CHAT_ID
+TELEGRAM_CONTROL_USER_IDS
 ```
 
-The external monitor's own period is what pages: set it slightly longer than the timer's interval, so
-a single missed run is tolerated and a stopped box is not. Until the file carries a URL the switch is
-unprovisioned and silence stays ambiguous.
+`TELEGRAM_ALERT_CHAT_ID` is optional and falls back to the main chat.
+`TELEGRAM_CONTROL_USER_IDS` is a comma-separated set of numeric sender IDs.
+The systemd units own state paths; callers cannot redirect them through an
+environment variable.
 
-## Operating it
+Messages are escaped once and sent as one monospace HTML block. Telegram's
+4096-character limit is respected by batching below 3500 characters. A 429 is
+retried once only when the requested wait is within the bounded retry cap.
 
-- A daily engine digest is not a dead-man's switch: a host can die just after
-  sending it. The positive continuous signal is the external switch above.
-  Until a URL is in `liveness.env`, silence between daily digests means either
-  a healthy fleet or a dead one — and a deploy that stops the fleet stops the
-  watchdog with it, so that is exactly when the ambiguity bites.
-- Noise is not health either, and it is the more dangerous of the two. A channel that is entirely false
-  positives is worse than a quiet one, because the real alert arrives into a habit of ignoring it. If a
-  check cannot clear, it is broken — fix or retire it, do not let it run.
-- No watchdog alert but something looks wrong → check `TELEGRAM_*` on the watchdog unit; both channels
-  share the same credentials and a bad token silences both at once.
-- Alert storm after a restart → the per-check startup grace should absorb most of it, and what is left
-  arrives as one message per run rather than one per check; if a slow bootstrap overlaps the cycle-age
-  bound it resolves itself, and the resolved note will say so.
-- Mainnet pages come from the Telegram pair inside `/etc/liquidity-migration/bybit-mainnet.env`; the
-  watchdog unit strips the API keys and `REAL_MONEY` straight back out, so it can page but holds no
-  trading authority.
-- Thresholds here were chosen against demo latency. They are unexercised on a funded account — watch
-  them during Tier 1 rather than trusting them ([`operations.md`](operations.md) §Real money).
+## Diagnosis
+
+Use the corresponding unit journal before changing state:
+
+```sh
+scripts/ops.sh logs trade-notify.service 200
+scripts/ops.sh logs demo-liveness.service 200
+scripts/ops.sh logs mainnet-liveness.service 200
+scripts/ops.sh logs telegram-controls.service 200
+```
+
+For missing trade messages, inspect the notifier state offset, the exact realm
+heartbeat, and the trade-log tail. For an alert, follow its key to the named
+artifact. For a refused control, inspect the helper error; do not bypass the
+release, account, or heartbeat check with direct systemd actions.

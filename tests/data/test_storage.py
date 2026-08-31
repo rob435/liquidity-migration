@@ -15,11 +15,11 @@ import pytest
 
 from liquidity_migration.data import storage
 from liquidity_migration.core.symbol_codec import encode_symbol_partition
-from liquidity_migration.data.storage import dataset_lock_path, dataset_path, exclusive_file_lock, read_dataset, write_dataset
+from liquidity_migration.data.storage import dataset_lock_path, exclusive_file_lock, read_dataset, write_dataset
 
 
 def _hold_exclusive_file_lock(path: str, acquired, release) -> None:
-    with exclusive_file_lock(path, stale_seconds=600, poll_seconds=0.005):
+    with exclusive_file_lock(path, poll_seconds=0.005):
         acquired.set()
         if not release.wait(timeout=10.0):
             raise RuntimeError("timed out waiting to release test lock")
@@ -292,7 +292,6 @@ def test_exclusive_file_lock_adopts_legacy_payload_without_unlink(
 
     with exclusive_file_lock(
         lock_path,
-        stale_seconds=0,
         poll_seconds=0.0,
     ):
         assert lock_path.read_text(encoding="utf-8") == legacy
@@ -333,7 +332,6 @@ def test_exclusive_file_lock_never_unlinks_malformed_legacy_leaf(
 
     with exclusive_file_lock(
         lock_path,
-        stale_seconds=0,
         poll_seconds=0.0,
     ):
         assert lock_path.read_bytes() == b""
@@ -357,7 +355,7 @@ def test_exclusive_file_lock_never_age_evicts_live_owner(tmp_path: Path) -> None
     def contend() -> None:
         contender_started.set()
         try:
-            with exclusive_file_lock(lock_path, stale_seconds=0.05, poll_seconds=0.005):
+            with exclusive_file_lock(lock_path, poll_seconds=0.005):
                 contender_entered.set()
         except BaseException as exc:  # pragma: no cover - surfaced below
             contender_errors.append(exc)
@@ -795,7 +793,7 @@ if not ready or os.read(read_fd, 1) != b"1" or child_status != [0]:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_concurrent_cycle_writers_do_not_lose_or_tear_rows(tmp_path: Path) -> None:
+def test_concurrent_dataset_writers_do_not_lose_or_tear_rows(tmp_path: Path) -> None:
     from concurrent.futures import ThreadPoolExecutor
     rows_per_writer = 10
     writer_count = 4
@@ -804,200 +802,27 @@ def test_concurrent_cycle_writers_do_not_lose_or_tear_rows(tmp_path: Path) -> No
         batch = pl.DataFrame(
             [
                 {
-                    "cycle_id": f"cycle-w{writer_id}-r{i}",
+                    "symbol": f"S{writer_id:02}USDT",
                     "ts_ms": 1_700_000_000_000 + writer_id * 1000 + i,
+                    "buy_quote": float(i),
                 }
                 for i in range(rows_per_writer)
             ]
         )
-        write_dataset(batch, tmp_path, "continuous_fade_demo_cycles", partition_by=())
+        write_dataset(batch, tmp_path, "funding", partition_by=())
 
     with ThreadPoolExecutor(max_workers=writer_count) as executor:
         futures = [executor.submit(write_batch, writer) for writer in range(writer_count)]
         for _ in range(20):
-            stored = read_dataset(tmp_path, "continuous_fade_demo_cycles")
+            stored = read_dataset(tmp_path, "funding")
             if not stored.is_empty():
                 assert stored.height % rows_per_writer == 0
-                assert stored.select("cycle_id").n_unique() == stored.height
+                assert stored.select("ts_ms", "symbol").unique().height == stored.height
             time.sleep(0.005)
         for future in futures:
             future.result()
-    stored = read_dataset(tmp_path, "continuous_fade_demo_cycles")
+    stored = read_dataset(tmp_path, "funding")
     assert stored.height == writer_count * rows_per_writer
-
-
-from liquidity_migration.data.storage import _LEDGER_MONTH_COL  # noqa: E402
-from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
-
-_MS_PER_DAY = 86_400_000
-
-
-def _cycle(cycle_id: str, ts_ms: int, **over) -> dict:
-    row = {
-        "cycle_id": cycle_id,
-        "ts_ms": ts_ms,
-    }
-    row.update(over)
-    return row
-
-
-def _write_legacy_month_part(root: Path, dataset: str, row: dict, month: int) -> Path:
-    """Hand-write a part in the retired `_ledger_month=` layout, as a root written
-    before the day-bucket switch still holds."""
-    part_dir = dataset_path(root, dataset) / f"{_LEDGER_MONTH_COL}={month}"
-    part_dir.mkdir(parents=True, exist_ok=True)
-    frame = pl.DataFrame([{**row, _LEDGER_MONTH_COL: month}])
-    part = part_dir / "part.parquet"
-    frame.write_parquet(part)
-    return part
-
-
-def test_cycles_write_day_buckets_without_leaking_partition_column(tmp_path: Path) -> None:
-    jan = 1_704_067_200_000  # 2024-01-01 UTC
-    mar = jan + 70 * _MS_PER_DAY  # 2024-03-11
-    dataset = "continuous_fade_demo_cycles"
-    write_dataset(pl.DataFrame([_cycle("c-jan", jan)]), tmp_path, dataset, partition_by=())
-    write_dataset(pl.DataFrame([_cycle("c-mar", mar)]), tmp_path, dataset, partition_by=())
-    root = dataset_path(tmp_path, dataset)
-    buckets = sorted(p.name for p in root.glob("date=*"))
-    assert buckets == ["date=2024-01-01", "date=2024-03-11"]
-    assert not (root / "part.parquet").exists()
-    out = read_dataset(tmp_path, dataset)
-    assert _LEDGER_MONTH_COL not in out.columns
-    assert out.height == 2
-    assert set(out["cycle_id"].to_list()) == {"c-jan", "c-mar"}
-
-
-def test_day_bucket_write_lands_in_the_right_part(tmp_path: Path) -> None:
-    day0 = 1_704_067_200_000  # 2024-01-01 UTC
-    dataset = "carry_hold_demo_cycles"
-    for offset in (0, 1, 2):
-        write_dataset(
-            pl.DataFrame([_cycle(f"c-{offset}", day0 + offset * _MS_PER_DAY)]),
-            tmp_path,
-            dataset,
-            partition_by=(),
-        )
-    root = dataset_path(tmp_path, dataset)
-    parts = {p.parent.name: pl.read_parquet(p) for p in root.glob("date=*/part.parquet")}
-    assert sorted(parts) == ["date=2024-01-01", "date=2024-01-02", "date=2024-01-03"]
-    assert [frame.height for frame in parts.values()] == [1, 1, 1]
-    assert parts["date=2024-01-02"]["cycle_id"].to_list() == ["c-1"]
-
-
-def test_append_rewrite_reads_only_the_current_day_part(tmp_path: Path) -> None:
-    """The point of the day bucket: appending a row for day B must not rewrite
-    day A's part, so per-append cost stays at one day of rows."""
-    day_a = 1_704_067_200_000  # 2024-01-01 UTC
-    day_b = day_a + _MS_PER_DAY
-    dataset = "carry_hold_demo_cycles"
-    for i in range(5):
-        write_dataset(
-            pl.DataFrame([_cycle(f"a-{i}", day_a + i * 60_000)]), tmp_path, dataset, partition_by=()
-        )
-    root = dataset_path(tmp_path, dataset)
-    part_a = root / "date=2024-01-01" / "part.parquet"
-    before = part_a.stat().st_mtime_ns
-
-    write_dataset(pl.DataFrame([_cycle("b-0", day_b)]), tmp_path, dataset, partition_by=())
-
-    assert part_a.stat().st_mtime_ns == before
-    assert pl.read_parquet(part_a).height == 5
-    assert pl.read_parquet(root / "date=2024-01-02" / "part.parquet").height == 1
-
-
-def test_mainnet_carry_cycles_are_day_bucketed(tmp_path: Path) -> None:
-    """An unregistered cycles dataset gets no bucket at all — one part.parquet
-    rewritten in full every cycle, forever. The mainnet carry ledger must stay
-    registered."""
-    dataset = "carry_hold_mainnet_cycles"
-    write_dataset(
-        pl.DataFrame([_cycle("m-0", 1_704_067_200_000)]), tmp_path, dataset, partition_by=()
-    )
-    root = dataset_path(tmp_path, dataset)
-    assert (root / "date=2024-01-01" / "part.parquet").exists()
-    assert not (root / "part.parquet").exists()
-
-
-def test_mixed_month_and_day_partitions_read_as_one_frame(tmp_path: Path) -> None:
-    dataset = "continuous_fade_demo_cycles"
-    aug = 1_754_006_400_000  # 2025-08-01 UTC
-    _write_legacy_month_part(
-        tmp_path, dataset, {"cycle_id": "old", "ts_ms": aug, "date": "2025-08-01"}, 202508
-    )
-    write_dataset(
-        pl.DataFrame([_cycle("new", aug + _MS_PER_DAY)]), tmp_path, dataset, partition_by=()
-    )
-
-    out = read_dataset(tmp_path, dataset)
-    assert set(out["cycle_id"].to_list()) == {"old", "new"}
-    assert _LEDGER_MONTH_COL not in out.columns
-
-    projected = read_dataset_columns(tmp_path, dataset, columns=["cycle_id", "ts_ms"])
-    assert set(projected["cycle_id"].to_list()) == {"old", "new"}
-    assert projected.columns == ["cycle_id", "ts_ms"]
-
-
-def test_since_date_read_keeps_parts_outside_the_date_tree(tmp_path: Path) -> None:
-    """A since_date read prunes by directory name. Parts outside the date= tree
-    carry no date in their path, so they are not prunable and must still be
-    read — dropping them silently loses the pre-migration history."""
-    dataset = "continuous_fade_demo_cycles"
-    aug = 1_754_006_400_000  # 2025-08-01 UTC
-    _write_legacy_month_part(
-        tmp_path, dataset, {"cycle_id": "old", "ts_ms": aug, "date": "2025-08-01"}, 202508
-    )
-    write_dataset(
-        pl.DataFrame([_cycle("new", aug + _MS_PER_DAY)]), tmp_path, dataset, partition_by=()
-    )
-    root = dataset_path(tmp_path, dataset)
-    # The pruning fast path only runs when a top-level date= dir exists.
-    assert list(root.glob("date=*"))
-    assert list(root.glob(f"{_LEDGER_MONTH_COL}=*"))
-
-    out = read_dataset_columns(tmp_path, dataset, since_date="2025-08-02")
-    assert set(out["cycle_id"].to_list()) == {"old", "new"}
-
-
-def test_malformed_ledger_ts_lands_in_unknown_bucket(tmp_path: Path) -> None:
-    dataset = "carry_hold_demo_cycles"
-    write_dataset(pl.DataFrame([_cycle("bad", 0)]), tmp_path, dataset, partition_by=())
-    write_dataset(
-        pl.DataFrame([_cycle("good", 1_704_067_200_000)]), tmp_path, dataset, partition_by=()
-    )
-    root = dataset_path(tmp_path, dataset)
-    assert (root / "date=unknown" / "part.parquet").exists()
-
-    # `unknown` sorts after any real date, so a since_date read never prunes it.
-    out = read_dataset_columns(tmp_path, dataset, since_date="2024-01-01")
-    assert set(out["cycle_id"].to_list()) == {"bad", "good"}
-
-
-def test_cycle_schema_drift_across_buckets_unions(tmp_path: Path) -> None:
-    jan = 1_704_067_200_000
-    mar = jan + 70 * _MS_PER_DAY
-    dataset = "continuous_fade_demo_cycles"
-    write_dataset(pl.DataFrame([_cycle("c-jan", jan)]), tmp_path, dataset, partition_by=())
-    write_dataset(
-        pl.DataFrame([_cycle("c-mar", mar, candidate_count=3)]),
-        tmp_path, dataset, partition_by=(),
-    )
-    out = read_dataset(tmp_path, dataset)
-    assert set(out["cycle_id"].to_list()) == {"c-jan", "c-mar"}
-    assert "candidate_count" in out.columns
-
-
-def test_non_ledger_dataset_keeps_its_own_partitioning(tmp_path: Path) -> None:
-    """The ledger hook must not touch a dataset outside LEDGER_BUCKET_SOURCE: the
-    caller's (date, symbol) layout stays, and no month column is written."""
-    write_dataset(
-        pl.DataFrame([{"ts_ms": 1_704_067_200_000, "symbol": "BTCUSDT", "buy_quote": 1.0, "sell_quote": 2.0}]),
-        tmp_path, "funding",
-    )
-    root = dataset_path(tmp_path, "funding")
-    assert not list(root.glob(f"{_LEDGER_MONTH_COL}=*"))  # not bucketed
-    assert (root / "date=2024-01-01" / "symbol=BTCUSDT" / "part.parquet").exists()
-    assert read_dataset(tmp_path, "funding").height == 1
 
 
 def test_exclusive_file_lock_release_does_not_delete_successor_lock(tmp_path: Path) -> None:
@@ -1006,7 +831,7 @@ def test_exclusive_file_lock_release_does_not_delete_successor_lock(tmp_path: Pa
     lock -- an unconditional unlink-by-path admits a second concurrent writer.
     """
     lock = tmp_path / "x.lock"
-    with exclusive_file_lock(lock, stale_seconds=600):
+    with exclusive_file_lock(lock):
         os.unlink(lock)
         with open(lock, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"pid": 999_999, "created": time.time()}))
@@ -1017,7 +842,7 @@ def test_exclusive_file_lock_release_does_not_delete_successor_lock(tmp_path: Pa
 
 def test_exclusive_file_lock_release_keeps_its_persistent_inode(tmp_path: Path) -> None:
     lock = tmp_path / "z.lock"
-    with exclusive_file_lock(lock, stale_seconds=600):
+    with exclusive_file_lock(lock):
         inode = lock.stat().st_ino
     assert lock.exists()
     assert lock.stat().st_ino == inode

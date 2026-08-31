@@ -128,24 +128,6 @@ impl<'a> Params<'a> {
         })
     }
 
-    pub(crate) fn opt_u64(&self, param: &'static str) -> Result<Option<u64>, BuildError> {
-        let Some(value) = self.table.get(param) else {
-            return Ok(None);
-        };
-        let Some(n) = value.as_integer() else {
-            return Err(self.invalid(
-                param,
-                format!("expected a whole number, got {}", type_name(value)),
-            ));
-        };
-        u64::try_from(n).map(Some).map_err(|_| {
-            self.invalid(
-                param,
-                format!("expected a whole number of at least 0, got {n}"),
-            )
-        })
-    }
-
     fn as_positive(&self, param: &'static str, value: &toml::Value) -> Result<f64, BuildError> {
         let n = self.as_number(param, value)?;
         if n <= 0.0 {

@@ -1,11 +1,11 @@
 //! Deciding where a two-sided quote should sit, and what to do about the one
 //! already resting.
 //!
-//! Pure arithmetic, like the target-book planner: the market, the orders this
+//! Pure arithmetic, like the position planner: the market, the orders this
 //! strategy already has out, and the position are arguments, so every rule
 //! here can be tested on its own. This is the other kind of strategy the
 //! engine carries — one whose whole decision is in the loop, reacting to a
-//! price in microseconds rather than following a book decided hours ago.
+//! price in microseconds rather than a scheduled signal.
 
 use engine_types::{BookLevel, Depth, InstrumentRule, Quote, Side, TradeFlow};
 use serde::{Deserialize, Serialize};

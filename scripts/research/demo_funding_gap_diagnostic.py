@@ -30,7 +30,8 @@ from liquidity_migration.research.backtest.financed_longs import (
     prepare,
     top_n_universe,
 )
-from liquidity_migration.rules.carry_hold import CarryHoldConfig, carry_hold_weights
+from liquidity_migration.rules.carry_hold import CarryHoldConfig
+from liquidity_migration.rules.rust_strategy_contract import rust_carry_research_weights
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,7 +84,7 @@ def main() -> int:
     panel = load_panel(args.panel_root)
     grid = daily_grid(prepare(panel))
     universe = top_n_universe(grid, cfg.universe_top_n)
-    book = carry_hold_weights(universe, cfg)
+    book = rust_carry_research_weights(universe, cfg)
 
     # Hold name-days are the rows where the book actually stands long.
     held = universe.join(book, on=["bar_ts_ms", "symbol"], how="inner").filter(

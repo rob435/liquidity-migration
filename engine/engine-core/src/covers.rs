@@ -144,6 +144,15 @@ impl CoverBook {
             .sum()
     }
 
+    /// Symbols with a nonzero send-ahead cover for one strategy.
+    pub fn symbols(&self, strategy: StrategyId) -> impl Iterator<Item = SymbolId> + '_ {
+        let mut seen = std::collections::BTreeSet::new();
+        self.records
+            .iter()
+            .filter(move |record| record.strategy == strategy && seen.insert(record.symbol.0))
+            .map(|record| record.symbol)
+    }
+
     /// Terminal news ended `qty` of a send without a fill: the whole size on
     /// a reject, the unfilled remainder on a cancel. It comes off the newest
     /// cover, because that is the send the news is about — an older record

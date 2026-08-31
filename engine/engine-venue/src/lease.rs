@@ -1,12 +1,9 @@
-//! One writer per venue account, shared with the Python fleet.
+//! One kernel-enforced writer per venue account.
 //!
-//! The Python side already has a single-writer rule, in
-//! `liquidity_migration/account/account_owner_lease.py`. This is the engine
-//! joining it, not a second rule standing beside it: the directory, the file
-//! name, the open flags, the lock, the identity re-proof after the lock, and
-//! the note written into the file are all copied from there. A lease that
-//! differed in any one of those would protect nothing — the two processes
-//! would hold two different locks and each would believe it was alone.
+//! Every authenticated order path in the current fleet is a Rust engine. All
+//! adapters use this one directory, path format, open/lock sequence, and
+//! identity re-proof. A second process addressing the same venue account must
+//! contend on the same inode or the lease protects nothing.
 //!
 //! The lock is a kernel `flock` on a file named after the venue's own account
 //! id, so every process that could send an order to that account contends for
@@ -34,22 +31,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::registry::VenueName;
 
-/// Where lease files live. Python's units are handed this directory by
-/// systemd's `RuntimeDirectory`; it is written out here rather than derived
-/// because the two systems must name the same string or they are not sharing
-/// a lock.
+/// Where every venue adapter takes its account lease. It is fixed so two
+/// engines cannot derive different lock roots for the same account.
 pub const LEASE_DIRECTORY: &str = "/run/lock/liquidity-migration";
 
-/// Bybit's practice account. Spelled without the venue because this string is
-/// a contract with the Python fleet, which has written it since before there
-/// was a second venue.
+/// Bybit's practice account. Spelled without the venue to match its engine
+/// config and heartbeat identity.
 pub const REALM_DEMO: &str = "demo";
 /// Bybit's funded account. Naming it is not reaching it — see the module note.
 pub const REALM_MAINNET: &str = "mainnet";
 
-/// The venue name in a Bybit lease's path and note. Python writes this
-/// literal; the engine must write the same one or the two would name two
-/// different files for one account.
+/// The venue name in a Bybit lease's path and note.
 pub const VENUE_BYBIT: &str = "bybit";
 
 /// Every realm a lease may be taken for: exactly the realms a venue name
@@ -58,12 +50,12 @@ fn known_realms() -> [&'static str; VenueName::ALL.len()] {
     VenueName::ALL.map(VenueName::realm)
 }
 
-/// Owner read and write, the mode Python's own lease creates the file with.
+/// Owner read and write.
 /// Only used when the file does not exist yet; an existing file keeps the
 /// permissions whoever made it chose.
 const LEASE_FILE_MODE: libc::c_uint = 0o600;
 
-/// The lock directory's mode, again matching Python's `mkdir(mode=0o700)`.
+/// The lock directory is visible only to its owner.
 const LEASE_DIRECTORY_MODE: u32 = 0o700;
 
 /// Enough of the holder's note to identify them. The note is one short line;
@@ -261,10 +253,8 @@ pub fn probe(venue: &str, realm: &str, user_id: &str) -> Result<LeaseHolder, Lea
 /// test for "is it free" is to try to take it. So this does hold the lock for
 /// the few microseconds between being granted it and giving it back, and a
 /// process starting inside that window is told the lease is held. That
-/// process then refuses to start — it does not start unprotected — and the
-/// Python protocol probes exactly the same way, in
-/// `revalidate_inherited_account_owner_lease`. This is the fleet's existing
-/// behaviour rather than a new hazard.
+/// process then refuses to start — it does not start unprotected. Every lease
+/// probe in the fleet uses this same take-and-release rule.
 pub fn probe_at(path: &Path) -> Result<LeaseHolder, LeaseError> {
     // No O_CREAT: a file that is not there is a lease nobody has ever taken,
     // and looking must not leave one behind. The mode below goes unused for
@@ -323,8 +313,8 @@ fn acquire_at_with(
     }
 
     if let Some(dir) = path.parent() {
-        // Python's units are handed this directory by systemd. The engine can
-        // be started by hand on a box where nothing has made it yet.
+        // A direct engine start may reach a box where deployment has not made
+        // the fixed lease directory yet.
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(LEASE_DIRECTORY_MODE)
@@ -395,21 +385,14 @@ fn acquire_at_with(
     Ok(lease)
 }
 
-/// The note written into the file, in Python's own encoding: JSON with the
-/// keys sorted and a newline after it, so the file reads the same whichever
-/// system took the lease and either can parse the other's.
+/// The human-readable lease note: sorted JSON plus one trailing newline.
 ///
-/// Nothing reads this note to decide anything — the flock is the exclusion,
-/// and Python re-proves its own hold from its own state. It is here so that
-/// `cat` on a stuck lease names the holder.
+/// Nothing reads this note to decide anything — the flock is the exclusion.
+/// It exists so `cat` on a stuck lease names the holder.
 ///
-/// The live Python holders write `{api_key_sha256, environment, pid, user_id,
-/// venue}`. This writes the same minus `api_key_sha256`, plus `role` and
-/// `started_at_ns`. The fingerprint is left out on purpose: it would mean
-/// handing the credential to the lease module for a field no reader uses,
-/// and the file name plus `user_id` already say which account this is.
-/// `role` is the addition worth having — Python's note cannot tell you which
-/// of its own processes is holding, and this one can.
+/// It deliberately omits a credential fingerprint: handing secret-derived
+/// material to the lease module would add no exclusion. The path and `user_id`
+/// identify the account; `role` and `started_at_ns` identify the holder.
 fn note(venue: &str, realm: &str, role: &str, user_id: Option<&str>) -> String {
     let mut fields: Vec<(&str, String)> = vec![
         ("environment", quoted(realm)),
@@ -420,11 +403,9 @@ fn note(venue: &str, realm: &str, role: &str, user_id: Option<&str>) -> String {
     if let Some(user_id) = user_id {
         fields.push(("user_id", quoted(user_id)));
     }
-    // Python writes `venue` for Bybit demo and leaves it out otherwise; that
-    // shape is kept so a demo note reads identically whichever side wrote it.
-    // Every other venue names itself, because with four of them a note that
-    // does not say which venue does not say which account either. The note is
-    // read by people, not by the lock — the flock is what excludes.
+    // Bybit demo and every non-Bybit realm name the venue. Funded Bybit keeps
+    // the compact note shape; its path already fixes venue and realm. The note
+    // is for people, not exclusion — the flock is what excludes.
     if realm == REALM_DEMO || venue != VENUE_BYBIT {
         fields.push(("venue", quoted(venue)));
     }
@@ -462,8 +443,8 @@ fn realm_text(raw: &str) -> Option<&'static str> {
 /// A venue account id as the lease path spells it, for any of the four
 /// venues.
 ///
-/// Bybit and Lighter number their accounts, and a numeric id keeps Python's
-/// exact normalization so the two systems name one file. Hyperliquid's
+/// Bybit and Lighter number their accounts, so numeric ids use one canonical
+/// spelling with no leading zeros. Hyperliquid's
 /// "account" is a wallet address, which is not a number at all — so anything
 /// that is not all digits is accepted as a lowercase token instead, and
 /// refused if it carries a character that has no business in a file name.
@@ -493,10 +474,8 @@ pub fn account_key_text(raw: &str) -> Option<String> {
 
 /// The numeric half: decimal digits, no leading zeros, always above zero.
 ///
-/// Python reaches the same string by `str(int(user_id))`, and its own check on
-/// the canonical path is `user_id.isdigit() and int(user_id) > 0`. Working on
-/// the digits rather than parsing into a fixed-width integer means an id
-/// longer than 64 bits is normalized rather than refused.
+/// Working on digits rather than parsing into a fixed-width integer means an
+/// account id longer than 64 bits is normalized rather than refused.
 pub fn account_id_text(raw: &str) -> Option<String> {
     let digits = raw.trim().strip_prefix('+').unwrap_or(raw.trim());
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -697,9 +676,8 @@ mod tests {
     }
 
     #[test]
-    fn the_canonical_path_is_the_string_python_builds() {
-        // Hardcoded, both sides. If either system changes how it spells this,
-        // the two stop sharing a lock and nothing else would say so.
+    fn the_canonical_path_has_one_frozen_spelling() {
+        // Hardcoded so every account owner contends on the same inode.
         assert_eq!(
             canonical_path(VENUE_BYBIT, "demo", "6039967"),
             PathBuf::from("/run/lock/liquidity-migration/bybit-demo-user-6039967.lock")
@@ -711,9 +689,8 @@ mod tests {
     }
 
     #[test]
-    fn the_canonical_path_normalizes_the_way_python_does() {
-        // Python reaches the file name through `str(int(user_id))`, so a
-        // padded or spaced id lands on the same file rather than a second one.
+    fn the_canonical_path_normalizes_numeric_account_ids() {
+        // A padded or spaced id lands on the same file rather than a second one.
         assert_eq!(
             canonical_path(VENUE_BYBIT, " DEMO ", " 0006039967 "),
             canonical_path(VENUE_BYBIT, "demo", "6039967")
@@ -837,9 +814,8 @@ mod tests {
     }
 
     #[test]
-    fn a_numeric_account_still_normalizes_exactly_the_way_python_does() {
-        // Bybit's ids are numbers and the file name is shared with Python, so
-        // this branch may not move however many venues arrive later.
+    fn a_numeric_account_has_only_one_lease_key() {
+        // This branch may not move however many venues arrive later.
         assert_eq!(account_id_text("6039967").as_deref(), Some("6039967"));
         assert_eq!(account_id_text(" 0042 ").as_deref(), Some("42"));
         assert_eq!(account_id_text("+7").as_deref(), Some("7"));
@@ -910,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn the_note_carries_the_keys_python_writes() {
+    fn the_note_carries_the_canonical_holder_keys() {
         let dir = TempDir::new("note");
         let path = dir.join("bybit-demo-user-7.lock");
         let lease = acquire_at(&path, "demo", "engine").unwrap();
@@ -918,7 +894,7 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
             raw.ends_with('\n'),
-            "python writes a newline after it: {raw:?}"
+            "the note must end with a newline: {raw:?}"
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("the note is JSON");
@@ -935,8 +911,7 @@ mod tests {
         assert_eq!(fields["pid"].as_u64(), Some(u64::from(std::process::id())));
         assert!(fields["started_at_ns"].as_u64().unwrap() > 1_600_000_000_000_000_000);
 
-        // Python's `json.dumps(..., sort_keys=True)` spelling, byte for byte,
-        // so an operator reading the file cannot tell which system wrote it.
+        // Sorted compact JSON makes the human-readable note deterministic.
         assert!(
             raw.starts_with("{\"environment\": \"demo\", \"pid\": "),
             "{raw}"
@@ -946,8 +921,7 @@ mod tests {
 
     #[test]
     fn a_mainnet_note_leaves_the_venue_key_out() {
-        // Python adds `venue` for demo only. Matching the file it writes is
-        // the whole point of writing one.
+        // Funded Bybit uses the compact note shape; the path already names it.
         let dir = TempDir::new("mainnet-note");
         let path = dir.join("bybit-mainnet-user-8.lock");
         let lease = acquire_at(&path, REALM_MAINNET, "engine").unwrap();
@@ -1009,7 +983,7 @@ mod tests {
     #[test]
     fn the_default_path_is_the_canonical_one() {
         // `acquire` has one job before it reaches the disk: put the lease at
-        // the path Python uses. Read the source back and prove it hands
+        // the canonical account path. Read the source back and prove it hands
         // `canonical_path` to the worker, the same way `demo_fence.rs` proves
         // the venue hosts. A runtime check would have to write into
         // /run/lock, which is the fleet's live lease.
@@ -1036,12 +1010,11 @@ mod tests {
 
     #[test]
     fn the_note_names_the_account_as_well_as_the_file() {
-        // The live Python holders put `user_id` in the note. A lease found
-        // stuck should say which account it is holding without the reader
-        // having to parse the file name.
+        // A stuck lease should name its account without requiring the reader
+        // to parse the file name.
         let written = note(VENUE_BYBIT, REALM_DEMO, "engine", Some("579580669"));
         assert!(written.contains("\"user_id\": \"579580669\""), "{written}");
-        // Sorted keys, the way Python's json.dumps(sort_keys=True) writes it.
+        // Sorted keys keep the note deterministic and easy to inspect.
         let keys: Vec<&str> = written
             .trim_start_matches('{')
             .split(", \"")

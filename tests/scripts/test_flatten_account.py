@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -11,270 +12,297 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "vps" / "flatten_account.sh"
+DIRECTIONAL = ("long", "carry", "exodus")
 
 
-def _heartbeat(*, symbols: tuple[str, ...] = (), **overrides: object) -> dict:
+def _heartbeat(
+    *,
+    symbols: tuple[str, ...] = (),
+    entries_enabled: bool = True,
+    pending: tuple[tuple[str, str], ...] = (),
+    working: tuple[tuple[str, str], ...] = (),
+    **overrides: object,
+) -> dict[str, object]:
     now_ms = int(time.time() * 1_000)
     beat: dict[str, object] = {
         "account_observed_wall_ts_ms": now_ms,
         "account_user_id": "555899665",
-        "engine_version": "engine-core 0.1.0",
+        "pending_flatten_requests": [
+            {"strategy": strategy, "request_id": request_id}
+            for strategy, request_id in pending
+        ],
         "positions": [
-            {"symbol": symbol, "qty": 1.0, "side": "long", "entry_px": 1.0}
+            {
+                "symbol": symbol,
+                "qty": 1.0,
+                "side": "long",
+                "entry_px": 1.0,
+                "strategy": "long",
+            }
             for symbol in symbols
         ],
         "realm": "demo",
+        "strategy_entries_enabled": [
+            {"strategy": strategy, "entries_enabled": entries_enabled}
+            for strategy in DIRECTIONAL
+        ],
         "venue": "bybit",
         "wall_ts_ms": now_ms,
+        "working_entries": [
+            {"strategy": strategy, "symbol": symbol}
+            for strategy, symbol in working
+        ],
     }
     beat.update(overrides)
     return beat
 
 
-def _write_fake_tools(tmp_path: Path) -> Path:
+def _write_fake_tools(
+    tmp_path: Path, heartbeat_path: Path, next_path: Path | None
+) -> tuple[Path, Path, Path]:
     tools = tmp_path / "bin"
     tools.mkdir()
+    engine_log = tmp_path / "engine.log"
+
     systemctl = tools / "systemctl"
     systemctl.write_text(
         """#!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$FLATTEN_TEST_SYSTEMCTL_LOG"
-case "$1" in
-  is-active)
-    count_file="$FLATTEN_TEST_IS_ACTIVE_COUNT"
-    count=0
-    [ ! -f "$count_file" ] || count="$(cat "$count_file")"
-    count=$((count + 1))
-    printf '%s' "$count" > "$count_file"
-    [ "$count" -lt "${FLATTEN_TEST_ENGINE_FAIL_AT:-999}" ]
-    ;;
-  stop)
-    [ "${FLATTEN_TEST_STOP_FAIL:-}" != "$2" ]
-    ;;
-  show)
-    printf '%s\n' "${FLATTEN_TEST_ACTIVE_STATE:-inactive}"
-    ;;
-  *) exit 2 ;;
-esac
+[ "$1" = is-active ]
 """
     )
     systemctl.chmod(0o755)
 
     sleep = tools / "sleep"
+    copy = (
+        f"cp {shlex.quote(str(next_path))} {shlex.quote(str(heartbeat_path))}\n"
+        if next_path is not None
+        else ""
+    )
     sleep.write_text(
-        """#!/usr/bin/env bash
-set -eu
-python3 - "$1" <<'PY'
-import sys
-import time
-time.sleep(float(sys.argv[1]))
-PY
-if [ -n "${FLATTEN_TEST_NEXT_HEARTBEAT:-}" ]; then
-  cp "$FLATTEN_TEST_NEXT_HEARTBEAT" "$FLATTEN_HEARTBEAT_PATH"
-fi
-python3 - "$FLATTEN_HEARTBEAT_PATH" <<'PY'
-import json
-import sys
-import time
-path = sys.argv[1]
-try:
-    with open(path) as handle:
-        beat = json.load(handle)
-except Exception:
-    raise SystemExit(0)
-now_ms = int(time.time() * 1_000)
-beat["wall_ts_ms"] = now_ms
-beat["account_observed_wall_ts_ms"] = now_ms
-with open(path, "w") as handle:
-    json.dump(beat, handle)
-PY
-"""
+        "#!/usr/bin/env bash\nset -eu\n"
+        + copy
+        + f"python3 - {shlex.quote(str(heartbeat_path))} <<'PY'\n"
+        + "import json, sys, time\n"
+        + "path = sys.argv[1]\n"
+        + "with open(path, encoding='utf-8') as handle: beat = json.load(handle)\n"
+        + "now = int(time.time() * 1000)\n"
+        + "beat['wall_ts_ms'] = now\nbeat['account_observed_wall_ts_ms'] = now\n"
+        + "with open(path, 'w', encoding='utf-8') as handle: json.dump(beat, handle)\n"
+        + "PY\n"
     )
     sleep.chmod(0o755)
-    return tools
+
+    engine = tmp_path / "engine"
+    engine.write_text(
+        "#!/usr/bin/env bash\nset -eu\n"
+        + f"printf '%s\\n' \"$*\" >> {shlex.quote(str(engine_log))}\n"
+        + "command=$1\nshift\nstrategy=\nrequest_id=\nenabled=\n"
+        + "while [ \"$#\" -gt 0 ]; do\n"
+        + "  case \"$1\" in\n"
+        + "    --strategy) strategy=$2; shift 2 ;;\n"
+        + "    --request-id) request_id=$2; shift 2 ;;\n"
+        + "    --entries-enabled) enabled=$2; shift 2 ;;\n"
+        + "    *) shift ;;\n"
+        + "  esac\n"
+        + "done\n"
+        + f"python3 - {shlex.quote(str(heartbeat_path))} \"$command\" \"$strategy\" \"$request_id\" \"$enabled\" <<'PY'\n"
+        + "import json, sys, time\n"
+        + "path, command, strategy, request_id, enabled = sys.argv[1:]\n"
+        + "with open(path, encoding='utf-8') as handle: beat = json.load(handle)\n"
+        + "if command == 'set-strategy-entry-permission':\n"
+        + "    for row in beat['strategy_entries_enabled']:\n"
+        + "        if row['strategy'] == strategy: row['entries_enabled'] = enabled == 'true'\n"
+        + "elif command == 'flatten-strategy':\n"
+        + "    beat['pending_flatten_requests'].append({'strategy': strategy, 'request_id': request_id})\n"
+        + "now = int(time.time() * 1000)\n"
+        + "beat['wall_ts_ms'] = now\nbeat['account_observed_wall_ts_ms'] = now\n"
+        + "with open(path, 'w', encoding='utf-8') as handle: json.dump(beat, handle)\n"
+        + "PY\n"
+    )
+    engine.chmod(0o755)
+
+    setpriv = tmp_path / "setpriv"
+    setpriv.write_text(
+        """#!/usr/bin/env bash
+set -eu
+while [ "$#" -gt 0 ] && [ "$1" != /usr/bin/env ]; do shift; done
+[ "$#" -gt 0 ] || exit 2
+exec "$@"
+"""
+    )
+    setpriv.chmod(0o755)
+    return tools, engine, setpriv
 
 
 def _run(
     tmp_path: Path,
-    heartbeat: dict | str | None,
+    heartbeat: dict[str, object] | str | None,
     *,
     execute: bool = True,
-    extra_env: dict[str, str] | None = None,
-    next_heartbeat: dict | str | None = None,
-) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    next_heartbeat: dict[str, object] | str | None = None,
+    wait_seconds: int = 1,
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
     heartbeat_path = tmp_path / "heartbeat.json"
     if isinstance(heartbeat, dict):
         heartbeat_path.write_text(json.dumps(heartbeat))
     elif isinstance(heartbeat, str):
         heartbeat_path.write_text(heartbeat)
 
+    next_path = None
+    if next_heartbeat is not None:
+        next_path = tmp_path / "next-heartbeat.json"
+        next_path.write_text(
+            json.dumps(next_heartbeat)
+            if isinstance(next_heartbeat, dict)
+            else next_heartbeat
+        )
+
     engine_env = tmp_path / "engine.env"
     engine_env.write_text(
-        "\n".join(
-            (
-                "EXPECTED_ENGINE_ACCOUNT_USER_ID=555899665",
-                "EXPECTED_ENGINE_VENUE=bybit",
-                "EXPECTED_ENGINE_REALM=demo",
-                "EXPECTED_ENGINE_VERSION=engine-core 0.1.0",
-                "",
-            )
-        )
+        "EXPECTED_ENGINE_ACCOUNT_USER_ID=555899665\n"
+        "EXPECTED_ENGINE_VENUE=bybit\n"
+        "EXPECTED_ENGINE_REALM=demo\n"
     )
-    target_root = tmp_path / "targets"
-    systemctl_log = tmp_path / "systemctl.log"
-    tools = _write_fake_tools(tmp_path)
+    engine_config = tmp_path / "engine.toml"
+    engine_config.write_text("[engine]\n")
+    tools, engine, setpriv = _write_fake_tools(tmp_path, heartbeat_path, next_path)
+
+    runnable = tmp_path / "flatten-account-test.sh"
+    runnable.write_text(SCRIPT.read_text().replace("/usr/bin/setpriv", str(setpriv)))
+    runnable.chmod(0o755)
+
     environment = os.environ.copy()
     environment.update(
         {
             "PATH": f"{tools}{os.pathsep}{environment['PATH']}",
+            "FLATTEN_ENGINE_BINARY": str(engine),
+            "FLATTEN_ENGINE_CONFIG_PATH": str(engine_config),
             "FLATTEN_ENGINE_ENV_PATH": str(engine_env),
             "FLATTEN_HEARTBEAT_PATH": str(heartbeat_path),
             "FLATTEN_MAX_HEARTBEAT_AGE_SECONDS": "30",
             "FLATTEN_POLL_SECONDS": "0.01",
-            "FLATTEN_TARGET_ROOT": str(target_root),
-            "FLATTEN_TEST_IS_ACTIVE_COUNT": str(tmp_path / "is-active-count"),
-            "FLATTEN_TEST_SYSTEMCTL_LOG": str(systemctl_log),
+            "FLATTEN_TEST_SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
         }
     )
-    if next_heartbeat is not None:
-        next_path = tmp_path / "next-heartbeat.json"
-        if isinstance(next_heartbeat, dict):
-            next_path.write_text(json.dumps(next_heartbeat))
-        else:
-            next_path.write_text(next_heartbeat)
-        environment["FLATTEN_TEST_NEXT_HEARTBEAT"] = str(next_path)
-    if extra_env:
-        environment.update(extra_env)
-
-    command = ["bash", str(SCRIPT), "--environment", "demo", "--wait-seconds", "2"]
-    command.append("--execute" if execute else "--dry-run")
+    command = [
+        "bash",
+        str(runnable),
+        "--environment",
+        "demo",
+        "--wait-seconds",
+        str(wait_seconds),
+        "--execute" if execute else "--dry-run",
+    ]
     result = subprocess.run(command, env=environment, text=True, capture_output=True, check=False)
-    return result, target_root, systemctl_log
+    systemctl_calls = (tmp_path / "systemctl.log").read_text().splitlines()
+    engine_calls = (
+        (tmp_path / "engine.log").read_text().splitlines()
+        if (tmp_path / "engine.log").exists()
+        else []
+    )
+    return result, systemctl_calls, engine_calls
 
 
-def test_execute_stops_producers_even_when_already_flat(tmp_path: Path) -> None:
-    result, target_root, systemctl_log = _run(tmp_path, _heartbeat())
+def test_dry_run_only_reads_the_engine_and_never_stops_signal_ingestion(tmp_path: Path) -> None:
+    result, systemctl_calls, engine_calls = _run(
+        tmp_path, _heartbeat(symbols=("BTCUSDT",)), execute=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert systemctl_calls == ["is-active --quiet liquidity-migration-engine.service"]
+    assert engine_calls == []
+    assert "would set entries_enabled=false strategy=long" in result.stdout
+    assert "would request flatten strategy=exodus" in result.stdout
+    assert "signal-worker" not in result.stdout + result.stderr
+
+
+def test_execute_waits_for_flat_reducer_acks_and_no_directional_open_orders(tmp_path: Path) -> None:
+    result, systemctl_calls, engine_calls = _run(
+        tmp_path,
+        _heartbeat(symbols=("BTCUSDT",)),
+        next_heartbeat=_heartbeat(entries_enabled=False),
+        wait_seconds=2,
+    )
 
     assert result.returncode == 6, result.stderr
-    calls = systemctl_log.read_text().splitlines()
-    for unit in (
-        "liquidity-migration-bybit-carry-demo.service",
-        "liquidity-migration-bybit-long-demo.service",
-    ):
-        assert f"stop {unit}" in calls
-        assert f"show --property=ActiveState --value {unit}" in calls
-    assert "configured_positions_closed global_flat=unproven" in result.stderr
-    assert "waiting for post-write heartbeat" in result.stdout
-    for name in ("carry-demo.json", "long-demo.json", "exodus-demo.json"):
-        assert json.loads((target_root / name).read_text())["targets"] == []
+    assert systemctl_calls == ["is-active --quiet liquidity-migration-engine.service"]
+    assert len(engine_calls) == 6
+    assert sum(call.startswith("set-strategy-entry-permission ") for call in engine_calls) == 3
+    assert sum(call.startswith("flatten-strategy ") for call in engine_calls) == 3
+    assert "status=engine_positions_closed" in result.stderr
+    assert "entries remain paused" in result.stderr
+    assert all("signal-worker" not in call for call in systemctl_calls + engine_calls)
 
 
-def test_a_stop_failure_aborts_before_any_book_write(tmp_path: Path) -> None:
-    failed = "liquidity-migration-bybit-carry-demo.service"
-    result, target_root, _ = _run(
-        tmp_path,
-        _heartbeat(symbols=("BTCUSDT",)),
-        extra_env={"FLATTEN_TEST_STOP_FAIL": failed},
-    )
-
+def test_execute_does_not_treat_spool_acceptance_as_reducer_ack(tmp_path: Path) -> None:
+    result, _, _ = _run(tmp_path, _heartbeat(), wait_seconds=0)
     assert result.returncode == 5
-    assert f"failed to stop producer unit={failed}; no books written" in result.stderr
-    assert not target_root.exists()
-
-
-def test_missing_inactive_proof_aborts_before_any_book_write(tmp_path: Path) -> None:
-    result, target_root, _ = _run(
-        tmp_path,
-        _heartbeat(symbols=("BTCUSDT",)),
-        extra_env={"FLATTEN_TEST_ACTIVE_STATE": "active"},
-    )
-
-    assert result.returncode == 5
-    assert "state=active, expected inactive; no books written" in result.stderr
-    assert not target_root.exists()
+    assert "pending_flatten_acks=3" in result.stdout
+    assert "status=engine_positions_closed" not in result.stderr
 
 
 @pytest.mark.parametrize(
-    "condition",
+    ("symbols", "working", "expected_progress"),
     [
-        "missing",
-        "malformed",
-        "stale-heartbeat",
-        "stale-account-view",
-        "wrong-account",
-        "wrong-venue",
-        "wrong-realm",
-        "wrong-version",
-        "positions-unknown",
+        (
+            ("BTCUSDT",),
+            (),
+            "still held=BTCUSDT",
+        ),
+        (
+            (),
+            (("carry", "ETHUSDT"),),
+            "directional_working_entries=1",
+        ),
+    ],
+)
+def test_execute_refuses_to_finish_while_any_completion_fact_is_open(
+    tmp_path: Path,
+    symbols: tuple[str, ...],
+    working: tuple[tuple[str, str], ...],
+    expected_progress: str,
+) -> None:
+    heartbeat = _heartbeat(
+        symbols=symbols,
+        entries_enabled=False,
+        working=working,
+    )
+    result, _, _ = _run(tmp_path, heartbeat, wait_seconds=0)
+    assert result.returncode == 5
+    assert "status=timed_out" in result.stderr
+    assert expected_progress in result.stdout
+
+
+@pytest.mark.parametrize(
+    "heartbeat",
+    [
+        None,
+        "{broken\n",
+        _heartbeat(wall_ts_ms=1),
+        _heartbeat(account_observed_wall_ts_ms=1),
+        _heartbeat(account_user_id="wrong"),
+        _heartbeat(venue="wrong"),
+        _heartbeat(realm="mainnet"),
+        _heartbeat(positions=None),
+        _heartbeat(strategy_entries_enabled=None),
+        _heartbeat(pending_flatten_requests=None),
+        _heartbeat(working_entries=None),
     ],
 )
 def test_unknown_heartbeat_never_means_flat(
-    tmp_path: Path, condition: str
+    tmp_path: Path, heartbeat: dict[str, object] | str | None
 ) -> None:
-    heartbeat: dict | str | None
-    if condition == "missing":
-        heartbeat = None
-    elif condition == "malformed":
-        heartbeat = "{not json\n"
-    else:
-        changes: dict[str, object] = {
-            "stale-heartbeat": {"wall_ts_ms": 1},
-            "stale-account-view": {"account_observed_wall_ts_ms": 1},
-            "wrong-account": {"account_user_id": "wrong-account"},
-            "wrong-venue": {"venue": "wrong-venue"},
-            "wrong-realm": {"realm": "mainnet"},
-            "wrong-version": {"engine_version": "wrong-version"},
-            "positions-unknown": {"positions": None},
-        }[condition]
-        heartbeat = _heartbeat(**changes)
-    result, target_root, systemctl_log = _run(tmp_path, heartbeat)
-
+    result, systemctl_calls, engine_calls = _run(tmp_path, heartbeat)
     assert result.returncode == 4
-    assert "configured-position state is unknown" in result.stderr
-    assert "configured_positions_closed" not in result.stderr
-    assert not target_root.exists()
-    calls = systemctl_log.read_text().splitlines()
-    assert sum(line.startswith("stop ") for line in calls) == 2
-    assert sum(line.startswith("show ") for line in calls) == 2
+    assert "engine state is unknown" in result.stderr
+    assert systemctl_calls == ["is-active --quiet liquidity-migration-engine.service"]
+    assert engine_calls == []
 
 
-def test_a_dry_run_with_unknown_heartbeat_changes_nothing(tmp_path: Path) -> None:
-    result, target_root, systemctl_log = _run(
-        tmp_path,
-        "{not json\n",
-        execute=False,
-    )
-
-    assert result.returncode == 4
-    assert "configured-position state is unknown" in result.stderr
-    assert not target_root.exists()
-    assert not any(line.startswith("stop ") for line in systemctl_log.read_text().splitlines())
-
-
-def test_a_fresh_flat_heartbeat_after_writes_closes_configured_positions(
-    tmp_path: Path,
-) -> None:
-    result, target_root, _ = _run(
-        tmp_path,
-        _heartbeat(symbols=("BTCUSDT",)),
-        next_heartbeat=_heartbeat(),
-    )
-
-    assert result.returncode == 6, result.stderr
-    assert "configured_positions_closed global_flat=unproven" in result.stderr
-    for name in ("carry-demo.json", "long-demo.json", "exodus-demo.json"):
-        rows = json.loads((target_root / name).read_text())["targets"]
-        assert [row["symbol"] for row in rows] == ["BTCUSDT"]
-
-
-def test_a_broken_heartbeat_after_writes_cannot_report_closed(tmp_path: Path) -> None:
-    result, target_root, _ = _run(
-        tmp_path,
-        _heartbeat(symbols=("BTCUSDT",)),
-        next_heartbeat="{broken\n",
-    )
-
-    assert result.returncode == 5
-    assert "status=heartbeat_unknown global_flat=unproven" in result.stderr
-    assert "configured_positions_closed" not in result.stderr
-    assert target_root.exists(), "zero books were already written before telemetry broke"
+def test_flat_dry_run_is_evidence_only_and_changes_nothing(tmp_path: Path) -> None:
+    result, _, engine_calls = _run(tmp_path, _heartbeat(), execute=False)
+    assert result.returncode == 6
+    assert "global_flat=unproven" in result.stdout
+    assert engine_calls == []

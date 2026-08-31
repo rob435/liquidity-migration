@@ -53,10 +53,9 @@ def env_positive_float(
 ) -> float | None:
     """The named dial as a positive finite float, or None when unset.
 
-    An empty or malformed value raises rather than falling back: an operator
-    who typed a line meant to change the number, and a sizing dial that
-    silently reverts to the committed default is a size nobody chose. Same
-    rule as ``parse_real_money_dials`` applies to the ``RM_*`` surface.
+    An empty or malformed value raises rather than silently falling back after
+    an operator supplied the setting. The same rule applies to the ``RM_*``
+    surface parsed by ``parse_real_money_dials``.
     """
 
     source = os.environ if environ is None else environ

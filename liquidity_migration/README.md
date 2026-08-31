@@ -1,49 +1,52 @@
 # `liquidity_migration/`
 
-Python is the research, market-data, strategy, and operations plane. It has no
-authenticated order path. The Rust workspace under `engine/` is the sole
-account and execution authority.
+Python is the research, evidence, data, policy, notification, and deployment
+support plane. It has no live directional decision, registered directional
+config render, or authenticated order path. The Rust workspace under `engine/`
+owns public-signal production, registered config rendering, live
+LONG/CARRY/Exodus decisions, private account state, risk, and execution.
 
 ## Packages
 
 | Package | Responsibility |
 | --- | --- |
-| `core/` | Business-neutral time, serialization, durable files, filesystem watches, logging, configuration, and venue-realm types |
-| `marketdata/` | Credential-free public REST and WebSocket feeds and caches |
-| `data/` | Point-in-time datasets, ingestion, manifests, histories, universes, and trade tapes |
-| `rules/` | Registered decision rules and the strict absolute target-book contract |
-| `research/` | Historical replay, panels, measurement, charts, and evidence reports |
-| `strategy/` | LONG and CARRY producers, persistent sleeve state, scheduling, account-heartbeat projection, and target evidence |
-| `venue/` | Read-only authenticated account observation used by operator diagnostics; never order mutation |
-| `policy/` | Execution environment, sizing profiles, and real-money arming checks |
-| `ops/` | Notifications and read-only operator reporting |
-| `cli/` | `python -m liquidity_migration` research/data command surface |
-| `runtime/` | Cross-package runtime health views, including strict engine heartbeat parsing |
+| `core/` | Business-neutral time, serialization, durable files, typed operational configuration, and venue-realm types |
+| `marketdata/` | Historical/PIT ingestion, public download helpers, and research caches |
+| `data/` | Point-in-time datasets, manifests, histories, universes, and trade tapes |
+| `rules/` | Registered research metadata, takeover-source readers, and persistent clients for the Rust strategy replay contract |
+| `research/` | Historical replay, panels, measurement, charts, accounting, and evidence reports |
+| `policy/` | Real-money arming, funded-profile, and systemd-environment checks |
+| `ops/` | Telegram controls and read-only operator reporting |
+| `cli/` | `python -m liquidity_migration` research and data commands |
 
 `__init__.py` and `__main__.py` are the only modules at the package root.
 
 ## Dependency rule
 
-Imports must follow the ranks enforced by
+Imports follow the ranks enforced by
 [`tests/repo/test_import_order.py`](../tests/repo/test_import_order.py). Lower
-layers cannot import strategy or operations code, and registered rules cannot
-depend on historical research engines. Absolute imports are mandatory.
+layers cannot import research, policy, or operations code, and registered
+rules cannot depend on historical research engines. Absolute imports are
+mandatory.
 
-The live seam is deliberately narrow:
+The Python seams are read-only with respect to trading:
 
 ```text
-public data -> Python strategy -> durable absolute target book -> Rust engine
-private venue state --------------------------------------------> Rust engine
-Rust engine -> exact-identity heartbeat -> Python sizing and exit gates
+historical or PIT data -> Python research -> Rust strategy_contract -> report
+public forward capture -> immutable research archive
+Rust heartbeat/trades  -> Python liveness and notifications
+operator request       -> commit-bound helper -> Rust control spool
 ```
 
-A strategy daemon is a plug on `strategy/strategy_host.py`. The host owns
-public caches, semantic account-change wakes, deadlines, price-touch wakes,
-event tapes, cycle health, and activation evidence. A plug supplies decision
-logic and publishes only its own target-book source.
+The live Rust flow is documented in
+[`docs/architecture.md`](../docs/architecture.md).
 
 ## Entrypoints
 
-`python -m liquidity_migration` is the research and data CLI. Runtime wrappers
-live under `scripts/runtime/`; systemd units call those wrappers so module moves
-do not leak into unit files. See [`scripts/README.md`](../scripts/README.md).
+`python -m liquidity_migration` exposes research and data work. Deployed Python
+units are observers, notifications, public forward capture/upload, backup,
+Telegram transport, and research-only jobs. Live signal acquisition,
+directional config rendering, reduction, account control, and execution run in
+the `signal-worker` and `engine` Rust binaries through the trusted launcher. See
+[`scripts/README.md`](../scripts/README.md) and
+[`deploy/systemd/README.md`](../deploy/systemd/README.md).

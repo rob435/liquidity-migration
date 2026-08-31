@@ -19,7 +19,6 @@ use serde::Deserialize;
 
 use crate::config::{EngineSection, StrategyConfig};
 use crate::heartbeat::Heartbeat;
-use crate::targets::{TargetBookWatcher, TargetBooks};
 use crate::trades::Trades;
 
 /// Open the log and replay what an earlier run left. The log may have been
@@ -141,107 +140,6 @@ pub fn inventory_probe(name: VenueName) -> Result<InventoryProbe, VenueError> {
     InventoryProbe::build(name)
 }
 
-/// Every target book this engine watches, each bound to the one strategy that
-/// named its path. No paths means no watcher runs and no book ever reaches a
-/// strategy — *no decision*, which is not the same as an empty book.
-///
-/// Two ways to say it, and they cannot be mixed:
-///
-/// - `book_path` inside a `[[strategy]]` block. This is how an account with
-///   more than one sleeve is configured, because it says which book is whose.
-/// - `target_book_path` in `[engine]`, which predates routing and means "the
-///   one follower's book". Kept because it is what existing configs say, and
-///   refused the moment there is more than one follower to give it to.
-///
-/// Both directions of the wiring are checked. A path on a strategy that
-/// ignores books is a file nobody reads; a follower with no path is a sleeve
-/// that will never be told what to hold, and would sit there looking healthy.
-pub fn target_books(
-    settings: &EngineSection,
-    configured: &[StrategyConfig],
-    built: &[Box<dyn Strategy>],
-) -> Result<TargetBooks, Box<dyn Error>> {
-    let followers: Vec<usize> = built
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.follows_a_target_book())
-        .map(|(index, _)| index)
-        .collect();
-
-    let mut paths: Vec<(usize, PathBuf)> = Vec::new();
-    for (index, cfg) in configured.iter().enumerate() {
-        let Some(path) = cfg.book_path.as_ref() else {
-            continue;
-        };
-        if !followers.contains(&index) {
-            return Err(format!(
-                "strategy \"{}\" names a book_path, but it does not act on target books \
-                 at all — that file would never be read",
-                cfg.name
-            )
-            .into());
-        }
-        paths.push((index, path.clone()));
-    }
-
-    if let Some(engine_path) = settings.target_book_path.as_ref() {
-        if !paths.is_empty() {
-            return Err(
-                "[engine] target_book_path and a strategy's own book_path are two \
-                        ways of saying the same thing; keep the per-strategy one, which \
-                        says whose book it is"
-                    .to_string()
-                    .into(),
-            );
-        }
-        match followers.as_slice() {
-            [] => {
-                return Err(
-                    "[engine] target_book_path is set, but no strategy acts on target books"
-                        .to_string()
-                        .into(),
-                )
-            }
-            [only] => paths.push((*only, engine_path.clone())),
-            many => {
-                return Err(format!(
-                    "[engine] target_book_path cannot say which of the {} book-following \
-                     strategies it belongs to; give each one its own book_path",
-                    many.len()
-                )
-                .into())
-            }
-        }
-    }
-
-    for index in &followers {
-        if !paths.iter().any(|(at, _)| at == index) {
-            return Err(format!(
-                "strategy \"{}\" follows a target book but no path was given for it; it \
-                 would run, and hold nothing, for ever",
-                configured
-                    .get(*index)
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("?")
-            )
-            .into());
-        }
-    }
-
-    let watchers = paths
-        .into_iter()
-        .map(|(index, path)| {
-            tracing::info!(
-                strategy = index,
-                path = %path.display(),
-                "watching for a target book"
-            );
-            (StrategyId(index as u16), TargetBookWatcher::start(path))
-        })
-        .collect();
-    Ok(TargetBooks::new(watchers))
-}
-
 /// The heartbeat writer, but only when the config names a path. No path means
 /// no file is written and nothing at all is said about it — an engine nobody
 /// asked to report on itself is not a fault, and a line every few seconds
@@ -262,8 +160,8 @@ pub fn heartbeat(
 }
 
 /// The closed-round-trip file, but only when the config names a path. No path
-/// means the engine says nothing about what its positions made, and the phone
-/// hears about exits from the target books instead.
+/// means the engine says nothing about what its positions made, and the trade
+/// notifier has no closed-round-trip source.
 pub fn trades(settings: &EngineSection) -> Option<Trades> {
     let path = settings.trades_path.as_ref()?;
     tracing::info!(path = %path.display(), "writing a closed-trade file");
@@ -272,7 +170,7 @@ pub fn trades(settings: &EngineSection) -> Option<Trades> {
 
 /// The `[risk]` block, exactly as engine.toml spells it. There are no
 /// defaults for the capital controls: every number is written down, and the
-/// Python fleet's values are recorded in engine-risk/PORT_NOTES.md.
+/// reference-model values are recorded in engine-risk/PORT_NOTES.md.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RiskSection {
@@ -322,8 +220,8 @@ fn default_qty_tolerance() -> f64 {
 ///
 /// Either the caps are written out in `[risk]`, or `[risk]` names the fleet's
 /// operational profile and they come from that document. Naming a profile is
-/// what the funded account does, so the engine and the Python fleet are held
-/// to one file rather than to two copies of it.
+/// what the funded account does, so native config rendering and the account
+/// kernel are held to one file rather than two copied limits.
 pub fn risk(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
     if section.contains_key("operational_profile_path") {
         return risk_from_profile(section);
@@ -406,11 +304,9 @@ pub fn strategies(configured: &[StrategyConfig]) -> Result<Vec<Box<dyn Strategy>
 /// at once, and it is refused here rather than resolved at run time.
 ///
 /// This is not the only line of defence, and not the load-bearing one.
-/// A target book may name a symbol no config listed, and the engine takes that
-/// name on while it runs, so overlap can arrive hours after boot where this
-/// check cannot see it. `StrategyCtx::foreign_position` is what answers it
-/// then: a plug leaves alone any name another strategy is holding. This stays
-/// because a config that means to overlap should be corrected, not tolerated.
+/// Signal-driven reducers may admit symbols after boot, where this check
+/// cannot see overlap. `StrategyCtx::foreign_position` answers that runtime
+/// case. This check still refuses overlap already present in config.
 ///
 /// Two behaviours on one symbol is one strategy with two branches.
 fn one_owner_per_symbol(built: &[Box<dyn Strategy>]) -> Result<(), Box<dyn Error>> {
@@ -467,25 +363,6 @@ fn one_name_per_sleeve(configured: &[StrategyConfig]) -> Result<(), Box<dyn Erro
 mod tests {
     use super::*;
 
-    fn sniper(symbol: &str) -> StrategyConfig {
-        let params: toml::Table = toml::from_str(&format!(
-            r#"
-            symbol = "{symbol}"
-            side = "buy"
-            trigger_px = 100.0
-            qty = 0.01
-            stop_px = 90.0
-        "#
-        ))
-        .expect("test config parses");
-        StrategyConfig {
-            name: "touch_sniper".into(),
-            sleeve: None,
-            book_path: None,
-            params,
-        }
-    }
-
     fn quoter(symbol: &str) -> StrategyConfig {
         let params: toml::Table = toml::from_str(&format!(
             r#"
@@ -501,7 +378,6 @@ mod tests {
         StrategyConfig {
             name: "quoter".into(),
             sleeve: None,
-            book_path: None,
             params,
         }
     }
@@ -563,25 +439,31 @@ max_initial_margin_usdt = 100.0
 
     #[test]
     fn strategies_on_different_symbols_are_fine() {
-        let built = strategies(&[sniper("BTCUSDT"), quoter("ETHUSDT")])
-            .expect("two strategies, two symbols");
+        let mut first = quoter("BTCUSDT");
+        first.sleeve = Some("first".into());
+        let mut second = quoter("ETHUSDT");
+        second.sleeve = Some("second".into());
+        let built = strategies(&[first, second]).expect("two strategies, two symbols");
         assert_eq!(built.len(), 2);
     }
 
     #[test]
     fn two_strategies_on_one_symbol_are_refused() {
-        let Err(err) = strategies(&[sniper("BTCUSDT"), quoter("BTCUSDT")]) else {
+        let mut first = quoter("BTCUSDT");
+        first.sleeve = Some("first".into());
+        let mut second = quoter("BTCUSDT");
+        second.sleeve = Some("second".into());
+        let Err(err) = strategies(&[first, second]) else {
             panic!("the venue cannot say whose position BTCUSDT is; this must not boot");
         };
         let text = err.to_string();
         assert!(text.contains("BTCUSDT"), "{text}");
-        assert!(text.contains("touch_sniper"), "{text}");
         assert!(text.contains("quoter"), "{text}");
     }
 
     #[test]
     fn the_same_strategy_twice_on_one_symbol_is_refused() {
-        assert!(strategies(&[sniper("BTCUSDT"), sniper("BTCUSDT")]).is_err());
+        assert!(strategies(&[quoter("BTCUSDT"), quoter("BTCUSDT")]).is_err());
     }
 
     // ----------------------------------------------------------------------
@@ -589,7 +471,7 @@ max_initial_margin_usdt = 100.0
     // ----------------------------------------------------------------------
 
     /// The `[risk]` block a funded engine would ship: no caps of its own, a
-    /// path to the document the Python fleet already reads.
+    /// path to the same document native config rendering consumes.
     fn profile_risk(profile: &str) -> toml::Table {
         risk_block(&format!(
             r#"
@@ -610,7 +492,7 @@ disaster_stop_fraction = 0.35
 
     /// A strategy block that names its own sleeve.
     fn sleeve_strategy(sleeve: &str, symbol: &str) -> StrategyConfig {
-        let mut cfg = sniper(symbol);
+        let mut cfg = quoter(symbol);
         cfg.sleeve = Some(sleeve.to_string());
         cfg
     }
@@ -646,168 +528,10 @@ disaster_stop_fraction = 0.35
         assert!(err.to_string().contains("carry"), "{err}");
     }
 
-    // ----------------------------------------------------------------------
-    // Which book belongs to which strategy
-    // ----------------------------------------------------------------------
-
-    /// A strategy that follows books, and one that does not, without
-    /// depending on any real plug's parameter schema.
-    struct Listener {
-        follows: bool,
-    }
-
-    impl engine_types::Strategy for Listener {
-        fn name(&self) -> &str {
-            "listener"
-        }
-        fn subscriptions(&self) -> Vec<Subscription> {
-            Vec::new()
-        }
-        fn on_event(
-            &mut self,
-            _event: &engine_types::EngineEvent,
-            _ctx: &mut dyn engine_types::StrategyCtx,
-        ) {
-        }
-        fn follows_a_target_book(&self) -> bool {
-            self.follows
-        }
-    }
-
-    fn built(follows: &[bool]) -> Vec<Box<dyn Strategy>> {
-        follows
-            .iter()
-            .map(|f| Box::new(Listener { follows: *f }) as Box<dyn Strategy>)
-            .collect()
-    }
-
-    fn blocks(paths: &[Option<&str>]) -> Vec<StrategyConfig> {
-        paths
-            .iter()
-            .enumerate()
-            .map(|(i, path)| StrategyConfig {
-                name: format!("s{i}"),
-                sleeve: None,
-                book_path: path.map(PathBuf::from),
-                params: toml::Table::new(),
-            })
-            .collect()
-    }
-
-    fn settings(engine_level_book: Option<&str>) -> EngineSection {
-        EngineSection {
-            wal_path: PathBuf::from("engine.wal"),
-            venue: "bybit_demo".into(),
-            group_flush_ms: 250,
-            wal_rotate_mb: 256,
-            account_view_max_age_ms: 5_000,
-            max_quote_age_ms: 30_000,
-            leverage_authority: crate::config::LeverageAuthority::default(),
-            target_book_path: engine_level_book.map(PathBuf::from),
-            heartbeat_path: None,
-            trades_path: None,
-        }
-    }
-
-    fn books_error(
-        engine_level: Option<&str>,
-        paths: &[Option<&str>],
-        follows: &[bool],
-        what: &str,
-    ) -> String {
-        match target_books(&settings(engine_level), &blocks(paths), &built(follows)) {
-            Ok(_) => panic!("{what}"),
-            Err(err) => err.to_string(),
-        }
-    }
-
-    #[tokio::test]
-    async fn two_sleeves_each_get_their_own_book() {
-        let books = target_books(
-            &settings(None),
-            &blocks(&[Some("carry.json"), Some("long.json")]),
-            &built(&[true, true]),
-        )
-        .expect("two sleeves with two books is the funded shape");
-        assert_eq!(books.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn the_engine_level_path_still_works_for_a_single_follower() {
-        // What configs written before routing say. It still means what it
-        // meant, because there is only one strategy it could have meant.
-        let books = target_books(
-            &settings(Some("carry.json")),
-            &blocks(&[None]),
-            &built(&[true]),
-        )
-        .expect("one follower, one book");
-        assert_eq!(books.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn the_engine_level_path_is_refused_once_there_are_two_followers() {
-        // It has no way to say whose book it is, and guessing would hand one
-        // sleeve's decisions to whichever plug happened to be first.
-        let err = books_error(
-            Some("carry.json"),
-            &[None, None],
-            &[true, true],
-            "an ambiguous book path was accepted",
-        );
-        assert!(err.contains("book_path"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn saying_it_both_ways_at_once_is_refused() {
-        let err = books_error(
-            Some("carry.json"),
-            &[Some("carry.json")],
-            &[true],
-            "two ways of naming one book were accepted",
-        );
-        assert!(err.contains("target_book_path"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn a_book_given_to_a_strategy_that_ignores_books_is_refused() {
-        // The file would never be read, and the operator would be watching a
-        // producer write into nothing.
-        let err = books_error(
-            None,
-            &[Some("carry.json")],
-            &[false],
-            "a book for a strategy that ignores books was accepted",
-        );
-        assert!(err.contains("never be read"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn a_follower_with_no_book_is_refused() {
-        // It would boot, subscribe, and hold nothing for ever -- which from
-        // outside looks exactly like a sleeve with nothing to do.
-        let err = books_error(
-            None,
-            &[None],
-            &[true],
-            "a follower with no book was accepted",
-        );
-        assert!(err.contains("no path was given"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn no_books_at_all_is_a_normal_config() {
-        // Nothing here follows a book, so nothing is watched. That is the
-        // touch-sniper shape, and it is not a fault.
-        let books = target_books(&settings(None), &blocks(&[None]), &built(&[false]))
-            .expect("a config with no books at all is fine");
-        assert!(books.is_empty());
-    }
-
     #[test]
     fn the_sleeve_name_falls_back_to_the_strategy_name() {
-        let mut cfg = sniper("BTCUSDT");
-        assert_eq!(cfg.sleeve_name(), "touch_sniper");
+        let mut cfg = quoter("BTCUSDT");
+        assert_eq!(cfg.sleeve_name(), "quoter");
         cfg.sleeve = Some("carry".into());
         assert_eq!(cfg.sleeve_name(), "carry");
     }
@@ -901,7 +625,7 @@ mod deployed_templates {
                 &profile_path,
             )
             .replace(
-                "/etc/liquidity-migration/producer-mainnet-source/operational-profile.json",
+                "/etc/liquidity-migration/signal-worker-mainnet-source/operational-profile.json",
                 &profile_path,
             );
         toml::from_str::<Config>(&text).unwrap_or_else(|e| panic!("{template} must parse: {e}"))
@@ -909,29 +633,24 @@ mod deployed_templates {
 
     fn assemble(template: &str, profile: &str) -> Config {
         let config = config_from(template, profile);
-        let built = strategies(&config.strategies)
+        strategies(&config.strategies)
             .unwrap_or_else(|e| panic!("{template} must build its strategies: {e}"));
         risk(&config.risk).unwrap_or_else(|e| panic!("{template} must build its risk kernel: {e}"));
-        target_books(&config.engine, &config.strategies, &built)
-            .unwrap_or_else(|e| panic!("{template} must wire its books: {e}"));
         config
     }
 
-    // `target_books` starts a watcher task, so these need a runtime under
-    // them the way the engine has one.
-    #[tokio::test]
-    async fn the_demo_template_assembles_whole() {
+    #[test]
+    fn the_demo_template_assembles_whole() {
         let config = assemble("engine.demo.toml.template", "operational.demo.json");
         assert_eq!(config.engine.venue, "bybit_demo");
         assert!(
             config.engine.heartbeat_path.is_some(),
-            "both producers size from the equity in the heartbeat; without a path \
-             they block every entry, quietly"
+            "the fleet observer contract requires the engine heartbeat path"
         );
     }
 
-    #[tokio::test]
-    async fn the_mainnet_template_assembles_whole() {
+    #[test]
+    fn the_mainnet_template_assembles_whole() {
         let config = assemble("engine.mainnet.toml.template", "operational.mainnet.json");
         assert_eq!(config.engine.venue, "bybit_mainnet");
     }
@@ -955,36 +674,16 @@ mod deployed_templates {
     }
 
     #[test]
-    fn each_sleeve_in_the_demo_template_reads_its_own_book() {
-        // Books are routed, not broadcast. Two sleeves sharing one path would
-        // each act on the other's decisions.
+    fn demo_directional_sleeves_use_current_native_inputs() {
         let config = config_from("engine.demo.toml.template", "operational.demo.json");
-        let paths: Vec<&std::path::Path> = config
-            .strategies
-            .iter()
-            .map(|s| s.book_path.as_deref().expect("every sleeve names a book"))
-            .collect();
-        assert_eq!(paths.len(), 3);
-        for (i, a) in paths.iter().enumerate() {
-            for b in paths.iter().skip(i + 1) {
-                assert_ne!(a, b, "one file cannot be two sleeves' decisions");
-            }
-        }
-    }
-
-    #[test]
-    fn each_target_book_sleeve_in_the_mainnet_template_reads_its_own_book() {
-        let config = config_from("engine.mainnet.toml.template", "operational.mainnet.json");
-        let paths: Vec<&std::path::Path> = config
-            .strategies
-            .iter()
-            .filter_map(|s| s.book_path.as_deref())
-            .collect();
-        assert_eq!(paths.len(), 3);
-        for (i, a) in paths.iter().enumerate() {
-            for b in paths.iter().skip(i + 1) {
-                assert_ne!(a, b, "one file cannot be two sleeves' decisions");
-            }
-        }
+        let built = strategies(&config.strategies).unwrap();
+        assert_eq!(
+            built
+                .iter()
+                .map(|strategy| strategy.requires_signal_feed())
+                .collect::<Vec<_>>(),
+            [true, true, false],
+            "CARRY and LONG consume external observations; Exodus consumes CARRY events"
+        );
     }
 }

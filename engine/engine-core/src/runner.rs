@@ -4,10 +4,9 @@
 //! constructor returns "not wired yet", so this command starts, names the
 //! missing part, and stops without writing to the log or touching a venue.
 //!
-//! Two claims are staked before any of it runs: the venue account, so this
-//! engine is not sending orders beside the Python fleet, and the log file, so
-//! it is not appending beside another engine. Both are kernel locks that die
-//! with the process.
+//! Two claims are staked before any of it runs: the venue account, so this is
+//! its only order writer, and the log file, so no second engine can append to
+//! the same WAL. Both are kernel locks that die with the process.
 
 use std::error::Error;
 use std::path::Path;
@@ -21,8 +20,7 @@ use crate::config;
 use crate::engine::Engine;
 
 /// What the engine writes into the lease file, so an operator who finds the
-/// account held knows which of the fleet's programs is holding it. The Python
-/// side spells its own roles the same way — `ledger_reset`, and so on.
+/// account held knows which program is holding it.
 const LEASE_ROLE: &str = "engine";
 
 pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
@@ -47,24 +45,26 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // Building a strategy is reading its config block: no clock, no socket,
     // no decision. Nothing below has happened yet when the lease is taken.
     let strategies: Vec<Box<dyn Strategy>> = assembly::strategies(&loaded.config.strategies)?;
-    // Each block's own name, so the log and the heartbeat can tell two sleeves
-    // running the same plug apart. Both of this fleet's are `target_book`.
+    if strategies
+        .iter()
+        .any(|strategy| strategy.requires_signal_feed())
+        && settings.signal_spool_path.is_none()
+    {
+        return Err("a configured strategy requires engine.signal_spool_path".into());
+    }
+    // Each block's sleeve name, so the WAL and heartbeat keep the fixed native
+    // strategy order distinct even when plugs share implementation helpers.
     let sleeves: Vec<String> = loaded
         .config
         .strategies
         .iter()
         .map(|s| s.sleeve_name().to_string())
         .collect();
-    let wanted: Vec<_> = strategies
+    let mut wanted: Vec<_> = strategies
         .iter()
         .flat_map(|s| s.subscriptions())
         .collect::<Vec<_>>();
     let risk = assembly::risk(&loaded.config.risk)?;
-    // Checked here, while the strategies are still in hand and before the
-    // account lease is taken: a config that wires a book to the wrong plug is
-    // a mistake to make at the door, not after claiming an account.
-    let books = assembly::target_books(&settings, &loaded.config.strategies, &strategies)?;
-
     // The log is claimed and replayed before anything is given a symbol
     // table, because the table STARTS from the log: the previous run's own
     // id order, then this config's subscriptions on top. Claim before open,
@@ -73,6 +73,11 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // take it too: they write the same log.
     let _log_claim = engine_wal::lock(&settings.wal_path)?;
     let (wal, replayed) = assembly::wal(&settings.wal_path)?;
+    for subscription in crate::signals::active_subscriptions(&replayed) {
+        if !wanted.contains(&subscription) {
+            wanted.push(subscription);
+        }
+    }
     let symbols = assembly::symbol_order(&replayed, &wanted);
 
     // The switch, turned once. All three of the venue's parts are built from
@@ -107,7 +112,6 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     )
     .await?;
 
-    engine.watch_targets(books);
     if let Some(trades) = assembly::trades(&settings) {
         engine.write_trades(trades);
     }
@@ -122,9 +126,53 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         engine.write_heartbeat(heartbeat);
     }
 
-    let outcome = engine
-        .run(&mut market_feed, &mut order_feed, stop_signal())
-        .await?;
+    let outcome = match (
+        settings.signal_spool_path.as_deref(),
+        settings.control_spool_path.as_deref(),
+    ) {
+        (Some(signal_path), Some(control_path)) => {
+            let mut signals = crate::signals::SpoolSignalFeed::new(signal_path);
+            let mut controls = crate::controls::SpoolRuntimeControlFeed::new(control_path);
+            engine
+                .run_with_inputs(
+                    &mut market_feed,
+                    &mut order_feed,
+                    &mut signals,
+                    &mut controls,
+                    stop_signal(),
+                )
+                .await?
+        }
+        (Some(signal_path), None) => {
+            let mut signals = crate::signals::SpoolSignalFeed::new(signal_path);
+            engine
+                .run_with_signals(
+                    &mut market_feed,
+                    &mut order_feed,
+                    &mut signals,
+                    stop_signal(),
+                )
+                .await?
+        }
+        (None, Some(control_path)) => {
+            let mut signals = crate::signals::NoSignals;
+            let mut controls = crate::controls::SpoolRuntimeControlFeed::new(control_path);
+            engine
+                .run_with_inputs(
+                    &mut market_feed,
+                    &mut order_feed,
+                    &mut signals,
+                    &mut controls,
+                    stop_signal(),
+                )
+                .await?
+        }
+        (None, None) => {
+            engine
+                .run(&mut market_feed, &mut order_feed, stop_signal())
+                .await?
+        }
+    };
     tracing::info!(?outcome, "stopped");
     Ok(())
 }
@@ -167,10 +215,8 @@ struct Claim {
 
 /// Make sure nothing else is sending orders to this venue account.
 ///
-/// The lock is the Python fleet's own — same directory, same file name, same
-/// protocol — so the engine and the owner service contend with each other
-/// rather than each holding a lock the other has never heard of. See
-/// `engine_venue::lease`.
+/// The lock uses the account-owner lease protocol in `engine_venue::lease`, so
+/// every engine process for the same venue account contends on one identity.
 ///
 /// Take it before the engine boots, and refuse to start if somebody already
 /// has it.

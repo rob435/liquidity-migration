@@ -14,7 +14,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGE = "liquidity_migration"
 
-#: The documented order (liquidity_migration/README.md §Import order). An
+#: The documented order (liquidity_migration/README.md §Dependency rule). An
 #: import may only point at a strictly lower rank. ``ops`` and ``cli`` share a
 #: rank and, measured from the tree, have no edges between them in either
 #: direction — so a same-rank cross-package import is a violation too.
@@ -24,12 +24,9 @@ _RANKS = {
     "data": 2,
     "rules": 3,
     "research": 4,
-    "venue": 5,
-    "policy": 6,
-    "runtime": 7,
-    "strategy": 8,
-    "ops": 9,
-    "cli": 9,
+    "policy": 5,
+    "ops": 6,
+    "cli": 6,
 }
 
 
@@ -99,8 +96,8 @@ def test_checker_flags_synthetic_bad_edges(tmp_path: Path) -> None:
     root = tmp_path / _PACKAGE
     (root / "core").mkdir(parents=True)
     (root / "core" / "bad.py").write_text(
-        "from liquidity_migration.strategy.foo import bar\n"
-        "import liquidity_migration.venue.baz\n"
+        "from liquidity_migration.unranked.foo import bar\n"
+        "import liquidity_migration.policy.baz\n"
         "from liquidity_migration.core.sibling import fine\n",
         encoding="utf-8",
     )
@@ -109,14 +106,14 @@ def test_checker_flags_synthetic_bad_edges(tmp_path: Path) -> None:
         "import liquidity_migration.cli.commands\n",
         encoding="utf-8",
     )
-    (root / "strategy").mkdir()
-    (root / "strategy" / "good.py").write_text(
+    (root / "research").mkdir()
+    (root / "research" / "good.py").write_text(
         "from liquidity_migration.core.substrate import helper\n",
         encoding="utf-8",
     )
     violations = import_order_violations(root)
     assert len(violations) == 3
-    assert any("bad.py" in item and "strategy" in item for item in violations)
-    assert any("bad.py" in item and "venue" in item for item in violations)
+    assert any("bad.py" in item and "unranked" in item for item in violations)
+    assert any("bad.py" in item and "policy" in item for item in violations)
     assert any("sideways.py" in item and "cli" in item for item in violations)
     assert not any("good.py" in item for item in violations)

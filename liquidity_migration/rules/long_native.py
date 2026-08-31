@@ -8,13 +8,14 @@ CLI. The historical equity engine that replays this rule lives in
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import polars as pl
 
 from liquidity_migration.core._common import calendar_roll, calendar_shift
-from liquidity_migration.core.config import DEFAULT_EXCLUDED_SYMBOLS
 from liquidity_migration.rules.long_identity import (
     LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID,
     LONG_V12_WIDE_STOP_STRATEGY_ID,
@@ -30,30 +31,28 @@ class LongNativeConfig:
     when the active demo runtime or standard equity runner consumes them.
     """
 
-    execution_strategy_id: str = LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
-    execution_leverage: float = 10.0
-    start_date: str = ""
-    end_date: str = ""
+    execution_strategy_id: str
+    start_date: str
+    end_date: str
 
-    universe_size: int = 50
-    universe_volume_window_days: int = 90
-    min_listing_history_days: int = 30
-    exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
-    regime_symbol: str = "BTCUSDT"
-    regime_sma_days: int = 30
+    universe_size: int
+    universe_volume_window_days: int
+    min_listing_history_days: int
+    exclude_symbols: tuple[str, ...]
+    regime_symbol: str
+    regime_sma_days: int
 
-    fc_min_day_return: float = 0.15
-    fc_top_volume_rank_max: int = 10
-    fc_min_close_location: float = 0.70
-    fc_max_hold_days: int = 3
-    fc_max_atr_pct: float = 0.12
-    fc_atr_stop_mult: float = 1.5
-    fc_atr_tp_mult: float = 4.0
-    fc_sigma_mult: float = 2.5
-    fc_sniper_retrace_pct: float = 0.01
-    fc_sniper_deadline_hours: int = 6
-    weekend_size_mult: float = 1.5
-    fc_close_loc_multi_day: float = 0.6
+    fc_min_day_return: float
+    fc_top_volume_rank_max: int
+    fc_min_close_location: float
+    fc_max_hold_days: int
+    fc_max_atr_pct: float
+    fc_atr_stop_mult: float
+    fc_sigma_mult: float
+    fc_sniper_retrace_pct: float
+    fc_sniper_deadline_hours: int
+    weekend_size_mult: float
+    fc_close_loc_multi_day: float
 
     # Tighten the stop to N x ATR once a position is this many hours old. Zero
     # disables, so v11a is unchanged. Pairs with a wide `fc_atr_stop_mult`:
@@ -61,27 +60,90 @@ class LongNativeConfig:
     # 2.5 sigma TODAY, so a narrow stop sits inside the noise of the very move
     # that triggered the entry. Give the trade room through that move, then stop
     # giving it room once it has had two days and gone nowhere.
-    fc_stop_time_decay_hours: int = 0
-    fc_stop_time_decay_atr_mult: float = 0.0
+    fc_stop_time_decay_hours: int
+    fc_stop_time_decay_atr_mult: float
 
-    max_concurrent_positions: int = 10
-    cooldown_days: int = 7
-    entry_delay_hours: int = 1
-    gross_exposure: float = 1.0
-    notional_multiplier: float = 1.0
-    vol_estimate_window_days: int = 30
-    vol_floor_annual: float = 0.30
-    max_position_weight: float = 0.30
-    vol_target_annual: float = 0.60
-    vol_target_min_scale: float = 0.30
-    vol_target_max_scale: float = 1.25
-    cost_multiplier: float = 3.0
+    max_concurrent_positions: int
+    cooldown_days: int
+    entry_delay_hours: int
+    gross_exposure: float
+    vol_estimate_window_days: int
+    vol_floor_annual: float
+    max_position_weight: float
+    vol_target_annual: float
+    vol_target_min_scale: float
+    vol_target_max_scale: float
+    cost_multiplier: float
+
+
+LONG_STRATEGY_PROFILE_CHOICES = ("v11a", "v12")
+_CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
+LONG_REGISTERED_RULE_PATHS = {
+    name: _CONFIGS_DIR / f"long_native_{name}.json" for name in LONG_STRATEGY_PROFILE_CHOICES
+}
+
+
+def _registered_long_profiles() -> dict[str, LongNativeConfig]:
+    expected_fields = set(LongNativeConfig.__dataclass_fields__)
+    integer_fields = {
+        "universe_size",
+        "universe_volume_window_days",
+        "min_listing_history_days",
+        "regime_sma_days",
+        "fc_top_volume_rank_max",
+        "fc_max_hold_days",
+        "fc_sniper_deadline_hours",
+        "fc_stop_time_decay_hours",
+        "max_concurrent_positions",
+        "cooldown_days",
+        "entry_delay_hours",
+        "vol_estimate_window_days",
+    }
+    text_fields = {"execution_strategy_id", "start_date", "end_date", "regime_symbol"}
+    loaded: dict[str, LongNativeConfig] = {}
+    for name in LONG_STRATEGY_PROFILE_CHOICES:
+        payload = json.loads(LONG_REGISTERED_RULE_PATHS[name].read_bytes())
+        if not isinstance(payload, dict) or set(payload) != {"schema_version", "kind", "profile_name", "rule"}:
+            raise ValueError("LONG registered rule has unexpected or missing fields")
+        if (
+            payload["schema_version"] != 1
+            or payload["kind"] != "liquidity_migration_long_native_rule"
+            or payload["profile_name"] != name
+        ):
+            raise ValueError("unsupported LONG registered rule identity")
+        row = payload["rule"]
+        if not isinstance(row, dict) or set(row) != expected_fields:
+            raise ValueError(f"LONG registered profile {name!r} has unexpected or missing fields")
+        if any(type(row[field]) is not int for field in integer_fields):
+            raise ValueError(f"LONG registered profile {name!r} has a non-integer field")
+        if any(not isinstance(row[field], str) for field in text_fields):
+            raise ValueError(f"LONG registered profile {name!r} has a non-text field")
+        excluded = row["exclude_symbols"]
+        if (
+            not isinstance(excluded, list)
+            or any(not isinstance(symbol, str) or not symbol for symbol in excluded)
+            or excluded != sorted(set(excluded))
+        ):
+            raise ValueError(f"LONG registered profile {name!r} has invalid excluded symbols")
+        values = dict(row)
+        values["exclude_symbols"] = tuple(excluded)
+        for field in expected_fields - integer_fields - text_fields - {"exclude_symbols"}:
+            value = values[field]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(f"LONG registered profile {name!r} has an invalid number")
+            values[field] = float(value)
+        loaded[name] = LongNativeConfig(**values)
+    if loaded["v11a"].execution_strategy_id != LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID:
+        raise ValueError("LONG v11a registered identity disagrees with attribution")
+    if loaded["v12"].execution_strategy_id != LONG_V12_WIDE_STOP_STRATEGY_ID:
+        raise ValueError("LONG v12 registered identity disagrees with attribution")
+    return loaded
 
 
 def long_v11a_profile() -> LongNativeConfig:
     """Return the deployed LONG strategy profile."""
 
-    return LongNativeConfig()
+    return _registered_long_profiles()["v11a"]
 
 
 def long_v12_profile() -> LongNativeConfig:
@@ -89,7 +151,7 @@ def long_v12_profile() -> LongNativeConfig:
 
     Every other v11a rule was ablated on the real engine and kept: the volume
     rank, the BTC-and-ETH regime gate, the 2.5 sigma trigger family, the 7-day
-    cooldown, the 3-day hold, the 4xATR target, the 1%/6h retrace entry and the
+    cooldown, the 3-day hold, the 1%/6h retrace entry and the
     top-50 universe all lose Sharpe when loosened. The stop was the one number
     that was wrong.
 
@@ -108,25 +170,16 @@ def long_v12_profile() -> LongNativeConfig:
     record starts at the commit that registers this profile.
     """
 
-    return LongNativeConfig(
-        execution_strategy_id=LONG_V12_WIDE_STOP_STRATEGY_ID,
-        fc_atr_stop_mult=3.0,
-        fc_stop_time_decay_hours=48,
-        fc_stop_time_decay_atr_mult=1.5,
-    )
+    return _registered_long_profiles()["v12"]
 
 
-# Runtime selector names accepted by the CLI/daemon. Each maps to exactly one
-# registered profile; anything else fails at argument parsing or resolution.
-LONG_STRATEGY_PROFILE_CHOICES = ("v11a", "v12")
-
-
+# Each selector maps to exactly one registered profile. Unknown values fail
+# instead of silently changing the persisted strategy identity.
 def resolve_long_strategy_profile(name: str) -> LongNativeConfig:
     """Resolve a runtime profile selector to its registered LONG config.
 
     Deliberately strict: an unknown selector raises instead of defaulting, so a
-    typo in deploy wiring cannot silently publish targets under the wrong
-    persisted execution identity.
+    typo in native config cannot silently run the wrong execution identity.
     """
 
     normalized = str(name).strip().lower()
@@ -137,14 +190,6 @@ def resolve_long_strategy_profile(name: str) -> LongNativeConfig:
     raise ValueError(
         f"unknown LONG strategy profile {name!r}; supported: {', '.join(LONG_STRATEGY_PROFILE_CHOICES)}"
     )
-
-
-def _vol_target_scale(config: "LongNativeConfig", btc_rv: float | None) -> float:
-    """Active v11a BTC-vol book scalar, shared by equity and runtime."""
-
-    rv = btc_rv or config.vol_target_annual  # None/0.0 -> target (scale 1.0); mirrors backtest
-    vt = config.vol_target_annual / max(rv, 1e-6)
-    return max(config.vol_target_min_scale, min(config.vol_target_max_scale, vt))
 
 
 def build_long_features(klines_1h: pl.DataFrame, *, config: LongNativeConfig) -> pl.DataFrame:
@@ -281,95 +326,6 @@ def build_long_features_from_daily(
         daily = daily.with_columns(pl.lit(False).alias("eth_regime_on"))
 
     return daily.sort(["ts_ms", "symbol"])
-
-
-def detect_pattern_fomo_chase(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
-    """Return whether a closed daily row satisfies the active FC-v11a signal."""
-
-    if not row.get("in_universe") or not row.get("regime_on") or not row.get("eth_regime_on"):
-        return False
-    today_rank = _safe_float(row.get("today_volume_rank"))
-    if today_rank is None or today_rank > cfg.fc_top_volume_rank_max:
-        return False
-    if _safe_float(row.get("log_return")) is None:
-        return False
-    pump = long_pump_family(row, cfg)
-    close_location = _safe_float(row.get("close_location"))
-    close_loc_3d = _safe_float(row.get("close_loc_3d"))
-    close_loc_7d = _safe_float(row.get("close_loc_7d"))
-    trigger_1d = bool(pump["trigger_1d"]) and (
-        close_location is not None and close_location >= cfg.fc_min_close_location
-    )
-    trigger_3d = bool(pump["trigger_3d"]) and (
-        close_loc_3d is not None and close_loc_3d >= cfg.fc_close_loc_multi_day
-    )
-    trigger_7d = bool(pump["trigger_7d"]) and (
-        close_loc_7d is not None and close_loc_7d >= cfg.fc_close_loc_multi_day
-    )
-    if not (trigger_1d or trigger_3d or trigger_7d):
-        return False
-    atr_pct = _safe_float(row.get("atr_14d_pct"))
-    return atr_pct is not None and 0.0 < atr_pct <= cfg.fc_max_atr_pct
-
-
-def long_pump_family(row: dict[str, Any], cfg: LongNativeConfig) -> dict[str, Any]:
-    """Return the causal FC pump family before active alpha filters.
-
-    The diagnostic source population uses these exact magnitude thresholds but
-    records regime, universe/rank, close-location, and ATR constraints later.
-    ``detect_pattern_fomo_chase`` consumes the same flags, preventing a second
-    implementation of the active pump arithmetic.
-    """
-
-    sigma_d = _safe_float(row.get("sigma_daily_30d"))
-    threshold_1d = (
-        cfg.fc_sigma_mult * sigma_d
-        if sigma_d is not None and sigma_d > 0.0
-        else math.log1p(cfg.fc_min_day_return)
-    )
-    thresholds = {
-        "1d": threshold_1d,
-        "3d": threshold_1d * math.sqrt(3),
-        "7d": threshold_1d * math.sqrt(7),
-    }
-    values = {
-        "1d": _safe_float(row.get("log_return")),
-        "3d": _safe_float(row.get("pump_3d_log")),
-        "7d": _safe_float(row.get("pump_7d_log")),
-    }
-    triggers = {
-        horizon: value is not None and value >= thresholds[horizon]
-        for horizon, value in values.items()
-    }
-    ratios = [
-        value / thresholds[horizon]
-        for horizon, value in values.items()
-        if value is not None and thresholds[horizon] > 0.0
-    ]
-    return {
-        "threshold_1d": thresholds["1d"],
-        "threshold_3d": thresholds["3d"],
-        "threshold_7d": thresholds["7d"],
-        "trigger_1d": triggers["1d"],
-        "trigger_3d": triggers["3d"],
-        "trigger_7d": triggers["7d"],
-        "trigger_any": any(triggers.values()),
-        "source_strength": max(ratios) if ratios else None,
-    }
-
-
-def _fc_exit_params(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[float, float]:
-    atr_pct = _safe_float(row.get("atr_14d_pct"))
-    if atr_pct is None or atr_pct <= 0.0:
-        raise ValueError("active FC-v11a entry requires positive atr_14d_pct")
-    return atr_pct * cfg.fc_atr_stop_mult, atr_pct * cfg.fc_atr_tp_mult
-
-
-def _classify_entry(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[str | None, float, float, int]:
-    if not detect_pattern_fomo_chase(row, cfg):
-        return None, 0.0, 0.0, 0
-    stop_pct, take_profit_pct = _fc_exit_params(row, cfg)
-    return "fomo_chase", stop_pct, take_profit_pct, cfg.fc_max_hold_days
 
 
 def _cal_roll(

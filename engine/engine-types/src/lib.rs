@@ -18,7 +18,6 @@ pub mod orders;
 pub mod quantize;
 pub mod risk;
 pub mod strategy;
-pub mod targets;
 pub mod wal;
 
 pub use async_trait::async_trait;
@@ -33,11 +32,20 @@ pub use orders::{
     Side, StopSpec, TimeInForce, VenueError, VenueExecution, VenueOrder, WorkPolicy,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
-pub use strategy::{EngineEvent, Strategy, StrategyCtx};
-pub use targets::{BookTarget, TargetBook};
+pub use strategy::{
+    CheckpointProvenance, EngineEvent, RuntimeControlCommand, RuntimeControlError,
+    RuntimeControlFeed, RuntimeControlRequest, SignalError, SignalFeed, SignalObservation,
+    Strategy, StrategyAccountSummary, StrategyCheckpoint, StrategyCheckpointIdentity, StrategyCtx,
+    StrategyEvent, StrategyImportContext, StrategyImportSource, StrategyPositionFacts,
+    TranslatedStrategyEvent, TranslatedStrategyState, MAX_DURABLE_SIGNAL_SUBSCRIPTIONS,
+    MAX_SIGNAL_OBSERVATION_BYTES, MAX_SIGNAL_SUBSCRIPTIONS, MAX_STRATEGY_EVENT_BYTES,
+    MAX_STRATEGY_STATE_BYTES, SIGNAL_OBSERVATION_SCHEMA_VERSION,
+    STRATEGY_ENTRY_PERMISSION_SCHEMA_VERSION,
+};
 pub use wal::{
-    AnchorState, FilledTotal, IntendedStop, OpenOrderState, RecentExecutionId, SymbolTotal, Wal,
-    WalError, WalRecord,
+    AnchorState, FilledTotal, IntendedStop, OpenOrderState, RecentExecutionId, SignalCursor,
+    SignalSubscriptionState, StrategyCheckpointState, StrategyGlobalCheckpointState,
+    StrategySymbol, SymbolTotal, Wal, WalError, WalRecord,
 };
 
 /// Which venue account a gateway's credentials actually reach, as the venue

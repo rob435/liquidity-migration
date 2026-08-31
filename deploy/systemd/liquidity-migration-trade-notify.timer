@@ -1,10 +1,9 @@
 [Unit]
-Description=Diff the target books for trade updates every 5 minutes
+Description=Read attributed engine fills and closed trades every 5 minutes
 
 [Timer]
-# Books change on the producers' own clocks (midnight for carry, any cycle
-# for LONG, settlements for exodus); five minutes keeps the phone close to
-# the decision without re-reading three small files to no purpose.
+# Five minutes keeps the phone close to fills without putting notification
+# work on either account owner's hot path.
 OnCalendar=*-*-* *:0/5:30
 AccuracySec=30s
 Persistent=true

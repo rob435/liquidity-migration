@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -49,9 +50,7 @@ def test_no_guard_ends_a_deploy_function_as_an_and_list() -> None:
     """
     lines = DEPLOY.read_text(encoding="utf-8").splitlines()
     offenders = [
-        index + 1
-        for index, line in enumerate(lines[:-1])
-        if "&& fail" in line and lines[index + 1].rstrip() == "}"
+        index + 1 for index, line in enumerate(lines[:-1]) if "&& fail" in line and lines[index + 1].rstrip() == "}"
     ]
     assert not offenders, f"&& fail ends a function at line(s) {offenders}"
 
@@ -63,15 +62,18 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
         "scripts/deploy_vps_live.sh",
         "scripts/ops.sh",
         "scripts/run_authorized_runtime.sh",
-        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
-        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
     ):
         assert (ROOT / relative).stat().st_mode & stat.S_IXUSR, relative
 
 
 def test_manifest_contains_only_the_current_rust_owned_fleet() -> None:
     units = _units()
-    assert len(units) == 22
+    manifest = {
+        row.split("|", 1)[0]
+        for row in _read("deploy/fleet_manifest.tsv").splitlines()
+        if row and not row.startswith("#")
+    }
+    assert set(units) == manifest
     assert "liquidity-migration-engine.service" in units
     assert "liquidity-migration-engine-mainnet.service" in units
     assert not any("account-execution" in name for name in units)
@@ -85,8 +87,7 @@ def _authorized_commands() -> dict[str, str]:
     for block in body.split(";;"):
         names = re.findall(r"(liquidity-migration-[\w-]+\.service):main", block)
         text = block + "".join(
-            _read(f"scripts/runtime/{wrapper}")
-            for wrapper in re.findall(r"scripts/runtime/([\w.-]+\.sh)", block)
+            _read(f"scripts/runtime/{wrapper}") for wrapper in re.findall(r"scripts/runtime/([\w.-]+\.sh)", block)
         )
         commands.update(dict.fromkeys(names, text))
     return commands
@@ -101,14 +102,9 @@ def test_polars_units_keep_cgroup_memory_visibility() -> None:
     reaches_polars = {
         name
         for name, command in _authorized_commands().items()
-        if re.search(r"-m liquidity_migration(?![\w.])", command)
-        or "check_fleet_liveness.py" in command
+        if re.search(r"-m liquidity_migration(?![\w.])", command) or "check_fleet_liveness.py" in command
     }
     assert reaches_polars == {
-        "liquidity-migration-bybit-long-demo.service",
-        "liquidity-migration-bybit-long-mainnet.service",
-        "liquidity-migration-bybit-carry-demo.service",
-        "liquidity-migration-bybit-carry-mainnet.service",
         "liquidity-migration-demo-liveness.service",
         "liquidity-migration-mainnet-liveness.service",
     }
@@ -117,7 +113,6 @@ def test_polars_units_keep_cgroup_memory_visibility() -> None:
         body = units[name]
         assert "ProtectProc=invisible" in body, name
         assert "ProcSubset=pid" not in body, name
-        assert "/proc/meminfo" in body, name
     # The compiled engines read no Parquet and keep the tighter setting.
     for name in ("liquidity-migration-engine.service", "liquidity-migration-engine-mainnet.service"):
         assert "ProcSubset=pid" in units[name], name
@@ -126,10 +121,7 @@ def test_polars_units_keep_cgroup_memory_visibility() -> None:
 def test_guarded_units_cross_the_installed_release_gate_before_checkout_code() -> None:
     guarded = [body for name, body in _units().items() if name.endswith(".service")]
     for body in guarded:
-        assert (
-            "ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime"
-            in body
-        )
+        assert "ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime" in body
         if "Restart=always" in body:
             assert "RestartPreventExitStatus=78" in body
         assert "KillMode=control-group" in body
@@ -147,24 +139,41 @@ def test_guarded_units_cross_the_installed_release_gate_before_checkout_code() -
         "diff-index --quiet",
         'show "$marker_commit:scripts/run_authorized_runtime.sh"',
         'sha256sum "$ENGINE"',
+        'sha256sum "$SIGNAL_WORKER"',
         'sha256sum "$LAUNCHER"',
         'sha256sum "$CONTROL_HELPER"',
         'sha256sum "$TELEGRAM_BOT"',
         "activation_authority_valid",
         "terminate_child",
-        'exit 78',
+        "exit 78",
     ):
         assert required in launcher
 
 
-def test_execution_engines_and_producers_run_as_distinct_unprivileged_users() -> None:
+def test_signal_worker_units_use_the_digest_bound_rust_binary() -> None:
+    commands = _authorized_commands()
+    for unit in (
+        "liquidity-migration-signal-worker-demo.service",
+        "liquidity-migration-signal-worker-mainnet.service",
+    ):
+        assert unit in commands
+        assert "/opt/liquidity-migration-engine/bin/signal-worker" in commands[unit]
+    launcher = _read("deploy/run_authorized_runtime_trusted.sh")
+    assert "SIGNAL_WORKER=/opt/liquidity-migration-engine/bin/signal-worker" in launcher
+    assert 'sha256sum "$SIGNAL_WORKER"' in launcher
+    assert "marker_signal_worker_digest" in launcher
+
+
+def test_execution_engines_and_signal_workers_run_as_distinct_unprivileged_users() -> None:
     units = _units()
     assert "User=liquidity-engine-demo" in units["liquidity-migration-engine.service"]
     assert "User=liquidity-engine-mainnet" in units["liquidity-migration-engine-mainnet.service"]
-    for name, body in units.items():
-        if "bybit-" in name:
-            assert "User=liquidity-producer" in body
-            assert "User=root" not in body
+    for name in (
+        "liquidity-migration-signal-worker-demo.service",
+        "liquidity-migration-signal-worker-mainnet.service",
+    ):
+        assert "User=liquidity-signal-worker" in units[name]
+        assert "User=root" not in units[name]
     capture = units["liquidity-migration-forward-capture.service"]
     assert "User=liquidity-capture" in capture
     assert "StateDirectory=liquidity-migration/forward-market" in capture
@@ -187,37 +196,35 @@ def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> N
     assert "User=root" not in unit
 
     helper = _read("deploy/telegram_control_helper.sh")
-    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-demo"):
+    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-fleet"):
         assert action in helper
     assert 'case "$ACTION" in' in helper
     assert "/usr/bin/systemd-run --quiet --wait --pipe --collect" in helper
     assert '"$HELPER" --worker "$ACTION"' in helper
     assert "demo resume requires this generation's completed activation receipt" in helper
     assert "control_helper_sha256" in helper
+    assert "signal_worker_sha256" in helper
     assert "controls_sudoers_sha256" in helper
     assert "telegram_bot_sha256" in helper
     assert "InaccessiblePaths=" in helper
-    assert "quarantine_pair" in helper
-    assert 'systemctl is-active --quiet "$unit"' in helper
-    assert 'systemctl is-enabled "$unit"' in helper
-    assert "demo pause could not quarantine both producers" in helper
-    assert "mainnet pause could not quarantine both funded producers" in helper
+    assert "set-strategy-entry-permission" in helper
+    assert "strategy_entries_enabled" in helper
+    assert "wait_heartbeat_entries" in helper
+    assert "/usr/bin/setpriv" in helper
+    assert "quarantine_units" not in helper
     assert "demo resume requires the account owner to be active" in helper
-    # The funded resume carries the same two proofs as the demo one, and a
-    # failure to bring either producer up puts both back in quarantine.
     assert "funded resume requires this generation's completed activation receipt" in helper
     assert "funded resume requires the funded account owner to be active" in helper
-    assert "funded resume failed; both funded producers were re-quarantined" in helper
+    assert "funded CARRY pause was not durably applied" in helper
+    assert "funded Exodus resume was not durably applied" in helper
+    assert "liquidity-migration-signal-worker" not in helper
+    assert "deploy/fleet_manifest.tsv" in helper
 
     sudoers = _read("deploy/liquidity-controls.sudoers")
-    allowed = {
-        line.split("NOPASSWD: ", 1)[1]
-        for line in sudoers.splitlines()
-        if "NOPASSWD: " in line
-    }
+    allowed = {line.split("NOPASSWD: ", 1)[1] for line in sudoers.splitlines() if "NOPASSWD: " in line}
     assert allowed == {
         f"/opt/liquidity-migration-engine/bin/telegram-control-helper {action}"
-        for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-demo")
+        for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-fleet")
     }
     assert "!setenv" in sudoers
     policy = _function(
@@ -231,50 +238,84 @@ def test_telegram_controls_use_an_isolated_identity_and_exact_root_helper() -> N
     assert "tr -d '[:space:]'" not in policy
     actual_block = policy[policy.index("actual=") : policy.index("expected=")]
     expected_block = policy[policy.index("expected=") :]
-    assert all(
-        block.index("LC_ALL=C sed") < block.index("LC_ALL=C sort")
-        for block in (actual_block, expected_block)
-    )
+    assert all(block.index("LC_ALL=C sed") < block.index("LC_ALL=C sort") for block in (actual_block, expected_block))
     assert "exact five-command boundary" in policy
+    assert "status_action=status-fleet" in policy
+    assert "status_action=status-demo" in policy
 
     bot = _read("liquidity_migration/ops/telegram_controls.py")
     fleet = bot[bot.index("class VpsFleet:") : bot.index("# The panel")]
     assert '"/usr/bin/sudo", "-n", CONTROL_HELPER' in bot
-    assert "systemctl\", \"enable" not in fleet
-    assert "systemctl\", \"disable" not in fleet
+    assert 'self._control("status-fleet")' in fleet
+    assert 'systemctl", "enable' not in fleet
+    assert 'systemctl", "disable' not in fleet
+    assert '"systemctl", "is-active"' not in fleet
     assert "write_text(" not in fleet and "os.replace(" not in fleet
+    for unit in (
+        "liquidity-migration-engine.service",
+        "liquidity-migration-engine-mainnet.service",
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-carry-demo.service",
+        "liquidity-migration-bybit-exodus-demo.service",
+        "liquidity-migration-bybit-long-mainnet.service",
+        "liquidity-migration-bybit-carry-mainnet.service",
+        "liquidity-migration-bybit-exodus-mainnet.service",
+    ):
+        assert unit not in bot
 
     identities = _function(
         DEPLOY.read_text(encoding="utf-8"),
         "ensure_runtime_identities",
-        "write_producer_environment",
+        "write_signal_worker_environment",
     )
     assert "CONTROLS_USER" in identities and "CONTROLS_GROUP" in identities
     assert 'id -nG "$CONTROLS_USER"' in identities
 
 
+def test_native_runtime_controls_have_separate_engine_owned_spools() -> None:
+    units = _units()
+    demo = units["liquidity-migration-engine.service"]
+    mainnet = units["liquidity-migration-engine-mainnet.service"]
+    assert "/var/lib/liquidity-migration/controls/demo" in demo
+    assert "/var/lib/liquidity-migration/controls/mainnet" in mainnet
+    assert "liquidity-migration-signal-worker-demo.service" in demo
+    assert "liquidity-migration-signal-worker-mainnet.service" in mainnet
+
+    demo_config = _read("deploy/engine.demo.toml.template")
+    mainnet_config = _read("deploy/engine.mainnet.toml.template")
+    assert 'control_spool_path = "/var/lib/liquidity-migration/controls/demo"' in demo_config
+    assert 'control_spool_path = "/var/lib/liquidity-migration/controls/mainnet"' in mainnet_config
+
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    identities = _function(deploy, "ensure_runtime_identities", "write_signal_worker_environment")
+    normalize = _function(deploy, "normalize_runtime_state_access", "ensure_runtime_identities")
+    assert 'CONTROL_SPOOL_ROOT=/var/lib/liquidity-migration/controls' in deploy
+    assert '"$DEMO_ENGINE_USER" "$control_spool_root/demo"' in normalize
+    assert '"$MAINNET_ENGINE_USER" "$control_spool_root/mainnet"' in normalize
+    assert 'install -d -o "$DEMO_ENGINE_USER"' in identities
+    assert 'install -d -o "$MAINNET_ENGINE_USER"' in identities
+
+
 def test_funded_owner_retains_only_its_load_bearing_account_identity() -> None:
     units = _units()
     funded = units["liquidity-migration-engine-mainnet.service"]
-    unset = next(
-        line for line in funded.splitlines() if line.startswith("UnsetEnvironment=")
-    )
+    unset = next(line for line in funded.splitlines() if line.startswith("UnsetEnvironment="))
     assert "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" not in unset
     for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_ALERT_CHAT_ID"):
         assert key in unset
     for name, body in units.items():
         if not name.endswith(".service") or name == "liquidity-migration-engine-mainnet.service":
             continue
-        other_unset = " ".join(
-            line for line in body.splitlines() if line.startswith("UnsetEnvironment=")
-        )
+        other_unset = " ".join(line for line in body.splitlines() if line.startswith("UnsetEnvironment="))
         assert "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" in other_unset, name
 
 
-def test_producers_never_receive_venue_credentials_or_the_arming_switch() -> None:
-    for name, body in _units().items():
-        if "bybit-" not in name:
-            continue
+def test_signal_workers_never_receive_venue_credentials_or_the_arming_switch() -> None:
+    for name in (
+        "liquidity-migration-signal-worker-demo.service",
+        "liquidity-migration-signal-worker-mainnet.service",
+    ):
+        body = _units()[name]
         unset = next(line for line in body.splitlines() if line.startswith("UnsetEnvironment="))
         for key in (
             "BYBIT_DEMO_API_KEY",
@@ -291,43 +332,31 @@ def test_producers_never_receive_venue_credentials_or_the_arming_switch() -> Non
             assert key in unset, (name, key)
 
 
-def test_producer_source_templates_are_non_secret_and_realm_bound() -> None:
+def test_signal_worker_source_templates_are_non_secret_and_realm_bound() -> None:
     for realm in ("demo", "mainnet"):
-        body = _read(f"deploy/producer-{realm}-source.env.template")
-        assert f"PRODUCER_REALM={realm}" in body
+        body = _read(f"deploy/signal-worker-{realm}.env.template")
+        assert f"SIGNAL_WORKER_REALM={realm}" in body
         for key in (
             "CANDIDATE_UNIVERSE_FILE",
             "OPERATIONAL_PROFILE_FILE",
         ):
             assert f"{key}=/" in body
         assert "BYBIT_" not in body and "REAL_MONEY" not in body
+        assert "CARRY_NOTIONAL_MULTIPLIER" not in body
+        assert "LONG_NOTIONAL_MULTIPLIER" not in body
 
 
-def test_producer_projection_is_an_explicit_non_secret_allowlist() -> None:
-    block = _function(DEPLOY.read_text(encoding="utf-8"), "write_producer_environment", "project_mainnet_telegram_environment")
-    assert '"OPERATIONAL_PROFILE_FILE", "PRODUCER_REALM"' in block
+def test_signal_worker_projection_is_an_explicit_non_secret_allowlist() -> None:
+    block = _function(
+        DEPLOY.read_text(encoding="utf-8"), "write_signal_worker_environment", "project_mainnet_telegram_environment"
+    )
+    assert '"OPERATIONAL_PROFILE_FILE", "SIGNAL_WORKER_REALM"' in block
+    assert "CARRY_NOTIONAL_MULTIPLIER" not in block
+    assert "LONG_NOTIONAL_MULTIPLIER" not in block
     assert "VENUE_RULES_FILE" not in block
-    assert "producer source contains forbidden secret/control keys" in block
+    assert "signal-worker source contains forbidden secret/control keys" in block
     assert "os.replace(temporary, target)" in block
     assert "os.fsync(directory)" in block
-
-
-def test_producer_wrappers_require_rust_books_binding_and_heartbeat() -> None:
-    for relative, book in (
-        ("scripts/runtime/run_bybit_long_demo_event_engine.sh", "LONG_ENGINE_TARGET_BOOK_PATH"),
-        ("scripts/runtime/run_bybit_carry_demo_event_engine.sh", "CARRY_ENGINE_TARGET_BOOK_PATH"),
-    ):
-        body = _read(relative)
-        for key in (
-            book,
-            "LIVENESS_ENGINE_HEARTBEAT_FILE",
-            "EXPECTED_ENGINE_ACCOUNT_USER_ID",
-            "OPERATIONAL_PROFILE_FILE",
-            "PRODUCER_REALM",
-        ):
-            assert key in body
-        assert '[ "$PRODUCER_REALM" = "$EXECUTION_ENVIRONMENT" ]' in body
-        assert 'ENGINE_ACCOUNT_HEARTBEAT_FILE="$LIVENESS_ENGINE_HEARTBEAT_FILE"' in body
 
 
 def test_engine_environment_is_bound_to_account_venue_realm_config_and_heartbeat() -> None:
@@ -342,7 +371,14 @@ def test_engine_environment_is_bound_to_account_venue_realm_config_and_heartbeat
     ):
         assert key in block
     assert "config heartbeat_path disagrees" in block
-    assert "book_path is" in block
+    assert "engine signal_spool_path disagrees" in block
+    assert "engine control_spool_path disagrees" in block
+    assert "carry_native" in block
+    assert "long_native" in block
+    assert "exodus_native" in block
+    assert "target-book wiring" in block
+    assert "install_demo_native_engine_config check" in block
+    assert "install_mainnet_native_engine_config check" in block
 
 
 def test_both_liveness_units_can_receive_the_dead_mans_switch() -> None:
@@ -367,7 +403,7 @@ def test_both_realms_state_sole_leverage_authority() -> None:
         assert config["engine"]["leverage_authority"] == "sole", template
 
 
-def test_funded_exodus_and_maker_canary_are_wired_to_the_engine() -> None:
+def test_funded_directional_reducers_and_maker_canary_are_wired_to_the_engine() -> None:
     config = tomllib.loads(_read("deploy/engine.mainnet.toml.template"))
     strategies = config["strategy"]
     assert [row["sleeve"] for row in strategies] == [
@@ -376,14 +412,22 @@ def test_funded_exodus_and_maker_canary_are_wired_to_the_engine() -> None:
         "exodus",
         "maker_canary",
     ]
-    exodus = strategies[2]
-    assert exodus == {
-        "name": "target_book",
-        "sleeve": "exodus",
-        "book_path": "/var/lib/liquidity-migration/targets/exodus-mainnet.json",
-        "rest_entries": False,
-        "symbols": ["DOGEUSDT"],
-    }
+    for row, name, sleeve in zip(
+        strategies[:3],
+        ("carry_native", "long_native", "exodus_native"),
+        ("carry", "long", "exodus"),
+        strict=True,
+    ):
+        assert set(row) == {"name", "sleeve", "config_json"}
+        assert row["name"] == name
+        assert row["sleeve"] == sleeve
+        native = json.loads(row["config_json"])
+        assert native["environment"] == "mainnet"
+        assert native["entries_enabled"] is True
+        assert len(native["rule_sha256"]) == 64
+        assert len(native["operational_profile_sha256"]) == 64
+    assert len(json.loads(strategies[0]["config_json"])["feature_contract_sha256"]) == 64
+    assert len(json.loads(strategies[1]["config_json"])["feature_contract_sha256"]) == 64
     maker = strategies[3]
     assert maker["name"] == "quoter"
     assert maker["quote_enabled"] is False
@@ -401,36 +445,90 @@ def test_funded_exodus_and_maker_canary_are_wired_to_the_engine() -> None:
     assert "toxicity_bps" not in maker
     assert "trade_lean_bps" not in maker
 
-    carry_unit = _read(
-        "deploy/systemd/liquidity-migration-bybit-carry-mainnet.service"
-    )
-    assert "Environment=EXODUS_SHORT_PROFILE=v1" in carry_unit
-    assert (
-        "Environment=EXODUS_ENGINE_TARGET_BOOK_PATH="
-        "/var/lib/liquidity-migration/targets/exodus-mainnet.json"
-    ) in carry_unit
-
+    assert not (ROOT / "deploy/systemd/liquidity-migration-bybit-carry-mainnet.service").exists()
+    assert not (ROOT / "deploy/systemd/liquidity-migration-bybit-exodus-mainnet.service").exists()
     deploy = DEPLOY.read_text(encoding="utf-8")
     validation = _function(deploy, "validate_engine_environment", "quarantine_engine_inputs")
     quarantine = _function(deploy, "quarantine_engine_inputs", "wait_engine_heartbeat")
     activation = _function(deploy, "start_mainnet_fleet", "resolve_fail_safe_python")
-    expected = "/var/lib/liquidity-migration/targets/exodus-mainnet.json"
-    assert expected in validation
-    assert "exodus-mainnet.json" in quarantine
-    assert expected in activation
-    install_config = _function(
-        deploy, "install_mainnet_engine_config", "require_rollout_for_funded_generation_change"
-    )
+    render = _function(deploy, "render_native_engine_config", "install_demo_native_engine_config")
+    takeover = _function(deploy, "import_native_strategy_state", "require_rollout_for_funded_generation_change")
     install_mode = _function(deploy, "install_mode", "load_authorization")
-    assert "deploy/engine.mainnet.toml.template" in install_config
-    assert 'mv -f "${ENGINE_MAINNET_CONFIG}.new"' in install_config
-    assert install_mode.index("checkout -B") < install_mode.index(
-        "install-mainnet-engine-config"
+    assert "target-book wiring" in validation
+    assert "takeover evidence" in quarantine
+    assert activation.index("install_mainnet_native_engine_config") < activation.index(
+        "import_native_strategy_state mainnet"
+    ) < activation.index("activate_signal_worker mainnet")
+    assert '"$ENGINE_BINARY" render-native-config' in render
+    assert render.index('mv -f -- "$staged" "$output"') < render.rindex(
+        '--output "$output" --check'
     )
+    assert "lane2_toxic_flow_quoter_v1.json" in render
+    assert "render_maker_canary_config.py" not in render
+    assert "long-book-state-v2" in takeover
+    assert "carry-reducer-v2-target-book-v1" in takeover
+    assert "exodus-state-v1-v4-event-tape-v1" in takeover
+    assert "verify-native-strategy-state" in takeover
+    assert "initialize-native-strategy-state" in takeover
+    assert install_mode.index("engine-build") < install_mode.index(
+        "install-demo-native-engine-config"
+    ) < install_mode.index("import-demo-native-strategy-state")
 
     flatten = _read("scripts/vps/flatten_account.sh")
-    assert "BOOK_NAMES=(carry-mainnet.json long-mainnet.json exodus-mainnet.json)" in flatten
-    assert 'BOOKS+=("$TARGET_ROOT/$name")' in flatten
+    assert "set-strategy-entry-permission" in flatten
+    assert "flatten-strategy" in flatten
+    assert "strategy_entries_enabled" in flatten
+    assert "pending_flatten_requests" in flatten
+    assert "working_entries" in flatten
+    assert "PENDING_EXPECTED_COUNT" in flatten
+    assert "DIRECTIONAL_WORKING_COUNT" in flatten
+    assert "signal-worker" not in flatten
+    assert "TARGET_ROOT" not in flatten
+
+
+def test_native_takeover_is_stopped_account_bound_complete_and_retry_safe() -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    runner = _function(
+        deploy,
+        "run_engine_takeover_command",
+        "import_native_strategy_state",
+    )
+    takeover = _function(
+        deploy,
+        "import_native_strategy_state",
+        "require_rollout_for_funded_generation_change",
+    )
+
+    assert "BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET" in runner
+    assert "BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET" in runner
+    assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in runner
+    assert "credential_env=/etc/liquidity-migration/bybit-demo.env" in runner
+    assert 'credential_env="$MAINNET_ATTESTOR_ENV"' in runner
+    assert 'engine_env="$ENGINE_ENVIRONMENT"' in runner
+    assert 'engine_env="$ENGINE_MAINNET_ENVIRONMENT"' in runner
+    assert "EXPECTED_ENGINE_ACCOUNT_USER_ID" in runner
+    assert "/usr/bin/setpriv" in runner
+    assert '--reuid "$runtime_user" --regid "$RUNTIME_GROUP" --clear-groups' in runner
+
+    assert takeover.index("verify-native-strategy-state") < takeover.index("for source in")
+    assert 'if [ "$present" -eq 0 ] && [ ! -s "$wal" ]' in takeover
+    assert "initialize-native-strategy-state" in takeover
+    assert '[ "$present" -eq 6 ]' in takeover
+    for source in (
+        "long-${realm}-state.json",
+        "carry_sizing_anchors.json",
+        "carry-${realm}.json",
+        "carry_presettlement_events.jsonl",
+        "exodus_state_identity.json",
+        "exodus_state.json",
+    ):
+        assert source in takeover
+    assert takeover.index("--strategy long") < takeover.index(
+        "--strategy carry"
+    ) < takeover.index("--strategy exodus")
+    assert takeover.rindex("verify-native-strategy-state") > takeover.index(
+        "--strategy exodus"
+    )
 
 
 def test_demo_engine_template_has_an_exact_account_id_and_mainnet_requires_one() -> None:
@@ -553,17 +651,13 @@ def test_demo_engine_environment_reconciliation_precedes_runtime_build() -> None
         "trusted_checkout_directory",
     )
     install = _function(deploy, "install_mode", "load_authorization")
-    assert prepare.index("reconcile_demo_engine_environment") < prepare.index(
-        "write_producer_environment"
-    )
+    assert prepare.index("reconcile_demo_engine_environment") < prepare.index("write_signal_worker_environment")
     assert install.index("prepare_demo_runtime_config") < install.index("build_engine")
 
 
 def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    compile_exact = _function(
-        text, "compile_engine_commit", "verify_prefetched_engine_candidate"
-    )
+    compile_exact = _function(text, "compile_engine_commit", "verify_prefetched_engine_candidate")
     toolchain_check = _function(text, "require_pinned_engine_toolchain", "compile_engine_commit")
     builder = _function(text, "run_engine_builder_step", "compile_engine_commit")
     prefetch = _function(text, "prefetch_rollout_target", "record_installed_profile")
@@ -575,35 +669,31 @@ def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:
     assert 'RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN"' in toolchain_check
     assert 'RUSTUP_TOOLCHAIN="$ENGINE_RUST_TOOLCHAIN"' in builder
     assert "require_pinned_engine_toolchain" in prefetch
-    assert 'engine_git reset --hard --quiet FETCH_HEAD' in compile_exact
+    assert "engine_git reset --hard --quiet FETCH_HEAD" in compile_exact
     assert 'built" = "$commit' in compile_exact
     assert 'compile_engine_commit "$EXPECTED_COMMIT"' in prefetch
     assert 'verify_prefetched_engine_candidate "$commit"' in build
     assert "compile_engine_commit" not in build
     assert (
-        "commit=%s\\nsha256=%s\\nlauncher_sha256=%s\\n"
+        "commit=%s\\nsha256=%s\\nsignal_worker_sha256=%s\\nlauncher_sha256=%s\\n"
         "control_helper_sha256=%s\\ncontrols_sudoers_sha256=%s\\n"
         "telegram_bot_sha256=%s\\nrustc=1.90.0"
     ) in build
     assert '"$ENGINE_LAUNCHER.new"' in build
-    assert (
-        'install -d -o root -g root -m 0755 "${ENGINE_BINARY%/*}"'
-        in build
-    )
-    assert (
-        'install -d -o root -g liquidity-migration -m 0755 "${ENGINE_BINARY%/*}"'
-        not in build
-    )
+    assert 'install -d -o root -g root -m 0755 "${ENGINE_BINARY%/*}"' in build
+    assert 'install -d -o root -g liquidity-migration -m 0755 "${ENGINE_BINARY%/*}"' not in build
     assert (
         build.index('mv -f "$ENGINE_BINARY.new"')
+        < build.index('mv -f "$SIGNAL_WORKER_BINARY.new"')
         < build.index('mv -f "$ENGINE_LAUNCHER.new"')
         < build.index('mv -f "$ENGINE_CONTROL_HELPER.new"')
         < build.index('mv -f "$CONTROLS_SUDOERS.new"')
         < build.index('mv -f "$marker_tmp"')
     )
-    assert "verify_engine_release launcher-required" in build
+    assert "verify_engine_release" in build
     assert 'marker_commit" = "$installed_head' in verify
     assert 'marker_digest" = "$actual_digest' in verify
+    assert 'marker_signal_worker_digest" = "$actual_signal_worker_digest' in verify
     assert 'actual_launcher_digest" = "$marker_launcher_digest' in verify
     assert 'actual_helper_digest" = "$marker_helper_digest' in verify
     assert 'actual_sudoers_digest" = "$marker_sudoers_digest' in verify
@@ -622,7 +712,7 @@ def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:
 
 def test_engine_heartbeat_activation_gate_checks_identity_freshness_and_may_open() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    block = _function(text, "wait_engine_heartbeat", "wait_fresh_producer_book")
+    block = _function(text, "wait_engine_heartbeat", "wait_signal_worker_ready")
     for field in (
         '"account_user_id"',
         '"venue"',
@@ -635,28 +725,69 @@ def test_engine_heartbeat_activation_gate_checks_identity_freshness_and_may_open
     assert 'payload.get("may_open") is not True' in block
 
 
-def test_activation_accepts_only_books_from_the_current_producer_generation() -> None:
+def test_activation_accepts_only_the_current_signal_worker_generation() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    block = _function(text, "wait_fresh_producer_book", "start_required_engine")
-    assert "InvocationID" in block
-    assert 'health.get("invocation_id") != invocation' in block
-    assert 'health["completed_ts_ns"] < started_ns' in block
-    assert "stat.st_mtime_ns < started_ns" in block
-    assert 'valid_until <= now_ms' in block
+    block = _function(text, "wait_signal_worker_ready", "activate_signal_worker")
+    assert 'systemctl show "$unit" --property=MainPID' in block
+    assert 'payload.get("pid") != main_pid' in block
+    assert "updated < started_ms" in block
+    assert 'payload.get("status") != "ready"' in block
+    assert 'payload.get("credential_free") is not True' in block
+    for field in (
+        "signal_config_sha256",
+        "long_rule_sha256",
+        "carry_config_sha256",
+        "operational_config_sha256",
+        "engine_config_sha256",
+        "universe_file_sha256",
+        "universe_artifact_sha256",
+    ):
+        assert field in block
 
 
-def test_activation_starts_engine_then_producers_then_immediate_liveness() -> None:
+def test_activation_starts_worker_then_engine_then_immediate_liveness() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
+    worker_activation = _function(text, "activate_signal_worker", "activate_manifest_units")
+    assert 'unit="$(lm_signal_worker_unit "$realm")"' in worker_activation
+    assert 'systemctl enable --now "$unit"' in worker_activation
+    assert worker_activation.index('systemctl enable --now "$unit"') < worker_activation.index(
+        'start_required_engine "$owner_unit"'
+    )
+    assert worker_activation.index('start_required_engine "$owner_unit"') < worker_activation.index(
+        'wait_signal_worker_ready "$unit"'
+    )
     demo = _function(text, "activate_mode", "provision_mainnet_prerequisites")
-    assert demo.index("start_required_engine") < demo.index("start_if")
-    assert demo.index("wait_fresh_producer_book") < demo.index("demo-liveness.timer")
-    assert demo.index("demo-liveness.timer") < demo.index("demo-liveness.service")
+    worker_call = 'activate_signal_worker \\\n        demo "$signal_started_ms" "$ENGINE_UNIT" "$ENGINE_ENVIRONMENT"'
+    assert demo.index(worker_call) < demo.index("activate_manifest_units demo")
     mainnet = _function(text, "start_mainnet_fleet", "disarm_mainnet_mode")
-    assert mainnet.index("start_required_engine") < mainnet.index("carry-mainnet.service")
-    assert mainnet.index("wait_fresh_producer_book") < mainnet.index("MAINNET_LIVENESS_TIMER")
+    mainnet_call = 'activate_signal_worker mainnet "$signal_started_ms" "$MAINNET_OWNER_UNIT"'
+    assert mainnet.index(mainnet_call) < mainnet.index("activate_manifest_units mainnet")
+
+    manifest_activation = _function(text, "activate_manifest_units", "start_required_engine")
+    assert manifest_activation.index('lm_immediate_timer_jobs "$realm"') < (
+        manifest_activation.index('lm_activation_units "$realm" start')
+    )
 
 
-def test_mainnet_preflight_uses_only_credentials_and_neutral_producer_inputs() -> None:
+def test_activation_starts_and_waits_for_one_manifest_signal_worker_per_realm() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    activation = _function(text, "activate_signal_worker", "activate_manifest_units")
+    assert 'unit="$(lm_signal_worker_unit "$realm")"' in activation
+    assert 'heartbeat="$(lm_output_artifact_for_unit "$unit")"' in activation
+    assert 'systemctl enable --now "$unit"' in activation
+    assert 'wait_signal_worker_ready "$unit"' in activation
+    rows = [
+        line.split("|") for line in _read("deploy/fleet_manifest.tsv").splitlines() if line and not line.startswith("#")
+    ]
+
+    workers = [row for row in rows if row[1] == "service" and "signal-worker" in row[0]]
+    assert [(row[0], row[2]) for row in workers] == [
+        ("liquidity-migration-signal-worker-demo.service", "demo"),
+        ("liquidity-migration-signal-worker-mainnet.service", "mainnet"),
+    ]
+
+
+def test_mainnet_preflight_uses_only_credentials_and_neutral_signal_inputs() -> None:
     arming = _read("liquidity_migration/policy/real_money_arming.py")
     provision = _function(
         DEPLOY.read_text(encoding="utf-8"),
@@ -664,7 +795,7 @@ def test_mainnet_preflight_uses_only_credentials_and_neutral_producer_inputs() -
         "require_mainnet_preflight",
     )
     assert "MAINNET_CREDENTIAL_ENV" in arming
-    assert "MAINNET_PRODUCER_SOURCE_ENV" in arming
+    assert "MAINNET_SIGNAL_SOURCE_ENV" in arming
     assert "OPERATIONAL_PROFILE_FILE" in arming
     assert 'install -d -o root -g "$RUNTIME_GROUP" -m 0750' in provision
     assert 'chmod 700 "$(dirname "$risk_policy_file")"' not in provision
@@ -722,9 +853,7 @@ def test_embedded_fail_safe_disarm_parser_is_strict_and_standalone() -> None:
 def test_rollout_and_activation_do_not_depend_on_flatness_attestation() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
-    prerequisites = _function(
-        text, "provision_mainnet_prerequisites", "require_mainnet_preflight"
-    )
+    prerequisites = _function(text, "provision_mainnet_prerequisites", "require_mainnet_preflight")
     for removed in (
         "trusted-rollout-attestor",
         "rollout_flat_check",
@@ -739,9 +868,7 @@ def test_rollout_and_activation_do_not_depend_on_flatness_attestation() -> None:
 
 def test_engine_build_runs_unprivileged_against_immutable_exact_source() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    compile_exact = _function(
-        text, "compile_engine_commit", "verify_prefetched_engine_candidate"
-    )
+    compile_exact = _function(text, "compile_engine_commit", "verify_prefetched_engine_candidate")
     builder = _function(text, "run_engine_builder_step", "compile_engine_commit")
     for required in (
         "ENGINE_BUILDER_USER",
@@ -758,20 +885,16 @@ def test_engine_build_runs_unprivileged_against_immutable_exact_source() -> None
     for required in (
         "chown -R root:root",
         "chmod -R a-w",
-        'engine_git status --porcelain=v1 --untracked-files=all',
+        "engine_git status --porcelain=v1 --untracked-files=all",
         'readlink -f "$ENGINE_CANDIDATE_BINARY"',
         'stat -c %h "$ENGINE_CANDIDATE_BINARY"',
+        'readlink -f "$SIGNAL_WORKER_CANDIDATE_BINARY"',
+        'stat -c %h "$SIGNAL_WORKER_CANDIDATE_BINARY"',
     ):
         assert required in compile_exact
-    assert compile_exact.index("chmod -R a-w") < compile_exact.index(
-        "run_engine_builder_step fetch"
-    )
-    assert compile_exact.index("run_engine_builder_step fetch") < compile_exact.index(
-        "run_engine_builder_step build"
-    )
-    assert compile_exact.index("run_engine_builder_step build") < compile_exact.rindex(
-        "engine_git status"
-    )
+    assert compile_exact.index("chmod -R a-w") < compile_exact.index("run_engine_builder_step fetch")
+    assert compile_exact.index("run_engine_builder_step fetch") < compile_exact.index("run_engine_builder_step build")
+    assert compile_exact.index("run_engine_builder_step build") < compile_exact.rindex("engine_git status")
 
 
 def test_engine_build_fetches_locked_crates_then_compiles_offline() -> None:
@@ -789,48 +912,41 @@ def test_engine_build_fetches_locked_crates_then_compiles_offline() -> None:
 
 def test_cargo_hardlinks_are_confined_then_materialized_as_one_link() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    materialize = _function(
-        text, "materialize_single_link_engine_candidate", "compile_engine_commit"
-    )
-    compile_exact = _function(
-        text, "compile_engine_commit", "verify_prefetched_engine_candidate"
-    )
+    materialize = _function(text, "materialize_single_link_release_candidate", "compile_engine_commit")
+    compile_exact = _function(text, "compile_engine_commit", "verify_prefetched_engine_candidate")
 
     assert '-xdev -type f -samefile "$candidate"' in materialize
     assert 'internal_links" -eq "$hardlink_count"' in materialize
-    assert 'mktemp "$candidate_dir/.engine-candidate.XXXXXX"' in materialize
+    assert 'mktemp "$candidate_dir/.$artifact-candidate.XXXXXX"' in materialize
     assert 'temporary_digest" = "$source_digest"' in materialize
     assert 'stat -c %h "$temporary")" -eq 1' in materialize
     assert 'mv -fT -- "$temporary" "$candidate"' in materialize
-    assert compile_exact.index("run_engine_builder_step build") < compile_exact.index(
-        "materialize_single_link_engine_candidate"
-    ) < compile_exact.index('[ -f "$ENGINE_CANDIDATE_BINARY" ]')
+    assert (
+        compile_exact.index("run_engine_builder_step build")
+        < compile_exact.index("materialize_single_link_release_candidate")
+        < compile_exact.index('[ -f "$ENGINE_CANDIDATE_BINARY" ]')
+    )
+    assert compile_exact.count("materialize_single_link_release_candidate") == 2
 
 
 def test_engine_candidate_is_built_before_rollout_stops_and_reused_exactly() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     prefetch = _function(text, "prefetch_rollout_target", "record_installed_profile")
-    verifier = _function(
-        text, "verify_prefetched_engine_candidate", "verify_controls_sudo_policy"
-    )
+    verifier = _function(text, "verify_prefetched_engine_candidate", "verify_controls_sudo_policy")
     build = _function(text, "build_engine", "verify_engine_release")
     install = _function(text, "install_mode", "load_authorization")
     rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
 
     assert 'compile_engine_commit "$EXPECTED_COMMIT"' in prefetch
-    assert install.index("verify_prefetched_deploy_inputs") < install.index(
-        "require_quiescent"
-    )
-    assert rollout.index("rollout-target-prefetch") < rollout.index(
-        "snapshot-prior-topology"
-    )
+    assert install.index("verify_prefetched_deploy_inputs") < install.index("require_quiescent")
+    assert rollout.index("rollout-target-prefetch") < rollout.index("snapshot-prior-topology")
     assert rollout.index("rollout-target-prefetch") < rollout.index("ROLLOUT_STOPPED=1")
-    assert rollout.index("rollout-target-prefetch") < rollout.index(
-        "stop-downstream-units"
-    )
+    assert rollout.index("rollout-target-prefetch") < rollout.index("stop-downstream-units")
     assert 'ENGINE_PREFETCHED_COMMIT" = "$commit' in verifier
     assert 'actual_digest" = "$ENGINE_PREFETCHED_DIGEST' in verifier
+    assert 'actual_signal_worker_digest" = "$SIGNAL_WORKER_PREFETCHED_DIGEST' in verifier
     assert 'stat -c %U "$ENGINE_CANDIDATE_BINARY"' in verifier
+    assert 'stat -c %U "$SIGNAL_WORKER_CANDIDATE_BINARY"' in verifier
     assert 'verify_prefetched_engine_candidate "$commit"' in build
     assert "compile_engine_commit" not in build
     assert "cargo build" not in build
@@ -842,23 +958,24 @@ def test_rollout_stop_list_covers_every_current_non_owner_unit() -> None:
         "liquidity-migration-engine.service",
         "liquidity-migration-engine-mainnet.service",
     }
-    text = DEPLOY.read_text(encoding="utf-8")
-    block = text[
-        text.index("ROLLOUT_DOWNSTREAM_UNITS=(") : text.index("ROLLOUT_OWNER_UNITS=(")
-    ]
-    listed = set(
-        re.findall(
-            r"liquidity-migration-[A-Za-z0-9@_.-]+\.(?:service|timer)", block
-        )
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail; . deploy/lib_sleeves.sh; lm_rollout_units downstream",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
     )
-    assert units - owners <= listed
+    listed = set(completed.stdout.splitlines())
+    assert units - owners == listed - {unit for unit in listed if unit not in units}
 
 
 def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    stop = _function(
-        text, "stop_active_engine_builder_unit", "run_engine_builder_step"
-    )
+    stop = _function(text, "stop_active_engine_builder_unit", "run_engine_builder_step")
     stale = _function(text, "stop_stale_engine_builder_units", "run_engine_builder_step")
     builder = _function(text, "run_engine_builder_step", "compile_engine_commit")
     deploy_cleanup = _function(text, "deploy_cleanup", "rollout_cancel")
@@ -866,9 +983,7 @@ def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:
     dispatch = text[text.index("trap deploy_cleanup EXIT") : text.index("REMOTE_SCRIPT\n")]
 
     assert 'ENGINE_ACTIVE_BUILDER_UNIT="$unit"' in builder
-    assert builder.index('ENGINE_ACTIVE_BUILDER_UNIT="$unit"') < builder.index(
-        "systemd-run"
-    )
+    assert builder.index('ENGINE_ACTIVE_BUILDER_UNIT="$unit"') < builder.index("systemd-run")
     assert "RuntimeMaxSec=45m" in builder
     assert "TimeoutStopSec=30s" in builder
     assert "stop_active_engine_builder_unit" in builder
@@ -877,9 +992,7 @@ def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:
     assert 'ENGINE_ACTIVE_BUILDER_UNIT=""' in stop
     assert "liquidity-migration-engine-python-fetch-" in stale
     assert 'systemctl stop "$unit"' in stale
-    assert "stop_stale_engine_builder_units" in _function(
-        text, "prefetch_rollout_target", "record_installed_profile"
-    )
+    assert "stop_stale_engine_builder_units" in _function(text, "prefetch_rollout_target", "record_installed_profile")
     assert "stop_active_engine_builder_unit" in deploy_cleanup
     assert "stop_active_engine_builder_unit" in rollout_cleanup
     for signal in ("INT", "TERM", "HUP", "PIPE"):
@@ -889,12 +1002,8 @@ def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:
 def test_all_network_inputs_are_prefetched_and_stopped_install_is_offline() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     prefetch = _function(text, "prefetch_rollout_target", "record_installed_profile")
-    python_prefetch = _function(
-        text, "prefetch_python_dependencies", "verify_prefetched_python_dependencies"
-    )
-    wheel_digest = _function(
-        text, "python_wheel_cache_digest", "prefetch_python_dependencies"
-    )
+    python_prefetch = _function(text, "prefetch_python_dependencies", "verify_prefetched_python_dependencies")
+    wheel_digest = _function(text, "python_wheel_cache_digest", "prefetch_python_dependencies")
     install = _function(text, "install_mode", "load_authorization")
     venv_install = _function(text, "install_python_environment", "verify_controls_sudo_policy")
     staged = _function(text, "staged_mode", "rollout_mode")
@@ -902,9 +1011,11 @@ def test_all_network_inputs_are_prefetched_and_stopped_install_is_offline() -> N
 
     assert "git_fetch fetch" in prefetch
     assert "prefetch_python_dependencies" in prefetch
-    assert prefetch.index("git_fetch fetch") < prefetch.index(
-        "compile_engine_commit"
-    ) < prefetch.index("prefetch_python_dependencies")
+    assert (
+        prefetch.index("git_fetch fetch")
+        < prefetch.index("compile_engine_commit")
+        < prefetch.index("prefetch_python_dependencies")
+    )
     assert "python-fetch" in python_prefetch
     assert "PYTHON_PREFETCHED_LOCK_DIGEST" in python_prefetch
     assert "PYTHON_PREFETCHED_WHEEL_DIGEST" in python_prefetch
@@ -922,30 +1033,28 @@ def test_all_network_inputs_are_prefetched_and_stopped_install_is_offline() -> N
 
 def test_engine_prefetch_scrubs_only_its_disposable_build_clone() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    prepare = _function(
-        text, "prepare_disposable_engine_build_root", "compile_engine_commit"
-    )
-    compile_commit = _function(
-        text, "compile_engine_commit", "verify_prefetched_engine_candidate"
-    )
+    prepare = _function(text, "prepare_disposable_engine_build_root", "compile_engine_commit")
+    compile_commit = _function(text, "compile_engine_commit", "verify_prefetched_engine_candidate")
 
-    assert 'ENGINE_BUILD_DIR=/opt/engine-build' in text
+    assert "ENGINE_BUILD_DIR=/opt/engine-build" in text
     assert '[ "$ENGINE_BUILD_DIR" = /opt/engine-build ]' in prepare
     assert '[ ! -L "$ENGINE_BUILD_DIR" ]' in prepare
     assert 'readlink -f "$ENGINE_BUILD_DIR"' in prepare
     assert 'readlink -f "$ENGINE_BUILD_DIR/.git"' in prepare
-    assert '/proc/self/mountinfo' in prepare
+    assert "/proc/self/mountinfo" in prepare
     assert 'index($5, root "/") == 1' in prepare
     assert "0022" in prepare
     assert 'install -d -o root -g root -m 0755 "$ENGINE_BUILD_DIR"' in prepare
     assert 'chmod 0755 "$ENGINE_BUILD_DIR"' in prepare
     assert "prepare_disposable_engine_build_root" in compile_commit
     assert "engine_git clean -ffdx --quiet" in compile_commit
-    assert compile_commit.index("prepare_disposable_engine_build_root") < (
-        compile_commit.index('chmod -R u+rwX "$ENGINE_BUILD_DIR"')
-    ) < compile_commit.index("engine_git reset --hard --quiet FETCH_HEAD") < (
-        compile_commit.index("engine_git clean -ffdx --quiet")
-    ) < compile_commit.index('dirty="$(engine_git status --porcelain=v1')
+    assert (
+        compile_commit.index("prepare_disposable_engine_build_root")
+        < (compile_commit.index('chmod -R u+rwX "$ENGINE_BUILD_DIR"'))
+        < compile_commit.index("engine_git reset --hard --quiet FETCH_HEAD")
+        < (compile_commit.index("engine_git clean -ffdx --quiet"))
+        < compile_commit.index('dirty="$(engine_git status --porcelain=v1')
+    )
     assert "safe_git clean" not in compile_commit
 
 
@@ -975,10 +1084,7 @@ def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None
     assert "for distribution in distributions():" not in install
     assert "actual != expected" in install
     assert "extra = sorted" in install
-    assert (
-        '|| fail "fresh Python environment does not exactly match the deployment lock"'
-        in install
-    )
+    assert '|| fail "fresh Python environment does not exactly match the deployment lock"' in install
     assert "renameat2" in install
     assert "RENAME_EXCHANGE = 2" in install
     assert "renameat2(AT_FDCWD, source, AT_FDCWD, target, RENAME_EXCHANGE)" in install
@@ -995,34 +1101,31 @@ def test_python_environment_is_fresh_verified_and_atomically_exchanged() -> None
 def test_deployed_python_is_verified_from_unprivileged_runtime_identities() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     install_mode = _function(text, "install_mode", "load_authorization")
-    verify = _function(
-        text, "verify_python_runtime_environment", "remove_deploy_venv_staging"
-    )
+    verify = _function(text, "verify_python_runtime_environment", "remove_deploy_venv_staging")
 
     assert "run_phase verify-python-runtime verify_python_runtime_environment" in install_mode
     assert '[ "$(stat -c %a "$deployed")" = 755 ]' in verify
-    assert '"$PRODUCER_USER" "$CONTROLS_USER" "$OBSERVER_USER" "$LLM_USER"' in verify
+    assert '"$SIGNAL_WORKER_USER" "$CONTROLS_USER" "$OBSERVER_USER" "$LLM_USER"' in verify
     assert '/usr/bin/sudo -u "$runtime_user"' in verify
     assert "/usr/bin/env PYTHONDONTWRITEBYTECODE=1" in verify
     assert "Path(sys.prefix).resolve() != expected" in verify
     assert "import polars" in verify
     assert "from liquidity_migration.cli.commands import main" in verify
-    assert "long-demo-state.json" in verify
-    assert "long-mainnet-state.json" in verify
-    assert "migrate_empty_v1_book_state(sys.argv[1])" in verify
-    assert "read_book_state(sys.argv[1])" in verify
+    assert "long-demo-state.json" not in verify
+    assert "long-mainnet-state.json" not in verify
+    assert "migrate_empty_v1_book_state" not in verify
 
 
-def test_preserved_long_book_state_is_migrated_for_its_producer() -> None:
+def test_preserved_long_book_state_is_prepared_for_stopped_takeover() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    identities = _function(text, "ensure_runtime_identities", "write_producer_environment")
+    identities = _function(text, "ensure_runtime_identities", "write_signal_worker_environment")
     migrate = _function(
         text,
-        "normalize_producer_book_state_access",
-        "write_producer_environment",
+        "normalize_takeover_source_access",
+        "write_signal_worker_environment",
     )
 
-    assert "normalize_producer_book_state_access" in identities
+    assert "normalize_takeover_source_access" in identities
     assert "long-demo-state.json" in migrate
     assert "long-mainnet-state.json" in migrate
     assert "stat.S_ISREG" in migrate
@@ -1037,34 +1140,15 @@ def test_preserved_long_book_state_is_migrated_for_its_producer() -> None:
     assert "os.fchmod(descriptor, 0o640)" in migrate
 
 
-def test_llm_gate_uses_its_writer_owned_state_directory() -> None:
+def test_llm_ledger_is_research_only_and_uses_its_writer_owned_state_directory() -> None:
     units = _units()
     llm = units["liquidity-migration-llm-ledger.service"]
-    long_demo = units["liquidity-migration-bybit-long-demo.service"]
-    path = "/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json"
-    text = DEPLOY.read_text(encoding="utf-8")
-    migration = _function(
-        text, "migrate_legacy_llm_gate_candidates", "ensure_runtime_identities"
-    )
-
-    assert f"Environment=LONG_ENGINE_LLM_GATE_CANDIDATES_PATH={path}" in long_demo
+    assert all("LONG_ENGINE_LLM_GATE" not in body for body in units.values())
     assert "StateDirectory=liquidity-migration/llm-driver-ledger" in llm
     assert "StateDirectoryMode=0750" in llm
     assert "ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger" in llm
     assert "ReadWritePaths=/var/lib/liquidity-migration/targets" not in llm
-    assert "LEGACY_LLM_GATE_CANDIDATES_PATH" in migration
-    assert "LLM_GATE_CANDIDATES_PATH" in migration
-    assert 'mv -T -- "$source" "$target"' in migration
-
-
-def test_live_producer_wrappers_never_fall_back_to_system_python() -> None:
-    for relative in (
-        "scripts/runtime/run_bybit_long_demo_event_engine.sh",
-        "scripts/runtime/run_bybit_carry_demo_event_engine.sh",
-    ):
-        body = _read(relative)
-        assert "Pinned Python runtime is unavailable" in body
-        assert "command -v python" not in body
+    assert "LLM_GATE_CANDIDATES_PATH" in DEPLOY.read_text(encoding="utf-8")
 
 
 def test_fresh_python_verifier_ignores_source_tree_distribution_metadata(
@@ -1102,11 +1186,7 @@ def test_fresh_python_verifier_ignores_source_tree_distribution_metadata(
 
 def test_funded_attestor_template_has_only_the_read_only_identity_contract() -> None:
     template = _read("deploy/bybit-mainnet-attestor.env.template")
-    assignments = {
-        line.split("=", 1)[0]
-        for line in template.splitlines()
-        if line and not line.startswith("#")
-    }
+    assignments = {line.split("=", 1)[0] for line in template.splitlines() if line and not line.startswith("#")}
     assert assignments == {
         "BYBIT_ATTEST_API_KEY",
         "BYBIT_ATTEST_API_SECRET",
@@ -1122,9 +1202,7 @@ def test_persistent_services_never_receive_the_transient_attestor_key() -> None:
         if not name.endswith(".service"):
             continue
         assert "EnvironmentFile=/etc/liquidity-migration/bybit-mainnet-attestor.env" not in body
-        unset = " ".join(
-            line for line in body.splitlines() if line.startswith("UnsetEnvironment=")
-        )
+        unset = " ".join(line for line in body.splitlines() if line.startswith("UnsetEnvironment="))
         for key in (
             "BYBIT_ATTEST_API_KEY",
             "BYBIT_ATTEST_API_SECRET",
@@ -1149,8 +1227,8 @@ def test_direct_generation_modes_refuse_every_persisted_funded_surface() -> None
         "MAINNET_ATTESTOR_ENV",
         "ENGINE_MAINNET_ENVIRONMENT",
         "engine-mainnet.toml",
-        "PRODUCER_MAINNET_ENV",
-        "PRODUCER_MAINNET_SOURCE_ENV",
+        "SIGNAL_WORKER_MAINNET_ENV",
+        "MAINNET_SIGNAL_SOURCE_ENV",
         "MAINNET_TELEGRAM_ENV",
     ):
         assert surface in inventory
@@ -1160,9 +1238,7 @@ def test_direct_generation_modes_refuse_every_persisted_funded_surface() -> None
         ("activate_mode", "provision_mainnet_prerequisites"),
         ("staged_mode", "rollout_mode"),
     ):
-        assert "require_rollout_for_funded_generation_change" in _function(
-            text, function, boundary
-        )
+        assert "require_rollout_for_funded_generation_change" in _function(text, function, boundary)
     rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
     assert "ROLLOUT_FUNDED_AUTHORITY=1" in rollout
 
@@ -1171,12 +1247,8 @@ def test_rollout_accepts_a_markerless_incumbent_until_the_stopped_install() -> N
     text = DEPLOY.read_text(encoding="utf-8")
     block = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
     before_install = block[: block.index("stopped-install")]
-    assert before_install.index("rollout-target-prefetch") < before_install.index(
-        "stop-downstream-units"
-    )
-    assert before_install.index("snapshot-prior-topology") < before_install.index(
-        "stop-downstream-units"
-    )
+    assert before_install.index("rollout-target-prefetch") < before_install.index("stop-downstream-units")
+    assert before_install.index("snapshot-prior-topology") < before_install.index("stop-downstream-units")
     for incompatible in (
         "load_authorization",
         "verify_topology",
@@ -1205,9 +1277,7 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
     install = rollout.index("stopped-install")
     assert owners_stopped < boot_fence < irreversible < install
 
-    fence = _function(
-        text, "disable_rollout_units_for_boot_fence", "stop_all_rollout_units_best_effort"
-    )
+    fence = _function(text, "disable_rollout_units_for_boot_fence", "stop_all_rollout_units_best_effort")
     for required in (
         'systemctl disable "$unit"',
         "systemctl daemon-reload",
@@ -1218,9 +1288,7 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
     ):
         assert required in fence
 
-    quarantine = _function(
-        text, "stop_all_rollout_units_best_effort", "cleanup_notice"
-    )
+    quarantine = _function(text, "stop_all_rollout_units_best_effort", "cleanup_notice")
     for required in (
         "systemctl disable --now",
         "systemctl daemon-reload",
@@ -1236,13 +1304,9 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
     cancel = _function(text, "rollout_cancel", "rollout_cleanup")
     assert 'ROLLOUT_CANCELLATION_SIGNAL="$signal"' in cancel
     cancellation_start = 'if [ "$status" -ne 0 ] && [ -n "$cancellation_signal" ]'
-    assert cleanup.index(cancellation_start) < cleanup.index(
-        'if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]'
-    )
+    assert cleanup.index(cancellation_start) < cleanup.index('if [ "$ROLLOUT_IRREVERSIBLE" -eq 0 ]')
     cancellation = cleanup[
-        cleanup.index(cancellation_start) : cleanup.index(
-            'elif [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ]'
-        )
+        cleanup.index(cancellation_start) : cleanup.index('elif [ "$status" -ne 0 ] && [ "$ROLLOUT_STOPPED" -eq 1 ]')
     ]
     assert "stop_all_rollout_units_best_effort" in cancellation
     assert 'ROLLOUT_STOPPED" -eq 1' in cancellation
@@ -1250,9 +1314,7 @@ def test_rollout_persists_boot_fence_before_mutation_and_requarantines_failures(
     assert "activate_mode" not in cancellation
     for signal, status in (("INT", 130), ("TERM", 143), ("HUP", 129), ("PIPE", 141)):
         assert f"trap 'rollout_cancel {signal} {status}' {signal}" in rollout
-    snapshot_restore = _function(
-        text, "restore_prior_topology_snapshot", "restore_prior_topology"
-    )
+    snapshot_restore = _function(text, "restore_prior_topology_snapshot", "restore_prior_topology")
     restore = _function(text, "restore_prior_topology", "stop_rollout_units")
     assert "activate_mode" not in snapshot_restore
     assert "verify_engine_release" not in snapshot_restore
@@ -1300,9 +1362,7 @@ def test_rollout_cleanup_quarantines_cancellation_but_restores_ordinary_failure(
     bash = shutil.which("bash")
     assert bash is not None
     trigger = (
-        f"rollout_cancel {cancellation_signal} {expected_status}"
-        if cancellation_signal
-        else f"exit {expected_status}"
+        f"rollout_cancel {cancellation_signal} {expected_status}" if cancellation_signal else f"exit {expected_status}"
     )
     script = f"""
 set -u
@@ -1338,14 +1398,12 @@ def test_activation_receipt_commits_only_after_full_in_boot_verification() -> No
     text = DEPLOY.read_text(encoding="utf-8")
     activate = _function(text, "activate_mode", "provision_mainnet_prerequisites")
     begin = activate.index("begin_activation_generation")
-    first_enable = activate.index("start_required_engine")
+    first_enable = activate.index("activate_signal_worker")
     verified = activate.index("verify_topology activation-in-progress")
     completed = activate.index("complete_activation_generation")
     assert begin < first_enable < verified < completed
 
-    permit = _function(
-        text, "begin_activation_generation", "complete_activation_generation"
-    )
+    permit = _function(text, "begin_activation_generation", "complete_activation_generation")
     for required in (
         "invalidate_activation_authority",
         "/proc/sys/kernel/random/boot_id",
@@ -1356,6 +1414,7 @@ def test_activation_receipt_commits_only_after_full_in_boot_verification() -> No
         "start_activation_watchdog",
         "ACTIVATION_PERMIT",
         "activation_authority_matches",
+        "signal_worker_sha256",
         "control_helper_sha256",
         "controls_sudoers_sha256",
         "telegram_bot_sha256",
@@ -1363,14 +1422,12 @@ def test_activation_receipt_commits_only_after_full_in_boot_verification() -> No
     ):
         assert required in permit
 
-    complete = _function(
-        text, "complete_activation_generation", "validate_engine_environment"
-    )
+    complete = _function(text, "complete_activation_generation", "validate_engine_environment")
     receipt_move = complete.index('mv -f "$temporary" "$ACTIVATION_RECEIPT"')
     watchdog_stop = complete.index("stop_activation_watchdog")
     permit_remove = complete.index('rm -f -- "$ACTIVATION_PERMIT"')
     assert complete.index("sync") < receipt_move < watchdog_stop < permit_remove
-    assert "activation_authority_matches \"$ACTIVATION_RECEIPT\" complete" in complete
+    assert 'activation_authority_matches "$ACTIVATION_RECEIPT" complete' in complete
 
     topology = _function(text, "verify_topology", "start_if")
     assert "activation-in-progress" in topology
@@ -1403,25 +1460,19 @@ def test_runtime_supervisor_revokes_same_boot_partial_activation() -> None:
     assert '/usr/bin/flock -s "$authority_fd"' in launcher
 
     deploy = DEPLOY.read_text(encoding="utf-8")
-    watchdog = _function(
-        deploy, "start_activation_watchdog", "activation_authority_matches"
-    )
+    watchdog = _function(deploy, "start_activation_watchdog", "activation_authority_matches")
     assert "/usr/bin/systemd-run" in watchdog
     assert '"$ENGINE_LAUNCHER" --activation-watchdog' in watchdog
     assert "PrivateNetwork=true" in watchdog
     assert "ProtectSystem=strict" in watchdog
-    assert 'ReadWritePaths=${ACTIVATION_PERMIT%/*}' in watchdog
+    assert "ReadWritePaths=${ACTIVATION_PERMIT%/*}" in watchdog
     assert "activation_authority_matches_unlocked" in deploy
     assert '/usr/bin/flock -s "$authority_fd"' in deploy
 
 
 def test_trusted_launcher_rejects_mutable_checkout_and_git_boundaries() -> None:
     launcher = _read("deploy/run_authorized_runtime_trusted.sh")
-    ancestry = launcher[
-        launcher.index("trusted_checkout_directory()") : launcher.index(
-            'for path in "$ENGINE"'
-        )
-    ]
+    ancestry = launcher[launcher.index("trusted_checkout_directory()") : launcher.index('for path in "$ENGINE"')]
     for boundary in (
         '"${REPOSITORY%/*}"',
         '"$REPOSITORY"',
@@ -1439,11 +1490,7 @@ def test_trusted_launcher_rejects_mutable_checkout_and_git_boundaries() -> None:
     assert "! -type f -a ! -type d" in launcher
 
     deploy = DEPLOY.read_text(encoding="utf-8")
-    checkout = deploy[
-        deploy.index("trusted_checkout_directory()") : deploy.index(
-            "clean_checkout_status()"
-        )
-    ]
+    checkout = deploy[deploy.index("trusted_checkout_directory()") : deploy.index("clean_checkout_status()")]
     assert "umask 022" in deploy
     for boundary in (
         '"${REPO_DIR%/*}"',
@@ -1464,9 +1511,7 @@ def test_trusted_launcher_rejects_mutable_checkout_and_git_boundaries() -> None:
         deploy[deploy.index("rollout_mode()") : deploy.index("acquire_maintenance_locks\n")],
     ):
         assert "require_trusted_checkout" in trusted_path
-    resolver = _function(
-        deploy, "resolve_fail_safe_python", "quarantine_mainnet_units"
-    )
+    resolver = _function(deploy, "resolve_fail_safe_python", "quarantine_mainnet_units")
     assert "/usr/bin/readlink -f /usr/bin/python3" in resolver
     assert "8#$mode & 0022" in resolver
     fail_safe_paths = (
@@ -1486,16 +1531,9 @@ def test_trusted_launcher_rejects_mutable_checkout_and_git_boundaries() -> None:
 
 def test_watchdog_renews_one_locked_inode_and_never_recreates_a_deleted_permit() -> None:
     launcher = _read("deploy/run_authorized_runtime_trusted.sh")
-    refresh = launcher[
-        launcher.index("watchdog_refresh_permit()") : launcher.index(
-            "activation_watchdog_mode()"
-        )
-    ]
+    refresh = launcher[launcher.index("watchdog_refresh_permit()") : launcher.index("activation_watchdog_mode()")]
     assert 'exec {pinned_permit_fd}<"$ACTIVATION_PERMIT"' in launcher
-    assert (
-        'exec {WATCHDOG_PERMIT_FD}<>"/proc/self/fd/$pinned_permit_fd"'
-        in launcher
-    )
+    assert 'exec {WATCHDOG_PERMIT_FD}<>"/proc/self/fd/$pinned_permit_fd"' in launcher
     assert 'exec {WATCHDOG_PERMIT_FD}<>"$ACTIVATION_PERMIT"' not in launcher
     assert "initial_permit_identity" in launcher
     assert "stat -c '%d:%i'" in launcher
@@ -1509,24 +1547,14 @@ def test_watchdog_renews_one_locked_inode_and_never_recreates_a_deleted_permit()
     assert "mktemp" not in refresh
     assert "mv -f" not in refresh
 
-    hot = launcher[
-        launcher.index("activation_authority_valid()") : launcher.index(
-            'child_pid=""'
-        )
-    ]
-    assert hot.count(
-        'activation_authority_content_matches "$ACTIVATION_RECEIPT" complete'
-    ) == 2
-    assert hot.count(
-        'activation_authority_matches "$ACTIVATION_RECEIPT" complete'
-    ) == 2
+    hot = launcher[launcher.index("activation_authority_valid()") : launcher.index('child_pid=""')]
+    assert hot.count('activation_authority_content_matches "$ACTIVATION_RECEIPT" complete') == 2
+    assert hot.count('activation_authority_matches "$ACTIVATION_RECEIPT" complete') == 2
 
 
 def test_tmpfiles_recreates_only_runtime_lock_boundaries_after_reboot() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    identities = _function(
-        text, "ensure_runtime_identities", "write_producer_environment"
-    )
+    identities = _function(text, "ensure_runtime_identities", "write_signal_worker_environment")
     for exact_rule in (
         "d /run/liquidity-migration 0755 root root -",
         "f /run/liquidity-migration/maintenance.lock 0600 root root -",
@@ -1540,12 +1568,8 @@ def test_tmpfiles_recreates_only_runtime_lock_boundaries_after_reboot() -> None:
 
 def test_install_reopens_persistent_account_leases_for_isolated_engines() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    normalize = _function(
-        text, "normalize_account_lease_access", "ensure_runtime_identities"
-    )
-    identities = _function(
-        text, "ensure_runtime_identities", "write_producer_environment"
-    )
+    normalize = _function(text, "normalize_account_lease_access", "ensure_runtime_identities")
+    identities = _function(text, "ensure_runtime_identities", "write_signal_worker_environment")
 
     assert "-mindepth 1 -maxdepth 1" in normalize
     assert "-name '*-user-*.lock' -print0" in normalize
@@ -1554,27 +1578,21 @@ def test_install_reopens_persistent_account_leases_for_isolated_engines() -> Non
     assert '[ "$links" -eq 1 ]' in normalize
     assert 'chown root:"$RUNTIME_GROUP" -- "$lease"' in normalize
     assert 'chmod 0660 -- "$lease"' in normalize
-    assert identities.index("systemd-tmpfiles --create") < identities.index(
-        "normalize_account_lease_access"
-    )
+    assert identities.index("systemd-tmpfiles --create") < identities.index("normalize_account_lease_access")
 
 
 def test_install_rehomes_persistent_runtime_state_without_replacing_it() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    normalize = _function(
-        text, "normalize_runtime_state_access", "migrate_legacy_llm_gate_candidates"
-    )
-    identities = _function(
-        text, "ensure_runtime_identities", "write_producer_environment"
-    )
+    normalize = _function(text, "normalize_runtime_state_access", "ensure_runtime_identities")
+    identities = _function(text, "ensure_runtime_identities", "write_signal_worker_environment")
 
     for directory, owner in (
         ("/var/lib/liquidity-migration-engine", "$DEMO_ENGINE_USER"),
         ("/var/lib/liquidity-migration-engine-mainnet", "$MAINNET_ENGINE_USER"),
-        ("$LONG_DEMO_ROOT", "$PRODUCER_USER"),
-        ("$CARRY_DEMO_ROOT", "$PRODUCER_USER"),
-        ("$LONG_MAINNET_ROOT", "$PRODUCER_USER"),
-        ("$CARRY_MAINNET_ROOT", "$PRODUCER_USER"),
+        ("$LONG_DEMO_ROOT", "$SIGNAL_WORKER_USER"),
+        ("$CARRY_DEMO_ROOT", "$SIGNAL_WORKER_USER"),
+        ("$LONG_MAINNET_ROOT", "$SIGNAL_WORKER_USER"),
+        ("$CARRY_MAINNET_ROOT", "$SIGNAL_WORKER_USER"),
         ("$LLM_STATE_ROOT", "$LLM_USER"),
     ):
         assert directory in normalize
@@ -1590,14 +1608,10 @@ def test_install_rehomes_persistent_runtime_state_without_replacing_it() -> None
     assert "os.fchown" in normalize
     assert "os.fchmod" in normalize
     assert '[ "$?" -eq 0 ] || fail "cannot migrate runtime-state ownership"' in normalize
-    assert normalize.index("migrate_directory(child") < normalize.index(
-        "os.fchown(child"
-    )
+    assert normalize.index("migrate_directory(child") < normalize.index("os.fchown(child")
     for replacing in ("rm -rf", "shutil.move", "os.replace", "shutil.copy"):
         assert replacing not in normalize
-    assert identities.index("normalize_account_lease_access") < identities.index(
-        "normalize_runtime_state_access"
-    )
+    assert identities.index("normalize_account_lease_access") < identities.index("normalize_runtime_state_access")
     assert "chown -R --no-dereference" not in text
 
 
@@ -1610,16 +1624,12 @@ def test_runtime_state_refusal_cannot_be_masked_by_run_phase(
     import pwd
 
     text = DEPLOY.read_text(encoding="utf-8")
-    normalize = _function(
-        text, "normalize_runtime_state_access", "migrate_legacy_llm_gate_candidates"
-    )
+    normalize = _function(text, "normalize_runtime_state_access", "ensure_runtime_identities")
     demo_engine = tmp_path / "absent-demo-engine"
     mainnet_engine = tmp_path / "absent-mainnet-engine"
     normalize = normalize.replace(
         "/var/lib/liquidity-migration-engine-mainnet", shlex.quote(str(mainnet_engine))
-    ).replace(
-        "/var/lib/liquidity-migration-engine", shlex.quote(str(demo_engine))
-    )
+    ).replace("/var/lib/liquidity-migration-engine", shlex.quote(str(demo_engine)))
     target = tmp_path / "real"
     target.mkdir()
     linked = tmp_path / "linked"
@@ -1633,12 +1643,14 @@ PYTHON={shlex.quote(sys.executable)}
 RUNTIME_GROUP={group}
 DEMO_ENGINE_USER={user}
 MAINNET_ENGINE_USER={user}
-PRODUCER_USER={user}
+SIGNAL_WORKER_USER={user}
 LLM_USER={user}
 LONG_DEMO_ROOT={shlex.quote(str(linked))}
-CARRY_DEMO_ROOT={absent}
-LONG_MAINNET_ROOT={absent}
-CARRY_MAINNET_ROOT={absent}
+    CARRY_DEMO_ROOT={absent}
+    EXODUS_DEMO_ROOT={absent}
+    LONG_MAINNET_ROOT={absent}
+    CARRY_MAINNET_ROOT={absent}
+    EXODUS_MAINNET_ROOT={absent}
 LLM_STATE_ROOT={absent}
 fail() {{ exit 77; }}
 {normalize}
@@ -1686,6 +1698,7 @@ def _runtime_supervisor_fixture(
     wrapper = repository / "scripts" / "run_authorized_runtime.sh"
     bot = repository / "liquidity_migration" / "ops" / "telegram_controls.py"
     engine = bin_dir / "engine"
+    signal_worker = bin_dir / "signal-worker"
     launcher = bin_dir / "run-authorized-runtime"
     helper = bin_dir / "telegram-control-helper"
     marker = bin_dir / "engine.release"
@@ -1739,13 +1752,18 @@ def _runtime_supervisor_fixture(
         text=True,
     ).stdout.strip()
 
-    for path, content in ((engine, "engine\n"), (helper, "helper\n")):
+    for path, content in (
+        (engine, "engine\n"),
+        (signal_worker, "signal-worker\n"),
+        (helper, "helper\n"),
+    ):
         path.write_text(content, encoding="utf-8")
         path.chmod(0o755)
     source = _read("deploy/run_authorized_runtime_trusted.sh")
     replacements = {
         "REPOSITORY=/opt/liquidity-migration": f"REPOSITORY={repository}",
         "ENGINE=/opt/liquidity-migration-engine/bin/engine": f"ENGINE={engine}",
+        "SIGNAL_WORKER=/opt/liquidity-migration-engine/bin/signal-worker": f"SIGNAL_WORKER={signal_worker}",
         "LAUNCHER=/opt/liquidity-migration-engine/bin/run-authorized-runtime": f"LAUNCHER={launcher}",
         "CONTROL_HELPER=/opt/liquidity-migration-engine/bin/telegram-control-helper": f"CONTROL_HELPER={helper}",
         "TELEGRAM_BOT=/opt/liquidity-migration/liquidity_migration/ops/telegram_controls.py": f"TELEGRAM_BOT={bot}",
@@ -1760,6 +1778,7 @@ def _runtime_supervisor_fixture(
     for expression in (
         '$(stat -c %u "$REPOSITORY")" -eq 0',
         '$(stat -c %u "$path")" -eq 0',
+        '$(stat -c %u "$rust_binary")" -eq 0',
         '$(stat -c %u "$REPOSITORY/.git")" -eq 0',
         '$(stat -c %u "$directory")" -eq 0',
         '$(stat -c %u "${ENGINE%/*}")" -eq 0',
@@ -1790,6 +1809,7 @@ def _runtime_supervisor_fixture(
     authority_prefix = (
         f"commit={commit}\n"
         f"sha256={digest(engine)}\n"
+        f"signal_worker_sha256={digest(signal_worker)}\n"
         f"launcher_sha256={digest(launcher)}\n"
         f"control_helper_sha256={digest(helper)}\n"
         f"controls_sudoers_sha256={'d' * 64}\n"
@@ -1841,6 +1861,37 @@ def _terminate_test_process(process: subprocess.Popen[str] | None) -> None:
         process.wait(timeout=5)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires Linux release utilities")
+def test_runtime_launcher_refuses_a_mixed_rust_binary_generation(tmp_path: Path) -> None:
+    (
+        launcher,
+        _permit,
+        receipt,
+        child_pid_file,
+        owner,
+        authority_prefix,
+        _owner_start_ticks,
+    ) = _runtime_supervisor_fixture(tmp_path)
+    receipt.write_text(authority_prefix, encoding="utf-8")
+    receipt.chmod(0o644)
+    signal_worker = launcher.parent / "signal-worker"
+    signal_worker.write_text("different generation\n", encoding="utf-8")
+    signal_worker.chmod(0o755)
+    try:
+        result = subprocess.run(
+            [launcher, "fixture.service", "main"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        assert result.returncode == 78, result.stderr
+        assert "signal-worker digest does not match" in result.stderr
+        assert not child_pid_file.exists()
+    finally:
+        _terminate_test_process(owner)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="requires Linux /proc and release utilities")
 @pytest.mark.parametrize("failure_mode", ["owner-death", "watchdog-death"])
 def test_runtime_supervisor_revokes_when_activation_lease_loses_its_owner(
@@ -1856,9 +1907,7 @@ def test_runtime_supervisor_revokes_when_activation_lease_loses_its_owner(
         authority_prefix,
         owner_start_ticks,
     ) = _runtime_supervisor_fixture(tmp_path)
-    _write_runtime_permit(
-        permit, authority_prefix, owner.pid, owner_start_ticks
-    )
+    _write_runtime_permit(permit, authority_prefix, owner.pid, owner_start_ticks)
     watchdog = subprocess.Popen(
         [launcher, "--activation-watchdog", str(owner.pid), str(owner_start_ticks)],
         stdout=subprocess.PIPE,
@@ -1879,9 +1928,7 @@ def test_runtime_supervisor_revokes_when_activation_lease_loses_its_owner(
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and not child_pid_file.exists():
             time.sleep(0.05)
-        assert child_pid_file.exists(), (
-            process.stderr.read() if process.poll() is not None else ""
-        )
+        assert child_pid_file.exists(), process.stderr.read() if process.poll() is not None else ""
         child_pid = int(child_pid_file.read_text(encoding="ascii").strip())
         if failure_mode == "owner-death":
             owner.kill()
@@ -1941,9 +1988,7 @@ def test_runtime_supervisor_does_not_recreate_a_directly_revoked_permit(
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and not child_pid_file.exists():
             time.sleep(0.05)
-        assert child_pid_file.exists(), (
-            process.stderr.read() if process.poll() is not None else ""
-        )
+        assert child_pid_file.exists(), process.stderr.read() if process.poll() is not None else ""
         child_pid = int(child_pid_file.read_text(encoding="ascii").strip())
 
         permit.unlink()
@@ -1971,9 +2016,7 @@ def test_runtime_supervisor_does_not_recreate_a_directly_revoked_permit(
 
 @pytest.mark.skipif(os.name == "nt", reason="requires Linux /proc and release utilities")
 @pytest.mark.parametrize("revocation", ["unlink", "replacement"])
-def test_watchdog_initial_inode_pin_rejects_raced_revocation(
-    tmp_path: Path, revocation: str
-) -> None:
+def test_watchdog_initial_inode_pin_rejects_raced_revocation(tmp_path: Path, revocation: str) -> None:
     (
         launcher,
         permit,
@@ -2019,9 +2062,7 @@ def test_watchdog_initial_inode_pin_rejects_raced_revocation(
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and not ready.exists():
             time.sleep(0.01)
-        assert ready.exists(), (
-            watchdog.stderr.read() if watchdog.poll() is not None else ""
-        )
+        assert ready.exists(), watchdog.stderr.read() if watchdog.poll() is not None else ""
         if revocation == "unlink":
             permit.unlink()
         else:
@@ -2101,9 +2142,7 @@ def test_activation_watchdog_rejects_a_reused_pid_identity(tmp_path: Path) -> No
         owner_start_ticks,
     ) = _runtime_supervisor_fixture(tmp_path)
     stale_start_ticks = owner_start_ticks + 1
-    _write_runtime_permit(
-        permit, authority_prefix, owner.pid, stale_start_ticks
-    )
+    _write_runtime_permit(permit, authority_prefix, owner.pid, stale_start_ticks)
     watchdog = subprocess.Popen(
         [launcher, "--activation-watchdog", str(owner.pid), str(stale_start_ticks)],
         stdout=subprocess.PIPE,
@@ -2135,9 +2174,7 @@ def test_activation_receipt_handoff_keeps_the_verified_child_running(
         authority_prefix,
         owner_start_ticks,
     ) = _runtime_supervisor_fixture(tmp_path)
-    _write_runtime_permit(
-        permit, authority_prefix, owner.pid, owner_start_ticks
-    )
+    _write_runtime_permit(permit, authority_prefix, owner.pid, owner_start_ticks)
     watchdog = subprocess.Popen(
         [launcher, "--activation-watchdog", str(owner.pid), str(owner_start_ticks)],
         stdout=subprocess.PIPE,
@@ -2227,9 +2264,7 @@ def test_completed_generation_starts_after_reboot_without_the_tmpfs_permit_root(
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and not child_pid_file.exists():
             time.sleep(0.05)
-        assert child_pid_file.exists(), (
-            process.stderr.read() if process.poll() is not None else ""
-        )
+        assert child_pid_file.exists(), process.stderr.read() if process.poll() is not None else ""
         assert process.poll() is None
         child_pid = int(child_pid_file.read_text(encoding="ascii").strip())
         os.kill(child_pid, 0)
@@ -2243,29 +2278,31 @@ def test_completed_generation_starts_after_reboot_without_the_tmpfs_permit_root(
                 pass
 
 
-def test_release_marker_binds_helper_sudoers_and_bot_before_activation() -> None:
+def test_release_marker_binds_both_rust_binaries_and_controls_before_activation() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     build = _function(text, "build_engine", "verify_engine_release")
     for required in (
         "telegram_control_helper.sh",
         "liquidity-controls.sudoers",
         "TELEGRAM_CONTROLS_BOT",
+        "SIGNAL_WORKER_CANDIDATE_BINARY",
+        "SIGNAL_WORKER_BINARY",
         "/usr/sbin/visudo -cf",
-        'install -o root -g root -m 0755',
-        'install -o root -g root -m 0440',
+        "install -o root -g root -m 0755",
+        "install -o root -g root -m 0440",
         "control_helper_sha256",
+        "signal_worker_sha256",
         "controls_sudoers_sha256",
         "telegram_bot_sha256",
     ):
         assert required in build
     marker = build.index('mv -f "$marker_tmp"')
+    assert build.index('mv -f "$SIGNAL_WORKER_BINARY.new"') < marker
     assert build.index('mv -f "$ENGINE_CONTROL_HELPER.new"') < marker
     assert build.index('mv -f "$CONTROLS_SUDOERS.new"') < marker
     activate = _function(text, "activate_mode", "provision_mainnet_prerequisites")
-    assert build.index("verify_engine_release launcher-required") >= 0
-    assert activate.index("begin_activation_generation") < activate.index(
-        "liquidity-migration-telegram-controls.service"
-    )
+    assert build.index("verify_engine_release") >= 0
+    assert activate.index("begin_activation_generation") < activate.index("activate_manifest_units demo")
 
 
 def test_exact_commit_checkout_gate_uses_an_independent_index_and_rechecks_head() -> None:
@@ -2274,7 +2311,7 @@ def test_exact_commit_checkout_gate_uses_an_independent_index_and_rechecks_head(
     assert "mktemp -d /run/liquidity-migration/deploy-index" in block
     assert "read-tree" in block and "diff-index --quiet" in block
     exact = _function(text, "require_clean_checkout_at", "require_clean_head")
-    assert exact.count('safe_git rev-parse HEAD') >= 2
+    assert exact.count("safe_git rev-parse HEAD") >= 2
 
 
 def test_systemd_install_is_manifest_exact_and_refuses_dropins() -> None:
@@ -2302,7 +2339,7 @@ def test_every_remote_mode_shares_the_maintenance_locks() -> None:
     call = text.rindex("acquire_maintenance_locks\n")
     dispatch = text.rindex('case "$MODE" in')
     assert call < dispatch
-    assert "maintenance.lock" in text and "deploy.lock" in text
+    assert "maintenance.lock" in text
     helper = _function(text, "acquire_maintenance_fd", "acquire_maintenance_locks")
     assert '[ "$MODE" = disarm-mainnet ]' in helper
     assert 'flock --exclusive --timeout "$remaining_seconds" "$descriptor"' in helper
@@ -2310,12 +2347,7 @@ def test_every_remote_mode_shares_the_maintenance_locks() -> None:
     lock = _function(text, "acquire_maintenance_locks", "ensure_runtime_identities")
     assert "DISARM_MAINTENANCE_LOCK_WAIT_SECONDS=120" in text
     assert "disarm_deadline=$((SECONDS + DISARM_MAINTENANCE_LOCK_WAIT_SECONDS))" in lock
-    for descriptor, label in (
-        ("9", "maintenance.lock"),
-        ("8", "legacy-deploy.lock"),
-        ("7", "legacy-reset.lock"),
-    ):
-        assert f'acquire_maintenance_fd {descriptor} {label} "$disarm_deadline"' in lock
+    assert 'acquire_maintenance_fd 9 maintenance.lock "$disarm_deadline"' in lock
     assert "maintenance_lock.py" not in text
 
 
@@ -2480,9 +2512,7 @@ def test_deploy_python_modules_resolve_in_the_checkout() -> None:
     missing = {}
     for module, owners in discovered.items():
         relative = Path(*module.split("."))
-        if not (ROOT / relative).with_suffix(".py").is_file() and not (
-            ROOT / relative / "__init__.py"
-        ).is_file():
+        if not (ROOT / relative).with_suffix(".py").is_file() and not (ROOT / relative / "__init__.py").is_file():
             missing[module] = sorted(owners)
     assert not missing
 
@@ -2493,8 +2523,8 @@ def test_operational_surface_has_no_deleted_repo_references() -> None:
         ROOT / "scripts" / "ops.sh",
         ROOT / "scripts" / "dev.sh",
         ROOT / "scripts" / "README.md",
-        ROOT / "deploy" / "producer-demo-source.env.template",
-        ROOT / "deploy" / "producer-mainnet-source.env.template",
+        ROOT / "deploy" / "signal-worker-demo.env.template",
+        ROOT / "deploy" / "signal-worker-mainnet.env.template",
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
     for retired in (
@@ -2530,15 +2560,17 @@ def test_operational_literal_script_references_exist() -> None:
 
     assert owners
     missing = {
-        relative: sorted(references)
-        for relative, references in owners.items()
-        if not (ROOT / relative).is_file()
+        relative: sorted(references) for relative, references in owners.items() if not (ROOT / relative).is_file()
     }
     assert not missing
 
 
 def test_rust_engine_is_the_only_live_instrument_rule_source() -> None:
-    engine = _read("engine/engine-core/src/engine.rs")
+    engine_paths = [
+        ROOT / "engine" / "engine-core" / "src" / "engine.rs",
+        *sorted((ROOT / "engine" / "engine-core" / "src" / "engine").glob("*.inc.rs")),
+    ]
+    engine = "\n".join(path.read_text(encoding="utf-8") for path in engine_paths)
     bybit = _read("engine/engine-venue/src/venues/bybit/gateway.rs")
     assert "for (name, rule) in venue.instrument_rules().await?" in engine
     assert "self.venue.instrument_rules().await" in engine
@@ -2595,9 +2627,7 @@ def test_ssh_recovery_never_claims_success_after_a_failed_restart() -> None:
     restore = _read("scripts/vps/vps_restore_ssh_access.sh")
     assert "systemctl restart ssh.service ||" not in restore
     assert "service ssh restart ||" not in restore
-    assert restore.index('systemctl is-active --quiet ssh.service') < restore.index(
-        'echo "ssh-restore-ok"'
-    )
+    assert restore.index("systemctl is-active --quiet ssh.service") < restore.index('echo "ssh-restore-ok"')
     assert '[ "$ssh_restarted" -eq 1 ]' in restore
 
     generator = _read("scripts/vps/print_vps_recovery_command.sh")
@@ -2608,9 +2638,7 @@ def test_ssh_recovery_never_claims_success_after_a_failed_restart() -> None:
 
 def test_runtime_dependencies_are_exact_version_pins() -> None:
     rows = [
-        line.strip()
-        for line in _read("requirements.lock").splitlines()
-        if line.strip() and not line.startswith("#")
+        line.strip() for line in _read("requirements.lock").splitlines() if line.strip() and not line.startswith("#")
     ]
     assert rows and all(re.fullmatch(r"[A-Za-z0-9_.-]+==[^\s]+", row) for row in rows)
 
@@ -2630,26 +2658,13 @@ def test_oneshots_and_daemons_have_bounded_resources() -> None:
 
 def test_status_checks_every_timer_backed_oneshot_result() -> None:
     deploy = DEPLOY.read_text(encoding="utf-8")
+    fleet = _function(deploy, "verify_fleet_units", "verify_topology")
+    assert "lm_fleet_health_rows" in fleet
+    assert 'verify_unit "$expectation" "$unit"' in fleet
+    assert 'verify_timer_job "$unit" "$timer_service"' in fleet
+    assert fleet.count("verify_timer_job") == 1
     verify = _function(deploy, "verify_topology", "start_if")
-    checked = set(
-        re.findall(r"\s+(liquidity-migration-[\w-]+\.service)(?:;|\s*\\)", verify)
-    )
-    timer_backed = {
-        path.name.replace(".timer", ".service")
-        for path in SYSTEMD.glob("liquidity-migration-*.timer")
-    }
-    assert timer_backed <= checked
-    assert verify.count("verify_timer_job") == len(timer_backed)
-    for unit in (
-        "liquidity-migration-telegram-controls.service",
-        "liquidity-migration-llm-ledger.timer",
-        "liquidity-migration-trade-notify.timer",
-        "liquidity-migration-backup.timer",
-        "liquidity-migration-chaos-drill.timer",
-        "liquidity-migration-forward-capture.service",
-        "liquidity-migration-forward-upload.timer",
-    ):
-        assert f"verify_unit on {unit}" in verify
+    assert "verify_fleet_units" in verify
 
 
 def test_liveness_units_bind_exact_engine_identity_without_venue_credentials() -> None:
@@ -2684,10 +2699,7 @@ def test_dispatched_scripts_can_import_the_package_when_run_as_a_file() -> None:
 
     for relative in dispatched:
         source = _read(relative)
-        imports = [
-            match.start()
-            for match in re.finditer(r"^\s*(?:from|import) liquidity_migration", source, re.M)
-        ]
+        imports = [match.start() for match in re.finditer(r"^\s*(?:from|import) liquidity_migration", source, re.M)]
         if not imports:
             continue
         bootstrap = source.find("sys.path.insert")
@@ -2702,11 +2714,7 @@ def test_a_long_running_unit_records_only_a_graceful_commanded_stop_as_success()
     for name, text in _units().items():
         if not name.endswith(".service") or "Type=simple" not in text:
             continue
-        allowed = [
-            line.split("=", 1)[1].split()
-            for line in text.splitlines()
-            if line.startswith("SuccessExitStatus=")
-        ]
+        allowed = [line.split("=", 1)[1].split() for line in text.splitlines() if line.startswith("SuccessExitStatus=")]
         assert allowed, f"{name} never says a commanded stop is a clean one"
         assert any("143" in codes for codes in allowed), (
             f"{name} does not count 143 as success, so every stop of it pages"
@@ -2727,9 +2735,7 @@ def test_a_long_running_unit_records_only_a_graceful_commanded_stop_as_success()
 
 def test_trusted_supervisor_reports_a_forced_child_kill_as_failure() -> None:
     wrapper = _read("deploy/run_authorized_runtime_trusted.sh")
-    helpers = wrapper[
-        wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")
-    ]
+    helpers = wrapper[wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")]
     harness = f"""
 set -u
 stop_grace_seconds=1
@@ -2761,14 +2767,8 @@ def test_trusted_supervisor_preserves_child_shutdown_failure(
     handler_status: int, expected_status: int, message: str
 ) -> None:
     wrapper = _read("deploy/run_authorized_runtime_trusted.sh")
-    helpers = wrapper[
-        wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")
-    ]
-    child = (
-        "import signal,time; "
-        f"signal.signal(signal.SIGTERM, lambda *_: exit({handler_status})); "
-        "time.sleep(30)"
-    )
+    helpers = wrapper[wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")]
+    child = f"import signal,time; signal.signal(signal.SIGTERM, lambda *_: exit({handler_status})); time.sleep(30)"
     harness = f"""
 set -u
 stop_grace_seconds=2
@@ -2795,9 +2795,7 @@ stop_for_signal 143 70
 
 def test_trusted_supervisor_accepts_a_default_sigterm_exit() -> None:
     wrapper = _read("deploy/run_authorized_runtime_trusted.sh")
-    helpers = wrapper[
-        wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")
-    ]
+    helpers = wrapper[wrapper.index("child_is_running()") : wrapper.index("\ntrap 'stop_for_signal")]
     harness = f"""
 set -u
 stop_grace_seconds=2

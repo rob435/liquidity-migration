@@ -322,6 +322,10 @@ name = "engine-strategies"
 version = "0.1.0"
 dependencies = [
  "engine-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
  "toml",
  "tracing",
 ]
@@ -1099,6 +1103,27 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "signal-worker"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "engine-strategies",
+ "engine-types",
+ "getrandom 0.4.3",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

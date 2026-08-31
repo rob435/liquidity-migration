@@ -270,12 +270,8 @@ impl BybitGateway {
     pub fn new(realm: VenueRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
         let creds = realm.credentials()?;
         let built = Self::build(realm, realm.rest_base(), creds, symbols, realm.trade_ws());
-        // The Python fleet reads the resolved endpoint back and compares it to
-        // the realm it asked for (`bybit._require_realm_endpoint`), because
-        // there the transport picks its own host from a separate argument.
-        // Here one function derives it, so this can only fail if someone later
-        // reintroduces a second way to set the host — which is exactly when
-        // you want to hear about it.
+        // One function derives the endpoint. This check catches any later
+        // second host input before credentials or sockets can cross realms.
         if built.rest.base() != realm.rest_base() {
             return Err(VenueError::BadRequest(format!(
                 "realm {realm} resolved to {}, but only {} is permitted for that realm",
@@ -1339,9 +1335,8 @@ impl VenueGateway for BybitGateway {
             venue: crate::lease::VENUE_BYBIT.to_string(),
             user_id,
             // Which realm this gateway was built for, not a reading and not
-            // a guess. Both halves that read a realm depend on it: the
-            // mainnet producers check it against their own environment, and
-            // the single-writer lease is named by it.
+            // a guess. The heartbeat, config identity, and single-writer lease
+            // all bind to it.
             realm: realm_name(self.realm).to_string(),
         };
         // A settle-coin read hides flat symbols, while those are exactly the
@@ -1794,14 +1789,11 @@ fn tif_str(tif: TimeInForce) -> &'static str {
 }
 
 /// The realm's name as everything outside this crate spells it: the lease
-/// file, the heartbeat, and the environment the target producers check their
-/// own against.
+/// file, heartbeat, config identity, and observer contract.
 ///
-/// It is the realm the gateway was built for and never a fixed spelling: the
-/// mainnet producers compare it against their own environment and block every
-/// entry when it disagrees, and the single-writer lease is named by it, so a
-/// funded engine reporting `demo` would take its lease in the wrong realm's
-/// name.
+/// It is the realm the gateway was built for and never a fixed spelling. A
+/// funded engine reporting `demo` would publish the wrong identity and take
+/// its lease in the wrong realm's name.
 fn realm_name(realm: VenueRealm) -> &'static str {
     match realm {
         VenueRealm::Demo => crate::lease::REALM_DEMO,
@@ -1815,9 +1807,8 @@ mod tests {
     fn each_realm_reports_its_own_name_and_never_the_other() {
         // Found on the funded account's first shadow run: the engine
         // authenticated as 552445993 and published `realm: "demo"` beside it.
-        // The mainnet producers compare that against their own environment and
-        // would have blocked every entry; the single-writer lease is named by
-        // it, so a live funded engine would have taken a demo-realm lease.
+        // The heartbeat and single-writer lease are named by this value, so a
+        // funded engine reporting demo would claim the wrong account namespace.
         assert_eq!(realm_name(VenueRealm::Demo), "demo");
         assert_eq!(realm_name(VenueRealm::Mainnet), "mainnet");
         assert_ne!(

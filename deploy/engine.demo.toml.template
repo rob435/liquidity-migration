@@ -1,33 +1,39 @@
-# /etc/liquidity-migration/engine.toml  --  root-owned, mode 0600
+# /etc/liquidity-migration/engine.toml  --  root:liquidity-migration, mode 0640
 #
-# The engine's config for the FLEET'S DEMO ACCOUNT (555899665). Copy this file
-# to the path above on the VPS and edit it there; no deploy writes it.
+# The engine's config for the fleet demo account. Deployment renders the
+# machine-owned strategy region, atomically installs the result at the path
+# above, and checks the installed bytes against a second Rust render.
 #
 # There is no venue address in here and no way to put one there. `venue` is a
 # name that picks one of the adapters compiled into the engine, and every host
 # any of them knows is written in one source file which a test reads back.
-#
-# This is the account the two demo producers publish their books to, and the
-# account whose equity they size from -- they read `account_equity_usdt` out of
-# the heartbeat below and block every entry when it is missing or stale. So the
-# venue, the credential file on the unit, and the two book paths all have to
-# name the same account, and nothing checks that agreement for you.
+# The engine authenticates the credential-bound account before it takes the
+# single-writer lease. Native reducers receive the resulting account facts from
+# the engine; the public signal worker has no account credential.
 
 [engine]
 venue = "bybit_demo"
 
 wal_path = "/var/lib/liquidity-migration-engine/engine.wal"
 
-# One line of JSON, rewritten every few seconds. Two readers, both load-bearing:
-# scripts/runtime/check_fleet_liveness.py pages on stale, unreadable, or
-# latched; and BOTH PRODUCERS size from `account_equity_usdt` in it. Leave this
-# path out and the producers block every entry, per cycle, quietly.
+# Credential-free normalized observations arrive here. The engine records an
+# observation in its WAL before waking a native sleeve, then removes the spool
+# file only after that durable barrier.
+signal_spool_path = "/var/lib/liquidity-migration/signals/demo"
+
+# Root submits immutable pause/resume/flatten commands here through the
+# commit-bound helper. The engine records and barriers each command before it
+# changes a reducer's effective entry permission.
+control_spool_path = "/var/lib/liquidity-migration/controls/demo"
+
+# One line of JSON, rewritten every few seconds. Liveness checks its account,
+# realm, freshness, latches, controls, attributed positions, and working work.
+# The trade notifier uses the same attributed positions for entry messages.
 heartbeat_path = "/var/lib/liquidity-migration-engine/heartbeat.json"
 
 # One line of JSON per position that closes: what it made, what it cost, how
-# long it was held. The trade-notify unit reads it and is what puts an exit on
-# the owner's phone with its numbers. Leave this path out and exits fall back
-# to the target books, which can say a position ended but never what it made.
+# long it was held. The trade-notify unit uses this as the only exit-message
+# source; desired strategy state is not accounting evidence.
 trades_path = "/var/lib/liquidity-migration-engine/trades.jsonl"
 
 group_flush_ms = 250
@@ -58,8 +64,8 @@ leverage_authority = "sole"
 # ---------------------------------------------------------------------------
 # Capital limits
 # ---------------------------------------------------------------------------
-# The engine loads configs/operational.demo.json itself, so a cap tightened
-# there tightens for the producers and the engine at once.
+# The engine loads configs/operational.demo.json itself. Rust config rendering
+# uses the same bytes for native sizing and binds their hash into each block.
 #
 # THERE IS NO PER-SLEEVE SHARE. Every sleeve draws on the account-wide caps and
 # any one of them can spend the lot; what bounds a loss is the venue-native stop
@@ -77,63 +83,29 @@ max_account_view_age_s = 120
 # ---------------------------------------------------------------------------
 # The sleeves
 # ---------------------------------------------------------------------------
-# Each reads its own book. Books are routed, not broadcast: one reaches its own
-# sleeve and no other.
-#
 # ORDER MATTERS AND IS NOT COSMETIC. A strategy's id is its position in this
 # file, and the engine's record of whose position is whose is keyed on that id
 # and rebuilt from the log at boot. Putting a new block ahead of `carry` would
 # hand carry's whole fill history to whatever took its place. Append; never
 # insert.
 #
-# `symbols` is what each sleeve subscribes to at boot. It is a seed, not a
-# ceiling: a name a book mentions that is not listed here is taken on while the
-# engine runs. Listing the names each sleeve most often holds only saves the
-# admission round trip the first time.
-#
-# The lists must not overlap -- the engine refuses a config where two
-# strategies claim one symbol. If their books later name the same symbol
-# anyway, which they can, the engine handles it at run time: whichever sleeve
-# is holding the name keeps it, and the other leaves it alone until it is flat.
-# That is not a reason to be careless here.
+# Native subscriptions are restored from the WAL and grow from durable signal
+# observations. If two sleeves want one venue symbol, its current attributed
+# owner keeps it and the other waits for a proven flat handoff.
 
+# BEGIN GENERATED NATIVE DIRECTIONAL STRATEGIES
 [[strategy]]
-name = "target_book"
+name = "carry_native"
 sleeve = "carry"
-book_path = "/var/lib/liquidity-migration/targets/carry-demo.json"
-# Rest entries at the touch and let the engine work them in, rather than
-# crossing the spread. Carry entries are not urgent and the spread is the
-# largest cost they pay.
-rest_entries = true
-# Two dials on how the resting is worked, both off unless written here. The
-# first pins the rest to the price the order was decided at and stops it
-# following a market that leaves; the second takes the order down at the end
-# of its patience instead of crossing. Together they are "my price or no
-# trade". See docs/engine.md §Worked entries for what they cost.
-# hold_decision_price = true
-# give_up_instead_of_crossing = true
-symbols = ["BTCUSDT", "ETHUSDT"]
+config_json = '''{"capital_reference_usdt":250000.0,"early_exit_enabled":true,"entries_enabled":true,"entry_leverage":5.0,"environment":"demo","execution":{"book_validity_ms":108000000,"engine_entry_cutoff_ms":900000,"entry_floor_usdt":6.0,"presettlement_window_ms":900000,"resize_floor_fraction":0.05,"resize_floor_usdt":1.0,"signal_validity_ms":21600000},"exit_bp":3.0,"exodus_sleeve_name":"exodus","feature_contract_sha256":"d9a96b4c1b9f4a6bf4cdf1bac280025c258e0a5121d716529c9bf9ce2e60000c","give_up_instead_of_crossing":false,"hold_decision_price":false,"max_new_entries_per_cycle":10,"notional_multiplier":3.0,"operational_profile_sha256":"9c3c0a3d96ca567a6246bddf85f86f20f72251b206bc2c592aff3064f20c9091","presettlement_exit_enabled":true,"profile_name":"carry_hold_v7_live_v1","rest_entries":true,"rule":{"config_id":"lane2_carry_hold_v7","depth_exponent":1.5,"depth_floor":0.25,"depth_ref_bp_per_day":120.0,"enter_bp":10.0,"exit_bp":3.0,"flow_cut":0.4,"flow_lo":0.5,"gross_cap":1.0,"min_vol30_daily":0.05,"per_name_cap":0.1,"persistence_cut":0.1,"persistence_lo":0.0,"toxic_band_ret3d_hi":0.0,"toxic_band_ret3d_lo":-0.3,"trail_recovery_exit_bp_2d":30.0,"universe_top_n":100,"whale_cut":-0.26,"whale_lo":0.5},"rule_sha256":"4ac21e95be3481b35ea0288c55b8168af54bb80c8d07aa8f3e1293dcf0e4cddf","schema_version":1,"stop_loss_fraction":0.35}'''
 
 [[strategy]]
-name = "target_book"
+name = "long_native"
 sleeve = "long"
-book_path = "/var/lib/liquidity-migration/targets/long-demo.json"
-# LONG enters on a breakout that has already happened, so a resting entry can
-# sit behind a market that has left. It crosses.
-rest_entries = false
-symbols = ["SOLUSDT", "XRPUSDT"]
+config_json = '''{"book_validity_ms":3600000,"engine_entry_cutoff_ms":900000,"entries_enabled":true,"entry_floor_usdt":6.0,"entry_leverage":5.0,"environment":"demo","feature_contract_sha256":"1b9f6fc251f1f2a57a9cd92b9fa39786336384e1db021342efb9a314c923d0b7","give_up_instead_of_crossing":false,"hold_decision_price":false,"max_new_entries_per_cycle":5,"notional_multiplier":6.0,"operational_profile_sha256":"9c3c0a3d96ca567a6246bddf85f86f20f72251b206bc2c592aff3064f20c9091","order_notional_pct_equity":0.0,"profile_name":"v12","resize_floor_fraction":0.05,"resize_floor_usdt":1.0,"rest_entries":false,"rule":{"cooldown_days":7,"entry_delay_hours":1,"execution_strategy_id":"long_native_v12_wide_stop","fc_atr_stop_mult":3.0,"fc_close_loc_multi_day":0.6,"fc_max_atr_pct":0.12,"fc_max_hold_days":3,"fc_min_close_location":0.7,"fc_min_day_return":0.15,"fc_sigma_mult":2.5,"fc_sniper_deadline_hours":6,"fc_sniper_retrace_pct":0.01,"fc_stop_time_decay_atr_mult":1.5,"fc_stop_time_decay_hours":48,"fc_top_volume_rank_max":10.0,"gross_exposure":1.0,"max_concurrent_positions":10,"max_position_weight":0.3,"vol_floor_annual":0.3,"vol_target_annual":0.6,"vol_target_max_scale":1.25,"vol_target_min_scale":0.3,"weekend_size_mult":1.5},"rule_sha256":"a17751aec0655d51fc45f975a53c6b30ded359ce75b4cd72782f94173339405b","schema_version":1,"signal_freshness_ms":86400000,"wallet_balance_fraction":1.0}'''
 
 [[strategy]]
-name = "target_book"
+name = "exodus_native"
 sleeve = "exodus"
-# Written by the CARRY producer, not a unit of its own: the sleeve's whole
-# trigger is carry's pre-settle exit fire, so it lives in that process
-# (lane2_exodus_short_v1). The book holds shorts for ~75 minutes at a time.
-book_path = "/var/lib/liquidity-migration/targets/exodus-demo.json"
-# Entries cross: the ride is an hour and the measured economics already pay
-# the taker fee. Resting a dying name's entry misses the move it exists for.
-rest_entries = false
-# Seed only; every real name arrives via the book. Must not overlap the
-# other sleeves' seeds (see above).
-symbols = ["DOGEUSDT"]
-
+config_json = '''{"carry_sleeve_name":"carry","entries_enabled":true,"entry_leverage":5.0,"environment":"demo","give_up_instead_of_crossing":false,"hold_decision_price":false,"operational_profile_sha256":"9c3c0a3d96ca567a6246bddf85f86f20f72251b206bc2c592aff3064f20c9091","profile_name":"v1","rest_entries":false,"rule":{"accepted_source_config_id":"lane2_carry_hold_v7","accepted_source_profile":"carry_hold_v7_live_v1","config_id":"lane2_exodus_short_v1","cover_minutes_after_settlement":60,"entry_valid_minutes_after_settlement":20,"stop_loss_fraction":0.35},"rule_sha256":"bd3f5b4ac2951d00a2d3f7323e1fe742903e0a9f2f243750fbb269819191235a","schema_version":1}'''
+# END GENERATED NATIVE DIRECTIONAL STRATEGIES

@@ -1,8 +1,8 @@
-//! The engine reads the fleet's own profile documents.
+//! The engine reads the deployed profile documents.
 //!
 //! These load `configs/operational.mainnet.json` and
 //! `configs/operational.demo.json` from the repository — the real files, the
-//! ones the Python fleet installs — rather than a copy. A cap that changes in
+//! ones the native config renderer installs — rather than a copy. A cap that changes in
 //! the file changes here, and if a change makes the profile unloadable this
 //! suite says so before a deploy does.
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration MAINNET Rust owner and strategy-input liveness watchdog
+Description=liquidity-migration MAINNET Rust owner and signal-worker liveness watchdog
 Wants=network-online.target
 # No Requires= on the owner: the observer must still run when the owner is
 # stopped or failed, which is exactly what it alerts on.
@@ -16,7 +16,7 @@ User=liquidity-observer
 Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
-EnvironmentFile=/etc/liquidity-migration/producer-mainnet.env
+EnvironmentFile=/etc/liquidity-migration/signal-worker-mainnet.env
 # Notification-only projection created atomically by deploy. The observer never
 # receives or has filesystem access to the funded API key or REAL_MONEY switch.
 EnvironmentFile=/etc/liquidity-migration/telegram-mainnet.env
@@ -34,15 +34,13 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectProc=invisible
-# Polars reads /proc/meminfo to size its cgroup-aware memory manager.  Keep
-# process metadata hidden, but retain the non-process kernel interfaces.
 ProtectSystem=strict
 ProtectHome=true
 StateDirectory=liquidity-migration/liveness-mainnet
 Environment=LIVENESS_STATE_FILE=/var/lib/liquidity-migration/liveness-mainnet/state.json
 ReadWritePaths=/var/lib/liquidity-migration/liveness-mainnet
 MemoryMax=512M
-# An observer must not preempt the producers it observes (they run Nice=5,
+# An observer must not preempt the Rust worker it observes (it runs Nice=3,
 # the owners Nice=-5).
 Nice=10
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-mainnet-liveness.service main

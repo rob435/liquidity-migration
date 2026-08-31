@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from liquidity_migration.research.backtest.exodus_contract import (
     render_exodus_replay_report,
+    replay_exodus_contract,
     replay_exodus_contract_file,
 )
 
@@ -12,67 +15,53 @@ from liquidity_migration.research.backtest.exodus_contract import (
 FIXTURE = Path(__file__).parents[2] / "fixtures" / "exodus_live_contract_replay_v1.json"
 
 
-def test_replay_pins_exact_state_and_target_bytes_across_restart_and_cover() -> None:
+def test_replay_pins_exact_rust_checkpoint_and_output_bytes_across_restart_and_cover() -> None:
     report = replay_exodus_contract_file(FIXTURE)
     steps = report["steps"]
 
-    assert report["effective_config_sha256"] == ("a78841b88d81b2a76d65d98540b5829a43b6073c2b9c8daf0ac570082ad21a2c")
-    assert [step["target_book_sha256"] for step in steps] == [
-        "b66b1b91d003428101770f447ea0f5e89d3414e684953a0de973594cf72bcee0",
-        "540fc82965888719dcd703c57071dba7c397e89b1bccecb4aabde804c7fd893f",
-        "f7126dd7635356630e8211286b62d491f73a4f7c380826540069bad4d3114bd9",
-        "58b9610a5ebaa3a31b32661ac329651e65734968c96ab3294e04bf7b2128428e",
+    assert report["decision_config_sha256"] == ("570b799bbf1817fdf9dfaa25eba7984fa9f146aa02913328f0c84c25e3d9fb65")
+    assert [step["checkpoint_sha256"] for step in steps] == [
+        "1e7b42ccdf085068dc71f44efd362e67b069f6893d8a57e0bfe62e16dc88e2d1",
+        "0ff9943dfd3b877824f99ca4706f466f809e5b6db464a8da08912a0d53f601ed",
+        "0ff9943dfd3b877824f99ca4706f466f809e5b6db464a8da08912a0d53f601ed",
+        "e418f0e5545cff6a5e1f01c98f8ac232a1ce83d6b76de6fafdd78bfeff72cfe2",
     ]
-    assert [step["staged_state_sha256"] for step in steps] == [
-        "24d35c75bf94488b9b80fb758253adc6528aff0c89df9e998b7f5eaabfb72deb",
-        "6c193cf409b8b3ad54c57c5f53c7a365efa7453fc48cf389594f5232a6b16883",
-        "6c193cf409b8b3ad54c57c5f53c7a365efa7453fc48cf389594f5232a6b16883",
-        "6c193cf409b8b3ad54c57c5f53c7a365efa7453fc48cf389594f5232a6b16883",
+    assert [step["reducer_output_sha256"] for step in steps] == [
+        "b98ce819eee937b9773fe9b6378da8c1da0133e541be99018d1c8314565cf39d",
+        "fcf91118bf150342e08a80efd0b5b342e18993ea7d707ef396f5880ef32024b6",
+        "9a8c87e38c2a16cc28f3752664fc3553c8d145e6b9cefff228a0fa416c403550",
+        "0bf3157c580d47024e0fc3cd0f5a890b8b4ebdf1a04dcd24d04ff2227912266b",
     ]
-    assert [step["final_state_sha256"] for step in steps] == [
-        "24d35c75bf94488b9b80fb758253adc6528aff0c89df9e998b7f5eaabfb72deb",
-        "6c193cf409b8b3ad54c57c5f53c7a365efa7453fc48cf389594f5232a6b16883",
-        "6c193cf409b8b3ad54c57c5f53c7a365efa7453fc48cf389594f5232a6b16883",
-        "d24d85ada459bb791d68d2ecf4ed26252bb52066d6f0a0cc6ce38e9f1d5630c7",
-    ]
-    assert steps[0]["target_book_utf8"] == (
-        "{\n"
-        '  "decision_ts_ms": 1800000000000,\n'
-        '  "source": "exodus_short",\n'
-        '  "targets": [\n'
-        "    {\n"
-        '      "entry_valid_until_ms": 1800000900000,\n'
-        '      "leverage": 5.0,\n'
-        '      "notional_usdt": -32.5,\n'
-        '      "stop_loss_fraction": 0.35,\n'
-        '      "symbol": "AUSDT",\n'
-        '      "target_qty": -3.25\n'
-        "    }\n"
-        "  ],\n"
-        '  "valid_until_ms": 1800001800000,\n'
-        '  "version": 2\n'
-        "}\n"
-    )
-    assert steps[1]["prior_state_utf8"] == steps[0]["final_state_utf8"]
-    assert steps[2]["prior_state_utf8"] == steps[1]["final_state_utf8"]
-    assert steps[2]["staged_state_utf8"] == steps[2]["final_state_utf8"]
+    assert json.loads(steps[0]["checkpoint_utf8"])["open"]["AUSDT"]["target_qty"] == 3.25
+    assert json.loads(steps[1]["prior_checkpoint_utf8"]) == json.loads(steps[0]["checkpoint_utf8"])
+    assert json.loads(steps[2]["prior_checkpoint_utf8"]) == json.loads(steps[1]["checkpoint_utf8"])
     assert steps[2]["covered_symbols"] == ["AUSDT"]
-    assert steps[3]["staged_state_utf8"] == steps[2]["final_state_utf8"]
-    assert json.loads(steps[3]["final_state_utf8"])["open"] == []
-    assert steps[3]["covered_symbols"] == ["AUSDT"]
+    assert json.loads(steps[3]["checkpoint_utf8"])["open"] == {}
+    assert steps[3]["retired_symbols"] == ["AUSDT"]
 
 
 def test_replay_reports_live_application_order_and_honest_evidence_boundary() -> None:
     report = replay_exodus_contract_file(FIXTURE)
 
     assert report["application_order"] == [
-        "persist_staged_state",
-        "publish_target_book_bytes",
-        "persist_final_state_after_conclusive_flat",
+        "persist_checkpoint",
+        "consume_carry_fire",
+        "order_effects",
     ]
     assert all(step["application_order"] == report["application_order"] for step in report["steps"])
+    assert report["steps"][0]["effect_order"] == [
+        "persist_checkpoint",
+        "consume_carry_fire",
+        "order",
+    ]
+    assert report["steps"][2]["effect_order"] == [
+        "persist_checkpoint",
+        "consume_carry_fire",
+        "order",
+    ]
     boundary = report["evidence_boundary"]
     assert boundary["calls_live_reducer"] is True
+    assert boundary["calls_rust_reducer"] is True
     assert boundary["publishes_targets"] is False
     assert boundary["proves_venue_fills"] is False
     assert any("Minute klines cannot prove" in note for note in boundary["notes"])
@@ -85,3 +74,15 @@ def test_replay_report_serialization_is_canonical_and_repeatable() -> None:
     assert first == second
     assert first.endswith(b"\n")
     assert json.loads(first)["name"] == "exodus_live_contract_replay_v1"
+
+
+def test_replay_rejects_bool_schema_and_leverage() -> None:
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["schema_version"] = True
+    with pytest.raises(ValueError, match="schema"):
+        replay_exodus_contract(payload)
+
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["effective_config"]["entry_leverage"] = True
+    with pytest.raises(ValueError, match="leverage"):
+        replay_exodus_contract(payload)

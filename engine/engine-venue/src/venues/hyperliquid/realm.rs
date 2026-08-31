@@ -5,12 +5,9 @@
 //! variable name. Two networks, and the difference between them is real money.
 //!
 //! **Why the realm names carry the venue.** Bybit's realms are spelled `demo`
-//! and `mainnet` because those strings are a contract with the Python fleet,
-//! written since before there was a second venue. The three venues that came
-//! after cannot borrow those spellings: a realm string travels in the engine's
-//! heartbeat and the producers refuse to size from a heartbeat whose realm is
-//! not the one they were told to trade. Two venues both saying `mainnet` would
-//! let one venue's heartbeat pass the other's check.
+//! and `mainnet`; the other venues cannot borrow those spellings. A realm
+//! string travels in the engine heartbeat and lease path, so two venues both
+//! saying `mainnet` would make their account identities ambiguous.
 //!
 //! **Hyperliquid has no play-money account of Bybit's kind.** Its practice
 //! realm is its testnet, which is a separate chain with its own funds. So
@@ -134,7 +131,7 @@ mod tests {
             HyperliquidRealm::Testnet
         );
         // `mainnet` alone is Bybit's realm. Accepting it here would put two
-        // venues on one name in the heartbeat every producer reads.
+        // venues on one name in the heartbeat and lease namespace.
         for refused in [
             "",
             "mainnet",

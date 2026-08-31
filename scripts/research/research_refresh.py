@@ -29,7 +29,7 @@ import polars as pl  # noqa: E402
 from liquidity_migration.data.binance_vision import validate_usdm_usdt_symbols  # noqa: E402
 from liquidity_migration.core._common import sha256_file  # noqa: E402
 from liquidity_migration.core.deterministic_serialization import canonical_json  # noqa: E402
-from liquidity_migration.strategy.carry_demo import CARRY_CONFIG_PATH  # noqa: E402
+from liquidity_migration.rules.carry_models import CARRY_CONFIG_PATH  # noqa: E402
 
 # The deployed carry config decides which summary the backtest step produces;
 # deriving the name here means a promotion moves this expectation with it.

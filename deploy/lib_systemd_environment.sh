@@ -68,7 +68,7 @@ lm_load_private_systemd_environment() {
         return 1
     fi
 
-    # Commit the parsed snapshot only after the producer exited successfully.
+    # Commit the parsed snapshot only after the parser exited successfully.
     # Missing requested keys erase ambient values instead of inheriting them.
     for _lse_name in "${_lse_names[@]}"; do
         unset "$_lse_name"

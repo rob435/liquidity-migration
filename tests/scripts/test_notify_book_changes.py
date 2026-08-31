@@ -22,14 +22,24 @@ _SPEC.loader.exec_module(notify)
 from liquidity_migration.ops.telegram import as_block  # noqa: E402
 
 
-def test_default_funded_account_includes_exodus_book() -> None:
+def test_default_funded_account_reads_its_engine_heartbeat() -> None:
     funded = next(account for account in notify.ACCOUNTS if account.name == "funded")
-    assert funded.books["EXODUS"].endswith("/exodus-mainnet.json")
+    assert funded.realm == "mainnet"
+    assert funded.heartbeat.endswith("/liquidity-migration-engine-mainnet/heartbeat.json")
 
 
-def _book(tmp: Path, rows: list[tuple[str, float]]) -> str:
-    p = tmp / "book.json"
-    p.write_text(json.dumps({"targets": [{"symbol": s, "notional_usdt": n} for s, n in rows]}))
+def _heartbeat(tmp: Path, rows: list[dict], *, realm: str = "demo") -> str:
+    p = tmp / "heartbeat.json"
+    p.write_text(
+        json.dumps(
+            {
+                "mode": "live",
+                "realm": realm,
+                "wall_ts_ms": 1_000_000,
+                "positions": rows,
+            }
+        )
+    )
     return str(p)
 
 
@@ -59,21 +69,34 @@ def _trade(**over) -> dict:
     return trade
 
 
-class TestReadPositiveTargets:
-    def test_zero_rows_are_not_positions(self, tmp_path: Path) -> None:
-        path = _book(tmp_path, [("AAAUSDT", 40.0), ("BBBUSDT", 0.0)])
-        assert notify.read_positive_targets(path) == {"AAAUSDT": 40.0}
+class TestReadAttributedPositions:
+    def test_only_attributed_directional_positions_are_entries(self, tmp_path: Path) -> None:
+        path = _heartbeat(
+            tmp_path,
+            [
+                {"symbol": "AAAUSDT", "side": "long", "qty": 2.0, "entry_px": 20.0, "strategy": "long"},
+                {"symbol": "CANARYUSDT", "side": "long", "qty": 1.0, "entry_px": 5.0, "strategy": "maker_canary"},
+                {"symbol": "MYSTERYUSDT", "side": "short", "qty": 3.0, "entry_px": 4.0, "strategy": None},
+            ],
+        )
+        read = notify.read_attributed_positions(path, realm="demo", now_ms=1_001_000)
+        assert read is not None
+        assert read.positions["LONG"] == {"AAAUSDT": 40.0}
+        assert read.positions["CARRY"] == {}
+        assert read.ambiguous_symbols == {"MYSTERYUSDT"}
 
-    def test_an_unreadable_book_is_none_not_empty(self, tmp_path: Path) -> None:
+    def test_an_unreadable_heartbeat_is_none_not_empty(self, tmp_path: Path) -> None:
         p = tmp_path / "torn.json"
         p.write_text("{ torn")
-        assert notify.read_positive_targets(str(p)) is None
+        assert notify.read_attributed_positions(str(p), realm="demo") is None
 
-    def test_a_missing_book_is_none(self, tmp_path: Path) -> None:
-        assert notify.read_positive_targets(str(tmp_path / "absent.json")) is None
+    def test_a_stale_or_wrong_realm_heartbeat_is_none(self, tmp_path: Path) -> None:
+        path = _heartbeat(tmp_path, [], realm="mainnet")
+        assert notify.read_attributed_positions(path, realm="demo", now_ms=1_001_000) is None
+        assert notify.read_attributed_positions(path, realm="mainnet", now_ms=2_000_000) is None
 
 
-class TestBookDiff:
+class TestPositionDiff:
     def test_a_new_symbol_is_an_entry_with_its_size(self) -> None:
         assert notify.entry_messages("LONG", "", {}, {"ADAUSDT": 35.69}) == [
             "LONG enters ADAUSDT · $35.69"
@@ -86,14 +109,10 @@ class TestBookDiff:
 
     def test_a_resize_stays_off_the_phone(self) -> None:
         assert notify.entry_messages("CARRY", "", {"EDENUSDT": 120.0}, {"EDENUSDT": 90.0}) == []
-        assert notify.book_exit_messages("CARRY", "", {"EDENUSDT": 120.0}, {"EDENUSDT": 90.0}) == []
 
-    def test_exodus_speaks_shorts_and_covers(self) -> None:
+    def test_exodus_speaks_shorts(self) -> None:
         assert notify.entry_messages("EXODUS", "", {}, {"ONGUSDT": 85.0}) == [
             "EXODUS shorts ONGUSDT · $85.00"
-        ]
-        assert notify.book_exit_messages("EXODUS", "", {"ONGUSDT": 85.0}, {}) == [
-            "EXODUS covers ONGUSDT"
         ]
 
     def test_the_real_money_account_leads_with_rm(self) -> None:
@@ -254,7 +273,6 @@ class TestDailySummary:
         assert "⚪" not in notify.exit_message(_trade(), "DEMO ")
         assert "⚪" not in notify.exit_message(_trade(round_trip=None), "DEMO ")
         assert all("⚪" not in m for m in notify.entry_messages("LONG", "DEMO ", {}, {"AUSDT": 1.0}))
-        assert all("⚪" not in m for m in notify.book_exit_messages("LONG", "DEMO ", {"AUSDT": 1.0}, {}))
         assert "⚪" not in notify.daily_summary(self._rows(), "2026-08-23")
 
     def test_one_trip_reads_as_won_or_lost_not_one_won(self) -> None:
@@ -369,10 +387,8 @@ class TestOneWholeRun:
             notify.Account(
                 name="demo",
                 tag="DEMO ",
-                books={
-                    "CARRY": str(tmp_path / "carry.json"),
-                    "EXODUS": str(tmp_path / "exodus.json"),
-                },
+                realm="demo",
+                heartbeat=str(tmp_path / "carry.json"),
                 trades=str(tmp_path / "trades.jsonl"),
             )
         ]
@@ -381,7 +397,8 @@ class TestOneWholeRun:
                 notify.Account(
                     name="funded",
                     tag="RM ",
-                    books={"CARRY": str(tmp_path / "carry-mainnet.json")},
+                    realm="mainnet",
+                    heartbeat=str(tmp_path / "carry-mainnet.json"),
                     trades=str(tmp_path / "trades-mainnet.jsonl"),
                 )
             )
@@ -399,9 +416,24 @@ class TestOneWholeRun:
         return out
 
     def _write_book(self, path: Path, rows: dict[str, float]) -> None:
+        realm = "mainnet" if "mainnet" in path.name else "demo"
         path.write_text(
             json.dumps(
-                {"targets": [{"symbol": s, "notional_usdt": n} for s, n in rows.items()]}
+                {
+                    "mode": "live",
+                    "realm": realm,
+                    "wall_ts_ms": int(notify.time.time() * 1000),
+                    "positions": [
+                        {
+                            "symbol": symbol,
+                            "side": "long",
+                            "qty": notional_usdt,
+                            "entry_px": 1.0,
+                            "strategy": "carry",
+                        }
+                        for symbol, notional_usdt in rows.items()
+                    ],
+                }
             )
         )
 
@@ -412,7 +444,7 @@ class TestOneWholeRun:
         notify.main()
         assert sent == []
 
-    def test_a_new_book_symbol_pages_as_an_entry(self, tmp_path, monkeypatch) -> None:
+    def test_a_new_attributed_position_pages_as_an_entry(self, tmp_path, monkeypatch) -> None:
         sent = self._fleet(tmp_path, monkeypatch)
         self._write_book(tmp_path / "carry.json", {})
         self._write_book(tmp_path / "exodus.json", {})
@@ -421,7 +453,7 @@ class TestOneWholeRun:
         notify.main()
         assert self._bodies(sent) == ["DEMO CARRY enters ONGUSDT · $478"]
 
-    def test_with_no_engine_file_an_exit_still_pages_off_the_book(
+    def test_a_position_disappearance_never_invents_an_unpriced_exit(
         self, tmp_path, monkeypatch
     ) -> None:
         sent = self._fleet(tmp_path, monkeypatch)
@@ -430,7 +462,7 @@ class TestOneWholeRun:
         notify.main()
         self._write_book(tmp_path / "carry.json", {})
         notify.main()
-        assert self._bodies(sent) == ["DEMO CARRY exits ONGUSDT"]
+        assert sent == []
 
     def test_with_an_engine_file_the_exit_comes_with_its_money_and_only_once(
         self, tmp_path, monkeypatch
@@ -514,7 +546,7 @@ class TestOneWholeRun:
         assert sent == [], "the canary is not a trading result"
         assert "not shown (maker_canary): DEMO AGIUSDT" in capsys.readouterr().out
 
-    def test_an_unreadable_book_is_not_a_mass_exit(self, tmp_path, monkeypatch) -> None:
+    def test_an_unreadable_heartbeat_is_not_a_position_change(self, tmp_path, monkeypatch) -> None:
         sent = self._fleet(tmp_path, monkeypatch)
         self._write_book(tmp_path / "carry.json", {"ONGUSDT": 478.10, "AGIUSDT": 478.10})
         self._write_book(tmp_path / "exodus.json", {})
@@ -625,7 +657,7 @@ class TestOneWholeRun:
         assert notify.main() == 0
         assert attempts[:2] == attempts[2:]
 
-    def test_failed_delivery_retains_books_offsets_and_summary_day(
+    def test_failed_delivery_retains_positions_offsets_and_summary_day(
         self, tmp_path, monkeypatch
     ) -> None:
         self._fleet(tmp_path, monkeypatch)
@@ -652,7 +684,7 @@ class TestOneWholeRun:
         assert state_path.read_bytes() == before
         assert notify.main() == 0
         state = json.loads(state_path.read_text())
-        assert state["books"]["demo/CARRY"] == {"MOVEUSDT": 200.0}
+        assert state["positions"]["demo/CARRY"] == {"MOVEUSDT": 200.0}
         assert state["trade_offsets"][str(trades)] == trades.stat().st_size
         assert state["summarised_day"] == "2026-08-23"
 

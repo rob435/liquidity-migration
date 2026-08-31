@@ -5,7 +5,6 @@ import tomllib
 from pathlib import Path
 
 from scripts.research.compare_toxic_quoter import NS, simulate
-from scripts.research.render_maker_canary_config import main as render_maker_config
 
 
 SYMBOL = "TESTUSDT"
@@ -62,7 +61,6 @@ def test_flow_can_only_protect_against_trades_after_the_trigger() -> None:
 
 
 def test_registered_rule_and_disabled_runtime_block_are_one_mapping() -> None:
-    assert render_maker_config(["--check"]) == 0
     registered = json.loads(
         (ROOT / "configs" / "lane2_toxic_flow_quoter_v1.json").read_text()
     )["rule"]

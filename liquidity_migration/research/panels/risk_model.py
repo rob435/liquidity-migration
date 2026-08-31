@@ -156,11 +156,8 @@ def build_factor_panel(
     ``btc_beta``. ``realized_vol_7d`` is converted to its cross-sectional rank
     (``realized_vol_rank``).
 
-    ``klines_dataset`` overrides the autodetected kline store name. Autodetect
-    only distinguishes the Bybit/Binance funding-dir conventions and always
-    returns ``klines_1h``, but the live demo roots store WS-driven klines
-    under ``event_demo_klines_1h``, so the offline rmom refresh must pass the
-    real store name or both reads return zero rows.
+    ``klines_dataset`` overrides the canonical ``klines_1h`` store name for a
+    deliberately separate research dataset.
     """
     feat = build_feature_panel(
         data_root, start=start, end=end,

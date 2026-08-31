@@ -360,7 +360,8 @@ async fn recovery_once(history_rows: usize) -> Result<u64, Error> {
         account_view_max_age_ms: 60_000,
         max_quote_age_ms: 60_000,
         leverage_authority: LeverageAuthority::Shared,
-        target_book_path: None,
+        signal_spool_path: None,
+        control_spool_path: None,
         heartbeat_path: None,
         trades_path: None,
     };

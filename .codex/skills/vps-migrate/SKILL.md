@@ -93,7 +93,7 @@ edit. Verify never repairs drift: it compares installed unit files against the
 checkout's manifest and asserts topology, not the installed HEAD.
 
 Confirm the success marker, exact commit, resolved sleeves, installed profile,
-credential mode, service/timer state, start order (producers first, the engine last), liveness,
+credential mode, service/timer state, start order (signal worker before the engine), liveness,
 and journal/venue agreement appropriate to the task.
 
 ## GitHub Actions

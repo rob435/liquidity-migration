@@ -138,9 +138,8 @@ async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
 
 #[tokio::test]
 async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
-    // This fleet runs `target_book` twice. Named by the plug, the log and the
-    // heartbeat said "target_book" twice and nobody could tell carry's
-    // trading from long's.
+    // Two sleeves can share one implementation. Their configured names keep
+    // the log and heartbeat records distinct.
     let (one, _a) = Buyer::new("BTCUSDT", 100, 0.01);
     let (two, _b) = Buyer::new("ETHUSDT", 100, 0.01);
     let tape = tape();

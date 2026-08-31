@@ -110,7 +110,7 @@ mod tests {
             BinanceRealm::Mainnet
         );
         // `mainnet` alone is Bybit's realm. Accepting it here would put two
-        // venues on one name in the heartbeat every producer reads.
+        // venues on one name in the engine heartbeat.
         for refused in ["", "mainnet", "testnet", "demo", "binance", "binance_demo"] {
             assert!(
                 BinanceRealm::parse(refused).is_err(),

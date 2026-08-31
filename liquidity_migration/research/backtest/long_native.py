@@ -1,8 +1,10 @@
-"""Historical runner and report writer for the registered LONG rule.
+"""Hourly diagnostic runner and report writer for the registered LONG rule.
 
 The rule itself — profiles, features, signal — lives in
-``liquidity_migration/rules/long_native.py``; this module replays its
-chronological lifecycle and renders the equity evidence.
+``liquidity_migration/rules/long_native.py``. Decisions go through the native
+Rust reducer, but hourly bars cannot reconstruct intraday signal arrivals,
+venue fills, or the engine's dead-band resizes. Its P&L remains diagnostic
+until those execution events are replayed from the minute/tick tape.
 """
 
 from __future__ import annotations
@@ -11,8 +13,8 @@ import datetime as dt
 import json
 import math
 from bisect import bisect_right
+from dataclasses import asdict, dataclass
 from datetime import date as dt_date
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -28,17 +30,29 @@ from liquidity_migration.core._common import (
     date_ms,
     exact_duration_ms,
     finite_float,
-    is_weekend_ms,
     pct,
 )
 from liquidity_migration.core.config import CostConfig, TradeLifecycleConfig
 from liquidity_migration.rules.long_native import (
     LongNativeConfig,
-    _classify_entry,
     _safe_float,
-    _vol_target_scale,
     build_long_features,
     long_v11a_profile,
+)
+from liquidity_migration.rules.long_config import (
+    ConfigLayer,
+    StrategyConfig,
+    profile_name_for_rule,
+    resolve_strategy_config,
+)
+from liquidity_migration.rules.long_models import (
+    DecisionAction,
+    DecisionInput,
+    PriorState,
+)
+from liquidity_migration.rules.rust_strategy_contract import (
+    RustLongDecisionReducer,
+    RustStrategyContract,
 )
 from liquidity_migration.research.backtest.run_diagnostics import diagnose, is_tainted, render
 from liquidity_migration.data.storage import read_dataset, read_dataset_columns
@@ -53,20 +67,118 @@ from liquidity_migration.data.trade_lifecycle import (
 from liquidity_migration.rules.long_identity import SUPPORTED_LONG_STRATEGY_IDS
 from liquidity_migration.research.backtest.volume_events_charts import _write_equity_benchmark_chart
 from liquidity_migration.data.volume_events_pit import (
+    FullPitUniverseCoverage,
     _covered_kline_date_symbol_set,
     _full_pit_universe_coverage,
     _pit_manifest_metadata,
     filter_klines_to_pit_membership,
 )
 
+
+@dataclass(frozen=True, slots=True)
+class LongPitCoverageScope:
+    feature_lookback_days: int
+    input_start: str | None
+    input_end_exclusive: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LongPitCoverageAssessment:
+    scope: LongPitCoverageScope
+    run: FullPitUniverseCoverage
+    full_root: FullPitUniverseCoverage
+
+
+def _long_feature_lookback_days(config: LongNativeConfig) -> int:
+    return max(
+        1,
+        config.universe_volume_window_days,
+        config.vol_estimate_window_days,
+        config.regime_sma_days,
+        config.min_listing_history_days,
+        30,  # BTC realized volatility
+        14,  # ATR
+        7,  # longest pump and close-location window
+    )
+
+
+def _long_pit_coverage_scope(config: LongNativeConfig) -> LongPitCoverageScope:
+    """Map signal timestamps to the source dates that can change them."""
+
+    lookback_days = _long_feature_lookback_days(config)
+    input_start = None
+    if config.start_date:
+        signal_start = dt.datetime.fromtimestamp(
+            date_ms(config.start_date) / 1000,
+            tz=dt.timezone.utc,
+        ).date()
+        input_start = (signal_start - dt.timedelta(days=lookback_days)).isoformat()
+
+    input_end_exclusive = None
+    if config.end_date:
+        signal_end = dt.datetime.fromtimestamp(
+            date_ms(config.end_date) / 1000,
+            tz=dt.timezone.utc,
+        ).date()
+        # A source day's daily bar is timestamped at the following midnight.
+        input_end_exclusive = (signal_end - dt.timedelta(days=1)).isoformat()
+
+    return LongPitCoverageScope(
+        feature_lookback_days=lookback_days,
+        input_start=input_start,
+        input_end_exclusive=input_end_exclusive,
+    )
+
+
+def _scope_pit_frame(
+    frame: pl.DataFrame,
+    scope: LongPitCoverageScope,
+) -> pl.DataFrame:
+    if frame.is_empty() or "date" not in frame.columns:
+        return frame
+    scoped = frame
+    if scope.input_start is not None:
+        scoped = scoped.filter(pl.col("date").cast(pl.String) >= scope.input_start)
+    if scope.input_end_exclusive is not None:
+        scoped = scoped.filter(pl.col("date").cast(pl.String) < scope.input_end_exclusive)
+    return scoped
+
+
+def _assess_long_pit_coverage(
+    klines: pl.DataFrame,
+    archive_manifest: pl.DataFrame,
+    *,
+    config: LongNativeConfig,
+) -> LongPitCoverageAssessment:
+    full_root_covered = _covered_kline_date_symbol_set(klines)
+    full_root = _full_pit_universe_coverage(
+        klines,
+        archive_manifest,
+        kline_covered_date_symbols=full_root_covered,
+    )
+    scope = _long_pit_coverage_scope(config)
+    scoped_klines = _scope_pit_frame(klines, scope)
+    scoped_manifest = _scope_pit_frame(archive_manifest, scope)
+    scoped_covered = {
+        pair
+        for pair in full_root_covered
+        if (scope.input_start is None or pair[0] >= scope.input_start)
+        and (scope.input_end_exclusive is None or pair[0] < scope.input_end_exclusive)
+    }
+    run = _full_pit_universe_coverage(
+        scoped_klines,
+        scoped_manifest,
+        kline_covered_date_symbols=scoped_covered,
+    )
+    return LongPitCoverageAssessment(scope=scope, run=run, full_root=full_root)
+
+
 def _diagnostic_data_end(exclusive_end: str) -> str | None:
     """Translate the strategy's exclusive end into an inclusive data date."""
 
     if not exclusive_end:
         return None
-    return (
-        dt.date.fromisoformat(exclusive_end) - dt.timedelta(days=1)
-    ).isoformat()
+    return (dt.date.fromisoformat(exclusive_end) - dt.timedelta(days=1)).isoformat()
 
 
 def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfig | None = None) -> dict[str, Any]:
@@ -98,12 +210,13 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
     funding = _exclude_symbols(funding, cfg.exclude_symbols)
     archive_manifest = _exclude_symbols(archive_manifest, cfg.exclude_symbols)
 
-    pit_covered_date_symbols = _covered_kline_date_symbol_set(coverage_klines)
-    pit_coverage = _full_pit_universe_coverage(
+    pit_assessment = _assess_long_pit_coverage(
         coverage_klines,
         archive_manifest,
-        kline_covered_date_symbols=pit_covered_date_symbols,
+        config=cfg,
     )
+    pit_coverage = pit_assessment.run
+    pit_covered_date_symbols = pit_coverage.covered_date_symbols
     full_pit_universe_pass = pit_coverage.passed
     klines, pit_filter_receipt = filter_klines_to_pit_membership(
         coverage_klines,
@@ -123,14 +236,14 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
         "archive_manifest": archive_manifest,
         "features": features,
         "bars_by_symbol": _bars_by_symbol(klines),
-        "funding_lookup": (
-            _funding_lookup(funding)
-            if funding is not None and not funding.is_empty()
-            else None
-        ),
+        "funding_lookup": (_funding_lookup(funding) if funding is not None and not funding.is_empty() else None),
         "full_pit_universe_pass": full_pit_universe_pass,
+        "full_root_pit_universe_pass": pit_assessment.full_root.passed,
+        "pit_coverage_scope": asdict(pit_assessment.scope),
         "pit_covered_date_symbols": pit_covered_date_symbols,
         "pit_required_date_symbols": pit_coverage.required_date_symbols,
+        "pit_full_root_covered_date_symbols": (pit_assessment.full_root.covered_date_symbols),
+        "pit_full_root_required_date_symbols": (pit_assessment.full_root.required_date_symbols),
         "pit_filter_receipt": pit_filter_receipt,
     }
 
@@ -341,8 +454,7 @@ def _long_strategy_id(config: LongNativeConfig) -> str:
     strategy_id = config.execution_strategy_id.strip()
     if strategy_id not in SUPPORTED_LONG_STRATEGY_IDS:
         raise ValueError(
-            "LONG execution_strategy_id must be a registered identity: "
-            f"{sorted(SUPPORTED_LONG_STRATEGY_IDS)}"
+            f"LONG execution_strategy_id must be a registered identity: {sorted(SUPPORTED_LONG_STRATEGY_IDS)}"
         )
     return strategy_id
 
@@ -353,6 +465,7 @@ def run_long_native_research(
     config: LongNativeConfig | None = None,
     cost_config: CostConfig | None = None,
     report_dir: str | Path | None = None,
+    effective_config: StrategyConfig | None = None,
 ) -> dict[str, Any]:
     cfg = config or long_v11a_profile()
     costs = cost_config or CostConfig()
@@ -373,12 +486,25 @@ def run_long_native_research(
     pit_filter_receipt = inputs["pit_filter_receipt"]
 
     lifecycle_strategy_id = _long_strategy_id(cfg)
+    effective = effective_config or resolve_strategy_config(
+        profile_name_for_rule(cfg),
+        rule=cfg,
+        rule_source="research_config",
+        layers=(
+            ConfigLayer(
+                source="research_run",
+                values={
+                    "round_trip_cost_bps": (costs.base_entry_exit_cost_bps * cfg.cost_multiplier),
+                },
+            ),
+        ),
+    )
     trades, lifecycle_stats, event_counts = _run_long_pipeline(
         features=features,
         bars_by_symbol=bars_by_symbol,
         funding_lookup=funding_lookup,
         config=cfg,
-        costs=costs,
+        effective_config=effective,
     )
 
     bt_config = TradeLifecycleConfig(
@@ -397,10 +523,16 @@ def run_long_native_research(
     funding_mode = summary.get("funding_mode", "missing")
     execution_evidence = {
         "strategy_id": lifecycle_strategy_id,
-        "evidence_label": "chronological_native_strategy_replay",
+        "evidence_label": "hourly_diagnostic_rust_decision_contract",
+        "decision_authority": "rust_long_native",
+        "contract_transport": "one_persistent_jsonl_process",
         "historical_strategy_runtime_is_sequential": True,
         "same_timestamp_strategy_batching": True,
         "entry_capacity_evaluated_at_actual_entry_boundary": True,
+        "strategy_contract_shared_across_environments": True,
+        "historical_market_resolution": "1h",
+        "entry_fill_parity": False,
+        "target_deadband_replay": False,
         "strategy_runtime_shared_across_environments": False,
         "market_tape_shared_across_environments": False,
         "cross_environment_strategy_parity": False,
@@ -456,19 +588,30 @@ def run_long_native_research(
         n_features=features.height,
         n_trades=trades.height,
     )
+    pit_scope = _long_pit_coverage_scope(cfg)
+    pit_manifest_metadata = _pit_manifest_metadata(
+        _scope_pit_frame(archive_manifest, pit_scope),
+        features,
+        _scope_pit_frame(klines, pit_scope),
+        full_pit_universe_pass=full_pit_universe_pass,
+        kline_covered_date_symbols=pit_covered_date_symbols,
+        required_pit_date_symbols=pit_required_date_symbols,
+    )
+    pit_manifest_metadata.update(
+        {
+            "coverage_scope": inputs["pit_coverage_scope"],
+            "full_root_full_pit_universe_pass": inputs["full_root_pit_universe_pass"],
+            "full_root_required_manifest_date_symbols": len(inputs["pit_full_root_required_date_symbols"]),
+            "full_root_kline_covered_date_symbols": len(inputs["pit_full_root_covered_date_symbols"]),
+        }
+    )
 
     metadata = {
         "config": asdict(cfg),
+        "effective_strategy_config": effective.as_json_dict(),
         "rows": {"features": features.height, "trades": trades.height, "baskets": baskets.height},
         "date_range": _date_range(features),
-        "pit_manifest": _pit_manifest_metadata(
-            archive_manifest,
-            features,
-            klines,
-            full_pit_universe_pass=full_pit_universe_pass,
-            kline_covered_date_symbols=pit_covered_date_symbols,
-            required_pit_date_symbols=pit_required_date_symbols,
-        ),
+        "pit_manifest": pit_manifest_metadata,
         "pit_filter": pit_filter_receipt,
         "cost_model": {
             **asdict(costs),
@@ -566,8 +709,22 @@ def _run_long_pipeline(
     bars_by_symbol: dict[str, dict[str, Any]],
     funding_lookup: dict[str, dict[str, Any]] | None,
     config: LongNativeConfig,
-    costs: CostConfig,
+    effective_config: StrategyConfig,
+    decision_reducer: RustLongDecisionReducer | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int], dict[str, int]]:
+    if decision_reducer is None:
+        with RustStrategyContract() as contract:
+            return _run_long_pipeline(
+                features=features,
+                bars_by_symbol=bars_by_symbol,
+                funding_lookup=funding_lookup,
+                config=config,
+                effective_config=effective_config,
+                decision_reducer=RustLongDecisionReducer(contract, effective_config),
+            )
+    contract_config = effective_config
+    if contract_config.rule != config:
+        raise ValueError("effective LONG config disagrees with the research rule")
     dates_all = sorted(int(ts) for ts in features["ts_ms"].unique().to_list())
     features_by_date: dict[int, list[dict[str, Any]]] = {}
     for part in features.partition_by("ts_ms", maintain_order=True):
@@ -583,14 +740,11 @@ def _run_long_pipeline(
         "skipped_already_held": 0,
         "skipped_no_entry_bar": 0,
         "exits_stop": 0,
-        "exits_take_profit": 0,
         "exits_time": 0,
     }
     event_counts = {"fomo_chase": 0}
-    round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
+    round_trip_cost_bps = contract_config.round_trip_cost_bps
     notional_weight = config.gross_exposure / max(config.max_concurrent_positions, 1)
-    if not math.isfinite(config.execution_leverage) or config.execution_leverage <= 0.0:
-        raise ValueError("long-native execution_leverage must be finite and positive")
     window_end_ts_ms = date_ms(config.end_date) if config.end_date else None
     pending_exits: list[tuple[dict[str, Any], int, str]] = []
 
@@ -609,7 +763,7 @@ def _run_long_pipeline(
             notional_weight=notional_weight,
             round_trip_cost_bps=round_trip_cost_bps,
             funding_lookup=funding_lookup,
-            notional_multiplier=config.notional_multiplier,
+            notional_multiplier=contract_config.notional_multiplier,
         )
         pending_exits.append((trade, int(exit_ts_ms), str(pos["symbol"])))
         return trade
@@ -625,49 +779,50 @@ def _run_long_pipeline(
         start_idx = bisect_right(bars["ends"], start_after)
         end_idx = bisect_right(bars["ends"], through_ts)
         for idx in range(max(start_idx, int(pos["entry_bar_idx"]) + 1), end_idx):
-            bar_high = float(bars["high"][idx])
             bar_low = float(bars["low"][idx])
             bar_close = float(bars["close"][idx])
             bar_end_ts = int(bars["bar_end_ts_ms"][idx])
-            if (
-                config.fc_stop_time_decay_hours > 0
-                and bar_end_ts - int(pos["entry_ts_ms"])
-                >= config.fc_stop_time_decay_hours * MS_PER_HOUR
-            ):
-                pos["stop_price"] = max(
-                    float(pos["stop_price"]),
+            prior_state = PriorState(
+                requested=True,
+                filled=True,
+                entry_ts_ms=int(pos["entry_ts_ms"]),
+                entry_price=float(pos["entry_price"]),
+                target_notional_usdt=float(pos.get("target_fraction_of_equity") or 0.0),
+                stop_loss_fraction=float(pos["stop_pct"]),
+                stop_decay_after_ms=int(pos["stop_decay_after_ms"]),
+                decayed_stop_loss_fraction=float(pos["decayed_stop_loss_fraction"]),
+                max_hold_deadline_ts_ms=int(pos["planned_exit_ts_ms"]),
+            )
+            exit_decision = decision_reducer.decide(
+                DecisionInput(
+                    decision_ts_ms=bar_end_ts,
+                    symbol=symbol,
+                    signal_ts_ms=int(pos["entry_signal_ts_ms"]),
+                    market_price=bar_close,
+                    observed_low=bar_low,
+                ),
+                prior_state,
+            )
+            if exit_decision.action is DecisionAction.EXIT:
+                exit_price = (
                     float(pos["entry_price"])
-                    * (1.0 - config.fc_stop_time_decay_atr_mult * float(pos["atr_pct"])),
+                    * (
+                        1.0 - exit_decision.stop_loss_fraction
+                    )
+                    if exit_decision.reason in {"stop_loss", "decayed_stop_loss"}
+                    else bar_close
                 )
-            if bar_low <= pos["stop_price"]:
                 _record_exit_target(
                     pos,
                     exit_ts_ms=bar_end_ts,
-                    exit_price=pos["stop_price"],
-                    reason="stop_loss",
+                    exit_price=exit_price,
+                    reason=exit_decision.reason,
                 )
                 cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
-                stats["exits_stop"] += 1
-                return True
-            if bar_high >= pos["take_profit_price"]:
-                _record_exit_target(
-                    pos,
-                    exit_ts_ms=bar_end_ts,
-                    exit_price=pos["take_profit_price"],
-                    reason="take_profit",
-                )
-                cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
-                stats["exits_take_profit"] += 1
-                return True
-            if bar_end_ts >= pos["planned_exit_ts_ms"]:
-                _record_exit_target(
-                    pos,
-                    exit_ts_ms=bar_end_ts,
-                    exit_price=bar_close,
-                    reason="time_stop",
-                )
-                cooldown_until[symbol] = bar_end_ts + exact_duration_ms(days=config.cooldown_days)
-                stats["exits_time"] += 1
+                if exit_decision.reason == "time_stop":
+                    stats["exits_time"] += 1
+                else:
+                    stats["exits_stop"] += 1
                 return True
         pos["last_exit_scan_ts_ms"] = through_ts
         return False
@@ -693,19 +848,31 @@ def _run_long_pipeline(
 
     for ts in dates_all:
         _scan_all_positions(int(ts))
-        candidates: list[tuple[dict[str, Any], float, float, int]] = []
+        candidates: list[dict[str, Any]] = []
         for row in features_by_date.get(ts, []):
-            pattern, stop_pct, take_profit_pct, hold_days = _classify_entry(row, config)
-            if pattern is None:
+            symbol = str(row.get("symbol") or "")
+            signal_close = _safe_float(row.get("close")) or 0.0
+            probe = decision_reducer.decide(
+                DecisionInput(
+                    decision_ts_ms=int(ts + exact_duration_ms(hours=max(1, config.entry_delay_hours))),
+                    symbol=symbol,
+                    signal_ts_ms=int(ts),
+                    signal_close=signal_close,
+                    market_price=None,
+                    feature_row=row,
+                ),
+                PriorState(),
+            )
+            if probe.action is DecisionAction.REJECT:
                 continue
             stats["candidates_total"] += 1
             event_counts["fomo_chase"] += 1
-            candidates.append((row, stop_pct, take_profit_pct, hold_days))
+            candidates.append(row)
 
         _scan_all_positions(int(ts + exact_duration_ms(hours=config.entry_delay_hours)))
-        candidates.sort(key=lambda candidate: -(_safe_float(candidate[0].get("log_return")) or 0.0))
+        candidates.sort(key=lambda row: -(_safe_float(row.get("log_return")) or 0.0))
         pending_entries: list[tuple[str, dict[str, Any]]] = []
-        for row, stop_pct, take_profit_pct, hold_days in candidates:
+        for row in candidates:
             symbol = str(row["symbol"])
             bars = bars_by_symbol.get(symbol)
             if bars is None:
@@ -716,25 +883,35 @@ def _run_long_pipeline(
                 stats["skipped_no_entry_bar"] += 1
                 continue
             signal_close = float(bars["close"][signal_idx])
-            retrace_threshold = signal_close * (1.0 - config.fc_sniper_retrace_pct)
             first_hour = max(1, config.entry_delay_hours)
             deadline_hour = max(first_hour, config.fc_sniper_deadline_hours)
             observed_idx: int | None = None
+            entry_decision = None
             for hour in range(first_hour, deadline_hour + 1):
                 candidate_ts = ts + exact_duration_ms(hours=hour)
                 candidate_idx = bars["by_end"].get(candidate_ts)
                 if candidate_idx is None:
                     continue
-                if float(bars["low"][candidate_idx]) <= retrace_threshold:
+                candidate_decision = decision_reducer.decide(
+                    DecisionInput(
+                        decision_ts_ms=int(candidate_ts),
+                        symbol=symbol,
+                        signal_ts_ms=int(ts),
+                        signal_close=signal_close,
+                        market_price=float(bars["close"][candidate_idx]),
+                        observed_low=float(bars["low"][candidate_idx]),
+                        equity_usdt=1.0,
+                        feature_row=row,
+                    ),
+                    PriorState(),
+                )
+                if candidate_decision.action is DecisionAction.ENTER:
                     observed_idx = int(candidate_idx)
+                    entry_decision = candidate_decision
                     break
-            if observed_idx is None:
-                deadline_ts = ts + exact_duration_ms(hours=deadline_hour)
-                deadline_idx = bars["by_end"].get(deadline_ts)
-                if deadline_idx is None:
-                    stats["skipped_no_entry_bar"] += 1
-                    continue
-                observed_idx = int(deadline_idx)
+            if observed_idx is None or entry_decision is None:
+                stats["skipped_no_entry_bar"] += 1
+                continue
             entry = _entry_at_next_hour_open(
                 bars,
                 observed_bar_idx=observed_idx,
@@ -744,19 +921,7 @@ def _run_long_pipeline(
                 stats["skipped_no_entry_bar"] += 1
                 continue
             entry_ts_ms, entry_idx, entry_price = entry
-
-            vol_estimate = _safe_float(row.get("realized_vol")) or config.vol_floor_annual
-            vol_used = max(vol_estimate, config.vol_floor_annual)
-            position_weight = min(
-                config.vol_floor_annual / vol_used,
-                config.max_position_weight / notional_weight,
-            )
-            position_weight = max(position_weight, 0.25)
-            position_weight *= _vol_target_scale(config, _safe_float(row.get("btc_rv_30")))
-            if is_weekend_ms(int(entry_ts_ms)):
-                position_weight *= config.weekend_size_mult
-
-            planned_exit_ts_ms = entry_ts_ms + exact_duration_ms(days=hold_days)
+            planned_exit_ts_ms = entry_ts_ms + entry_decision.max_hold_duration_ms
             position = {
                 "symbol": symbol,
                 "pattern": "fomo_chase",
@@ -765,16 +930,15 @@ def _run_long_pipeline(
                 "last_exit_scan_ts_ms": int(entry_ts_ms),
                 "entry_bar_idx": int(entry_idx),
                 "entry_price": entry_price,
-                "stop_price": entry_price * (1.0 - stop_pct),
-                "take_profit_price": entry_price * (1.0 + take_profit_pct),
+                "stop_price": entry_price * (1.0 - entry_decision.stop_loss_fraction),
                 "planned_exit_ts_ms": int(planned_exit_ts_ms),
-                "position_weight": float(position_weight),
-                "stop_pct": float(stop_pct),
-                "tp_pct": float(take_profit_pct),
-                # kept so a time-decaying stop can be re-derived from ATR rather
-                # than from the (possibly range-based) initial stop
+                "position_weight": float(entry_decision.position_weight),
+                "target_fraction_of_equity": float(entry_decision.target_fraction_of_equity),
+                "stop_pct": float(entry_decision.stop_loss_fraction),
+                "stop_decay_after_ms": int(entry_decision.stop_decay_after_ms),
+                "decayed_stop_loss_fraction": float(entry_decision.decayed_stop_loss_fraction),
                 "atr_pct": float(_safe_float(row.get("atr_14d_pct")) or 0.0),
-                "max_hold_days": int(hold_days),
+                "max_hold_days": int(entry_decision.max_hold_duration_ms // exact_duration_ms(days=1)),
                 "basket_id": f"native-{_iso_date(int(ts))}-{symbol}",
             }
             pending_entries.append((symbol, position))
@@ -855,10 +1019,12 @@ def _finalize_trade(
         entry_ts_ms=int(pos["entry_ts_ms"]),
         exit_ts_ms=int(exit_ts_ms),
     )
-    # H1: scale the per-position gross by the deployed notional multiplier
-    # (applied AFTER the B.3 per-symbol cap, matching the live semantics).
-    # Default 1.0 leaves the historical backtest gross unchanged.
-    effective_weight = abs(notional_weight * float(pos["position_weight"])) * notional_multiplier
+    # The contract freezes the full equity fraction at entry. The fallback
+    # keeps older callers readable while they migrate their position rows.
+    effective_weight = abs(
+        float(pos.get("target_fraction_of_equity") or 0.0)
+        or (notional_weight * float(pos["position_weight"]) * notional_multiplier)
+    )
     funding_return = effective_weight * raw_funding_return
     cost_return = -effective_weight * round_trip_cost_bps / 10_000.0
     gross_return = effective_weight * gross_trade_return
@@ -881,7 +1047,6 @@ def _finalize_trade(
         "exit_reason": reason,
         "planned_exit_ts_ms": int(pos["planned_exit_ts_ms"]),
         "stop_price": float(pos["stop_price"]),
-        "take_profit_price": float(pos["take_profit_price"]),
         "notional_weight": effective_weight,
         "position_weight": float(pos["position_weight"]),
         "gross_trade_return": gross_trade_return,
@@ -1022,7 +1187,6 @@ def format_long_native_report(metadata: dict[str, Any]) -> str:
         "",
         "## Exits",
         f"- stop_loss: {lifecycle.get('exits_stop', 0)}",
-        f"- take_profit: {lifecycle.get('exits_take_profit', 0)}",
         f"- time/data_end: {lifecycle.get('exits_time', 0)}",
         "",
     ]

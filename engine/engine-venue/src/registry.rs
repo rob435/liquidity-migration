@@ -218,13 +218,9 @@ impl VenueName {
 
     /// Which of that venue's realms, spelled the way the heartbeat spells it.
     ///
-    /// The three venues that came after Bybit qualify their realm names with
-    /// the venue. That is not decoration: this string travels in the engine's
-    /// heartbeat, and the Python producers block every entry when it does not
-    /// match the environment they were told to size from. Two venues both
-    /// calling a realm `mainnet` would let one venue's heartbeat pass the
-    /// other's check. It also names the lease file, so the set of realms a
-    /// lease may be taken for is read from here.
+    /// The venues added after Bybit qualify realm names with the venue. This
+    /// string travels in the engine heartbeat and names the lease file, so it
+    /// must identify one account namespace without ambiguity.
     pub fn realm(self) -> &'static str {
         match self {
             VenueName::BybitDemo => VenueRealm::Demo.as_str(),
@@ -858,9 +854,8 @@ mod tests {
 
     #[test]
     fn no_two_names_share_a_realm_string() {
-        // The realm travels in the heartbeat, and the producers refuse to size
-        // from one whose realm is not theirs. Two venues sharing a realm
-        // string would let one venue's heartbeat pass the other's check.
+        // The realm travels in the heartbeat and lease path. Sharing one realm
+        // string would make two venue account identities indistinguishable.
         let mut seen: Vec<&str> = Vec::new();
         for name in known_venues() {
             let realm = VenueName::parse(name).unwrap().realm();

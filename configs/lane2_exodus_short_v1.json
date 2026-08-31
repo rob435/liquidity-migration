@@ -2,7 +2,7 @@
   "config_id": "lane2_exodus_short_v1",
   "registered": "2026-08-20",
   "lane": 2,
-  "surface": "runtime strategy rule for demo and funded producers",
+  "surface": "native Rust strategy rule for demo and funded engines",
   "authorizes": "rule parameters only; venue permission comes from the separately armed Rust engine and its host credential",
   "descends_from": "nothing - a new sleeve. It consumes the carry v7 pre-settle exit fire (lane2_carry_hold_v7.json under the v7 clock) as its trigger, but its economics are its own.",
   "claim": "After a dying deep-negative funding print settles, the name keeps falling for about an hour. When carry's v7 pre-settle exit fires, take over the exact position carry abandons as a SHORT, and cover 60 minutes after the settlement. The trigger, the name, and the size are all carry's own fire - this sleeve adds no signal, no threshold, and no universe of its own.",
@@ -20,7 +20,7 @@
       "basis": "carry_presettle_exit_fire",
       "source_profile": "carry_hold_v7_live_v1",
       "source_config_id": "lane2_carry_hold_v7",
-      "note": "the carry producer's v7 pre-settle exit fire on a name the carry book holds. No independent detection: if carry does not fire, this sleeve does nothing. The carry kill switch (CARRY_EARLY_EXIT) therefore also silences new exodus entries; covers of open records never depend on it."
+      "note": "CARRY's native v7 reducer emits a pre-settlement exit event for an attributed holding. Exodus has no independent detector: without that durable event it does nothing. Disabling new CARRY entries therefore removes future Exodus opportunities; covers of open Exodus records never depend on new CARRY entries."
     },
     "entry": {
       "side": "short",
@@ -30,7 +30,7 @@
     },
     "cover": {
       "minutes_after_settlement": 60,
-      "note": "time-boxed, never price-boxed. The producer publishes an explicit zero target and the engine crosses the exit. Covers ride the producer's 60s idle-floor contract with the deadline slot as an accelerator."
+      "note": "time-boxed, never price-boxed. The native reducer emits the cover effect and the engine crosses the exit. The durable settlement deadline drives retries until attributed exposure and owned opening work are flat."
     },
     "sizing": {
       "basis": "carry_position_at_fire",
@@ -52,7 +52,7 @@
     "grid": "none; single committed configuration",
     "eligibility": "only fires strictly after the registration commit count as forward evidence; the sleeve's demo fills are execution evidence, not alpha evidence, until the fill-vs-kline gap is measured",
     "cadence": "per fire, reviewed weekly for the first month",
-    "reproduce_with": "python scripts/research/replay_exodus_contract.py --input tests/fixtures/exodus_live_contract_replay_v1.json reproduces the typed reducer, restart state, cover ordering, and exact target bytes. It does not reconstruct the registration economics: the historical fire population and stop-sweep scratch programs were not retained in the repository."
+    "reproduce_with": "python scripts/research/replay_native_strategy_contract.py --sleeve exodus --input tests/fixtures/exodus_live_contract_replay_v1.json replays the typed fixture through the native Rust reducer and checks restart state, cover ordering, and exact outputs. It does not reconstruct the registration economics: the historical fire population and stop-sweep scratch programs are not retained in the repository."
   },
   "measured_at_registration": {
     "events": 1112,

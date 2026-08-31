@@ -20,9 +20,9 @@ So this script does exactly two things, and never trades:
   --triggers run hourly: detect fresh intraday deep-trigger events (rolling
              24h window, the 2.5-sigma family, regime and ATR gates
              approximated from public data), judge each, journal the event,
-             and publish every score >= 6 judgment to the LONG sleeve's
-             candidates file. The LONG producer owns everything after that —
-             sizing, exits, stops; this script holds no venue credentials.
+             and publish every score >= 6 judgment to a research candidates
+             file. It is not an input to the native LONG runtime and holds no
+             venue credentials.
   --grade    for ledger rows at least 3 days old, fetch what actually happened
              (public klines) and print forward return by prompt version, row
              type, and judged driver kind.
@@ -81,8 +81,7 @@ TRIGGER_TURNOVER_RANK_MAX = 10
 
 # The wide band (owner-directed forward A/B, change point 2026-08-30). Ranks
 # 11-30 are scanned, judged, and published like the core band but the event
-# carries band="wide" and the LONG producer labels those entries
-# llm_gate_wide, so the two cohorts grade apart. Mechanically the 11-30 pool
+# carries band="wide", so the research cohorts grade apart. Mechanically the 11-30 pool
 # is a lottery -- 9% of its triggers graduate to top-10 within 3 days
 # (+1,805 bp/trade, 89% win) and the other 91% average -126 bp/trade
 # (research_findings 2026-08-30) -- so what this band tests is precisely
@@ -726,13 +725,12 @@ def cmd_triggers(ledger_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # The candidates file (owner-directed integration, demo fleet only).
 #
-# Every score >= 6 trigger event is published to the LONG sleeve's candidates
-# file; the LONG producer reads it each cycle and takes entries through its
-# own sizing, exits, and venue-native stops. This script stays
-# credential-free and order-free. Every run that reaches a verdict publishes,
+# Every score >= 6 trigger event is published to the research candidates file.
+# The native LONG runtime does not read it. This script stays credential-free
+# and order-free. Every run that reaches a verdict publishes,
 # including the empty verdict: a fresh file saying "no candidates" is what
 # stops the previous run's names being entered for the rest of their validity.
-# The LONG side treats a missing or stale file as "no signal".
+# Research consumers treat a missing or stale file as "no signal".
 # ---------------------------------------------------------------------------
 
 GATE_CANDIDATES_PATH = (

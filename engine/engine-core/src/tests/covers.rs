@@ -59,6 +59,7 @@ impl Strategy for CoverProbe {
             return;
         };
         let tag = match event {
+            EngineEvent::Boot => "boot",
             EngineEvent::Market(_) => "quote",
             EngineEvent::Timer { .. } => "timer",
             EngineEvent::Order(OrderUpdate::Ack(_)) => "ack",
@@ -69,8 +70,11 @@ impl Strategy for CoverProbe {
             EngineEvent::Order(OrderUpdate::Reject { .. }) => "reject",
             EngineEvent::Order(OrderUpdate::StopAttached { .. }) => "stop",
             EngineEvent::Order(OrderUpdate::StreamReset { .. }) => "reset",
-            EngineEvent::Targets(_) => "book",
+            EngineEvent::Signal(_) => "signal",
+            EngineEvent::StrategyEvent(_) => "strategy-event",
             EngineEvent::IntentRefused { .. } => "refused",
+            EngineEvent::EntryPermission { .. } => "entry-permission",
+            EngineEvent::FlattenDirectional { .. } => "flatten-directional",
         };
         self.seen.lock().unwrap().push((tag, ctx.in_flight(symbol)));
         if let EngineEvent::Market(MarketEvent::Quote { quote, .. }) = event {

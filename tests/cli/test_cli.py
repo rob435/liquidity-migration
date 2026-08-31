@@ -17,34 +17,11 @@ from liquidity_migration.cli.commands import (
 )
 
 
-def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Path) -> None:
-    """Live daemon entrypoints self-provision a missing ledger root so a brand-new
-    sleeve does not crash-loop on first deploy; research/backtest commands keep the
-    strict must-already-exist guard; no-data-root commands return the path untouched.
-    """
-    missing = tmp_path / "new_sleeve_root"
-    assert not missing.exists()
-    out = _resolve_data_root("long-native-event-demo-cycle", missing)
-    assert out == missing and missing.is_dir()  # daemon command -> self-provisioned
-    with pytest.raises(FileNotFoundError):  # research command -> strict guard
+def test_resolve_data_root_guards_research_but_not_download_output(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
         _resolve_data_root("archive-manifest", tmp_path / "absent_research_root")
-    noop = tmp_path / "noop_root"  # no-data-root command -> untouched
+    noop = tmp_path / "noop_root"
     assert _resolve_data_root("download-data", noop) == noop and not noop.exists()
-
-
-def test_live_demo_cli_worker_defaults_match_wrappers(tmp_path: Path) -> None:
-    parser = build_parser()
-    long = parser.parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "long-native-event-demo-cycle",
-            "--execution-environment",
-            "demo",
-        ]
-    )
-
-    assert long.workers == 4
 
 
 def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
@@ -111,38 +88,6 @@ def test_cli_binance_proxy_parses_defaults(tmp_path: Path) -> None:
     assert "mark_price_1h" in args.datasets
 
 
-def test_cli_long_native_explicit_mainnet_environment_propagates(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "long-native-event-demo-cycle",
-            "--execution-environment",
-            "mainnet",
-        ]
-    )
-    assert args.execution_environment == "mainnet"
-
-
-def test_cli_long_native_requires_explicit_environment(tmp_path: Path) -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["--data-root", str(tmp_path), "long-native-event-demo-cycle"])
-
-
-def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
-    args = build_parser().parse_args(
-        [
-            "--data-root",
-            str(tmp_path),
-            "long-native-event-demo-cycle",
-            "--execution-environment",
-            "demo",
-        ]
-    )
-    assert args.notional_multiplier == 1.0
-    assert args.order_notional_pct_equity == 0.0
-
-
 # --------------------------------------------------------------------------- #
 # archive-* commands must print the slugified on-disk report path,
 # not the raw ``--name``.
@@ -175,9 +120,7 @@ def test_coverage_prints_the_pit_table_without_mutation(monkeypatch, capsys, tmp
 
     sentinel = object()
     monkeypatch.setattr(cli, "coverage_status", lambda root: sentinel)
-    monkeypatch.setattr(
-        cli, "format_coverage", lambda status: "COVERAGE-TABLE" if status is sentinel else "WRONG"
-    )
+    monkeypatch.setattr(cli, "format_coverage", lambda status: "COVERAGE-TABLE" if status is sentinel else "WRONG")
     out = _run(monkeypatch, capsys, tmp_path, ["coverage"])
     assert "COVERAGE-TABLE" in out
 
@@ -243,18 +186,6 @@ def test_binance_proxy_end_help_documents_exclusive_boundary() -> None:
     assert "Inclusive" in help_by_dest["start"]
     assert "Exclusive" in help_by_dest["end"]
     assert "not included" in help_by_dest["end"].lower()
-
-
-# The target route is explicit; there are no alternate order-submission flags.
-@pytest.mark.parametrize(
-    "subcommand",
-    ["long-native-event-demo-cycle"],
-)
-def test_target_environment_replaces_order_submission_flags(subcommand: str) -> None:
-    parser = build_parser()
-    args = parser.parse_args([subcommand, "--execution-environment", "demo"])
-    assert args.execution_environment == "demo"
-    assert not hasattr(args, "confirm_demo_orders")
 
 
 # Dataset + universe argument validation and symbol parsing.

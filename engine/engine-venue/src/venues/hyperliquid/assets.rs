@@ -1,9 +1,8 @@
 //! Symbols, asset numbers, and the venue's rules about how a number may be
 //! written.
 //!
-//! **Symbols.** The engine's tables and the research system's target books
-//! name a perpetual `BTCUSDT`, Bybit's spelling, and that spelling is what a
-//! book written for one venue has to keep to stay readable on another.
+//! **Symbols.** The engine's tables and native decisions name a perpetual
+//! `BTCUSDT`, Bybit's spelling, and that spelling stays stable across venues.
 //! Hyperliquid names the same contract `BTC` and addresses it on the wire by
 //! its position in the venue's asset list. So the mapping is one function,
 //! here: strip the quote currency to get the coin, then look the coin up.
@@ -38,7 +37,7 @@ const MAX_SIGNIFICANT_FIGURES: i32 = 5;
 /// Perp price decimals are this less the asset's size decimals.
 const PRICE_DECIMAL_BUDGET: i32 = 6;
 
-/// The quote currencies a book's symbol may end in. Hyperliquid perps are all
+/// The quote currencies an engine symbol may end in. Hyperliquid perps are all
 /// USD-margined, so this is only ever stripped, never used.
 const QUOTE_SUFFIXES: &[&str] = &["USDT", "USDC", "USD"];
 
@@ -61,8 +60,8 @@ pub(crate) struct Assets {
 
 impl Assets {
     /// Keyed upper-case, because the venue's own spelling is not: `kPEPE`,
-    /// `kBONK`, `kSHIB` and the rest carry a lower-case prefix, while a book's
-    /// symbol arrives upper-cased from every other part of the engine. Keying
+    /// `kBONK`, `kSHIB` and the rest carry a lower-case prefix, while an engine
+    /// symbol arrives upper-cased from every other part. Keying
     /// by the venue's spelling published those assets as tradable and then
     /// refused every order for them. [`Asset::coin`] keeps the venue's
     /// spelling; only the key is folded.
@@ -119,8 +118,7 @@ pub(crate) fn coin_of(symbol: &str) -> String {
     upper
 }
 
-/// `BTC` -> `BTCUSDT`. The engine's spelling, so one target book reads the
-/// same on every venue.
+/// `BTC` -> `BTCUSDT`. The engine uses one spelling on every venue.
 pub(crate) fn symbol_of(coin: &str) -> Symbol {
     format!("{}USDT", coin.trim().to_ascii_uppercase())
 }
@@ -217,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn a_book_symbol_finds_the_venues_coin() {
+    fn an_engine_symbol_finds_the_venues_coin() {
         assert_eq!(coin_of("BTCUSDT"), "BTC");
         assert_eq!(coin_of("ETHUSDC"), "ETH");
         assert_eq!(coin_of("SOLUSD"), "SOL");
@@ -238,7 +236,7 @@ mod tests {
     #[test]
     fn an_asset_the_venue_spells_with_a_lower_case_prefix_is_still_tradable() {
         // kPEPE, kBONK, kSHIB and their kin are the venue's own spelling, and
-        // they are exactly the high-funding perps a carry book wants. Keyed by
+        // they are exactly the high-funding perps a CARRY decision may want. Keyed by
         // that spelling they were published as tradable and then refused by
         // every order, stop and exit.
         let assets = Assets::from_rows(vec![asset("kPEPE", 5, 0), asset("BTC", 0, 5)]);

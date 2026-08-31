@@ -1,0 +1,234 @@
+{
+  "schema_version": 1,
+  "carry": {
+    "request": {
+      "schema_version": 1,
+      "operation": "carry_research_score",
+      "config": {
+        "config_id": "fixture_v7",
+        "enter_bp": 10.0,
+        "exit_bp": 3.0,
+        "per_name_cap": 0.1,
+        "gross_cap": 1.0,
+        "depth_ref_bp_per_day": 120.0,
+        "depth_floor": 0.25,
+        "depth_exponent": 1.5,
+        "toxic_band_ret3d": [-0.3, 0.0],
+        "min_vol30_daily": 0.05,
+        "trail_recovery_exit_bp_2d": 30.0,
+        "persistence_cut": 0.1,
+        "persistence_lo": 0.0,
+        "flow_cut": 0.4,
+        "flow_lo": 0.5,
+        "whale_cut": -0.26,
+        "whale_lo": 0.5
+      },
+      "rows": [
+        {
+          "symbol": "ALPHAUSDT",
+          "bar_ts_ms": 86400000,
+          "by_funding": -0.002,
+          "trail_fund_24h": null,
+          "ret_3d": null,
+          "vol_30d_daily": null,
+          "dtrail_2d": null,
+          "crowd_persistence": null,
+          "turn_growth_3d": null,
+          "d_tt_ls_3d": null
+        },
+        {
+          "symbol": "ALPHAUSDT",
+          "bar_ts_ms": 172800000,
+          "by_funding": -0.002,
+          "trail_fund_24h": -0.012,
+          "ret_3d": -0.1,
+          "vol_30d_daily": 0.1,
+          "dtrail_2d": 0.0,
+          "crowd_persistence": 0.5,
+          "turn_growth_3d": 1.0,
+          "d_tt_ls_3d": 1.0
+        },
+        {
+          "symbol": "ALPHAUSDT",
+          "bar_ts_ms": 259200000,
+          "by_funding": -0.002,
+          "trail_fund_24h": -0.006,
+          "ret_3d": 0.1,
+          "vol_30d_daily": 0.1,
+          "dtrail_2d": 0.0,
+          "crowd_persistence": 0.05,
+          "turn_growth_3d": 1.0,
+          "d_tt_ls_3d": 1.0
+        },
+        {
+          "symbol": "ALPHAUSDT",
+          "bar_ts_ms": 345600000,
+          "by_funding": 0.0,
+          "trail_fund_24h": -0.012,
+          "ret_3d": 0.1,
+          "vol_30d_daily": 0.1,
+          "dtrail_2d": 0.0,
+          "crowd_persistence": 0.5,
+          "turn_growth_3d": 1.0,
+          "d_tt_ls_3d": 1.0
+        },
+        {
+          "symbol": "ALPHAUSDT",
+          "bar_ts_ms": 432000000,
+          "by_funding": -0.002,
+          "trail_fund_24h": -0.012,
+          "ret_3d": 0.1,
+          "vol_30d_daily": 0.1,
+          "dtrail_2d": 0.0,
+          "crowd_persistence": 0.5,
+          "turn_growth_3d": 0.0,
+          "d_tt_ls_3d": -0.5
+        },
+        {
+          "symbol": "BETAUSDT",
+          "bar_ts_ms": 86400000,
+          "by_funding": null,
+          "trail_fund_24h": null,
+          "ret_3d": null,
+          "vol_30d_daily": null,
+          "dtrail_2d": null,
+          "crowd_persistence": null,
+          "turn_growth_3d": null,
+          "d_tt_ls_3d": null
+        },
+        {
+          "symbol": "BETAUSDT",
+          "bar_ts_ms": 172800000,
+          "by_funding": -0.002,
+          "trail_fund_24h": -0.012,
+          "ret_3d": null,
+          "vol_30d_daily": null,
+          "dtrail_2d": null,
+          "crowd_persistence": null,
+          "turn_growth_3d": null,
+          "d_tt_ls_3d": null
+        }
+      ]
+    },
+    "expected": {
+      "schema_version": 1,
+      "weights": [
+        {"bar_ts_ms": 86400000, "symbol": "ALPHAUSDT", "w": 0.025},
+        {"bar_ts_ms": 432000000, "symbol": "ALPHAUSDT", "w": 0.025},
+        {"bar_ts_ms": 172800000, "symbol": "BETAUSDT", "w": 0.1}
+      ]
+    }
+  },
+  "long": {
+    "request": {
+      "schema_version": 1,
+      "operation": "long_classify",
+      "config": {
+        "execution_strategy_id": "long_native_v11a_div_weekend_vol",
+        "entry_delay_hours": 1,
+        "fc_min_day_return": 0.15,
+        "fc_top_volume_rank_max": 10,
+        "fc_min_close_location": 0.7,
+        "fc_max_hold_days": 3,
+        "fc_max_atr_pct": 0.12,
+        "fc_atr_stop_mult": 1.5,
+        "fc_sigma_mult": 2.5,
+        "fc_sniper_retrace_pct": 0.01,
+        "fc_sniper_deadline_hours": 6,
+        "weekend_size_mult": 1.5,
+        "fc_close_loc_multi_day": 0.6,
+        "fc_stop_time_decay_hours": 0,
+        "fc_stop_time_decay_atr_mult": 0.0,
+        "max_concurrent_positions": 10,
+        "cooldown_days": 7,
+        "gross_exposure": 1.0,
+        "vol_floor_annual": 0.3,
+        "max_position_weight": 0.3,
+        "vol_target_annual": 0.6,
+        "vol_target_min_scale": 0.3,
+        "vol_target_max_scale": 1.25
+      },
+      "rows": [
+        {
+          "symbol": "ALPHAUSDT",
+          "ts_ms": 86400000,
+          "close": 100.0,
+          "turnover_quote": 1000000.0,
+          "log_return": 0.11,
+          "realized_vol": 0.5,
+          "sigma_daily_30d": 0.04,
+          "turnover_median_90d": 1000000.0,
+          "today_volume_rank": 1.0,
+          "universe_rank": 1.0,
+          "in_universe": true,
+          "pump_3d_log": null,
+          "pump_7d_log": null,
+          "close_location": 0.8,
+          "close_loc_3d": null,
+          "close_loc_7d": null,
+          "atr_14d_pct": 0.05,
+          "regime_on": true,
+          "btc_rv_30": 0.6,
+          "eth_regime_on": true,
+          "symbol_age_days": 100
+        },
+        {
+          "symbol": "BETAUSDT",
+          "ts_ms": 86400000,
+          "close": 100.0,
+          "turnover_quote": 1000000.0,
+          "log_return": 0.2,
+          "realized_vol": 0.5,
+          "sigma_daily_30d": null,
+          "turnover_median_90d": 1000000.0,
+          "today_volume_rank": 1.0,
+          "universe_rank": 1.0,
+          "in_universe": false,
+          "pump_3d_log": null,
+          "pump_7d_log": null,
+          "close_location": 0.8,
+          "close_loc_3d": null,
+          "close_loc_7d": null,
+          "atr_14d_pct": null,
+          "regime_on": true,
+          "btc_rv_30": 0.6,
+          "eth_regime_on": true,
+          "symbol_age_days": 100
+        }
+      ]
+    },
+    "expected": {
+      "schema_version": 1,
+      "classifications": [
+        {
+          "schema_version": 1,
+          "threshold_1d": 0.1,
+          "threshold_3d": 0.17320508075688773,
+          "threshold_7d": 0.2645751311064591,
+          "trigger_1d": true,
+          "trigger_3d": false,
+          "trigger_7d": false,
+          "trigger_any": true,
+          "source_strength": 1.0999999999999999,
+          "pattern": "fomo_chase",
+          "stop_loss_fraction": 0.07500000000000001,
+          "max_hold_days": 3
+        },
+        {
+          "schema_version": 1,
+          "threshold_1d": 0.13976194237515868,
+          "threshold_3d": 0.24207478515828848,
+          "threshold_7d": 0.3697753422760099,
+          "trigger_1d": true,
+          "trigger_3d": false,
+          "trigger_7d": false,
+          "trigger_any": true,
+          "source_strength": 1.4310047256151188,
+          "pattern": null,
+          "stop_loss_fraction": 0.0,
+          "max_hold_days": 0
+        }
+      ]
+    }
+  }
+}

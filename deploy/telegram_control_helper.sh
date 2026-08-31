@@ -10,6 +10,7 @@ umask 077
 
 REPOSITORY=/opt/liquidity-migration
 ENGINE=/opt/liquidity-migration-engine/bin/engine
+SIGNAL_WORKER=/opt/liquidity-migration-engine/bin/signal-worker
 LAUNCHER=/opt/liquidity-migration-engine/bin/run-authorized-runtime
 MARKER=/opt/liquidity-migration-engine/bin/engine.release
 HELPER=/opt/liquidity-migration-engine/bin/telegram-control-helper
@@ -17,6 +18,7 @@ SUDOERS=/etc/sudoers.d/liquidity-migration-controls
 BOT=/opt/liquidity-migration/liquidity_migration/ops/telegram_controls.py
 SLEEVES_LIBRARY=/opt/liquidity-migration/deploy/lib_sleeves.sh
 SLEEVES_DEFAULT=/opt/liquidity-migration/deploy/sleeves.env
+FLEET_MANIFEST=/opt/liquidity-migration/deploy/fleet_manifest.tsv
 ACTIVATION_RECEIPT=/opt/liquidity-migration-engine/bin/activation.complete
 HOST_SLEEVES=/etc/liquidity-migration/sleeves.env
 RESOLVED_SLEEVES=/etc/liquidity-migration/sleeves.resolved.env
@@ -24,6 +26,13 @@ HELPER_STATE=/var/lib/liquidity-migration-control-helper
 SAVED_SLEEVES="$HELPER_STATE/sleeves-before-pause"
 MAINTENANCE_LOCK=/run/liquidity-migration/maintenance.lock
 CALLER=liquidity-controls
+RUNTIME_GROUP=liquidity-migration
+DEMO_ENGINE_USER=liquidity-engine-demo
+MAINNET_ENGINE_USER=liquidity-engine-mainnet
+DEMO_ENGINE_CONFIG=/etc/liquidity-migration/engine.toml
+MAINNET_ENGINE_CONFIG=/etc/liquidity-migration/engine-mainnet.toml
+DEMO_HEARTBEAT=/var/lib/liquidity-migration-engine/heartbeat.json
+MAINNET_HEARTBEAT=/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
 
 refuse() {
     echo "telegram control helper refused: $*" >&2
@@ -46,7 +55,7 @@ if [ "${1:-}" != --worker ]; then
     [ "$#" -eq 1 ] || refuse "expected one fixed action"
     ACTION="$1"
     case "$ACTION" in
-        pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-demo) ;;
+        pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-fleet) ;;
         *) refuse "unsupported action" ;;
     esac
     [ "${SUDO_USER:-}" = "$CALLER" ] \
@@ -68,7 +77,7 @@ if [ "${1:-}" != --worker ]; then
         --property=ProtectSystem=true \
         --property=RestrictAddressFamilies=AF_UNIX \
         --property=UMask=0077 \
-        --property="InaccessiblePaths=-/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine.toml -/etc/liquidity-migration/engine-mainnet.toml -/etc/liquidity-migration/producer-demo.env -/etc/liquidity-migration/producer-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env" \
+        --property="InaccessiblePaths=-/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/signal-worker-demo.env -/etc/liquidity-migration/signal-worker-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env" \
         /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             "$HELPER" --worker "$ACTION"
 fi
@@ -77,7 +86,7 @@ fi
     || refuse "invalid privileged worker invocation"
 ACTION="$2"
 case "$ACTION" in
-    pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-demo) ;;
+    pause-demo|resume-demo|pause-mainnet|resume-mainnet|status-fleet) ;;
     *) refuse "unsupported privileged worker action" ;;
 esac
 [ -z "${SUDO_USER:-}" ] && [ -z "${BASH_ENV:-}" ] && [ -z "${ENV:-}" ] \
@@ -91,8 +100,8 @@ esac
     && [ "$(stat -c %u "$REPOSITORY/.git")" -eq 0 ] \
     || refuse "trusted checkout metadata is missing, linked, or not root-owned"
 
-for path in "$ENGINE" "$LAUNCHER" "$MARKER" "$HELPER" "$SUDOERS" "$BOT" \
-    "$SLEEVES_LIBRARY" "$SLEEVES_DEFAULT"; do
+for path in "$ENGINE" "$SIGNAL_WORKER" "$LAUNCHER" "$MARKER" "$HELPER" "$SUDOERS" "$BOT" \
+    "$SLEEVES_LIBRARY" "$SLEEVES_DEFAULT" "$FLEET_MANIFEST"; do
     [ -f "$path" ] && [ ! -L "$path" ] \
         && [ "$(stat -c %u "$path")" -eq 0 ] \
         || refuse "trusted input is missing, linked, or not root-owned: $path"
@@ -104,33 +113,38 @@ done
     && [ "$(stat -c %a "$BOT")" = 644 ] \
     && [ "$(stat -c %a "$SLEEVES_LIBRARY")" = 644 ] \
     && [ "$(stat -c %a "$SLEEVES_DEFAULT")" = 644 ] \
+    && [ "$(stat -c %a "$FLEET_MANIFEST")" = 644 ] \
     || refuse "tracked control inputs have unsafe modes"
 
 awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
-NR == 7 && $0 == "rustc=1.90.0" { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
+NR == 8 && $0 == "rustc=1.90.0" { next }
 { exit 1 }
-END { if (NR != 7) exit 1 }
+END { if (NR != 8) exit 1 }
 ' "$MARKER" || refuse "release marker schema is invalid"
 marker_commit="$(sed -n 's/^commit=//p' "$MARKER")"
 marker_engine="$(sed -n 's/^sha256=//p' "$MARKER")"
+marker_signal_worker="$(sed -n 's/^signal_worker_sha256=//p' "$MARKER")"
 marker_launcher="$(sed -n 's/^launcher_sha256=//p' "$MARKER")"
 marker_helper="$(sed -n 's/^control_helper_sha256=//p' "$MARKER")"
 marker_sudoers="$(sed -n 's/^controls_sudoers_sha256=//p' "$MARKER")"
 marker_bot="$(sed -n 's/^telegram_bot_sha256=//p' "$MARKER")"
 [[ "$marker_commit" =~ ^[0-9a-f]{40}$ ]] \
     && [[ "$marker_engine" =~ ^[0-9a-f]{64}$ ]] \
+    && [[ "$marker_signal_worker" =~ ^[0-9a-f]{64}$ ]] \
     && [[ "$marker_launcher" =~ ^[0-9a-f]{64}$ ]] \
     && [[ "$marker_helper" =~ ^[0-9a-f]{64}$ ]] \
     && [[ "$marker_sudoers" =~ ^[0-9a-f]{64}$ ]] \
     && [[ "$marker_bot" =~ ^[0-9a-f]{64}$ ]] \
     || refuse "release marker control digests are invalid"
 [ "$(sha256sum "$ENGINE" | awk '{print $1}')" = "$marker_engine" ] \
+    && [ "$(sha256sum "$SIGNAL_WORKER" | awk '{print $1}')" = "$marker_signal_worker" ] \
     && [ "$(sha256sum "$LAUNCHER" | awk '{print $1}')" = "$marker_launcher" ] \
     && [ "$(sha256sum "$HELPER" | awk '{print $1}')" = "$marker_helper" ] \
     && [ "$(sha256sum "$SUDOERS" | awk '{print $1}')" = "$marker_sudoers" ] \
@@ -154,7 +168,7 @@ checkout_commit="$(
     -c "safe.directory=$REPOSITORY" -c core.fsmonitor=false \
     -c core.hooksPath=/dev/null diff-index --quiet "$marker_commit" -- \
     || refuse "tracked checkout differs from the installed generation"
-for relative in deploy/lib_sleeves.sh deploy/sleeves.env; do
+for relative in deploy/lib_sleeves.sh deploy/sleeves.env deploy/fleet_manifest.tsv; do
     committed="$(
         /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
             GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
@@ -187,12 +201,18 @@ else
 fi
 LM_HOST_SLEEVES_ENV="$HOST_SLEEVES"
 LM_RESOLVED_SLEEVES_ENV="$RESOLVED_SLEEVES"
+LM_FLEET_MANIFEST="$FLEET_MANIFEST"
 LM_SYSTEMD_UNIT_DIR=/etc/systemd/system
 LM_RUNTIME_SYSTEMD_UNIT_DIR=/run/systemd/system
-export LM_HOST_SLEEVES_ENV LM_RESOLVED_SLEEVES_ENV \
+export LM_HOST_SLEEVES_ENV LM_RESOLVED_SLEEVES_ENV LM_FLEET_MANIFEST \
     LM_SYSTEMD_UNIT_DIR LM_RUNTIME_SYSTEMD_UNIT_DIR
 # shellcheck source=lib_sleeves.sh
 source "$SLEEVES_LIBRARY"
+lm_validate_fleet_manifest || refuse "fleet manifest is invalid"
+DEMO_OWNER_UNIT="$(lm_owner_unit demo)" \
+    || refuse "fleet manifest has no demo account owner"
+MAINNET_OWNER_UNIT="$(lm_owner_unit mainnet)" \
+    || refuse "fleet manifest has no funded account owner"
 
 validate_private_state_file() {
     local path="$1"
@@ -221,15 +241,17 @@ activation_complete() {
     awk '
 NR == 1 && /^commit=/ { next }
 NR == 2 && /^sha256=/ { next }
-NR == 3 && /^launcher_sha256=/ { next }
-NR == 4 && /^control_helper_sha256=/ { next }
-NR == 5 && /^controls_sudoers_sha256=/ { next }
-NR == 6 && /^telegram_bot_sha256=/ { next }
+NR == 3 && /^signal_worker_sha256=/ { next }
+NR == 4 && /^launcher_sha256=/ { next }
+NR == 5 && /^control_helper_sha256=/ { next }
+NR == 6 && /^controls_sudoers_sha256=/ { next }
+NR == 7 && /^telegram_bot_sha256=/ { next }
 { exit 1 }
-END { if (NR != 6) exit 1 }
+END { if (NR != 7) exit 1 }
 ' "$ACTIVATION_RECEIPT" >/dev/null || return 1
     [ "$(sed -n 's/^commit=//p' "$ACTIVATION_RECEIPT")" = "$marker_commit" ] \
         && [ "$(sed -n 's/^sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_engine" ] \
+        && [ "$(sed -n 's/^signal_worker_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_signal_worker" ] \
         && [ "$(sed -n 's/^launcher_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_launcher" ] \
         && [ "$(sed -n 's/^control_helper_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_helper" ] \
         && [ "$(sed -n 's/^controls_sudoers_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_sudoers" ] \
@@ -281,34 +303,95 @@ write_resolved() {
     sync
 }
 
-quarantine_pair() {
-    local first="$1" second="$2" unit enabled failed=0
-    /usr/bin/systemctl --quiet disable --now "$first" "$second" \
-        2>/dev/null || true
-    for unit in "$first" "$second"; do
-        /usr/bin/systemctl --quiet disable "$unit" 2>/dev/null || true
-        /usr/bin/systemctl --quiet stop "$unit" 2>/dev/null || true
+runtime_control() {
+    local realm="$1" strategy="$2" command="$3" value="$4" request_id="$5"
+    local user config
+    case "$realm" in
+        demo)
+            user="$DEMO_ENGINE_USER"
+            config="$DEMO_ENGINE_CONFIG"
+            ;;
+        mainnet)
+            user="$MAINNET_ENGINE_USER"
+            config="$MAINNET_ENGINE_CONFIG"
+            ;;
+        *) refuse "unknown runtime-control realm" ;;
+    esac
+    [ -x /usr/bin/setpriv ] || refuse "setpriv is required for runtime controls"
+    case "$command" in
+        entries)
+            /usr/bin/setpriv --reuid="$user" --regid="$RUNTIME_GROUP" --init-groups \
+                /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+                "$ENGINE" set-strategy-entry-permission \
+                --config "$config" --strategy "$strategy" \
+                --entries-enabled "$value" --request-id "$request_id" --wait-ms 30000
+            ;;
+        flatten)
+            /usr/bin/setpriv --reuid="$user" --regid="$RUNTIME_GROUP" --init-groups \
+                /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+                "$ENGINE" flatten-strategy --config "$config" \
+                --strategy "$strategy" --request-id "$request_id" --wait-ms 30000
+            ;;
+        *) refuse "unknown runtime-control command" ;;
+    esac
+}
+
+heartbeat_entries() {
+    local heartbeat="$1"
+    [ -f "$heartbeat" ] && [ ! -L "$heartbeat" ] \
+        || return 1
+    /usr/bin/python3 - "$heartbeat" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        payload = json.load(handle)
+    rows = payload["strategy_entries_enabled"]
+    values = {row["strategy"]: row["entries_enabled"] for row in rows}
+    if len(values) != len(rows):
+        raise ValueError("duplicate strategy")
+    for strategy in ("long", "carry", "exodus"):
+        value = values[strategy]
+        if type(value) is not bool:
+            raise ValueError("entry value is not bool")
+        print(f"{strategy}|{str(value).lower()}")
+except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+}
+
+wait_heartbeat_entries() {
+    local heartbeat="$1" expected_long="$2" expected_carry="$3" expected_exodus="$4"
+    local expected observed attempt
+    expected="$(printf 'long|%s\ncarry|%s\nexodus|%s\n' \
+        "$expected_long" "$expected_carry" "$expected_exodus")"
+    for attempt in $(seq 1 200); do
+        observed="$(heartbeat_entries "$heartbeat" 2>/dev/null || true)"
+        [ "$observed" = "$expected" ] && return 0
+        sleep 0.1
     done
-    for unit in "$first" "$second"; do
-        if /usr/bin/systemctl is-active --quiet "$unit"; then
-            failed=1
-        fi
-        enabled="$(/usr/bin/systemctl is-enabled "$unit" 2>/dev/null || true)"
-        case "$enabled" in
-            disabled|masked|masked-runtime|not-found) ;;
-            *) failed=1 ;;
-        esac
-    done
-    sync
-    [ "$failed" -eq 0 ]
+    return 1
+}
+
+new_request_prefix() {
+    printf '%s-%s-%s-%s\n' "$1" "$marker_commit" "$(date +%s%N)" "$$"
 }
 
 pause_demo() {
+    local request
+    /usr/bin/systemctl is-active --quiet "$DEMO_OWNER_UNIT" \
+        || refuse "demo pause requires the account owner to be active"
     save_original_once
-    quarantine_pair \
-        liquidity-migration-bybit-long-demo.service \
-        liquidity-migration-bybit-carry-demo.service \
-        || refuse "demo pause could not quarantine both producers"
+    request="$(new_request_prefix pause-demo)"
+    runtime_control demo long entries false "${request}-long" \
+        || refuse "demo LONG pause was not durably applied"
+    runtime_control demo carry entries false "${request}-carry" \
+        || refuse "demo CARRY pause was not durably applied"
+    runtime_control demo exodus entries false "${request}-exodus" \
+        || refuse "demo Exodus pause was not durably applied"
+    wait_heartbeat_entries "$DEMO_HEARTBEAT" false false false \
+        || refuse "demo pause was applied but heartbeat did not acknowledge all sleeves"
     atomic_install_text "$HOST_SLEEVES" \
         $'# paused by telegram-control-helper\nLONG_SLEEVE=off\nCARRY_SLEEVE=off\n'
     write_resolved
@@ -316,10 +399,10 @@ pause_demo() {
 }
 
 resume_demo() {
-    local temporary start_status=0
+    local temporary request long_enabled carry_enabled
     activation_complete \
         || refuse "demo resume requires this generation's completed activation receipt"
-    /usr/bin/systemctl is-active --quiet liquidity-migration-engine.service \
+    /usr/bin/systemctl is-active --quiet "$DEMO_OWNER_UNIT" \
         || refuse "demo resume requires the account owner to be active"
     validate_private_state_file "$SAVED_SLEEVES" \
         || refuse "no validated pre-pause sleeve state exists"
@@ -335,40 +418,35 @@ resume_demo() {
             || refuse "cannot atomically restore sleeve state"
     fi
     write_resolved
-    if sleeve_on "$LONG_SLEEVE"; then
-        /usr/bin/systemctl --quiet enable --now \
-            liquidity-migration-bybit-long-demo.service || start_status=$?
-    fi
-    if [ "$start_status" -eq 0 ] && sleeve_on "$CARRY_SLEEVE"; then
-        /usr/bin/systemctl --quiet enable --now \
-            liquidity-migration-bybit-carry-demo.service || start_status=$?
-    fi
-    if [ "$start_status" -eq 0 ] && sleeve_on "$LONG_SLEEVE" \
-        && ! /usr/bin/systemctl is-active --quiet \
-            liquidity-migration-bybit-long-demo.service; then
-        start_status=1
-    fi
-    if [ "$start_status" -eq 0 ] && sleeve_on "$CARRY_SLEEVE" \
-        && ! /usr/bin/systemctl is-active --quiet \
-            liquidity-migration-bybit-carry-demo.service; then
-        start_status=1
-    fi
-    if [ "$start_status" -ne 0 ]; then
-        quarantine_pair \
-            liquidity-migration-bybit-long-demo.service \
-            liquidity-migration-bybit-carry-demo.service 2>/dev/null || true
-        refuse "demo resume failed; both producers were re-quarantined"
-    fi
+    [ "$LONG_SLEEVE" = on ] && long_enabled=true || long_enabled=false
+    [ "$CARRY_SLEEVE" = on ] && carry_enabled=true || carry_enabled=false
+    request="$(new_request_prefix resume-demo)"
+    runtime_control demo long entries "$long_enabled" "${request}-long" \
+        || refuse "demo LONG resume was not durably applied"
+    runtime_control demo carry entries "$carry_enabled" "${request}-carry" \
+        || refuse "demo CARRY resume was not durably applied"
+    runtime_control demo exodus entries true "${request}-exodus" \
+        || refuse "demo Exodus resume was not durably applied"
+    wait_heartbeat_entries "$DEMO_HEARTBEAT" "$long_enabled" "$carry_enabled" true \
+        || refuse "demo resume was applied but heartbeat did not acknowledge all sleeves"
     rm -f -- "$SAVED_SLEEVES"
     sync
     printf 'resumed=demo long=%s carry=%s\n' "$LONG_SLEEVE" "$CARRY_SLEEVE"
 }
 
 pause_mainnet() {
-    quarantine_pair \
-        liquidity-migration-bybit-long-mainnet.service \
-        liquidity-migration-bybit-carry-mainnet.service \
-        || refuse "mainnet pause could not quarantine both funded producers"
+    local request
+    /usr/bin/systemctl is-active --quiet "$MAINNET_OWNER_UNIT" \
+        || refuse "funded pause requires the account owner to be active"
+    request="$(new_request_prefix pause-mainnet)"
+    runtime_control mainnet long entries false "${request}-long" \
+        || refuse "funded LONG pause was not durably applied"
+    runtime_control mainnet carry entries false "${request}-carry" \
+        || refuse "funded CARRY pause was not durably applied"
+    runtime_control mainnet exodus entries false "${request}-exodus" \
+        || refuse "funded Exodus pause was not durably applied"
+    wait_heartbeat_entries "$MAINNET_HEARTBEAT" false false false \
+        || refuse "funded pause was applied but heartbeat did not acknowledge all sleeves"
     echo "paused=mainnet"
 }
 
@@ -376,44 +454,54 @@ pause_mainnet() {
 # this helper never opens, so a resume cannot arm a disarmed account: with the
 # switch off the funded owner is not running and the check below refuses.
 resume_mainnet() {
-    local unit start_status=0
+    local request
     activation_complete \
         || refuse "funded resume requires this generation's completed activation receipt"
-    /usr/bin/systemctl is-active --quiet liquidity-migration-engine-mainnet.service \
+    /usr/bin/systemctl is-active --quiet "$MAINNET_OWNER_UNIT" \
         || refuse "funded resume requires the funded account owner to be active"
-    /usr/bin/systemctl --quiet enable --now \
-        liquidity-migration-bybit-carry-mainnet.service || start_status=$?
-    if [ "$start_status" -eq 0 ]; then
-        /usr/bin/systemctl --quiet enable --now \
-            liquidity-migration-bybit-long-mainnet.service || start_status=$?
-    fi
-    for unit in liquidity-migration-bybit-carry-mainnet.service \
-        liquidity-migration-bybit-long-mainnet.service; do
-        if [ "$start_status" -eq 0 ] \
-            && ! /usr/bin/systemctl is-active --quiet "$unit"; then
-            start_status=1
-        fi
-    done
-    if [ "$start_status" -ne 0 ]; then
-        quarantine_pair \
-            liquidity-migration-bybit-long-mainnet.service \
-            liquidity-migration-bybit-carry-mainnet.service 2>/dev/null || true
-        refuse "funded resume failed; both funded producers were re-quarantined"
-    fi
+    request="$(new_request_prefix resume-mainnet)"
+    runtime_control mainnet long entries true "${request}-long" \
+        || refuse "funded LONG resume was not durably applied"
+    runtime_control mainnet carry entries true "${request}-carry" \
+        || refuse "funded CARRY resume was not durably applied"
+    runtime_control mainnet exodus entries true "${request}-exodus" \
+        || refuse "funded Exodus resume was not durably applied"
+    wait_heartbeat_entries "$MAINNET_HEARTBEAT" true true true \
+        || refuse "funded resume was applied but heartbeat did not acknowledge all sleeves"
     sync
     printf 'resumed=mainnet\n'
 }
 
-status_demo() {
+status_fleet() {
+    local paused=false row unit realm role sleeve active demo_entries mainnet_entries
     lm_load_sleeve_toggles || refuse "cannot resolve demo sleeve state"
-    if [ -e "$SAVED_SLEEVES" ]; then
-        validate_private_state_file "$SAVED_SLEEVES" \
-            || refuse "saved sleeve state is invalid"
-        echo "paused=true"
-    else
-        echo "paused=false"
+    demo_entries="$(heartbeat_entries "$DEMO_HEARTBEAT")" \
+        || refuse "demo heartbeat has no exact strategy entry permissions"
+    mainnet_entries="$(heartbeat_entries "$MAINNET_HEARTBEAT")" \
+        || refuse "funded heartbeat has no exact strategy entry permissions"
+    if [ "$demo_entries" = $'long|false\ncarry|false\nexodus|false' ]; then
+        paused=true
     fi
-    printf 'LONG_SLEEVE=%s\nCARRY_SLEEVE=%s\n' "$LONG_SLEEVE" "$CARRY_SLEEVE"
+    printf 'fleet-status-v1\n'
+    printf 'demo-control|paused|%s\n' "$paused"
+    printf 'sleeve|long|%s\n' "$LONG_SLEEVE"
+    printf 'sleeve|carry|%s\n' "$CARRY_SLEEVE"
+    while IFS='|' read -r sleeve active; do
+        printf 'entries|demo|%s|%s\n' "$sleeve" "$active"
+    done <<< "$demo_entries"
+    while IFS='|' read -r sleeve active; do
+        printf 'entries|mainnet|%s|%s\n' "$sleeve" "$active"
+    done <<< "$mainnet_entries"
+    while IFS='|' read -r unit realm role sleeve; do
+        [ -n "$unit" ] || continue
+        active="$(/usr/bin/systemctl is-active "$unit" 2>/dev/null || true)"
+        case "$active" in
+            active|reloading|inactive|failed|activating|deactivating|maintenance|refreshing|unknown) ;;
+            *) active=unknown ;;
+        esac
+        printf 'unit|%s|%s|%s|%s|%s\n' \
+            "$realm" "$role" "$sleeve" "$unit" "$active"
+    done < <(lm_operator_status_rows)
 }
 
 case "$ACTION" in
@@ -421,5 +509,5 @@ case "$ACTION" in
     resume-demo) resume_demo ;;
     pause-mainnet) pause_mainnet ;;
     resume-mainnet) resume_mainnet ;;
-    status-demo) status_demo ;;
+    status-fleet) status_fleet ;;
 esac

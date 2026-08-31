@@ -28,7 +28,7 @@ ReadWritePaths=/var/lib/liquidity-migration/llm-driver-ledger
 StateDirectory=liquidity-migration/llm-driver-ledger
 StateDirectoryMode=0750
 MemoryMax=512M
-# Research must not preempt the producers (Nice=5) or the owners (Nice=-5).
+# Research must not preempt the signal workers (Nice=5) or owners (Nice=-5).
 Nice=10
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-llm-ledger.service main
 SuccessExitStatus=0

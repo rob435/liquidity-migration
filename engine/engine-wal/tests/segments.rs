@@ -36,6 +36,15 @@ fn base(mark: &str) -> WalRecord {
         intended_stops: Vec::new(),
         recent_execution_ids: Vec::new(),
         execution_history_through_ms: Some(7),
+        target_book_latches: Vec::new(),
+        strategy_checkpoints: Vec::new(),
+        strategy_global_checkpoints: Vec::new(),
+        strategy_events: Vec::new(),
+        signal_observations: Vec::new(),
+        signal_cursors: Vec::new(),
+        signal_subscriptions: Vec::new(),
+        runtime_control_requests: Vec::new(),
+        runtime_control_consumed: Vec::new(),
         open_orders: Vec::new(),
     }
 }

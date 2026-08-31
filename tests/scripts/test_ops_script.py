@@ -32,6 +32,8 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
     for relative in (
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
+        Path("deploy/lib_sleeves.sh"),
+        Path("deploy/fleet_manifest.tsv"),
     ):
         target = checkout / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -62,6 +64,7 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
 def test_help_lists_only_current_operator_routes() -> None:
     result = _run("help")
     assert result.returncode == 0
+    help_text = " ".join(result.stdout.split())
     for command in (
         "status",
         "units",
@@ -78,6 +81,9 @@ def test_help_lists_only_current_operator_routes() -> None:
     ):
         assert command in result.stdout
     assert "loss-reset" not in result.stdout
+    assert "durable Rust control commands" in help_text
+    assert "signal worker stays live" in help_text
+    assert "zero rows" not in help_text
 
 
 def test_unknown_command_fails_with_usage() -> None:
@@ -143,18 +149,21 @@ def test_flatness_control_uses_the_installed_rust_engine(tmp_path: Path) -> None
     payload = capture.read_text(encoding="utf-8")
     assert "REMOTE_ARGS=( demo )" in payload
     assert "engine_binary=/opt/liquidity-migration-engine/bin/engine" in payload
+    assert "signal_worker_binary=/opt/liquidity-migration-engine/bin/signal-worker" in payload
     assert (
         "runtime_launcher=/opt/liquidity-migration-engine/bin/run-authorized-runtime"
         in payload
     )
     assert "marker_launcher_digest" in payload
     for field in (
+        "marker_signal_worker_digest",
         "marker_helper_digest",
         "marker_sudoers_digest",
         "marker_bot_digest",
     ):
         assert field in payload
     assert "installed trusted runtime launcher digest mismatch" in payload
+    assert "installed Rust signal-worker release digest mismatch" in payload
     assert "installed Telegram control helper digest mismatch" in payload
     assert "installed controls sudoers boundary mismatch" in payload
     assert "installed Telegram controls bot digest mismatch" in payload
@@ -185,6 +194,7 @@ def test_flatness_control_uses_the_installed_rust_engine(tmp_path: Path) -> None
     ):
         assert key in payload
     assert payload.count('sha256sum "$engine_binary"') >= 2
+    assert payload.count('sha256sum "$signal_worker_binary"') >= 2
     assert "installed Rust engine changed during engine control" in payload
 
     assert '"$engine_binary" "${engine_args[@]}"' in payload
@@ -210,12 +220,21 @@ def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> Non
 
     assert _run("units", env=environment).returncode == 0
     payload = capture.read_text(encoding="utf-8")
-    assert "systemctl list-units 'liquidity-migration-*'" in payload
-    assert "systemctl list-timers 'liquidity-migration-*'" in payload
+    assert 'systemctl list-units "${REMOTE_ARGS[@]}"' in payload
+    assert 'systemctl list-timers "${REMOTE_ARGS[@]}"' in payload
+    for unit in (
+        "liquidity-migration-engine.service",
+        "liquidity-migration-engine-mainnet.service",
+        "liquidity-migration-backup.timer",
+        "liquidity-migration-chaos-drill.timer",
+        "liquidity-migration-signal-worker-demo.service",
+        "liquidity-migration-signal-worker-mainnet.service",
+    ):
+        assert unit in payload
 
-    assert _run("logs", "bybit-carry-demo.service", env=environment).returncode == 0
+    assert _run("logs", "signal-worker-demo.service", env=environment).returncode == 0
     payload = capture.read_text(encoding="utf-8")
-    assert "REMOTE_ARGS=( liquidity-migration-bybit-carry-demo.service 100 )" in payload
+    assert "REMOTE_ARGS=( liquidity-migration-signal-worker-demo.service 100 )" in payload
     assert "journalctl -u" in payload
 
     assert (
@@ -228,10 +247,10 @@ def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> Non
     assert "REMOTE_ARGS=( liquidity-migration-engine.service 40 )" in payload
 
     for verb in ("restart", "stop", "start"):
-        assert _run(verb, "bybit-long-demo.service", env=environment).returncode == 0
+        assert _run(verb, "signal-worker-demo.service", env=environment).returncode == 0
         payload = capture.read_text(encoding="utf-8")
         assert f'exec systemctl {verb} "${{REMOTE_ARGS[@]}}"' in payload
-        assert "REMOTE_ARGS=( liquidity-migration-bybit-long-demo.service )" in payload
+        assert "REMOTE_ARGS=( liquidity-migration-signal-worker-demo.service )" in payload
         assert _run(verb, env=environment).returncode == 2
 
 
@@ -241,7 +260,7 @@ def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> Non
     [
         "engine-mainnet.service",
         "engine-mainnet",
-        "bybit-carry-mainnet.service",
+        "signal-worker-mainnet.service",
         "mainnet-liveness.timer",
     ],
 )

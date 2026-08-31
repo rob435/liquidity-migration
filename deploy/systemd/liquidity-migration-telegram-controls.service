@@ -1,7 +1,7 @@
 [Unit]
 Description=liquidity-migration Telegram owner controls (pause/resume buttons)
 Wants=network-online.target
-# No Requires= on the owner or producers: the control panel must keep working
+# No Requires= on the owners or signal workers: the control panel must keep working
 # when the fleet it controls is stopped — that is exactly when it is needed.
 After=network-online.target
 
@@ -33,7 +33,7 @@ ProtectProc=invisible
 ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
-InaccessiblePaths=-/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine.toml -/etc/liquidity-migration/engine-mainnet.toml -/etc/liquidity-migration/producer-demo.env -/etc/liquidity-migration/producer-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env
+InaccessiblePaths=-/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine.toml -/etc/liquidity-migration/engine-mainnet.toml -/etc/liquidity-migration/signal-worker-demo.env -/etc/liquidity-migration/signal-worker-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
@@ -48,7 +48,7 @@ SystemCallArchitectures=native
 StateDirectory=liquidity-migration-telegram-controls
 StateDirectoryMode=0700
 MemoryMax=256M
-# An operator surface must not preempt the producers (Nice=5) or owners (-5).
+# An operator surface must not preempt signal workers (Nice=5) or owners (-5).
 Nice=10
 StandardOutput=journal
 StandardError=journal

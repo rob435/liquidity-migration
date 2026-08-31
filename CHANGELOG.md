@@ -6,6 +6,95 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-31 — The active fleet has one native directional path.** Python
+  producer daemons, target-book diagnostics, one-way schema migration tools,
+  dedicated Python decision-contract launchers, retired unit tombstones, and
+  their tests are removed. The fleet manifest lists active units only. Signal
+  worker identities and environment files use their runtime names throughout
+  deployment and funded-arming checks. The stopped-state importer remains the
+  one takeover path until the Rust WAL contains complete native checkpoints.
+  The registered Exodus rule now names the native CARRY-event trigger, native
+  cover reducer, and shared Rust replay; these wording changes alter its
+  registered byte hash and the renderer/fixture identities derived from it.
+  Native reducer and input-contract faults now have their own typed engine
+  heartbeat rows and page through fleet liveness; ordinary per-symbol entry
+  blockers remain trading state and do not page.
+
+- **2026-08-31 — Directional live decisions move into the Rust account owner.**
+  One credential-free Rust signal worker per realm now acquires and persists
+  the public LONG/CARRY inputs, publishes crash-atomic immutable observations,
+  and reports exact source, feature, universe, and engine-config identities.
+  The engine makes each observation durable before waking typed native LONG,
+  CARRY, and Exodus reducers. CARRY's pre-settlement handoff is an internal WAL
+  event, and every reducer owns a strict whole-sleeve checkpoint, restart-safe
+  entry permission, and durable flatten path. A shared persistent Rust replay
+  adapter is the research decision authority for all three sleeves. The
+  standard CARRY v7 curve sends its backward-only feature frame through the
+  native signal batch, including Rust top-N selection and daily weights; the
+  Python daily scorer remains only for labelled v1-v5 reference comparisons.
+  The mainnet maker rule is rendered from registered JSON by the Rust config
+  renderer; its quote reducer remains disabled. `touch_sniper` keeps its
+  restart-safe reducer but remains outside deployed templates. Six Python
+  directional services and their runtime wrappers are retired from the current
+  fleet. Rollout renders exact native configs only after installing the trusted
+  Rust release, imports a complete account-bound legacy state bundle while the
+  WAL and account are locked, and refuses partial, conflicting, corrupt, or
+  wrong-account state. Telegram pause/resume and account flatten use durable
+  engine controls while the signal workers keep running. Notifications read
+  actual attributed positions and closed trades rather than target files. This
+  repository change does not itself deploy or arm either account.
+
+- **2026-08-30 — Strategy decisions and fleet identity gain one contract each.**
+  Native LONG live and research planning now call the same pure typed reducer
+  for signal, sizing, entry, stop and time exit; the contract has no
+  take-profit. One typed effective config records field-level provenance, and
+  operational profiles are the sole live sizing source. The hourly runner is
+  explicitly diagnostic, while the new one-minute live-physics runner adds
+  causal wakes, fill-anchored clocks, current target and capital-reference
+  deadbands, fees and funding and labels its result a minute execution bound.
+  Separate candidate-window mark-price and traded-price tapes preserve the
+  live trigger/fill split; funding value uses the settlement mark. Each minute
+  report freezes the exact local research/live source closure and
+  runtime versions behind a recorded SHA-256, so a dirty exploratory tree is
+  still identifiable. The LLM ledger is research-only and no longer feeds any
+  Native LONG target path. CARRY now resolves its data root and private
+  state/tape paths in the typed effective config. One pure lifecycle reducer
+  owns sizing anchors, settled and pre-settlement exits, next-day drops,
+  admission, entry caps and exact target bytes; live and historical replay
+  call it. Historical replay carries modeled holdings, wakes deferred
+  admission on the configured cadence, and applies standing targets at hourly
+  marks while naming the assumed-fill boundary. It durably appends each
+  hash-chained Exodus handoff, persists the
+  reduced state, then publishes the exact book. A shared Python/Rust fixture
+  fences those bytes and the $6 entry plus $1/5% resize boundaries, including
+  current-mark valuation. Independent Exodus producers consume the handoff
+  tapes, call their own typed reducer, own their state and books, and replay
+  checked-in entry, restart and cover cycles with exact staged/final state and
+  target bytes. The registered Exodus evidence now names that replay and says
+  plainly that its discarded scratch economics cannot be reconstructed.
+  The Rust quoter now puts signal decay, fair value, inventory, directional
+  protection, venue minimums and quote effects behind one pure reducer used by
+  both the live plug and Python-driven replay. Its mainnet economic block is a
+  generated region of the registered JSON rule, and funded config installation
+  refuses drift before copying it. `touch_sniper` now has a typed reducer and a
+  fingerprinted WAL checkpoint restored with attributed position and owned
+  orders; its consumed arm is durable before entry and survives WAL rotation.
+  A second durable latch records an exit request before cancellation or close,
+  resumes partial-entry cleanup after restart, and reconciles uncertain saved
+  state with surviving attributed risk toward flat.
+  A durable per-sleeve target
+  latch now prevents a stale nonzero book from reopening a position that a
+  venue-native stop just flattened, across live callbacks, restart, and WAL
+  rotation; an explicit zero clears it. `deploy/fleet_manifest.tsv`
+  is the canonical inventory for lifecycle order, activation, timers, operator
+  policy, dependencies, health and runtime artifacts, including both engines,
+  backup and chaos drill.
+  LONG PIT taint now follows the exact causal input window: the signal start
+  minus the 90-day maximum feature lookback through the last daily source bar
+  admitted by the end-exclusive signal clock. Whole-root coverage remains a
+  separate receipt, so unrelated stored dates neither bless nor taint a scoped
+  replay.
+
 - **2026-08-30 — Binance gains a fenced adapter, and the LONG evidence program
   stops overstating what it saw.** The Rust engine now compiles six venue
   families and ten exact realms. Binance USD-M has

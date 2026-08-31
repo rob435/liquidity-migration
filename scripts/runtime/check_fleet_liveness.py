@@ -2,17 +2,16 @@
 """Rust account-owner and strategy-input liveness watchdog for the deployed fleets.
 
 Scope is ``demo`` or ``mainnet``. Within it the checker requires the Rust account
-owner, its exact-identity heartbeat, and strategy input,
-plus a recent healthy canonical venue snapshot. Strategy-daemon cycle and input
-checks live here because an execution owner cannot detect a hung signal
-scheduler or an empty/stale signal source. The ``mainnet`` scope is disjoint
-from the demo roots and runs only its own owner and producers.
+owner, its exact-identity heartbeat, and the realm's credential-free Rust signal
+worker. The worker heartbeat is bound to its current systemd process and to the
+exact signal, rule, risk, engine, and universe bytes it loaded. The ``mainnet``
+scope is disjoint from demo and reads only its own owner and worker.
 
 --engine-heartbeat-file (or LIVENESS_ENGINE_HEARTBEAT_FILE) adds the engine's
 own heartbeat file: how long ago it was written, and whether the engine has
 latched itself out of opening new positions — a state that looks perfectly
-healthy from every other check here. Unset, the file is never opened and
-nothing new can alert; no engine heartbeat is provisioned by default.
+healthy from every other check here. The installed fleet binds this path from
+the realm's engine environment; an explicit empty value skips the file.
 
 Alerts are de-duplicated with a cooldown state file: a new condition alerts
 immediately, a persisting one re-alerts at most every --cooldown-min, and a
@@ -31,6 +30,8 @@ an alert.
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -42,18 +43,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import polars as pl
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration.core._common import exact_duration_ms  # noqa: E402
 from liquidity_migration.core.env_flags import validate_systemd_invocation_id  # noqa: E402
-from liquidity_migration.data.storage import read_dataset_columns  # noqa: E402
-from liquidity_migration.strategy.strategy_cycle_health import (  # noqa: E402
-    StrategyCycleHealth,
-    read_strategy_cycle_health,
-)
 from liquidity_migration.ops.telegram import as_block, send_telegram_message  # noqa: E402
 
 # Severity order for message framing only.
@@ -67,22 +61,91 @@ def _plain_name(label: str) -> str:
     name = name.removesuffix(".service").removesuffix(".timer")
     name = name.removeprefix("bybit-").removesuffix("-event")
     return name.replace("-", " ") or label
-_DEMO_ACCOUNT_OWNER_UNIT = "liquidity-migration-engine.service"
-_MAINNET_ACCOUNT_OWNER_UNIT = "liquidity-migration-engine-mainnet.service"
+
+
+@dataclass(frozen=True)
+class FleetUnitSpec:
+    """The liveness fields read from the canonical fleet manifest."""
+
+    unit: str
+    kind: str
+    realm: str
+    lifecycle: str
+    stop_order: int
+    activation: str
+    health: str
+    output_artifact: str | None
+
+
+def _load_fleet_manifest() -> tuple[FleetUnitSpec, ...]:
+    path = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    parsed = list(csv.reader(lines, delimiter="|"))
+    if not parsed or any(len(row) != 16 for row in parsed):
+        raise ValueError("fleet manifest row shape is invalid")
+    rows = tuple(
+        FleetUnitSpec(
+            unit=row[0],
+            kind=row[1],
+            realm=row[2],
+            lifecycle=row[3],
+            stop_order=int(row[4]),
+            activation=row[5],
+            health=row[8],
+            output_artifact=None if row[9] == "-" else row[9],
+        )
+        for row in parsed
+    )
+    if len({row.unit for row in rows}) != len(rows):
+        raise ValueError("fleet manifest contains duplicate units")
+    return rows
+
+
+_FLEET_UNITS = _load_fleet_manifest()
+
+
+def _manifest_owner(realm: str) -> str:
+    matches = [
+        row.unit
+        for row in _FLEET_UNITS
+        if row.kind == "service"
+        and row.realm == realm
+        and row.lifecycle == "owner"
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"fleet manifest must name one {realm} account owner")
+    return matches[0]
+
+
+def _manifest_signal_worker(realm: str) -> FleetUnitSpec:
+    matches = [
+        row
+        for row in _FLEET_UNITS
+        if row.realm == realm
+        and row.unit == f"liquidity-migration-signal-worker-{realm}.service"
+        and row.health == "active"
+        and row.output_artifact is not None
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"fleet manifest must name one {realm} signal worker")
+    return matches[0]
+
+
+_DEMO_ACCOUNT_OWNER_UNIT = _manifest_owner("demo")
+_MAINNET_ACCOUNT_OWNER_UNIT = _manifest_owner("mainnet")
 _REQUIRED_ACCOUNT_OWNER_UNITS = (_DEMO_ACCOUNT_OWNER_UNIT,)
 _ACCOUNT_SCOPES = ("demo", "mainnet")
-_LONG_DEMO_UNIT = "liquidity-migration-bybit-long-demo.service"
-_LONG_MAINNET_UNIT = "liquidity-migration-bybit-long-mainnet.service"
-_CARRY_DEMO_UNIT = "liquidity-migration-bybit-carry-demo.service"
-_CARRY_MAINNET_UNIT = "liquidity-migration-bybit-carry-mainnet.service"
-def _default_root(rel: str) -> str:
-    """Anchor a default data root at the repo dir, not the CWD."""
-    return str(_REPO_ROOT / rel)
-
-
-def _sleeve_on(env_var: str, *, default: str = "off") -> bool:
-    """Read a sleeve toggle, failing safe to the supplied default."""
-    return os.environ.get(env_var, default).strip().lower() in {"on", "1", "true", "yes"}
+_DEMO_SIGNAL_WORKER = _manifest_signal_worker("demo")
+_MAINNET_SIGNAL_WORKER = _manifest_signal_worker("mainnet")
+def _manifest_signal_heartbeat(realm: str) -> str:
+    artifact = _manifest_signal_worker(realm).output_artifact
+    if artifact is None:
+        raise ValueError(f"{realm} signal worker has no heartbeat artifact")
+    return artifact
 
 
 @dataclass(frozen=True)
@@ -106,49 +169,114 @@ class UnitRuntime:
 
     invocation_id: str | None
     active_age_minutes: float | None
+    main_pid: int | None = None
 
 
-@dataclass(frozen=True)
-class CompletedCycleObservation:
-    """A completion projection bound back to its durable causal cycle row."""
-
-    health: StrategyCycleHealth
-    row: dict[str, Any]
-
-
-# Pure decision logic (no I/O)
-def evaluate_cycle_liveness(
-    *, latest_cycle_ts_ms: int | None, now_ms: int, max_age_minutes: float, label: str
+def evaluate_signal_worker_heartbeat(
+    payload: dict[str, Any],
+    *,
+    now_ms: int,
+    max_age_seconds: float,
+    expected_pid: int | None,
+    expected_hashes: dict[str, str],
+    label: str,
 ) -> Alert | None:
-    """No cycle written within the freshness window -> the daemon is down/hung."""
-    if latest_cycle_ts_ms is None:
-        return Alert(
-            key=f"liveness:{label}",
-            severity=CRITICAL,
-            message=f"{label}: no cycle reports found — daemon may have never started.",
-            headline=f"{_plain_name(label)}: no cycles ever recorded — the producer may never have started.",
+    """Validate the Rust worker's exact running generation and public inputs."""
+    problems: list[str] = []
+    if payload.get("schema_version") != 1:
+        problems.append("schema_version is not 1")
+    if payload.get("kind") != "liquidity_migration_signal_worker_heartbeat":
+        problems.append("kind is not the directional worker contract")
+    if payload.get("status") != "ready":
+        problems.append("status is not ready")
+    if payload.get("credential_free") is not True:
+        problems.append("credential_free is not true")
+    if payload.get("public_market_realm") != "mainnet" or payload.get(
+        "public_bybit_host"
+    ) != "api.bybit.com":
+        problems.append("public Bybit source is not mainnet api.bybit.com")
+    if expected_pid is None or payload.get("pid") != expected_pid:
+        problems.append("heartbeat process id is not the current systemd process")
+    updated_at_ms = payload.get("updated_at_ms")
+    if type(updated_at_ms) is not int:
+        problems.append("updated_at_ms is missing")
+    else:
+        age_ms = now_ms - updated_at_ms
+        if age_ms < 0:
+            problems.append("heartbeat is future-dated")
+        elif age_ms > max_age_seconds * 1000:
+            problems.append(f"heartbeat is {age_ms / 1000:.0f}s old")
+    for key, expected in expected_hashes.items():
+        if payload.get(key) != expected:
+            problems.append(f"{key} does not match the installed input")
+    for key in ("last_input_sequence", "long_output_sequence", "carry_output_sequence"):
+        if type(payload.get(key)) is not int or payload[key] <= 0:
+            problems.append(f"{key} has not advanced")
+    if type(payload.get("last_observed_ts_ms")) is not int or payload[
+        "last_observed_ts_ms"
+    ] <= 0:
+        problems.append("no causal public observation is recorded")
+    if not problems:
+        return None
+    return Alert(
+        key=f"signal-worker:{label}",
+        severity=CRITICAL,
+        message=f"{label}: " + "; ".join(problems),
+        headline=f"{_plain_name(label)}: Rust signal input is stale, mismatched, or not ready.",
+    )
+
+
+def gather_signal_worker_alerts(
+    *,
+    heartbeat_path: Path,
+    signal_config: Path,
+    long_rule: Path,
+    carry_config: Path,
+    operational_config: Path,
+    engine_config: Path,
+    universe: Path,
+    runtime: UnitRuntime | None,
+    now_ms: int,
+    max_age_seconds: float,
+    startup_grace_minutes: float,
+    label: str,
+) -> list[Alert]:
+    try:
+        universe_payload = json.loads(universe.read_bytes())
+        expected_hashes = {
+            "signal_config_sha256": hashlib.sha256(signal_config.read_bytes()).hexdigest(),
+            "long_rule_sha256": hashlib.sha256(long_rule.read_bytes()).hexdigest(),
+            "carry_config_sha256": hashlib.sha256(carry_config.read_bytes()).hexdigest(),
+            "operational_config_sha256": hashlib.sha256(
+                operational_config.read_bytes()
+            ).hexdigest(),
+            "engine_config_sha256": hashlib.sha256(engine_config.read_bytes()).hexdigest(),
+            "universe_file_sha256": hashlib.sha256(universe.read_bytes()).hexdigest(),
+            "universe_artifact_sha256": str(universe_payload["artifact_sha256"]),
+        }
+        payload = json.loads(heartbeat_path.read_bytes())
+        if not isinstance(payload, dict):
+            raise ValueError("heartbeat is not an object")
+        alert = evaluate_signal_worker_heartbeat(
+            payload,
+            now_ms=now_ms,
+            max_age_seconds=max_age_seconds,
+            expected_pid=runtime.main_pid if runtime is not None else None,
+            expected_hashes=expected_hashes,
+            label=label,
         )
-    age_min = (now_ms - latest_cycle_ts_ms) / 60_000.0
-    if age_min < 0.0:
-        return Alert(
-            key=f"liveness:{label}",
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        alert = Alert(
+            key=f"signal-worker:{label}",
             severity=CRITICAL,
-            message=(
-                f"{label}: latest cycle is {-age_min:.1f} min future-dated; scheduler liveness evidence is invalid."
-            ),
-            headline=f"{_plain_name(label)}: cycle timestamps are in the future — clock or data problem.",
+            message=f"{label}: signal heartbeat or installed input is unreadable: {type(exc).__name__}: {exc}",
+            headline=f"{_plain_name(label)}: Rust signal heartbeat is unreadable.",
         )
-    if age_min > max_age_minutes:
-        return Alert(
-            key=f"liveness:{label}",
-            severity=CRITICAL,
-            message=(
-                f"{label}: DAEMON DOWN/HUNG — last cycle {age_min:.1f} min ago "
-                f"(> {max_age_minutes:.0f} min). Check positions; manual close may be needed."
-            ),
-            headline=f"{_plain_name(label)}: producer down or hung — last cycle {age_min:.0f} min ago.",
-        )
-    return None
+    if alert is None:
+        return []
+    if _within_startup_grace(runtime, max_age_minutes=startup_grace_minutes):
+        return []
+    return [alert]
 
 
 def _within_startup_grace(
@@ -161,25 +289,6 @@ def _within_startup_grace(
         return False
     age = runtime.active_age_minutes
     return age is not None and 0.0 <= age <= max_age_minutes
-
-
-def _unverified_generation_cycle_alert(
-    *, label: str, detail: str, active_minutes: float | None, startup_bound_min: float
-) -> Alert:
-    age = "unknown time" if active_minutes is None else f"{active_minutes:.0f} min"
-    return Alert(
-        key=f"liveness:{label}",
-        severity=CRITICAL,
-        message=(
-            f"{label}: DAEMON HUNG — up {age} in the current service generation with no "
-            f"verified completed cycle, past the {startup_bound_min:.0f} min startup budget "
-            f"that covers the boot kline backfill ({detail[:300]})."
-        ),
-        headline=(
-            f"{_plain_name(label)}: producer up {age} without completing a cycle — "
-            "past the startup budget, so this is a hang, not a warmup."
-        ),
-    )
 
 
 # `systemctl is-enabled` values that mean "this unit is supposed to be running".
@@ -294,28 +403,6 @@ def evaluate_required_account_owner_states(
     return alerts
 
 
-def evaluate_ws_staleness(
-    *, store_max_ts_ms: int | None, now_ms: int, max_lag_hours: float, label: str
-) -> Alert | None:
-    if not store_max_ts_ms:
-        return None
-    lag_h = (now_ms - store_max_ts_ms) / 3_600_000.0
-    if lag_h > max_lag_hours:
-        return Alert(
-            key=f"ws_stale:{label}",
-            severity=WARNING,
-            message=(
-                f"{label}: WS kline feed stalled — newest bar {lag_h:.1f}h old "
-                f"(> {max_lag_hours:.0f}h). REST fallback still covers data; watch for escalation."
-            ),
-            headline=(
-                f"{_plain_name(label)}: live price feed stalled — newest bar {lag_h:.1f}h old "
-                "(a fallback source still covers it)."
-            ),
-        )
-    return None
-
-
 def evaluate_disk_space(
     *,
     path: str,
@@ -376,6 +463,14 @@ VENUE_SNAPSHOT_AGE_FLOOR_MINUTES = 25.0
 
 
 @dataclass(frozen=True)
+class StrategyError:
+    """One sleeve that cannot reduce its current inputs."""
+
+    strategy: str
+    error: str
+
+
+@dataclass(frozen=True)
 class EngineHeartbeat:
     """One checked reading of the engine's heartbeat file."""
 
@@ -391,6 +486,7 @@ class EngineHeartbeat:
     engine_version: str
     venue: str
     realm: str
+    strategy_errors: tuple[StrategyError, ...]
     #: When the venue reading this beat carries was taken, on the same clock as
     #: ``wall_ts_ms``. Absent until the engine has taken one at all.
     account_observed_wall_ts_ms: int | None = None
@@ -482,6 +578,7 @@ def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
         ("may_open", bool),
         ("market_events", int),
         ("orders_sent", int),
+        ("strategy_errors", list),
     ):
         value = payload.get(field)
         if expected is int and isinstance(value, bool):
@@ -503,6 +600,21 @@ def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
     # read the venue yet writes it as null. `bool` being a subclass of `int`
     # would let `true` through as a timestamp, so it is excluded by hand.
     observed = payload.get("account_observed_wall_ts_ms")
+    strategy_errors: list[StrategyError] = []
+    seen_strategies: set[str] = set()
+    for index, row in enumerate(payload["strategy_errors"]):
+        if not isinstance(row, dict):
+            raise ValueError(f"strategy_errors[{index}] is not an object")
+        strategy = row.get("strategy")
+        error = row.get("error")
+        if not isinstance(strategy, str) or not strategy.strip():
+            raise ValueError(f"strategy_errors[{index}].strategy is not a non-empty string")
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError(f"strategy_errors[{index}].error is not a non-empty string")
+        if strategy in seen_strategies:
+            raise ValueError(f"strategy_errors repeats strategy {strategy!r}")
+        seen_strategies.add(strategy)
+        strategy_errors.append(StrategyError(strategy=strategy, error=error))
     return EngineHeartbeat(
         wall_ts_ms=int(payload["wall_ts_ms"]),
         mode=mode,
@@ -514,6 +626,7 @@ def parse_engine_heartbeat(data: bytes) -> EngineHeartbeat:
         engine_version=str(payload["engine_version"]),
         venue=str(payload["venue"]),
         realm=str(payload["realm"]),
+        strategy_errors=tuple(strategy_errors),
         account_observed_wall_ts_ms=(observed if isinstance(observed, int) and not isinstance(observed, bool) else None),
     )
 
@@ -610,6 +723,21 @@ def evaluate_engine_heartbeat(
                     f"The engine is alive but has stopped opening new positions ({heartbeat.mode_note}) — "
                     "someone has to read the engine's log to find out why."
                 ),
+            )
+        )
+    if heartbeat.strategy_errors:
+        failures = "; ".join(
+            f"{row.strategy}: {row.error[:300]}" for row in heartbeat.strategy_errors
+        )
+        alerts.append(
+            Alert(
+                key="engine_strategy_error",
+                severity=CRITICAL,
+                message=(
+                    "one or more strategies cannot reduce their current inputs even though the "
+                    f"engine is alive: {failures}. Read the engine log for the first matching fault."
+                ),
+                headline="The engine is alive, but a strategy reducer is broken.",
             )
         )
     lag_minutes = heartbeat.account_view_lag_minutes
@@ -1056,8 +1184,7 @@ def _boottime_ns() -> int | None:
 def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
     """Read generation id and monotonic active age for systemd services.
 
-    Missing or malformed metadata yields no grace period; the caller falls back
-    to the causal-cycle check.
+    Missing or malformed metadata yields no signal-worker startup grace.
     """
     boot_ns = _boottime_ns()
     metadata: dict[str, UnitRuntime] = {}
@@ -1070,6 +1197,7 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
                     unit,
                     "--property=InvocationID",
                     "--property=ActiveEnterTimestampMonotonic",
+                    "--property=MainPID",
                 ],
                 capture_output=True,
                 text=True,
@@ -1081,6 +1209,7 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
             raw_invocation_id = values.get("InvocationID") or None
             invocation_id = validate_systemd_invocation_id(raw_invocation_id) if raw_invocation_id is not None else None
             active_enter_us = int(values.get("ActiveEnterTimestampMonotonic") or "0")
+            main_pid_value = int(values.get("MainPID") or "0")
             active_age_minutes: float | None = None
             if boot_ns is not None and active_enter_us > 0:
                 age_ns = boot_ns - active_enter_us * 1_000
@@ -1089,6 +1218,7 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
             metadata[unit] = UnitRuntime(
                 invocation_id=invocation_id,
                 active_age_minutes=active_age_minutes,
+                main_pid=main_pid_value if main_pid_value > 0 else None,
             )
         except (OSError, subprocess.SubprocessError, ValueError):
             metadata[unit] = UnitRuntime(
@@ -1098,28 +1228,16 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
     return metadata
 
 
-def _default_units_for_toggles() -> list[str]:
-    units = list(_REQUIRED_ACCOUNT_OWNER_UNITS)
-    if _sleeve_on("LONG_SLEEVE"):
-        units.append(_LONG_DEMO_UNIT)
-    if _sleeve_on("CARRY_SLEEVE"):
-        units.append(_CARRY_DEMO_UNIT)
-    return units
-
-
 def _default_units_for_scope(account_scope: str) -> list[str]:
     """Narrow the toggle-derived unit inventory to the authorized owners.
 
-    ``demo`` monitors the demo owner and its toggled producers; ``mainnet``
-    shares no unit with it and is built from its own toggles.
+    Each scope monitors one account owner and its credential-free signal worker.
     """
     if account_scope not in _ACCOUNT_SCOPES:
         raise ValueError(f"unsupported account liveness scope: {account_scope}")
     if account_scope == "mainnet":
-        # An armed mainnet fleet always runs both registered producers; the
-        # installed risk profile, not a toggle, decides their shares.
-        return [_MAINNET_ACCOUNT_OWNER_UNIT, _CARRY_MAINNET_UNIT, _LONG_MAINNET_UNIT]
-    return _default_units_for_toggles()
+        return [_MAINNET_ACCOUNT_OWNER_UNIT, _MAINNET_SIGNAL_WORKER.unit]
+    return [*_REQUIRED_ACCOUNT_OWNER_UNITS, _DEMO_SIGNAL_WORKER.unit]
 
 
 def _ping_heartbeat(url: str) -> None:
@@ -1158,267 +1276,6 @@ def _save_state(path: Path, state: dict[str, int]) -> None:
             pass
 
 
-# Columns each sleeve's checks actually inspect. Projected reads keep the
-# watchdog's cost independent of how wide or old the cycle datasets grow.
-LONG_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "kline_store_max_ts_ms"]
-CARRY_CYCLE_COLUMNS = ["cycle_id", "ts_ms", "decision_stale", "decision_error"]
-
-
-def _read_cycles_columns(root: Path, cycles_dataset: str, columns: list[str]) -> pl.DataFrame:
-    """Projected, lock-free read of a producer's cycle dataset.
-
-    An observer must not take the producers' write locks (that stalls live
-    cycle writes) or create lock files under roots it only observes, so it
-    reads without the lock and retries once if it straddles a concurrent
-    part replace (a torn read raises).
-    """
-
-    try:
-        return read_dataset_columns(root, cycles_dataset, columns=columns, lock=False)
-    except Exception:  # noqa: BLE001 — one concurrent-writer retry, then report
-        time.sleep(0.1)
-        return read_dataset_columns(root, cycles_dataset, columns=columns, lock=False)
-
-
-def _observe_completed_cycle(
-    *,
-    root: Path,
-    cycles_dataset: str,
-    runtime: UnitRuntime,
-    sleeve: str,
-    environment: str,
-    columns: list[str],
-) -> tuple[CompletedCycleObservation | None, str]:
-    """Read the receipt first, then bind it to its durable cycle row.
-
-    Producers publish the dataset before the receipt, so reading in that order
-    lets a concurrent update advance the receipt past an already-snapshotted
-    dataset and pair rows from different generations. Receipt-first guarantees
-    the referenced cycle was durable before the receipt could be read.
-    """
-    invocation_id = runtime.invocation_id
-    if invocation_id is None:
-        return None, "current systemd invocation id is unavailable"
-    try:
-        health = read_strategy_cycle_health(root)
-    except (OSError, RuntimeError, ValueError) as exc:
-        return None, f"completion receipt unavailable: {type(exc).__name__}: {exc}"
-    if health.invocation_id != invocation_id:
-        return None, "completion receipt belongs to a prior service generation"
-    if health.sleeve != sleeve or health.environment != environment:
-        return None, (
-            f"completion receipt scope mismatch: {health.sleeve}/{health.environment} != {sleeve}/{environment}"
-        )
-    try:
-        cycles = _read_cycles_columns(root, cycles_dataset, columns)
-    except Exception as exc:  # noqa: BLE001 — watchdog reports unreadable evidence
-        return None, f"durable cycle output is unreadable: {type(exc).__name__}: {exc}"
-    if cycles is None or cycles.is_empty() or "cycle_id" not in cycles.columns or "ts_ms" not in cycles.columns:
-        return None, "durable cycle output is unavailable"
-    matching = cycles.filter((pl.col("cycle_id") == health.cycle_id) & (pl.col("ts_ms") == health.cycle_ts_ms))
-    if matching.is_empty():
-        return None, "completion receipt does not match a durable causal cycle row"
-    return CompletedCycleObservation(
-        health=health,
-        row=matching.tail(1).to_dicts()[0],
-    ), ""
-
-
-def gather_long_alerts(
-    *,
-    long_root: Path,
-    now_ms: int | None = None,
-    args: argparse.Namespace,
-    cycle_checks: bool = True,
-    cycles_dataset: str = "long_native_demo_cycles",
-    environment: str = "demo",
-    unit_runtime: UnitRuntime | None = None,
-) -> list[Alert]:
-    """Check the LONG strategy scheduler and WS input freshness only."""
-    if not long_root.exists():
-        return []
-    label = long_root.name
-    alerts: list[Alert] = []
-    if cycle_checks:
-        row: dict[str, Any] | None
-        liveness_ts_ms: int | None
-        generation_bound = unit_runtime is not None and unit_runtime.invocation_id is not None
-        if generation_bound:
-            assert unit_runtime is not None
-            observation, detail = _observe_completed_cycle(
-                root=long_root,
-                cycles_dataset=cycles_dataset,
-                runtime=unit_runtime,
-                sleeve="long",
-                environment=environment,
-                columns=LONG_CYCLE_COLUMNS,
-            )
-            if observation is None:
-                if _within_startup_grace(
-                    unit_runtime,
-                    max_age_minutes=args.max_startup_min,
-                ):
-                    return alerts
-                alerts.append(
-                    _unverified_generation_cycle_alert(
-                        label=label,
-                        detail=detail,
-                        active_minutes=unit_runtime.active_age_minutes,
-                        startup_bound_min=args.max_startup_min,
-                    )
-                )
-                return alerts
-            row = observation.row
-            liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
-        else:
-            try:
-                cyc = _read_cycles_columns(long_root, cycles_dataset, LONG_CYCLE_COLUMNS)
-            except Exception:  # noqa: BLE001 — watchdog never crashes
-                cyc = pl.DataFrame()
-            latest_row = (
-                cyc.sort("ts_ms").tail(1).to_dicts()[0]
-                if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
-                else None
-            )
-            row = latest_row
-            liveness_ts_ms = (
-                int(latest_row["ts_ms"]) if latest_row is not None and latest_row.get("ts_ms") is not None else None
-            )
-        observed_now_ms = _now_ms() if now_ms is None else now_ms
-        live = evaluate_cycle_liveness(
-            latest_cycle_ts_ms=liveness_ts_ms,
-            now_ms=observed_now_ms,
-            max_age_minutes=args.max_cycle_age_min,
-            label=label,
-        )
-        if live:
-            alerts.append(live)
-        if row is not None and row.get("kline_store_max_ts_ms") is not None:
-            store_max = int(row.get("kline_store_max_ts_ms") or 0)
-            ws = evaluate_ws_staleness(
-                store_max_ts_ms=store_max,
-                now_ms=observed_now_ms,
-                max_lag_hours=args.max_ws_lag_hours,
-                label=label,
-            )
-            if ws:
-                alerts.append(ws)
-    return alerts
-
-
-def gather_carry_alerts(
-    *,
-    carry_root: Path,
-    now_ms: int | None = None,
-    args: argparse.Namespace,
-    cycle_checks: bool = True,
-    cycles_dataset: str = "carry_hold_demo_cycles",
-    environment: str = "demo",
-    unit_runtime: UnitRuntime | None = None,
-) -> list[Alert]:
-    """Check the CARRY strategy scheduler's cycle heartbeat and decision health.
-
-    Carry streams its klines like LONG with REST as the gap fallback, and the
-    cycle never blocks on the stream — so freshness is the cycle heartbeat
-    itself. ``decision_stale`` means the daemon is holding previous targets
-    and pages.
-    """
-    if not carry_root.exists():
-        return []
-    label = carry_root.name
-    alerts: list[Alert] = []
-    if cycle_checks:
-        row: dict[str, Any] | None
-        liveness_ts_ms: int | None
-        generation_bound = unit_runtime is not None and unit_runtime.invocation_id is not None
-        if generation_bound:
-            assert unit_runtime is not None
-            observation, detail = _observe_completed_cycle(
-                root=carry_root,
-                cycles_dataset=cycles_dataset,
-                runtime=unit_runtime,
-                sleeve="carry",
-                environment=environment,
-                columns=CARRY_CYCLE_COLUMNS,
-            )
-            if observation is None:
-                if _within_startup_grace(
-                    unit_runtime,
-                    max_age_minutes=args.max_startup_min,
-                ):
-                    return alerts
-                alerts.append(
-                    _unverified_generation_cycle_alert(
-                        label=label,
-                        detail=detail,
-                        active_minutes=unit_runtime.active_age_minutes,
-                        startup_bound_min=args.max_startup_min,
-                    )
-                )
-                return alerts
-            row = observation.row
-            liveness_ts_ms = observation.health.completed_ts_ns // 1_000_000
-        else:
-            try:
-                cyc = _read_cycles_columns(carry_root, cycles_dataset, CARRY_CYCLE_COLUMNS)
-            except Exception:  # noqa: BLE001 — watchdog never crashes
-                cyc = pl.DataFrame()
-            latest_row = (
-                cyc.sort("ts_ms").tail(1).to_dicts()[0]
-                if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns)
-                else None
-            )
-            row = latest_row
-            liveness_ts_ms = (
-                int(latest_row["ts_ms"]) if latest_row is not None and latest_row.get("ts_ms") is not None else None
-            )
-        observed_now_ms = _now_ms() if now_ms is None else now_ms
-        live = evaluate_cycle_liveness(
-            latest_cycle_ts_ms=liveness_ts_ms,
-            now_ms=observed_now_ms,
-            max_age_minutes=args.max_cycle_age_min,
-            label=label,
-        )
-        if live:
-            alerts.append(live)
-        if row is not None:
-            if bool(row.get("decision_stale")):
-                detail = str(row.get("decision_error") or "").strip()
-                suffix = f" (decision_error: {detail[:200]})" if detail else ""
-                alerts.append(
-                    Alert(
-                        key=f"carry_decision_stale:{label}",
-                        severity=CRITICAL,
-                        message=(
-                            f"{label}: carry sleeve is holding PREVIOUS targets — the latest "
-                            f"cycle could not produce a fresh decision{suffix}."
-                        ),
-                        headline=(
-                            f"{_plain_name(label)}: carry is holding old targets — "
-                            "it could not make a fresh decision."
-                        ),
-                    )
-                )
-            elif str(row.get("decision_error") or "").strip():
-                alerts.append(
-                    Alert(
-                        key=f"carry_decision_error:{label}",
-                        severity=WARNING,
-                        message=(
-                            f"{label}: carry cycle reported a decision error: "
-                            f"{str(row.get('decision_error'))[:300]}"
-                        ),
-                        headline=f"{_plain_name(label)}: carry reported a decision error.",
-                    )
-                )
-    return alerts
-
-
-# The 25-minute venue-snapshot bound is VENUE_SNAPSHOT_AGE_FLOOR_MINUTES,
-# defined once, above. A second definition here once shadowed it: function
-# defaults bound the first value at def time while the runtime clamps read the
-# module attribute, so editing one silently diverged the two.
-
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -1436,41 +1293,55 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(default: environment or demo)"
         ),
     )
-    p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
     p.add_argument(
-        "--max-startup-min",
+        "--max-signal-startup-min",
         type=float,
-        default=120.0,
+        default=30.0,
         help=(
-            "how long a just-restarted producer may run before its first completed cycle pages. "
-            "Boot pays a kline backfill budgeted at 20 minutes and contended across every "
-            "producer on the box — observed near 100 minutes after a full-fleet deploy — so this "
-            "is different physics from --max-cycle-age-min's steady state. A dead or failed unit "
-            "still pages within minutes through the unit-state checks; only the hung-but-active "
-            "case waits this long"
+            "how long the current Rust worker process may perform its bounded cold public-data "
+            "fill before a missing ready heartbeat pages"
         ),
     )
-    p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
-    # Roots stay strings so the empty-string skip sentinel does not become Path('.').
     p.add_argument(
-        "--long-root",
-        default=os.environ.get("LONG_DEMO_DATA_ROOT") or _default_root("data/bybit-long-demo-event"),
-        help="long-native sleeve root for cycle/input freshness ('' to skip)",
+        "--signal-worker-heartbeat-file",
+        default="",
+        help="Rust directional worker heartbeat (defaults from the fleet manifest)",
     )
     p.add_argument(
-        "--carry-root",
-        default=os.environ.get("CARRY_DEMO_DATA_ROOT") or _default_root("data/bybit-carry-demo-event"),
-        help="carry-hold sleeve root for cycle/decision freshness ('' to skip)",
+        "--max-signal-heartbeat-age-sec",
+        type=float,
+        default=30.0,
+        help="critical alert if the ready Rust worker heartbeat is older than this",
     )
     p.add_argument(
-        "--carry-mainnet-root",
-        default=os.environ.get("CARRY_MAINNET_DATA_ROOT") or _default_root("data/bybit-carry-mainnet-event"),
-        help="carry-hold mainnet root for cycle/decision freshness ('' to skip)",
+        "--signal-config-file",
+        default="",
+        help="machine signal config (defaults to configs/signal-worker.<scope>.json)",
     )
     p.add_argument(
-        "--long-mainnet-root",
-        default=os.environ.get("LONG_MAINNET_DATA_ROOT") or _default_root("data/bybit-long-mainnet-event"),
-        help="long-native mainnet root for cycle/input freshness ('' to skip)",
+        "--long-rule-file",
+        default=str(_REPO_ROOT / "configs" / "long_native_v12.json"),
+        help="registered LONG rule consumed by the Rust worker",
+    )
+    p.add_argument(
+        "--carry-config-file",
+        default=str(_REPO_ROOT / "configs" / "lane2_carry_hold_v7.json"),
+        help="registered CARRY rule consumed by the Rust worker",
+    )
+    p.add_argument(
+        "--operational-config-file",
+        default=os.environ.get("OPERATIONAL_PROFILE_FILE") or "",
+        help="installed operational profile consumed by the Rust worker",
+    )
+    p.add_argument(
+        "--worker-engine-config-file",
+        default=os.environ.get("ENGINE_CONFIG_FILE") or "",
+        help="installed engine config whose native strategy slots route worker output",
+    )
+    p.add_argument(
+        "--candidate-universe-file",
+        default=os.environ.get("CANDIDATE_UNIVERSE_FILE") or "",
+        help="reviewed realm-specific candidate universe consumed by the Rust worker",
     )
     p.add_argument(
         "--max-account-health-age-min",
@@ -1482,8 +1353,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--engine-heartbeat-file",
         default=os.environ.get("LIVENESS_ENGINE_HEARTBEAT_FILE") or "",
         help=(
-            "the engine's heartbeat file; alerts when it stops being written, cannot be read, or says "
-            "the engine has latched itself out of opening positions ('' to skip). Defaults to the "
+            "the engine's heartbeat file; alerts when it stops being written, cannot be read, names "
+            "a strategy fault, or says the engine has latched itself out of opening positions ('' to skip). Defaults to the "
             "LIVENESS_ENGINE_HEARTBEAT_FILE env var so a unit can wire it via EnvironmentFile"
         ),
     )
@@ -1594,10 +1465,26 @@ def main() -> int:
             ]
         )
     )
-    long_root = Path(args.long_root) if str(args.long_root).strip() else None
-    carry_root = Path(args.carry_root) if str(args.carry_root).strip() else None
-    carry_mainnet_root = Path(args.carry_mainnet_root) if str(args.carry_mainnet_root).strip() else None
-    long_mainnet_root = Path(args.long_mainnet_root) if str(args.long_mainnet_root).strip() else None
+    scope = args.account_scope
+    signal_worker = _MAINNET_SIGNAL_WORKER if mainnet else _DEMO_SIGNAL_WORKER
+    signal_heartbeat = Path(
+        args.signal_worker_heartbeat_file or _manifest_signal_heartbeat(scope)
+    )
+    signal_config = Path(
+        args.signal_config_file
+        or _REPO_ROOT / "configs" / f"signal-worker.{scope}.json"
+    )
+    required_worker_inputs = {
+        "operational config": args.operational_config_file,
+        "engine config": args.worker_engine_config_file,
+        "candidate universe": args.candidate_universe_file,
+    }
+    # Missing bindings become one actionable heartbeat alert below. A watchdog
+    # never crashes and silently stops paging because its own config is bad.
+    worker_input_paths = {
+        label: Path(value) if str(value).strip() else Path(f"/missing/{label.replace(' ', '-')}")
+        for label, value in required_worker_inputs.items()
+    }
     # Repo-data anchoring for both scopes, so no sleeve root is recreated just
     # to hold this file. The two scopes share no alert keys, so they keep
     # separate file names.
@@ -1613,8 +1500,6 @@ def main() -> int:
         k[len(_PENDING_SERVICE_PREFIX) :] for k in state if k.startswith(_PENDING_SERVICE_PREFIX)
     }
 
-    # Disabled sleeves skip cycle checks but keep every other check: turning a
-    # sleeve off does not flatten it.
     unit_states = _unit_states(units)
     runtime_units = list(dict.fromkeys([*units, *_default_units_for_scope(args.account_scope)]))
     unit_runtime = _unit_runtime_metadata(runtime_units)
@@ -1641,46 +1526,22 @@ def main() -> int:
             required_units=required_account_owner_units,
         )
     )
-    if not mainnet and long_root is not None:
-        alerts.extend(
-            gather_long_alerts(
-                long_root=long_root,
-                args=args,
-                cycle_checks=_sleeve_on("LONG_SLEEVE"),
-                environment="demo",
-                unit_runtime=unit_runtime.get(_LONG_DEMO_UNIT),
-            )
+    alerts.extend(
+        gather_signal_worker_alerts(
+            heartbeat_path=signal_heartbeat,
+            signal_config=signal_config,
+            long_rule=Path(args.long_rule_file),
+            carry_config=Path(args.carry_config_file),
+            operational_config=worker_input_paths["operational config"],
+            engine_config=worker_input_paths["engine config"],
+            universe=worker_input_paths["candidate universe"],
+            runtime=unit_runtime.get(signal_worker.unit),
+            now_ms=now_ms,
+            max_age_seconds=args.max_signal_heartbeat_age_sec,
+            startup_grace_minutes=args.max_signal_startup_min,
+            label=signal_worker.unit,
         )
-    if not mainnet and carry_root is not None:
-        alerts.extend(
-            gather_carry_alerts(
-                carry_root=carry_root,
-                args=args,
-                cycle_checks=_sleeve_on("CARRY_SLEEVE"),
-                environment="demo",
-                unit_runtime=unit_runtime.get(_CARRY_DEMO_UNIT),
-            )
-        )
-    if mainnet and carry_mainnet_root is not None:
-        alerts.extend(
-            gather_carry_alerts(
-                carry_root=carry_mainnet_root,
-                args=args,
-                cycles_dataset="carry_hold_mainnet_cycles",
-                environment="mainnet",
-                unit_runtime=unit_runtime.get(_CARRY_MAINNET_UNIT),
-            )
-        )
-    if mainnet and long_mainnet_root is not None:
-        alerts.extend(
-            gather_long_alerts(
-                long_root=long_mainnet_root,
-                args=args,
-                cycles_dataset="long_native_mainnet_cycles",
-                environment="mainnet",
-                unit_runtime=unit_runtime.get(_LONG_MAINNET_UNIT),
-            )
-        )
+    )
     disk_alert = evaluate_disk_space(path=str(_REPO_ROOT))
     if disk_alert is not None:
         alerts.append(disk_alert)

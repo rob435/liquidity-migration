@@ -91,11 +91,16 @@ pub struct EngineSection {
     /// position rows and any mismatch alarms and evicts the trust.
     #[serde(default)]
     pub leverage_authority: LeverageAuthority,
-    /// Where the research system writes its target book. Left out means no
-    /// watcher is started at all — which is *no decision*, not an empty book:
-    /// a follower plug holds whatever it holds.
+    /// Directory containing immutable ordered signal-observation envelopes.
+    /// Strategies that declare an external signal dependency refuse to boot
+    /// when this is absent.
     #[serde(default)]
-    pub target_book_path: Option<PathBuf>,
+    pub signal_spool_path: Option<PathBuf>,
+    /// Directory containing immutable live operator command envelopes. When
+    /// absent, the engine runs normally but cannot be paused, resumed, or
+    /// flattened without a controlled restart.
+    #[serde(default)]
+    pub control_spool_path: Option<PathBuf>,
     /// Where to write the heartbeat file — one line saying how this engine
     /// is, for something outside the process to read. Left out means none is
     /// written and nothing is said about it: an engine nobody asked to report
@@ -126,13 +131,6 @@ pub struct StrategyConfig {
     /// is named after its sleeve — and is not, when two blocks run one plug.
     #[serde(default)]
     pub sleeve: Option<String>,
-    /// Where the producer writes this strategy's target book.
-    ///
-    /// Books are routed, not broadcast: this one reaches this strategy and no
-    /// other. Two sleeves on one account each name their own file, which is
-    /// the only thing that keeps them from acting on each other's decisions.
-    #[serde(default)]
-    pub book_path: Option<PathBuf>,
     /// Everything else in the block, handed to the strategy as written.
     #[serde(flatten)]
     pub params: toml::Table,
@@ -263,10 +261,6 @@ symbols = ["BTCUSDT"]
             "a config written before the key existed still means the demo venue"
         );
         assert_eq!(
-            cfg.engine.target_book_path, None,
-            "no path means no watcher, which is no decision"
-        );
-        assert_eq!(
             cfg.engine.heartbeat_path, None,
             "no path means no heartbeat is written and nothing is said about it"
         );
@@ -304,6 +298,16 @@ symbols = ["BTCUSDT"]
     }
 
     #[test]
+    fn retired_target_book_watcher_config_is_rejected() {
+        let stale = SAMPLE.replace(
+            "wal_path = \"engine.wal\"",
+            "wal_path = \"engine.wal\"\ntarget_book_path = \"targets.json\"",
+        );
+        let error = toml::from_str::<Config>(&stale).expect_err("watcher field must stay retired");
+        assert!(error.to_string().contains("target_book_path"), "{error}");
+    }
+
+    #[test]
     fn group_flush_cannot_stall_control_work() {
         for bad in [0, MAX_GROUP_FLUSH_MS + 1, u64::MAX] {
             let src = SAMPLE.replace(
@@ -313,19 +317,6 @@ symbols = ["BTCUSDT"]
             let cfg: Config = toml::from_str(&src).unwrap();
             assert!(validate(&cfg).is_err(), "accepted {bad} ms");
         }
-    }
-
-    #[test]
-    fn a_named_target_book_path_is_read_as_written() {
-        let src = SAMPLE.replace(
-            "wal_path = \"engine.wal\"",
-            "wal_path = \"engine.wal\"\ntarget_book_path = \"var/targets/carry.json\"",
-        );
-        let cfg: Config = toml::from_str(&src).unwrap();
-        assert_eq!(
-            cfg.engine.target_book_path,
-            Some(PathBuf::from("var/targets/carry.json"))
-        );
     }
 
     #[test]

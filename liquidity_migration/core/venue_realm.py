@@ -1,9 +1,4 @@
-"""Which Bybit public-data realm a producer addresses: ``demo`` or ``mainnet``.
-
-Distinct from ``ExecutionEnvironment``, which names the Rust owner process a
-producer publishes to. Python uses this module only to bind public market data
-and candidate-universe artifacts to an explicit venue endpoint.
-"""
+"""Which Bybit public-data realm Python research addresses."""
 
 from __future__ import annotations
 

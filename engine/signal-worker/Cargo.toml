@@ -1,0 +1,30 @@
+[package]
+name = "signal-worker"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[lib]
+name = "signal_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "signal-worker"
+path = "src/main.rs"
+
+[dependencies]
+bytes = "1.12.1"
+engine-types = { path = "../engine-types" }
+engine-strategies = { path = "../engine-strategies" }
+getrandom = "0.4.3"
+hex = "0.4.3"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.0", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27.9", default-features = false, features = ["webpki-roots", "http1", "ring"] }
+hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync", "signal"] }
+toml = "1.1.4"

@@ -8,6 +8,7 @@ members = [
     "engine-risk",
     "engine-strategies",
     "engine-core",
+    "signal-worker",
 ]
 
 [workspace.package]

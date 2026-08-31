@@ -121,6 +121,16 @@ fn previous_log() -> Vec<WalRecord> {
             strategies: vec!["buyer".to_string()],
             symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
         },
+        WalRecord::StrategyCheckpoint {
+            wall_ts_ms: recent_replay_ms(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            checkpoint: StrategyCheckpoint {
+                schema_version: 3,
+                decision_fingerprint: "touch-v3".to_string(),
+                payload: br#"{"phase":"done"}"#.to_vec(),
+            },
+        },
         WalRecord::ControlAnchor {
             source: "risk".to_string(),
             state: "anchor-1".to_string(),
@@ -188,6 +198,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
         attribution,
         logged_exposure,
         intended_stops,
+        strategy_checkpoints,
         open_orders,
         ..
     } = &base
@@ -221,6 +232,14 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
         .map(|row| (row.symbol.0, row.trigger_px))
         .collect();
     assert_eq!(stops, vec![(0, STOP_BTC), (1, STOP_ETH)]);
+    assert_eq!(strategy_checkpoints.len(), 1);
+    assert_eq!(strategy_checkpoints[0].strategy, StrategyId(0));
+    assert_eq!(strategy_checkpoints[0].symbol, SymbolId(0));
+    assert_eq!(strategy_checkpoints[0].checkpoint.schema_version, 3);
+    assert_eq!(
+        strategy_checkpoints[0].checkpoint.decision_fingerprint,
+        "touch-v3"
+    );
     assert_eq!(open_orders.len(), 1, "only eng-b is still out there");
     assert_eq!(open_orders[0].request.client_order_id, "eng-b");
     assert_eq!(

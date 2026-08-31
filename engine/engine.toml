@@ -63,17 +63,6 @@ group_flush_ms = 250
 # this number). The risk kernel's own staleness bound is the separate
 # [risk] max_account_view_age_s below — tighten that one for protection.
 account_view_max_age_ms = 5000
-# Where the research system writes its target book. Left out, as it is here,
-# means no watcher runs at all — which is "no decision", not an empty book: a
-# follower plug holds whatever it holds.
-#
-# This line only works when exactly one strategy follows books, because it does
-# not say which one it belongs to. An account running two sleeves puts the path
-# in the strategy block instead (`book_path = "..."`), and then each book
-# reaches its own sleeve and no other. That routing is what stops two followers
-# on one account from acting on each other's decisions — the venue keeps one
-# position per symbol and no note of who asked for it.
-# target_book_path = "var/targets/carry.json"
 # Where to write the heartbeat file: one line of JSON, rewritten every few
 # seconds, saying when it was written, whose account it is on,
 # whether it is still allowed to open positions, and what it has seen and sent.
@@ -87,8 +76,8 @@ account_view_max_age_ms = 5000
 # The two capital controls. Nothing here has a default: every number is
 # written down, and what each one means is in engine-risk/PORT_NOTES.md.
 #
-# THE OTHER WAY. Instead of writing the caps out, point at the profile
-# document the Python fleet already reads, and the caps come from it:
+# THE OTHER WAY. Instead of writing the caps out, point at the shared
+# operational profile, and the caps come from it:
 #
 #   [risk]
 #   operational_profile_path = "configs/operational.mainnet.json"
@@ -120,23 +109,12 @@ disaster_stop_fraction = 0.35
 # with it, so this file is at the same 100 USDT test scale as the rest.
 #
 # A second account-wide gross ceiling, at or below reference x
-# gross_notional_multiple. Both Python profiles ship it equal to that cap, so it
-# is equal here too and the envelope allowance is what binds.
+# gross_notional_multiple. Registered operational profiles set it equal to that
+# cap, so the envelope allowance is what binds.
 max_component_gross_notional_usdt = 200.0
-# Most margin the whole book may commit. Both Python profiles set this to the
-# reference exactly.
+# Most margin the whole portfolio may commit. Registered operational profiles
+# set this to the reference exactly.
 max_initial_margin_usdt = 100.0
 
-# One block per strategy — the plug seam. `name` and `sleeve` are the engine's:
-# `sleeve` is what the log, the heartbeat and the cost report call this block,
-# and defaults to `name`. Every other key belongs to the strategy and is handed
-# over as written.
-[[strategy]]
-name = "touch_sniper"
-symbol = "BTCUSDT"
-side = "buy"
-trigger_px = 60000.0
-qty = 0.001
-stop_px = 59000.0
-take_px = 61000.0
-ttl_s = 3600
+# Strategy blocks are rendered from registered rule files for deployed runs.
+# See the demo and mainnet templates under `deploy/`.

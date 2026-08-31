@@ -1,20 +1,20 @@
 //! The plugs: strategies the engine loads by name.
 //!
-//! This crate is the seam between the two halves of the repository. The
-//! research system (Python) decides what to trade and writes it down as a
-//! small config block; the engine core reads that file and hands each block
-//! here. Nothing else crosses the wall — no research code runs in the engine,
-//! and no plug reaches back for data, a clock, or a socket. A plug sees only
-//! the events it is handed and the context it is given.
+//! The credential-free Rust signal worker supplies normalized public
+//! observations. The engine journals them, then native LONG and CARRY plugs
+//! run typed pure reducers; native Exodus consumes CARRY's durable internal
+//! events. Offline research supplies rules and replay fixtures only. Plugs do
+//! not reach out for data, a clock, or a socket: they translate engine events
+//! and context into reducer input and apply the reducer's ordered effects.
 
+pub mod native_carry;
+pub mod native_common;
+pub mod native_config;
+pub mod native_exodus;
+pub mod native_long;
 mod params;
+pub mod position_plan;
 pub mod quoter;
-pub mod target_book;
-/// A copy-me starting point. Compiled and tested with the rest so it cannot
-/// rot, and deliberately absent from [`PLUGS`] so no config can
-/// run it by accident.
-pub mod template;
-mod touch_sniper;
 
 #[cfg(test)]
 mod mock_ctx;
@@ -25,9 +25,6 @@ use std::fmt;
 
 use engine_types::{Strategy, StrategyId};
 
-pub use target_book::TargetBookFollower;
-pub use touch_sniper::TouchSniper;
-
 /// How one plug is built from its id and its parameter table.
 type Builder = fn(StrategyId, &toml::Value) -> Result<Box<dyn Strategy>, BuildError>;
 
@@ -37,14 +34,23 @@ type Builder = fn(StrategyId, &toml::Value) -> Result<Box<dyn Strategy>, BuildEr
 /// one fact in one place, so a plug is added in one line and cannot be half
 /// added.
 const PLUGS: &[(&str, Builder)] = &[
-    (target_book::follower::NAME, |id, params| {
-        Ok(Box::new(TargetBookFollower::from_params(id, params)?))
+    (native_carry::plug::NAME, |id, params| {
+        Ok(Box::new(native_carry::plug::NativeCarry::from_params(
+            id, params,
+        )?))
+    }),
+    (native_long::plug::NAME, |id, params| {
+        Ok(Box::new(native_long::plug::NativeLong::from_params(
+            id, params,
+        )?))
+    }),
+    (native_exodus::plug::NAME, |id, params| {
+        Ok(Box::new(native_exodus::plug::NativeExodus::from_params(
+            id, params,
+        )?))
     }),
     (quoter::plug::NAME, |id, params| {
         Ok(Box::new(quoter::Quoter::from_params(id, params)?))
-    }),
-    (touch_sniper::NAME, |id, params| {
-        Ok(Box::new(TouchSniper::from_params(id, params)?))
     }),
 ];
 
@@ -76,7 +82,7 @@ pub enum BuildError {
         detail: String,
     },
     /// A key the strategy does not read — a typo would otherwise silently
-    /// change behavior (a misspelled take_px means "no profit level").
+    /// change behavior.
     UnknownParam {
         strategy: &'static str,
         param: String,
@@ -130,31 +136,8 @@ impl std::error::Error for BuildError {}
 /// config order; every intent the plug emits carries it, which is how the log
 /// says whose position is whose.
 ///
-/// The research system emits flat blocks in this shape. The engine core keeps
-/// `name`, `sleeve` and `book_path` for itself and hands everything else to
-/// this function as the parameter table:
-///
-/// ```toml
-/// [[strategy]]
-/// name = "touch_sniper"
-/// symbol = "BTCUSDT"      # venue symbol
-/// side = "buy"            # "buy" or "sell"
-/// trigger_px = 61000.0    # the level to watch
-/// qty = 0.01              # size in base units
-/// stop_px = 60500.0       # required: an entry always carries a stop
-/// take_px = 61800.0       # optional: leave here for a profit
-/// ttl_s = 900             # optional: leave anyway after this long
-/// ```
-///
-/// The follower's block is shorter, because everything it trades comes from
-/// the book rather than from config. `symbols` is its universe, and the
-/// engine collects it once at boot:
-///
-/// ```toml
-/// [[strategy]]
-/// name = "target_book"
-/// symbols = ["KAITOUSDT", "COTIUSDT"]
-/// ```
+/// Engine configuration keeps `name` and `sleeve`; the remaining strict
+/// parameter table is handed to the selected plug.
 pub fn build_strategy(
     name: &str,
     strategy_id: StrategyId,

@@ -1,0 +1,45 @@
+{
+  "base_ts_ms": 1735689600000,
+  "days": 40,
+  "decision_ts_ms": 1739145600000,
+  "rows": [
+    {
+      "symbol": "AAAUSDT",
+      "bar_ts_ms": 1739145600000,
+      "by_close": 104.67110947230451,
+      "by_turnover_quote": 1391.0,
+      "by_funding": -0.0017716735086019872,
+      "by_funding_age_h": 0.0,
+      "adv24": 28692.0,
+      "trail_fund_24h": -0.005362995839966134,
+      "momentum": 0.005701865676265072,
+      "ret_3d": -0.001114166024568597,
+      "vol_30d_daily": 0.002115913213419855,
+      "dtrail_2d": -0.0003551030116835611,
+      "crowd_persistence": 1.0,
+      "turn_growth_3d": 0.0,
+      "d_tt_ls_3d": 0.018497706009564352,
+      "adv_rank": 2,
+      "in_universe": true
+    },
+    {
+      "symbol": "BBBUSDT",
+      "bar_ts_ms": 1739145600000,
+      "by_close": 211.19628814355428,
+      "by_turnover_quote": 2391.0,
+      "by_funding": -0.001539705525029332,
+      "by_funding_age_h": 0.0,
+      "adv24": 52692.0,
+      "trail_fund_24h": -0.0047900650399779355,
+      "momentum": 0.006481812032266054,
+      "ret_3d": -0.0019644508276925876,
+      "vol_30d_daily": 0.002821901002801816,
+      "dtrail_2d": 0.0005973319588224064,
+      "crowd_persistence": 1.0,
+      "turn_growth_3d": 0.0,
+      "d_tt_ls_3d": 0.00573738919819089,
+      "adv_rank": 1,
+      "in_universe": true
+    }
+  ]
+}

@@ -10,7 +10,6 @@ import dataclasses
 
 import pytest
 
-from liquidity_migration.rules.long_identity import LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID
 from liquidity_migration.rules.long_native import (
     LongNativeConfig,
     long_v11a_profile,
@@ -23,7 +22,6 @@ def test_active_profile_has_no_legacy_strategy_switches() -> None:
     field_names = {field.name for field in dataclasses.fields(LongNativeConfig)}
     assert field_names == {
         "execution_strategy_id",
-        "execution_leverage",
         "start_date",
         "end_date",
         "universe_size",
@@ -38,7 +36,6 @@ def test_active_profile_has_no_legacy_strategy_switches() -> None:
         "fc_max_hold_days",
         "fc_max_atr_pct",
         "fc_atr_stop_mult",
-        "fc_atr_tp_mult",
         "fc_sigma_mult",
         "fc_sniper_retrace_pct",
         "fc_sniper_deadline_hours",
@@ -51,7 +48,6 @@ def test_active_profile_has_no_legacy_strategy_switches() -> None:
         "cooldown_days",
         "entry_delay_hours",
         "gross_exposure",
-        "notional_multiplier",
         "vol_estimate_window_days",
         "vol_floor_annual",
         "max_position_weight",
@@ -72,15 +68,3 @@ def test_resolve_long_strategy_profile_maps_registered_names() -> None:
     for invalid in ("", "v13", "wide", None):
         with pytest.raises(ValueError, match="unknown LONG strategy profile"):
             resolve_long_strategy_profile(invalid)  # type: ignore[arg-type]
-
-
-def test_long_profile_display_names_stay_pinned_to_identities() -> None:
-    from liquidity_migration.rules.long_identity import (
-        LONG_V12_WIDE_STOP_STRATEGY_ID,
-        long_profile_display_name,
-    )
-
-    assert long_profile_display_name(LONG_V11A_DIV_WEEKEND_VOL_STRATEGY_ID) == "LongV11aDivWeekendVol"
-    assert long_profile_display_name(LONG_V12_WIDE_STOP_STRATEGY_ID) == "LongV12WideStop"
-    with pytest.raises(ValueError, match="unsupported LONG strategy id"):
-        long_profile_display_name("long_native_v9_retired")

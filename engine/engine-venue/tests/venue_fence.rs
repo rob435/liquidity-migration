@@ -592,7 +592,7 @@ fn no_two_realms_anywhere_share_a_credential_variable() {
         }
     }
 
-    // Bybit's four are the Python fleet's, and the fleet still reads them.
+    // Python account-reconciliation tools read the same four Bybit names.
     use engine_venue::VenueRealm;
     assert_eq!(
         VenueRealm::Demo.credential_vars(),

@@ -551,6 +551,15 @@ fn a_barrier_after_a_rotation_covers_the_new_segment() {
         intended_stops: Vec::new(),
         recent_execution_ids: Vec::new(),
         execution_history_through_ms: Some(1_770_000_000_000),
+        target_book_latches: Vec::new(),
+        strategy_checkpoints: Vec::new(),
+        strategy_global_checkpoints: Vec::new(),
+        strategy_events: Vec::new(),
+        signal_observations: Vec::new(),
+        signal_cursors: Vec::new(),
+        signal_subscriptions: Vec::new(),
+        runtime_control_requests: Vec::new(),
+        runtime_control_consumed: Vec::new(),
         open_orders: Vec::new(),
     };
     assert!(wal.rotate(&base).unwrap(), "the file-backed log rotates");

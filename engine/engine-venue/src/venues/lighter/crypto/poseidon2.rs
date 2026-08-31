@@ -232,4 +232,3 @@ mod tests {
         assert_ne!(out[8..12], out[4..8]);
     }
 }
-

@@ -16,7 +16,7 @@ from liquidity_migration.policy.systemd_environment import parse_systemd_environ
 
 REPO = Path(__file__).resolve().parents[2]
 CREDENTIAL_TEMPLATE = REPO / "deploy" / "bybit-mainnet.env.template"
-PRODUCER_TEMPLATE = REPO / "deploy" / "producer-mainnet-source.env.template"
+SIGNAL_TEMPLATE = REPO / "deploy" / "signal-worker-mainnet.env.template"
 
 
 def _private_file(path: Path, body: bytes | str) -> Path:
@@ -46,12 +46,12 @@ def _credential(tmp_path: Path, **overrides: str) -> Path:
     )
 
 
-def _producer_source(tmp_path: Path, profile: Path, *, realm: str = "mainnet") -> Path:
+def _signal_source(tmp_path: Path, profile: Path, *, realm: str = "mainnet") -> Path:
     candidate = _private_file(tmp_path / "candidate.json", "{}\n")
     return _private_file(
-        tmp_path / "producer-mainnet-source.env",
+        tmp_path / "signal-worker-mainnet-source.env",
         (
-            f"PRODUCER_REALM={realm}\n"
+            f"SIGNAL_WORKER_REALM={realm}\n"
             f"CANDIDATE_UNIVERSE_FILE={candidate.as_posix()}\n"
             f"OPERATIONAL_PROFILE_FILE={profile.as_posix()}\n"
         ),
@@ -68,18 +68,18 @@ def test_templates_are_strict_and_ship_disarmed_without_secrets() -> None:
     credentials = parse_systemd_environment_bytes(
         CREDENTIAL_TEMPLATE.read_bytes(), label=str(CREDENTIAL_TEMPLATE)
     )
-    producer = parse_systemd_environment_bytes(
-        PRODUCER_TEMPLATE.read_bytes(), label=str(PRODUCER_TEMPLATE)
+    signal = parse_systemd_environment_bytes(
+        SIGNAL_TEMPLATE.read_bytes(), label=str(SIGNAL_TEMPLATE)
     )
     assert credentials["REAL_MONEY"] == "false"
     assert credentials["BYBIT_REAL_API_KEY"] == ""
     assert credentials["BYBIT_REAL_API_SECRET"] == ""
-    assert producer["PRODUCER_REALM"] == "mainnet"
+    assert signal["SIGNAL_WORKER_REALM"] == "mainnet"
     assert {
         "CANDIDATE_UNIVERSE_FILE",
         "OPERATIONAL_PROFILE_FILE",
-    } <= producer.keys()
-    keys = "\n".join(producer)
+    } <= signal.keys()
+    keys = "\n".join(signal)
     assert "ACCOUNT_EXECUTION" not in keys
     assert "ACCOUNT_INTENT" not in keys
 
@@ -99,13 +99,13 @@ def test_profile_dials_are_parsed_and_proved() -> None:
         render_real_money_profile(RealMoneyDials(carry_stop_loss_fraction=1.0))
 
 
-def test_preflight_accepts_exact_profile_and_neutral_producer_inputs(tmp_path: Path) -> None:
+def test_preflight_accepts_exact_profile_and_neutral_signal_inputs(tmp_path: Path) -> None:
     credential = _credential(tmp_path)
     rendered, _profile = render_real_money_profile()
     profile = _private_file(tmp_path / "profile.json", rendered)
-    producer = _producer_source(tmp_path, profile)
+    signal = _signal_source(tmp_path, profile)
 
-    rows = preflight(credential_env=credential, producer_env=producer)
+    rows = preflight(credential_env=credential, signal_env=signal)
 
     assert rows
     assert all(row.ok for row in rows), [row.render() for row in rows]
@@ -116,9 +116,9 @@ def test_preflight_accepts_a_distinct_backup_execution_ip(tmp_path: Path) -> Non
     credential = _credential(tmp_path, BYBIT_REAL_API_KEY_BACKUP_IP="198.51.100.2")
     rendered, _profile = render_real_money_profile()
     profile = _private_file(tmp_path / "profile.json", rendered)
-    producer = _producer_source(tmp_path, profile)
+    signal = _signal_source(tmp_path, profile)
 
-    rows = preflight(credential_env=credential, producer_env=producer)
+    rows = preflight(credential_env=credential, signal_env=signal)
 
     assert all(row.ok for row in rows), [row.render() for row in rows]
 
@@ -126,13 +126,13 @@ def test_preflight_accepts_a_distinct_backup_execution_ip(tmp_path: Path) -> Non
 def test_preflight_rejects_wrong_realm_missing_input_and_profile_drift(tmp_path: Path) -> None:
     credential = _credential(tmp_path)
     profile = _private_file(tmp_path / "profile.json", "{}\n")
-    producer = _producer_source(tmp_path, profile, realm="demo")
+    signal = _signal_source(tmp_path, profile, realm="demo")
     (tmp_path / "candidate.json").unlink()
 
-    rows = preflight(credential_env=credential, producer_env=producer)
+    rows = preflight(credential_env=credential, signal_env=signal)
 
     failed = {row.name for row in rows if not row.ok}
-    assert {"PRODUCER_REALM", "CANDIDATE_UNIVERSE_FILE", "profile matches dials"} <= failed
+    assert {"SIGNAL_WORKER_REALM", "CANDIDATE_UNIVERSE_FILE", "profile matches dials"} <= failed
 
 
 @pytest.mark.parametrize("bad_ip", ("", "*", "0.0.0.0", "127.0.0.1", "203.0.113.0/24"))
@@ -142,9 +142,9 @@ def test_preflight_rejects_missing_wildcard_or_non_host_ip(
     credential = _credential(tmp_path, BYBIT_REAL_API_KEY_IP=bad_ip)
     rendered, _profile = render_real_money_profile()
     profile = _private_file(tmp_path / "profile.json", rendered)
-    producer = _producer_source(tmp_path, profile)
+    signal = _signal_source(tmp_path, profile)
 
-    rows = preflight(credential_env=credential, producer_env=producer)
+    rows = preflight(credential_env=credential, signal_env=signal)
 
     assert not next(row for row in rows if row.name == "BYBIT_REAL_API_KEY_IP").ok
 
@@ -154,9 +154,9 @@ def test_preflight_rejects_unsafe_backup_ip(tmp_path: Path, bad_ip: str) -> None
     credential = _credential(tmp_path, BYBIT_REAL_API_KEY_BACKUP_IP=bad_ip)
     rendered, _profile = render_real_money_profile()
     profile = _private_file(tmp_path / "profile.json", rendered)
-    producer = _producer_source(tmp_path, profile)
+    signal = _signal_source(tmp_path, profile)
 
-    rows = preflight(credential_env=credential, producer_env=producer)
+    rows = preflight(credential_env=credential, signal_env=signal)
 
     assert not next(
         row for row in rows if row.name == "BYBIT_REAL_API_KEY_BACKUP_IP"
@@ -167,9 +167,9 @@ def test_preflight_rejects_backup_ip_that_duplicates_primary(tmp_path: Path) -> 
     credential = _credential(tmp_path, BYBIT_REAL_API_KEY_BACKUP_IP="203.0.113.7")
     rendered, _profile = render_real_money_profile()
     profile = _private_file(tmp_path / "profile.json", rendered)
-    producer = _producer_source(tmp_path, profile)
+    signal = _signal_source(tmp_path, profile)
 
-    rows = preflight(credential_env=credential, producer_env=producer)
+    rows = preflight(credential_env=credential, signal_env=signal)
 
     assert not next(
         row for row in rows if row.name == "BYBIT_REAL_API_KEY_BACKUP_IP"
@@ -184,8 +184,8 @@ def test_preflight_json_is_machine_readable(
             "preflight",
             "--credential-env",
             str(tmp_path / "missing-credential"),
-            "--producer-env",
-            str(tmp_path / "missing-producer"),
+            "--signal-env",
+            str(tmp_path / "missing-signal"),
             "--json",
         ]
     )

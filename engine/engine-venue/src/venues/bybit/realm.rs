@@ -7,7 +7,8 @@
 //! a single place to read it.
 //!
 //! The arming and credential rules live entirely in this Rust engine. Python's
-//! `liquidity_migration/core/venue_realm.py` names public-data endpoints only:
+//! `liquidity_migration/core/venue_realm.py` is research-only public endpoint
+//! metadata:
 //!
 //! - **A realm is always named.** There is no default. A config that does not
 //!   say which account it trades does not get one picked for it.

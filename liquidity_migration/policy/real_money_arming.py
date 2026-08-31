@@ -25,12 +25,12 @@ from liquidity_migration.policy.systemd_environment import parse_systemd_environ
 __all__ = ["CheckResult", "preflight", "main"]
 
 MAINNET_CREDENTIAL_ENV = Path("/etc/liquidity-migration/bybit-mainnet.env")
-MAINNET_PRODUCER_SOURCE_ENV = Path(
-    "/etc/liquidity-migration/producer-mainnet-source.env"
+MAINNET_SIGNAL_SOURCE_ENV = Path(
+    "/etc/liquidity-migration/signal-worker-mainnet-source.env"
 )
 
 _CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
-_PRODUCER_PATH_KEYS = (
+_SIGNAL_PATH_KEYS = (
     "CANDIDATE_UNIVERSE_FILE",
     "OPERATIONAL_PROFILE_FILE",
 )
@@ -234,18 +234,18 @@ def _installed_profile_matches_dials(
     )
 
 
-def _producer_checks(values: Mapping[str, str]) -> list[CheckResult]:
+def _signal_checks(values: Mapping[str, str]) -> list[CheckResult]:
     results: list[CheckResult] = []
-    realm = values.get("PRODUCER_REALM", "").strip()
+    realm = values.get("SIGNAL_WORKER_REALM", "").strip()
     results.append(
         CheckResult(
-            "PRODUCER_REALM",
+            "SIGNAL_WORKER_REALM",
             realm == "mainnet",
             f"is {realm!r}",
-            "set PRODUCER_REALM=mainnet" if realm != "mainnet" else "",
+            "set SIGNAL_WORKER_REALM=mainnet" if realm != "mainnet" else "",
         )
     )
-    for key in _PRODUCER_PATH_KEYS:
+    for key in _SIGNAL_PATH_KEYS:
         raw = values.get(key, "").strip()
         path = Path(raw) if raw else None
         valid = bool(path and path.is_absolute() and path.is_file() and not path.is_symlink())
@@ -263,7 +263,7 @@ def _producer_checks(values: Mapping[str, str]) -> list[CheckResult]:
 def preflight(
     *,
     credential_env: Path = MAINNET_CREDENTIAL_ENV,
-    producer_env: Path = MAINNET_PRODUCER_SOURCE_ENV,
+    signal_env: Path = MAINNET_SIGNAL_SOURCE_ENV,
 ) -> list[CheckResult]:
     """Read every funded-engine arming input and report all failures."""
 
@@ -274,11 +274,11 @@ def preflight(
         results.extend(_credential_checks(credentials))
         results.extend(_dial_checks(credentials))
 
-    producer, producer_result = _read_environment(producer_env)
-    results.append(producer_result)
-    if producer is not None:
-        results.extend(_producer_checks(producer))
-        installed_profile = producer.get("OPERATIONAL_PROFILE_FILE", "").strip()
+    signal, signal_result = _read_environment(signal_env)
+    results.append(signal_result)
+    if signal is not None:
+        results.extend(_signal_checks(signal))
+        installed_profile = signal.get("OPERATIONAL_PROFILE_FILE", "").strip()
         if credentials is not None and installed_profile:
             results.append(
                 _installed_profile_matches_dials(
@@ -402,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
 
     check = subparsers.add_parser("preflight", help="Report every arming input")
     check.add_argument("--credential-env", default=str(MAINNET_CREDENTIAL_ENV))
-    check.add_argument("--producer-env", default=str(MAINNET_PRODUCER_SOURCE_ENV))
+    check.add_argument("--signal-env", default=str(MAINNET_SIGNAL_SOURCE_ENV))
     check.add_argument("--json", action="store_true")
 
     render = subparsers.add_parser("render-profile", help="Render the operational profile")
@@ -436,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
 
     results = preflight(
         credential_env=Path(args.credential_env),
-        producer_env=Path(args.producer_env),
+        signal_env=Path(args.signal_env),
     )
     if args.json:
         print(json.dumps([asdict(row) for row in results], indent=2))

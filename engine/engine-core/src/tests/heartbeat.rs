@@ -120,6 +120,29 @@ impl Strategy for BlockedStrategy {
     }
 }
 
+struct BrokenStrategy;
+
+impl Strategy for BrokenStrategy {
+    fn name(&self) -> &str {
+        "broken_test"
+    }
+
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: "BTCUSDT".to_string(),
+            feed: Feed::Quote,
+        }]
+    }
+
+    fn entry_blockers(&self) -> Vec<(String, String)> {
+        vec![("BTCUSDT".to_string(), "outside entry window".to_string())]
+    }
+
+    fn health_error(&self) -> Option<&str> {
+        Some("decision contract mismatch")
+    }
+}
+
 #[test]
 fn blockers_are_deduplicated_per_configured_strategy_and_symbol() {
     let strategies: Vec<Box<dyn Strategy>> = vec![
@@ -133,10 +156,7 @@ fn blockers_are_deduplicated_per_configured_strategy_and_symbol() {
             rows: vec![("BTCUSDT".to_string(), "carry_skip".to_string())],
         }),
     ];
-    let configured = vec![
-        "target_book_long".to_string(),
-        "target_book_carry".to_string(),
-    ];
+    let configured = vec!["long".to_string(), "carry".to_string()];
 
     let rows = crate::engine::named_entry_blockers(&strategies, &configured);
 
@@ -144,16 +164,54 @@ fn blockers_are_deduplicated_per_configured_strategy_and_symbol() {
         rows,
         vec![
             (
-                "target_book_carry".to_string(),
+                "carry".to_string(),
                 "BTCUSDT".to_string(),
                 "carry_skip".to_string(),
             ),
             (
-                "target_book_long".to_string(),
+                "long".to_string(),
                 "BTCUSDT".to_string(),
                 "kernel_refusal".to_string(),
             ),
         ]
+    );
+}
+
+#[tokio::test]
+async fn strategy_faults_have_their_own_heartbeat_field() {
+    let path = temp_path("heartbeat-strategy-error");
+    let (mut engine, _h) = build_with(
+        &quick_tick(),
+        allow_all(),
+        vec![Box::new(BrokenStrategy)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+    )
+    .await;
+    engine.write_heartbeat(every_tick(path.path()));
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(40)),
+        )
+        .await
+        .unwrap();
+
+    let fields = heartbeat_at(path.path());
+    assert_eq!(
+        fields["strategy_errors"],
+        serde_json::json!([{
+            "strategy": "broken_test",
+            "error": "decision contract mismatch",
+        }])
+    );
+    assert_eq!(fields["entry_blockers"][0]["symbol"], "BTCUSDT");
+    assert_eq!(
+        fields["entry_blockers"][0]["reason"],
+        "outside entry window"
     );
 }
 

@@ -5,13 +5,10 @@ description: Orient in the liquidity-migration codebase, locate ownership, and t
 
 # Navigate the repository
 
-Read `liquidity_migration/README.md` first: it names all twelve subpackages,
-what belongs in each, and the measured import order (`core` knows nothing;
-`runtime` is an empty sink — the owner runners it held went with the Python
-order path, deleted 2026-08-14). `scripts/README.md` does the same for the
-script tree. Then `docs/architecture.md` (§Where modules live) for the Python
-side — its owner-era sections are historical spec — and `docs/engine.md` for
-the Rust engine in `engine/`, which is the whole order path now.
+Read `liquidity_migration/README.md` first: it names the Python support-plane
+packages, what belongs in each, and the measured import order. `scripts/README.md`
+does the same for the script tree. Then read `docs/architecture.md` for the
+cross-language boundary and `docs/engine.md` for the Rust runtime in `engine/`.
 Before broad work, run `scripts/dev.sh doctor --json` when selected-Python,
 worktree, dependency-lock, or skill-tree state could affect the result. Treat
 diagnostics as local facts, never as runtime authorization.
@@ -24,23 +21,21 @@ Start from the source that owns the question:
   the Progressive Evidence Model itself.
 - Research decisions and queue: `docs/research/research_findings.md` and raw run
   artifacts.
-- Active profile contract: `docs/trading_logic.md`, then the strategy
-  modules, target producers, the registered rules in
-  `liquidity_migration/rules/`, and deploy overrides it cites.
+- Active profile contract: `docs/trading_logic.md`, the native Rust reducers
+  under `engine/engine-strategies/`, their registered configs, and the deploy
+  overrides the document cites.
 - CLI ownership: `liquidity_migration/cli/commands.py`, parser modules, and current
   `--help`.
 - Data/PIT: `liquidity_migration/data/` (`storage.py`, `ingestion.py`,
   `archive_manifest.py`, `volume_events_pit.py`) and `docs/data.md` (Research
   roots, Point-in-time membership).
-- Execution lifecycle: the Rust engine owns the whole order path — `engine/`
-  and `docs/engine.md` (contracts, latency budget, safety posture). On the
-  Python side: the target producers in `liquidity_migration/strategy/` replay
-  the registered rules from `liquidity_migration/rules/` and write the target
-  books the engine follows; `liquidity_migration/account/` is the producers'
-  library (contracts, the deterministic kernel, leases, health — nothing in
-  it turns a target into an order any more); the credentialed Bybit edge for
-  the surviving Python tools is `liquidity_migration/venue/`; the tape is
-  `liquidity_migration/data/trade_lifecycle.py`; and their tests.
+- Execution lifecycle: `engine/signal-worker/` owns public directional signal
+  production; the native reducers under `engine/engine-strategies/` own each
+  strategy decision; `engine/engine-core/` owns durable application, account
+  state, scheduling, and admission; `engine/engine-venue/` owns authenticated
+  venue I/O. Python may replay the Rust contracts for research, read the WAL
+  and venue history for accounting, and carry operator messages, but it does
+  not decide or submit live orders.
 
 Use `rg --files` and `rg` for direct discovery.
 

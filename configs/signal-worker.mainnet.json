@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "kind": "liquidity_migration_signal_worker",
+  "config_id": "directional_public_features_v1_mainnet",
+  "routing": {
+    "source": "directional_public_v1",
+    "long_sleeve": "long",
+    "carry_sleeve": "carry"
+  },
+  "sources": {
+    "bybit_category": "linear",
+    "bybit_settle_coin": "USDT",
+    "bybit_mainnet_host": "api.bybit.com",
+    "bybit_demo_host": "api-demo.bybit.com",
+    "binance_host": "fapi.binance.com",
+    "kline_interval_minutes": 60,
+    "funding_event_kind": "settlement",
+    "whale_source": "binance_toptrader_position_long_short_ratio",
+    "whale_period": "5m_eod",
+    "mark_max_age_ms": 30000,
+    "universe_identity_required": true
+  },
+  "live": {
+    "environment": "mainnet",
+    "public_market_realm": "mainnet",
+    "request_timeout_ms": 10000,
+    "request_retries": 3,
+    "retry_base_ms": 500,
+    "ticker_cadence_ms": 5000,
+    "instrument_cadence_ms": 3600000,
+    "funding_cadence_ms": 60000,
+    "kline_cadence_ms": 60000,
+    "whale_cadence_ms": 3600000,
+    "max_parallel_requests": 16,
+    "kline_page_limit": 1000,
+    "funding_page_limit": 200,
+    "whale_page_limit": 500,
+    "instrument_max_pages": 10
+  },
+  "long": {
+    "profile_name": "v12",
+    "features": {
+      "daily_min_hourly_bars": 20,
+      "cold_start_lookback_days": 100,
+      "pump_lookback_days": [3, 7],
+      "atr_window_days": 14,
+      "atr_min_samples": 7,
+      "btc_rv_window_days": 30,
+      "btc_rv_min_samples": 20,
+      "btc_rv_null_value": 0.8,
+      "regime_missing_is_on": false,
+      "median_fallback_to_daily_turnover": true
+    }
+  },
+  "carry_profile_name": "carry_hold_v7_live_v1",
+  "carry_feature_physics": {
+    "momentum_lookback_hours": 168,
+    "adv_window_hours": 24,
+    "return_lookback_hours": 72,
+    "vol_window_hours": 720,
+    "vol_return_lag_hours": 24,
+    "vol_required_finite_samples": 720,
+    "trail_window_hours": 24,
+    "trail_change_lookback_hours": 48,
+    "turn_growth_lookback_hours": 72,
+    "whale_change_lookback_hours": 72,
+    "whale_freshness_hours": 48,
+    "whale_feed_days": 6,
+    "settlement_age_reset_threshold_hours": 0.5,
+    "decision_phase_ms": 0,
+    "decision_kline_lag_ms": 1200000,
+    "minimum_replay_days": 90,
+    "minimum_decision_symbols": 50,
+    "minimum_funding_coverage": 0.5,
+    "standing_funding_max_age_hours": 25.0,
+    "presettlement_window_ms": 900000,
+    "missing_conditioning": "fail_open",
+    "missing_depth": "floor",
+    "stale_whale": "null_fail_open"
+  }
+}

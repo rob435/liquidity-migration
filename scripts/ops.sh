@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_TARGET="${SSH_TARGET:-root@208.84.103.4}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
+LM_FLEET_MANIFEST="$ROOT_DIR/deploy/fleet_manifest.tsv"
+. "$ROOT_DIR/deploy/lib_sleeves.sh"
 
 if [[ -n "${PYTHON:-}" ]]; then
   PYTHON_BIN="$PYTHON"
@@ -32,12 +34,10 @@ Operator commands:
   start UNIT...                start units
   equity [ARGS...]             standard descriptive equity curves
   flatten --environment demo|mainnet [--reason TEXT] [--execute]
-                               take an account to zero exposure through the
-                               engine: stop the producers, then write a book of
-                               zero rows naming everything it holds. Reports
-                               without --execute. The producers are stopped,
-                               not disabled -- turn the sleeve off to make it
-                               stick across a deploy
+                               ask each native directional reducer to close its
+                               attributed exposure through durable Rust control
+                               commands. Reports without --execute; the signal
+                               worker stays live while exits complete
   attest-flat --environment demo|mainnet
                                run the installed Rust adapter's credential-wide
                                two-scan flatness proof (read-only)
@@ -51,8 +51,8 @@ Operator commands:
   help                         show this help and do nothing else
 
 A UNIT that does not already start with `liquidity-migration-` gets the prefix:
-`logs bybit-carry-demo.service` reads
-`liquidity-migration-bybit-carry-demo.service`.
+`logs signal-worker-demo.service` reads
+`liquidity-migration-signal-worker-demo.service`.
 
 Environment overrides:
   SSH_TARGET   VPS SSH destination (default: root@208.84.103.4)
@@ -119,6 +119,7 @@ remote_engine_control() {
 action=attest-flat
 realm="${REMOTE_ARGS[0]}"
 engine_binary=/opt/liquidity-migration-engine/bin/engine
+signal_worker_binary=/opt/liquidity-migration-engine/bin/signal-worker
 runtime_launcher=/opt/liquidity-migration-engine/bin/run-authorized-runtime
 control_helper=/opt/liquidity-migration-engine/bin/telegram-control-helper
 controls_sudoers=/etc/sudoers.d/liquidity-migration-controls
@@ -158,6 +159,10 @@ esac
   && [ "$(stat -c %u "$engine_binary")" -eq 0 ] \
   && [ "$(stat -c %a "$engine_binary")" = 755 ] \
   || { echo "installed Rust engine is not a trusted root-owned release" >&2; exit 3; }
+[ -f "$signal_worker_binary" ] && [ ! -L "$signal_worker_binary" ] \
+  && [ "$(stat -c %u "$signal_worker_binary")" -eq 0 ] \
+  && [ "$(stat -c %a "$signal_worker_binary")" = 755 ] \
+  || { echo "installed Rust signal worker is not a trusted root-owned release" >&2; exit 3; }
 [ -f "$release_marker" ] && [ ! -L "$release_marker" ] \
   && [ "$(stat -c %u "$release_marker")" -eq 0 ] \
   && [ "$(stat -c %g "$release_marker")" -eq 0 ] \
@@ -165,6 +170,7 @@ esac
   || { echo "installed Rust engine release marker is untrusted" >&2; exit 3; }
 marker_commit="$(sed -n "s/^commit=//p" "$release_marker")"
 marker_digest="$(sed -n "s/^sha256=//p" "$release_marker")"
+marker_signal_worker_digest="$(sed -n "s/^signal_worker_sha256=//p" "$release_marker")"
 marker_launcher_digest="$(sed -n "s/^launcher_sha256=//p" "$release_marker")"
 marker_helper_digest="$(sed -n "s/^control_helper_sha256=//p" "$release_marker")"
 marker_sudoers_digest="$(sed -n "s/^controls_sudoers_sha256=//p" "$release_marker")"
@@ -176,6 +182,9 @@ repo_commit="$(/usr/bin/git -C "$REPO_DIR" rev-parse HEAD)" \
 [[ "$marker_digest" =~ ^[0-9a-f]{64}$ ]] \
   && [ "$(sha256sum "$engine_binary" | awk "{print \$1}")" = "$marker_digest" ] \
   || { echo "installed Rust engine release digest mismatch" >&2; exit 3; }
+[[ "$marker_signal_worker_digest" =~ ^[0-9a-f]{64}$ ]] \
+  && [ "$(sha256sum "$signal_worker_binary" | awk "{print \$1}")" = "$marker_signal_worker_digest" ] \
+  || { echo "installed Rust signal-worker release digest mismatch" >&2; exit 3; }
 [[ "$marker_launcher_digest" =~ ^[0-9a-f]{64}$ ]] \
   && [ -f "$runtime_launcher" ] && [ ! -L "$runtime_launcher" ] \
   && [ "$(stat -c %u "$runtime_launcher")" -eq 0 ] \
@@ -187,8 +196,8 @@ repo_commit="$(/usr/bin/git -C "$REPO_DIR" rev-parse HEAD)" \
   && [[ "$marker_sudoers_digest" =~ ^[0-9a-f]{64}$ ]] \
   && [[ "$marker_bot_digest" =~ ^[0-9a-f]{64}$ ]] \
   || { echo "installed release marker has invalid control boundary digests" >&2; exit 3; }
-expected_marker="$(printf "commit=%s\nsha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nrustc=1.90.0" \
-  "$marker_commit" "$marker_digest" "$marker_launcher_digest" \
+expected_marker="$(printf "commit=%s\nsha256=%s\nsignal_worker_sha256=%s\nlauncher_sha256=%s\ncontrol_helper_sha256=%s\ncontrols_sudoers_sha256=%s\ntelegram_bot_sha256=%s\nrustc=1.90.0" \
+  "$marker_commit" "$marker_digest" "$marker_signal_worker_digest" "$marker_launcher_digest" \
   "$marker_helper_digest" "$marker_sudoers_digest" "$marker_bot_digest")"
 [ "$(cat "$release_marker")" = "$expected_marker" ] \
   || { echo "installed release marker schema is invalid" >&2; exit 3; }
@@ -278,6 +287,8 @@ else
 fi
 [ "$(sha256sum "$engine_binary" | awk "{print \$1}")" = "$marker_digest" ] \
   || { echo "installed Rust engine changed during engine control" >&2; exit 3; }
+[ "$(sha256sum "$signal_worker_binary" | awk "{print \$1}")" = "$marker_signal_worker_digest" ] \
+  || { echo "installed Rust signal worker changed during engine control" >&2; exit 3; }
 [ "$(sha256sum "$runtime_launcher" | awk "{print \$1}")" = "$marker_launcher_digest" ] \
   && [ "$(sha256sum "$control_helper" | awk "{print \$1}")" = "$marker_helper_digest" ] \
   && [ "$(sha256sum "$controls_sudoers" | awk "{print \$1}")" = "$marker_sudoers_digest" ] \
@@ -300,8 +311,14 @@ case "$command" in
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" verify "$@"
     ;;
   units)
-    remote_exec "systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager --plain
-systemctl list-timers 'liquidity-migration-*' --no-pager"
+    lm_validate_fleet_manifest || die_usage "fleet manifest is invalid"
+    FLEET_UNITS=()
+    while IFS= read -r unit; do
+      FLEET_UNITS+=("$unit")
+    done < <(lm_expected_systemd_units)
+    [[ "${#FLEET_UNITS[@]}" -gt 0 ]] || die_usage "fleet manifest has no current units"
+    remote_exec 'systemctl list-units "${REMOTE_ARGS[@]}" --all --no-legend --no-pager --plain
+systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     ;;
   logs)
     [[ "$#" -ge 1 ]] || die_usage "logs requires a unit name"
@@ -315,26 +332,25 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
       [[ "$unit" =~ ^liquidity-migration-[A-Za-z0-9_.@:-]+$ ]] \
         || die_usage "invalid systemd unit name '$unit'"
       if [[ "$command" != stop ]]; then
-        case "$unit" in
-          liquidity-migration-engine.service|\
-          liquidity-migration-bybit-long-demo.service|\
-          liquidity-migration-bybit-carry-demo.service|\
-          liquidity-migration-demo-liveness.service|\
-          liquidity-migration-demo-liveness.timer|\
-          liquidity-migration-telegram-controls.service|\
-          liquidity-migration-llm-ledger.service|\
-          liquidity-migration-llm-ledger.timer|\
-          liquidity-migration-trade-notify.service|\
-          liquidity-migration-trade-notify.timer|\
-          liquidity-migration-forward-capture.service|\
-          liquidity-migration-forward-upload.service|\
-          liquidity-migration-forward-upload.timer)
+        operator_policy="$(lm_manifest_operator_policy "$unit" 2>/dev/null || true)"
+        case "$operator_policy" in
+          direct)
             ;;
-          liquidity-migration-*mainnet*)
+          funded)
             die_usage "$command of funded units is forbidden; use deploy rollout --profile operational"
             ;;
-          *)
+          none)
             die_usage "$command is allowed only for an exact reviewed demo/observer unit"
+            ;;
+          *)
+            case "$unit" in
+              liquidity-migration-*mainnet*)
+                die_usage "$command of funded units is forbidden; use deploy rollout --profile operational"
+                ;;
+              *)
+                die_usage "$command is allowed only for an exact reviewed demo/observer unit"
+                ;;
+            esac
             ;;
         esac
       fi
@@ -370,9 +386,9 @@ systemctl list-timers 'liquidity-migration-*' --no-pager"
     remote_python_module liquidity_migration.policy.real_money_arming "$@"
     ;;
   flatten)
-    # On the engine's own path: it stops the producers and writes a book
-    # of explicit zero rows naming everything the engine says it holds, which
-    # the engine reads as "hold none of this" and closes.
+    # On the engine's own path: durably disable entries, submit one replayable
+    # flatten request per native directional reducer, then wait for the engine
+    # heartbeat to show no attributed position or opening work.
     #
     # Dry run unless --execute, and made explicit here as well as in the script
     # so neither side alone can turn a report into a close.

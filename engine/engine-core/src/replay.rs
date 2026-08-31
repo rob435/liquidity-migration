@@ -369,6 +369,98 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        WalRecord::TargetBookLatch {
+            strategy,
+            symbol,
+            latched,
+            ..
+        } => format!(
+            "book latch {} leaves {} {}",
+            names.strategy(*strategy),
+            names.symbol(*symbol),
+            if *latched { "alone" } else { "eligible" }
+        ),
+        WalRecord::StrategyCheckpoint {
+            strategy,
+            symbol,
+            checkpoint,
+            ..
+        } => format!(
+            "checkpoint {} {} v{} {}",
+            names.strategy(*strategy),
+            names.symbol(*symbol),
+            checkpoint.schema_version,
+            checkpoint.decision_fingerprint
+        ),
+        WalRecord::StrategyGlobalCheckpoint {
+            strategy,
+            checkpoint,
+            provenance,
+            ..
+        } => format!(
+            "global checkpoint {} v{} {}{}",
+            names.strategy(*strategy),
+            checkpoint.schema_version,
+            checkpoint.decision_fingerprint,
+            provenance
+                .as_ref()
+                .map(|source| format!(" imported from {} {}", source.source_format, source.source_sha256))
+                .unwrap_or_default()
+        ),
+        WalRecord::StrategyEventPublished { event, .. } => format!(
+            "strategy event {} -> {} {} {}",
+            names.strategy(event.source),
+            names.strategy(event.destination),
+            event.kind,
+            event.event_id
+        ),
+        WalRecord::StrategyEventConsumed {
+            source,
+            destination,
+            event_id,
+            ..
+        } => format!(
+            "strategy event consumed {} -> {} {}",
+            names.strategy(*source),
+            names.strategy(*destination),
+            event_id
+        ),
+        WalRecord::SignalObservation { observation, .. } => format!(
+            "signal {} #{} -> {} {} {}",
+            observation.source,
+            observation.sequence,
+            names.strategy(observation.destination),
+            observation.kind,
+            observation.observation_id
+        ),
+        WalRecord::SignalObservationConsumed {
+            strategy,
+            source,
+            sequence,
+            observation_id,
+            ..
+        } => format!(
+            "signal consumed {} #{} by {} {}",
+            source,
+            sequence,
+            names.strategy(*strategy),
+            observation_id
+        ),
+        WalRecord::RuntimeControlAccepted { request, .. } => format!(
+            "runtime    {} {} {:?}",
+            names.strategy(request.strategy),
+            request.request_id,
+            request.command
+        ),
+        WalRecord::RuntimeControlConsumed {
+            strategy,
+            request_id,
+            ..
+        } => format!(
+            "runtime consumed {} {}",
+            names.strategy(*strategy),
+            request_id
+        ),
         WalRecord::LatchCleared {
             note,
             restated_exposure,

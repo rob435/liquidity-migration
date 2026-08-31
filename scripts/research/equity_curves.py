@@ -73,14 +73,29 @@ def _run_long(
     # LONG records its own PIT pass/taint label; pit_tol does not apply.
     del pit_tol
     from liquidity_migration.research.backtest.long_native import run_long_native_research
+    from liquidity_migration.rules.long_config import ConfigLayer, resolve_strategy_config
     from liquidity_migration.rules.long_native import long_v11a_profile, long_v12_profile
 
     profile = {"v11a": long_v11a_profile, "v12": long_v12_profile}[long_profile]
     cfg = replace(profile(), start_date=start, end_date=end)
+    execution_values = {
+        "round_trip_cost_bps": costs.base_entry_exit_cost_bps * cfg.cost_multiplier
+    }
     if long_notional is not None:
         # Research convention is 1x; this option draws pure leverage on the same signal.
-        cfg = replace(cfg, notional_multiplier=float(long_notional))
-    return run_long_native_research(root, config=cfg, cost_config=costs, report_dir=out)
+        execution_values["notional_multiplier"] = float(long_notional)
+    effective = resolve_strategy_config(
+        long_profile,
+        rule=cfg,
+        layers=(ConfigLayer(source="equity_curve_cli", values=execution_values),),
+    )
+    return run_long_native_research(
+        root,
+        config=cfg,
+        cost_config=costs,
+        report_dir=out,
+        effective_config=effective,
+    )
 
 
 def _load_research_panel(panel_root: str | Path) -> Any:
@@ -123,15 +138,17 @@ def _run_carry(
         CarryReplaySettings,
         research_equity_chart,
     )
-    from liquidity_migration.strategy.carry_config import (
+    from liquidity_migration.rules.carry_models import (
         CARRY_CONFIG_PATH,
-        resolve_carry_strategy_profile,
+        CARRY_PROFILE_NAME,
     )
-    from liquidity_migration.strategy.carry_runtime import load_durable_presettlement_events
+    from liquidity_migration.rules.carry_event_tape import (
+        load_carry_presettlement_events,
+    )
 
     panel = _load_research_panel(panel_root)
     events = (
-        load_durable_presettlement_events(
+        load_carry_presettlement_events(
             Path(presettlement_event_tape).expanduser().resolve()
         )
         if presettlement_event_tape
@@ -141,7 +158,7 @@ def _run_carry(
     carry = operational.carry
     replay_settings = CarryReplaySettings(
         environment="mainnet",
-        source_profile=resolve_carry_strategy_profile("v7").profile_name,
+        source_profile=CARRY_PROFILE_NAME,
         notional_multiplier=carry.notional_multiplier,
         entry_leverage=carry.entry_leverage,
         stop_loss_fraction=carry.declared_stop_loss_fraction,
@@ -624,8 +641,9 @@ def main() -> int:
         help=(
             "Registered financed-longs config JSON (repeatable) to render through the "
             "SAME standard chart, labelled RESEARCH / simulation-on-seen-data. This is "
-            "the supported way to put a Lane-2 research config in the standard format; "
-            "never hand-build a lookalike chart. Reads the cross-venue panel."
+            "the Rust registered-rule comparison route, not the full active v7 lifecycle "
+            "contract. Use --sleeves carry for the Rust v7 lifecycle replay. Reads the "
+            "cross-venue panel."
         ),
     )
     p.add_argument(

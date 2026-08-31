@@ -1,0 +1,48 @@
+[Unit]
+Description=liquidity-migration credential-free Rust directional signal worker (demo)
+Wants=network-online.target
+Before=liquidity-migration-engine.service
+After=network-online.target
+
+[Service]
+Type=simple
+User=liquidity-signal-worker
+Group=liquidity-migration
+StateDirectory=liquidity-migration-signal-worker-demo
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/liquidity-migration-signal-worker-demo
+EnvironmentFile=/etc/liquidity-migration/signal-worker-demo.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+Environment=SIGNAL_WORKER_CONFIG_FILE=/opt/liquidity-migration/configs/signal-worker.demo.json
+Environment=LONG_NATIVE_RULE_FILE=/opt/liquidity-migration/configs/long_native_v12.json
+Environment=CARRY_SIGNAL_CONFIG_FILE=/opt/liquidity-migration/configs/lane2_carry_hold_v7.json
+Environment=ENGINE_CONFIG_FILE=/etc/liquidity-migration/engine.toml
+Environment=SIGNAL_WORKER_SPOOL_DIR=/var/lib/liquidity-migration/signals/demo
+Environment=SIGNAL_WORKER_STATE_DIR=/var/lib/liquidity-migration-signal-worker-demo
+Environment=SIGNAL_WORKER_HEARTBEAT_FILE=/var/lib/liquidity-migration-signal-worker-demo/heartbeat.json
+Environment=LM_CHILD_STOP_GRACE_SECONDS=45
+ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-signal-worker-demo.service main
+SuccessExitStatus=143
+Restart=always
+RestartPreventExitStatus=78
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=60
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+UMask=0027
+ReadWritePaths=/var/lib/liquidity-migration-signal-worker-demo /var/lib/liquidity-migration/signals/demo
+MemoryMax=1024M
+MemorySwapMax=384M
+LimitNOFILE=65536
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

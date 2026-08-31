@@ -11,9 +11,7 @@
 //! ```ignore
 //! let mut h = Harness::new(strategy);
 //! h.quote("BTCUSDT", 60_999.0, 61_000.0);   // the level is touched
-//! h.ack("c1");
-//! h.fill("c1", "BTCUSDT", Side::Buy, 0.01, 61_000.0);
-//! assert_eq!(h.drain().len(), 1);
+//! assert_eq!(h.drain_actions().len(), 1);
 //! ```
 //!
 //! A plug is a pure state machine, so the bench needs no threads, no sleeps
@@ -22,9 +20,9 @@
 use std::collections::{HashMap, HashSet};
 
 use engine_types::{
-    Action, Depth, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderAck, OrderKind,
-    OrderUpdate, PositionView, Quote, RestingOrder, Side, Strategy, StrategyCheckpoint,
-    StrategyCtx, SymbolId, TargetBook, Ticker, TimerId, TradeFlow,
+    Action, Depth, EngineEvent, InstrumentRule, Intent, MarketEvent, OrderKind, OrderUpdate,
+    PositionView, Quote, RestingOrder, Side, Strategy, StrategyAccountSummary, StrategyCheckpoint,
+    StrategyCtx, StrategyId, SymbolId, Ticker, TimerId, TradeFlow,
 };
 
 /// A timer the strategy asked for, and when it comes due.
@@ -79,10 +77,10 @@ pub struct MockCtx {
     /// be quantized for it.
     rules: HashMap<SymbolId, InstrumentRule>,
     checkpoints: HashMap<SymbolId, StrategyCheckpoint>,
+    global_checkpoint: Option<StrategyCheckpoint>,
+    strategy_ids: HashMap<String, StrategyId>,
     now_ns: u64,
-    /// The wall clock, separate from `now_ns` on purpose: a target book's
-    /// validity window is wall time, and a test has to be able to move it
-    /// without touching the monotonic one.
+    /// The wall clock, separate from monotonic strategy time.
     wall_ms: i64,
     /// Everything the strategy emitted, oldest first.
     pub emitted: Vec<Action>,
@@ -109,6 +107,8 @@ impl MockCtx {
             in_flight: HashMap::new(),
             rules: HashMap::new(),
             checkpoints: HashMap::new(),
+            global_checkpoint: None,
+            strategy_ids: HashMap::new(),
             now_ns: 1_000,
             // An ordinary unix millisecond stamp, so anything that reads like
             // a real clock reads like a real clock in tests too.
@@ -146,10 +146,6 @@ impl MockCtx {
         self.now_ns = now_ns;
     }
 
-    pub fn set_wall_ms(&mut self, wall_ms: i64) {
-        self.wall_ms = wall_ms;
-    }
-
     /// Seed what the account reading says is held, as this strategy's own.
     /// Interns the symbol if it is new, the way a subscription would have.
     ///
@@ -159,9 +155,7 @@ impl MockCtx {
     pub fn set_position(&mut self, symbol: &str, side: Side, qty: f64, entry_px: f64) {
         let id = self.add_symbol(symbol);
         self.foreign.remove(&id);
-        // Attributed to this strategy too: a holding a test seeds is one this
-        // strategy opened unless the test says otherwise, and the follower
-        // now reads exposure with no fills behind it as somebody else's.
+        // A seeded holding belongs to this strategy unless the test says otherwise.
         self.mine.insert(
             id,
             match side {
@@ -221,32 +215,34 @@ impl MockCtx {
         self.mine.insert(id, signed_qty);
     }
 
-    /// Seed what the engine's cover book would answer for this symbol: the
-    /// signed quantity sent that the account reading has not shown yet. Zero
-    /// clears it, the way a reading that caught up would.
-    pub fn set_in_flight(&mut self, symbol: &str, signed_qty: f64) {
-        let id = self.add_symbol(symbol);
-        if signed_qty == 0.0 {
-            self.in_flight.remove(&id);
-        } else {
-            self.in_flight.insert(id, signed_qty);
-        }
-    }
-
     /// Seed the venue's tick, step and minimums for a symbol.
     pub fn set_rule(&mut self, symbol: &str, rule: InstrumentRule) {
         let id = self.add_symbol(symbol);
         self.rules.insert(id, rule);
     }
 
-    /// Seed the newest durable state this strategy wrote for one symbol.
-    pub fn set_strategy_checkpoint(&mut self, symbol: &str, checkpoint: StrategyCheckpoint) {
-        let id = self.add_symbol(symbol);
-        self.checkpoints.insert(id, checkpoint);
+    pub fn set_wall_ms(&mut self, wall_ms: i64) {
+        self.wall_ms = wall_ms;
+    }
+
+    pub fn set_global_checkpoint(&mut self, checkpoint: StrategyCheckpoint) {
+        self.global_checkpoint = Some(checkpoint);
+    }
+
+    pub fn set_strategy_id(&mut self, name: &str, id: StrategyId) {
+        self.strategy_ids.insert(name.to_owned(), id);
     }
 }
 
 impl StrategyCtx for MockCtx {
+    fn account_summary(&self) -> StrategyAccountSummary {
+        StrategyAccountSummary {
+            equity_usdt: 1_000.0,
+            available_margin_usdt: 1_000.0,
+            observed_ns: self.now_ns,
+        }
+    }
+
     fn quote(&self, symbol: SymbolId) -> &Quote {
         &self.quotes[symbol.0 as usize]
     }
@@ -311,6 +307,14 @@ impl StrategyCtx for MockCtx {
         self.checkpoints.get(&symbol)
     }
 
+    fn strategy_global_checkpoint(&self) -> Option<&StrategyCheckpoint> {
+        self.global_checkpoint.as_ref()
+    }
+
+    fn strategy_id(&self, name: &str) -> Option<StrategyId> {
+        self.strategy_ids.get(name).copied()
+    }
+
     fn emit(&mut self, action: Action) {
         self.emitted.push(action);
     }
@@ -355,7 +359,7 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// Boot a plug: intern the symbols it subscribed to, then hand it events.
+    /// Build the plug bench and intern the symbols it subscribed to.
     pub fn new(strategy: Box<dyn Strategy>) -> Self {
         let mut ctx = MockCtx::new();
         for sub in strategy.subscriptions() {
@@ -366,6 +370,11 @@ impl Harness {
 
     fn deliver(&mut self, event: EngineEvent) {
         self.strategy.on_event(&event, &mut self.ctx);
+    }
+
+    /// Deliver the same post-restore wake that engine boot delivers.
+    pub fn boot(&mut self) {
+        self.deliver(EngineEvent::Boot);
     }
 
     /// A new best bid/ask. The market picture is updated first, then the
@@ -439,48 +448,9 @@ impl Harness {
         }));
     }
 
-    /// A target book reaching the strategies. Only ever delivered when a
-    /// whole book was read, which is why there is no verb here for "the book
-    /// was unreadable": that case delivers nothing at all.
-    pub fn targets(&mut self, book: TargetBook) {
-        self.deliver(EngineEvent::Targets(book));
-    }
-
-    /// The kernel refused an intent the strategy placed. The engine delivers
-    /// this after the refusal is journaled, so nothing is resting and the
-    /// account reading is unchanged.
-    pub fn refuse(&mut self, symbol: SymbolId, reduce_only: bool) {
-        self.refuse_as(symbol, reduce_only, "test_refusal");
-    }
-
-    /// The same, with the reason the engine would have logged.
-    pub fn refuse_as(&mut self, symbol: SymbolId, reduce_only: bool, reason: &str) {
-        self.deliver(EngineEvent::IntentRefused {
-            symbol,
-            reduce_only,
-            reason: reason.to_string(),
-        });
-    }
-
     pub fn feed_reset(&mut self) {
         let recv_ns = self.ctx.now_ns;
         self.deliver(EngineEvent::Market(MarketEvent::FeedReset { recv_ns }));
-    }
-
-    pub fn ack(&mut self, client_order_id: &str) {
-        let ack = OrderAck {
-            client_order_id: client_order_id.to_string(),
-            venue_order_id: format!("v-{client_order_id}"),
-            sent_ns: 0,
-            ack_ns: self.ctx.now_ns,
-        };
-        self.deliver(EngineEvent::Order(OrderUpdate::Ack(ack)));
-    }
-
-    /// A fill that crossed the spread. The common case in these tests, and
-    /// the one a strategy that sends market orders always gets.
-    pub fn fill(&mut self, client_order_id: &str, symbol: &str, side: Side, qty: f64, px: f64) {
-        self.fill_as(client_order_id, symbol, side, qty, px, false);
     }
 
     /// A fill where we were the resting side. Only a strategy that quotes
@@ -573,43 +543,6 @@ impl Harness {
         }));
     }
 
-    pub fn reject(&mut self, client_order_id: &str, reason: &str) {
-        self.deliver(EngineEvent::Order(OrderUpdate::Reject {
-            client_order_id: client_order_id.to_string(),
-            code: 10001,
-            reason: reason.to_string(),
-        }));
-    }
-
-    pub fn cancelled(&mut self, client_order_id: &str) {
-        self.deliver(EngineEvent::Order(OrderUpdate::Cancelled {
-            client_order_id: client_order_id.to_string(),
-            recv_ns: self.ctx.now_ns,
-        }));
-    }
-
-    /// Move the clock to the next armed timer and fire it. Returns false when
-    /// nothing was waiting.
-    pub fn fire_next_timer(&mut self) -> bool {
-        let Some(next) = self.ctx.timers.iter().copied().min_by_key(|t| t.due_ns) else {
-            return false;
-        };
-        self.ctx.timers.retain(|t| t.id != next.id);
-        self.ctx.set_now(next.due_ns);
-        self.deliver(EngineEvent::Timer {
-            id: next.id,
-            now_ns: next.due_ns,
-        });
-        true
-    }
-
-    /// Fire a timer the strategy never armed — the engine can echo one back
-    /// that a plug does not recognise.
-    pub fn fire_timer(&mut self, id: TimerId) {
-        let now_ns = self.ctx.now_ns;
-        self.deliver(EngineEvent::Timer { id, now_ns });
-    }
-
     /// Give the strategy a working order to find through `ctx.resting`.
     pub fn rest(&mut self, seed: RestingSeed) {
         self.ctx.resting.push(seed);
@@ -631,18 +564,6 @@ impl Harness {
                 _ => None,
             })
             .collect()
-    }
-
-    /// The single intent emitted since the last call. Panics on none or many,
-    /// which is what "emit exactly once" tests want to see.
-    pub fn one_intent(&mut self) -> Intent {
-        let mut drained = self.drain();
-        assert_eq!(
-            drained.len(),
-            1,
-            "expected exactly one intent, got {drained:?}"
-        );
-        drained.remove(0)
     }
 
     /// The single action emitted since the last call, whatever kind it is.

@@ -1,19 +1,16 @@
-"""Synthetic-tape tests for the quote lab: book mirror, shadow fills, summary."""
+"""Synthetic-tape tests for the quote-lab book mirror and shadow fills."""
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 
 from liquidity_migration.research.execution.quote_lab.book import BookMirror
 from liquidity_migration.research.execution.quote_lab.shadow import (
-    ShadowOutcome,
     ShadowPolicy,
     run_shadow_attempts,
 )
-from liquidity_migration.research.execution.quote_lab.summary import summarize_outcomes
 
 NS = 1_000_000_000
 BASE_S = 1_000.0  # synthetic clock start; zero would read as a missing timestamp
@@ -336,73 +333,3 @@ class TestShadowFills:
         # Empty level: the first trade at our price fills us.
         assert outcome.filled_conservative is True
         assert outcome.time_to_fill_s_conservative == pytest.approx(1.0)
-
-
-class TestSummary:
-    def _outcome(self, **overrides: Any) -> ShadowOutcome:
-        base: dict[str, Any] = {
-            "symbol": "T",
-            "side": "Buy",
-            "decision_ts_ns": 1,
-            "decision_bid": 100.0,
-            "decision_ask": 100.02,
-            "placed_prices": [100.0],
-            "filled_conservative": True,
-            "filled_optimistic": True,
-            "time_to_fill_s_conservative": 5.0,
-            "time_to_fill_s_optimistic": 3.0,
-            "traded_through": False,
-            "reprices": 0,
-            "terminal_ts_ns": 2,
-            "terminal_bid": 100.0,
-            "terminal_ask": 100.02,
-            "terminal_reason": "filled",
-            "decision_spread_bp": 2.0,
-            "queue_ahead_at_placement": 10.0,
-        }
-        base.update(overrides)
-        return ShadowOutcome(**base)
-
-    def test_aggregation_math_and_fill_conditioning(self) -> None:
-        filled = self._outcome(adverse_markout_bp_10s=3.0)
-        unfilled = self._outcome(
-            filled_conservative=False,
-            filled_optimistic=False,
-            time_to_fill_s_conservative=None,
-            time_to_fill_s_optimistic=None,
-            terminal_reason="timeout",
-            decision_spread_bp=4.0,
-            # Present but must be excluded: markouts are conditioned on a fill.
-            adverse_markout_bp_10s=99.0,
-        )
-        rows = summarize_outcomes([filled, unfilled], taker_fee_bp=5.5)
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["symbol"] == "T"
-        assert row["side"] == "Buy"
-        assert row["attempts"] == 2
-        assert row["fill_rate_conservative"] == pytest.approx(0.5)
-        assert row["fill_rate_optimistic"] == pytest.approx(0.5)
-        assert row["traded_through_rate"] == 0.0
-        assert row["median_time_to_fill_s_conservative"] == pytest.approx(5.0)
-        assert row["median_time_to_fill_s_optimistic"] == pytest.approx(3.0)
-        assert row["mean_decision_spread_bp"] == pytest.approx(3.0)
-        assert row["half_spread_bp"] == pytest.approx(1.5)
-        assert row["taker_cost_bp"] == pytest.approx(7.0)
-        assert row["mean_adverse_markout_bp"]["10s"] == pytest.approx(3.0)
-        assert row["mean_adverse_markout_bp"]["30s"] is None
-        assert row["maker_edge_bp"]["10s"] == pytest.approx(1.5 - 3.0)
-        assert row["maker_edge_bp"]["30s"] is None
-        json.dumps(rows)
-
-    def test_groups_split_by_symbol_and_side(self) -> None:
-        rows = summarize_outcomes(
-            [
-                self._outcome(),
-                self._outcome(side="Sell"),
-                self._outcome(symbol="A"),
-            ]
-        )
-        assert [(row["symbol"], row["side"]) for row in rows] == [("A", "Buy"), ("T", "Buy"), ("T", "Sell")]
-        assert all(row["attempts"] == 1 for row in rows)
-        assert all(row["taker_fee_bp"] == 5.5 for row in rows)

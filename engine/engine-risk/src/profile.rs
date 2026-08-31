@@ -1,28 +1,25 @@
 //! Reading the fleet's operational profile into a [`KernelConfig`].
 //!
 //! The rendered operational profile is the document that says how much of the
-//! funded account may be at risk. The Python fleet loads it and proves it at
-//! start-up, and the engine reads the same file rather than a copy of its
-//! numbers — a copy of a risk limit is a limit that can drift without anyone
-//! noticing.
+//! funded account may be at risk. Deployment renders native strategy config
+//! from it, while the engine reads the same file for account-wide risk rather
+//! than a copied set of limits.
 //!
-//! If an operator tightens a cap, both halves tighten. If the two disagree,
-//! they disagree because the file says two things, which is a thing you can go
-//! and look at.
+//! If an operator tightens a cap, native config rendering and the kernel share
+//! one reviewed source instead of drifting copies.
 //!
 //! **What is deliberately strict.** Unknown keys inside `account_risk` and
 //! `capital_reference` are refused rather than ignored. Those are the blocks
-//! the kernel reads, and a cap added on the Python side that the engine
-//! silently did not enforce is exactly the failure this module exists to stop.
-//! Most producer-block values (`long`, `carry`, `hedge`) are sizing for the
-//! Python producers and are skipped by name. The carry stop distance is the
-//! exception: the kernel must admit every stop a producer can publish, so it
-//! reads that one field as well.
+//! the kernel reads, and a cap that the engine silently ignored would not be a
+//! cap. Strategy blocks (`long`, `carry`, `hedge`) feed config rendering and
+//! are skipped by the account kernel. The carry stop distance is the exception:
+//! the kernel must admit every stop the native reducer may request, so it reads
+//! that field as well.
 //!
 //! **What is not in the file.** The caller supplies a baseline disaster-stop
 //! distance and the maximum account-view age through [`ProfileInputs`]. The
 //! effective stop ceiling is the larger of that baseline and carry's declared
-//! stop, so a host-rendered carry dial cannot pass producer preflight and then
+//! stop, so a host-rendered carry dial cannot pass config preflight and then
 //! be refused by a stale engine constant.
 
 use serde_json::Value;
@@ -41,9 +38,9 @@ pub const PROFILE_KIND: &str = "liquidity_migration_operational_profile";
 const MODE_ACCOUNT_EQUITY: &str = "account_equity";
 const MODE_FIXED: &str = "fixed";
 
-/// Top-level keys that belong to the Python producers rather than the kernel.
+/// Top-level strategy keys consumed by config rendering rather than the kernel.
 /// Named so that a genuinely unknown key is still an error.
-const PRODUCER_BLOCKS: &[&str] = &["long", "carry", "hedge"];
+const STRATEGY_BLOCKS: &[&str] = &["long", "carry", "hedge"];
 
 const TOP_LEVEL_KEYS: &[&str] = &[
     "schema_version",
@@ -71,7 +68,7 @@ const CAPITAL_REFERENCE_KEYS: &[&str] = &[
 /// The numbers the kernel needs that the profile does not carry.
 #[derive(Clone, Copy, Debug)]
 pub struct ProfileInputs {
-    /// Baseline upper bound for stop distance. Producer declarations may
+    /// Baseline upper bound for stop distance. Strategy declarations may
     /// widen it, but never narrow the bound used by the other sleeves.
     pub disaster_stop_fraction: f64,
     /// An account view older than this is not evidence about the account now.
@@ -182,7 +179,7 @@ pub fn kernel_config_from_profile(
     reject_unknown_keys(
         root,
         TOP_LEVEL_KEYS,
-        PRODUCER_BLOCKS,
+        STRATEGY_BLOCKS,
         "the operational profile",
     )?;
 

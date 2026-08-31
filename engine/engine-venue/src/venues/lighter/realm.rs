@@ -142,9 +142,8 @@ impl AccountKey {
             )
         })?;
         // Above zero, not merely non-negative: the account lease names its
-        // file by this number and shares that naming with the Python fleet,
-        // whose rule is `> 0`. An index of zero read fine here and then failed
-        // at the lease, after the account had already been read.
+        // file by this number and rejects zero. Refuse it before reading an
+        // account that cannot later be claimed.
         if account_index <= 0 {
             return Err(VenueError::Credentials(format!(
                 "{account_index} is not an account index; the lease names its file by this \

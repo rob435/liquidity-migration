@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{StrategyId, SymbolId};
+use crate::strategy::{StrategyCheckpoint, StrategyEvent};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
@@ -203,6 +204,46 @@ pub enum Action {
     RecordQuoteFill {
         features: QuoteFillFeatures,
     },
+    /// Replace one strategy symbol's durable checkpoint. The engine context
+    /// overwrites `strategy`, exactly as it does for an intent owner.
+    SetStrategyCheckpoint {
+        strategy: StrategyId,
+        symbol: SymbolId,
+        checkpoint: StrategyCheckpoint,
+    },
+    /// Replace the durable checkpoint for this whole sleeve. The engine
+    /// context overwrites `strategy`; there is no sentinel symbol.
+    SetStrategyGlobalCheckpoint {
+        strategy: StrategyId,
+        checkpoint: StrategyCheckpoint,
+    },
+    /// Publish one immutable event to another configured strategy. The engine
+    /// context overwrites `event.source` before it reaches the WAL.
+    PublishStrategyEvent {
+        event: StrategyEvent,
+    },
+    /// Mark a cross-sleeve event consumed. The engine context overwrites
+    /// `destination`, so only the addressed strategy can remove it.
+    ConsumeStrategyEvent {
+        source: StrategyId,
+        destination: StrategyId,
+        event_id: String,
+    },
+    /// Mark one durable external observation consumed. The engine context
+    /// overwrites `strategy`, so another sleeve cannot acknowledge it.
+    ConsumeSignalObservation {
+        strategy: StrategyId,
+        source: String,
+        sequence: u64,
+        observation_id: String,
+    },
+    /// Acknowledge one replayable runtime control after the reducer's own
+    /// checkpoint/effects have entered the FIFO. The context overwrites the
+    /// strategy id.
+    ConsumeRuntimeControl {
+        strategy: StrategyId,
+        request_id: String,
+    },
 }
 
 impl Action {
@@ -217,16 +258,28 @@ impl Action {
             // Only ever accepted when it tightens, so it can only cut risk.
             Action::SetStop { .. } => true,
             Action::RecordQuoteFill { .. } => true,
+            Action::SetStrategyCheckpoint { .. } => true,
+            Action::SetStrategyGlobalCheckpoint { .. }
+            | Action::PublishStrategyEvent { .. }
+            | Action::ConsumeStrategyEvent { .. }
+            | Action::ConsumeSignalObservation { .. }
+            | Action::ConsumeRuntimeControl { .. } => true,
         }
     }
 
-    pub fn symbol(&self) -> SymbolId {
+    pub fn symbol(&self) -> Option<SymbolId> {
         match self {
-            Action::Place(intent) => intent.symbol,
+            Action::Place(intent) => Some(intent.symbol),
             Action::Cancel { symbol, .. }
             | Action::Amend { symbol, .. }
-            | Action::SetStop { symbol, .. } => *symbol,
-            Action::RecordQuoteFill { features } => features.symbol,
+            | Action::SetStop { symbol, .. }
+            | Action::SetStrategyCheckpoint { symbol, .. } => Some(*symbol),
+            Action::RecordQuoteFill { features } => Some(features.symbol),
+            Action::SetStrategyGlobalCheckpoint { .. }
+            | Action::PublishStrategyEvent { .. }
+            | Action::ConsumeStrategyEvent { .. }
+            | Action::ConsumeSignalObservation { .. }
+            | Action::ConsumeRuntimeControl { .. } => None,
         }
     }
 }
