@@ -189,6 +189,49 @@ def test_update_subscriptions_adds_and_removes() -> None:
         pool.close()
 
 
+def test_whole_universe_replacements_do_not_retain_closed_clients_or_slots() -> None:
+    pool, factory = _build_pool(topics_per_connection=2)
+    pool.subscribe(["AUSDT", "BUSDT"], lambda s, b, c: None)
+    try:
+        for generation in range(10):
+            desired = {f"A{generation}USDT", f"B{generation}USDT"}
+            pool.update_subscriptions(desired)
+            assert set(pool._symbol_to_connection) == desired
+            assert len(pool._connections) == 1
+            assert pool._connections[0].client is factory.built[-1]
+
+        assert len(factory.built) == 11
+        assert all(client.closed for client in factory.built[:-1])
+        assert factory.built[-1].closed is False
+    finally:
+        pool.close()
+
+
+def test_compaction_reindexes_live_connections_and_keeps_callbacks_routed() -> None:
+    pool, factory = _build_pool(topics_per_connection=2)
+    received: list[str] = []
+    pool.subscribe(
+        ["AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT"],
+        lambda symbol, _bar, _confirmed: received.append(symbol),
+    )
+    try:
+        pool.update_subscriptions({"CUSDT", "DUSDT", "EUSDT", "FUSDT"})
+
+        assert factory.built[0].closed is True
+        assert [state.index for state in pool._connections] == [0, 1]
+        assert pool._symbol_to_connection == {
+            "CUSDT": 0,
+            "DUSDT": 0,
+            "EUSDT": 1,
+            "FUSDT": 1,
+        }
+        factory.built[1].inject_bar(symbol="CUSDT")
+        factory.built[2].inject_bar(symbol="FUSDT")
+        assert received == ["CUSDT", "FUSDT"]
+    finally:
+        pool.close()
+
+
 class _AlreadySubscribedWebSocket(_FakeWebSocket):
     """pybit quirk repro: a topic stays in the callback directory even after
     ``unsubscribe()``, so re-subscribing it raises 'already subscribed'.
@@ -304,6 +347,113 @@ def test_reconnect_resubscribes_slice_on_stale_connection() -> None:
         assert pool.stats()["subscribed_symbols"] == 2
     finally:
         pool.close()
+
+
+class _ImmediateCallbackWebSocket(_FakeWebSocket):
+    def kline_stream(self, *, interval, symbol, callback) -> None:
+        super().kline_stream(interval=interval, symbol=symbol, callback=callback)
+        symbols = symbol if isinstance(symbol, list) else [symbol]
+        for subscribed_symbol in symbols:
+            self.inject_bar(symbol=subscribed_symbol)
+
+
+class _ImmediateCallbackFactory(_FakeWebSocketFactory):
+    def __call__(
+        self, *, testnet: bool, demo: bool, channel_type: str
+    ) -> _ImmediateCallbackWebSocket:
+        ws = _ImmediateCallbackWebSocket()
+        self.built.append(ws)
+        return ws
+
+
+def test_fast_subscribe_callbacks_survive_initial_add_and_reconnect() -> None:
+    factory = _ImmediateCallbackFactory()
+    pool, _ = _build_pool(
+        topics_per_connection=10,
+        stale_warning_seconds=0.01,
+        stale_reconnect_seconds=0.02,
+        factory=factory,
+    )
+    received: list[str] = []
+    pool.subscribe(["AUSDT"], lambda symbol, _bar, _confirmed: received.append(symbol))
+    try:
+        pool.update_subscriptions({"AUSDT", "BUSDT"})
+        pool._connections[0].last_message_monotonic = time.monotonic() - 5.0
+        assert pool.check_stale_connections() == 1
+
+        assert received.count("AUSDT") == 2
+        assert received.count("BUSDT") == 2
+    finally:
+        pool.close()
+
+
+class _TimeoutWebSocket(_FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_subscribe = False
+
+    def kline_stream(self, *, interval, symbol, callback) -> None:
+        if self.fail_subscribe:
+            symbols = symbol if isinstance(symbol, list) else [symbol]
+            self.kline_stream_calls.append(list(symbols))
+            raise TimeoutError("simulated disconnected subscribe")
+        super().kline_stream(interval=interval, symbol=symbol, callback=callback)
+
+
+class _TimeoutThenHealthyFactory(_FakeWebSocketFactory):
+    def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _FakeWebSocket:
+        ws = _TimeoutWebSocket() if not self.built else _FakeWebSocket()
+        self.built.append(ws)
+        return ws
+
+
+def test_disconnected_add_stops_after_one_timeout_then_watchdog_rebuilds() -> None:
+    factory = _TimeoutThenHealthyFactory()
+    pool, _ = _build_pool(topics_per_connection=10, factory=factory)
+    pool.subscribe(["AUSDT"], lambda _symbol, _bar, _confirmed: None)
+    first = factory.built[0]
+    assert isinstance(first, _TimeoutWebSocket)
+    first.fail_subscribe = True
+    try:
+        result = pool.update_subscriptions({"AUSDT", "BUSDT", "CUSDT", "DUSDT"})
+
+        assert result["added"] == 0
+        assert len(first.kline_stream_calls) == 2
+        assert first.closed is True
+        assert pool._connections[0].closed is True
+        assert pool._connections[0].client is None
+        assert set(pool._symbol_to_connection) == {"AUSDT"}
+
+        assert pool.check_stale_connections() == 1
+        healed = pool.update_subscriptions({"AUSDT", "BUSDT", "CUSDT", "DUSDT"})
+        assert healed["added"] == 3
+        assert set(pool._symbol_to_connection) == {
+            "AUSDT",
+            "BUSDT",
+            "CUSDT",
+            "DUSDT",
+        }
+    finally:
+        pool.close()
+
+
+def test_timeout_then_removal_cannot_compact_an_unclosed_client() -> None:
+    factory = _TimeoutThenHealthyFactory()
+    pool, _ = _build_pool(topics_per_connection=10, factory=factory)
+    pool.subscribe(["AUSDT"], lambda _symbol, _bar, _confirmed: None)
+    first = factory.built[0]
+    assert isinstance(first, _TimeoutWebSocket)
+    first.fail_subscribe = True
+
+    pool.update_subscriptions({"AUSDT", "BUSDT"})
+    assert first.closed is True
+    pool.update_subscriptions(set())
+
+    assert pool._connections == []
+    assert pool._symbol_to_connection == {}
+    assert first.closed is True
+    pool.close()
+    assert first.closed is True
 
 
 def test_reconnect_backoff_does_not_sleep_under_lock() -> None:
@@ -749,6 +899,215 @@ def test_close_does_not_wait_for_an_in_progress_universe_rebuild() -> None:
     assert pool.stats()["connections"] == 0
     assert pool.stats()["subscribed_symbols"] == 0
     assert all(client.closed for client in factory.built)
+    assert not factory.built[-1].kline_stream_calls
+
+
+def test_close_does_not_wait_for_a_new_connection_added_by_refresh() -> None:
+    entered_factory = threading.Event()
+    release_factory = threading.Event()
+
+    class _BlockingAddFactory(_FakeWebSocketFactory):
+        def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _FakeWebSocket:
+            if len(self.built) == 1:
+                entered_factory.set()
+                assert release_factory.wait(timeout=5.0)
+            return super().__call__(testnet=testnet, demo=demo, channel_type=channel_type)
+
+    factory = _BlockingAddFactory()
+    pool, _ = _build_pool(topics_per_connection=1, factory=factory)
+    pool.subscribe(["AUSDT"], lambda s, b, c: None)
+    update_errors: list[BaseException] = []
+
+    def update() -> None:
+        try:
+            pool.update_subscriptions({"AUSDT", "BUSDT"})
+        except BaseException as exc:
+            update_errors.append(exc)
+
+    updater = threading.Thread(target=update)
+    closer = threading.Thread(target=pool.close)
+    updater.start()
+    assert entered_factory.wait(timeout=5.0)
+    closer.start()
+    closer.join(timeout=1.0)
+    assert not closer.is_alive(), "close waited for an added websocket constructor"
+
+    release_factory.set()
+    updater.join(timeout=5.0)
+
+    assert not updater.is_alive()
+    assert len(update_errors) == 1
+    assert isinstance(update_errors[0], RuntimeError)
+    assert pool.stats()["connections"] == 0
+    assert pool.stats()["subscribed_symbols"] == 0
+    assert all(client.closed for client in factory.built)
+
+
+def test_close_does_not_wait_for_an_initial_websocket_constructor() -> None:
+    entered_factory = threading.Event()
+    release_factory = threading.Event()
+
+    class _BlockingInitialFactory(_FakeWebSocketFactory):
+        def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _FakeWebSocket:
+            entered_factory.set()
+            assert release_factory.wait(timeout=5.0)
+            return super().__call__(testnet=testnet, demo=demo, channel_type=channel_type)
+
+    factory = _BlockingInitialFactory()
+    pool, _ = _build_pool(topics_per_connection=10, factory=factory)
+    subscribe_errors: list[BaseException] = []
+
+    def subscribe() -> None:
+        try:
+            pool.subscribe(["AUSDT", "BUSDT"], lambda s, b, c: None)
+        except BaseException as exc:
+            subscribe_errors.append(exc)
+
+    subscriber = threading.Thread(target=subscribe)
+    closer = threading.Thread(target=pool.close)
+    subscriber.start()
+    assert entered_factory.wait(timeout=5.0)
+    closer.start()
+    closer.join(timeout=1.0)
+    assert not closer.is_alive(), "close waited for the initial websocket constructor"
+
+    release_factory.set()
+    subscriber.join(timeout=5.0)
+
+    assert not subscriber.is_alive()
+    assert len(subscribe_errors) == 1
+    assert isinstance(subscribe_errors[0], RuntimeError)
+    assert pool.stats()["connections"] == 0
+    assert pool.stats()["subscribed_symbols"] == 0
+    assert all(client.closed for client in factory.built)
+    assert all(not client.kline_stream_calls for client in factory.built)
+
+
+class _BlockingSubscribeWebSocket(_FakeWebSocket):
+    def __init__(self, entered: threading.Event, release: threading.Event) -> None:
+        super().__init__()
+        self._entered = entered
+        self._release = release
+
+    def kline_stream(self, *, interval, symbol, callback) -> None:
+        self._entered.set()
+        assert self._release.wait(timeout=5.0)
+        if self.closed:
+            raise ConnectionError("socket closed during subscribe")
+        super().kline_stream(interval=interval, symbol=symbol, callback=callback)
+
+
+class _BlockingSubscribeFactory(_FakeWebSocketFactory):
+    def __init__(
+        self,
+        *,
+        block_on_call: int,
+        entered: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        super().__init__()
+        self._block_on_call = block_on_call
+        self._entered = entered
+        self._release = release
+
+    def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _FakeWebSocket:
+        call = len(self.built) + 1
+        if call == self._block_on_call:
+            ws: _FakeWebSocket = _BlockingSubscribeWebSocket(
+                self._entered,
+                self._release,
+            )
+        else:
+            ws = _FakeWebSocket()
+        self.built.append(ws)
+        return ws
+
+
+@pytest.mark.parametrize("operation", ["initial", "add", "reconnect"])
+def test_close_claims_provisional_socket_before_blocked_subscribe_returns(
+    operation: str,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    factory = _BlockingSubscribeFactory(
+        block_on_call=1 if operation == "initial" else 2,
+        entered=entered,
+        release=release,
+    )
+    pool, _ = _build_pool(
+        topics_per_connection=1 if operation == "add" else 10,
+        stale_warning_seconds=0.01,
+        stale_reconnect_seconds=0.02,
+        factory=factory,
+    )
+    errors: list[BaseException] = []
+
+    if operation != "initial":
+        pool.subscribe(["AUSDT"], lambda _symbol, _bar, _confirmed: None)
+
+    def run_operation() -> None:
+        try:
+            if operation == "initial":
+                pool.subscribe(["AUSDT"], lambda _symbol, _bar, _confirmed: None)
+            elif operation == "add":
+                pool.update_subscriptions({"AUSDT", "BUSDT"})
+            else:
+                pool._connections[0].last_message_monotonic = time.monotonic() - 5.0
+                pool.check_stale_connections()
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_operation)
+    worker.start()
+    assert entered.wait(timeout=5.0)
+
+    started = time.monotonic()
+    pool.close()
+    elapsed = time.monotonic() - started
+
+    blocked_client = factory.built[-1]
+    assert elapsed < 1.0
+    assert blocked_client.closed is True
+    assert worker.is_alive(), "the fake subscribe should still be blocked"
+
+    release.set()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+    assert all(isinstance(exc, (ConnectionError, RuntimeError)) for exc in errors)
+    assert pool.stats()["connections"] == 0
+    assert pool.stats()["subscribed_symbols"] == 0
+
+
+class _FailAfterSubscribeWebSocket(_FakeWebSocket):
+    def kline_stream(self, *, interval, symbol, callback) -> None:
+        super().kline_stream(interval=interval, symbol=symbol, callback=callback)
+        raise RuntimeError("simulated subscribe failure")
+
+
+def test_callback_after_provisional_subscription_failure_is_dropped() -> None:
+    factory = _FakeWebSocketFactory()
+
+    def build_failing(
+        *, testnet: bool, demo: bool, channel_type: str
+    ) -> _FailAfterSubscribeWebSocket:
+        ws = _FailAfterSubscribeWebSocket()
+        factory.built.append(ws)
+        return ws
+
+    pool = BybitKlineStreamPool(
+        connection_spacing_seconds=0.0,
+        websocket_factory=build_failing,
+    )
+    received: list[str] = []
+    with pytest.raises(RuntimeError, match="simulated subscribe failure"):
+        pool.subscribe(
+            ["AUSDT"],
+            lambda symbol, _bar, _confirmed: received.append(symbol),
+        )
+
+    factory.built[0].inject_bar(symbol="AUSDT")
+    assert received == []
+    pool.close()
 
 
 # -- pre-decode frame gate ---------------------------------------------------

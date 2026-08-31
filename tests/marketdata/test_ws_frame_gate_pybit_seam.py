@@ -8,11 +8,15 @@ costing the saving (or, worse, dropping bars).
 from __future__ import annotations
 
 import inspect
+import time
 
 import pytest
 
 from liquidity_migration.marketdata import bybit_market_data
-from liquidity_migration.marketdata.bybit_market_data import _FrameGatedWebSocketMixin
+from liquidity_migration.marketdata.bybit_market_data import (
+    _BoundedSubscribeWebSocketMixin,
+    _FrameGatedWebSocketMixin,
+)
 from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate
 
 pybit_stream = pytest.importorskip("pybit._websocket_stream")
@@ -58,7 +62,57 @@ def test_gated_class_puts_the_override_ahead_of_pybit() -> None:
     gated = bybit_market_data._gated_websocket_class()
     assert issubclass(gated, unified_trading.WebSocket)
     assert gated._on_message is _FrameGatedWebSocketMixin._on_message
+    assert gated.subscribe is _BoundedSubscribeWebSocketMixin.subscribe
+    assert gated.is_connected is _BoundedSubscribeWebSocketMixin.is_connected
+    assert gated.__mro__.index(_BoundedSubscribeWebSocketMixin) < gated.__mro__.index(
+        unified_trading.WebSocket
+    )
     assert bybit_market_data._gated_websocket_class() is gated  # built once
+
+    bounded = bybit_market_data._bounded_websocket_class()
+    assert issubclass(bounded, unified_trading.WebSocket)
+    assert bounded.subscribe is _BoundedSubscribeWebSocketMixin.subscribe
+    assert bounded.is_connected is _BoundedSubscribeWebSocketMixin.is_connected
+    assert bounded.__mro__.index(_BoundedSubscribeWebSocketMixin) < bounded.__mro__.index(
+        unified_trading.WebSocket
+    )
+    assert bybit_market_data._bounded_websocket_class() is bounded
+
+
+def test_bounded_subscribe_times_out_and_clears_its_thread_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DisconnectedPybitLike:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.connected = False
+            self.subscribe_calls = 0
+
+        def is_connected(self) -> bool:
+            return self.connected
+
+        def subscribe(self, *args: object, **kwargs: object) -> str:
+            self.subscribe_calls += 1
+            while not self.is_connected():
+                time.sleep(0.001)
+            return "subscribed"
+
+    monkeypatch.setattr(bybit_market_data, "WebSocket", _DisconnectedPybitLike)
+    bounded = bybit_market_data._bounded_websocket_class()
+    client = bounded(subscribe_connect_timeout_seconds=0.01)
+
+    with pytest.raises(
+        TimeoutError,
+        match="pybit WebSocket remained disconnected while subscribing",
+    ):
+        client.subscribe("topic", object())
+    assert client.subscribe_calls == 1
+    assert not hasattr(client._subscribe_deadline, "value")
+
+    client.connected = True
+    assert client.subscribe("topic", object()) == "subscribed"
+    assert client.subscribe_calls == 2
+    assert not hasattr(client._subscribe_deadline, "value")
 
 
 def test_only_complete_kline_frames_are_gated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,7 +139,8 @@ def test_only_complete_kline_frames_are_gated(monkeypatch: pytest.MonkeyPatch) -
     }
 
     stream = bybit_market_data.BybitPublicTickerStream(testnet=True, demo=False)
-    assert type(stream._client) is _FakeBase
+    assert isinstance(stream._client, _FakeBase)
+    assert isinstance(stream._client, _BoundedSubscribeWebSocketMixin)
     assert stream._client.kwargs == {
         "testnet": True,
         "demo": False,
@@ -100,3 +155,8 @@ def test_pybit_still_decodes_inside_the_method_we_override() -> None:
     assert hasattr(unified_trading.WebSocket, "_on_message")
     source = inspect.getsource(pybit_stream._WebSocketManager._on_message)
     assert "json.loads" in source
+
+
+def test_pybit_disconnected_subscribe_wait_uses_the_overridden_connection_check() -> None:
+    source = inspect.getsource(pybit_stream._V5WebSocketManager.subscribe)
+    assert "while not self.is_connected()" in source

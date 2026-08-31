@@ -82,10 +82,14 @@ impl Kernel {
             (false, true) => observed,
             (false, false) => 0.0,
         };
-        let stop_fraction = if low_px > 0.0 && px > 0.0 {
-            read_stop(intent, low_px, px).unwrap_or(f64::MAX)
+        let stop_fraction = if intent.reduce_only {
+            Some(0.0)
+        } else if low_px > 0.0 && px > 0.0 {
+            read_stop(intent, low_px, px)
+                .ok()
+                .filter(|fraction| fraction.is_finite())
         } else {
-            f64::MAX
+            None
         };
         self.book.register(
             client_order_id,
@@ -266,15 +270,27 @@ impl Kernel {
             .envelope
             .position_worst_case_usdt(notional, stop_fraction);
         for (symbol, qty) in view.exposures() {
+            let just_filled = recent.remove(&symbol.0);
+            let effective_qty = qty
+                + just_filled
+                    .map(|exposure| exposure.signed_qty)
+                    .unwrap_or(0.0);
+            if effective_qty.abs() <= self.cfg.qty_tolerance {
+                continue;
+            }
+            let recent_stop = match just_filled {
+                Some(exposure) => exposure.stop_fraction.ok_or_else(|| {
+                    unknown("a fill newer than the account view has no readable stop distance")
+                })?,
+                None => 0.0,
+            };
             let held_px = self
                 .price_for(symbol, view)
                 .ok_or_else(|| unknown("no price for a held symbol"))?;
-            let just_filled = recent.remove(&symbol.0).unwrap_or_default();
-            let effective_qty = qty + just_filled.signed_qty;
             let held_usdt = effective_qty.abs() * held_px;
             projected.add(held_usdt);
             let held_stop = self.held_stop_fraction(symbol, view)?;
-            let combined_stop = held_stop.max(just_filled.stop_fraction);
+            let combined_stop = held_stop.max(recent_stop);
             projected.worst_case_loss_usdt += self
                 .envelope
                 .position_worst_case_usdt(held_usdt, combined_stop);
@@ -283,6 +299,9 @@ impl Kernel {
             if exposure.signed_qty.abs() <= self.cfg.qty_tolerance {
                 continue;
             }
+            let stop_fraction = exposure.stop_fraction.ok_or_else(|| {
+                unknown("a fill newer than the account view has no readable stop distance")
+            })?;
             let held_px = self
                 .price_for(SymbolId(symbol), view)
                 .ok_or_else(|| unknown("no price for a just-filled symbol"))?;
@@ -290,12 +309,12 @@ impl Kernel {
             projected.add(held_usdt);
             projected.worst_case_loss_usdt += self
                 .envelope
-                .position_worst_case_usdt(held_usdt, exposure.stop_fraction);
+                .position_worst_case_usdt(held_usdt, stop_fraction);
         }
         let in_flight = self
             .book
             .pending_risk_rows(|symbol| self.price_for(symbol, view))
-            .ok_or_else(|| unknown("no price for an in-flight symbol"))?;
+            .map_err(unknown)?;
         for (_symbol, pending_usdt, pending_stop_fraction) in in_flight {
             projected.add(pending_usdt);
             projected.worst_case_loss_usdt += self

@@ -496,17 +496,71 @@ def test_start_recovers_from_flush_file(tmp_path: Path) -> None:
         manager.stop()
 
 
-def test_universe_refresh_handles_empty_change_quietly(tmp_path: Path) -> None:
+def test_universe_refresh_reconciles_pool_when_desired_set_is_unchanged(tmp_path: Path) -> None:
     manager, pool, market = _build_manager(
         tmp_path=tmp_path, initial_symbols=["BTCUSDT", "ETHUSDT"],
     )
     manager.start()
     try:
-        # Refresh with the same universe — no add, no remove, no pool update.
+        # A no-diff refresh still heals live-subscription drift left by a prior
+        # isolated symbol failure.
         before_updates = len(pool.updates)
         result = manager.force_refresh_universe()
         assert result == {"added": 0, "removed": 0, "size": 2}
-        assert len(pool.updates) == before_updates
+        assert len(pool.updates) == before_updates + 1
+        assert pool.updates[-1] == {"BTCUSDT", "ETHUSDT"}
+    finally:
+        manager.stop()
+
+
+def test_universe_refresh_retries_a_fail_once_symbol_on_the_next_unchanged_fetch(
+    tmp_path: Path,
+) -> None:
+    class _FailOnceAddPool(_RecordingPool):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active: set[str] = set()
+            self.failed_once = False
+
+        def subscribe(self, symbols, callback) -> None:
+            super().subscribe(symbols, callback)
+            self.active = set(symbols)
+
+        def update_subscriptions(self, new_symbols: set[str]) -> dict:
+            self.updates.append(set(new_symbols))
+            missing = new_symbols - self.active
+            self.active.intersection_update(new_symbols)
+            if missing and not self.failed_once:
+                self.failed_once = True
+                return {"added": 0, "removed": 0, "connections": 1}
+            self.active.update(missing)
+            return {"added": len(missing), "removed": 0, "connections": 1}
+
+    def _instruments(call_n: int):
+        if call_n == 1:
+            return _instruments_payload(["BTCUSDT"])
+        return _instruments_payload(["BTCUSDT", "SOLUSDT"])
+
+    pool = _FailOnceAddPool()
+    manager, _, _ = _build_manager(
+        tmp_path=tmp_path,
+        initial_symbols=["BTCUSDT"],
+        pool=pool,
+        instruments_factory=_instruments,
+    )
+    manager.start()
+    try:
+        first = manager.force_refresh_universe()
+        assert first == {"added": 1, "removed": 0, "size": 2}
+        assert pool.active == {"BTCUSDT"}
+
+        second = manager.force_refresh_universe()
+        assert second == {"added": 0, "removed": 0, "size": 2}
+        assert pool.active == {"BTCUSDT", "SOLUSDT"}
+        assert pool.updates == [
+            {"BTCUSDT", "SOLUSDT"},
+            {"BTCUSDT", "SOLUSDT"},
+        ]
     finally:
         manager.stop()
 

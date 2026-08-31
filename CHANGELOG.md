@@ -6,6 +6,20 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-31 — LONG reconnect recovery and post-fill risk accounting close
+  their remaining gaps.** Public Bybit subscriptions stop waiting after three
+  seconds on a disconnected socket, retire that connection after one failed
+  addition, and let the watchdog rebuild its assigned slice. Every socket
+  being built or subscribed is owned during the operation, so shutdown closes
+  it before waiting for worker threads. Empty retired connection slots are
+  discarded, quick subscription callbacks keep their symbols, and an
+  unchanged hourly universe retries any symbol missed by the prior refresh.
+  The risk book records a known reduction as zero added stop distance and an
+  unreadable opening stop as explicit unknown state. It refuses that unknown
+  before loss arithmetic, preserves the widest known opening stop across
+  partial reductions, and skips a stale held stop once a newer fill has fully
+  closed the position.
+
 - **2026-08-31 — The recurring LONG disconnect stall and fleet error floods
   are repaired at their sources.** Public Bybit streams have one reconnect
   owner, stuck shutdown closes the socket, and a kline-universe removal

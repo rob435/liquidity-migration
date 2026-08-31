@@ -267,7 +267,11 @@ class KlineStreamManager:
             additions = new_universe - previous
             removals = previous - new_universe
             self._universe = new_universe
-        if self.pool is not None and (additions or removals):
+        # Reconcile even when the fetched universe is unchanged. The pool
+        # isolates per-symbol subscribe failures, so the prior refresh may have
+        # published the desired universe while one transiently failing symbol
+        # remained absent from the live subscription map.
+        if self.pool is not None:
             try:
                 self.pool.update_subscriptions(new_universe)
             except Exception as exc:

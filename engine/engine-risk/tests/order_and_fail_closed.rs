@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use engine_risk::Kernel;
-use engine_types::orders::{OrderKind, Side, TimeInForce};
+use engine_types::orders::{OrderKind, OrderUpdate, Side, TimeInForce};
 use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};
 
 const NOW: u64 = 300 * SEC;
@@ -99,7 +99,6 @@ fn a_stale_reading_still_lets_a_genuine_exit_through() {
 
 #[test]
 fn a_fresh_fill_is_immediately_available_to_a_reduce_only_exit() {
-    use engine_types::orders::OrderUpdate;
     let mut k = kernel();
     let filled = entry(CARRY, BUSDT, Side::Buy, 3.0, 10.0, 9.0, SEC);
     k.register_order("fresh-entry", &filled, 3.0);
@@ -120,6 +119,144 @@ fn a_fresh_fill_is_immediately_available_to_a_reduce_only_exit() {
         k.assess(&out, &flat(1_000.0, SEC)),
         RiskVerdict::Allow { qty: 3.0 }
     );
+}
+
+#[test]
+fn a_fresh_reduce_only_fill_does_not_poison_unrelated_admission() {
+    let mut k = kernel();
+    k.observe_price(BUSDT, 10.0);
+    let held = view(
+        1_000.0,
+        vec![position(BUSDT, Side::Buy, 5.0, 10.0, true)],
+        NOW,
+    );
+    let mut trim = exit(CARRY, BUSDT, Side::Sell, 4.0, 10.0, NOW + 1);
+    trim.kind = OrderKind::Market;
+    assert_eq!(k.assess(&trim, &held), RiskVerdict::Allow { qty: 4.0 });
+    k.register_order("fresh-trim", &trim, 4.0);
+    k.on_update(&OrderUpdate::Fill {
+        exec_id: String::new(),
+        client_order_id: "fresh-trim".to_string(),
+        symbol: BUSDT,
+        side: Side::Sell,
+        qty: 4.0,
+        px: 10.0,
+        fee: Some(0.0),
+        is_maker: false,
+        venue_ts_ms: 0,
+        recv_ns: NOW + 2,
+    });
+
+    let next = entry(LONG, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW + 3);
+    assert_eq!(k.assess(&next, &held), RiskVerdict::Allow { qty: 1.0 });
+}
+
+#[test]
+fn a_partial_reduce_fill_nets_the_view_and_keeps_only_the_unfilled_exit_covered() {
+    let mut k = kernel();
+    let held = view(
+        1_000.0,
+        vec![position(BUSDT, Side::Buy, 5.0, 10.0, true)],
+        NOW,
+    );
+    let mut trim = exit(CARRY, BUSDT, Side::Sell, 4.0, 10.0, NOW + 1);
+    trim.kind = OrderKind::Market;
+    assert_eq!(k.assess(&trim, &held), RiskVerdict::Allow { qty: 4.0 });
+    k.register_order("partial-trim", &trim, 4.0);
+    k.on_update(&OrderUpdate::Fill {
+        exec_id: "partial-trim-1".into(),
+        client_order_id: "partial-trim".into(),
+        symbol: BUSDT,
+        side: Side::Sell,
+        qty: 2.0,
+        px: 10.0,
+        fee: Some(0.0),
+        is_maker: false,
+        venue_ts_ms: 1,
+        recv_ns: NOW + 2,
+    });
+
+    let retry = exit(CARRY, BUSDT, Side::Sell, 5.0, 10.0, NOW + 3);
+    assert_eq!(
+        k.assess(&retry, &held),
+        RiskVerdict::Allow { qty: 1.0 },
+        "three units remain and the first exit still covers two of them"
+    );
+    let unrelated = entry(LONG, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW + 3);
+    assert_eq!(k.assess(&unrelated, &held), RiskVerdict::Allow { qty: 1.0 });
+}
+
+#[test]
+fn a_full_reduce_fill_skips_the_closed_positions_stale_stop() {
+    let mut k = kernel();
+    let mut old = position(BUSDT, Side::Buy, 5.0, 10.0, true);
+    old.stop_px = 12.0;
+    let held = view(1_000.0, vec![old], NOW);
+    let mut close = exit(CARRY, BUSDT, Side::Sell, 5.0, 10.0, NOW + 1);
+    close.kind = OrderKind::Market;
+    assert_eq!(k.assess(&close, &held), RiskVerdict::Allow { qty: 5.0 });
+    k.register_order("full-close", &close, 5.0);
+    k.on_update(&OrderUpdate::Fill {
+        exec_id: "full-close-1".into(),
+        client_order_id: "full-close".into(),
+        symbol: BUSDT,
+        side: Side::Sell,
+        qty: 5.0,
+        px: 11.0,
+        fee: Some(0.0),
+        is_maker: false,
+        venue_ts_ms: 1,
+        recv_ns: NOW + 2,
+    });
+
+    let unrelated = entry(LONG, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW + 3);
+    assert_eq!(k.assess(&unrelated, &held), RiskVerdict::Allow { qty: 1.0 });
+}
+
+#[test]
+fn an_unreserved_opening_fill_has_a_specific_durable_refusal() {
+    let mut k = kernel();
+    k.on_update(&OrderUpdate::Fill {
+        exec_id: "foreign-open-1".into(),
+        client_order_id: String::new(),
+        symbol: BUSDT,
+        side: Side::Buy,
+        qty: 1.0,
+        px: 10.0,
+        fee: Some(0.0),
+        is_maker: false,
+        venue_ts_ms: 1,
+        recv_ns: NOW + 1,
+    });
+
+    let next = entry(LONG, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW + 2);
+    assert_durable_unknown(
+        k.assess(&next, &flat(1_000.0, NOW)),
+        "a fill newer than the account view has no readable stop distance",
+    );
+}
+
+#[test]
+fn an_unreserved_full_close_does_not_require_an_unknown_stop() {
+    let mut k = kernel();
+    let mut old = position(BUSDT, Side::Buy, 5.0, 10.0, true);
+    old.stop_px = 12.0;
+    let held = view(1_000.0, vec![old], NOW);
+    k.on_update(&OrderUpdate::Fill {
+        exec_id: "native-stop-1".into(),
+        client_order_id: String::new(),
+        symbol: BUSDT,
+        side: Side::Sell,
+        qty: 5.0,
+        px: 11.0,
+        fee: Some(0.0),
+        is_maker: false,
+        venue_ts_ms: 1,
+        recv_ns: NOW + 1,
+    });
+
+    let unrelated = entry(LONG, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW + 2);
+    assert_eq!(k.assess(&unrelated, &held), RiskVerdict::Allow { qty: 1.0 });
 }
 
 #[test]
@@ -161,6 +298,23 @@ fn deny_reason(verdict: RiskVerdict) -> DenyReason {
         RiskVerdict::Deny { reason } => reason,
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+fn assert_durable_unknown(verdict: RiskVerdict, expected_detail: &str) {
+    assert!(
+        matches!(
+            &verdict,
+            RiskVerdict::Deny {
+                reason: DenyReason::UnknownState { detail }
+            } if detail == expected_detail
+        ),
+        "expected a specific unknown-state refusal, got {verdict:?}"
+    );
+    let bytes = serde_json::to_vec(&verdict).expect("the refusal must be serializable");
+    assert_eq!(
+        serde_json::from_slice::<RiskVerdict>(&bytes).expect("the refusal must replay"),
+        verdict
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -554,15 +708,66 @@ fn a_wide_stop_keeps_its_full_loss_charge_as_pending_filled_and_restarted() {
 }
 
 #[test]
-fn an_unpriceable_recovered_market_reservation_fails_closed() {
+fn a_recent_reduction_preserves_a_wide_opening_fills_stop_charge() {
+    let mut kernel = narrow_wide_stop_kernel();
+    let stale = flat(1_000.0, NOW);
+    let wide = entry(CARRY, BUSDT, Side::Buy, 4.0, 10.0, 2.0, NOW);
+    assert_eq!(
+        kernel.assess(&wide, &stale),
+        RiskVerdict::Allow { qty: 4.0 }
+    );
+    kernel.register_order("wide-open", &wide, 4.0);
+    kernel.on_update(&OrderUpdate::Fill {
+        exec_id: "wide-open-1".into(),
+        client_order_id: "wide-open".into(),
+        symbol: BUSDT,
+        side: Side::Buy,
+        qty: 4.0,
+        px: 10.0,
+        fee: Some(0.0),
+        is_maker: false,
+        venue_ts_ms: 1,
+        recv_ns: NOW + 1,
+    });
+
+    let reduce = exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, NOW + 2);
+    assert_eq!(
+        kernel.assess(&reduce, &stale),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
+    kernel.register_order("wide-reduce", &reduce, 1.0);
+    kernel.on_update(&OrderUpdate::Fill {
+        exec_id: "wide-reduce-1".into(),
+        client_order_id: "wide-reduce".into(),
+        symbol: BUSDT,
+        side: Side::Sell,
+        qty: 1.0,
+        px: 10.0,
+        fee: Some(0.0),
+        is_maker: false,
+        venue_ts_ms: 2,
+        recv_ns: NOW + 3,
+    });
+
+    let next = entry(LONG, CUSDT, Side::Buy, 4.0, 10.0, 9.0, NOW + 4);
+    assert!(matches!(
+        kernel.assess(&next, &stale),
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+        }
+    ));
+}
+
+#[test]
+fn an_unpriceable_recovered_market_reservation_stays_durably_unknown_after_a_price() {
     let mut kernel = narrow_wide_stop_kernel();
     let market = market_entry(CARRY, BUSDT, Side::Buy, 1.0, 9.0, NOW);
     kernel.register_order("boot-market", &market, 1.0);
     let next = entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW + 1);
-    assert!(matches!(
-        kernel.assess(&next, &flat(1_000.0, NOW)),
-        RiskVerdict::Deny {
-            reason: DenyReason::UnknownState { .. }
-        }
-    ));
+    let account = flat(1_000.0, NOW);
+    let detail = "an in-flight opening order has no readable stop distance";
+    assert_durable_unknown(kernel.assess(&next, &account), detail);
+
+    kernel.observe_price(BUSDT, 10.0);
+    assert_durable_unknown(kernel.assess(&next, &account), detail);
 }

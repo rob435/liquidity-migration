@@ -321,6 +321,12 @@ file.
   each acknowledgement's header when that is larger than the documented
   default, so an upgraded market-maker tier takes effect without a code
   change.
+- **LONG's public kline pool owns reconnect recovery.** A subscription waiting
+  on a disconnected Bybit socket stops after three seconds, leaves its existing
+  symbol slice ready for the watchdog, and defers the rest of that add batch.
+  The next universe read reconciles the full desired set even when its symbol
+  list is unchanged. Shutdown closes sockets that are still being subscribed,
+  and retired empty connection slots do not accumulate.
 - **The engine says what its fills cost.** It keeps `is_maker` from the venue's
   execution row and writes the midpoint an order was decided against onto the
   order's own log record, so arrival shortfall, effective spread, fee and all-in
@@ -449,7 +455,11 @@ equity before its own vol/weekend scaling, each new carry name 30%, and a full
 CARRY book is 3× it). Startup and authorization
 reject unknown profile fields and producer leverage above the owner cap; how
 large a book the multipliers build is the owner's dial, bounded per position
-by each venue-native stop.
+by each venue-native stop. The risk book gives known reductions zero added stop
+distance, preserves the widest known opening stop across partial reductions,
+and refuses an unreadable opening stop explicitly before doing loss arithmetic.
+A newer fill that fully closes a stale held row removes that row before its old
+stop is read.
 
 **Real money**: the funded fleet sizes LONG at 6.0 and CARRY at 3.0. LONG's
 6.0 is set both in the committed profile and as `LONG_NOTIONAL_MULTIPLIER=6.0`
