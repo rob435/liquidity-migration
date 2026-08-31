@@ -297,6 +297,7 @@ struct MockVenue {
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
     stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
+    stop_failures_remaining: Rc<RefCell<usize>>,
     caps: VenueCaps,
     reply: Option<VenueError>,
     send_delay: Duration,
@@ -342,6 +343,7 @@ impl MockVenue {
                 cancels: Rc::new(RefCell::new(Vec::new())),
                 amends: Rc::new(RefCell::new(Vec::new())),
                 stops: Rc::new(RefCell::new(Vec::new())),
+                stop_failures_remaining: Rc::new(RefCell::new(0)),
                 caps: bybit_like_caps(),
                 reply: None,
                 send_delay: Duration::ZERO,
@@ -434,6 +436,11 @@ impl VenueGateway for MockVenue {
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
         self.stops.lock().unwrap().push((symbol, trigger_px));
+        let mut failures_remaining = self.stop_failures_remaining.lock().unwrap();
+        if *failures_remaining > 0 {
+            *failures_remaining -= 1;
+            return Err(VenueError::Transport("scripted stop failure".into()));
+        }
         Ok(())
     }
 
@@ -851,6 +858,7 @@ struct Harness {
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
     stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
+    stop_failures_remaining: Rc<RefCell<usize>>,
     risk_saw: Rc<RefCell<Vec<OrderUpdate>>>,
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Positions the venue's next account readings will report; see
@@ -958,6 +966,7 @@ async fn build_with_venue_state_and_rule(
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let stops = venue.stops.clone();
+    let stop_failures_remaining = venue.stop_failures_remaining.clone();
     let leverages = venue.leverages.clone();
     let account_readings = venue.account_readings.clone();
     let account_view_fails = venue.account_view_fails.clone();
@@ -984,6 +993,7 @@ async fn build_with_venue_state_and_rule(
             cancels,
             amends,
             stops,
+            stop_failures_remaining,
             risk_saw,
             leverages,
             account_readings,
@@ -1014,6 +1024,7 @@ async fn build_inner(
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let stops = venue.stops.clone();
+    let stop_failures_remaining = venue.stop_failures_remaining.clone();
     let leverages = venue.leverages.clone();
     let account_readings = venue.account_readings.clone();
     let account_view_fails = venue.account_view_fails.clone();
@@ -1041,6 +1052,7 @@ async fn build_inner(
             cancels,
             amends,
             stops,
+            stop_failures_remaining,
             risk_saw,
             leverages,
             account_readings,

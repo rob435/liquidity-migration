@@ -76,6 +76,104 @@ async fn a_live_stop_move_is_validated_and_survives_rotation() {
     assert_eq!(intended_stops[0].trigger_px, 90.0);
 }
 
+#[tokio::test]
+async fn an_equal_remembered_stop_is_not_sent_again_before_the_account_view_catches_up() {
+    let mover = StopMover {
+        symbol: "BTCUSDT".into(),
+        stops: VecDeque::from(vec![90.0, 90.0]),
+    };
+    let held = vec![PositionView {
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 1.0,
+        entry_px: 100.0,
+        stop_attached: true,
+        stop_px: 80.0,
+        leverage: None,
+    }];
+    let (mut engine, h) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(mover)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+        held,
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 2, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*h.stops.lock().unwrap(), vec![(symbol, 90.0)]);
+    assert_eq!(
+        h.records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| matches!(record, WalRecord::StopSet { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_equal_stop_is_retried_after_the_first_venue_call_fails() {
+    let mover = StopMover {
+        symbol: "BTCUSDT".into(),
+        stops: VecDeque::from(vec![90.0, 90.0, 90.0]),
+    };
+    let held = vec![PositionView {
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 1.0,
+        entry_px: 100.0,
+        stop_attached: true,
+        stop_px: 80.0,
+        leverage: None,
+    }];
+    let (mut engine, h) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(mover)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+        held,
+    )
+    .await;
+    *h.stop_failures_remaining.lock().unwrap() = 1;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 3, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *h.stops.lock().unwrap(),
+        vec![(symbol, 90.0), (symbol, 90.0)]
+    );
+    assert_eq!(
+        h.records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| matches!(record, WalRecord::StopSet { .. }))
+            .count(),
+        2
+    );
+}
+
 fn sent(id: &str, symbol: u16, qty: f64, stop: f64) -> WalRecord {
     WalRecord::OrderSent {
         request: OrderRequest {

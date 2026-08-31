@@ -586,6 +586,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             private_stream_ready: true,
             logged_exposure,
             intended_stops,
+            confirmed_stop_moves: std::collections::BTreeMap::new(),
             recovered_until_ms: recovery.through_ms,
             next_history_checkpoint_ms: recovery
                 .through_ms

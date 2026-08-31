@@ -549,11 +549,27 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let venue_stop =
             (position.stop_attached && position.stop_px.is_finite() && position.stop_px > 0.0)
                 .then_some(position.stop_px);
+        let confirmed_stop = self
+            .confirmed_stop_moves
+            .get(&symbol.0)
+            .filter(|stop| stop.side == position.side)
+            .map(|stop| stop.trigger_px);
         let baseline = match (position.side, remembered, venue_stop) {
             (Side::Buy, Some(a), Some(b)) => Some(a.max(b)),
             (Side::Sell, Some(a), Some(b)) => Some(a.min(b)),
             (_, a, b) => a.or(b),
         };
+        let tolerance = self
+            .rules
+            .get(symbol.0 as usize)
+            .and_then(|rule| rule.as_ref())
+            .map(|rule| rule.tick_size / 2.0)
+            .unwrap_or(1e-9);
+        if venue_stop.is_some_and(|old| (trigger_px - old).abs() <= tolerance)
+            || confirmed_stop.is_some_and(|old| (trigger_px - old).abs() <= tolerance)
+        {
+            return Ok(());
+        }
         let loosens = match (position.side, baseline) {
             (Side::Buy, Some(old)) => trigger_px < old,
             (Side::Sell, Some(old)) => trigger_px > old,
@@ -578,6 +594,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         );
         match self.venue.set_stop(symbol, trigger_px).await {
             Ok(()) => {
+                self.confirmed_stop_moves.insert(
+                    symbol.0,
+                    reconcile::IntendedPositionStop {
+                        side: position.side,
+                        trigger_px,
+                    },
+                );
                 tracing::info!(
                     symbol = self.market.table.name(symbol),
                     trigger_px,
