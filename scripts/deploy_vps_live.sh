@@ -3012,18 +3012,27 @@ END { if (NR != 8) exit 1 }
 # A generation may start under a root-watchdog freshness lease while it is
 # being verified, but it may survive a reboot only after the root-owned
 # completion receipt is atomically installed and synced.
+activation_watchdog_state() {
+    systemctl list-units --all --full --plain --no-legend \
+        "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null \
+        | awk -v unit="$ACTIVATION_WATCHDOG_UNIT" '
+$1 == unit { state = $3 }
+END { print state == "" ? "absent" : state }
+'
+}
+
 activation_watchdog_running() {
-    systemctl is-active --quiet "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null
+    [ "$(activation_watchdog_state)" = active ]
 }
 
 stop_activation_watchdog() {
-    systemctl stop "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true
-    if activation_watchdog_running; then
-        return 1
-    fi
-    if systemctl is-failed --quiet "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null; then
-        systemctl reset-failed "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true
-    fi
+    local state
+    state="$(activation_watchdog_state)" || return 1
+    case "$state" in
+        absent) return 0 ;;
+        failed) systemctl reset-failed "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null ;;
+        *) systemctl stop "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null ;;
+    esac
 }
 
 start_activation_watchdog() {
@@ -3079,8 +3088,8 @@ activation_authority_matches_unlocked() {
     local -a file_owner_fields=()
     local control_bound=0
     [ -f "$path" ] && [ ! -L "$path" ] \
-        && [ "$(stat -c %u "$path")" -eq 0 ] \
-        && [ "$(stat -c %g "$path")" -eq 0 ] \
+        && [ "$(stat -c %u "$path")" = 0 ] \
+        && [ "$(stat -c %g "$path")" = 0 ] \
         && [ "$(stat -c %a "$path")" = 644 ] \
         || return 1
     marker_commit="$(sed -n 's/^commit=//p' "${ENGINE_BINARY}.release")"
@@ -3148,8 +3157,8 @@ END { if (NR != 4) exit 1 }
         permit)
             [ -d "${ACTIVATION_PERMIT%/*}" ] \
                 && [ ! -L "${ACTIVATION_PERMIT%/*}" ] \
-                && [ "$(stat -c %u "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
-                && [ "$(stat -c %g "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
+                && [ "$(stat -c %u "${ACTIVATION_PERMIT%/*}")" = 0 ] \
+                && [ "$(stat -c %g "${ACTIVATION_PERMIT%/*}")" = 0 ] \
                 && [ "$(stat -c %a "${ACTIVATION_PERMIT%/*}")" = 755 ] \
                 || return 1
             [ "$control_bound" -eq 1 ] || return 1

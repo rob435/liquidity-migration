@@ -1470,32 +1470,51 @@ def test_runtime_supervisor_revokes_same_boot_partial_activation() -> None:
     assert "activation_authority_matches_unlocked" in deploy
     assert '/usr/bin/flock -s "$authority_fd"' in deploy
 
+    lifecycle = deploy[
+        deploy.index("activation_watchdog_state()") : deploy.index("start_activation_watchdog()")
+    ]
+    assert "systemctl list-units" in lifecycle
+    assert "absent) return 0" in lifecycle
+    assert "systemctl show" not in lifecycle
+    assert "systemctl is-active" not in lifecycle
+    assert "systemctl is-failed" not in lifecycle
+
 
 def test_activation_authority_stat_failure_is_quiet_and_fail_closed() -> None:
     launcher = _read("deploy/run_authorized_runtime_trusted.sh")
-    locked = _function(
-        launcher,
-        "with_locked_activation_authority",
-        "activation_authority_matches",
+    exposed = "\n".join(
+        (
+            _function(launcher, "watchdog_permit_matches", "watchdog_remove_owned_permit"),
+            _function(launcher, "watchdog_open_permit_is_current", "watchdog_refresh_permit"),
+            _function(
+                launcher,
+                "with_locked_activation_authority",
+                "activation_authority_matches",
+            ),
+        )
     )
-    guard = re.search(
-        r'&& (\[ "\$\(stat -Lc %h "\$descriptor_path"\)" (?:-eq|=) 1 \])',
-        locked,
+    guards = re.findall(
+        r'(?:^|&& )(?P<guard>\[ "\$\(stat [^\n]+?\)" = [0-9]+ \])',
+        exposed,
+        re.MULTILINE,
     )
-    assert guard is not None
-    script = f"""
+    assert len(guards) == 8
+    assert re.search(r'\$\(stat [^\n]+\)" -eq', launcher) is None
+    for guard in guards:
+        script = f"""
 stat() {{ :; }}
 descriptor_path=unavailable
-{guard.group(1)}
+path=unavailable
+{guard}
 """
-    result = subprocess.run(
-        ["bash", "-c", script],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 1
-    assert result.stderr == ""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 1
+        assert result.stderr == ""
 
     deploy = DEPLOY.read_text(encoding="utf-8")
     deployed_check = _function(
@@ -1826,12 +1845,12 @@ def _runtime_supervisor_fixture(
     ):
         source = source.replace(expression, expression.removesuffix("0") + str(uid))
     for expression in (
-        '$(stat -c %g "$path")" -eq 0',
-        '$(stat -c %g "${ACTIVATION_PERMIT%/*}")" -eq 0',
-        '$(stat -c %g "$LAUNCHER")" -eq 0',
-        '$(stat -c %g "${LAUNCHER%/*}")" -eq 0',
-        '$(stat -c %g "$MARKER")" -eq 0',
-        '$(stat -Lc %g "$descriptor_path")" -eq 0',
+        '$(stat -c %g "$path")" = 0',
+        '$(stat -c %g "${ACTIVATION_PERMIT%/*}")" = 0',
+        '$(stat -c %g "$LAUNCHER")" = 0',
+        '$(stat -c %g "${LAUNCHER%/*}")" = 0',
+        '$(stat -c %g "$MARKER")" = 0',
+        '$(stat -Lc %g "$descriptor_path")" = 0',
     ):
         source = source.replace(expression, expression.removesuffix("0") + str(gid))
     source = source.replace("! -uid 0", f"! -uid {uid}")
