@@ -1463,11 +1463,47 @@ def test_runtime_supervisor_revokes_same_boot_partial_activation() -> None:
     watchdog = _function(deploy, "start_activation_watchdog", "activation_authority_matches")
     assert "/usr/bin/systemd-run" in watchdog
     assert '"$ENGINE_LAUNCHER" --activation-watchdog' in watchdog
+    assert "SuccessExitStatus=143" in watchdog
     assert "PrivateNetwork=true" in watchdog
     assert "ProtectSystem=strict" in watchdog
     assert "ReadWritePaths=${ACTIVATION_PERMIT%/*}" in watchdog
     assert "activation_authority_matches_unlocked" in deploy
     assert '/usr/bin/flock -s "$authority_fd"' in deploy
+
+
+def test_activation_authority_stat_failure_is_quiet_and_fail_closed() -> None:
+    launcher = _read("deploy/run_authorized_runtime_trusted.sh")
+    locked = _function(
+        launcher,
+        "with_locked_activation_authority",
+        "activation_authority_matches",
+    )
+    guard = re.search(
+        r'&& (\[ "\$\(stat -Lc %h "\$descriptor_path"\)" (?:-eq|=) 1 \])',
+        locked,
+    )
+    assert guard is not None
+    script = f"""
+stat() {{ :; }}
+descriptor_path=unavailable
+{guard.group(1)}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert result.stderr == ""
+
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    deployed_check = _function(
+        deploy,
+        "activation_authority_matches",
+        "invalidate_activation_authority",
+    )
+    assert '[ "$(stat -Lc %h "$descriptor_path")" = 1 ]' in deployed_check
 
 
 def test_trusted_launcher_rejects_mutable_checkout_and_git_boundaries() -> None:

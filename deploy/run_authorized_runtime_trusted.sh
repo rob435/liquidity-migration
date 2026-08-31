@@ -433,7 +433,7 @@ with_locked_activation_authority() {
     descriptor_path="/proc/self/fd/$authority_fd"
     if /usr/bin/flock -s "$authority_fd" \
         && [ "$path" -ef "$descriptor_path" ] \
-        && [ "$(stat -Lc %h "$descriptor_path")" -eq 1 ] \
+        && [ "$(stat -Lc %h "$descriptor_path")" = 1 ] \
         && "$validator" "$path" "$kind" \
         && [ "$path" -ef "$descriptor_path" ]; then
         status=0

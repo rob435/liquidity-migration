@@ -3013,8 +3013,7 @@ END { if (NR != 8) exit 1 }
 # being verified, but it may survive a reboot only after the root-owned
 # completion receipt is atomically installed and synced.
 activation_watchdog_running() {
-    [ "$(systemctl show -p ActiveState --value "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true)" = active ] \
-        && [ "$(systemctl show -p SubState --value "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true)" = running ]
+    systemctl is-active --quiet "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null
 }
 
 stop_activation_watchdog() {
@@ -3022,7 +3021,9 @@ stop_activation_watchdog() {
     if activation_watchdog_running; then
         return 1
     fi
-    systemctl reset-failed "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true
+    if systemctl is-failed --quiet "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null; then
+        systemctl reset-failed "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null || true
+    fi
 }
 
 start_activation_watchdog() {
@@ -3035,6 +3036,7 @@ start_activation_watchdog() {
         --property=Group=root \
         --property=WorkingDirectory=/ \
         --property=Restart=no \
+        --property=SuccessExitStatus=143 \
         --property=KillMode=control-group \
         --property=TimeoutStopSec=10s \
         --property=RuntimeMaxSec=2h \
@@ -3204,7 +3206,7 @@ activation_authority_matches() {
     descriptor_path="/proc/self/fd/$authority_fd"
     if /usr/bin/flock -s "$authority_fd" \
         && [ "$path" -ef "$descriptor_path" ] \
-        && [ "$(stat -Lc %h "$descriptor_path")" -eq 1 ] \
+        && [ "$(stat -Lc %h "$descriptor_path")" = 1 ] \
         && activation_authority_matches_unlocked "$path" "$kind" \
         && [ "$path" -ef "$descriptor_path" ]; then
         status=0
