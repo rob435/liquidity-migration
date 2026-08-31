@@ -21,7 +21,8 @@ edit STATE.md to match.
   closed the position. Interrupted activation-authority metadata checks now
   fail quietly instead of passing empty `stat` results to shell arithmetic.
   The short-lived rollout watchdog marks its commanded 143 exit as success and
-  does not query a transient unit after systemd has already collected it.
+  waits for its transient definition to disappear without querying it after
+  systemd has already collected it.
 
 - **2026-08-31 — The recurring LONG disconnect stall and fleet error floods
   are repaired at their sources.** Public Bybit streams have one reconnect

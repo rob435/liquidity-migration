@@ -1453,6 +1453,9 @@ def test_runtime_supervisor_revokes_same_boot_partial_activation() -> None:
     ]
     assert "systemctl list-units" in lifecycle
     assert "absent) return 0" in lifecycle
+    assert 'systemctl stop --no-block "$ACTIVATION_WATCHDOG_UNIT"' in lifecycle
+    assert 'fragment="/run/systemd/transient/$ACTIVATION_WATCHDOG_UNIT"' in lifecycle
+    assert '[ ! -e "$fragment" ]' in lifecycle
     assert "systemctl show" not in lifecycle
     assert "systemctl is-active" not in lifecycle
     assert "systemctl is-failed" not in lifecycle

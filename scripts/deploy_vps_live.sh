@@ -2902,13 +2902,19 @@ activation_watchdog_running() {
 }
 
 stop_activation_watchdog() {
-    local state
+    local state fragment deadline
     state="$(activation_watchdog_state)" || return 1
     case "$state" in
         absent) return 0 ;;
         failed) systemctl reset-failed "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null ;;
-        *) systemctl stop "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null ;;
-    esac
+        *) systemctl stop --no-block "$ACTIVATION_WATCHDOG_UNIT" 2>/dev/null ;;
+    esac || return 1
+    fragment="/run/systemd/transient/$ACTIVATION_WATCHDOG_UNIT"
+    deadline=$((SECONDS + 12))
+    while [ -e "$fragment" ] && [ "$SECONDS" -lt "$deadline" ]; do
+        sleep 0.1
+    done
+    [ ! -e "$fragment" ]
 }
 
 start_activation_watchdog() {
