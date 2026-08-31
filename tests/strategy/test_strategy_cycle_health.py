@@ -37,7 +37,7 @@ def test_round_trip_is_private_atomic_and_replaces_latest(tmp_path: Path) -> Non
 
     assert path == strategy_cycle_health_path(tmp_path)
     if os.name != "nt":
-        assert path.stat().st_mode & 0o777 == 0o600
+        assert path.stat().st_mode & 0o777 == 0o640
     assert path.stat().st_nlink == 1
     assert read_strategy_cycle_health(tmp_path) == _health()
 
@@ -56,7 +56,7 @@ def test_round_trip_is_private_atomic_and_replaces_latest(tmp_path: Path) -> Non
 def test_reader_rejects_noncanonical_and_hardlinked_artifacts(tmp_path: Path) -> None:
     path = write_strategy_cycle_health(tmp_path, _health())
     path.write_text('{"schema_version": 1}\n', encoding="utf-8")
-    os.chmod(path, 0o600)
+    os.chmod(path, 0o640)
 
     with pytest.raises(ValueError, match="missing fields|not canonical"):
         read_strategy_cycle_health(tmp_path)

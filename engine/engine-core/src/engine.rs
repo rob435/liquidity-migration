@@ -376,6 +376,10 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// repairable at the level and direction the log proved. Unfilled
     /// opposite-side siblings never enter this map.
     intended_stops: std::collections::BTreeMap<u16, reconcile::IntendedPositionStop>,
+    /// Stop moves the venue accepted since the latest account reading. This
+    /// closes the short gap before that reading reflects the new stop without
+    /// confusing a durable intent with a successful API call.
+    confirmed_stop_moves: std::collections::BTreeMap<u16, reconcile::IntendedPositionStop>,
     /// Everything the venue traded before this wall time is in the log —
     /// delivered by the stream or recovered from the venue's history.
     /// Advanced only when a recovery pass completes, and it is where the
@@ -719,6 +723,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// cannot be done in one path and forgotten in the other.
     fn adopt_view(&mut self, view: AccountView) {
         self.risk.observe_account_view(&view);
+        self.confirmed_stop_moves.clear();
         match self.leverage_authority {
             crate::config::LeverageAuthority::Shared => {
                 forget_leverage_where_flat(&mut self.leverage_at, &view.positions)

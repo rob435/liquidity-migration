@@ -77,11 +77,21 @@ def test_only_complete_kline_frames_are_gated(monkeypatch: pytest.MonkeyPatch) -
         testnet=True, demo=True, channel_type="linear"
     )
     assert isinstance(kline_client.frame_gate, KlineFrameGate)
-    assert kline_client.kwargs == {"testnet": True, "demo": True, "channel_type": "linear"}
+    assert kline_client.kwargs == {
+        "testnet": True,
+        "demo": True,
+        "channel_type": "linear",
+        "restart_on_error": False,
+    }
 
     stream = bybit_market_data.BybitPublicTickerStream(testnet=True, demo=False)
     assert type(stream._client) is _FakeBase
-    assert stream._client.kwargs == {"testnet": True, "demo": False, "channel_type": "linear"}
+    assert stream._client.kwargs == {
+        "testnet": True,
+        "demo": False,
+        "channel_type": "linear",
+        "restart_on_error": False,
+    }
 
 
 def test_pybit_still_decodes_inside_the_method_we_override() -> None:

@@ -12,7 +12,8 @@ UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYB
 Environment=FORWARD_CAPTURE_ROOT=/var/lib/liquidity-migration/forward-market
 Environment=FORWARD_CAPTURE_REMOTE=gdrive:LiquidityMigration/forward-market
 Environment=FORWARD_UPLOAD_STATE_DIR=/var/lib/liquidity-migration/forward-upload
-Environment=RCLONE_CONFIG=/etc/liquidity-migration/rclone.conf
+Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/forward-upload/rclone.conf
+Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf
 ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-forward-upload.service main
 KillMode=control-group
 TimeoutStartSec=1800

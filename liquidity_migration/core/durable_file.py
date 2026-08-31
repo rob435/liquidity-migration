@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 
+from liquidity_migration.core.artifact_snapshot import rename_noreplace
+
 
 def durable_atomic_replace(
     path: str | Path,
@@ -77,6 +79,9 @@ def durable_create(
         raise TypeError(f"{label} data must be bytes")
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(
+        f".{target.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    )
     flags = (
         os.O_CREAT
         | os.O_EXCL
@@ -86,8 +91,9 @@ def durable_create(
         | getattr(os, "O_BINARY", 0)
     )
     created = False
+    published = False
     try:
-        descriptor = os.open(str(target), flags, mode)
+        descriptor = os.open(str(temporary), flags, mode)
         created = True
         try:
             if hasattr(os, "fchmod"):
@@ -102,6 +108,8 @@ def durable_create(
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        rename_noreplace(temporary, target, label=label)
+        published = True
         if os.name != "nt":
             directory_descriptor = os.open(
                 str(target.parent),
@@ -113,7 +121,21 @@ def durable_create(
                 os.close(directory_descriptor)
     except BaseException:
         if created:
+            temporary.unlink(missing_ok=True)
+        if published:
             target.unlink(missing_ok=True)
+            if os.name != "nt":
+                try:
+                    directory_descriptor = os.open(
+                        str(target.parent),
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                    try:
+                        os.fsync(directory_descriptor)
+                    finally:
+                        os.close(directory_descriptor)
+                except OSError:
+                    pass
         raise
     return target
 

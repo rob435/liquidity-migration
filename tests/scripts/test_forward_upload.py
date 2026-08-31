@@ -39,15 +39,21 @@ fi
     return executable
 
 
-def _run(tmp_path: Path, *, fail_check: bool = False) -> subprocess.CompletedProcess[str]:
+def _run(
+    tmp_path: Path,
+    *,
+    fail_check: bool = False,
+    seeded_config: bool = False,
+) -> subprocess.CompletedProcess[str]:
     source = tmp_path / "capture"
     state = tmp_path / "state"
-    config = tmp_path / "rclone.conf"
+    config_seed = tmp_path / "rclone.conf"
+    config = state / "rclone.conf" if seeded_config else config_seed
     log = tmp_path / "rclone.log"
     (source / "2026-08-30" / "BTCUSDT").mkdir(parents=True)
     (source / "2026-08-30" / "BTCUSDT" / "segment-000000.jsonl.zst").write_bytes(b"closed")
     (source / "2026-08-30" / "BTCUSDT" / "segment-000001.jsonl.partial").write_bytes(b"open")
-    config.write_text("[gdrive]\ntype = drive\n", encoding="utf-8")
+    config_seed.write_text("[gdrive]\ntype = drive\n", encoding="utf-8")
     env = {
         **os.environ,
         "FORWARD_CAPTURE_ROOT": str(source),
@@ -58,6 +64,8 @@ def _run(tmp_path: Path, *, fail_check: bool = False) -> subprocess.CompletedPro
         "FAKE_RCLONE_LOG": str(log),
         "FAKE_RCLONE_FAIL_CHECK": "1" if fail_check else "0",
     }
+    if seeded_config:
+        env["RCLONE_CONFIG_SEED"] = str(config_seed)
     return subprocess.run(
         ["bash", str(SCRIPT)],
         check=False,
@@ -86,3 +94,24 @@ def test_failed_verification_does_not_advance_ledger_or_stamp(tmp_path: Path) ->
     assert result.returncode != 0
     assert (tmp_path / "state" / "uploaded-files.txt").read_text(encoding="utf-8") == ""
     assert not (tmp_path / "state" / "last-success").exists()
+
+
+def test_seeds_a_private_writable_runtime_config(tmp_path: Path) -> None:
+    result = _run(tmp_path, seeded_config=True)
+
+    assert result.returncode == 0, result.stderr
+    runtime_config = tmp_path / "state" / "rclone.conf"
+    assert runtime_config.read_text(encoding="utf-8") == "[gdrive]\ntype = drive\n"
+    if os.name != "nt":
+        assert runtime_config.stat().st_mode & 0o777 == 0o600
+    log = (tmp_path / "rclone.log").read_text(encoding="utf-8")
+    assert f"--config {runtime_config}" in log
+
+
+def test_systemd_uses_the_state_copy_and_read_only_seed() -> None:
+    unit = (ROOT / "deploy" / "systemd" / "liquidity-migration-forward-upload.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/forward-upload/rclone.conf" in unit
+    assert "Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf" in unit

@@ -6,6 +6,21 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-08-31 — The recurring LONG disconnect stall and fleet error floods
+  are repaired at their sources.** Public Bybit streams have one reconnect
+  owner, stuck shutdown closes the socket, and a kline-universe removal
+  rebuilds its connection instead of asking pybit to remove one topic from a
+  multi-topic subscription. A previously live ticker stream is rebuilt when
+  it goes silent. Immutable target-book objects are fully written before their
+  names become visible, eliminating the concurrent Exodus publication race.
+  Strategy completion receipts are mode 0640 so the liveness observer can read
+  the producer group's files. The forward uploader gives rclone a private
+  writable copy of its root-owned OAuth seed. The target-book planner checks
+  order value after quantity rounding and preserves the tighter existing stop
+  during same-side growth, so it does not resubmit orders the execution kernel
+  must refuse. The engine skips a stop already present at the same tick, and
+  Bybit's explicit "not modified" response is treated as a successful no-op.
+
 - **2026-08-30 — The signed venue-history capture accepts Bybit's terminal
   null cursor.** The real read-only mainnet capture returned JSON `null` after
   the final transaction page. Capture now treats that explicit value as the

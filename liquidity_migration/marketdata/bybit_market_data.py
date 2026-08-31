@@ -481,7 +481,12 @@ class BybitPublicTickerStream:
         _patch_pybit_daemon_ping_timer()
         # Ticker messages are deltas. Every one must reach pybit so its cached
         # row remains a complete view of the latest venue state.
-        self._client = WebSocket(testnet=self.testnet, demo=self.demo, channel_type=self.category)
+        self._client = WebSocket(
+            testnet=self.testnet,
+            demo=self.demo,
+            channel_type=self.category,
+            restart_on_error=False,
+        )
 
     def subscribe_tickers(self, symbols: str | list[str], callback: Any) -> None:
         if isinstance(symbols, str):
@@ -507,9 +512,15 @@ def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
     the underlying TCP socket is in a half-closed state). Without a
     timeout, daemon shutdown waits indefinitely for the WS to die — and
     systemd then SIGKILLs the whole process. Running the close on a
-    background thread with a join timeout means a stuck close costs us
-    `timeout_seconds` per WS instead of unbounded blocking; the resources
-    leak (until process exit) but shutdown proceeds."""
+    background thread bounds that wait; a timeout disables the socket loop and
+    closes the underlying socket before checking the thread once more."""
+    # Stop pybit from starting another internal reconnect while this client is
+    # being retired. The pool and host own reconnects.
+    if hasattr(client, "handle_error"):
+        client.handle_error = False
+    if hasattr(client, "exited"):
+        client.exited = True
+
     # Cancel the ping timer under whichever attribute it lives on: our patch sets
     # both _agc_ping_timer and custom_ping_timer, but stock pybit (and a future
     # bump that stops calling our patched _send_initial_ping) uses only
@@ -546,10 +557,29 @@ def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
     thread.start()
     thread.join(timeout=timeout_seconds)
     if thread.is_alive():
-        logging.getLogger("liquidity_migration.marketdata.bybit").warning(
-            "ws close did not return within %.1fs; abandoning thread",
-            timeout_seconds,
-        )
+        websocket_app = getattr(client, "ws", None)
+        if websocket_app is not None:
+            try:
+                websocket_app.keep_running = False
+            except Exception:
+                pass
+            socket = getattr(websocket_app, "sock", None)
+            close_socket = getattr(socket, "close", None)
+            if callable(close_socket):
+                try:
+                    close_socket()
+                except Exception:
+                    pass
+            try:
+                websocket_app.sock = None
+            except Exception:
+                pass
+        thread.join(timeout=min(max(timeout_seconds, 0.0), 0.5))
+        if thread.is_alive():
+            logging.getLogger("liquidity_migration.marketdata.bybit").warning(
+                "ws close did not return within %.1fs after socket abort",
+                timeout_seconds,
+            )
 
 
 def _patch_pybit_daemon_ping_timer() -> None:
@@ -666,12 +696,18 @@ def _default_kline_websocket_factory(*, testnet: bool, demo: bool, channel_type:
     _patch_pybit_daemon_ping_timer()
     if not _websocket_supports_frame_gate():
         _logger_ws_klines.warning("pybit exposes no _on_message; kline frames decode ungated")
-        return WebSocket(testnet=testnet, demo=demo, channel_type=channel_type)
+        return WebSocket(
+            testnet=testnet,
+            demo=demo,
+            channel_type=channel_type,
+            restart_on_error=False,
+        )
     return _gated_websocket_class()(
         frame_gate=KlineFrameGate(),
         testnet=testnet,
         demo=demo,
         channel_type=channel_type,
+        restart_on_error=False,
     )
 
 
@@ -767,6 +803,7 @@ class BybitKlineStreamPool:
         self.reconnect_backoff_seconds = float(reconnect_backoff_seconds)
         self.subscribe_args_per_message = int(subscribe_args_per_message)
         self._websocket_factory = websocket_factory or _default_kline_websocket_factory
+        self._subscription_lock = threading.RLock()
         self._lock = threading.RLock()
         self._on_bar: Callable[[str, dict[str, Any], bool], None] | None = None
         self._connections: list[_KlineConnectionState] = []
@@ -786,34 +823,65 @@ class BybitKlineStreamPool:
     ) -> None:
         """Subscribe to ``symbols``. Idempotent: re-subscribing the same set
         is a no-op; a different set runs through ``update_subscriptions``."""
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("pool is closed")
-            unique_symbols = sorted({s for s in symbols if s})
-            # A different callback replaces the old one on every connection.
-            self._on_bar = on_bar
-            if not self._connections:
-                self._build_initial_connections_locked(unique_symbols)
-            else:
-                self.update_subscriptions(set(unique_symbols))
+        with self._subscription_lock:
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("pool is closed")
+                unique_symbols = sorted({s for s in symbols if s})
+                # A different callback replaces the old one on every connection.
+                self._on_bar = on_bar
+                if not self._connections:
+                    self._build_initial_connections_locked(unique_symbols)
+                else:
+                    self.update_subscriptions(set(unique_symbols))
 
     def update_subscriptions(self, new_symbols: set[str]) -> dict[str, int]:
-        """Diff the current assignment against ``new_symbols``: subscribe to
-        adds, unsubscribe from removals. Returns counts.
+        """Diff the current assignment against ``new_symbols``. Returns counts.
 
         Each add is ISOLATED: a subscribe failure on one symbol is logged and
         skipped, so one un-subscribable symbol cannot block every new listing
-        sorted after it on every hourly refresh."""
+        sorted after it on every hourly refresh. A removal rebuilds its whole
+        connection because pybit unsubscribes the entire original batch when
+        asked to remove one topic from a multi-topic subscribe frame."""
+        with self._subscription_lock:
+            return self._update_subscriptions_serialized(new_symbols)
+
+    def _update_subscriptions_serialized(self, new_symbols: set[str]) -> dict[str, int]:
+        reconnect_jobs: list[tuple[int, list[str], Any, int, float]] = []
+        clients_to_close: list[Any] = []
         with self._lock:
             if self._closed:
                 raise RuntimeError("pool is closed")
             if self._on_bar is None:
                 raise RuntimeError("subscribe() must be called before update_subscriptions()")
             current = set(self._symbol_to_connection)
-            adds = sorted(new_symbols - current)
             removes = sorted(current - new_symbols)
+            affected_connections: set[int] = set()
             for symbol in removes:
-                self._unsubscribe_symbol_locked(symbol)
+                index = self._symbol_to_connection.pop(symbol, None)
+                if index is None or index >= len(self._connections):
+                    continue
+                self._connections[index].assigned_symbols.discard(symbol)
+                affected_connections.add(index)
+            for index in sorted(affected_connections):
+                state = self._connections[index]
+                if state.assigned_symbols:
+                    job = self._prepare_reconnect_locked(index)
+                    if job is not None:
+                        reconnect_jobs.append(job)
+                elif not state.closed:
+                    state.closed = True
+                    clients_to_close.append(state.client)
+
+        for client in clients_to_close:
+            _close_ws_client(client)
+        for job in reconnect_jobs:
+            self._reconnect_connection(*job)
+
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("pool is closed")
+            adds = sorted(new_symbols - set(self._symbol_to_connection))
             added = 0
             for symbol in adds:
                 try:
@@ -924,25 +992,6 @@ class BybitKlineStreamPool:
             subscribed.update(slice_)
         return subscribed
 
-    def _unsubscribe_symbol_locked(self, symbol: str) -> None:
-        index = self._symbol_to_connection.pop(symbol, None)
-        if index is None or index >= len(self._connections):
-            return
-        state = self._connections[index]
-        state.assigned_symbols.discard(symbol)
-        topic = f"kline.{self.interval_minutes}.{symbol}"
-        unsubscribe = getattr(state.client, "unsubscribe", None)
-        if callable(unsubscribe):
-            try:
-                unsubscribe(topic=topic)
-            except Exception as exc:
-                _logger_ws_klines.warning(
-                    "kline unsubscribe failed conn=%d symbol=%s: %s",
-                    state.index,
-                    symbol,
-                    exc,
-                )
-
     def _make_callback(self, state: _KlineConnectionState) -> Callable[[dict[str, Any]], None]:
         """Build a closure that parses pybit's kline message, marks the
         connection alive, and dispatches each bar through ``on_bar``.
@@ -974,6 +1023,9 @@ class BybitKlineStreamPool:
                     return
                 symbol = _symbol_from_kline_topic(topic)
                 if symbol is None:
+                    state.dropped_messages += 1
+                    return
+                if state.closed or symbol not in state.assigned_symbols:
                     state.dropped_messages += 1
                     return
                 for bar in data:
@@ -1033,6 +1085,10 @@ class BybitKlineStreamPool:
         (closed=True with assigned_symbols still set); otherwise one transient
         ``_websocket_factory`` failure orphans that whole slice until the next
         hourly universe refresh."""
+        with self._subscription_lock:
+            return self._check_stale_connections_serialized()
+
+    def _check_stale_connections_serialized(self) -> int:
         reconnects = 0
         now = time.monotonic()
         with self._lock:
@@ -1148,7 +1204,6 @@ class BybitKlineStreamPool:
             )
             _close_ws_client(new_client)
             return
-        stale_subscriptions: list[str] = []
         close_new_client = False
         with self._lock:
             if self._closed or index >= len(self._connections):
@@ -1157,57 +1212,44 @@ class BybitKlineStreamPool:
                 old_state = self._connections[index]
                 desired_symbols = set(old_state.assigned_symbols)
                 install_symbols = sorted(set(subscribed) & desired_symbols)
-                # New client is up: drop the closed client's now-invalid
-                # symbol->conn entries. The lock only publishes the fresh state.
-                for symbol in slice_symbols:
-                    self._symbol_to_connection.pop(symbol, None)
                 if not install_symbols:
+                    for symbol in slice_symbols:
+                        self._symbol_to_connection.pop(symbol, None)
                     old_state.assigned_symbols.clear()
                     old_state.closed = True
                     close_new_client = True
+                elif set(subscribed) != desired_symbols:
+                    close_new_client = True
                 else:
+                    for symbol in slice_symbols:
+                        self._symbol_to_connection.pop(symbol, None)
                     new_state.assigned_symbols = set(install_symbols)
                     for symbol in install_symbols:
                         self._symbol_to_connection[symbol] = index
                     self._connections[index] = new_state
-                    stale_subscriptions = sorted(set(subscribed) - set(install_symbols))
-                self._reconnects_total += 1
+                    self._reconnects_total += 1
         if close_new_client:
             _close_ws_client(new_client)
-        elif stale_subscriptions:
-            self._unsubscribe_client_symbols(new_client, stale_subscriptions)
-
-    def _unsubscribe_client_symbols(self, client: Any, symbols: Iterable[str]) -> None:
-        unsubscribe = getattr(client, "unsubscribe", None)
-        if not callable(unsubscribe):
-            return
-        for symbol in symbols:
-            try:
-                unsubscribe(topic=f"kline.{self.interval_minutes}.{symbol}")
-            except Exception as exc:
-                _logger_ws_klines.warning(
-                    "kline stale unsubscribe failed symbol=%s: %s",
-                    symbol,
-                    exc,
-                )
 
     # -- shutdown -------------------------------------------------------
 
     def close(self) -> None:
-        self.stop_watchdog()
         with self._lock:
             self._closed = True
-            for state in self._connections:
-                try:
-                    self._close_state(state)
-                except Exception as exc:
-                    _logger_ws_klines.warning(
-                        "close failed conn=%d: %s",
-                        state.index,
-                        exc,
-                    )
+        self.stop_watchdog()
+        with self._lock:
+            states = list(self._connections)
             self._connections.clear()
             self._symbol_to_connection.clear()
+        for state in states:
+            try:
+                self._close_state(state)
+            except Exception as exc:
+                _logger_ws_klines.warning(
+                    "close failed conn=%d: %s",
+                    state.index,
+                    exc,
+                )
 
     @staticmethod
     def _close_state(state: _KlineConnectionState) -> None:

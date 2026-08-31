@@ -13,6 +13,7 @@ import pytest
 
 from liquidity_migration.marketdata.bybit_market_data import (
     BybitKlineStreamPool,
+    _close_ws_client,
     _symbol_from_kline_topic,
 )
 from liquidity_migration.marketdata.ws_frame_gate import KlineFrameGate
@@ -172,18 +173,17 @@ def test_callback_marks_unconfirmed_bar_but_still_calls() -> None:
 
 
 def test_update_subscriptions_adds_and_removes() -> None:
-    """Diff path: removed symbols are unsubscribed from their connection, new
-    symbols are added to connections with capacity (no new connection here)."""
+    """A removal rebuilds its connection before a new symbol is added."""
     pool, factory = _build_pool(topics_per_connection=10)
     pool.subscribe(["BTCUSDT", "ETHUSDT", "SOLUSDT"], lambda s, b, c: None)
     try:
         result = pool.update_subscriptions({"BTCUSDT", "ETHUSDT", "NEWUSDT"})
         assert result["added"] == 1
         assert result["removed"] == 1
-        # SOLUSDT was unsubscribed; NEWUSDT was added.
-        ws = factory.built[0]
-        assert "kline.60.SOLUSDT" in ws.unsubscribed_topics
-        assert "NEWUSDT" in ws.subscribed_symbols
+        old_ws, new_ws = factory.built
+        assert old_ws.closed is True
+        assert old_ws.unsubscribed_topics == []
+        assert sorted(new_ws.subscribed_symbols) == ["BTCUSDT", "ETHUSDT", "NEWUSDT"]
         assert pool.stats()["subscribed_symbols"] == 3
     finally:
         pool.close()
@@ -223,31 +223,24 @@ class _AlreadySubscribedFactory:
         return ws
 
 
-def test_update_subscriptions_adopts_already_subscribed_and_keeps_new_listing() -> None:
-    """A churn symbol leaves then re-enters the universe and pybit still holds its
-    topic, so the re-subscribe raises 'already subscribed'. The pool must not raise,
-    must adopt the churn symbol, and must still subscribe a genuinely-new listing
-    sorted after it in the same batch.
-    """
+def test_update_subscriptions_rebuilds_away_pybit_s_stale_callback_directory() -> None:
     factory = _AlreadySubscribedFactory()
     pool, _ = _build_pool(topics_per_connection=10, factory=factory)
     pool.subscribe(["AAAUSDT", "BILLUSDT"], lambda s, b, c: None)
     try:
-        ws = factory.built[0]
-        # BILLUSDT drops out -> unsubscribe (pybit directory NOT cleared).
+        first_ws = factory.built[0]
         pool.update_subscriptions({"AAAUSDT"})
         assert pool.stats()["subscribed_symbols"] == 1
+        assert first_ws.unsubscribed_topics == []
+        assert first_ws.closed is True
 
-        # BILLUSDT re-enters WITH a genuinely-new listing in the same batch.
-        # adds sort to [BILLUSDT, ZZZUSDT]; a throw on BILLUSDT would abort and
-        # never reached ZZZUSDT. Must NOT raise now.
         result = pool.update_subscriptions({"AAAUSDT", "BILLUSDT", "ZZZUSDT"})
 
         assert result["added"] == 2
         assert pool.stats()["subscribed_symbols"] == 3
-        # ZZZUSDT got a real subscribe frame; BILLUSDT was ADOPTED (no 2nd frame).
-        assert ws.subscribed_symbols.count("ZZZUSDT") == 1
-        assert ws.subscribed_symbols.count("BILLUSDT") == 1
+        current_ws = factory.built[-1]
+        assert current_ws.subscribed_symbols.count("ZZZUSDT") == 1
+        assert current_ws.subscribed_symbols.count("BILLUSDT") == 1
     finally:
         pool.close()
 
@@ -486,6 +479,41 @@ def test_close_closes_every_connection_and_clears_state() -> None:
     assert stats["subscribed_symbols"] == 0
 
 
+def test_close_disables_internal_reconnect_and_aborts_a_stuck_socket() -> None:
+    class _Socket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _App:
+        def __init__(self) -> None:
+            self.sock = _Socket()
+            self.keep_running = True
+
+    class _StuckClient:
+        def __init__(self) -> None:
+            self.handle_error = True
+            self.exited = False
+            self.ws = _App()
+
+        def exit(self) -> None:
+            while self.ws.sock is not None:
+                time.sleep(0.001)
+
+    client = _StuckClient()
+    socket = client.ws.sock
+
+    _close_ws_client(client, timeout_seconds=0.01)
+
+    assert client.handle_error is False
+    assert client.exited is True
+    assert client.ws.keep_running is False
+    assert socket.closed is True
+    assert client.ws.sock is None
+
+
 def test_close_blocks_further_subscribes() -> None:
     pool, _factory = _build_pool()
     pool.subscribe(["BTCUSDT"], lambda s, b, c: None)
@@ -642,6 +670,85 @@ def test_callback_thread_safety_concurrent_inject_and_update() -> None:
     pool.close()
     assert not errors, f"thread-safety violation: {errors!r}"
     assert len(received) >= 1
+
+
+def test_overlapping_universe_updates_finish_with_the_newest_whole_set() -> None:
+    entered_rebuild = threading.Event()
+    release_rebuild = threading.Event()
+
+    class _BlockingFactory(_FakeWebSocketFactory):
+        def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _FakeWebSocket:
+            if len(self.built) == 1:
+                entered_rebuild.set()
+                assert release_rebuild.wait(timeout=5.0)
+            return super().__call__(testnet=testnet, demo=demo, channel_type=channel_type)
+
+    factory = _BlockingFactory()
+    pool, _ = _build_pool(topics_per_connection=10, factory=factory)
+    pool.subscribe(["AUSDT", "BUSDT"], lambda s, b, c: None)
+    errors: list[BaseException] = []
+
+    def update(symbols: set[str]) -> None:
+        try:
+            pool.update_subscriptions(symbols)
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=update, args=({"AUSDT", "CUSDT"},))
+    second = threading.Thread(target=update, args=({"BUSDT", "DUSDT"},))
+    first.start()
+    assert entered_rebuild.wait(timeout=5.0)
+    second.start()
+    release_rebuild.set()
+    first.join(timeout=5.0)
+    second.join(timeout=5.0)
+
+    try:
+        assert not first.is_alive() and not second.is_alive()
+        assert errors == []
+        assert set(pool._symbol_to_connection) == {"BUSDT", "DUSDT"}
+    finally:
+        pool.close()
+
+
+def test_close_does_not_wait_for_an_in_progress_universe_rebuild() -> None:
+    entered_rebuild = threading.Event()
+    release_rebuild = threading.Event()
+
+    class _BlockingFactory(_FakeWebSocketFactory):
+        def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _FakeWebSocket:
+            if len(self.built) == 1:
+                entered_rebuild.set()
+                assert release_rebuild.wait(timeout=5.0)
+            return super().__call__(testnet=testnet, demo=demo, channel_type=channel_type)
+
+    factory = _BlockingFactory()
+    pool, _ = _build_pool(topics_per_connection=10, factory=factory)
+    pool.subscribe(["AUSDT", "BUSDT"], lambda s, b, c: None)
+    update_errors: list[BaseException] = []
+
+    def update() -> None:
+        try:
+            pool.update_subscriptions({"AUSDT", "CUSDT"})
+        except BaseException as exc:
+            update_errors.append(exc)
+
+    updater = threading.Thread(target=update)
+    closer = threading.Thread(target=pool.close)
+    updater.start()
+    assert entered_rebuild.wait(timeout=5.0)
+    closer.start()
+    closer.join(timeout=1.0)
+    assert not closer.is_alive(), "close waited for the blocked websocket constructor"
+    release_rebuild.set()
+    updater.join(timeout=5.0)
+
+    assert not updater.is_alive()
+    assert len(update_errors) == 1
+    assert isinstance(update_errors[0], RuntimeError)
+    assert pool.stats()["connections"] == 0
+    assert pool.stats()["subscribed_symbols"] == 0
+    assert all(client.closed for client in factory.built)
 
 
 # -- pre-decode frame gate ---------------------------------------------------

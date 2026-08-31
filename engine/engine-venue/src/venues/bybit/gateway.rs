@@ -1221,8 +1221,11 @@ impl VenueGateway for BybitGateway {
             .await;
         self.stop_limiter.anchor_completion(Instant::now(), 1);
         let envelope = envelope?;
-        venue_result(envelope)?;
-        Ok(())
+        match venue_result(envelope) {
+            Ok(_) => Ok(()),
+            Err(VenueError::Rejected { code: 34040, .. }) => Ok(()),
+            Err(other) => Err(other),
+        }
     }
 
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {

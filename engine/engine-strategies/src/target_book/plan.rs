@@ -120,7 +120,7 @@ pub enum Skipped {
     TooSmallToBother { symbol: String, delta_usdt: f64 },
     /// Below the floor an entry has to clear to be worth opening.
     BelowEntryFloor { symbol: String, notional_usdt: f64 },
-    /// The size the venue would accept rounds to nothing.
+    /// The rounded size or value does not reach the venue minimum.
     BelowVenueMinimum { symbol: String },
     /// The book's entry window has closed; exits are unaffected.
     EntryWindowClosed { symbol: String },
@@ -295,6 +295,12 @@ pub fn plan(
                     });
                     continue;
                 };
+                if qty * px + 1e-9 < rule.min_notional {
+                    skipped.push(Skipped::BelowVenueMinimum {
+                        symbol: symbol.to_string(),
+                    });
+                    continue;
+                }
                 opens.push(Step::Enter {
                     symbol: symbol.to_string(),
                     side: want_side,
@@ -362,6 +368,15 @@ pub fn plan(
                     });
                     continue;
                 };
+                if qty * px + 1e-9 < rule.min_notional {
+                    if let Some(step) = restop(symbol, target, &position, want_side, &rule) {
+                        exits.push(step);
+                    }
+                    skipped.push(Skipped::BelowVenueMinimum {
+                        symbol: symbol.to_string(),
+                    });
+                    continue;
+                }
                 let side = if growing {
                     want_side
                 } else {
@@ -378,7 +393,15 @@ pub fn plan(
                         } else {
                             px
                         };
-                        stop_price(anchor, want_side, target.stop_loss_fraction)
+                        let declared = stop_price(anchor, want_side, target.stop_loss_fraction);
+                        if position.stop_px.is_finite() && position.stop_px > 0.0 {
+                            match want_side {
+                                Side::Buy => declared.max(position.stop_px),
+                                Side::Sell => declared.min(position.stop_px),
+                            }
+                        } else {
+                            declared
+                        }
                     }),
                 };
                 if growing {
@@ -560,6 +583,52 @@ mod tests {
     }
 
     #[test]
+    fn a_resize_that_falls_below_the_value_floor_after_quantity_rounding_is_not_planned() {
+        let rule = InstrumentRule {
+            tick_size: 0.0001,
+            qty_step: 10.0,
+            min_qty: 10.0,
+            min_notional: 5.0,
+        };
+        let mut facts = Facts::default().holding("ROUNDUSDT", 10.0, Side::Buy, 0.49);
+        facts.rules.insert("ROUNDUSDT".into(), rule);
+
+        let plan = plan_now(&[target("ROUNDUSDT", 10.0)], &[], &facts);
+
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert!(matches!(
+            plan.skipped.as_slice(),
+            [Skipped::BelowVenueMinimum { symbol }] if symbol == "ROUNDUSDT"
+        ));
+    }
+
+    #[test]
+    fn a_subminimum_rounded_resize_still_tightens_the_stop() {
+        let rule = InstrumentRule {
+            tick_size: 0.0001,
+            qty_step: 10.0,
+            min_qty: 10.0,
+            min_notional: 5.0,
+        };
+        let mut facts = Facts::default().holding("ROUNDUSDT", 10.0, Side::Buy, 0.49);
+        let position = facts.held.get_mut("ROUNDUSDT").expect("held position");
+        position.stop_px = 0.2;
+        facts.rules.insert("ROUNDUSDT".into(), rule);
+
+        let plan = plan_now(&[target("ROUNDUSDT", 10.0)], &[], &facts);
+
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [Step::Restop { symbol, stop_px }]
+                if symbol == "ROUNDUSDT" && (*stop_px - 0.3185).abs() < 1e-9
+        ));
+        assert!(matches!(
+            plan.skipped.as_slice(),
+            [Skipped::BelowVenueMinimum { symbol }] if symbol == "ROUNDUSDT"
+        ));
+    }
+
+    #[test]
     fn a_wanted_symbol_with_no_position_is_entered_with_a_stop() {
         let facts = Facts::with("KAITOUSDT", 10.0);
         let plan = plan_now(&[target("KAITOUSDT", 100.0)], &[], &facts);
@@ -572,6 +641,28 @@ mod tests {
                 stop_px: 6.5,
             }]
         );
+    }
+
+    #[test]
+    fn an_entry_that_falls_below_the_value_floor_after_quantity_rounding_is_not_planned() {
+        let mut facts = Facts::with("ROUNDUSDT", 0.49);
+        facts.rules.insert(
+            "ROUNDUSDT".into(),
+            InstrumentRule {
+                tick_size: 0.0001,
+                qty_step: 10.0,
+                min_qty: 10.0,
+                min_notional: 5.0,
+            },
+        );
+
+        let plan = plan_now(&[target("ROUNDUSDT", 6.0)], &[], &facts);
+
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert!(matches!(
+            plan.skipped.as_slice(),
+            [Skipped::BelowVenueMinimum { symbol }] if symbol == "ROUNDUSDT"
+        ));
     }
 
     #[test]
@@ -688,6 +779,57 @@ mod tests {
             }
             other => panic!("expected a resize, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adding_to_a_long_keeps_a_tighter_existing_stop() {
+        let mut facts = Facts::default().holding("A", 10.0, Side::Buy, 10.0);
+        facts.held.get_mut("A").expect("held position").stop_px = 7.0;
+
+        let plan = plan_now(&[target("A", 150.0)], &["A".into()], &facts);
+
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [Step::Resize {
+                stop_px: Some(stop_px),
+                reduce_only: false,
+                ..
+            }] if (*stop_px - 7.0).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn adding_to_a_short_keeps_a_tighter_existing_stop() {
+        let mut facts = Facts::default().holding("A", 10.0, Side::Sell, 10.0);
+        facts.held.get_mut("A").expect("held position").stop_px = 13.0;
+
+        let plan = plan_now(&[target("A", -150.0)], &["A".into()], &facts);
+
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [Step::Resize {
+                stop_px: Some(stop_px),
+                reduce_only: false,
+                ..
+            }] if (*stop_px - 13.0).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn adding_to_a_long_uses_a_tighter_newly_declared_stop() {
+        let mut facts = Facts::default().holding("A", 10.0, Side::Buy, 10.0);
+        facts.held.get_mut("A").expect("held position").stop_px = 6.0;
+
+        let plan = plan_now(&[target("A", 150.0)], &["A".into()], &facts);
+
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [Step::Resize {
+                stop_px: Some(stop_px),
+                reduce_only: false,
+                ..
+            }] if (*stop_px - 6.5).abs() < 1e-9
+        ));
     }
 
     #[test]

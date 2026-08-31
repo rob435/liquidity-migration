@@ -6,8 +6,9 @@ set -euo pipefail
 
 SOURCE="${FORWARD_CAPTURE_ROOT:-/var/lib/liquidity-migration/forward-market}"
 DESTINATION="${FORWARD_CAPTURE_REMOTE:-gdrive:LiquidityMigration/forward-market}"
-CONFIG="${RCLONE_CONFIG:-/etc/liquidity-migration/rclone.conf}"
 STATE_DIR="${FORWARD_UPLOAD_STATE_DIR:-/var/lib/liquidity-migration/forward-upload}"
+CONFIG="${RCLONE_CONFIG:-/etc/liquidity-migration/rclone.conf}"
+CONFIG_SEED="${RCLONE_CONFIG_SEED:-}"
 RCLONE="${RCLONE_BIN:-/usr/bin/rclone}"
 
 case "$DESTINATION" in
@@ -15,10 +16,9 @@ case "$DESTINATION" in
     *) echo "forward upload: destination must be an rclone remote" >&2; exit 2 ;;
 esac
 [ -d "$SOURCE" ] || { echo "forward upload: capture root is missing: $SOURCE" >&2; exit 2; }
-[ -f "$CONFIG" ] || { echo "forward upload: rclone config is missing: $CONFIG" >&2; exit 2; }
 [ -x "$RCLONE" ] || { echo "forward upload: rclone is not executable: $RCLONE" >&2; exit 2; }
 
-umask 027
+umask 077
 mkdir -p "$STATE_DIR"
 if command -v flock >/dev/null 2>&1; then
     exec 9>"$STATE_DIR/upload.lock"
@@ -27,6 +27,15 @@ if command -v flock >/dev/null 2>&1; then
         exit 0
     fi
 fi
+if [ -n "$CONFIG_SEED" ]; then
+    [ -f "$CONFIG_SEED" ] || { echo "forward upload: rclone config seed is missing: $CONFIG_SEED" >&2; exit 2; }
+    if [ ! -f "$CONFIG" ] || [ "$CONFIG_SEED" -nt "$CONFIG" ]; then
+        CONFIG_TEMP="$STATE_DIR/.rclone.conf.seed.$$"
+        install -m 0600 "$CONFIG_SEED" "$CONFIG_TEMP"
+        mv "$CONFIG_TEMP" "$CONFIG"
+    fi
+fi
+[ -f "$CONFIG" ] || { echo "forward upload: rclone config is missing: $CONFIG" >&2; exit 2; }
 
 RUN_DIR="$(mktemp -d "$STATE_DIR/run.XXXXXX")"
 trap 'rm -rf -- "$RUN_DIR"' EXIT

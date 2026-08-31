@@ -646,6 +646,39 @@ async fn set_stop_uses_full_mode_on_the_one_way_position() {
 }
 
 #[tokio::test]
+async fn an_unchanged_stop_is_success_not_a_failure() {
+    let server = TestServer::start(|_, _| {
+        (
+            200,
+            r#"{"retCode":34040,"retMsg":"not modified","result":{},"time":1700000000000}"#
+                .to_string(),
+        )
+    })
+    .await;
+    let mut gw = gateway(&server);
+
+    gw.set_stop(SymbolId(1), 2950.0)
+        .await
+        .expect("an already-equal position stop is the requested state");
+}
+
+#[tokio::test]
+async fn a_real_stop_refusal_remains_a_failure() {
+    let server = TestServer::start(|_, _| {
+        (
+            200,
+            r#"{"retCode":34041,"retMsg":"invalid stop","result":{},"time":1700000000000}"#
+                .to_string(),
+        )
+    })
+    .await;
+    let mut gw = gateway(&server);
+
+    let error = gw.set_stop(SymbolId(1), 2950.0).await.unwrap_err();
+    assert!(matches!(error, VenueError::Rejected { code: 34041, .. }));
+}
+
+#[tokio::test]
 async fn account_view_reads_wallet_and_positions() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/account/wallet-balance" => ok(r#"{"list":[{"accountType":"UNIFIED",

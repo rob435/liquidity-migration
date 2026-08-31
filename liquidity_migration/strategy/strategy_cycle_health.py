@@ -2,8 +2,8 @@
 
 Strategy cycle timestamps are causal scheduling inputs.  They deliberately do
 not move when a slow cycle finishes, so they cannot also serve as operational
-completion heartbeats.  This private projection is written only after the
-cycle output and its scheduling evidence are durable.  It is not strategy
+completion heartbeats.  This producer-group projection is written only after
+the cycle output and its scheduling evidence are durable.  It is not strategy
 state and never participates in replay, accounting, or decision hashes.
 """
 
@@ -101,9 +101,9 @@ def strategy_cycle_health_path(root: str | Path) -> Path:
 
 
 def _atomic_private_replace(path: Path, data: bytes) -> None:
-    """Replace one private projection without exposing a torn target."""
+    """Replace one group-readable projection without exposing a torn target."""
 
-    durable_atomic_replace(path, data, label="strategy-cycle health")
+    durable_atomic_replace(path, data, mode=0o640, label="strategy-cycle health")
 
 
 def write_strategy_cycle_health(
@@ -118,7 +118,7 @@ def write_strategy_cycle_health(
 
 
 def read_strategy_cycle_health(root: str | Path) -> StrategyCycleHealth:
-    """Read and strictly validate one private completion projection."""
+    """Read and strictly validate one producer-group completion projection."""
 
     path = strategy_cycle_health_path(root)
     try:
@@ -126,7 +126,7 @@ def read_strategy_cycle_health(root: str | Path) -> StrategyCycleHealth:
             path,
             label="strategy-cycle health artifact",
             reject_empty=True,
-            require_mode=0o600,
+            require_mode=0o640,
             require_single_link=True,
             max_bytes=STRATEGY_CYCLE_HEALTH_MAX_BYTES,
         )

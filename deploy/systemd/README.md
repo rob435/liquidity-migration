@@ -52,9 +52,11 @@ The forward uploader reads that directory but selects only immutable `.zst`
 segments. It never sends `.partial` files, venue credentials, account WALs, or
 environment files. A local ledger advances only after `rclone check` passes,
 and each successful batch leaves a SHA-256 list under `_batches/` in Drive.
-Its root-only OAuth configuration is
-`/etc/liquidity-migration/rclone.conf`, beside the other host credentials that
-move with a VPS migration.
+Its root-only OAuth seed is `/etc/liquidity-migration/rclone.conf`, beside the
+other host credentials that move with a VPS migration. Each run uses the
+writable mode-0600 copy under
+`/var/lib/liquidity-migration/forward-upload/rclone.conf`, so token refreshes
+are retained without making `/etc` writable to the service.
 
 ## Dependency edges
 

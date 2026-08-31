@@ -768,8 +768,13 @@ class StrategyHostDaemon:
             # so a lost/rejected subscribe cannot persist for the daemon's life.
             ticker_silence = self._seconds_since_ticker_stream_installed()
             if ticker_silence > threshold:
-                self._rebuild_born_silent_ticker_stream(ticker_silence, threshold)
+                self._rebuild_stale_ticker_stream(ticker_silence, threshold, never_delivered=True)
+                return
         if ticker_silence != float("inf") and ticker_silence > threshold:
+            installed_silence = self._seconds_since_ticker_stream_installed()
+            if installed_silence > threshold:
+                self._rebuild_stale_ticker_stream(ticker_silence, threshold, never_delivered=False)
+                return
             self._ws_ticker_stale_ticks += 1
             if not self._ws_ticker_stale_warned:
                 _logger.warning(
@@ -790,10 +795,19 @@ class StrategyHostDaemon:
                 return float("inf")
         return time.monotonic() - installed_at
 
-    def _rebuild_born_silent_ticker_stream(self, silence_seconds: float, threshold: float) -> None:
+    def _rebuild_stale_ticker_stream(
+        self,
+        silence_seconds: float,
+        threshold: float,
+        *,
+        never_delivered: bool,
+    ) -> None:
+        self._ws_ticker_stale_ticks += 1
+        state = "never delivered a frame" if never_delivered else "stopped delivering frames"
         _logger.warning(
-            "%s ticker WS never delivered a frame %.0fs after subscribe (threshold %.0fs); rebuilding the subscription",
+            "%s ticker WS %s for %.0fs (threshold %.0fs); rebuilding the subscription",
             self._sleeve_label,
+            state,
             silence_seconds,
             threshold,
         )

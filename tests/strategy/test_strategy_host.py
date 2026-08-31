@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from liquidity_migration.core.config import ResearchConfig
 from liquidity_migration.rules.engine_targets import render_target_book, write_target_book
 from liquidity_migration.strategy.strategy_event_clock import StrategyEvent
@@ -484,6 +486,34 @@ def test_a_broken_level_row_never_costs_the_cache_its_update(tmp_path: Path) -> 
     daemon._handle_ticker_message(_ticker_push("BBBUSDT", 6.0))
     assert daemon._bar_event.is_set() is True
     assert daemon._ticker_cache.get("BBBUSDT") is not None
+
+
+def test_a_previously_live_ticker_stream_is_rebuilt_after_it_goes_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon = _host(tmp_path, state_cache_stale_seconds=60.0)
+
+    class _StaleCache:
+        @staticmethod
+        def is_seeded() -> bool:
+            return True
+
+        @staticmethod
+        def seconds_since_last_ws_event() -> float:
+            return 120.0
+
+    calls: list[str] = []
+    daemon._ticker_cache = _StaleCache()  # type: ignore[assignment]
+    daemon._ticker_stream = object()
+    daemon._ticker_stream_installed_monotonic = time.monotonic() - 120.0
+    monkeypatch.setattr(daemon, "_close_ticker_stream", lambda: calls.append("close"))
+    monkeypatch.setattr(daemon, "_open_ticker_stream", lambda: calls.append("open"))
+
+    daemon._check_ws_health()
+
+    assert calls == ["close", "open"]
+    assert daemon._ws_ticker_stale_ticks == 1
 
 
 def test_cycle_payload_is_not_decorated_with_ws_plane_stats(tmp_path: Path) -> None:
