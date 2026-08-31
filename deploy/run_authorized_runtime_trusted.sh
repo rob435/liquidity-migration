@@ -44,8 +44,8 @@ watchdog_permit_matches() {
     local line7 line8 line9 line10 extra file_boot_id file_owner_pid
     local file_owner_start_ticks file_not_after current_epoch
     [ -f "$path" ] && [ ! -L "$path" ] \
-        && [ "$(stat -c %u "$path")" -eq 0 ] \
-        && [ "$(stat -c %g "$path")" -eq 0 ] \
+        && [ "$(stat -c %u "$path")" = 0 ] \
+        && [ "$(stat -c %g "$path")" = 0 ] \
         && [ "$(stat -c %a "$path")" = 644 ] \
         || return 1
     {
@@ -106,9 +106,9 @@ watchdog_open_permit_is_current() {
         && [ -f "$ACTIVATION_PERMIT" ] \
         && [ ! -L "$ACTIVATION_PERMIT" ] \
         && [ "$ACTIVATION_PERMIT" -ef "$descriptor_path" ] \
-        && [ "$(stat -Lc %h "$descriptor_path")" -eq 1 ] \
-        && [ "$(stat -Lc %u "$descriptor_path")" -eq 0 ] \
-        && [ "$(stat -Lc %g "$descriptor_path")" -eq 0 ] \
+        && [ "$(stat -Lc %h "$descriptor_path")" = 1 ] \
+        && [ "$(stat -Lc %u "$descriptor_path")" = 0 ] \
+        && [ "$(stat -Lc %g "$descriptor_path")" = 0 ] \
         && [ "$(stat -Lc %a "$descriptor_path")" = 644 ]
 }
 
@@ -149,23 +149,23 @@ activation_watchdog_mode() {
         || refuse "activation watchdog owner identity is invalid"
     [ "$(readlink -f "$0")" = "$LAUNCHER" ] \
         && [ -f "$LAUNCHER" ] && [ ! -L "$LAUNCHER" ] \
-        && [ "$(stat -c %u "$LAUNCHER")" -eq 0 ] \
-        && [ "$(stat -c %g "$LAUNCHER")" -eq 0 ] \
+        && [ "$(stat -c %u "$LAUNCHER")" = 0 ] \
+        && [ "$(stat -c %g "$LAUNCHER")" = 0 ] \
         && [ "$(stat -c %a "$LAUNCHER")" = 755 ] \
         || refuse "activation watchdog launcher boundary is invalid"
     [ -d "${LAUNCHER%/*}" ] && [ ! -L "${LAUNCHER%/*}" ] \
-        && [ "$(stat -c %u "${LAUNCHER%/*}")" -eq 0 ] \
-        && [ "$(stat -c %g "${LAUNCHER%/*}")" -eq 0 ] \
+        && [ "$(stat -c %u "${LAUNCHER%/*}")" = 0 ] \
+        && [ "$(stat -c %g "${LAUNCHER%/*}")" = 0 ] \
         && [ "$(stat -c %a "${LAUNCHER%/*}")" = 755 ] \
         || refuse "activation watchdog release directory boundary is invalid"
     [ -f "$MARKER" ] && [ ! -L "$MARKER" ] \
-        && [ "$(stat -c %u "$MARKER")" -eq 0 ] \
-        && [ "$(stat -c %g "$MARKER")" -eq 0 ] \
+        && [ "$(stat -c %u "$MARKER")" = 0 ] \
+        && [ "$(stat -c %g "$MARKER")" = 0 ] \
         && [ "$(stat -c %a "$MARKER")" = 644 ] \
         || refuse "activation watchdog release marker boundary is invalid"
     [ -d "${ACTIVATION_PERMIT%/*}" ] && [ ! -L "${ACTIVATION_PERMIT%/*}" ] \
-        && [ "$(stat -c %u "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
-        && [ "$(stat -c %g "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
+        && [ "$(stat -c %u "${ACTIVATION_PERMIT%/*}")" = 0 ] \
+        && [ "$(stat -c %g "${ACTIVATION_PERMIT%/*}")" = 0 ] \
         && [ "$(stat -c %a "${ACTIVATION_PERMIT%/*}")" = 755 ] \
         || refuse "activation watchdog permit directory boundary is invalid"
     awk '
@@ -250,7 +250,7 @@ trusted_checkout_directory() {
     local directory="$1" mode
     [ -d "$directory" ] && [ ! -L "$directory" ] \
         && [ "$(readlink -f "$directory")" = "$directory" ] \
-        && [ "$(stat -c %u "$directory")" -eq 0 ] \
+        && [ "$(stat -c %u "$directory")" = 0 ] \
         || return 1
     mode="$(stat -c %a "$directory")" || return 1
     [[ "$mode" =~ ^[0-7]{3,4}$ ]] \
@@ -270,7 +270,7 @@ for path in "$ENGINE" "$LAUNCHER" "$CONTROL_HELPER" "$TELEGRAM_BOT" \
     "$MARKER" "$CHECKOUT_WRAPPER"; do
     [ -f "$path" ] && [ ! -L "$path" ] \
         || refuse "release input is missing, linked, or not regular: $path"
-    [ "$(stat -c %u "$path")" -eq 0 ] \
+    [ "$(stat -c %u "$path")" = 0 ] \
         || refuse "release input is not root-owned: $path"
 done
 [ "$(stat -c %a "$ENGINE")" = 755 ] \
@@ -289,7 +289,7 @@ unsafe_git_metadata="$(
 [ -z "$unsafe_git_metadata" ] \
     || refuse "trusted checkout metadata contains a non-root-owned, writable, linked, or special entry: $unsafe_git_metadata"
 [ -d "${ENGINE%/*}" ] && [ ! -L "${ENGINE%/*}" ] \
-    && [ "$(stat -c %u "${ENGINE%/*}")" -eq 0 ] \
+    && [ "$(stat -c %u "${ENGINE%/*}")" = 0 ] \
     && [ "$(stat -c %a "${ENGINE%/*}")" = 755 ] \
     || refuse "release directory is not a root-owned, non-writable fixed boundary"
 awk '
@@ -326,8 +326,8 @@ activation_authority_matches_unlocked() {
     local file_helper_digest file_sudoers_digest file_bot_digest
     local file_boot_id file_owner_pid file_owner_start_ticks file_not_after current_epoch
     [ -f "$path" ] && [ ! -L "$path" ] \
-        && [ "$(stat -c %u "$path")" -eq 0 ] \
-        && [ "$(stat -c %g "$path")" -eq 0 ] \
+        && [ "$(stat -c %u "$path")" = 0 ] \
+        && [ "$(stat -c %g "$path")" = 0 ] \
         && [ "$(stat -c %a "$path")" = 644 ] \
         || return 1
     file_commit="$(sed -n 's/^commit=//p' "$path")"
@@ -362,8 +362,8 @@ END { if (NR != 6) exit 1 }
             # compares this canonical value with the real kernel boot id.
             [ -d "${ACTIVATION_PERMIT%/*}" ] \
                 && [ ! -L "${ACTIVATION_PERMIT%/*}" ] \
-                && [ "$(stat -c %u "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
-                && [ "$(stat -c %g "${ACTIVATION_PERMIT%/*}")" -eq 0 ] \
+                && [ "$(stat -c %u "${ACTIVATION_PERMIT%/*}")" = 0 ] \
+                && [ "$(stat -c %g "${ACTIVATION_PERMIT%/*}")" = 0 ] \
                 && [ "$(stat -c %a "${ACTIVATION_PERMIT%/*}")" = 755 ] \
                 || return 1
             awk '
