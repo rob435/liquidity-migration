@@ -17,14 +17,15 @@ pub(crate) struct Pending {
     pub px: f64,
     /// Worst distance from a plausible fill price to the order's own stop.
     /// Persisted with the reservation so sibling and later admissions cannot
-    /// reprice a wide stop at only the generic disaster fraction.
-    pub stop_fraction: f64,
+    /// reprice a wide stop at only the generic disaster fraction. `None` is
+    /// unknown; `Some(0)` is a known reduction that adds no opening stop.
+    pub stop_fraction: Option<f64>,
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) struct RecentExposure {
     pub signed_qty: f64,
-    pub stop_fraction: f64,
+    pub stop_fraction: Option<f64>,
 }
 
 fn pending_px(pending: &Pending, price: &impl Fn(SymbolId) -> Option<f64>) -> Option<f64> {
@@ -44,7 +45,7 @@ pub(crate) struct Book {
     /// Every fill with when it arrived. A fill newer than the account view
     /// is in neither the view nor the reservations, and the envelope must
     /// still see it; entries the view has caught up with are pruned.
-    recent_fills: Vec<(u64, u16, f64, f64)>,
+    recent_fills: Vec<(u64, u16, f64, Option<f64>)>,
 }
 
 impl Book {
@@ -80,8 +81,7 @@ impl Book {
         let stop_fraction = self
             .pending
             .get(client_order_id)
-            .map(|pending| pending.stop_fraction)
-            .unwrap_or(f64::MAX);
+            .and_then(|pending| pending.stop_fraction);
         self.recent_fills
             .push((recv_ns, symbol.0, signed_qty, stop_fraction));
         let Some(pending) = self.pending.get_mut(client_order_id) else {
@@ -142,9 +142,15 @@ impl Book {
         self.prune_through(observed_ns);
         let mut net: HashMap<u16, RecentExposure> = HashMap::new();
         for (_, symbol, qty, stop_fraction) in &self.recent_fills {
-            let row = net.entry(*symbol).or_default();
+            let row = net.entry(*symbol).or_insert(RecentExposure {
+                signed_qty: 0.0,
+                stop_fraction: Some(0.0),
+            });
             row.signed_qty += qty;
-            row.stop_fraction = row.stop_fraction.max(*stop_fraction);
+            row.stop_fraction = match (row.stop_fraction, *stop_fraction) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                _ => None,
+            };
         }
         net
     }
@@ -154,21 +160,30 @@ impl Book {
     }
 
     /// Notional in flight per symbol, not yet visible in the account view.
-    /// `None` when an in-flight order cannot be priced. Per symbol rather than
-    /// one total because the per-symbol cap needs to know where it sits.
+    /// An error names the unreadable input before any unknown stop distance can
+    /// reach loss arithmetic. Per symbol rather than one total because the
+    /// per-symbol cap needs to know where it sits.
     pub(crate) fn pending_risk_rows(
         &self,
         price: impl Fn(SymbolId) -> Option<f64>,
-    ) -> Option<Vec<(u16, f64, f64)>> {
+    ) -> Result<Vec<(u16, f64, f64)>, &'static str> {
         let mut out: Vec<(u16, f64, f64)> = Vec::new();
         for pending in self.pending.values() {
             if pending.reduce_only || pending.signed_qty == 0.0 {
                 continue;
             }
-            let notional = pending.signed_qty.abs() * pending_px(pending, &price)?;
-            out.push((pending.symbol.0, notional, pending.stop_fraction));
+            let stop_fraction = pending
+                .stop_fraction
+                .ok_or("an in-flight opening order has no readable stop distance")?;
+            let px =
+                pending_px(pending, &price).ok_or("no price for an in-flight opening order")?;
+            let notional = pending.signed_qty.abs() * px;
+            if !notional.is_finite() {
+                return Err("an in-flight opening order has unreadable notional");
+            }
+            out.push((pending.symbol.0, notional, stop_fraction));
         }
-        Some(out)
+        Ok(out)
     }
 }
 
@@ -182,7 +197,7 @@ mod tests {
             signed_qty: qty,
             reduce_only: false,
             px: 10.0,
-            stop_fraction: 0.1,
+            stop_fraction: Some(0.1),
         }
     }
 
