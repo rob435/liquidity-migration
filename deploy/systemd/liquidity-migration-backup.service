@@ -1,23 +1,31 @@
 [Unit]
-Description=liquidity-migration off-box backup: the WALs and trade files to another machine
+Description=liquidity-migration off-box backup: the engines' logs and state to Google Drive
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
 KillMode=control-group
-# One rsync over a WAN; a nightly run that hangs must not stack behind itself.
+# One local snapshot and one Drive sync; a run that hangs must not stack
+# behind itself.
 TimeoutStartSec=900
 # Root, because the sources are two engines' state directories with two
-# different owners, and the SSH identity for the destination is root's.
+# different owners, and the rclone configuration is root's.
 User=root
 WorkingDirectory=/opt/liquidity-migration
-# Destination, sources and stamp all ride in one optional env file; absent
-# means the script notes "not configured" and exits 0. The venue credentials
-# are never loaded here at all — this unit touches files, not the account.
+# Destination, stamp, and sources have working defaults in the script; the
+# optional env file overrides them. The venue credentials are never loaded
+# here at all — this unit touches files, not the account — and the script
+# refuses any *.env source by name.
 EnvironmentFile=-/etc/liquidity-migration/backup.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=BACKUP_REMOTE=gdrive:LiquidityMigration/engine-state
+Environment=BACKUP_STAMP_FILE=/var/lib/liquidity-migration/receipts/backup.last-success
+Environment=BACKUP_STAGE_DIR=/var/lib/liquidity-migration/backup/stage
+Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/backup/rclone.conf
+Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf
+StateDirectory=liquidity-migration/backup liquidity-migration/receipts
 NoNewPrivileges=true
 PrivateTmp=true
 MemoryMax=512M
