@@ -24,7 +24,7 @@ MemoryMax=512M
 # A copy job must not preempt anything that trades.
 Nice=15
 IOSchedulingClass=idle
-ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-backup.service main
+ExecStart=/opt/liquidity-migration/scripts/runtime/backup_state.sh
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal

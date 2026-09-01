@@ -67,14 +67,12 @@ def _run(tmp_path: Path, body: str) -> tuple[int, str, str]:
 def test_unknown_liquidity_migration_unit_is_cleaned_and_verified(tmp_path: Path) -> None:
     rc, calls, err = _run(tmp_path, """
         systemctl enable --now liquidity-migration-engine.service
-        lm_verify_no_unknown_liqmig_units
         systemctl enable --now liquidity-migration-stale-alpha.service
-        if lm_verify_no_unknown_liqmig_units; then
-            echo "unknown unit passed verify" >&2
+        lm_cleanup_unknown_liqmig_units
+        if lm_host_liqmig_units | grep -q stale-alpha; then
+            echo "unknown unit survived cleanup" >&2
             exit 1
         fi
-        lm_cleanup_unknown_liqmig_units
-        lm_verify_no_unknown_liqmig_units
     """)
     assert rc == 0, err
     assert "disable --now liquidity-migration-stale-alpha.service" in calls
@@ -118,7 +116,6 @@ def test_host_override_can_only_turn_repo_on_sleeve_off(tmp_path: Path) -> None:
         test "$LONG_SLEEVE" = off
         test "$CARRY_SLEEVE" = off
         lm_write_resolved_sleeve_toggles
-        lm_verify_resolved_sleeve_toggles
         grep -Fx LONG_SLEEVE=off "{resolved_env}"
         grep -Fx CARRY_SLEEVE=off "{resolved_env}"
         ! grep -q MAINNET "{resolved_env}"

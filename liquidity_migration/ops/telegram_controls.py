@@ -385,8 +385,8 @@ class VpsFleet:
             self._control("resume-mainnet")
             return (
                 "▶️ Real-money entry permissions resumed for LONG, CARRY, and Exodus.\n"
-                "The helper proved this generation's activation receipt and that the funded "
-                "account owner is live. Arming is unchanged — REAL_MONEY is not touched."
+                "The helper proved the funded account owner is live. Arming is "
+                "unchanged — REAL_MONEY is not touched."
             )
         if environment != "demo":
             raise ValueError(f"unsupported environment: {environment}")

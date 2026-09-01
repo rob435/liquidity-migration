@@ -1,4 +1,4 @@
-name: CI and staged VPS operation
+name: CI and VPS operation
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && format('{0} {1}@{2}', inputs.mode, github.ref_name, github.sha) || format('checks {0}@{1}', github.ref_name, github.sha) }}
 
@@ -9,24 +9,18 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Rollout, staged install/activation, or read-only verification.
+        description: Deploy, read-only verification, or the funded safety disarm.
         required: true
         default: verify
         type: choice
-        options: [rollout, install, activate, verify, disarm-mainnet]
-      profile:
-        description: Deploy profile (single profile since the 2026-08-03 paper retirement).
-        required: true
-        default: operational
-        type: choice
-        options: [operational]
+        options: [deploy, verify, disarm-mainnet]
 
 permissions:
   contents: read
 
 concurrency:
   # Push/PR checks must not occupy or replace the deploy queue's single
-  # pending slot while a safety disarm is preempting a rollout.
+  # pending slot while a safety disarm is preempting a deploy.
   group: >-
     ${{ github.event_name == 'workflow_dispatch'
         && format('liquidity-migration-vps-{0}', github.ref)
@@ -162,8 +156,7 @@ jobs:
     needs: [ci, rust]
     runs-on: ubuntu-latest
     environment: production
-    # Bound the stopped window, but leave room for every guarded producer drain
-    # and both post-activation verification passes on a loaded host.
+    # Bound the stopped window; the deploy builds before it stops the fleet.
     timeout-minutes: 120
     env:
       VPS_HOST: ${{ vars.VPS_HOST || '208.84.103.4' }}
@@ -194,19 +187,14 @@ jobs:
       - name: Run VPS mode
         env:
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}
-          DEPLOY_PROFILE_INPUT: ${{ inputs.profile }}
         run: |
           set -euo pipefail
-          deploy_args=("$DEPLOY_MODE_INPUT")
-          # The deploy script accepts only `--profile` on rollout and rejects
-          # any other flag outright.
           case "$DEPLOY_MODE_INPUT" in
-            rollout) deploy_args+=(--profile "$DEPLOY_PROFILE_INPUT") ;;
-            install|activate|verify) ;;
+            deploy|verify) ;;
             *) exit 2 ;;
           esac
           EXPECTED_COMMIT="$GITHUB_SHA" \
           BRANCH=main \
           SSH_TARGET="$VPS_USER@$VPS_HOST" \
           SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3" \
-          scripts/deploy_vps_live.sh "${deploy_args[@]}"
+          scripts/deploy_vps_live.sh "$DEPLOY_MODE_INPUT"

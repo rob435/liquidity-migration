@@ -208,7 +208,7 @@ mere command-file acceptance.
 
 ## Stopped state takeover
 
-Deployment builds and installs the trusted Rust release before rendering the
+Deployment builds and installs the Rust release before rendering the
 engine configs. `engine render-native-config` derives the exact LONG, CARRY,
 Exodus, and mainnet maker TOML from registered JSON and the installed
 operational profile. The installed file is atomically replaced and checked

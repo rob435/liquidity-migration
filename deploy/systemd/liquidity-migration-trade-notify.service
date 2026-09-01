@@ -29,7 +29,7 @@ ReadWritePaths=/var/lib/liquidity-migration/trade-notify
 MemoryMax=256M
 # An observer must not preempt the signal workers (Nice=5) or owners (Nice=-5).
 Nice=10
-ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-trade-notify.service main
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/notify_book_changes.py
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal

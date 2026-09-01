@@ -1,7 +1,7 @@
 # Operational State
 
 Exact host truth comes from `scripts/ops.sh status`. Repository files describe
-the generation a rollout installs; they do not prove that a host is running
+the generation a deploy installs; they do not prove that a host is running
 that generation. This change does not deploy, arm, disarm, pause, resume, or
 flatten either account.
 
@@ -131,9 +131,9 @@ worker remains running throughout.
 
 ### State takeover
 
-Rollout installs the trusted Rust binaries with all units stopped, renders the
-exact native configs from registered JSON and the installed operational
-profile, and runs account-bound state takeover before activation.
+Deploy installs the Rust binaries with all units stopped, renders the exact
+native configs from registered JSON and the installed operational profile, and
+runs account-bound state takeover before starting the fleet.
 
 The importer holds both the WAL and authenticated account leases. It requires
 the exact account ID and strategy order. It translates the complete LONG,
@@ -175,21 +175,26 @@ are not account evidence.
 
 Venue-confirmed trade accounting binds the complete WAL family, engine and
 order boot config hashes, exact execution and cash rows, the authenticated
-account-history window, and the seven-field activation receipt for the deployed
+account-history window, and a seven-field activation receipt for the deployed
 engine and signal-worker generation. Both deployed binaries and the engine
 config are rehashed against independently retained digests. Missing or
 contradictory evidence withholds the venue-confirmed label.
 
+`scripts/research/reconcile_venue_wal.py` still requires that receipt, and
+deployment no longer writes one. Trades executed by a generation installed
+after the receipt was retired therefore cannot reach the venue-confirmed
+label until the owner decides what binds a generation in its place. Trades
+from earlier generations with a retained receipt are unaffected.
+
 ## Deployment status
 
-This repository generation requires an operational rollout before it becomes
-host state. Run:
+This repository generation requires a deploy before it becomes host state.
+Run:
 
 ```text
 scripts/ops.sh status
 ```
 
-to read the installed commit, armed state, units, worker readiness, engine
-identity, positions, and current health. Use the exact-commit operational
-rollout for deployment; do not manually start individual units or copy
-templates onto a running account.
+to read the installed commit, armed state, unit states, and heartbeat ages.
+Use the exact-commit deploy (`scripts/ops.sh deploy`); do not copy templates
+onto a running account by hand.

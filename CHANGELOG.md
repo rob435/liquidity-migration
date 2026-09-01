@@ -6,6 +6,31 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — The deploy machinery is cut to the operations it performs.**
+  The audit found roughly twenty thousand lines of guards, gates, receipts,
+  and proofs around a deploy whose real work is: fetch a commit, build, copy
+  files, restart units. That machinery had kept the armed fleet down for days
+  — dozens of failed activation attempts since 2026-08-28, ending in a staged
+  install refused outright because the host holds funded configuration.
+  Removed: the trusted runtime launcher and its permits, watchdog leases, and
+  activation receipts (every unit now ExecStarts its real committed command);
+  release markers and digest re-verification in the deploy, the operator
+  router, and the Telegram helper; the install/activate/staged/rollout mode
+  split and the funded-host refusal; topology snapshots, boot fences,
+  quiescence proofs, quarantine inventories, and the sandboxed builder; and
+  the liveness checker's identity re-proving. The deploy script is now one
+  `deploy` mode plus read-only `verify` and the funded `stop-mainnet` /
+  `disarm-mainnet` safety stops, at about a tenth of its size. Kept: the
+  `REAL_MONEY` arming switch and funded preflight, exact-commit binding with
+  the on-main ancestry check, state takeover, the engine's WAL and lease
+  contracts, pinned CI SSH identities, the sudoers boundary, and the
+  always-available disarm. Root SSH access and the pushed `main` branch are
+  now the stated security boundary. Liveness pages on inactive units, stale
+  heartbeats, a cannot-open engine, disk, backups, and host clock — not on
+  hash identity. The venue-confirmed accounting tool still consumes a
+  deployment-time activation receipt; future generations do not produce one,
+  and that contract is an open owner decision.
+
 - **2026-09-01 — A refused runtime control retires instead of wedging the
   engine.** The final control audit found that a durable control request the
   engine would never accept — unreadable bytes, an envelope from another

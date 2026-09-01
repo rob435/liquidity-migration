@@ -65,20 +65,15 @@ write access only to their state, signal spool, control spool, and account
 lease directory. Signal workers have write access only to their state and
 signal spool.
 
-All repository workloads enter through
-`/opt/liquidity-migration-engine/bin/run-authorized-runtime`. The installed
-launcher and Rust binaries are bound to the checked-out commit and release
-hashes. Unit environment files select reviewed inputs; callers cannot append an
-alternate command line.
+Each unit file carries its own committed command line. Unit environment files
+select reviewed inputs; callers cannot append an alternate command line.
 
 ## Lifecycle
 
-Rollout stops downstream units in manifest order before stopping either
-account owner. It installs the exact commit with all units disabled and
-quiescent, installs the trusted Rust release, renders native configs, completes
-stopped state takeover, then creates the activation permit. Activation starts
-and verifies the candidate topology before committing the persistent release
-receipt.
+Deploy stops every liquidity-migration unit, installs the exact commit and the
+Rust release, renders native configs, completes stopped state takeover, then
+starts the signal worker, the account owner, and the downstream units in
+manifest order, waiting for a fresh heartbeat at each step.
 
 Pause and flatten do not stop signal workers. They use durable entry-permission
 and flatten requests in the engine control spool, so settlement observations

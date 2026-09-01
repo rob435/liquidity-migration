@@ -37,14 +37,11 @@ UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY B
 # copy to fill in. No live switch lives here: REAL_MONEY in the credential
 # file is what decides whether this unit runs at all.
 EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
-Environment=LM_CHILD_STOP_GRACE_SECONDS=20
 
-ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-engine-mainnet.service main
-# The trusted supervisor records 143 only when the child finishes inside its
-# grace period. A forced kill stays a service failure.
+ExecStart=/opt/liquidity-migration-engine/bin/engine run --config ${ENGINE_CONFIG_FILE}
+# 143 is a clean SIGTERM stop.
 SuccessExitStatus=143
 Restart=always
-RestartPreventExitStatus=78
 RestartSec=5
 KillMode=control-group
 # The engine finishes its current write and drops its account lease on the way

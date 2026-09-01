@@ -161,220 +161,6 @@ lm_fleet_manifest_rows() {
     LC_ALL=C awk -F '|' '!/^#/ && !/^[[:space:]]*$/ { print }' "$LM_FLEET_MANIFEST"
 }
 
-lm_rollout_units() {
-    _lru_phase="$1"
-    case "$_lru_phase" in downstream|owner) ;; *) return 2 ;; esac
-    lm_validate_fleet_manifest || return 1
-    lm_fleet_manifest_rows \
-        | awk -F '|' -v phase="$_lru_phase" '$4 == phase { print $5 "|" $1 }' \
-        | sort -t '|' -k1,1n \
-        | cut -d '|' -f2
-}
-
-# Rollout stops the ordered union of the installed and candidate generations.
-# The installed side may carry either supported manifest schema; only active
-# schema-v1 rows participate because retired rows have no installed unit.
-lm_rollout_transition_inventory() {
-    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || return 2
-    local incumbent_manifest="$1" candidate_manifest="$2"
-    local wanted_realm="${3:-}"
-    local incumbent_header incumbent_columns candidate_header candidate_columns rows
-    local manifest incumbent_schema
-    case "$wanted_realm" in
-        ""|demo|mainnet|shared) ;;
-        *) return 2 ;;
-    esac
-    for manifest in "$incumbent_manifest" "$candidate_manifest"; do
-        [ -f "$manifest" ] && [ ! -L "$manifest" ] || {
-            echo "rollout transition manifest is missing or linked: $manifest" >&2
-            return 1
-        }
-    done
-    incumbent_header="$(sed -n '1p' "$incumbent_manifest")" || return 1
-    incumbent_columns="$(sed -n '2p' "$incumbent_manifest")" || return 1
-    candidate_header="$(sed -n '1p' "$candidate_manifest")" || return 1
-    candidate_columns="$(sed -n '2p' "$candidate_manifest")" || return 1
-    case "$incumbent_header|$incumbent_columns" in
-        '# fleet-manifest-v1|# unit|state|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact')
-            incumbent_schema=1
-            ;;
-        '# fleet-manifest-v2|# unit|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact')
-            incumbent_schema=2
-            ;;
-        *)
-            echo "incumbent fleet manifest has an unsupported transition schema: $incumbent_manifest" >&2
-            return 1
-            ;;
-    esac
-    [ "$candidate_header" = '# fleet-manifest-v2' ] \
-        && [ "$candidate_columns" = '# unit|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact' ] || {
-        echo "candidate fleet manifest is not schema v2: $candidate_manifest" >&2
-        return 1
-    }
-    rows="$(
-        LC_ALL=C awk -F '|' \
-            -v incumbent="$incumbent_manifest" \
-            -v incumbent_schema="$incumbent_schema" \
-            -v wanted_realm="$wanted_realm" '
-function fail_at(manifest, line, message) {
-    print "invalid rollout transition manifest at " manifest ":" line ": " message > "/dev/stderr"
-    failed = 1
-}
-function is_uint(value) { return value ~ /^[1-9][0-9]*$/ }
-function selected(unit) { return wanted_realm == "" || union_realm[unit] == wanted_realm }
-function add_active(manifest, unit, kind, realm, phase, order, dependencies, line, key, order_key) {
-    key = manifest SUBSEP unit
-    if (active[key]++) {
-        fail_at(manifest, line, "duplicate active unit " unit)
-        return
-    }
-    order_key = manifest SUBSEP phase SUBSEP order
-    if (order_seen[order_key]++) fail_at(manifest, line, "duplicate stop order in " phase ": " order)
-    active_name[key] = 1
-    active_kind[key] = kind
-    active_realm[key] = realm
-    active_phase[key] = phase
-    active_order[key] = order
-    active_dependencies[key] = dependencies
-    active_line[key] = line
-    if (phase == "owner") owner_count[manifest SUBSEP realm]++
-    if ((unit in union_phase) &&
-        (union_phase[unit] != phase || union_kind[unit] != kind || union_realm[unit] != realm)) {
-        fail_at(manifest, line, "unit identity changes across rollout: " unit)
-    } else if (!(unit in union_phase)) {
-        union_phase[unit] = phase
-        union_kind[unit] = kind
-        union_realm[unit] = realm
-        # Incumbent rows are read first. Their order is the deterministic
-        # preference for rollback; candidate-only rows keep candidate order.
-        union_preference[unit] = order + 0
-    }
-}
-function emit_phase(wanted,    remaining, unit, edge, parts, ready, best, sequence) {
-    remaining = 0
-    for (unit in union_phase) {
-        if (union_phase[unit] == wanted && selected(unit)) remaining++
-    }
-    sequence = 0
-    while (remaining > 0) {
-        best = ""
-        for (unit in union_phase) {
-            if (union_phase[unit] != wanted || !selected(unit) || emitted[unit]) continue
-            ready = 1
-            for (edge in must_stop_before) {
-                split(edge, parts, SUBSEP)
-                if (parts[2] == unit && selected(parts[1]) && !emitted[parts[1]]) {
-                    ready = 0
-                    break
-                }
-            }
-            if (ready &&
-                (best == "" || union_preference[unit] < union_preference[best] ||
-                 (union_preference[unit] == union_preference[best] && unit < best))) {
-                best = unit
-            }
-        }
-        if (best == "") {
-            fail_at("transition", 1, "installed and candidate dependencies form a stop-order cycle")
-            return
-        }
-        emitted[best] = 1
-        sequence++
-        merged_order[wanted SUBSEP sequence] = best
-        remaining--
-    }
-}
-FNR <= 2 { next }
-/\r/ { fail_at(FILENAME, FNR, "carriage returns are not allowed"); next }
-/^#/ { next }
-/^[[:space:]]*$/ { next }
-{
-    manifest = (FILENAME == incumbent ? "incumbent" : "candidate")
-    schema = (FILENAME == incumbent ? incumbent_schema : 2)
-    expected_fields = (schema == 1 ? 17 : 16)
-    if (NF != expected_fields) {
-        fail_at(FILENAME, FNR, "expected " expected_fields " fields, found " NF)
-        next
-    }
-    unit = $1
-    state = (schema == 1 ? $2 : "current")
-    kind = (schema == 1 ? $3 : $2)
-    realm = (schema == 1 ? $4 : $3)
-    phase = (schema == 1 ? $5 : $4)
-    order = (schema == 1 ? $6 : $5)
-    dependencies = (schema == 1 ? $9 : $8)
-    if (unit !~ /^liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer)$/) {
-        fail_at(FILENAME, FNR, "invalid unit name " unit)
-    }
-    key = manifest SUBSEP unit
-    if (seen[key]++) fail_at(FILENAME, FNR, "duplicate unit " unit)
-    if (state !~ /^(current|retired)$/) fail_at(FILENAME, FNR, "invalid state for " unit)
-    if (kind !~ /^(service|timer)$/ || unit !~ ("\\." kind "$")) {
-        fail_at(FILENAME, FNR, "kind disagrees with unit suffix for " unit)
-    }
-    if (realm !~ /^(demo|mainnet|shared)$/) fail_at(FILENAME, FNR, "invalid realm for " unit)
-    if (phase !~ /^(downstream|owner)$/) fail_at(FILENAME, FNR, "invalid lifecycle phase for " unit)
-    if (!is_uint(order)) fail_at(FILENAME, FNR, "invalid stop order for " unit)
-    if (dependencies != "-" && dependencies !~ /^liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer)(,liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer))*$/) {
-        fail_at(FILENAME, FNR, "invalid dependency list for " unit)
-    }
-    if (state == "retired") next
-    add_active(manifest, unit, kind, realm, phase, order, dependencies, FNR)
-}
-END {
-    manifests["incumbent"] = 1
-    manifests["candidate"] = 1
-    for (manifest in manifests) {
-        if (owner_count[manifest SUBSEP "demo"] != 1) {
-            fail_at(manifest, 1, "manifest must have one active demo owner")
-        }
-        if (owner_count[manifest SUBSEP "mainnet"] != 1) {
-            fail_at(manifest, 1, "manifest must have one active mainnet owner")
-        }
-    }
-    for (key in active_dependencies) {
-        split(key, parts, SUBSEP)
-        manifest = parts[1]
-        unit = parts[2]
-        if (active_dependencies[key] == "-") continue
-        count = split(active_dependencies[key], values, ",")
-        for (dep_index = 1; dep_index <= count; dep_index++) {
-            dependency = values[dep_index]
-            dependency_key = manifest SUBSEP dependency
-            if (!(dependency_key in active_name)) {
-                fail_at(manifest, active_line[key], unit " depends on an inactive or unknown unit " dependency)
-                continue
-            }
-            if (active_phase[key] == "owner" && active_phase[dependency_key] == "downstream") {
-                fail_at(manifest, active_line[key], "owner depends on downstream unit: " unit)
-            }
-            if (active_phase[key] == active_phase[dependency_key] &&
-                active_order[key] >= active_order[dependency_key]) {
-                fail_at(manifest, active_line[key], unit " must stop before dependency " dependency)
-            }
-            must_stop_before[unit SUBSEP dependency] = 1
-        }
-    }
-    if (failed) exit 1
-    emit_phase("downstream")
-    emit_phase("owner")
-    if (failed) exit 1
-    for (key in merged_order) {
-        split(key, parts, SUBSEP)
-        unit = merged_order[key]
-        print parts[1] "|" parts[2] "|" unit
-    }
-}
-' "$incumbent_manifest" "$candidate_manifest"
-    )" || return 1
-    [ -n "$rows" ] || {
-        echo "rollout transition inventory is empty" >&2
-        return 1
-    }
-    printf '%s\n' "$rows" \
-        | LC_ALL=C sort -t '|' -k1,1 -k2,2n -k3,3
-}
-
 lm_realm_units() {
     _lru_realm="$1"
     case "$_lru_realm" in demo|mainnet|shared) ;; *) return 2 ;; esac
@@ -476,19 +262,6 @@ lm_operator_status_rows() {
     ' | sort -t '|' -k1,1n -k2,2n -k3,3 -k4,4 | cut -d '|' -f4-
 }
 
-lm_unit_for_output_artifact() {
-    _lufoa_artifact="$1"
-    case "$_lufoa_artifact" in /*) ;; *) return 2 ;; esac
-    lm_validate_fleet_manifest || return 1
-    _lufoa_unit="$(
-        lm_fleet_manifest_rows | awk -F '|' -v artifact="$_lufoa_artifact" '
-            $10 == artifact { print $1 }
-        '
-    )"
-    [ -n "$_lufoa_unit" ] && [ "${_lufoa_unit#*$'\n'}" = "$_lufoa_unit" ] || return 1
-    printf '%s\n' "$_lufoa_unit"
-}
-
 lm_output_artifact_for_unit() {
     _loafu_unit="$1"
     lm_validate_fleet_manifest || return 1
@@ -499,41 +272,6 @@ lm_output_artifact_for_unit() {
     )"
     [ -n "$_loafu_artifact" ] || return 1
     printf '%s\n' "$_loafu_artifact"
-}
-
-lm_guarded_units() {
-    lm_validate_fleet_manifest || return 1
-    lm_fleet_manifest_rows | awk -F '|' '$2 == "service" { print $1 }'
-}
-
-lm_manifest_operator_policy() {
-    _lmop_unit="$1"
-    lm_validate_fleet_manifest || return 1
-    _lmop_policy="$(
-        lm_fleet_manifest_rows | awk -F '|' -v unit="$_lmop_unit" '$1 == unit { print $7 }'
-    )"
-    [ -n "$_lmop_policy" ] || return 1
-    printf '%s\n' "$_lmop_policy"
-}
-
-lm_fleet_health_rows() {
-    _lfhr_long="$1"
-    _lfhr_carry="$2"
-    _lfhr_mainnet="$3"
-    for _lfhr_value in "$_lfhr_long" "$_lfhr_carry" "$_lfhr_mainnet"; do
-        case "$_lfhr_value" in on|off) ;; *) return 2 ;; esac
-    done
-    lm_validate_fleet_manifest || return 1
-    lm_fleet_manifest_rows | awk -F '|' \
-        -v long="$_lfhr_long" -v carry="$_lfhr_carry" -v mainnet="$_lfhr_mainnet" '
-        $9 == "none" { next }
-        {
-            expected = "off"
-            if ($6 == "always") expected = "on"
-            else if ($6 == "mainnet") expected = mainnet
-            print $1 "|" expected "|" $9 "|" $10 "|" $11 "|" $12 "|" $13 "|" $14 "|" $15
-        }
-    '
 }
 
 lm_parse_sleeve_environment() {
@@ -637,47 +375,9 @@ lm_write_resolved_sleeve_toggles() {
     mv "$_lr_tmp" "$LM_RESOLVED_SLEEVES_ENV"
 }
 
-lm_verify_resolved_sleeve_toggles() {
-    [ -f "$LM_RESOLVED_SLEEVES_ENV" ] || {
-        echo "verify failed: missing resolved sleeve env $LM_RESOLVED_SLEEVES_ENV" >&2
-        return 1
-    }
-    grep -Fx "LONG_SLEEVE=${LONG_SLEEVE:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
-        echo "verify failed: resolved LONG_SLEEVE does not match loaded toggle" >&2
-        return 1
-    }
-    grep -Fx "CARRY_SLEEVE=${CARRY_SLEEVE:-off}" "$LM_RESOLVED_SLEEVES_ENV" >/dev/null || {
-        echo "verify failed: resolved CARRY_SLEEVE does not match loaded toggle" >&2
-        return 1
-    }
-}
-
 lm_expected_systemd_units() {
     lm_validate_fleet_manifest || return 1
     lm_fleet_manifest_rows | awk -F '|' '{ print $1 }'
-}
-
-lm_verify_source_systemd_manifest() {
-    _lvssm_expected=" $(lm_expected_systemd_units | tr '\n' ' ') " || return 1
-    for _lvssm_unit in $(lm_expected_systemd_units); do
-        [ -f "$_LM_DEPLOY_DIRECTORY/systemd/$_lvssm_unit" ] || {
-            echo "fleet manifest names a missing systemd unit: $_lvssm_unit" >&2
-            return 1
-        }
-    done
-    for _lvssm_path in \
-        "$_LM_DEPLOY_DIRECTORY"/systemd/liquidity-migration-*.service \
-        "$_LM_DEPLOY_DIRECTORY"/systemd/liquidity-migration-*.timer; do
-        [ -e "$_lvssm_path" ] || continue
-        _lvssm_unit="$(basename "$_lvssm_path")"
-        case "$_lvssm_expected" in
-            *" $_lvssm_unit "*) ;;
-            *)
-                echo "systemd unit is absent from the fleet manifest: $_lvssm_unit" >&2
-                return 1
-                ;;
-        esac
-    done
 }
 
 lm_host_liqmig_units() {
@@ -736,78 +436,16 @@ lm_cleanup_unknown_liqmig_units() {
     done
 }
 
-lm_verify_no_unknown_liqmig_units() {
-    _lvnu_expected=" $(lm_expected_systemd_units | tr '\n' ' ') "
-    for _lvnu_unit in $(lm_host_liqmig_units); do
-        case "$_lvnu_expected" in
-            *" $_lvnu_unit "*) continue ;;
-        esac
-        echo "verify failed: unknown liquidity-migration unit present: $_lvnu_unit" >&2
-        return 1
-    done
-}
-
-# Fail closed unless systemd's effective guarded-unit surface is exactly the
-# checked manifest. A manifest-unit drop-in is never deleted here — it may be
-# operator work; deployment stops and names the conflicting path instead.
-lm_verify_guarded_unit_surfaces() {
-    _lvgus_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    lm_validate_fleet_manifest || return 1
-    for _lvgus_unit in $(lm_guarded_units); do
-        _lvgus_source="$_lvgus_dir/systemd/$_lvgus_unit"
-        _lvgus_installed="$LM_SYSTEMD_UNIT_DIR/$_lvgus_unit"
-        if [ ! -f "$_lvgus_source" ] || [ ! -f "$_lvgus_installed" ]; then
-            echo "verify failed: guarded unit fragment is missing: $_lvgus_unit" >&2
-            return 1
-        fi
-        if ! cmp -s "$_lvgus_source" "$_lvgus_installed"; then
-            echo "verify failed: guarded unit differs from checked manifest: $_lvgus_installed" >&2
-            return 1
-        fi
-
-        for _lvgus_root in "$LM_SYSTEMD_UNIT_DIR" "$LM_RUNTIME_SYSTEMD_UNIT_DIR"; do
-            _lvgus_dropin_dir="$_lvgus_root/$_lvgus_unit.d"
-            if [ -d "$_lvgus_dropin_dir" ] \
-                && [ -n "$(find "$_lvgus_dropin_dir" -mindepth 1 -print -quit)" ]; then
-                echo "verify failed: guarded unit has an unreviewed drop-in: $_lvgus_dropin_dir" >&2
-                return 1
-            fi
-        done
-
-        _lvgus_fragment="$(systemctl show "$_lvgus_unit" --property=FragmentPath --value --no-pager)" || return 1
-        if [ "$_lvgus_fragment" != "$_lvgus_installed" ]; then
-            echo "verify failed: guarded unit loaded from unexpected fragment: $_lvgus_unit -> $_lvgus_fragment" >&2
-            return 1
-        fi
-        _lvgus_dropins="$(systemctl show "$_lvgus_unit" --property=DropInPaths --value --no-pager)" || return 1
-        if [ -n "$_lvgus_dropins" ]; then
-            echo "verify failed: guarded unit has effective drop-ins: $_lvgus_unit -> $_lvgus_dropins" >&2
-            return 1
-        fi
-        _lvgus_exec="$(systemctl show "$_lvgus_unit" --property=ExecStart --value --no-pager)" || return 1
-        case "$_lvgus_exec" in
-            *"argv[]=/opt/liquidity-migration-engine/bin/run-authorized-runtime $_lvgus_unit main ;"*) ;;
-            *)
-                echo "verify failed: guarded unit has unexpected effective ExecStart: $_lvgus_unit -> $_lvgus_exec" >&2
-                return 1
-                ;;
-        esac
-    done
-}
-
 # Install exactly the checked-in unit manifest without enabling or starting any
 # service/timer. Units absent from the manifest are stopped and removed.
 lm_install_current_systemd_units() {
     _licsu_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    lm_verify_source_systemd_manifest || return 1
+    lm_validate_fleet_manifest || return 1
     mkdir -p "$LM_SYSTEMD_UNIT_DIR"
     for _licsu_unit in $(lm_expected_systemd_units); do
-        cp "$_licsu_dir/systemd/$_licsu_unit" "$LM_SYSTEMD_UNIT_DIR/$_licsu_unit"
+        cp "$_licsu_dir/systemd/$_licsu_unit" "$LM_SYSTEMD_UNIT_DIR/$_licsu_unit" || return 1
     done
-
     systemctl daemon-reload
     lm_cleanup_unknown_liqmig_units
     systemctl daemon-reload
-    lm_verify_no_unknown_liqmig_units
-    lm_verify_guarded_unit_surfaces
 }

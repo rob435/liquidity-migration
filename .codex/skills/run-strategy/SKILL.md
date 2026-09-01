@@ -29,10 +29,9 @@ Do not maintain a static package-subcommand list.
 ## Canonical wrappers
 
 - Deployment/account state: `scripts/ops.sh status`.
-- Deploy a new generation on a host with funded configuration only through
-  `scripts/ops.sh deploy rollout --profile operational`. Inspect current help
-  before using `install`, `activate`, or `staged`; those modes refuse a funded
-  generation change.
+- Deploy a new generation with `scripts/ops.sh deploy`, optionally pinning
+  `EXPECTED_COMMIT`. It stops the fleet, installs the exact commit, and starts
+  the funded realm only while `REAL_MONEY` is armed.
 - Stop or persistently disarm funded trading with `scripts/ops.sh deploy
   stop-mainnet` or `scripts/ops.sh deploy disarm-mainnet` respectively.
 - Mainnet arming state (read-only): `scripts/ops.sh real-money preflight`.
@@ -51,8 +50,8 @@ Do not maintain a static package-subcommand list.
 ## Forward safety
 
 Demo is not a dry run: it changes the external demo account. Before a forward
-command, inspect `EXECUTION_ENVIRONMENT`, the installed profile marker,
-credentials, confirmation, checkout, and `REAL_MONEY`. Use a true plan/dry-run
+command, inspect `EXECUTION_ENVIRONMENT`, credentials, confirmation,
+checkout, and `REAL_MONEY`. Use a true plan/dry-run
 mode when one exists.
 
 Mainnet is categorically separate. Never set `REAL_MONEY`, select mainnet

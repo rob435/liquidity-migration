@@ -41,7 +41,8 @@ MemoryMax=512M
 # An observer must not preempt the Rust worker it observes (it runs Nice=5,
 # the owners Nice=-5).
 Nice=10
-ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-demo-liveness.service main
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_liveness.py \
+    --account-scope demo --cooldown-min 60 --host-clock-check --telegram
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal

@@ -27,15 +27,12 @@ scripts/ops.sh attest-flat --environment demo|mainnet
 scripts/ops.sh flatten --environment demo|mainnet [--reason TEXT] [--execute]
 scripts/ops.sh real-money preflight
 scripts/ops.sh real-money render-profile [--execute --output PATH]
-scripts/ops.sh deploy MODE [ARGS...]
+scripts/ops.sh deploy [deploy|verify|stop-mainnet|disarm-mainnet]
 ```
 
 `start`, `stop`, `restart`, `flatten --execute`, profile rendering, and deploy
 modes mutate the host. A unit name without the
 `liquidity-migration-` prefix is qualified automatically.
-
-Direct start, stop, or restart of funded units is not the funded rollout
-contract. Use the exact-commit operational rollout for a funded generation.
 
 ## What runs
 
@@ -56,65 +53,43 @@ The signal worker has its own state and heartbeat under the public runtime
 tree. Each realm has distinct signal and control spools. Units absent from the
 manifest are disabled and removed during installation.
 
-## Release boundary
-
-Systemd does not execute a mutable checkout command directly. The trusted
-launcher verifies a root-owned release marker that binds:
-
-- the exact git commit;
-- engine and signal-worker binary hashes;
-- the authorized runtime launcher;
-- the Telegram control helper and sudo policy; and
-- the Telegram bot boundary.
-
-The short-lived activation permit binds that release to the rollout process.
-The persistent activation receipt allows ordinary service restarts only for
-the installed generation. A changed checkout, binary, launcher, helper, or
-receipt is refused.
+## Release layout
 
 The engine binary and signal worker are installed outside the checkout under
 `/opt/liquidity-migration-engine/bin`. Runtime config and credentials remain
 root-owned under `/etc/liquidity-migration`. State remains under `/var/lib` and
-is not recreated by a code checkout.
+is not recreated by a code checkout. Root SSH access and the pushed `main`
+branch are the security boundary: the deploy installs exactly the commit it is
+given, and that commit must already be on `origin/main`.
 
 ## Deployment modes
 
 The deploy entry point accepts:
 
-- `verify`: read-only topology and artifact checks;
-- `install`: fetch, build, install, and prepare a stopped generation;
-- `activate`: activate and verify an installed generation;
-- `staged --profile operational`: prefetch, install, activate, and verify in
-  one remote session;
-- `rollout --profile operational`: exact-commit funded generation change with
-  topology snapshot, ordered stop, install, activation, and verification;
+- `deploy`: fetch and check out the exact commit, build the Rust release,
+  install binaries, units, and rendered configs, run state takeover if it is
+  still pending, and restart the fleet — worker first, then the account owner,
+  then the downstream units, waiting for a fresh heartbeat at each step. The
+  funded realm starts only while `REAL_MONEY=true` is present in the funded
+  credential file; otherwise its units stay stopped;
+- `verify`: read-only fleet summary — installed commit, arming state, unit
+  states, heartbeat ages, and disk;
 - `stop-mainnet`: stop the funded realm; and
-- `disarm-mainnet`: remove funded runtime authorization through its explicit
-  owner boundary.
-
-For funded generation changes, use a full commit SHA:
+- `disarm-mainnet`: stop the funded realm and set `REAL_MONEY=false` in the
+  credential file.
 
 ```sh
-EXPECTED_COMMIT=<40-lowercase-hex> \
-  scripts/ops.sh deploy rollout --profile operational
+EXPECTED_COMMIT=<40-lowercase-hex> scripts/ops.sh deploy
 ```
 
-Rollout prefetches and compiles before it stops the incumbent. It then stops
-the validated ordered union of the installed and candidate manifests,
-downstream units before account owners, proves the managed fleet quiescent,
-installs the exact commit, activates owners before dependants, and verifies the
-resulting topology. This transition inventory covers retired producer units
-even though they are absent from the candidate manifest. A failure before
-checkout mutation can restore the prior topology; a failure after authority
-changes leaves the managed fleet stopped for explicit recovery.
-
-Install builds the Rust release before generating strategy config. Rust
-renders the exact native directional blocks and, for mainnet, the maker block.
-The installed TOML is atomically replaced and checked against a second render.
+`EXPECTED_COMMIT` defaults to the local checkout's `origin/main` tip. The host
+refuses a commit that is not on `origin/main`. Rust renders the exact native
+directional blocks and, for mainnet, the maker block; the installed TOML is
+atomically replaced.
 
 ## Native state takeover
 
-Install handles each realm while its owner is stopped:
+Deploy handles each realm while its owner is stopped:
 
 1. `verify-native-strategy-state` accepts an already complete native WAL and
    skips stopped-state import.
@@ -127,18 +102,9 @@ Install handles each realm while its owner is stopped:
    source provenance, and WAL tail.
 
 Takeover takes both the WAL lock and authenticated account lease and requires
-`EXPECTED_ENGINE_ACCOUNT_USER_ID`. Demo uses its demo account credential;
-mainnet prefers the optional globally read-only attestor and otherwise uses the
-existing execution credential inside the Rust inventory type, which exposes no
-order or account-mutation method. An exact retry is a no-op. A partial bundle,
-another account, changed source bytes, or a conflicting checkpoint stops
-installation.
-
-Before it snapshots or stops any unit, an armed rollout validates the selected
-credential as a single-link `root:root` mode-`0600` file, runs the exact
-candidate's read-only identity command, and matches the authenticated Bybit UID
-to the engine's expected account. Missing or mismatched credentials therefore
-leave the incumbent fleet untouched.
+`EXPECTED_ENGINE_ACCOUNT_USER_ID`. Each realm uses its own credential file.
+An exact retry is a no-op. A partial bundle, another account, or a conflicting
+checkpoint stops installation.
 
 The seven persistent stopped-state source roles are:
 
@@ -181,13 +147,12 @@ status-fleet
 ```
 
 Demo pause also saves the owner-controlled LONG/CARRY entry switches and writes
-their resolved off state. Resume restores those switches, submits the matching
-durable permissions, and requires the current activation receipt. Exodus
-resumes with the realm when the committed config permits entries.
+their resolved off state. Resume restores those switches and submits the
+matching durable permissions. Exodus resumes with the realm when the committed
+config permits entries.
 
 Mainnet resume cannot arm an account. It requires the funded engine already
-running under the separately owner-managed `REAL_MONEY=true` credential and a
-matching activation receipt.
+running under the separately owner-managed `REAL_MONEY=true` credential.
 
 ## Flatten
 
@@ -249,18 +214,15 @@ scripts/ops.sh logs engine.service 200
 scripts/ops.sh logs signal-worker-demo.service 200
 ```
 
-Status verifies the exact commit, clean checkout, release marker, binary
-digests, launcher and receipt, exact systemd inventory, config render,
-WAL/native state, spools, runtime identities, heartbeats, timers, and active
-realm policy. Do not replace a failed check with an interpretation of an old
-doc or an old rollout receipt.
+Status reports the installed commit, arming state, every manifest unit's
+active state, heartbeat ages, and disk. Do not replace a failed check with an
+interpretation of an old doc.
 
-Liveness separately checks current heartbeats, account and signal freshness,
-independent LONG and CARRY cycle completion, spool publication, WebSocket and
-REST fallback state, systemd memory pressure, WAL growth and storage, feed
-readiness, controls, timers, host clock, latches, and native reducer errors.
-Symbol entry blockers remain trading state and do not page. A systemd `active`
-state alone is not proof that either sleeve is producing decisions.
+Liveness separately pages on an inactive manifest unit, a stale or unreadable
+heartbeat, an engine that reports it cannot open positions, low disk, a stale
+off-box backup stamp, and (in one scope per box) an unsynchronised host clock.
+A systemd `active` state alone is not proof that either sleeve is producing
+decisions.
 
 ## Venue-confirmed trade accounting
 
@@ -314,8 +276,8 @@ wrong-generation, or out-of-retention row withholds the label.
   engine merely because the worker failed; the engine still owns exits.
 - A WAL/account mismatch is reconciled from authenticated venue state and WAL
   attribution. Do not edit the WAL or strategy checkpoint by hand.
-- A failed rollout after authority changes stays stopped. Repair the named
-  check and rerun the exact-commit flow.
+- A failed deploy leaves the fleet stopped. Repair the named check and rerun
+  the exact-commit flow.
 - A funded stop or disarm is not reversed by a demo command, resume action, or
   ordinary service restart.
 

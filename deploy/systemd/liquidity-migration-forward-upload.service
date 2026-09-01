@@ -14,7 +14,7 @@ Environment=FORWARD_CAPTURE_REMOTE=gdrive:LiquidityMigration/forward-market
 Environment=FORWARD_UPLOAD_STATE_DIR=/var/lib/liquidity-migration/forward-upload
 Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/forward-upload/rclone.conf
 Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf
-ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-forward-upload.service main
+ExecStart=/opt/liquidity-migration/scripts/runtime/upload_forward_capture.sh
 KillMode=control-group
 TimeoutStartSec=1800
 

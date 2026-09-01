@@ -1,6 +1,6 @@
 ---
 name: vps-migrate
-description: Migrate or recover the demo VPS and restore checked GitHub Actions operation. Use for VPS replacement, IP or host-key changes, SSH recovery, deploy-key mismatch, staged workflow failures, or expected-commit drift. Derive hosts, fingerprints, keys, workflow modes, and service state from current canonical files and provider/GitHub state; never rely on values embedded in a skill, enable real money, or destroy a dirty checkout without explicit approval.
+description: Migrate or recover the demo VPS and restore checked GitHub Actions operation. Use for VPS replacement, IP or host-key changes, SSH recovery, deploy-key mismatch, deploy workflow failures, or expected-commit drift. Derive hosts, fingerprints, keys, workflow modes, and service state from current canonical files and provider/GitHub state; never rely on values embedded in a skill, enable real money, or destroy a dirty checkout without explicit approval.
 ---
 
 # Migrate or recover the VPS
@@ -10,7 +10,7 @@ services. Derive current values from:
 
 - `.github/workflows/vps-deploy.yml`;
 - `scripts/deploy_vps_live.sh` with
-  `install|activate|staged|verify|rollout|stop-mainnet`;
+  `deploy|verify|stop-mainnet|disarm-mainnet`;
 - `scripts/vps/print_vps_recovery_command.sh` and the current SSH restore scripts;
 - `deploy/systemd/README.md`, unit files, and `deploy/sleeves.env`;
 - GitHub variables/secrets and the provider console.
@@ -26,8 +26,7 @@ receipts or this skill.
 3. Confirm the task authorizes recovery/deployment, not only diagnosis.
 4. Verify all credential paths remain demo and `REAL_MONEY=false`.
 5. Read current workflow/script refusal conditions.
-6. Record whether the fleet is quiescent and which profile marker
-   (`/etc/liquidity-migration/profile`) is installed.
+6. Record whether the fleet is quiescent and which commit is installed.
 
 If the checkout is dirty, preserve and inspect its diff first. Do not reset,
 overwrite, or delete it without explicit cleanup authority and a verified
@@ -61,49 +60,35 @@ After SSH returns, confirm the repository/commit, strict environment-file
 ownership and modes, authorized keys, demo-only credential set, and absence of
 unexpected `REAL_MONEY` or mainnet variables.
 
-## Staged operation
-
-Installation, authorization, and activation are separate boundaries.
+## Deploy operation
 
 ```bash
-# Requires the whole project fleet stopped; installs but starts nothing.
+# Fetch the exact commit, build, install, restart the fleet.
 EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
-  scripts/deploy_vps_live.sh install
+  scripts/deploy_vps_live.sh deploy
 
-# Configure/review the stopped host, then activate.
-
-# Reads the installed profile marker and starts only that topology.
-EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
-  scripts/deploy_vps_live.sh activate
-
-# Read-only exact checkout/input/topology verification.
-EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
-  scripts/deploy_vps_live.sh verify
+# Read-only fleet summary.
+SSH_TARGET=USER_AT_HOST scripts/deploy_vps_live.sh verify
 ```
 
 Use current script help and environment names; placeholders are not literal values.
 
-Install requires a clean checkout, target commit on the selected remote branch,
-and a quiescent fleet. It installs locked dependencies, validates code, installs
-the current unit manifest, disables all project units, writes resolved sleeve
-toggles, and starts nothing.
+Deploy requires the target commit to be on the selected remote branch. It
+installs locked dependencies and the current unit manifest, renders the native
+configs, runs state takeover while the owners are stopped, and starts the
+signal worker before the engine in each realm. The funded realm starts only
+while `REAL_MONEY` is armed. Verify never repairs drift.
 
-Activation must follow the install without an intervening checkout or config
-edit. Verify never repairs drift: it compares installed unit files against the
-checkout's manifest and asserts topology, not the installed HEAD.
-
-Confirm the success marker, exact commit, resolved sleeves, installed profile,
-credential mode, service/timer state, start order (signal worker before the engine), liveness,
-and journal/venue agreement appropriate to the task.
+Confirm the exact commit, resolved sleeves, credential mode, service/timer
+state, start order, liveness, and journal/venue agreement appropriate to the
+task.
 
 ## GitHub Actions
 
-The manual workflow exposes `rollout`, `install`, `activate`, and `verify` — four
-of the six deploy modes; the two absent, `staged` and `stop-mainnet`, are
-shell-only, and only `stop-mainnet` is a mainnet mode. It
-runs CI first, configures the pinned SSH identity, and passes the workflow commit
-to the selected mode. A verify workflow cannot update a stale checkout; run
-install while stopped, then activate.
+The manual workflow exposes `deploy`, `verify`, and `disarm-mainnet`. It runs
+CI first, configures the pinned SSH identity, and passes the workflow commit to
+the selected mode. A verify workflow cannot update a stale checkout; run
+`deploy`.
 
 If host/IP/deploy identity changes permanently, update workflow variables or
 pins, scripts, tests, recovery material, and operator docs together. Run the
@@ -115,10 +100,7 @@ focused runtime/deploy tests and lint before proposing a push.
 - Deploy-key mismatch: correct the secret or perform a complete intentional
   rotation across workflow, authorized keys, scripts, and tests.
 - Permission denied: verify user, authorized keys, modes, and provider state.
-- Expected-commit mismatch: run stopped install; verify is not deploy.
-- Wrong or missing profile marker: keep the fleet stopped, correct the reviewed
-  inputs, and re-run `staged` or `rollout` with `--profile` — both write the
-  marker; `install` alone does not. Never hand-edit it.
+- Expected-commit mismatch: run `deploy`; verify is not deploy.
 - Dirty checkout: inspect and archive; request cleanup authority.
 - CI-only failure: compare workflow variables/secrets and environment with the
   successful local command without exposing secrets.

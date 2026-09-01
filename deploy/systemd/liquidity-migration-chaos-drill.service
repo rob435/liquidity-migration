@@ -21,6 +21,6 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=true
 PrivateTmp=true
 MemoryMax=256M
-ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-chaos-drill.service main
+ExecStart=/opt/liquidity-migration/scripts/runtime/chaos_drill.sh
 StandardOutput=journal
 StandardError=journal

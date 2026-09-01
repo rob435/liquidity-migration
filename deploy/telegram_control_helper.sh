@@ -11,20 +11,16 @@ umask 077
 REPOSITORY=/opt/liquidity-migration
 ENGINE=/opt/liquidity-migration-engine/bin/engine
 SIGNAL_WORKER=/opt/liquidity-migration-engine/bin/signal-worker
-LAUNCHER=/opt/liquidity-migration-engine/bin/run-authorized-runtime
-MARKER=/opt/liquidity-migration-engine/bin/engine.release
 HELPER=/opt/liquidity-migration-engine/bin/telegram-control-helper
 SUDOERS=/etc/sudoers.d/liquidity-migration-controls
 BOT=/opt/liquidity-migration/liquidity_migration/ops/telegram_controls.py
 SLEEVES_LIBRARY=/opt/liquidity-migration/deploy/lib_sleeves.sh
 SLEEVES_DEFAULT=/opt/liquidity-migration/deploy/sleeves.env
 FLEET_MANIFEST=/opt/liquidity-migration/deploy/fleet_manifest.tsv
-ACTIVATION_RECEIPT=/opt/liquidity-migration-engine/bin/activation.complete
 HOST_SLEEVES=/etc/liquidity-migration/sleeves.env
 RESOLVED_SLEEVES=/etc/liquidity-migration/sleeves.resolved.env
 HELPER_STATE=/var/lib/liquidity-migration-control-helper
 SAVED_SLEEVES="$HELPER_STATE/sleeves-before-pause"
-MAINTENANCE_LOCK=/run/liquidity-migration/maintenance.lock
 CALLER=liquidity-controls
 RUNTIME_GROUP=liquidity-migration
 DEMO_ENGINE_USER=liquidity-engine-demo
@@ -100,94 +96,13 @@ esac
     && [ "$(stat -c %u "$REPOSITORY/.git")" -eq 0 ] \
     || refuse "trusted checkout metadata is missing, linked, or not root-owned"
 
-for path in "$ENGINE" "$SIGNAL_WORKER" "$LAUNCHER" "$MARKER" "$HELPER" "$SUDOERS" "$BOT" \
+for path in "$ENGINE" "$SIGNAL_WORKER" "$HELPER" "$SUDOERS" "$BOT" \
     "$SLEEVES_LIBRARY" "$SLEEVES_DEFAULT" "$FLEET_MANIFEST"; do
-    [ -f "$path" ] && [ ! -L "$path" ] \
-        && [ "$(stat -c %u "$path")" -eq 0 ] \
-        || refuse "trusted input is missing, linked, or not root-owned: $path"
-done
-[ "$(stat -c %g "$SUDOERS")" -eq 0 ] \
-    && [ "$(stat -c %a "$SUDOERS")" = 440 ] \
-    || refuse "sudoers boundary is not root:root mode 0440"
-[ "$(stat -c %a "$MARKER")" = 644 ] \
-    && [ "$(stat -c %a "$BOT")" = 644 ] \
-    && [ "$(stat -c %a "$SLEEVES_LIBRARY")" = 644 ] \
-    && [ "$(stat -c %a "$SLEEVES_DEFAULT")" = 644 ] \
-    && [ "$(stat -c %a "$FLEET_MANIFEST")" = 644 ] \
-    || refuse "tracked control inputs have unsafe modes"
-
-awk '
-NR == 1 && /^commit=/ { next }
-NR == 2 && /^sha256=/ { next }
-NR == 3 && /^signal_worker_sha256=/ { next }
-NR == 4 && /^launcher_sha256=/ { next }
-NR == 5 && /^control_helper_sha256=/ { next }
-NR == 6 && /^controls_sudoers_sha256=/ { next }
-NR == 7 && /^telegram_bot_sha256=/ { next }
-NR == 8 && $0 == "rustc=1.90.0" { next }
-{ exit 1 }
-END { if (NR != 8) exit 1 }
-' "$MARKER" || refuse "release marker schema is invalid"
-marker_commit="$(sed -n 's/^commit=//p' "$MARKER")"
-marker_engine="$(sed -n 's/^sha256=//p' "$MARKER")"
-marker_signal_worker="$(sed -n 's/^signal_worker_sha256=//p' "$MARKER")"
-marker_launcher="$(sed -n 's/^launcher_sha256=//p' "$MARKER")"
-marker_helper="$(sed -n 's/^control_helper_sha256=//p' "$MARKER")"
-marker_sudoers="$(sed -n 's/^controls_sudoers_sha256=//p' "$MARKER")"
-marker_bot="$(sed -n 's/^telegram_bot_sha256=//p' "$MARKER")"
-[[ "$marker_commit" =~ ^[0-9a-f]{40}$ ]] \
-    && [[ "$marker_engine" =~ ^[0-9a-f]{64}$ ]] \
-    && [[ "$marker_signal_worker" =~ ^[0-9a-f]{64}$ ]] \
-    && [[ "$marker_launcher" =~ ^[0-9a-f]{64}$ ]] \
-    && [[ "$marker_helper" =~ ^[0-9a-f]{64}$ ]] \
-    && [[ "$marker_sudoers" =~ ^[0-9a-f]{64}$ ]] \
-    && [[ "$marker_bot" =~ ^[0-9a-f]{64}$ ]] \
-    || refuse "release marker control digests are invalid"
-[ "$(sha256sum "$ENGINE" | awk '{print $1}')" = "$marker_engine" ] \
-    && [ "$(sha256sum "$SIGNAL_WORKER" | awk '{print $1}')" = "$marker_signal_worker" ] \
-    && [ "$(sha256sum "$LAUNCHER" | awk '{print $1}')" = "$marker_launcher" ] \
-    && [ "$(sha256sum "$HELPER" | awk '{print $1}')" = "$marker_helper" ] \
-    && [ "$(sha256sum "$SUDOERS" | awk '{print $1}')" = "$marker_sudoers" ] \
-    && [ "$(sha256sum "$BOT" | awk '{print $1}')" = "$marker_bot" ] \
-    || refuse "installed control boundary differs from its release marker"
-
-checkout_commit="$(
-    /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
-        GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
-        /usr/bin/git --no-pager --no-optional-locks \
-        --git-dir="$REPOSITORY/.git" --work-tree="$REPOSITORY" \
-        -c "safe.directory=$REPOSITORY" -c core.hooksPath=/dev/null \
-        rev-parse HEAD
-)" || refuse "cannot read checkout generation"
-[ "$checkout_commit" = "$marker_commit" ] \
-    || refuse "checkout is not the installed release generation"
-/usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
-    GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
-    /usr/bin/git --no-pager --no-optional-locks \
-    --git-dir="$REPOSITORY/.git" --work-tree="$REPOSITORY" \
-    -c "safe.directory=$REPOSITORY" -c core.fsmonitor=false \
-    -c core.hooksPath=/dev/null diff-index --quiet "$marker_commit" -- \
-    || refuse "tracked checkout differs from the installed generation"
-for relative in deploy/lib_sleeves.sh deploy/sleeves.env deploy/fleet_manifest.tsv; do
-    committed="$(
-        /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
-            GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 \
-            /usr/bin/git --no-pager --no-optional-locks \
-            --git-dir="$REPOSITORY/.git" --work-tree="$REPOSITORY" \
-            -c "safe.directory=$REPOSITORY" -c core.hooksPath=/dev/null \
-            show "$marker_commit:$relative" | sha256sum | awk '{print $1}'
-    )" || refuse "cannot digest committed helper input: $relative"
-    [ "$(sha256sum "$REPOSITORY/$relative" | awk '{print $1}')" = "$committed" ] \
-        || refuse "helper input differs from its committed blob: $relative"
+    [ -f "$path" ] \
+        || refuse "trusted input is missing: $path"
 done
 
-[ -f "$MAINTENANCE_LOCK" ] && [ ! -L "$MAINTENANCE_LOCK" ] \
-    && [ "$(stat -c %u "$MAINTENANCE_LOCK")" -eq 0 ] \
-    && [ "$(stat -c %g "$MAINTENANCE_LOCK")" -eq 0 ] \
-    && [ "$(stat -c %a "$MAINTENANCE_LOCK")" = 600 ] \
-    || refuse "trusted maintenance lock is missing"
-exec 9<>"$MAINTENANCE_LOCK" || refuse "cannot open the maintenance lock"
-flock --exclusive --nonblock 9 || refuse "deployment or maintenance is active"
+
 
 if [ -e "$HELPER_STATE" ]; then
     [ -d "$HELPER_STATE" ] && [ ! -L "$HELPER_STATE" ] \
@@ -230,32 +145,6 @@ validate_host_sleeves() {
     LM_HOST_SLEEVES_ENV="$original"
     export LM_HOST_SLEEVES_ENV
     return "$status"
-}
-
-activation_complete() {
-    [ -f "$ACTIVATION_RECEIPT" ] && [ ! -L "$ACTIVATION_RECEIPT" ] \
-        && [ "$(stat -c %u "$ACTIVATION_RECEIPT")" -eq 0 ] \
-        && [ "$(stat -c %g "$ACTIVATION_RECEIPT")" -eq 0 ] \
-        && [ "$(stat -c %a "$ACTIVATION_RECEIPT")" = 644 ] \
-        || return 1
-    awk '
-NR == 1 && /^commit=/ { next }
-NR == 2 && /^sha256=/ { next }
-NR == 3 && /^signal_worker_sha256=/ { next }
-NR == 4 && /^launcher_sha256=/ { next }
-NR == 5 && /^control_helper_sha256=/ { next }
-NR == 6 && /^controls_sudoers_sha256=/ { next }
-NR == 7 && /^telegram_bot_sha256=/ { next }
-{ exit 1 }
-END { if (NR != 7) exit 1 }
-' "$ACTIVATION_RECEIPT" >/dev/null || return 1
-    [ "$(sed -n 's/^commit=//p' "$ACTIVATION_RECEIPT")" = "$marker_commit" ] \
-        && [ "$(sed -n 's/^sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_engine" ] \
-        && [ "$(sed -n 's/^signal_worker_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_signal_worker" ] \
-        && [ "$(sed -n 's/^launcher_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_launcher" ] \
-        && [ "$(sed -n 's/^control_helper_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_helper" ] \
-        && [ "$(sed -n 's/^controls_sudoers_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_sudoers" ] \
-        && [ "$(sed -n 's/^telegram_bot_sha256=//p' "$ACTIVATION_RECEIPT")" = "$marker_bot" ]
 }
 
 atomic_install_text() {
@@ -375,7 +264,7 @@ wait_heartbeat_entries() {
 }
 
 new_request_prefix() {
-    printf '%s-%s-%s-%s\n' "$1" "$marker_commit" "$(date +%s%N)" "$$"
+    printf '%s-%s-%s\n' "$1" "$(date +%s%N)" "$$"
 }
 
 pause_demo() {
@@ -400,8 +289,6 @@ pause_demo() {
 
 resume_demo() {
     local temporary request long_enabled carry_enabled
-    activation_complete \
-        || refuse "demo resume requires this generation's completed activation receipt"
     /usr/bin/systemctl is-active --quiet "$DEMO_OWNER_UNIT" \
         || refuse "demo resume requires the account owner to be active"
     validate_private_state_file "$SAVED_SLEEVES" \
@@ -455,8 +342,6 @@ pause_mainnet() {
 # switch off the funded owner is not running and the check below refuses.
 resume_mainnet() {
     local request
-    activation_complete \
-        || refuse "funded resume requires this generation's completed activation receipt"
     /usr/bin/systemctl is-active --quiet "$MAINNET_OWNER_UNIT" \
         || refuse "funded resume requires the funded account owner to be active"
     request="$(new_request_prefix resume-mainnet)"

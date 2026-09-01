@@ -20,11 +20,18 @@ Environment=ENGINE_CONFIG_FILE=/etc/liquidity-migration/engine.toml
 Environment=SIGNAL_WORKER_SPOOL_DIR=/var/lib/liquidity-migration/signals/demo
 Environment=SIGNAL_WORKER_STATE_DIR=/var/lib/liquidity-migration-signal-worker-demo
 Environment=SIGNAL_WORKER_HEARTBEAT_FILE=/var/lib/liquidity-migration-signal-worker-demo/heartbeat.json
-Environment=LM_CHILD_STOP_GRACE_SECONDS=45
-ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-signal-worker-demo.service main
+ExecStart=/opt/liquidity-migration-engine/bin/signal-worker live \
+    --signal-config ${SIGNAL_WORKER_CONFIG_FILE} \
+    --long-rule ${LONG_NATIVE_RULE_FILE} \
+    --carry-config ${CARRY_SIGNAL_CONFIG_FILE} \
+    --operational-config ${OPERATIONAL_PROFILE_FILE} \
+    --engine-config ${ENGINE_CONFIG_FILE} \
+    --universe ${CANDIDATE_UNIVERSE_FILE} \
+    --spool-dir ${SIGNAL_WORKER_SPOOL_DIR} \
+    --state-dir ${SIGNAL_WORKER_STATE_DIR} \
+    --heartbeat ${SIGNAL_WORKER_HEARTBEAT_FILE}
 SuccessExitStatus=143
 Restart=always
-RestartPreventExitStatus=78
 RestartSec=5
 KillMode=control-group
 TimeoutStopSec=60

@@ -55,45 +55,25 @@ Demo and mainnet liveness timers run their realm-specific checks. Alerts use
 `TELEGRAM_ALERT_CHAT_ID`; if it is absent, the main chat is used so a fault is
 not silently dropped.
 
-The check derives its expected owner and signal-worker artifacts from
-[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv). It evaluates the
-system as a joined contract, including:
+The check derives its expected units and heartbeat artifacts from
+[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv). It pages on:
 
-- expected units, activation state, dependencies, and timer cadence;
-- exact engine account, venue, realm, release, lease, and heartbeat age;
-- account-view freshness, private-feed readiness, reconciliation latches,
-  pending controls, and position attribution;
-- signal-worker process identity, ready state, source hashes, rule and feature
-  hashes, universe hashes, sequence progress, feature watermarks, source epoch,
-  subscription and ticker coverage, data-frame freshness, gap state, and fixed
-  queue/cache occupancy;
-- WAL and state storage health;
-- host clock state and public-data freshness; and
-- backup, upload, and forward-capture jobs where configured.
+- an inactive unit the manifest says must be running;
+- a stale or unreadable engine or worker heartbeat;
+- an engine whose heartbeat says it cannot open positions;
+- low disk under `/var/lib`;
+- a stale off-box backup stamp where configured; and
+- an unsynchronised host clock (checked in one scope per box).
 
 One systemd process being `active` does not suppress a stale heartbeat or a
-latched engine. A worker that is active but no longer advances observations is
-also unhealthy.
-
-Worker alerts use independent keys for producer continuity, LONG cycles, CARRY
-cycles, spool pressure, WebSocket transport, and memory pressure. LONG and CARRY
-each page after three configured cycle cadences even when the process and
-heartbeat still update. Their current feature and action horizons are separate
-from historical CARRY scorer catch-up.
-
-A WebSocket-only fault is a warning only while a fresh REST ticker fallback
-completed after the gap opened and producer plus sleeve clocks remain healthy.
-Missing fallback or stalled decisions makes it critical. Systemd
-`MemoryCurrent` against a finite `MemoryMax` warns at 75% and becomes critical
-at 90%; the alert includes exact bytes, MiB, and percentage.
+latched engine.
 
 Alerts are keyed and persisted. A new condition sends immediately, a continuing
 condition re-alerts after its cooldown, and a cleared condition sends one
-resolved note. Notification delivery failure makes the oneshot fail so the
-next timer run retries rather than recording an unsent alert as delivered.
+resolved note.
 
-An optional external heartbeat URL is pinged only after the local checks and
-Telegram sends succeed.
+An optional external heartbeat URL is pinged on a healthy run so an external
+dead-man's-switch catches a box death the on-box watchdog cannot.
 
 ## Control panel
 
@@ -118,9 +98,8 @@ allow-list. In a group, an allow-list is required. The unprivileged bot can run
 only an exact action from the sudo policy; it cannot pass paths, units,
 environment variables, or extra arguments.
 
-The root-owned helper is bound to the installed release marker and checkout.
-It takes the maintenance lock and submits immutable controls to the engine as
-the realm runtime user.
+The root-owned helper submits immutable controls to the engine as the realm
+runtime user.
 
 ### Pause
 
@@ -137,15 +116,14 @@ owner is already active.
 
 ### Resume
 
-Demo resume requires the current generation's activation receipt and a live
-demo owner. It restores the saved LONG/CARRY switches, submits the matching
+Demo resume requires a live demo owner. It restores the saved LONG/CARRY switches, submits the matching
 entry permissions, enables Exodus when its committed config permits it, and
 waits for heartbeat acknowledgement.
 
-The trusted helper has an explicit `resume-mainnet` recovery action, but the
-phone panel does not expose it. That action requires the current activation
-receipt and an already running funded owner. It does not read or write
-`REAL_MONEY`, so it cannot arm a disarmed account.
+The helper has an explicit `resume-mainnet` recovery action, but the phone
+panel does not expose it. That action requires an already running funded
+owner. It does not read or write `REAL_MONEY`, so it cannot arm a disarmed
+account.
 
 ## Fleet status
 

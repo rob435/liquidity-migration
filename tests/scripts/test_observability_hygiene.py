@@ -13,7 +13,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BACKUP = ROOT / "scripts" / "runtime" / "backup_state.sh"
 DRILL = ROOT / "scripts" / "runtime" / "chaos_drill.sh"
-WRAPPER = ROOT / "scripts" / "run_authorized_runtime.sh"
 SYSTEMD = ROOT / "deploy" / "systemd"
 
 
@@ -314,12 +313,11 @@ def test_a_configured_backup_requires_its_stamp_and_sources() -> None:
     assert "BACKUP_STAMP_FILE" in done.stderr
 
 
-def test_both_new_units_dispatch_through_the_committed_wrapper() -> None:
-    wrapper = WRAPPER.read_text(encoding="utf-8")
-    assert "liquidity-migration-backup.service:main" in wrapper
-    assert "liquidity-migration-chaos-drill.service:main" in wrapper
-    assert "backup_state.sh" in wrapper
-    assert "chaos_drill.sh" in wrapper
+def test_both_new_units_run_their_committed_scripts() -> None:
+    backup_unit = (SYSTEMD / "liquidity-migration-backup.service").read_text(encoding="utf-8")
+    drill_unit = (SYSTEMD / "liquidity-migration-chaos-drill.service").read_text(encoding="utf-8")
+    assert "ExecStart=/opt/liquidity-migration/scripts/runtime/backup_state.sh" in backup_unit
+    assert "ExecStart=/opt/liquidity-migration/scripts/runtime/chaos_drill.sh" in drill_unit
 
 
 def test_the_drill_timer_is_deliberately_not_persistent() -> None:

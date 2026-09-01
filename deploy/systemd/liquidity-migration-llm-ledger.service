@@ -30,7 +30,8 @@ StateDirectoryMode=0750
 MemoryMax=512M
 # Research must not preempt the signal workers (Nice=5) or owners (Nice=-5).
 Nice=10
-ExecStart=/opt/liquidity-migration-engine/bin/run-authorized-runtime liquidity-migration-llm-ledger.service main
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/research/llm_driver_ledger.py \
+    --once --triggers --ledger-dir /var/lib/liquidity-migration/llm-driver-ledger
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal
