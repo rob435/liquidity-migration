@@ -776,7 +776,7 @@ try:
             handle.write(f"{key}={shlex.quote(str(value))}\n")
         handle.flush()
         os.fsync(handle.fileno())
-    os.chmod(temporary, 0o640)
+    os.chmod(temporary, 0o600)
     os.replace(temporary, target)
     directory = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -787,7 +787,7 @@ except BaseException:
     Path(temporary).unlink(missing_ok=True)
     raise
 PY
-    chown root:"$RUNTIME_GROUP" "$target" && chmod 0640 "$target" \
+    chown root:root "$target" && chmod 0600 "$target" \
         || fail "cannot secure signal-worker environment $target"
     unset OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
     lm_load_private_systemd_environment "$PYTHON" "$source" \

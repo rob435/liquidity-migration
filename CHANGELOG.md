@@ -6,6 +6,12 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — Signal-worker environment projections stay root-only.** The
+  deploy writer installs each generated worker environment as `root:root`
+  mode `0600`, matching the strict loader used during activation. Systemd
+  reads the file before dropping to the credential-free worker identity; the
+  separate universe and operational-profile inputs remain group-readable.
+
 - **2026-09-01 — Exodus takeover preserves the retired Python tape bytes.**
   The stopped-state codec keeps Python's exact finite-number spelling while it
   checks the CARRY event ID and tape hash. The compatibility parser is confined

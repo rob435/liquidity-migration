@@ -362,6 +362,51 @@ def test_signal_worker_projection_is_an_explicit_non_secret_allowlist() -> None:
     assert "os.fsync(directory)" in block
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private environment modes are Unix-only")
+def test_signal_worker_projection_is_owner_only_and_loadable(tmp_path: Path) -> None:
+    from liquidity_migration.policy.systemd_environment import (
+        load_private_systemd_environment,
+    )
+
+    block = _function(
+        DEPLOY.read_text(encoding="utf-8"),
+        "write_signal_worker_environment",
+        "project_mainnet_telegram_environment",
+    )
+    program = _python_heredoc(block)
+    source = tmp_path / "source.env"
+    target = tmp_path / "projected.env"
+    source.write_text(
+        "SIGNAL_WORKER_REALM=demo\n"
+        "CANDIDATE_UNIVERSE_FILE=/etc/liquidity-migration/universe.json\n"
+        "OPERATIONAL_PROFILE_FILE=/etc/liquidity-migration/profile.json\n"
+        "IGNORED_VALUE=not-projected\n",
+        encoding="utf-8",
+    )
+    source.chmod(0o600)
+    result = subprocess.run(
+        [sys.executable, "-", str(source), str(target)],
+        cwd=ROOT,
+        input=program.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert target.read_text(encoding="utf-8") == (
+        "CANDIDATE_UNIVERSE_FILE=/etc/liquidity-migration/universe.json\n"
+        "OPERATIONAL_PROFILE_FILE=/etc/liquidity-migration/profile.json\n"
+        "SIGNAL_WORKER_REALM=demo\n"
+    )
+    assert load_private_systemd_environment(target) == {
+        "CANDIDATE_UNIVERSE_FILE": "/etc/liquidity-migration/universe.json",
+        "OPERATIONAL_PROFILE_FILE": "/etc/liquidity-migration/profile.json",
+        "SIGNAL_WORKER_REALM": "demo",
+    }
+    assert not list(tmp_path.glob(".projected.env.*"))
+    assert 'chown root:root "$target" && chmod 0600 "$target"' in block
+
+
 def test_engine_environment_is_bound_to_account_venue_realm_config_and_heartbeat() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     block = _function(text, "validate_engine_environment", "quarantine_engine_inputs")
