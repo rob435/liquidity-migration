@@ -6,6 +6,55 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — The market recorder, its upload, and the backup stand apart
+  from the trading fleet, and the fleet can roll itself back.** The fleet had
+  been down since 13:32 UTC: the 13:30 deploy's demo engine was killed by the
+  kernel nineteen times in a row at boot, and the old rollout then forced
+  every unit stopped — including the recorder and the watchdogs, which had
+  nothing to do with it. Measured on the host, a full replay of the demo log
+  peaks at 1.57 GB of memory (322 MB for its newest 53 MB segment alone) and
+  the funded log at 522 MB, against unit caps of 256 MB and 512 MB; neither
+  engine could have booted. Both engine units now cap at 2 GB, sized to about
+  six times the 256 MB rotation size. The fleet manifest gains a third
+  lifecycle, `independent`: the recorder, the hourly market-tape upload, the
+  six-hourly state backup, and a new host watchdog are never stopped by a
+  deploy, a funded stop, or a disarm, and start at boot; deploy restarts the
+  recorder only when its own inputs changed. Deploy records the commit whose
+  deploy finished and the one before it; a realm that publishes no fresh
+  heartbeat on a new commit is rolled back to the last finished one and the
+  run fails visibly, and `rollback` is an operator mode (`ops.sh deploy
+  rollback`, the CI dispatch choice). The backup, which had never run because
+  its destination was unset, now snapshots the engines' logs, closed trades,
+  heartbeats, worker checkpoints, target books, spools, takeover sources, and
+  the two rendered engine configs locally and mirrors them to Google Drive
+  (`LiquidityMigration/engine-state/latest`), moving changed or vanished files
+  into a dated `history/` kept 60 days; it refuses any `*.env` source by name.
+  The recorder rolls its files on the hour under `<day>/<HH>/<symbol>/`,
+  spreads its subscriptions over several venue connections with backoff, adds
+  a wide tier — top of book, trades, ticker, and liquidations for every other
+  listed USDT perpetual, re-read daily — and writes a daily instrument and
+  ticker snapshot; its memory cap rises from 512 MB, where it sat at peak, to
+  1 GB. The Drive stops receiving hundreds of files an hour: each finished
+  hour ships as one tar with a `MANIFEST.json` under
+  `market-tape/bybit-linear/YYYY/MM/DD/`, checked against the Drive's hash
+  before the hour is marked shipped; the four days recorded in the daily
+  layout ship once as `<day>.legacy.tar`, and the old `forward-market` folder
+  on the Drive is left for the owner to delete once they are there. The new
+  host liveness scope pages on the recorder's own status (no frames, blocked
+  storage, new drops, connections down), stale upload or backup receipts, a
+  Drive short of space, disk, and the host clock; the realm scopes no longer
+  watch shared units, disk, or the clock, so one cause pages once. Every
+  engine build is stamped with its git commit: the log's Boot record and the
+  heartbeat (`engine_commit`) name it, and the venue-confirmed accounting tool
+  binds each graded fill's Boot to the expected commit and config hash in
+  place of the retired seven-field activation receipt and the binary digests;
+  logs from builds before the stamp cannot reach the label. On GitHub, `main`
+  now requires a pull request with green `ci` and `rust` checks, linear
+  history, and no force pushes or deletion; secret scanning, push protection,
+  and vulnerability alerts are on. Not a host change until the next deploy,
+  which the owner runs. That deploy starts the funded engine, because
+  `REAL_MONEY=true` is present in the funded credential file.
+
 - **2026-09-01 — The engine refuses new entries after a losing day of its own
   trades.** On the owner's instruction, an emergency last resort replaces the
   daily-loss halt retired on 2026-08-20, built without that halt's two faults.
