@@ -140,7 +140,7 @@ fn a_profile_still_declaring_sleeve_shares_is_refused_rather_than_ignored() {
 fn a_profile_from_the_future_is_refused() {
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
-    doc["schema_version"] = serde_json::json!(3);
+    doc["schema_version"] = serde_json::json!(4);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(err.to_string().contains("schema_version"), "{err}");
 }
@@ -148,7 +148,7 @@ fn a_profile_from_the_future_is_refused() {
 #[test]
 fn some_other_json_document_is_not_an_operational_profile() {
     let err = kernel_config_from_profile(
-        r#"{"schema_version": 2, "kind": "something_else"}"#,
+        r#"{"schema_version": 3, "kind": "something_else"}"#,
         &inputs(),
     )
     .unwrap_err();
