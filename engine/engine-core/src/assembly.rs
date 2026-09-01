@@ -178,6 +178,7 @@ struct RiskSection {
     leverage: f64,
     #[serde(default = "default_qty_tolerance")]
     qty_tolerance: f64,
+    max_rolling_loss_fraction: f64,
     envelope: EnvelopeSection,
 }
 
@@ -244,6 +245,7 @@ pub fn risk(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
         },
         leverage: parsed.leverage,
         qty_tolerance: parsed.qty_tolerance,
+        max_rolling_loss_fraction: parsed.max_rolling_loss_fraction,
     };
     Ok(Kernel::new(cfg).map_err(|e| format!("the risk kernel refuses this config: {e}"))?)
 }
@@ -385,6 +387,7 @@ mod tests {
     /// The shipped engine.toml `[risk]` block.
     const RISK: &str = r#"
 max_account_view_age_s = 120
+max_rolling_loss_fraction = 0.1
 leverage = 2.0
 
 [envelope]

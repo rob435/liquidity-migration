@@ -116,6 +116,10 @@ pub struct KernelConfig {
     pub leverage: f64,
     /// Quantities at or below this are treated as zero.
     pub qty_tolerance: f64,
+    /// Share of the current capital reference that this engine's own closed
+    /// trades may lose, net of venue fees, inside the rolling loss window
+    /// before entries and growth are refused. In (0, 1].
+    pub max_rolling_loss_fraction: f64,
 }
 
 impl KernelConfig {
@@ -124,6 +128,14 @@ impl KernelConfig {
         positive(self.leverage, "leverage")?;
         if !self.qty_tolerance.is_finite() || self.qty_tolerance < 0.0 {
             return Err(bad("qty_tolerance must not be negative"));
+        }
+        if !(self.max_rolling_loss_fraction.is_finite()
+            && self.max_rolling_loss_fraction > 0.0
+            && self.max_rolling_loss_fraction <= 1.0)
+        {
+            return Err(bad(
+                "max_rolling_loss_fraction must be a fraction in (0, 1]",
+            ));
         }
         // operational_profile.py:409, the one load-time proof PORT_NOTES had
         // recorded as not ported. It needs both blocks, which is why it lives

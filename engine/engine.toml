@@ -93,6 +93,7 @@ account_view_max_age_ms = 5000
 # the fleet and the engine at once.
 [risk]
 max_account_view_age_s = 120
+max_rolling_loss_fraction = 0.1
 # Account leverage: turns the book's gross notional into the margin it commits.
 leverage = 2.0
 

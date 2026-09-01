@@ -616,7 +616,7 @@ fn validate_signal(value: &Value, realm: &str) -> Result<(), String> {
 }
 
 fn validate_operational(value: &Value) -> Result<(), String> {
-    if u64_path(value, &["schema_version"])? != 2
+    if u64_path(value, &["schema_version"])? != 3
         || string_path(value, &["kind"])? != "liquidity_migration_operational_profile"
     {
         return Err("unsupported operational config".to_owned());

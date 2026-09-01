@@ -61,7 +61,7 @@ def _signal_source(tmp_path: Path, profile: Path, *, realm: str = "mainnet") -> 
 def test_committed_profile_is_the_default_render() -> None:
     data, profile = render_real_money_profile()
     assert data == (REPO / "configs" / "operational.mainnet.json").read_bytes()
-    assert profile.schema_version == 2
+    assert profile.schema_version == 3
 
 
 def test_templates_are_strict_and_ship_disarmed_without_secrets() -> None:

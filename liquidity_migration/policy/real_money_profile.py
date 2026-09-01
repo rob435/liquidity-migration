@@ -8,9 +8,10 @@ module builds that account document; the committed
 test.
 
 The capital reference tracks observed venue equity, so every cap below is a
-ratio of the wallet and the declared 100 USDT scale is only a floor. The one
-live dial here is ``RM_CARRY_STOP_LOSS_FRACTION``; any other ``RM_*`` line in
-an env file is refused by name.
+ratio of the wallet and the declared 100 USDT scale is only a floor. The two
+live dials here are ``RM_CARRY_STOP_LOSS_FRACTION`` and
+``RM_ROLLING_LOSS_FRACTION``; any other ``RM_*`` line in an env file is refused
+by name.
 """
 
 from __future__ import annotations
@@ -50,12 +51,17 @@ _LONG_MAX_NEW_ENTRIES_PER_CYCLE = 5
 
 @dataclass(frozen=True, slots=True)
 class RealMoneyDials:
-    """The one live dial on this surface: the carry disaster-stop distance."""
+    """The two live dials on this surface."""
 
     #: Venue-native disaster-stop distance on carry entries, armed with the
     #: entry. Wide on purpose: the funding-normalisation exit is the intended
     #: exit; this only covers the case where nothing local is running.
     carry_stop_loss_fraction: float = 0.35
+    #: Share of the capital reference the engine's own closed trades may lose,
+    #: net of venue fees, over any rolling 24 hours before the engine refuses
+    #: new entries and growth. Exits always pass. Emergency last resort, not a
+    #: sizing rule.
+    rolling_loss_fraction: float = 0.10
 
 
 def dial_environment_keys() -> tuple[str, ...]:
@@ -116,6 +122,8 @@ def render_real_money_profile_json(
     dials = RealMoneyDials() if dials is None else dials
     if not 0.0 < dials.carry_stop_loss_fraction < 1.0:
         raise ValueError("RM_CARRY_STOP_LOSS_FRACTION must sit in (0, 1)")
+    if not 0.0 < dials.rolling_loss_fraction <= 1.0:
+        raise ValueError("RM_ROLLING_LOSS_FRACTION must sit in (0, 1]")
     reference = float(capital_reference_usdt)
     if not math.isfinite(reference) or reference <= 0.0:
         raise ValueError("capital_reference_usdt must be finite and positive")
@@ -143,6 +151,7 @@ def render_real_money_profile_json(
             "max_account_gross_notional_usdt": account_gross,
             "max_initial_margin_usdt": margin_cap,
             "max_leverage": _ENTRY_LEVERAGE,
+            "max_rolling_loss_fraction": dials.rolling_loss_fraction,
             "quantity_tolerance": 1e-12,
         },
         "long": {

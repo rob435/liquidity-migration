@@ -18,6 +18,8 @@ pub const MAX_VIEW_AGE_NS: u64 = 120 * SEC;
 pub const DISASTER_STOP_FRACTION: f64 = 0.35;
 /// account_contracts.py: AccountRiskPolicy.quantity_tolerance.
 pub const QTY_TOLERANCE: f64 = 1e-12;
+/// Both operational profiles: max_rolling_loss_fraction.
+pub const ROLLING_LOSS_FRACTION: f64 = 0.1;
 
 pub const CARRY: StrategyId = StrategyId(0);
 pub const LONG: StrategyId = StrategyId(1);
@@ -48,6 +50,7 @@ pub fn demo_config() -> KernelConfig {
         },
         leverage: 2.0,
         qty_tolerance: QTY_TOLERANCE,
+        max_rolling_loss_fraction: ROLLING_LOSS_FRACTION,
     }
 }
 

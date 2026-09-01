@@ -629,7 +629,7 @@ fn parse_carry(
 
 fn validate_operational(value: &Value) -> Result<(), WorkerError> {
     if value.get("kind").and_then(Value::as_str) != Some("liquidity_migration_operational_profile")
-        || value.get("schema_version").and_then(Value::as_u64) != Some(2)
+        || value.get("schema_version").and_then(Value::as_u64) != Some(3)
     {
         return Err(WorkerError::config("unsupported operational profile"));
     }

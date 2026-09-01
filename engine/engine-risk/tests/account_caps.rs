@@ -40,6 +40,7 @@ fn mainnet_config() -> KernelConfig {
         },
         leverage: 2.0,
         qty_tolerance: QTY_TOLERANCE,
+        max_rolling_loss_fraction: ROLLING_LOSS_FRACTION,
     }
 }
 

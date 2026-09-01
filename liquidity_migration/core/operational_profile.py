@@ -17,7 +17,7 @@ from typing import Any, Mapping
 from liquidity_migration.core.artifact_snapshot import StableFileSnapshot, read_stable_file
 
 
-OPERATIONAL_PROFILE_SCHEMA_VERSION = 2
+OPERATIONAL_PROFILE_SCHEMA_VERSION = 3
 OPERATIONAL_PROFILE_KIND = "liquidity_migration_operational_profile"
 
 
@@ -72,6 +72,10 @@ class AccountRiskSettings:
     max_account_gross_notional_usdt: float
     max_initial_margin_usdt: float
     max_leverage: float
+    #: Share of the capital reference the engine's own closed trades may lose,
+    #: net of venue fees, inside any rolling 24 hours before the engine refuses
+    #: new entries and growth. Exits pass. In (0, 1].
+    max_rolling_loss_fraction: float
     quantity_tolerance: float
 
 
@@ -154,9 +158,15 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         "max_account_gross_notional_usdt",
         "max_initial_margin_usdt",
         "max_leverage",
+        "max_rolling_loss_fraction",
         "quantity_tolerance",
     }
     row = _object(value, label="operational profile account_risk", fields=fields)
+    rolling_loss = _positive_float(
+        row["max_rolling_loss_fraction"], label="account_risk.max_rolling_loss_fraction"
+    )
+    if rolling_loss > 1.0:
+        raise ValueError("account_risk.max_rolling_loss_fraction cannot exceed 1")
     settings = AccountRiskSettings(
         max_component_gross_notional_usdt=_positive_float(
             row["max_component_gross_notional_usdt"],
@@ -171,6 +181,7 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
             label="account_risk.max_initial_margin_usdt",
         ),
         max_leverage=_positive_float(row["max_leverage"], label="account_risk.max_leverage"),
+        max_rolling_loss_fraction=rolling_loss,
         quantity_tolerance=_positive_float(row["quantity_tolerance"], label="account_risk.quantity_tolerance"),
     )
     if settings.max_component_gross_notional_usdt > settings.max_account_gross_notional_usdt:
